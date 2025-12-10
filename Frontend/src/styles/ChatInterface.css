@@ -1,0 +1,327 @@
+/* ======================================================
+   Import Google Fonts
+====================================================== */
+@import url('https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=Inter:wght@100..900&display=swap');
+
+/* ======================================================
+   Scrollbar Styling
+====================================================== */
+.scrollbar-custom::-webkit-scrollbar {
+  width: 8px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb {
+  background: #a0aec0;
+  border-radius: 4px;
+}
+
+.scrollbar-custom::-webkit-scrollbar-thumb:hover {
+  background: #718096;
+}
+
+/* ======================================================
+   AI Response Text Styling
+====================================================== */
+.analysis-page-ai-response {
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-size: 24px !important;
+  line-height: 1.8 !important;
+  color: #111 !important;
+}
+
+.response-content h1 {
+  font-size: 2rem !important;
+  font-weight: 700 !important;
+  color: #1a202c !important;
+  margin-top: 2.5rem !important;
+  margin-bottom: 1.5rem !important;
+  border-bottom: 2px solid #e5e7eb !important;
+  padding-bottom: 0.5rem !important;
+}
+
+.response-content h2 {
+  font-size: 1.85rem !important;
+  font-weight: 700 !important;
+  color: #1a202c !important;
+  margin-top: 2rem !important;
+  margin-bottom: 1rem !important;
+}
+
+.response-content h3 {
+  font-size: 1.5rem !important;
+  font-weight: 600 !important;
+  color: #1a202c !important;
+  margin-top: 1.5rem !important;
+  margin-bottom: 0.75rem !important;
+}
+
+.response-content h4 {
+  font-size: 1.3rem !important;
+  font-weight: 600 !important;
+  color: #1a202c !important;
+  margin-top: 1.25rem !important;
+  margin-bottom: 0.75rem !important;
+}
+
+.response-content p {
+  margin-bottom: 1rem !important;
+  font-size: 22px !important;
+  line-height: 1.8 !important;
+  color: #111827 !important;
+}
+
+.response-content strong,
+.response-content b {
+  font-weight: 700 !important;
+  color: #111827 !important;
+  font-size: inherit !important;
+}
+
+/* ======================================================
+   Table Styling
+====================================================== */
+.analysis-table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 1.5rem 0 !important;
+  font-family: "Inter", sans-serif !important;
+  font-size: 18px !important;
+  background-color: #ffffff !important;
+  border: 1px solid #d1d5db !important;
+  border-radius: 8px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+  overflow: hidden !important;
+}
+
+.analysis-table thead {
+  background-color: #f9fafb !important;
+}
+
+.analysis-table th {
+  padding: 0.9rem 1rem !important;
+  border: 1px solid #e5e7eb !important;
+  font-weight: 600 !important;
+  color: #374151 !important;
+  font-size: 17px !important;
+  text-align: left !important;
+  background-color: #f3f4f6 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.04em !important;
+}
+
+.analysis-table td {
+  padding: 0.8rem 1rem !important;
+  border: 1px solid #e5e7eb !important;
+  color: #111827 !important;
+  vertical-align: middle !important;
+  background-color: #ffffff !important;
+  transition: background-color 0.2s ease-in-out !important;
+  font-size: 17px !important;
+}
+
+.analysis-table tbody tr:nth-child(even) td {
+  background-color: #fafafa !important;
+}
+
+.analysis-table tbody tr:hover td {
+  background-color: #f1f5f9 !important;
+}
+
+.analysis-table tr:first-child th:first-child {
+  border-top-left-radius: 8px !important;
+}
+
+.analysis-table tr:first-child th:last-child {
+  border-top-right-radius: 8px !important;
+}
+
+.analysis-table tr:last-child td:first-child {
+  border-bottom-left-radius: 8px !important;
+}
+
+.analysis-table tr:last-child td:last-child {
+  border-bottom-right-radius: 8px !important;
+}
+
+.analysis-table-wrapper {
+  overflow-x: auto !important;
+  margin: 1rem 0 !important;
+  border-radius: 8px !important;
+}
+
+.analysis-table td span {
+  display: inline-block !important;
+  background-color: #fef2f2 !important;
+  color: #b91c1c !important;
+  padding: 3px 8px !important;
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  font-size: 16px !important;
+  line-height: 1.3 !important;
+}
+
+/* ======================================================
+   Prose Table Overrides
+====================================================== */
+.prose table,
+.prose th,
+.prose td {
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+}
+
+.prose table {
+  font-size: 20px !important;
+}
+
+.prose th {
+  font-size: 18px !important;
+  font-weight: 600 !important;
+}
+
+.prose td {
+  font-size: 18px !important;
+}
+
+/* ======================================================
+   List Styling
+====================================================== */
+.response-content ul,
+.response-content ol {
+  margin: 12px 0 !important;
+  padding-left: 28px !important;
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-size: 22px !important;
+}
+
+.response-content li {
+  margin: 8px 0 !important;
+  line-height: 1.8 !important;
+  font-size: 22px !important;
+}
+
+/* ======================================================
+   Code Styling
+====================================================== */
+.response-content code {
+  background-color: #f3f4f6 !important;
+  color: #dc2626 !important;
+  padding: 3px 8px !important;
+  border-radius: 4px !important;
+  font-family: 'Courier New', monospace !important;
+  font-size: 17px !important;
+}
+
+.response-content pre {
+  background-color: #1f2937 !important;
+  color: #f9fafb !important;
+  padding: 20px !important;
+  border-radius: 8px !important;
+  overflow-x: auto !important;
+  margin: 20px 0 !important;
+  font-family: 'Courier New', monospace !important;
+  font-size: 16px !important;
+}
+
+.response-content pre code {
+  background-color: transparent !important;
+  color: #f9fafb !important;
+  padding: 0 !important;
+}
+
+/* ======================================================
+   Blockquote Styling
+====================================================== */
+.response-content blockquote {
+  border-left: 4px solid #3b82f6 !important;
+  padding: 12px 16px !important;
+  margin: 16px 0 !important;
+  background-color: #eff6ff !important;
+  color: #1e40af !important;
+  font-style: italic !important;
+  border-radius: 0 6px 6px 0 !important;
+  font-size: 20px !important;
+}
+
+/* ======================================================
+   Link Styling
+====================================================== */
+.response-content a {
+  color: #2563eb !important;
+  text-decoration: underline !important;
+  font-weight: 500 !important;
+}
+
+/* ======================================================
+   Horizontal Rule
+====================================================== */
+.response-content hr {
+  border: none !important;
+  border-top: 2px solid #e5e7eb !important;
+  margin: 24px 0 !important;
+}
+
+/* ======================================================
+   Claude-Style Stop Button
+====================================================== */
+.stop-button {
+  padding: 10px;
+  background-color: #2f2f2f;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+}
+
+.stop-button:hover {
+  background-color: #1f1f1f;
+  transform: scale(1.05);
+}
+
+.stop-button:active {
+  transform: scale(0.95);
+}
+
+.stop-icon {
+  width: 16px;
+  height: 16px;
+  background-color: white;
+  border-radius: 2px;
+}
+
+/* ======================================================
+   Emphasis & Italic
+====================================================== */
+.response-content em,
+.response-content i {
+  font-style: italic !important;
+  color: #1f2937 !important;
+}
+
+/* ======================================================
+   Image Styling
+====================================================== */
+.response-content img {
+  max-width: 100% !important;
+  height: auto !important;
+  border-radius: 8px !important;
+  margin: 16px 0 !important;
+}
+
+/* ======================================================
+   Ensure Content Doesn't Overflow
+====================================================== */
+.response-content * {
+  box-sizing: border-box !important;
+  max-width: 100% !important;
+}

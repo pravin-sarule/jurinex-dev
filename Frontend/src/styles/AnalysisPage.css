@@ -1,0 +1,334 @@
+/* /* ======================================================
+   Import Google Fonts
+====================================================== */
+@import url('https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=Inter:wght@100..900&display=swap');
+/* Note: Google Sans and Product Sans are proprietary fonts. 
+   Inter is used as the primary fallback as it's very similar to Google Sans. */
+
+/* ======================================================
+   General Text Styling
+====================================================== */
+.analysis-page-ai-response {
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-size: 22px;
+  line-height: 1.6;
+  color: #111;
+}
+
+
+
+
+.response-content h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1a202c;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+}
+
+.response-content h3 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: #1a202c;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.response-content p {
+  margin-bottom: 0.75rem;
+  font-size: 18px;
+  line-height: 1.6;
+  color: #111827;
+}
+
+/* ======================================================
+   Table Styling
+====================================================== */
+.analysis-table {
+  width: 100%;
+  border-collapse: collapse;       /* full grid layout */
+  margin: 1.5rem 0;
+  font-family: "Inter", sans-serif; /* Revert to original or default */
+  font-size: 17px; /* Increased from 15px */
+  background-color: #ffffff;
+  border: 1px solid #d1d5db;       /* outer border */
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+
+/* ---------- Header ---------- */
+.analysis-table thead {
+  background-color: #f9fafb;       /* subtle header */
+}
+
+.analysis-table th {
+  padding: 0.9rem 1rem;
+  border: 1px solid #e5e7eb;       /* inner grid lines */
+  font-weight: 600;
+  color: #374151;                  /* gray-700 */
+  font-size: 16px; /* Increased from 14px */
+  text-align: left;
+  background-color: #f3f4f6;       /* gray-100 */
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- Body ---------- */
+.analysis-table td {
+  padding: 0.8rem 1rem;
+  border: 1px solid #e5e7eb;       /* visible cell borders */
+  color: #111827;                  /* gray-900 */
+  vertical-align: middle;
+  background-color: #ffffff;
+  transition: background-color 0.2s ease-in-out;
+}
+
+/* alternate row shading */
+.analysis-table tbody tr:nth-child(even) td {
+  background-color: #fafafa;
+}
+
+/* hover effect */
+.analysis-table tbody tr:hover td {
+  background-color: #f1f5f9;
+}
+
+/* ---------- Rounded Corners ---------- */
+.analysis-table tr:first-child th:first-child {
+  border-top-left-radius: 8px;
+}
+.analysis-table tr:first-child th:last-child {
+  border-top-right-radius: 8px;
+}
+.analysis-table tr:last-child td:first-child {
+  border-bottom-left-radius: 8px;
+}
+.analysis-table tr:last-child td:last-child {
+  border-bottom-right-radius: 8px;
+}
+
+/* Ensure font consistency within markdown-rendered tables */
+.prose table,
+.prose th,
+.prose td {
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+}
+
+.prose table {
+  font-size: 20px !important; /* Increased from 18px */
+}
+
+.prose th {
+  font-size: 18px !important; /* Increased from 16px */
+  font-weight: 600 !important;
+}
+
+.prose td {
+  font-size: 18px !important; /* Increased from 16px */
+}
+
+/* ---------- Responsive Wrapper ---------- */
+.analysis-table-wrapper {
+  overflow-x: auto;
+  margin: 1rem 0;
+  border-radius: 8px;
+}
+
+/* ---------- Inline Badge Highlight ---------- */
+.analysis-table td span {
+  display: inline-block;
+  background-color: #fef2f2;       /* light red background */
+  color: #b91c1c;                  /* red-700 text */
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 16px; /* Increased from 14px */
+  line-height: 1.3;
+}
+
+/* ======================================================
+   Font Classes
+====================================================== */
+.analysis-page-user-input {
+  font-family: "Styrene B", sans-serif;
+}
+
+.analysis-input-container {
+  border: 1px solid #21C1B6; /* Default border color */
+  transition: border-color 0.3s ease-in-out; /* Smooth transition for border color */
+}
+
+.analysis-input-container:hover {
+  border-color: #1AA49B; /* Hover border color */
+}
+
+/* For artifact text, if applicable, using Inter */
+.analysis-page-artifact-text {
+  font-family: "Inter", sans-serif;
+  font-optical-sizing: auto;
+  font-weight: 400;
+  font-style: normal;
+  font-variation-settings: "slnt" 0;
+}
+
+/* ChatGPT-like Spinner */
+.loader {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-block;
+  position: relative;
+  border: 3px solid;
+  border-color: #000 #000 transparent transparent;
+  box-sizing: border-box;
+  animation: rotation 1s linear infinite;
+}
+.loader::before,
+.loader::after {
+  content: '';
+  box-sizing: border-box;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  margin: auto;
+  border: 3px solid;
+  border-color: transparent transparent #000 #000;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  animation: rotationOpposite .5s linear infinite;
+  transform-origin: center top;
+}
+.loader::before {
+  width: 14px;
+  height: 14px;
+  border-color: #000 #000 transparent transparent;
+  animation: rotation .7s linear infinite
+}
+
+@keyframes rotation {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rotationOpposite {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(-360deg);
+  }
+}
+
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s infinite linear;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: .5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ======================================================
+   Mindmap Text Styling - NotebookLM Font System
+====================================================== */
+/* Global SVG text styling for NotebookLM font system */
+svg text,
+svg tspan {
+  font-family: "Google Sans", "Product Sans", Inter, Roboto, Arial, sans-serif !important;
+  font-smooth: always;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  letter-spacing: 0;
+  fill: #000000 !important; /* Pure black for maximum readability */
+}
+
+.mindmap-node-group text,
+.mindmap-node-group tspan {
+  font-family: "Google Sans", "Product Sans", Inter, Roboto, Arial, sans-serif !important;
+  font-smooth: always;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  letter-spacing: 0;
+  fill: #000000 !important; /* Pure black for maximum readability */
+}
+
+/* Ensure proper line height and spacing for mindmap text */
+.mindmap-node-group text {
+  line-height: 1.4 !important;
+  letter-spacing: 0;
+}
+
+/* Main node titles - slightly bold (600) */
+.mindmap-node-group text[data-is-main="true"] {
+  font-weight: 600 !important;
+}
+
+/* Child node details - slightly bold (500) */
+.mindmap-node-group text[data-is-main="false"] {
+  font-weight: 500 !important;
+}
+
+/* ======================================================
+   Mindmap Generator Container Animations
+====================================================== */
+.mindmap-generator-container {
+  animation: fadeInSlideUp 0.25s ease-out;
+  transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+}
+
+@keyframes fadeInSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Fade-out animation when closing */
+.mindmap-generator-closing .mindmap-generator-container {
+  animation: none;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+}
+
+/* Close button hover effect - minimalistic style */
+.mindmap-generator-container button[aria-label="Close Mindmap Generator"] {
+  opacity: 0.6;
+  transition: opacity 0.2s ease-in-out, background-color 0.2s ease-in-out;
+}
+
+.mindmap-generator-container button[aria-label="Close Mindmap Generator"]:hover {
+  opacity: 1;
+  background-color: rgba(0, 0, 0, 0.05);
+}

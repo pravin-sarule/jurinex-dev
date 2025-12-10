@@ -1,0 +1,51 @@
+/* Container for the editor, providing the gray "desktop" background */
+.document-editor-container {
+    background-color: #f0f2f5;
+    padding: 3rem 1rem;
+    height: 100vh;
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+
+/* Styles the main editable area to look like a sheet of paper */
+.ck.ck-editor__main > .ck-editor__editable {
+    width: 21cm; /* A4 width */
+    min-height: 29.7cm; /* A4 height */
+    padding: 2cm; /* Page margins */
+    margin: 1.5rem auto; /* Center the page and add space between pages */
+    background: white;
+    border: 1px solid #d4d4d4;
+    border-radius: 3px;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.15);
+    box-sizing: border-box;
+}
+
+/* Removes the default editor border when not focused */
+.ck.ck-editor__main > .ck-editor__editable:not(.ck-focused) {
+    border-color: #d4d4d4;
+}
+
+/* --- STYLES FOR THE PAGE BREAK PLUGIN --- */
+
+/* Styles the visual page break element in the editor */
+.ck-content .page-break {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    border-top: 2px dashed #ccc;
+    border-bottom: 2px dashed #ccc;
+    background-color: #f7f7f7;
+    padding: 10px 0;
+    margin: 20px 0;
+    user-select: none; /* Make the label unselectable */
+}
+
+/* Styles the text label inside the page break element */
+.ck-content .page-break::after {
+    content: 'Page Break';
+    color: #999;
+    font-size: 12px;
+    font-weight: bold;
+    text-transform: uppercase;
+}

@@ -1,0 +1,86 @@
+// services/gcsService.js
+
+const { getBucket } = require('../config/gcs');
+const path = require('path');
+
+/**
+ * Uploads a file buffer to GCS
+ * Uses the singleton Storage client from config/gcs.js
+ *
+ * @param {string} bucketName - Target GCS bucket name
+ * @param {string} gcsFilePath - GCS file path (e.g., 'chat-uploads/user1/file.pdf')
+ * @param {Buffer} fileBuffer - File buffer (from req.file.buffer)
+ * @param {string} mimeType - File MIME type (e.g., 'application/pdf')
+ * @returns {Promise<string>} Uploaded file's GCS URI ('gs://bucket/path')
+ */
+async function uploadFileToGCS(bucketName, gcsFilePath, fileBuffer, mimeType) {
+    if (!bucketName || !gcsFilePath || !fileBuffer) {
+        throw new Error("Missing GCS service parameters. Required: bucketName, gcsFilePath, fileBuffer");
+    }
+
+    try {
+        // Validate buffer
+        if (!Buffer.isBuffer(fileBuffer)) {
+            throw new Error('fileBuffer must be a Buffer object');
+        }
+
+        console.log(`📤 Initializing GCS upload: ${bucketName}/${gcsFilePath}`);
+        
+        // Get bucket using singleton storage client
+        const bucket = getBucket(bucketName);
+        
+        // Check if bucket exists
+        const [bucketExists] = await bucket.exists();
+        if (!bucketExists) {
+            throw new Error(`Bucket '${bucketName}' does not exist or you don't have access to it`);
+        }
+
+        const file = bucket.file(gcsFilePath);
+        
+        // Upload file using save() method (more reliable than streams)
+        console.log(`📤 Uploading file to GCS...`);
+        await file.save(fileBuffer, {
+            resumable: false,
+            metadata: {
+                contentType: mimeType || 'application/octet-stream',
+                cacheControl: 'private, max-age=3600',
+            },
+        });
+
+        const gcsUri = `gs://${bucketName}/${gcsFilePath}`;
+        console.log(`✅ Successfully uploaded to ${gcsUri}`);
+        
+        return gcsUri;
+    } catch (error) {
+        console.error('❌ GCS Upload error:', error.message);
+        console.error('❌ Error stack:', error.stack);
+        
+        // Provide more helpful error messages
+        if (error.message.includes('invalid_grant') || error.message.includes('JWT') || error.message.includes('Token')) {
+            throw new Error(
+                `GCS Authentication failed: Invalid or expired service account key. ` +
+                `Please check: 1) Service account key is valid and not expired, 2) System clock is synchronized, ` +
+                `3) GCS_KEY_BASE64 is correctly base64 encoded. ` +
+                `Try regenerating the service account key in GCP Console. ` +
+                `Original error: ${error.message}`
+            );
+        } else if (error.message.includes('permission') || error.message.includes('access') || error.message.includes('denied')) {
+            throw new Error(
+                `GCS Permission denied: Service account does not have permission to upload to bucket '${bucketName}'. ` +
+                `Please check IAM permissions. The service account needs 'Storage Object Admin' or 'Storage Admin' role. ` +
+                `Original error: ${error.message}`
+            );
+        } else if (error.message.includes('not initialized')) {
+            throw new Error(
+                `GCS Storage client not initialized. Please check GCS_KEY_BASE64 in .env file. ` +
+                `Original error: ${error.message}`
+            );
+        } else {
+            throw new Error(`GCS Upload failed: ${error.message}`);
+        }
+    }
+}
+
+module.exports = {
+    uploadFileToGCS
+};

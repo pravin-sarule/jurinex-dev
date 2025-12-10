@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visual Service - Flowchart Generator Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+
+        .form-section {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+        }
+
+        input, textarea, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .result-section {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .result-section.show {
+            display: block;
+        }
+
+        .result-card {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .result-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .result-content {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .mermaid-container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            overflow-x: auto;
+            min-height: 200px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .mermaid-container .mermaid {
+            width: 100%;
+            min-height: 200px;
+        }
+
+        .mermaid-container svg {
+            max-width: 100%;
+            height: auto;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #c33;
+            margin: 20px 0;
+        }
+
+        .success {
+            background: #efe;
+            color: #3c3;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #3c3;
+            margin: 20px 0;
+        }
+
+        .info-box {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #2196f3;
+        }
+
+        .info-box code {
+            background: rgba(0,0,0,0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .endpoint-selector {
+            margin-bottom: 20px;
+        }
+
+        .endpoint-selector label {
+            display: inline-block;
+            margin-right: 15px;
+        }
+
+        .endpoint-selector input[type="radio"] {
+            width: auto;
+            margin-right: 5px;
+        }
+
+        .fix-notice {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin-top: 15px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎨 Visual Service - Flowchart Generator</h1>
+        <p class="subtitle">Test the Visual Service API and generate flowcharts from documents</p>
+
+        <div class="info-box">
+            <strong>ℹ️ Info:</strong> This page tests the Visual Service API. Make sure:
+            <ul style="margin-top: 10px; margin-left: 20px;">
+                <li>Visual Service is running on <code>http://localhost:8081</code></li>
+                <li>You have a valid JWT token</li>
+                <li>You have a valid file_id from Document Service</li>
+            </ul>
+        </div>
+
+        <div class="form-section">
+            <div class="endpoint-selector">
+                <label>
+                    <input type="radio" name="endpoint" value="single" checked>
+                    Single Document Flowchart
+                </label>
+                <label>
+                    <input type="radio" name="endpoint" value="multi">
+                    Multiple Documents Flowchart
+                </label>
+            </div>
+
+            <div id="single-doc-form">
+                <div class="form-group">
+                    <label for="jwt-token">JWT Token (Authorization Bearer Token)</label>
+                    <input type="text" id="jwt-token" placeholder="Enter your JWT token" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="file-id">File ID (UUID)</label>
+                    <input type="text" id="file-id" placeholder="Enter document file ID" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="flowchart-type">Flowchart Type</label>
+                    <select id="flowchart-type">
+                        <option value="process">Process</option>
+                        <option value="decision">Decision</option>
+                        <option value="workflow">Workflow</option>
+                        <option value="system">System</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="prompt">Custom Prompt (Optional)</label>
+                    <textarea id="prompt" placeholder="Enter custom prompt for flowchart generation (optional)"></textarea>
+                </div>
+            </div>
+
+            <div id="multi-doc-form" style="display: none;">
+                <div class="form-group">
+                    <label for="file-ids">File IDs (Comma-separated UUIDs)</label>
+                    <input type="text" id="file-ids" placeholder="uuid1, uuid2, uuid3">
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button id="test-direct-btn" onclick="testDirectService()">Test Direct Service (Port 8081)</button>
+                <button id="test-gateway-btn" onclick="testGatewayService()">Test via Gateway (Port 5000)</button>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Generating flowchart... This may take 30-120 seconds.</p>
+        </div>
+
+        <div class="result-section" id="result-section">
+            <div class="result-card">
+                <div class="result-title">📊 Response Status</div>
+                <div class="result-content" id="status-content"></div>
+            </div>
+
+            <div class="result-card" id="mermaid-card" style="display: none;">
+                <div class="result-title">📈 Flowchart Diagram (Mermaid)</div>
+                <div class="mermaid-container">
+                    <div class="mermaid" id="mermaid-diagram"></div>
+                </div>
+            </div>
+
+            <div class="result-card">
+                <div class="result-title">📝 Flowchart Description</div>
+                <div class="result-content" id="description-content"></div>
+            </div>
+
+            <div class="result-card">
+                <div class="result-title">🔧 Raw Response</div>
+                <div class="result-content">
+                    <pre id="raw-response" style="white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto;"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Mermaid
+        mermaid.initialize({ 
+            startOnLoad: false,
+            theme: 'default',
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+
+        // Toggle between single and multi document forms
+        document.querySelectorAll('input[name="endpoint"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                if (this.value === 'single') {
+                    document.getElementById('single-doc-form').style.display = 'block';
+                    document.getElementById('multi-doc-form').style.display = 'none';
+                } else {
+                    document.getElementById('single-doc-form').style.display = 'none';
+                    document.getElementById('multi-doc-form').style.display = 'block';
+                }
+            });
+        });
+
+        function getEndpointType() {
+            return document.querySelector('input[name="endpoint"]:checked').value;
+        }
+
+        function getBaseUrl(useGateway) {
+            return useGateway 
+                ? 'http://localhost:5000' 
+                : 'http://localhost:8081';
+        }
+
+        function getEndpoint(useGateway) {
+            const baseUrl = getBaseUrl(useGateway);
+            const endpointType = getEndpointType();
+            
+            if (useGateway) {
+                if (endpointType === 'single') {
+                    return `${baseUrl}/visual/generate-flowchart`;
+                } else {
+                    return `${baseUrl}/visual/generate-flowchart-multi`;
+                }
+            } else {
+                if (endpointType === 'single') {
+                    return `${baseUrl}/api/visual/generate-flowchart`;
+                } else {
+                    return `${baseUrl}/api/visual/generate-flowchart-multi`;
+                }
+            }
+        }
+
+        function getRequestData() {
+            const endpointType = getEndpointType();
+            const token = document.getElementById('jwt-token').value;
+            
+            if (!token) {
+                alert('Please enter a JWT token');
+                return null;
+            }
+
+            if (endpointType === 'single') {
+                const fileId = document.getElementById('file-id').value;
+                if (!fileId) {
+                    alert('Please enter a file ID');
+                    return null;
+                }
+
+                return {
+                    url: getEndpoint(false),
+                    gatewayUrl: getEndpoint(true),
+                    token: token,
+                    body: {
+                        file_id: fileId,
+                        flowchart_type: document.getElementById('flowchart-type').value,
+                        prompt: document.getElementById('prompt').value || undefined
+                    }
+                };
+            } else {
+                const fileIds = document.getElementById('file-ids').value;
+                if (!fileIds) {
+                    alert('Please enter file IDs');
+                    return null;
+                }
+
+                const ids = fileIds.split(',').map(id => id.trim()).filter(id => id);
+                if (ids.length === 0) {
+                    alert('Please enter at least one file ID');
+                    return null;
+                }
+
+                return {
+                    url: getEndpoint(false),
+                    gatewayUrl: getEndpoint(true),
+                    token: token,
+                    body: {
+                        file_ids: ids,
+                        flowchart_type: document.getElementById('flowchart-type').value,
+                        prompt: document.getElementById('prompt').value || undefined
+                    }
+                };
+            }
+        }
+
+        async function testDirectService() {
+            const data = getRequestData();
+            if (!data) return;
+
+            await makeRequest(data.url, data.token, data.body, false);
+        }
+
+        async function testGatewayService() {
+            const data = getRequestData();
+            if (!data) return;
+
+            await makeRequest(data.gatewayUrl, data.token, data.body, true);
+        }
+
+        function cleanMermaidSyntax(mermaidCode) {
+            // Remove markdown code blocks
+            let cleaned = mermaidCode.trim();
+            cleaned = cleaned.replace(/^```mermaid\s*/i, '');
+            cleaned = cleaned.replace(/^```\s*/, '');
+            cleaned = cleaned.replace(/\s*```$/g, '');
+            cleaned = cleaned.trim();
+            
+            console.log('Original code:', mermaidCode);
+            
+            // Fix quote issues in node labels
+            // This regex finds text within {} or [] or () and fixes unescaped quotes
+            cleaned = cleaned.replace(/(\{|\[|\()([^}\]\)]*?)(\}|\]|\))/g, (match, open, content, close) => {
+                // Replace straight double quotes with curly quotes or escape them
+                let fixedContent = content.replace(/"/g, '#quot;');
+                return open + fixedContent + close;
+            });
+            
+            // Also fix quotes in edge labels (text after -- or -->)
+            cleaned = cleaned.replace(/(--\s*|-->\s*)([^-\n]+?)(\s*--)/g, (match, arrow, label, nextArrow) => {
+                let fixedLabel = label.replace(/"/g, '#quot;');
+                return arrow + fixedLabel + nextArrow;
+            });
+            
+            console.log('Cleaned code:', cleaned);
+            
+            return cleaned;
+        }
+
+        async function renderMermaidDiagram(mermaidCode, originalCode) {
+            const mermaidDiagram = document.getElementById('mermaid-diagram');
+            
+            // Clean the code
+            let cleanedCode = cleanMermaidSyntax(mermaidCode);
+            
+            console.log('Rendering Mermaid code:', cleanedCode);
+            
+            try {
+                // Clear previous content
+                mermaidDiagram.innerHTML = '';
+                mermaidDiagram.removeAttribute('data-processed');
+                
+                // Create a unique ID for this diagram
+                const diagramId = 'mermaid-diagram-' + Date.now();
+                mermaidDiagram.id = diagramId;
+                
+                // Set the Mermaid code as text content
+                mermaidDiagram.textContent = cleanedCode;
+                
+                // Render using mermaid.run()
+                await mermaid.run({
+                    nodes: [document.getElementById(diagramId)]
+                });
+                
+                console.log('✅ Mermaid diagram rendered successfully');
+                
+                // Show a notice if we had to fix quotes
+                if (cleanedCode !== mermaidCode.trim()) {
+                    const notice = document.createElement('div');
+                    notice.className = 'fix-notice';
+                    notice.innerHTML = `
+                        <strong>🔧 Auto-fix Applied:</strong> Special characters in labels were automatically escaped to fix rendering issues.
+                    `;
+                    mermaidDiagram.parentElement.insertBefore(notice, mermaidDiagram);
+                }
+                
+            } catch (error) {
+                console.error('❌ Mermaid rendering error:', error);
+                
+                // Display error with the code and suggestions
+                mermaidDiagram.innerHTML = `
+                    <div class="error">
+                        <strong>⚠️ Mermaid Rendering Error:</strong><br>
+                        ${error.message}
+                    </div>
+                    
+                    <div style="margin-top: 15px;">
+                        <strong>Original Mermaid Code:</strong>
+                        <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; margin-top: 10px;">${originalCode}</pre>
+                    </div>
+                    
+                    <div style="margin-top: 15px;">
+                        <strong>Cleaned Mermaid Code (with auto-fixes):</strong>
+                        <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; margin-top: 10px;">${cleanedCode}</pre>
+                    </div>
+                    
+                    <div style="margin-top: 10px; padding: 10px; background: #fff3cd; border-radius: 5px;">
+                        <strong>💡 Debugging Tips:</strong>
+                        <ul style="margin-left: 20px; margin-top: 5px;">
+                            <li>Copy the code above and test it at <a href="https://mermaid.live" target="_blank">mermaid.live</a></li>
+                            <li>Check for syntax errors in node IDs and connections</li>
+                            <li>Look for unescaped quotes (") in labels - use single quotes (') instead</li>
+                            <li>Ensure all parentheses, brackets, and braces are properly matched</li>
+                            <li>Common issue: <code>10(1")</code> should be <code>10(1)</code> or <code>10(1')</code></li>
+                        </ul>
+                    </div>
+                    
+                    <div style="margin-top: 10px; padding: 10px; background: #e3f2fd; border-radius: 5px;">
+                        <strong>🔧 Quick Fix Suggestion:</strong><br>
+                        The error mentions an unexpected quote character. Try removing or replacing quotes in node labels.
+                    </div>
+                `;
+            }
+        }
+
+        async function makeRequest(url, token, body, isGateway) {
+            // Show loading
+            document.getElementById('loading').classList.add('show');
+            document.getElementById('result-section').classList.remove('show');
+            
+            // Disable buttons
+            document.getElementById('test-direct-btn').disabled = true;
+            document.getElementById('test-gateway-btn').disabled = true;
+
+            try {
+                console.log('Making request to:', url);
+                console.log('Request body:', body);
+                
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const result = await response.json();
+                console.log('Response received:', result);
+
+                // Hide loading
+                document.getElementById('loading').classList.remove('show');
+                document.getElementById('result-section').classList.add('show');
+
+                // Display status
+                const statusContent = document.getElementById('status-content');
+                if (response.ok) {
+                    statusContent.innerHTML = `<div class="success">
+                        <strong>✅ Success!</strong><br>
+                        Status: ${response.status} ${response.statusText}<br>
+                        Service: ${isGateway ? 'Gateway (Port 5000)' : 'Direct (Port 8081)'}<br>
+                        Endpoint: ${url}
+                    </div>`;
+                } else {
+                    statusContent.innerHTML = `<div class="error">
+                        <strong>❌ Error!</strong><br>
+                        Status: ${response.status} ${response.statusText}<br>
+                        Message: ${result.error || result.message || 'Unknown error'}
+                    </div>`;
+                }
+
+                // Display description
+                document.getElementById('description-content').textContent = 
+                    result.flowchart_description || result.description || result.error || 'No description available';
+
+                // Display and render Mermaid if available
+                const mermaidCard = document.getElementById('mermaid-card');
+                
+                if (result.mermaid_syntax) {
+                    console.log('Mermaid syntax found, displaying card');
+                    mermaidCard.style.display = 'block';
+                    
+                    // Render the Mermaid diagram
+                    await renderMermaidDiagram(result.mermaid_syntax, result.mermaid_syntax);
+                } else {
+                    console.log('No mermaid_syntax in response');
+                    mermaidCard.style.display = 'none';
+                }
+
+                // Display raw response
+                document.getElementById('raw-response').textContent = 
+                    JSON.stringify(result, null, 2);
+
+            } catch (error) {
+                console.error('Request failed:', error);
+                
+                // Hide loading
+                document.getElementById('loading').classList.remove('show');
+                document.getElementById('result-section').classList.add('show');
+
+                // Display error
+                document.getElementById('status-content').innerHTML = `<div class="error">
+                    <strong>❌ Request Failed!</strong><br>
+                    Error: ${error.message}<br>
+                    <br>
+                    <strong>Troubleshooting:</strong>
+                    <ul style="margin-left: 20px; margin-top: 5px;">
+                        <li>Make sure the Visual Service is running on the correct port</li>
+                        <li>Check if CORS is enabled on the service</li>
+                        <li>Verify your JWT token is valid</li>
+                        <li>Check browser console for detailed errors</li>
+                    </ul>
+                </div>`;
+
+                document.getElementById('description-content').textContent = 
+                    `Error: ${error.message}`;
+                document.getElementById('raw-response').textContent = 
+                    `Error: ${error.message}\n\nStack: ${error.stack}`;
+            } finally {
+                // Re-enable buttons
+                document.getElementById('test-direct-btn').disabled = false;
+                document.getElementById('test-gateway-btn').disabled = false;
+            }
+        }
+
+        // Test service health on page load
+        window.addEventListener('load', async () => {
+            console.log('Page loaded, checking service health...');
+            try {
+                const response = await fetch('http://localhost:8081/health');
+                const data = await response.json();
+                if (data.status === 'healthy') {
+                    console.log('✅ Visual Service is running and healthy');
+                } else {
+                    console.warn('⚠️ Visual Service returned unexpected status:', data);
+                }
+            } catch (error) {
+                console.warn('⚠️ Visual Service health check failed:', error.message);
+                console.warn('Make sure the Visual Service is running on http://localhost:8081');
+            }
+        });
+    </script>
+</body>
+</html>

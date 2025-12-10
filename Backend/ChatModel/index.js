@@ -1,0 +1,72 @@
+const express = require('express');
+const cors = require('cors');
+require('dotenv').config();
+
+// Initialize GCS configuration
+const { initializeGCS } = require('./config/gcs');
+const { checkSystemClock } = require('./utils/systemCheck');
+
+// Check system clock first (important for JWT tokens)
+checkSystemClock().then(clockStatus => {
+  if (!clockStatus.synchronized && clockStatus.differenceMinutes) {
+    console.error(`\n⚠️ CRITICAL: System clock is out of sync by ${clockStatus.differenceMinutes.toFixed(2)} minutes!`);
+    console.error('   This will cause JWT authentication errors with GCS.');
+    console.error('   Please sync your system clock before using GCS features.\n');
+  }
+});
+
+// Initialize GCS
+try {
+  initializeGCS();
+} catch (error) {
+  console.error('⚠️ Warning: GCS initialization failed. File uploads will not work:', error.message);
+  console.error('   Run: node scripts/test-gcs-credentials.js to diagnose the issue');
+}
+
+const chatRoutes = require('./routes/chatRoutes');
+
+const app = express();
+const PORT = process.env.PORT || 5003;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'ChatModel service is running',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// API Routes
+app.use('/api/chat', chatRoutes);
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found'
+  });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('❌ Error:', err);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal server error'
+  });
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 ChatModel service running on port ${PORT}`);
+  console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+module.exports = app;
+

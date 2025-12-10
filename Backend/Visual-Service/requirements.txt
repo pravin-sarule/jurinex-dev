@@ -1,0 +1,7 @@
+Flask==3.0.0
+flask-cors==4.0.0
+requests==2.31.0
+PyJWT==2.8.0
+python-dotenv==1.0.0
+google-generativeai==0.3.2
+psycopg2-binary==2.9.11  # Updated to the latest version with Python 3.13 support
