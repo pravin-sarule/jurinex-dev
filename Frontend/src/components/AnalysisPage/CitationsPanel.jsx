@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { FileText, X, ExternalLink } from 'lucide-react';
 import apiService from '../../services/api';
 
-const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:5000';
+const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
 
 const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitationClick }) => {
   const [expandedCitations, setExpandedCitations] = useState({});

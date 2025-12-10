@@ -73,7 +73,7 @@ export const AnalysisPageProvider = ({
   const animationFrameRef = useRef(null);
 
   // API CONFIG
-  const API_BASE_URL = 'http://localhost:5000';
+  const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
   
   // ✅ FUNCTION 1: getAuthToken
   const getAuthToken = () => {

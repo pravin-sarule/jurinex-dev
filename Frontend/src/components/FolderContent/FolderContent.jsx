@@ -31,7 +31,7 @@
 //  const lastProgressRef = useRef(new Map());
 
 //  const getApiBaseUrl = () => {
-//  return window.REACT_APP_API_URL || "http://localhost:5000";
+//  return window.REACT_APP_API_URL || "https://gateway-service-120280829617.asia-south1.run.app";
 //  };
 //  const getAuthToken = () =>
 //  localStorage.getItem("token") || localStorage.getItem("authToken");
@@ -584,7 +584,7 @@
 //  const lastProgressRef = useRef(new Map());
 
 //  const getApiBaseUrl = () => {
-//  return window.REACT_APP_API_URL || "http://localhost:5000";
+//  return window.REACT_APP_API_URL || "https://gateway-service-120280829617.asia-south1.run.app";
 //  };
 //  const getAuthToken = () =>
 //  localStorage.getItem("token") || localStorage.getItem("authToken");
@@ -1133,7 +1133,7 @@ const FolderContent = ({ onDocumentClick }) => {
  const requestIdRef = useRef(0);
 
  const getApiBaseUrl = () => {
- return window.REACT_APP_API_URL || "http://localhost:5000";
+ return window.REACT_APP_API_URL || "https://gateway-service-120280829617.asia-south1.run.app";
  };
  const getAuthToken = () =>
  localStorage.getItem("token") || localStorage.getItem("authToken");

@@ -1622,7 +1622,7 @@ import apiService from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 // FIXED: Remove hardcoded test key - get from environment or backend
-const BACKEND_BASE_URL = import.meta.env.VITE_APP_API_URL || 'http://localhost:5000/payments';
+const BACKEND_BASE_URL = import.meta.env.VITE_APP_API_URL || 'https://gateway-service-120280829617.asia-south1.run.app/payments';
 
 console.log('Environment variables:', { BACKEND_BASE_URL });
 

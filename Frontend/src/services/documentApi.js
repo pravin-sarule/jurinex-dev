@@ -2,7 +2,7 @@
 
 // import axios from 'axios';
 
-// const API_BASE_URL = 'http://localhost:5000/docs';
+// const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 // const getAuthHeader = () => {
 //   const token = localStorage.getItem('token');
@@ -246,7 +246,7 @@
 
 // import axios from 'axios';
 
-// const API_BASE_URL = 'http://localhost:5000/docs';
+// const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 // const getAuthHeader = () => {
 //   const token = localStorage.getItem('token');
@@ -538,7 +538,7 @@
 
 // import axios from 'axios';
 
-// const API_BASE_URL = 'http://localhost:5000/docs';
+// const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 // const getAuthHeader = () => {
 //   const token = localStorage.getItem('token');
@@ -795,7 +795,7 @@
 
 // import axios from 'axios';
 
-// const API_BASE_URL = 'http://localhost:5000/docs';
+// const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 // const getAuthHeader = () => {
 //   const token = localStorage.getItem('token');
@@ -1058,7 +1058,7 @@
 
 // import axios from 'axios';
 
-// const API_BASE_URL = 'http://localhost:5000/docs';
+// const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 // const getAuthHeader = () => {
 //   const token = localStorage.getItem('token');
@@ -1393,7 +1393,7 @@
 
 // import axios from 'axios';
 
-// const API_BASE_URL = 'http://localhost:5000/docs';
+// const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 // const getAuthHeader = () => {
 //   const token = localStorage.getItem('token');
@@ -1657,7 +1657,7 @@
 
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:5000/docs';
+const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app/docs';
 
 const getAuthHeader = () => {
   const token = localStorage.getItem('token');

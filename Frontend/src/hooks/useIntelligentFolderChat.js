@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 
 // Get API base URL from environment or default
-const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:5000';
+const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
 const API_BASE = `${API_BASE_URL}/docs`;
 
 // Helper to get auth token from localStorage

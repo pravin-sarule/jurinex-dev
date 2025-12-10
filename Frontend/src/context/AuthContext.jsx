@@ -179,7 +179,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       console.log('🔄 AuthContext: Fetching plan from API...');
-      const response = await fetch('http://localhost:5000/user-resources/plan-details', {
+      const response = await fetch('https://gateway-service-120280829617.asia-south1.run.app/user-resources/plan-details', {
         headers: {
           'Authorization': `Bearer ${authToken}`,
           'Content-Type': 'application/json'

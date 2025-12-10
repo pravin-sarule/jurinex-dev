@@ -12,7 +12,7 @@
 // const api = {
 //  getUserPlanDetails: async () => {
 //  const token = localStorage.getItem('token');
-//  const response = await fetch('http://localhost:5000/user-resources/plan-details', {
+//  const response = await fetch('https://gateway-service-120280829617.asia-south1.run.app/user-resources/plan-details', {
 //  headers: {
 //  'Authorization': `Bearer ${token}`,
 //  'Content-Type': 'application/json'
@@ -24,7 +24,7 @@
 //  },
 //  fetchPaymentHistory: async () => {
 //  const token = localStorage.getItem('token');
-//  const response = await fetch('http://localhost:5000/payments/history', {
+//  const response = await fetch('https://gateway-service-120280829617.asia-south1.run.app/payments/history', {
 //  headers: {
 //  'Authorization': `Bearer ${token}`,
 //  'Content-Type': 'application/json'
@@ -36,7 +36,7 @@
 //  },
 //  getUserTokenUsage: async (userId) => {
 //  const token = localStorage.getItem('token');
-//  const response = await fetch(`http://localhost:5000/files/user-usage-and-plan/${userId}`, {
+//  const response = await fetch(`https://gateway-service-120280829617.asia-south1.run.app/files/user-usage-and-plan/${userId}`, {
 //  headers: {
 //  'Authorization': `Bearer ${token}`,
 //  'Content-Type': 'application/json'
@@ -787,7 +787,7 @@ import html2pdf from 'html2pdf.js';
 const api = {
  getUserPlanDetails: async () => {
  const token = localStorage.getItem('token');
- const response = await fetch('http://localhost:5000/user-resources/plan-details', {
+ const response = await fetch('https://gateway-service-120280829617.asia-south1.run.app/user-resources/plan-details', {
  headers: {
  'Authorization': `Bearer ${token}`,
  'Content-Type': 'application/json'
@@ -799,7 +799,7 @@ const api = {
  },
  fetchPaymentHistory: async () => {
  const token = localStorage.getItem('token');
- const response = await fetch('http://localhost:5000/payments/history', {
+ const response = await fetch('https://gateway-service-120280829617.asia-south1.run.app/payments/history', {
  headers: {
  'Authorization': `Bearer ${token}`,
  'Content-Type': 'application/json'
@@ -811,7 +811,7 @@ const api = {
  },
  getUserTokenUsage: async (userId) => {
  const token = localStorage.getItem('token');
- const response = await fetch(`http://localhost:5000/files/user-usage-and-plan/${userId}`, {
+ const response = await fetch(`https://gateway-service-120280829617.asia-south1.run.app/files/user-usage-and-plan/${userId}`, {
  headers: {
  'Authorization': `Bearer ${token}`,
  'Content-Type': 'application/json'

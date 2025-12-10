@@ -52,7 +52,7 @@ export default function IntelligentFolderChat({
   } = useIntelligentFolderChat(folderName, authToken);
 
   // API Configuration
-  const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:5000';
+  const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
 
   // Helper to get auth token from localStorage
   const getAuthToken = () => {

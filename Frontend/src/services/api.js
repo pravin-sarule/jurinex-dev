@@ -1,6 +1,6 @@
 
 const API_BASE_URL =
- import.meta.env.VITE_APP_API_URL || "http://localhost:5000";
+ import.meta.env.VITE_APP_API_URL || "https://gateway-service-120280829617.asia-south1.run.app";
 
 class ApiService {
  constructor() {
@@ -154,7 +154,7 @@ class ApiService {
  }
 
  async verifyOtp(email, otp) {
- const response = await this.request("http://localhost:5000/auth/api/auth/verify-otp", {
+ const response = await this.request("https://gateway-service-120280829617.asia-south1.run.app/auth/api/auth/verify-otp", {
  method: "POST",
  body: JSON.stringify({ email, otp }),
  });
@@ -213,7 +213,7 @@ class ApiService {
  }
 
  async getDraftingTemplates() {
- return this.request("http://localhost:5000/drafting");
+ return this.request("https://gateway-service-120280829617.asia-south1.run.app/drafting");
  }
 
  // ========================
@@ -485,12 +485,12 @@ class ApiService {
  }
 
  // ========================
- // ✅ ChatModel APIs (Base URL: http://localhost:5000)
+ // ✅ ChatModel APIs (Base URL: https://gateway-service-120280829617.asia-south1.run.app)
  // ========================
  
  // Helper method for ChatModel API requests
  async chatModelRequest(endpoint, options = {}) {
- const CHAT_MODEL_BASE_URL = "http://localhost:5000";
+ const CHAT_MODEL_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
  const url = endpoint.startsWith("http://") || endpoint.startsWith("https://")
    ? endpoint
    : `${CHAT_MODEL_BASE_URL}${endpoint}`;
@@ -563,7 +563,7 @@ class ApiService {
 
  // Ask question (streaming) - returns EventSource-like stream
  async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError) {
- const CHAT_MODEL_BASE_URL = "http://localhost:5000";
+ const CHAT_MODEL_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
  const token = this.getAuthToken();
  
  const body = { question, file_id: fileId };

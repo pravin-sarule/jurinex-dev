@@ -133,7 +133,7 @@
 //   const [courts, setCourts] = useState([]);
 //   const [loading, setLoading] = useState(false);
 
-//   const API_BASE_URL = 'http://localhost:5002/api/content';
+//   const API_BASE_URL = 'https://document-service-120280829617.asia-south1.run.app/api/content';
 
 //   // Fetch case types on component mount
 //   useEffect(() => {
@@ -333,7 +333,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   const hasConvertedCaseType = React.useRef(false);
   const hasConvertedCourt = React.useRef(false);
 
-  const API_BASE_URL = "http://localhost:5002/api/content";
+  const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
 
   useEffect(() => {
     fetchCaseTypes();

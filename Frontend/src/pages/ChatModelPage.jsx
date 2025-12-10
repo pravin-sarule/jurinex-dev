@@ -307,7 +307,7 @@
 //   const uploadIntervalRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = 'http://localhost:5000';
+//   const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
 //   const getAuthToken = () => {
 //     const tokenKeys = [
@@ -3217,7 +3217,7 @@ const ChatModelPage = () => {
   const uploadIntervalRef = useRef(null);
 
   // API Configuration
-  const API_BASE_URL = 'http://localhost:5000';
+  const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -3305,7 +3305,7 @@ const ChatModelPage = () => {
 
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        const CHAT_MODEL_BASE_URL = "http://localhost:5000";
+        const CHAT_MODEL_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
         // Track upload progress
         xhr.upload.addEventListener('progress', (e) => {
