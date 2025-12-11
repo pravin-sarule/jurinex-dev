@@ -18,6 +18,7 @@ import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup'
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import { isUserFreeTier, FREE_TIER_MAX_FILE_SIZE_BYTES, FREE_TIER_MAX_FILE_SIZE_MB, formatFileSize } from '../utils/planUtils';
 import {
   Search,
   Send,
@@ -47,6 +48,7 @@ import {
   Circle,
   CreditCard,
   Square,
+  Zap,
 } from 'lucide-react';
 
 const PROGRESS_STAGES = {
@@ -251,6 +253,7 @@ const ChatModelPage = () => {
   const [success, setSuccess] = useState(null);
   const [hasResponse, setHasResponse] = useState(false);
   const [isSecretPromptSelected, setIsSecretPromptSelected] = useState(false);
+  const [fileSizeLimitError, setFileSizeLimitError] = useState(null);
 
   // Document and Analysis Data
   const [documentData, setDocumentData] = useState(null);
@@ -1562,6 +1565,10 @@ const ChatModelPage = () => {
     console.log('Files selected:', files.length);
     if (files.length === 0) return;
    
+    // Check if user is on free tier
+    const isFreeUser = isUserFreeTier();
+    console.log('Is free user:', isFreeUser);
+   
     const allowedTypes = [
       'application/pdf',
       'application/msword',
@@ -1571,21 +1578,53 @@ const ChatModelPage = () => {
       'image/jpeg',
       'image/tiff',
     ];
-    const maxSize = 300 * 1024 * 1024;
+    
+    // Set max size based on user plan
+    const maxSize = isFreeUser ? FREE_TIER_MAX_FILE_SIZE_BYTES : 300 * 1024 * 1024; // 10MB for free, 300MB for paid
+    
+    let hasFileSizeError = false;
     const validFiles = files.filter((file) => {
       if (!allowedTypes.includes(file.type)) {
         setError(`File "${file.name}" has an unsupported type.`);
         return false;
       }
-      if (file.size > maxSize) {
+      
+      // Check file size based on user plan
+      if (isFreeUser && file.size > maxSize) {
+        const fileSizeFormatted = formatFileSize(file.size);
+        console.log('File size limit exceeded:', { fileName: file.name, fileSize: fileSizeFormatted, maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB` });
+        hasFileSizeError = true;
+        setFileSizeLimitError({
+          fileName: file.name,
+          fileSize: fileSizeFormatted,
+          maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB`
+        });
+        return false;
+      } else if (!isFreeUser && file.size > maxSize) {
         setError(`File "${file.name}" is too large (max 300MB).`);
         return false;
       }
+      
       return true;
     });
    
+    // Clear any previous file size limit error if we have valid files
+    if (validFiles.length > 0) {
+      setFileSizeLimitError(null);
+    }
+   
     if (validFiles.length === 0) {
-      event.target.value = '';
+      // Only clear input if there's no file size error (to keep the alert visible)
+      if (!hasFileSizeError) {
+        event.target.value = '';
+      } else {
+        // Clear input after a delay to allow the alert to show
+        setTimeout(() => {
+          if (event.target) {
+            event.target.value = '';
+          }
+        }, 100);
+      }
       return;
     }
 
@@ -2906,8 +2945,49 @@ const ChatModelPage = () => {
                     </button>
                   </div>
                 </div>
+                )}
+              </form>
+              
+              {/* File Size Limit Alert - Compact with Project Theme */}
+              {fileSizeLimitError && (
+                <div className="mt-2 animate-fadeIn">
+                  <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
+                          <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setFileSizeLimitError(null);
+                              navigate('/subscription-plans');
+                            }}
+                            className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
+                          >
+                            <Zap className="h-3 w-3 mr-1.5" />
+                            Upgrade Plan
+                          </button>
+                          <button
+                            onClick={() => setFileSizeLimitError(null)}
+                            className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setFileSizeLimitError(null)}
+                        className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-0.5"
+                        aria-label="Close"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
               )}
-            </form>
           </div>
           </div>
          
@@ -3141,6 +3221,47 @@ const ChatModelPage = () => {
                   </div>
                 )}
               </form>
+              
+              {/* File Size Limit Alert - Compact with Project Theme */}
+              {fileSizeLimitError && (
+                <div className="mt-2 animate-fadeIn">
+                  <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
+                          <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setFileSizeLimitError(null);
+                              navigate('/subscription-plans');
+                            }}
+                            className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
+                          >
+                            <Zap className="h-3 w-3 mr-1.5" />
+                            Upgrade Plan
+                          </button>
+                          <button
+                            onClick={() => setFileSizeLimitError(null)}
+                            className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setFileSizeLimitError(null)}
+                        className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-0.5"
+                        aria-label="Close"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
