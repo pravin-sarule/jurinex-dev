@@ -106,3 +106,5 @@ COMMENT ON COLUMN document_ai_extractions.tables IS 'Array of extracted tables (
 COMMENT ON COLUMN document_ai_extractions.raw_response IS 'Complete raw response from Document AI API';
 
 
+
+

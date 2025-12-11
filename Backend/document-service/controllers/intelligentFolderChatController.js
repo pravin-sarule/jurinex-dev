@@ -1754,8 +1754,18 @@ exports.intelligentFolderChat = async (req, res) => {
 
     // 6. Store chat in folder_chat table WITH citations
     console.log(`💾 [intelligentFolderChat] Saving chat to folder_chat table with ${citations.length} citations...`);
-    // For secret prompts, store secret name as the question; for regular queries, store the question
-    const storedQuestion = (used_secret_prompt && secretName) ? secretName : question.trim();
+    // ✅ For secret prompts, ALWAYS store secret name as the question; for regular queries, store the question
+    // This ensures prompt_label is always stored in question column for secret prompts
+    let storedQuestion;
+    if (used_secret_prompt) {
+      // For secret prompts, use secretName if available, otherwise use a fallback
+      storedQuestion = secretName || question?.trim() || 'Secret Prompt';
+      console.log(`💾 [intelligentFolderChat] Secret prompt detected - storing question as: "${storedQuestion}"`);
+    } else {
+      // For regular queries, use the question
+      storedQuestion = question?.trim() || '';
+      console.log(`💾 [intelligentFolderChat] Regular query - storing question as: "${storedQuestion}"`);
+    }
     // ✅ Store citations permanently in database
     const savedChat = await FolderChat.saveFolderChat(
       userId,
@@ -2976,17 +2986,29 @@ exports.intelligentFolderChatStream = async (req, res) => {
     console.log(`${'='.repeat(80)}\n`);
 
     // Save chat
+    // ✅ For secret prompts, ALWAYS store secret name as the question; for regular queries, store the question
+    // This ensures prompt_label is always stored in question column for secret prompts
+    let storedQuestion;
+    if (used_secret_prompt) {
+      // For secret prompts, use secretName if available, otherwise use a fallback
+      storedQuestion = secretName || actualQuestion?.trim() || 'Secret Prompt';
+      console.log(`💾 [Streaming] Secret prompt detected - storing question as: "${storedQuestion}"`);
+    } else {
+      // For regular queries, use the question
+      storedQuestion = actualQuestion?.trim() || '';
+      console.log(`💾 [Streaming] Regular query - storing question as: "${storedQuestion}"`);
+    }
     // ✅ Store citations permanently in database
     const savedChat = await FolderChat.saveFolderChat(
       userId,
       folderName,
-      actualQuestion.trim(),
+      storedQuestion,
       fullAnswer,
       finalSessionId,
       usedFileIds,
       usedChunkIds,
       used_secret_prompt,
-      null,
+      secretName || null, // prompt_label (use secret name if secret prompt)
       secret_id,
       historyForStorage,
       citations // ✅ Store citations in database for permanent access

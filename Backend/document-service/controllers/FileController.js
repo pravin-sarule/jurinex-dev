@@ -6309,6 +6309,101 @@ exports.deleteFolderChatSession = async (req, res) => {
   }
 };
 
+/* ---------------------- Delete Single Folder Chat by ID ---------------------- */
+exports.deleteSingleFolderChat = async (req, res) => {
+  try {
+    const { folderName, chatId } = req.params;
+    const userId = req.user.id;
+
+    console.log(`🗑️ [deleteSingleFolderChat] Deleting chat: ${chatId} from folder: ${folderName}, user: ${userId}`);
+
+    // Check if chatId is a valid UUID
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const isValidUUID = UUID_REGEX.test(chatId);
+    
+    if (!isValidUUID) {
+      return res.status(400).json({
+        error: "Invalid chat ID format",
+        chatId,
+        message: "Chat ID must be a valid UUID format"
+      });
+    }
+
+    // First, verify the chat exists and belongs to this user and folder
+    const checkQuery = `
+      SELECT id, folder_name, question, created_at
+      FROM folder_chats
+      WHERE id = $1::uuid
+        AND user_id = $2
+    `;
+    
+    const checkResult = await pool.query(checkQuery, [chatId, userId]);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        error: "Chat not found",
+        chatId,
+        message: "Chat not found or you don't have permission to delete it."
+      });
+    }
+
+    const chat = checkResult.rows[0];
+    const normalizedFolderName = folderName.trim();
+    const chatFolderName = chat.folder_name?.trim() || '';
+
+    // Verify folder matches (case-insensitive)
+    if (chatFolderName.toLowerCase() !== normalizedFolderName.toLowerCase()) {
+      return res.status(404).json({
+        error: "Chat not found in this folder",
+        chatId,
+        folderName: normalizedFolderName,
+        actualFolder: chatFolderName,
+        message: `Chat belongs to folder "${chatFolderName}", not "${normalizedFolderName}"`
+      });
+    }
+
+    // Delete the single chat
+    const deleteQuery = `
+      DELETE FROM folder_chats
+      WHERE id = $1::uuid
+        AND user_id = $2
+        AND LOWER(TRIM(folder_name)) = LOWER(TRIM($3))
+      RETURNING id, folder_name, question
+    `;
+
+    const result = await pool.query(deleteQuery, [chatId, userId, normalizedFolderName]);
+    const deletedCount = result.rowCount || 0;
+
+    console.log(`🗑️ [deleteSingleFolderChat] Deleted ${deletedCount} chat(s) with id: ${chatId}`);
+
+    if (deletedCount === 0) {
+      return res.status(404).json({
+        error: "Chat not found",
+        chatId,
+        folderName: normalizedFolderName,
+        message: "Chat not found. It may have already been deleted or doesn't exist."
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Chat deleted successfully",
+      folderName: normalizedFolderName,
+      chatId,
+      deletedChat: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error("❌ deleteSingleFolderChat error:", error);
+    console.error("❌ deleteSingleFolderChat error stack:", error.stack);
+    res.status(500).json({
+      error: "Failed to delete chat",
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+};
+
 
 
 

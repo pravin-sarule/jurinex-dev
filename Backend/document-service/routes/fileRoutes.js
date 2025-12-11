@@ -135,6 +135,8 @@ router.delete("/:folderName/sessions/:sessionId", authMiddleware.protect, fileCo
 // Alternative routes using /chats/ pattern (for compatibility)
 router.get("/:folderName/chats", authMiddleware.protect, fileController.getFolderChatsByFolder);
 router.get("/:folderName/chats/:sessionId", authMiddleware.protect, fileController.getFolderChatSessionById);
+// ✅ Delete single chat by chat ID (not session ID) - must come before session delete route
+router.delete("/:folderName/chat/:chatId", authMiddleware.protect, fileController.deleteSingleFolderChat);
 router.delete("/:folderName/chats/:sessionId", authMiddleware.protect, fileController.deleteFolderChatSession);
 
 
