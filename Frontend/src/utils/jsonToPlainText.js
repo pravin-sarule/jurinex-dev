@@ -4,6 +4,52 @@
  * @param {string|object} text - The text that might be JSON (string) or already parsed JSON (object)
  * @returns {string} Plain text representation
  */
+/**
+ * Attempts to parse partial/incomplete JSON during streaming
+ * Returns the parsed object if successful, or null if parsing fails
+ */
+function tryParsePartialJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+  
+  try {
+    return JSON.parse(trimmed);
+  } catch (e) {
+    // Try to fix common incomplete JSON issues during streaming
+    let fixedJson = trimmed;
+    
+    // Try to close unclosed strings
+    const openQuotes = (fixedJson.match(/"/g) || []).length;
+    if (openQuotes % 2 !== 0) {
+      fixedJson += '"';
+    }
+    
+    // Try to close unclosed objects/arrays
+    const openBraces = (fixedJson.match(/\{/g) || []).length;
+    const closeBraces = (fixedJson.match(/\}/g) || []).length;
+    const openBrackets = (fixedJson.match(/\[/g) || []).length;
+    const closeBrackets = (fixedJson.match(/\]/g) || []).length;
+    
+    // Add missing closing braces/brackets
+    for (let i = 0; i < openBraces - closeBraces; i++) {
+      fixedJson += '}';
+    }
+    for (let i = 0; i < openBrackets - closeBrackets; i++) {
+      fixedJson += ']';
+    }
+    
+    // Try parsing again
+    try {
+      return JSON.parse(fixedJson);
+    } catch (e2) {
+      // Still failed, return null
+      return null;
+    }
+  }
+}
+
 export function convertJsonToPlainText(text) {
   // Handle null, undefined, or empty values
   if (!text) {
@@ -29,8 +75,26 @@ export function convertJsonToPlainText(text) {
       jsonData = JSON.parse(trimmed);
     }
   } catch (e) {
-    // Not JSON, return as is
-    return text;
+    // Try partial JSON parsing for streaming
+    jsonData = tryParsePartialJson(text);
+    if (!jsonData) {
+      // If it looks like JSON but can't parse, try to format what we can
+      // Extract any readable content from partial JSON
+      if (trimmed.startsWith('{')) {
+        // Try to extract key-value pairs that are complete
+        const keyValuePairs = [];
+        const regex = /"([^"]+)":\s*"([^"]*)"/g;
+        let match;
+        while ((match = regex.exec(trimmed)) !== null) {
+          keyValuePairs.push(`**${match[1]}:** ${match[2]}\n`);
+        }
+        if (keyValuePairs.length > 0) {
+          return keyValuePairs.join('\n');
+        }
+      }
+      // Not JSON or can't parse, return as is (but this should be rare during streaming)
+      return text;
+    }
   }
 
   // If it's JSON, convert to readable format

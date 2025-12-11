@@ -495,11 +495,11 @@ import ChatSessionList from './ChatInterface/ChatSessionList';
 import ChatMessage from './ChatInterface/ChatMessage';
 import ChatInput from './ChatInterface/ChatInput';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import ApiService from '../services/api';
 import { BookOpen, ChevronDown, MessageSquare, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 
 const DocumentChatView = () => {
   const { selectedFolder, chatSessions, setChatSessions, selectedChatSessionId, setSelectedChatSessionId } = useContext(FileManagerContext);
@@ -928,7 +928,19 @@ const DocumentChatView = () => {
               <div className="prose prose-gray max-w-none custom-markdown-renderer">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  children={animatedResponseContent || currentResponse || ''}
+                  children={(() => {
+                    const rawResponse = animatedResponseContent || currentResponse || '';
+                    if (!rawResponse) return '';
+                    
+                    // Check if it's structured JSON and format it accordingly
+                    const isStructured = isStructuredJsonResponse(rawResponse);
+                    if (isStructured) {
+                      return renderSecretPromptResponse(rawResponse);
+                    }
+                    
+                    // Convert any JSON to plain text
+                    return convertJsonToPlainText(rawResponse);
+                  })()}
                   components={{
                     h1: ({node, ...props}) => <h1 className="text-2xl font-bold mb-6 mt-8 text-black border-b-2 border-gray-300 pb-2" {...props} />,
                     h2: ({node, ...props}) => <h2 className="text-xl font-bold mb-4 mt-6 text-black" {...props} />,

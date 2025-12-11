@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useContext, useRef, useMemo } from "react";
+import React, { useState, useEffect, useContext, useRef, useMemo, useCallback, startTransition } from "react";
 import { FileManagerContext } from "../../context/FileManagerContext";
 import documentApi from "../../services/documentApi";
 import {
@@ -17,9 +17,12 @@ import {
   Trash2,
   FileText,
   X,
+  ArrowRight,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import { SidebarContext } from "../../context/SidebarContext";
 import DownloadPdf from "../DownloadPdf/DownloadPdf";
 import { toast } from "react-toastify";
@@ -27,6 +30,7 @@ import "../../styles/ChatInterface.css";
 import CitationsPanel from "../AnalysisPage/CitationsPanel";
 import apiService from "../../services/api";
 import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
+import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../utils/renderSecretPromptResponse";
 
 // Previous commented code below
 
@@ -401,7 +405,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const dropdownRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //   const getAuthToken = () => {
 //     const tokenKeys = [
@@ -1052,7 +1056,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const dropdownRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //   const getAuthToken = () => {
 //     const tokenKeys = [
@@ -1840,7 +1844,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const dropdownRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //   const getAuthToken = () => {
 //     const tokenKeys = [
@@ -2601,7 +2605,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const dropdownRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //   const getAuthToken = () => {
 //     const tokenKeys = [
@@ -3565,7 +3569,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const dropdownRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //   const getAuthToken = () => {
 //     const tokenKeys = [
@@ -4316,7 +4320,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //  const dropdownRef = useRef(null);
 
 //  // API Configuration
-//  const API_BASE_URL = "http://localhost:5000";
+//  const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //  const getAuthToken = () => {
 //  const tokenKeys = [
@@ -5072,7 +5076,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //  const animationIntervalRef = useRef(null);
 
 //  // API Configuration
-//  const API_BASE_URL = "http://localhost:5000";
+//  const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 
 //  const getAuthToken = () => {
 //  const tokenKeys = [
@@ -5889,7 +5893,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const animationIntervalRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 //   const getAuthToken = () => {
 //     const tokenKeys = [
 //       "authToken",
@@ -6630,7 +6634,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const animationFrameRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 //   const getAuthToken = () => {
 //     const tokenKeys = [
 //       "authToken",
@@ -7381,7 +7385,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const markdownOutputRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 //   const getAuthToken = () => {
 //     const tokenKeys = [
 //       "authToken",
@@ -8357,7 +8361,7 @@ import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 //   const markdownOutputRef = useRef(null);
 
 //   // API Configuration
-//   const API_BASE_URL = "http://localhost:5000";
+//   const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
 //   const getAuthToken = () => {
 //     const tokenKeys = [
 //       "authToken",
@@ -9327,11 +9331,32 @@ const ChatInterface = () => {
     return htmlTablePattern || markdownTablePattern;
   }, [animatedResponseContent]);
 
+  // ✅ Format response content - must be at top level (not conditional) to follow Rules of Hooks
+  const formattedResponseContent = useMemo(() => {
+    const rawResponse = animatedResponseContent || '';
+    if (!rawResponse) return '';
+    
+    // ✅ CRITICAL: Always check if the response is structured JSON
+    // This ensures JSON responses are never displayed as raw JSON
+    const isStructured = isStructuredJsonResponse(rawResponse);
+    
+    // Always format structured JSON responses (whether secret prompt or not)
+    // This ensures JSON responses are never displayed as raw JSON
+    if (isStructured) {
+      return renderSecretPromptResponse(rawResponse);
+    }
+    
+    // For non-structured responses, convert any JSON to plain text
+    // This catches any JSON that wasn't detected as structured
+    return convertJsonToPlainText(rawResponse);
+  }, [animatedResponseContent]);
+
   const shouldShowHorizontalScrollbar = useMemo(() => {
     return isSmallScreen && responseHasTable && needsHorizontalScroll;
   }, [isSmallScreen, responseHasTable, needsHorizontalScroll]);
   const responseRef = useRef(null);
   const dropdownRef = useRef(null);
+  const completeResponseRef = useRef(null); // Store complete response for skip animation
   const animationFrameRef = useRef(null);
   const markdownOutputRef = useRef(null);
   const horizontalScrollRef = useRef(null);
@@ -9342,9 +9367,10 @@ const ChatInterface = () => {
   const streamReaderRef = useRef(null);
   const chatMenuRefs = useRef({});
   const panelStatesSetRef = useRef(false); // Track if panel states have been set for current stream
+  const fetchedFoldersRef = useRef(new Set()); // Track which folders we've fetched chats for
 
   // API Configuration
-  const API_BASE_URL = "http://localhost:5000";
+  const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
   const getAuthToken = () => {
     const tokenKeys = [
       "authToken",
@@ -9459,6 +9485,72 @@ const ChatInterface = () => {
     } catch (error) {
       console.error("Failed to copy:", error);
       alert("Failed to copy to clipboard");
+    }
+  };
+
+  // Skip animation and show complete response immediately
+  const skipAnimation = () => {
+    console.log('[ChatInterface] skipAnimation called');
+    
+    // Cancel any ongoing animation
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      clearTimeout(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    
+    // Get the complete response - try multiple sources in priority order
+    let completeResponse = '';
+    
+    // Priority 1: Get from completeResponseRef (stored when animation started)
+    if (completeResponseRef.current) {
+      completeResponse = completeResponseRef.current;
+      console.log('[ChatInterface] skipAnimation: Found complete response in ref, length:', completeResponse.length);
+    }
+    
+    // Priority 2: Get from selected message (if response is already saved)
+    if (!completeResponse && selectedMessageId) {
+      const selectedMessage = currentChatHistory.find(msg => msg.id === selectedMessageId);
+      if (selectedMessage) {
+        const rawResponse = selectedMessage.response || selectedMessage.answer || selectedMessage.message || "";
+        if (rawResponse) {
+          // Format the response if needed
+          const isStructured = isStructuredJsonResponse(rawResponse);
+          completeResponse = isStructured
+            ? renderSecretPromptResponse(rawResponse)
+            : convertJsonToPlainText(rawResponse);
+          console.log('[ChatInterface] skipAnimation: Found response in message, length:', completeResponse.length);
+        }
+      }
+    }
+    
+    // Priority 3: Get from streamBufferRef (for responses currently being generated)
+    if (!completeResponse && streamBufferRef.current) {
+      const rawResponse = streamBufferRef.current;
+      if (rawResponse) {
+        const isStructured = isStructuredJsonResponse(rawResponse);
+        completeResponse = isStructured
+          ? renderSecretPromptResponse(rawResponse)
+          : convertJsonToPlainText(rawResponse);
+        console.log('[ChatInterface] skipAnimation: Found response in streamBufferRef, length:', completeResponse.length);
+      }
+    }
+    
+    // Priority 4: Use formattedResponseContent (already formatted)
+    if (!completeResponse && formattedResponseContent) {
+      completeResponse = formattedResponseContent;
+      console.log('[ChatInterface] skipAnimation: Using formattedResponseContent, length:', completeResponse.length);
+    }
+    
+    if (completeResponse) {
+      // Set the complete response immediately
+      setAnimatedResponseContent(completeResponse);
+      setIsAnimatingResponse(false);
+      setIsGenerating(false);
+      completeResponseRef.current = null; // Clear ref after skipping
+      console.log('[ChatInterface] skipAnimation: Animation skipped, complete response displayed');
+    } else {
+      console.warn('[ChatInterface] skipAnimation: No response found to skip to');
     }
   };
 
@@ -9582,31 +9674,71 @@ const ChatInterface = () => {
     }
   };
 
-  // Fetch chat history
-  const fetchChatHistory = async (sessionId) => {
-    if (!selectedFolder) return;
+  // Fetch chat history - use useCallback to ensure it always has latest selectedFolder
+  const fetchChatHistory = useCallback(async (sessionId, folderName = null) => {
+    // Use provided folderName or fall back to selectedFolder from context
+    // ✅ Ensure we extract string from selectedFolder if it's an object
+    let folderToFetch = folderName;
+    if (!folderToFetch) {
+      if (typeof selectedFolder === 'string') {
+        folderToFetch = selectedFolder;
+      } else if (selectedFolder) {
+        folderToFetch = selectedFolder.originalname || selectedFolder.name || null;
+      }
+    }
+    if (!folderToFetch) {
+      console.log('[ChatInterface] fetchChatHistory: No folder to fetch, returning early. selectedFolder:', selectedFolder);
+      return;
+    }
+    console.log('[ChatInterface] fetchChatHistory: Starting fetch for folder:', folderToFetch, 'sessionId:', sessionId);
     setLoadingChat(true);
     setChatError(null);
     try {
-      const data = await documentApi.getFolderChats(selectedFolder);
+      console.log('[ChatInterface] fetchChatHistory: Calling API...');
+      const data = await documentApi.getFolderChats(folderToFetch);
+      console.log('[ChatInterface] fetchChatHistory: API response:', data);
       const chats = Array.isArray(data.chats) ? data.chats : [];
-      console.log('[ChatInterface] Fetched chats:', chats);
+      console.log('[ChatInterface] fetchChatHistory: Parsed chats array:', chats);
+      console.log('[ChatInterface] fetchChatHistory: Number of chats:', chats.length);
+      
       // Ensure all messages have used_chunk_ids, citations, and chunk_details (even if empty array/null)
+      // ✅ Also ensure prompt_label is preserved and used as question if question is missing
+      // ✅ Map answer to response for consistency
       const chatsWithChunks = chats.map(chat => ({
         ...chat,
+        // Map answer to response for consistency (backend returns 'answer', frontend uses 'response')
+        response: chat.response || chat.answer || chat.message || "",
+        answer: chat.answer || chat.response || chat.message || "", // Keep both for compatibility
         used_chunk_ids: chat.used_chunk_ids || [],
         citations: chat.citations || null,
-        chunk_details: chat.chunk_details || null // Preserve chunk_details from backend
+        chunk_details: chat.chunk_details || null, // Preserve chunk_details from backend
+        // ✅ Use prompt_label as question if question is missing (for secret prompts)
+        question: chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled",
+        prompt_label: chat.prompt_label || chat.promptLabel || null
       }));
-      setCurrentChatHistory(chatsWithChunks);
+      console.log('[ChatInterface] fetchChatHistory: Setting currentChatHistory with', chatsWithChunks.length, 'chats');
+      // ✅ Use functional update to ensure we don't lose state during refresh
+      setCurrentChatHistory(prev => {
+        // If we have new chats, use them; otherwise keep previous (prevents flash on refresh)
+        if (chatsWithChunks.length > 0) {
+          return chatsWithChunks;
+        }
+        return prev.length > 0 ? prev : chatsWithChunks; // Only clear if truly empty
+      });
+      
       if (sessionId) {
         setSelectedChatSessionId(sessionId);
         const selectedChat = chatsWithChunks.find((c) => c.id === sessionId);
         if (selectedChat) {
           const responseText = selectedChat.response || selectedChat.answer || selectedChat.message || "";
           setSelectedMessageId(selectedChat.id);
+          // ✅ Convert JSON to formatted document before displaying saved responses
+          const isStructured = isStructuredJsonResponse(responseText);
+          const formattedResponse = isStructured
+            ? renderSecretPromptResponse(responseText)
+            : convertJsonToPlainText(responseText);
           // Set content directly without animation for restored messages
-          setAnimatedResponseContent(responseText);
+          setAnimatedResponseContent(formattedResponse);
           setIsAnimatingResponse(false);
           setIsGenerating(false);
           setHasResponse(true);
@@ -9625,28 +9757,37 @@ const ChatInterface = () => {
         setForceSidebarCollapsed(false);
       }
     } catch (err) {
-      console.error("Error fetching chats:", err);
+      console.error("[ChatInterface] fetchChatHistory: Error fetching chats:", err);
+      console.error("[ChatInterface] fetchChatHistory: Error details:", err.response?.data || err.message);
       setChatError("Failed to fetch chat history.");
     } finally {
       setLoadingChat(false);
+      console.log('[ChatInterface] fetchChatHistory: Completed');
     }
-  };
+  }, [selectedFolder]); // Include selectedFolder in dependencies
 
   // Fetch citations when message is selected
   useEffect(() => {
     const fetchCitations = async () => {
-      if (!selectedMessageId || !selectedFolder) {
-        console.log('[Citations] Missing selectedMessageId or selectedFolder:', { selectedMessageId, selectedFolder });
+      // ✅ Ensure selectedFolder is a string, not an object
+      const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+      if (!selectedMessageId || !folderName) {
+        console.log('[Citations] Missing selectedMessageId or selectedFolder:', { selectedMessageId, selectedFolder, folderName });
         setCitations([]);
+        setLoadingCitations(false);
         return;
       }
 
       const message = currentChatHistory.find(msg => msg.id === selectedMessageId);
       console.log('[Citations] Selected message:', message);
+      console.log('[Citations] Message has chunk_details:', message?.chunk_details);
+      console.log('[Citations] Message has citations:', message?.citations);
+      console.log('[Citations] Message has used_chunk_ids:', message?.used_chunk_ids);
       
       if (!message) {
-        console.log('[Citations] Message not found in currentChatHistory');
+        console.log('[Citations] Message not found in currentChatHistory, currentChatHistory length:', currentChatHistory.length);
         setCitations([]);
+        setLoadingCitations(false);
         return;
       }
       
@@ -9737,7 +9878,15 @@ const ChatInterface = () => {
       try {
         // For folder-based chat, use folder-based endpoint
         // getFolderChunkDetails already handles response format
-        const chunkDetails = await apiService.getFolderChunkDetails(message.used_chunk_ids, selectedFolder);
+        // ✅ Ensure selectedFolder is a string
+        const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+        if (!folderName) {
+          console.error('[Citations] Invalid folder name:', selectedFolder);
+          setCitations([]);
+          setLoadingCitations(false);
+          return;
+        }
+        const chunkDetails = await apiService.getFolderChunkDetails(message.used_chunk_ids, folderName);
         console.log('[Citations] Received chunk details:', chunkDetails);
         
         // Transform chunk details to citation format
@@ -9798,15 +9947,19 @@ const ChatInterface = () => {
   }, [selectedMessageId, selectedFolder, currentChatHistory]);
 
   // Animate typing effect - ChatGPT-style word-by-word animation
-  const animateResponse = (text, skipAnimation = false) => {
-    // ✅ Convert JSON to plain text first
-    const plainText = convertJsonToPlainText(text);
+  const animateResponse = (text, skipAnimation = false, isAlreadyFormatted = false) => {
+    // ✅ Convert JSON to plain text only if not already formatted
+    const plainText = isAlreadyFormatted ? text : convertJsonToPlainText(text);
+    
+    // Store complete response for skip animation
+    completeResponseRef.current = plainText;
     
     // Handle empty or invalid responses
     if (!plainText || typeof plainText !== 'string') {
       setIsAnimatingResponse(false);
       setIsGenerating(false);
       setAnimatedResponseContent(plainText || '');
+      completeResponseRef.current = null;
       return;
     }
 
@@ -9896,6 +10049,7 @@ const ChatInterface = () => {
         // Animation complete
         setIsAnimatingResponse(false);
         setIsGenerating(false);
+        completeResponseRef.current = null; // Clear ref when animation completes
         setAnimatedResponseContent(plainText);
         animationFrameRef.current = null;
       }
@@ -9914,9 +10068,12 @@ const ChatInterface = () => {
     }
     // Show full response immediately when stopped
     if (streamBufferRef.current) {
-      // ✅ Convert JSON to plain text before displaying
-      const plainTextResponse = convertJsonToPlainText(streamBufferRef.current);
-      setAnimatedResponseContent(plainTextResponse);
+      // ✅ Convert JSON to formatted document before displaying
+      const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+      const formattedResponse = isStructured
+        ? renderSecretPromptResponse(streamBufferRef.current)
+        : convertJsonToPlainText(streamBufferRef.current);
+      setAnimatedResponseContent(formattedResponse);
     }
     setIsAnimatingResponse(false);
     setIsGenerating(false);
@@ -10014,20 +10171,34 @@ const ChatInterface = () => {
         if (done) {
           setLoadingChat(false);
           // Create message with final response
-          // ✅ Convert JSON to plain text before processing
-          let finalResponse = convertJsonToPlainText(streamBufferRef.current);
+          // ✅ Convert JSON to formatted document before processing
+          const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+          let finalResponse = isStructured
+            ? renderSecretPromptResponse(streamBufferRef.current)
+            : convertJsonToPlainText(streamBufferRef.current);
           if (finalMetadata) {
             newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
             messageId = finalMetadata.message_id || finalMetadata.id || messageId;
           }
           
+          // Extract used_chunk_ids from metadata or citations
+          let usedChunkIds = finalMetadata?.used_chunk_ids || [];
+          if (!usedChunkIds.length && finalMetadata?.citations && Array.isArray(finalMetadata.citations)) {
+            usedChunkIds = finalMetadata.citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
+          }
+          
           const newMessage = {
             id: messageId,
-            question: promptLabel,
-            response: finalResponse,
+            question: promptLabel, // ✅ Store prompt name as question
+            prompt_label: promptLabel, // ✅ Also store as prompt_label for DB consistency
+            response: finalResponse, // ✅ Already formatted - save as plain text, not JSON
             timestamp: new Date().toISOString(),
             created_at: new Date().toISOString(),
             isSecretPrompt: true,
+            used_secret_prompt: true, // ✅ Mark as secret prompt
+            used_chunk_ids: usedChunkIds, // ✅ Include used_chunk_ids
+            citations: finalMetadata?.citations || null, // ✅ Include citations for secret prompts
+            chunk_details: finalMetadata?.chunk_details || null, // ✅ Include chunk_details for secret prompts
           };
           const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
           setCurrentChatHistory(history);
@@ -10045,22 +10216,13 @@ const ChatInterface = () => {
               setForceSidebarCollapsed(true);
               panelStatesSetRef.current = true;
             }
-            // Don't animate if content is already displayed from streaming
-            // Check if content matches (allowing for minor differences due to streaming updates)
-            const contentMatches = animatedResponseContent.trim() === finalResponse.trim() || 
-                                  animatedResponseContent === finalResponse ||
-                                  (animatedResponseContent.length > 0 && finalResponse.startsWith(animatedResponseContent));
-            
-            if (contentMatches) {
-              // Content already displayed from streaming, just ensure final content is set and animation is off
-              // finalResponse is already converted to plain text above
-              setAnimatedResponseContent(finalResponse); // Ensure exact match
+            // ✅ Animate the response word-by-word (same as custom queries)
+            // finalResponse is already formatted for secret prompts, so pass isAlreadyFormatted=true
+            if (finalResponse && finalResponse.trim()) {
+              animateResponse(finalResponse, false, true); // isAlreadyFormatted=true for secret prompts
+            } else {
               setIsAnimatingResponse(false);
               setIsGenerating(false);
-            } else {
-              // Content not yet displayed, animate it
-              // finalResponse is already converted to plain text above
-              animateResponse(finalResponse);
             }
           }
           break;
@@ -10083,20 +10245,34 @@ const ChatInterface = () => {
           // Handle completion
           if (data === '[DONE]') {
             setLoadingChat(false);
-            // ✅ Convert JSON to plain text before processing
-            let finalResponse = convertJsonToPlainText(streamBufferRef.current);
+            // ✅ Convert JSON to formatted document before processing
+            const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+            let finalResponse = isStructured
+              ? renderSecretPromptResponse(streamBufferRef.current)
+              : convertJsonToPlainText(streamBufferRef.current);
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
               messageId = finalMetadata.message_id || finalMetadata.id || messageId;
             }
             
+            // Extract used_chunk_ids from metadata or citations
+            let usedChunkIds = finalMetadata?.used_chunk_ids || [];
+            if (!usedChunkIds.length && finalMetadata?.citations && Array.isArray(finalMetadata.citations)) {
+              usedChunkIds = finalMetadata.citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
+            }
+            
             const newMessage = {
               id: messageId,
-              question: promptLabel,
-              response: finalResponse,
+              question: promptLabel, // ✅ Store prompt name as question
+              prompt_label: promptLabel, // ✅ Also store as prompt_label for DB consistency
+              response: finalResponse, // ✅ Already formatted - save as plain text, not JSON
               timestamp: new Date().toISOString(),
               created_at: new Date().toISOString(),
               isSecretPrompt: true,
+              used_secret_prompt: true, // ✅ Mark as secret prompt
+              used_chunk_ids: usedChunkIds, // ✅ Include used_chunk_ids
+              citations: finalMetadata?.citations || null, // ✅ Include citations for secret prompts
+              chunk_details: finalMetadata?.chunk_details || null, // ✅ Include chunk_details for secret prompts
             };
             const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
             setCurrentChatHistory(history);
@@ -10114,23 +10290,13 @@ const ChatInterface = () => {
                 setForceSidebarCollapsed(true);
                 panelStatesSetRef.current = true;
               }
-              // Don't animate if content is already displayed from streaming
-              const contentMatches = animatedResponseContent.trim() === finalResponse.trim() || 
-                                    animatedResponseContent === finalResponse ||
-                                    (animatedResponseContent.length > 0 && finalResponse.startsWith(animatedResponseContent));
-              
-              if (contentMatches) {
-                // Content already displayed from streaming, just ensure final content is set
-                // ✅ Convert JSON to plain text before displaying
-                const plainTextResponse = convertJsonToPlainText(finalResponse);
-                setAnimatedResponseContent(plainTextResponse);
+              // ✅ Animate the response word-by-word (same as custom queries)
+              // finalResponse is already formatted for secret prompts, so pass isAlreadyFormatted=true
+              if (finalResponse && finalResponse.trim()) {
+                animateResponse(finalResponse, false, true); // isAlreadyFormatted=true for secret prompts
+              } else {
                 setIsAnimatingResponse(false);
                 setIsGenerating(false);
-              } else {
-                // Content not yet displayed, animate it
-                // ✅ Convert JSON to plain text before animating
-                const plainTextResponse = convertJsonToPlainText(finalResponse);
-                animateResponse(plainTextResponse);
               }
             }
             return;
@@ -10145,6 +10311,9 @@ const ChatInterface = () => {
               console.log('Stream metadata:', parsed);
               newSessionId = parsed.session_id || parsed.sessionId || newSessionId;
               messageId = parsed.message_id || parsed.id || messageId;
+              // ✅ Store metadata for later use (citations, chunk_details)
+              if (!finalMetadata) finalMetadata = {};
+              finalMetadata = { ...finalMetadata, ...parsed };
               } else if (parsed.type === 'status') {
                 // Handle status updates (analyzing, generating, etc.) - Display prominently
                 setCurrentStatus({
@@ -10166,26 +10335,21 @@ const ChatInterface = () => {
                 }, 10); // 10ms debounce for smooth rendering
               }
             } else if (parsed.type === 'chunk') {
-              // CRITICAL: Render chunk immediately in real-time
+              // ✅ Like AnalysisPage: Accumulate chunks but DON'T show during streaming
+              // Only show complete formatted response after streaming is done
               const chunkText = parsed.text || '';
               if (chunkText) {
                 streamBufferRef.current += chunkText;
-                // Update UI immediately for real-time rendering
-                if (streamUpdateTimeoutRef.current) {
-                  clearTimeout(streamUpdateTimeoutRef.current);
-                }
-                streamUpdateTimeoutRef.current = setTimeout(() => {
-                  // ✅ Convert JSON chunks to plain text as they stream
-                  const plainTextChunk = convertJsonToPlainText(streamBufferRef.current);
-                  setAnimatedResponseContent(plainTextChunk);
-                }, 10); // 10ms debounce for smooth rendering
+                // Don't update animatedResponseContent during streaming
+                // Wait until streaming is complete (done event) to show formatted content
               }
             } else if (parsed.type === 'done') {
               // Final metadata - stream complete
-              finalMetadata = parsed;
-              console.log('[ChatInterface] Done metadata (first handler):', finalMetadata);
+              finalMetadata = { ...finalMetadata, ...parsed };
+              console.log('[ChatInterface] Done metadata (secret prompt):', finalMetadata);
               console.log('[ChatInterface] used_chunk_ids:', finalMetadata?.used_chunk_ids);
               console.log('[ChatInterface] citations:', finalMetadata?.citations);
+              console.log('[ChatInterface] chunk_details:', finalMetadata?.chunk_details);
               
               // Extract used_chunk_ids from metadata or citations
               let usedChunkIds = finalMetadata?.used_chunk_ids || [];
@@ -10193,8 +10357,11 @@ const ChatInterface = () => {
                 usedChunkIds = finalMetadata.citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
               }
               
-                // ✅ Convert JSON to plain text before processing
-                let finalResponse = convertJsonToPlainText(streamBufferRef.current);
+                // ✅ Convert JSON to formatted document before processing
+                const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+                let finalResponse = isStructured
+                  ? renderSecretPromptResponse(streamBufferRef.current)
+                  : convertJsonToPlainText(streamBufferRef.current);
                 setLoadingChat(false);
                 setCurrentStatus(null); // Clear status when done
                 // Ensure final thinking and text are displayed
@@ -10202,44 +10369,39 @@ const ChatInterface = () => {
                   setThinkingContent(streamThinkingRef.current);
                 }
                 
-              // Store message with citations and chunk_details if available
-              if (finalMetadata && (usedChunkIds.length > 0 || finalMetadata.citations || finalMetadata.chunk_details)) {
-                const messageId = finalMetadata.message_id || finalMetadata.id || Date.now().toString();
-                const newMessage = {
-                  id: messageId,
-                  question: questionText,
-                  response: finalResponse,
-                  timestamp: new Date().toISOString(),
-                  created_at: new Date().toISOString(),
-                  isSecretPrompt: false,
-                  used_chunk_ids: usedChunkIds,
-                  citations: finalMetadata.citations || null,
-                  chunk_details: finalMetadata.chunk_details || null, // Store chunk_details from backend
-                };
-                const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
-                setCurrentChatHistory(history);
-                setSelectedMessageId(newMessage.id);
+              // ✅ Always save message to chat history (even without metadata)
+              const messageId = finalMetadata?.message_id || finalMetadata?.id || Date.now().toString();
+              const newMessage = {
+                id: messageId,
+                question: questionText, // ✅ Store user's question
+                response: finalResponse, // ✅ Already formatted - save as plain text, not JSON
+                timestamp: new Date().toISOString(),
+                created_at: new Date().toISOString(),
+                isSecretPrompt: false,
+                used_chunk_ids: usedChunkIds,
+                citations: finalMetadata?.citations || null,
+                chunk_details: finalMetadata?.chunk_details || null,
+              };
+              const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
+              setCurrentChatHistory(history);
+              setSelectedMessageId(newMessage.id);
+              
+              // ✅ Set panel states
+              if (!panelStatesSetRef.current) {
+                setHasResponse(true);
+                setHasAiResponse(true);
+                setForceSidebarCollapsed(true);
+                panelStatesSetRef.current = true;
               }
-                
-                // Don't animate if content is already displayed from streaming
-                // Check if content matches (allowing for minor differences due to streaming updates)
-                const contentMatches = animatedResponseContent.trim() === finalResponse.trim() || 
-                                      animatedResponseContent === finalResponse ||
-                                      (animatedResponseContent.length > 0 && finalResponse.startsWith(animatedResponseContent));
-                
-                if (contentMatches) {
-                  // Content already displayed from streaming, just ensure final content is set and animation is off
-                  // ✅ Convert JSON to plain text before displaying
-                  const plainTextResponse = convertJsonToPlainText(finalResponse);
-                  setAnimatedResponseContent(plainTextResponse); // Ensure exact match
-                  setIsAnimatingResponse(false);
-                  setIsGenerating(false);
-                } else {
-                  // Content not yet displayed, animate it
-                  // ✅ Convert JSON to plain text before animating
-                  const plainTextResponse = convertJsonToPlainText(finalResponse);
-                  animateResponse(plainTextResponse);
-                }
+              
+              // ✅ Animate the response word-by-word (same as custom queries)
+              // finalResponse is already formatted for custom queries, so pass isAlreadyFormatted=true
+              if (finalResponse && finalResponse.trim()) {
+                animateResponse(finalResponse, false, true); // isAlreadyFormatted=true since it's already formatted
+              } else {
+                setIsAnimatingResponse(false);
+                setIsGenerating(false);
+              }
             } else if (parsed.type === 'error') {
               setChatError(parsed.message || parsed.error);
               setLoadingChat(false);
@@ -10348,8 +10510,11 @@ const ChatInterface = () => {
           if (done) {
             setLoadingChat(false);
             // Create message with final response
-            // ✅ Convert JSON to plain text before processing
-            let finalResponse = convertJsonToPlainText(streamBufferRef.current);
+            // ✅ Convert JSON to formatted document before processing
+            const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+            let finalResponse = isStructured
+              ? renderSecretPromptResponse(streamBufferRef.current)
+              : convertJsonToPlainText(streamBufferRef.current);
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
               messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -10397,18 +10562,13 @@ const ChatInterface = () => {
                                     animatedResponseContent === finalResponse ||
                                     (animatedResponseContent.length > 0 && finalResponse.startsWith(animatedResponseContent));
               
-              if (contentMatches) {
-                // Content already displayed from streaming, just ensure final content is set
-                // ✅ Convert JSON to plain text before displaying
-                const plainTextResponse = convertJsonToPlainText(finalResponse);
-                setAnimatedResponseContent(plainTextResponse);
+              // ✅ Always animate the response word-by-word (same as custom queries)
+              // finalResponse is already formatted, so pass isAlreadyFormatted=true
+              if (finalResponse && finalResponse.trim()) {
+                animateResponse(finalResponse, false, true); // isAlreadyFormatted=true
+              } else {
                 setIsAnimatingResponse(false);
                 setIsGenerating(false);
-              } else {
-                // Content not yet displayed, animate it
-                // ✅ Convert JSON to plain text before animating
-                const plainTextResponse = convertJsonToPlainText(finalResponse);
-                animateResponse(plainTextResponse);
               }
             }
             setChatInput("");
@@ -10432,8 +10592,11 @@ const ChatInterface = () => {
             // Handle completion
             if (data === '[DONE]') {
               setLoadingChat(false);
-              // ✅ Convert JSON to plain text before processing
-              let finalResponse = convertJsonToPlainText(streamBufferRef.current);
+              // ✅ Convert JSON to formatted document before processing
+              const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+              let finalResponse = isStructured
+                ? renderSecretPromptResponse(streamBufferRef.current)
+                : convertJsonToPlainText(streamBufferRef.current);
               if (finalMetadata) {
                 newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
                 messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -10497,19 +10660,13 @@ const ChatInterface = () => {
                 });
                 console.log('Status:', parsed.status, parsed.message);
               } else if (parsed.type === 'chunk') {
-                // CRITICAL: Render chunk immediately in real-time
+                // ✅ Like AnalysisPage: Accumulate chunks but DON'T show during streaming
+                // Only show complete formatted response after streaming is done
                 const chunkText = parsed.text || '';
                 if (chunkText) {
                   streamBufferRef.current += chunkText;
-                  // Update UI immediately for real-time rendering
-                  if (streamUpdateTimeoutRef.current) {
-                    clearTimeout(streamUpdateTimeoutRef.current);
-                  }
-                  streamUpdateTimeoutRef.current = setTimeout(() => {
-                    // ✅ Convert JSON to plain text before displaying
-      const plainTextResponse = convertJsonToPlainText(streamBufferRef.current);
-      setAnimatedResponseContent(plainTextResponse);
-                  }, 10); // 10ms debounce for smooth rendering
+                  // Don't update animatedResponseContent during streaming
+                  // Wait until streaming is complete (done event) to show formatted content
                 }
               } else if (parsed.type === 'done') {
                 // Final metadata - stream complete
@@ -10536,8 +10693,11 @@ const ChatInterface = () => {
                   usedChunkIds = citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
                 }
                 
-                // ✅ Convert JSON to plain text before processing
-                let finalResponse = convertJsonToPlainText(streamBufferRef.current);
+                // ✅ Convert JSON to formatted document before processing
+                const isStructured = isStructuredJsonResponse(streamBufferRef.current);
+                let finalResponse = isStructured
+                  ? renderSecretPromptResponse(streamBufferRef.current)
+                  : convertJsonToPlainText(streamBufferRef.current);
                 setLoadingChat(false);
                 setCurrentStatus(null); // Clear status when done
                 // Ensure final thinking and text are displayed
@@ -10561,25 +10721,13 @@ const ChatInterface = () => {
                 setCurrentChatHistory(history);
                 setSelectedMessageId(newMessage.id);
                 
-                // Don't animate if content is already displayed from streaming
-                // This prevents the blink when content is already there
-                // Check if content matches (allowing for minor differences due to streaming updates)
-                const contentMatches = animatedResponseContent.trim() === finalResponse.trim() || 
-                                      animatedResponseContent === finalResponse ||
-                                      (animatedResponseContent.length > 0 && finalResponse.startsWith(animatedResponseContent));
-                
-                if (contentMatches) {
-                  // Content already displayed from streaming, just ensure final content is set and animation is off
-                  // ✅ Convert JSON to plain text before displaying
-                  const plainTextResponse = convertJsonToPlainText(finalResponse);
-                  setAnimatedResponseContent(plainTextResponse); // Ensure exact match
+                // ✅ Animate the response word-by-word (same as custom queries)
+                // finalResponse is already formatted, so pass isAlreadyFormatted=true
+                if (finalResponse && finalResponse.trim()) {
+                  animateResponse(finalResponse, false, true); // isAlreadyFormatted=true
+                } else {
                   setIsAnimatingResponse(false);
                   setIsGenerating(false);
-                } else {
-                  // Content not yet displayed, animate it
-                  // ✅ Convert JSON to plain text before animating
-                  const plainTextResponse = convertJsonToPlainText(finalResponse);
-                  animateResponse(plainTextResponse);
                 }
               } else if (parsed.type === 'error') {
                 setChatError(parsed.message || parsed.error);
@@ -10605,24 +10753,37 @@ const ChatInterface = () => {
 
   // Handle selecting a chat
   const handleSelectChat = (chat) => {
+    console.log('[ChatInterface] handleSelectChat called with chat:', chat);
+    console.log('[ChatInterface] Chat has chunk_details:', chat?.chunk_details);
+    console.log('[ChatInterface] Chat has citations:', chat?.citations);
+    console.log('[ChatInterface] Chat has used_chunk_ids:', chat?.used_chunk_ids);
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       clearTimeout(animationFrameRef.current);
       animationFrameRef.current = null;
     }
-    setSelectedMessageId(chat.id);
     const responseText = chat.response || chat.answer || chat.message || "";
+    // ✅ Convert JSON to formatted document before displaying saved responses
+    const isStructured = isStructuredJsonResponse(responseText);
+    const formattedResponse = isStructured
+      ? renderSecretPromptResponse(responseText)
+      : convertJsonToPlainText(responseText);
     // Set content directly without animation for history messages
-    setAnimatedResponseContent(responseText);
-    setIsAnimatingResponse(false);
-    setIsGenerating(false);
-    setHasResponse(true);
-    setHasAiResponse(true);
-    setForceSidebarCollapsed(true);
+    // Batch all state updates together to prevent blinking
+    startTransition(() => {
+      setSelectedMessageId(chat.id); // ✅ Set selectedMessageId first to trigger citation fetch
+      setAnimatedResponseContent(formattedResponse);
+      setIsAnimatingResponse(false);
+      setIsGenerating(false);
+      setHasResponse(true);
+      setHasAiResponse(true);
+      setForceSidebarCollapsed(true);
+    });
     // Citations will be fetched automatically by useEffect when selectedMessageId changes
     // Clear any previous citations state to trigger fresh fetch
     setCitations([]);
     setShowCitations(false);
+    setLoadingCitations(true); // Show loading state while fetching citations
   };
 
   // Handle delete single chat
@@ -10633,7 +10794,12 @@ const ChatInterface = () => {
     
     setOpenChatMenuId(null); // Close the menu
     
-    if (!selectedFolder || !chatId) return;
+    // ✅ Extract folder name from selectedFolder (handle both string and object)
+    const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+    if (!folderName || !chatId) {
+      console.error('[ChatInterface] handleDeleteChat: Missing folderName or chatId', { selectedFolder, folderName, chatId });
+      return;
+    }
 
     if (!window.confirm('Are you sure you want to delete this chat? This action cannot be undone.')) {
       return;
@@ -10643,7 +10809,8 @@ const ChatInterface = () => {
       setLoadingChat(true);
       setChatError(null);
       
-      const deletePromise = documentApi.deleteSingleFolderChat(selectedFolder, chatId);
+      console.log('[ChatInterface] handleDeleteChat: Deleting chat', chatId, 'from folder', folderName);
+      const deletePromise = documentApi.deleteSingleFolderChat(folderName, chatId);
       
       toast.promise(deletePromise, {
         pending: 'Deleting chat...',
@@ -10672,7 +10839,9 @@ const ChatInterface = () => {
       }
       
       // Refresh the chat list
-      await fetchChatHistory();
+      if (folderName) {
+        await fetchChatHistory(null, folderName);
+      }
     } catch (err) {
       console.error("❌ Error deleting chat:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete chat';
@@ -10759,7 +10928,10 @@ const ChatInterface = () => {
       setIsGenerating(false);
       
       // Optionally refresh the chat list
-      await fetchChatHistory();
+      const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+      if (folderName) {
+        await fetchChatHistory(null, folderName);
+      }
     } catch (err) {
       console.error("❌ Error deleting all chats:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete all chats';
@@ -10854,14 +11026,16 @@ const ChatInterface = () => {
     fetchSecrets();
   }, []);
 
-  // Reset state when folder changes
+  // Reset state when folder changes and load chats
   useEffect(() => {
+    console.log('[ChatInterface] useEffect triggered, selectedFolder:', selectedFolder);
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
+    // ✅ Don't clear currentChatHistory immediately - let fetchChatHistory handle it
+    // This prevents flash of empty state on page refresh
     setChatSessions([]);
-    setCurrentChatHistory([]);
     setSelectedChatSessionId(null);
     setHasResponse(false);
     setHasAiResponse(false);
@@ -10875,11 +11049,36 @@ const ChatInterface = () => {
     setSelectedLlmName(null);
     setIsSecretPromptSelected(false);
     setChatInput("");
-    if (selectedFolder && selectedFolder !== "Test") {
-      // Pass selectedChatSessionId to restore the selected chat after refresh
-      fetchChatHistory(selectedChatSessionId);
+    
+    // ✅ Always fetch chats when folder changes (including on mount and page refresh)
+    // ✅ Include "Test" folder - no longer excluding it
+    const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+    if (folderName) {
+      const folderKey = `${folderName}`;
+      // Always fetch when folder changes (clear the ref entry for this folder first)
+      fetchedFoldersRef.current.delete(folderKey);
+      console.log('[ChatInterface] Calling fetchChatHistory for folder:', folderName);
+      fetchedFoldersRef.current.add(folderKey);
+      // Fetch immediately - pass folderName explicitly to avoid closure issues
+      fetchChatHistory(null, folderName).then(() => {
+        console.log('[ChatInterface] fetchChatHistory completed successfully');
+      }).catch(err => {
+        console.error('[ChatInterface] Error in fetchChatHistory:', err);
+        fetchedFoldersRef.current.delete(folderKey); // Remove on error so we can retry
+        setCurrentChatHistory([]);
+      });
+    } else {
+      console.log('[ChatInterface] Skipping fetchChatHistory - folder is:', selectedFolder);
+      // Don't clear on mount if folder is not yet set - wait for it to be set
+      if (selectedFolder === null || selectedFolder === undefined) {
+        console.log('[ChatInterface] selectedFolder is null/undefined - will fetch when folder is set');
+      } else {
+        // Clear fetched folders when folder changes to invalid value
+        fetchedFoldersRef.current.clear();
+        setCurrentChatHistory([]);
+      }
     }
-  }, [selectedFolder, selectedChatSessionId]);
+  }, [selectedFolder, fetchChatHistory]); // Include fetchChatHistory since it's now a useCallback
 
   if (!selectedFolder) {
     return (
@@ -10958,7 +11157,7 @@ const ChatInterface = () => {
                   <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900 mb-1 line-clamp-2">
-                        {chat.question || chat.query || "Untitled"}
+                        {chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled"}
                       </p>
                       <p className="text-xs text-gray-500">{getRelativeTime(chat.created_at || chat.timestamp)}</p>
                     </div>
@@ -11109,6 +11308,18 @@ const ChatInterface = () => {
                   {currentChatHistory.find((msg) => msg.id === selectedMessageId)?.question || "No question available"}
                 </p>
               </div>
+              {/* Skip Animation Button - Show when animation is in progress */}
+              {isAnimatingResponse && (
+                <div className="mt-3 flex justify-end">
+                  <button
+                    onClick={skipAnimation}
+                    className="text-xs text-[#21C1B6] hover:text-[#1AA49B] flex items-center space-x-1 transition-colors font-medium"
+                  >
+                    <span>Skip animation</span>
+                    <ArrowRight className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
             </div>
           )}
           <div className="flex-1 overflow-y-auto scrollbar-custom" ref={responseRef}>
@@ -11206,39 +11417,132 @@ const ChatInterface = () => {
                 
                 {/* Answer Section */}
                 {animatedResponseContent && (
-                  <div>
+                  <div className="bg-white rounded-lg shadow-sm p-6">
                     <div className="horizontal-scroll-container" ref={horizontalScrollRef}>
                       <div
-                        className="prose prose-gray max-w-none analysis-page-ai-response response-content"
+                        className="prose prose-gray prose-lg max-w-none"
                         ref={markdownOutputRef}
                         style={{ minWidth: "fit-content" }}
                       >
                         <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          h1: ({ ...props }) => <h1 {...props} />,
-                          h2: ({ ...props }) => <h2 {...props} />,
-                          h3: ({ ...props }) => <h3 {...props} />,
-                          p: ({ ...props }) => <p {...props} />,
-                          strong: ({ ...props }) => <strong {...props} />,
-                          ul: ({ ...props }) => <ul {...props} />,
-                          ol: ({ ...props }) => <ol {...props} />,
-                          li: ({ ...props }) => <li {...props} />,
-                          blockquote: ({ ...props }) => <blockquote {...props} />,
-                          code: ({ inline, ...props }) => <code {...props} />,
-                          table: ({ ...props }) => (
-                            <div className="analysis-table-wrapper">
-                              <table className="analysis-table" {...props} />
-                            </div>
-                          ),
-                          thead: ({ ...props }) => <thead {...props} />,
-                          th: ({ ...props }) => <th {...props} />,
-                          td: ({ ...props }) => <td {...props} />,
-                        }}
+                          remarkPlugins={[remarkGfm]}
+                          rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                          components={{
+                            h1: ({node, ...props}) => (
+                              <h1 className="text-4xl font-bold mb-8 mt-8 text-gray-900 border-b-2 border-blue-500 pb-4 analysis-page-ai-response tracking-tight" {...props} />
+                            ),
+                            h2: ({node, ...props}) => (
+                              <h2 className="text-2xl font-bold mb-6 mt-8 text-gray-900 border-b border-gray-300 pb-3 analysis-page-ai-response tracking-tight" {...props} />
+                            ),
+                            h3: ({node, ...props}) => (
+                              <h3 className="text-xl font-semibold mb-4 mt-6 text-gray-800 analysis-page-ai-response" {...props} />
+                            ),
+                            h4: ({node, ...props}) => (
+                              <h4 className="text-lg font-semibold mb-3 mt-5 text-gray-800 analysis-page-ai-response" {...props} />
+                            ),
+                            h5: ({node, ...props}) => (
+                              <h5 className="text-base font-semibold mb-2 mt-4 text-gray-700 analysis-page-ai-response" {...props} />
+                            ),
+                            h6: ({node, ...props}) => (
+                              <h6 className="text-sm font-semibold mb-2 mt-3 text-gray-700 analysis-page-ai-response" {...props} />
+                            ),
+                            p: ({node, ...props}) => (
+                              <p className="mb-5 leading-relaxed text-gray-800 text-[15px] analysis-page-ai-response" {...props} />
+                            ),
+                            strong: ({node, ...props}) => (
+                              <strong className="font-bold text-gray-900" {...props} />
+                            ),
+                            em: ({node, ...props}) => (
+                              <em className="italic text-gray-800" {...props} />
+                            ),
+                            ul: ({node, ...props}) => (
+                              <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />
+                            ),
+                            ol: ({node, ...props}) => (
+                              <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />
+                            ),
+                            li: ({node, ...props}) => (
+                              <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
+                            ),
+                            a: ({node, ...props}) => (
+                              <a
+                                {...props}
+                                className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              />
+                            ),
+                            blockquote: ({node, ...props}) => (
+                              <blockquote className="border-l-4 border-blue-500 pl-6 py-3 my-6 bg-blue-50 text-gray-800 italic rounded-r-lg analysis-page-ai-response shadow-sm" {...props} />
+                            ),
+                            code: ({node, inline, className, children, ...props}) => {
+                              const match = /language-(\w+)/.exec(className || '');
+                              const language = match ? match[1] : '';
+                              
+                              if (inline) {
+                                return (
+                                  <code
+                                    className="bg-gray-100 text-red-600 px-1.5 py-0.5 rounded text-sm font-mono border border-gray-200"
+                                    {...props}
+                                  >
+                                    {children}
+                                  </code>
+                                );
+                              }
+                              
+                              return (
+                                <div className="relative my-4">
+                                  {language && (
+                                    <div className="bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-t font-mono">
+                                      {language}
+                                    </div>
+                                  )}
+                                  <pre className={`bg-gray-900 text-gray-100 p-4 ${language ? 'rounded-b' : 'rounded'} overflow-x-auto`}>
+                                    <code className="font-mono text-sm" {...props}>
+                                      {children}
+                                    </code>
+                                  </pre>
+                                </div>
+                              );
+                            },
+                            pre: ({node, ...props}) => (
+                              <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />
+                            ),
+                            table: ({node, ...props}) => (
+                              <div className="my-6 rounded-lg border border-gray-300 shadow-sm overflow-hidden">
+                                <table className="min-w-full divide-y divide-gray-300" {...props} />
+                              </div>
+                            ),
+                            thead: ({node, ...props}) => (
+                              <thead className="bg-gradient-to-r from-gray-50 to-gray-100" {...props} />
+                            ),
+                            th: ({node, ...props}) => (
+                              <th className="px-6 py-4 text-left text-xs font-bold text-gray-800 uppercase tracking-wider border-b-2 border-gray-300" {...props} />
+                            ),
+                            tbody: ({node, ...props}) => (
+                              <tbody className="bg-white divide-y divide-gray-200" {...props} />
+                            ),
+                            tr: ({node, ...props}) => (
+                              <tr className="hover:bg-gray-50 transition-colors" {...props} />
+                            ),
+                            td: ({node, ...props}) => (
+                              <td className="px-6 py-4 text-sm text-gray-800 border-b border-gray-100 leading-relaxed" {...props} />
+                            ),
+                            hr: ({node, ...props}) => (
+                              <hr className="my-6 border-t-2 border-gray-300" {...props} />
+                            ),
+                            img: ({node, ...props}) => (
+                              <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />
+                            ),
+                          }}
                         >
-                          {animatedResponseContent}
+                          {formattedResponseContent}
                         </ReactMarkdown>
-                        {isAnimatingResponse && <span className="inline-block w-2 h-5 bg-gray-400 animate-pulse ml-1"></span>}
+                        {isAnimatingResponse && (
+                          <span className="inline-flex items-center ml-1">
+                            <span className="inline-block w-2 h-5 bg-blue-600 animate-pulse"></span>
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>

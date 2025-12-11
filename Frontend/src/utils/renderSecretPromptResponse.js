@@ -66,24 +66,26 @@ export function renderSecretPromptResponse(response) {
   if (typeof response === 'object' && response !== null) {
     jsonData = response;
   } else if (typeof response === 'string') {
-    // Try to extract JSON from markdown code blocks (case-insensitive)
+    // First, try to extract JSON from markdown code blocks (case-insensitive)
+    // This handles responses like: ```json\n{...}\n```
     const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/i);
     if (jsonMatch) {
       try {
         const jsonText = jsonMatch[1].trim();
         jsonData = JSON.parse(jsonText);
+        console.log('[renderSecretPromptResponse] Successfully parsed JSON from markdown code block');
       } catch (e) {
+        console.warn('[renderSecretPromptResponse] Failed to parse JSON from code block, trying partial parse:', e);
         // Try partial JSON parsing for streaming
-        jsonData = tryParsePartialJson(response);
+        jsonData = tryParsePartialJson(jsonMatch[1]);
         if (!jsonData) {
-          console.warn('Failed to parse JSON from code block:', e);
           // Try to clean and parse again
           try {
             // Remove any leading/trailing whitespace or newlines
             const cleaned = jsonMatch[1].trim().replace(/^\s+|\s+$/g, '');
             jsonData = JSON.parse(cleaned);
           } catch (e2) {
-            console.warn('Failed to parse cleaned JSON:', e2);
+            console.warn('[renderSecretPromptResponse] Failed to parse cleaned JSON:', e2);
           }
         }
       }
@@ -93,7 +95,9 @@ export function renderSecretPromptResponse(response) {
       if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
         try {
           jsonData = JSON.parse(trimmed);
+          console.log('[renderSecretPromptResponse] Successfully parsed direct JSON');
         } catch (e) {
+          console.warn('[renderSecretPromptResponse] Failed to parse direct JSON, trying partial parse:', e);
           // Try partial JSON parsing for streaming
           jsonData = tryParsePartialJson(response);
           if (!jsonData) {
@@ -105,32 +109,36 @@ export function renderSecretPromptResponse(response) {
                 jsonData = JSON.parse(match[0]);
               } catch (e2) {
                 // Not JSON, return as is
-                console.warn('Could not parse JSON from response:', e2);
+                console.warn('[renderSecretPromptResponse] Could not parse JSON from response:', e2);
                 return response;
               }
             } else {
               // Not JSON format, return as is
+              console.warn('[renderSecretPromptResponse] Response does not appear to be JSON');
               return response;
             }
           }
         }
       } else {
-        // Try to find JSON anywhere in the response
+        // Try to find JSON anywhere in the response (for cases where there's extra text)
         const jsonPattern = /\{[\s\S]{20,}\}/;
         const match = response.match(jsonPattern);
         if (match) {
           try {
             jsonData = JSON.parse(match[0]);
+            console.log('[renderSecretPromptResponse] Successfully parsed JSON from pattern match');
           } catch (e) {
             // Try partial JSON parsing
             jsonData = tryParsePartialJson(match[0]);
             if (!jsonData) {
               // Not JSON, return as is
+              console.warn('[renderSecretPromptResponse] Could not parse JSON from pattern match');
               return response;
             }
           }
         } else {
           // Not JSON format, return as is
+          console.warn('[renderSecretPromptResponse] No JSON pattern found in response');
           return response;
         }
       }
@@ -567,29 +575,21 @@ export function isStructuredJsonResponse(response) {
   }
   
   if (typeof response === 'string') {
-    // Check for JSON code block
-    if (response.includes('```json')) {
-      try {
-        const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[1].trim());
-          // Check for simple structure
-          if (parsed.title || parsed.sections || parsed.summary) return true;
-          // Check for output template structure
-          if (parsed.schemas && parsed.schemas.output_summary_template) return true;
-          // Check for direct generated_sections structure
-          if (parsed.generated_sections) return true;
-        }
-      } catch (e) {
-        return false;
-      }
+    let jsonToCheck = response;
+    
+    // First, try to extract JSON from markdown code blocks (case-insensitive)
+    const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/i);
+    if (jsonMatch) {
+      jsonToCheck = jsonMatch[1].trim();
+    } else {
+      // If no code blocks, use the response as-is
+      jsonToCheck = response.trim();
     }
     
-    // Check for direct JSON
-    const trimmed = response.trim();
-    if (trimmed.startsWith('{')) {
+    // Check if it looks like JSON (starts with { or [)
+    if (jsonToCheck.startsWith('{') || jsonToCheck.startsWith('[')) {
       try {
-        const parsed = JSON.parse(trimmed);
+        const parsed = JSON.parse(jsonToCheck);
         // Check for simple structure
         if (parsed.title || parsed.sections || parsed.summary) return true;
         // Check for output template structure
@@ -597,6 +597,22 @@ export function isStructuredJsonResponse(response) {
         // Check for direct generated_sections structure
         if (parsed.generated_sections) return true;
       } catch (e) {
+        // If parsing fails, try to find JSON object in the text
+        const jsonPattern = /\{[\s\S]{20,}\}/;
+        const match = jsonToCheck.match(jsonPattern);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[0]);
+            // Check for simple structure
+            if (parsed.title || parsed.sections || parsed.summary) return true;
+            // Check for output template structure
+            if (parsed.schemas && parsed.schemas.output_summary_template) return true;
+            // Check for direct generated_sections structure
+            if (parsed.generated_sections) return true;
+          } catch (e2) {
+            return false;
+          }
+        }
         return false;
       }
     }
@@ -604,4 +620,3 @@ export function isStructuredJsonResponse(response) {
   
   return false;
 }
-

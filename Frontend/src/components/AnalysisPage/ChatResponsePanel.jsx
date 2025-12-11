@@ -1831,15 +1831,18 @@ const ChatResponsePanel = ({
    const selectedMessage = messages.find(msg => msg.id === selectedMessageId);
    const isSecretPrompt = selectedMessage?.used_secret_prompt || false;
    
-   // ✅ CRITICAL: Always check if the response is structured JSON, even if message not found
+   // ✅ CRITICAL: Always check if the response is structured JSON
    // This handles cases where messages array hasn't loaded yet or message is missing
    const isStructured = isStructuredJsonResponse(rawResponse);
    
-   // If it's a secret prompt OR if the response looks like structured JSON, format it
-   if ((isSecretPrompt && isStructured) || (!selectedMessage && isStructured && rawResponse.trim().startsWith('{'))) {
+   // Always format structured JSON responses (whether secret prompt or not)
+   // This ensures JSON responses are never displayed as raw JSON
+   if (isStructured) {
      return renderSecretPromptResponse(rawResponse);
    }
    
+   // For non-structured responses, convert any JSON to plain text
+   // This catches any JSON that wasn't detected as structured
    return convertJsonToPlainText(rawResponse);
  })()}
  </ReactMarkdown>

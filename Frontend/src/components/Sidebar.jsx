@@ -1284,7 +1284,7 @@ const Sidebar = () => {
 
  const navigationItems = [
    { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
-   { name: 'Projects', icon: DocumentTextIcon },
+   { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
    { name: 'ICOM', path: '/analysis', icon: MagnifyingGlassCircleIcon },
    { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
    { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },

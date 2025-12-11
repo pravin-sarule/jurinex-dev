@@ -28,12 +28,13 @@ import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../../utils/renderSecretPromptResponse';
 
 const ChatMessage = ({ message }) => {
-  // ✅ For secret prompts, render structured JSON; otherwise convert to plain text
+  // ✅ Always format structured JSON responses; convert any JSON to plain text
   const rawResponse = message.response || message.message || JSON.stringify(message);
-  const isSecretPrompt = message.used_secret_prompt || false;
   const isStructured = isStructuredJsonResponse(rawResponse);
   
-  const responseContent = (isSecretPrompt && isStructured) 
+  // Always format structured JSON responses (whether secret prompt or not)
+  // This ensures JSON responses are never displayed as raw JSON
+  const responseContent = isStructured
     ? renderSecretPromptResponse(rawResponse)
     : convertJsonToPlainText(rawResponse);
   

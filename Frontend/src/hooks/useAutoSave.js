@@ -1,7 +1,7 @@
 // // hooks/useAutoSave.js
 // import { useEffect, useRef, useCallback, useState } from 'react';
 
-// const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
+// const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app/api/content";
 
 // // Function to decode JWT token without verification (client-side)
 // const decodeJWTToken = (token) => {
@@ -571,7 +571,7 @@
 // // hooks/useAutoSave.js
 // import { useEffect, useRef, useCallback, useState } from 'react';
 
-// const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
+// const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app/api/content";
 
 // // Decode JWT token (client-side only)
 // const decodeJWTToken = (token) => {
@@ -870,7 +870,7 @@
 // hooks/useAutoSave.js
 import { useEffect, useRef, useCallback, useState } from 'react';
 
-const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
+const API_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app/api/content";
 
 // Decode JWT token (client-side only)
 const decodeJWTToken = (token) => {

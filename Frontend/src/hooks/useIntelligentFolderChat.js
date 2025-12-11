@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 
 // Get API base URL from environment or default
 const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
@@ -145,9 +146,12 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
           // Stream complete - ensure final text and thinking are set ONCE
           setIsStreaming(false);
           if (accumulatedText) {
-            // ✅ Convert JSON to plain text before setting final text
-            const plainTextResponse = convertJsonToPlainText(accumulatedText);
-            setText(plainTextResponse);
+            // ✅ Convert JSON to formatted document before setting final text
+            const isStructured = isStructuredJsonResponse(accumulatedText);
+            const formattedResponse = isStructured
+              ? renderSecretPromptResponse(accumulatedText)
+              : convertJsonToPlainText(accumulatedText);
+            setText(formattedResponse);
           }
           if (accumulatedThinking) {
             setThinking(accumulatedThinking);
@@ -174,9 +178,12 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
             setIsStreaming(false);
             // Ensure final text is displayed once
             if (accumulatedText) {
-              // ✅ Convert JSON to plain text before setting final text
-              const plainTextResponse = convertJsonToPlainText(accumulatedText);
-              setText(plainTextResponse);
+              // ✅ Convert JSON to formatted document before setting final text
+              const isStructured = isStructuredJsonResponse(accumulatedText);
+              const formattedResponse = isStructured
+                ? renderSecretPromptResponse(accumulatedText)
+                : convertJsonToPlainText(accumulatedText);
+              setText(formattedResponse);
             }
             if (accumulatedThinking) {
               setThinking(accumulatedThinking);
@@ -230,26 +237,13 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 break;
 
               case 'chunk':
-                // CRITICAL: Render chunk immediately in real-time
+                // ✅ Like AnalysisPage: Accumulate chunks but DON'T show during streaming
+                // Only show complete formatted response after streaming is done
                 const chunkText = parsed.text || '';
                 if (chunkText) {
                   accumulatedText += chunkText;
-                  
-                  // Update UI immediately for real-time rendering
-                  // Debounce rapid updates to prevent excessive re-renders
-                  if (updateTimeoutRef.current) {
-                    clearTimeout(updateTimeoutRef.current);
-                  }
-                  
-                  // Use immediate update with minimal debounce for smooth rendering
-                  // This ensures chunks appear as fast as possible while batching
-                  // very rapid updates (multiple chunks in same frame)
-                  // ✅ Convert JSON to plain text as chunks accumulate
-                  updateTimeoutRef.current = setTimeout(() => {
-                    const plainTextResponse = convertJsonToPlainText(accumulatedText);
-                    setText(plainTextResponse);
-                    updateTimeoutRef.current = null;
-                  }, 10); // 10ms debounce - fast enough for real-time feel
+                  // Don't update text during streaming
+                  // Wait until streaming is complete (done event) to show formatted content
                 }
                 break;
 
@@ -269,9 +263,12 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 console.log('[useIntelligentFolderChat] citations:', parsed.citations);
                 // Ensure final text and thinking are set ONCE
                 if (accumulatedText) {
-                  // ✅ Convert JSON to plain text before setting final text
-                  const plainTextResponse = convertJsonToPlainText(accumulatedText);
-                  setText(plainTextResponse);
+                  // ✅ Convert JSON to formatted document before setting final text
+                  const isStructured = isStructuredJsonResponse(accumulatedText);
+                  const formattedResponse = isStructured
+                    ? renderSecretPromptResponse(accumulatedText)
+                    : convertJsonToPlainText(accumulatedText);
+                  setText(formattedResponse);
                 }
                 if (accumulatedThinking) {
                   setThinking(accumulatedThinking);

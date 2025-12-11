@@ -1975,10 +1975,10 @@ const documentApi = {
     return response.data;
   },
 
-  // Delete a single chat in a folder
+  // Delete a single chat in a folder by chat ID
   deleteSingleFolderChat: async (folderName, chatId) => {
     const response = await axios.delete(
-      `${API_BASE_URL}/${folderName}/chats/${chatId}`,
+      `${API_BASE_URL}/${folderName}/chat/${chatId}`, // ✅ Use /chat/:chatId endpoint (not /chats/:sessionId)
       { headers: getAuthHeader() }
     );
     return response.data;
