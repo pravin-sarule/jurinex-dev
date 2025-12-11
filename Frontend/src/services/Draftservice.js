@@ -1,5 +1,5 @@
 // services/draftService.js
-const API_BASE_URL = import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app/api/content';
+const API_BASE_URL = import.meta.env.REACT_APP_API_BASE_URL || 'https://document-service-120280829617.asia-south1.run.app/api/content';
 
 export const draftService = {
   // Save or update case draft

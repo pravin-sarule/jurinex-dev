@@ -337,7 +337,7 @@ const DocumentUploadPage = () => {
                     localStorage.getItem('access_token') || 
                     localStorage.getItem('jwt');
       
-      const response = await fetch(`https://gateway-service-120280829617.asia-south1.run.app/api/content/case-draft/${userId}`, {
+      const response = await fetch(`https://document-service-120280829617.asia-south1.run.app/api/content/case-draft/${userId}`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -399,7 +399,7 @@ const DocumentUploadPage = () => {
         return;
       }
 
-      const response = await fetch(`https://gateway-service-120280829617.asia-south1.run.app/api/content/case-draft/${userId}`, {
+      const response = await fetch(`https://document-service-120280829617.asia-south1.run.app/api/content/case-draft/${userId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,
