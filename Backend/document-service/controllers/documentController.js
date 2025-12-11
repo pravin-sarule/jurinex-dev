@@ -62,14 +62,129 @@ const CONVERSATION_HISTORY_TURNS = 5;
  * Adds structured JSON formatting instructions to secret prompt
  * Ensures LLM output is in clean, structured JSON format wrapped in markdown code blocks
  * @param {string} secretPrompt - The original secret prompt
+ * @param {Object} outputTemplate - Optional output template data with structure to follow
  * @returns {string} - The prompt with JSON formatting instructions appended
  */
-function addSecretPromptJsonFormatting(secretPrompt) {
-  const jsonFormattingInstructions = `
+function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
+  let jsonFormattingInstructions = '';
+
+  // If output template exists, reference it in the instructions
+  if (outputTemplate && outputTemplate.extracted_text) {
+    // Extract all required sections from the template
+    const templateText = outputTemplate.extracted_text;
+    const sectionKeys = [];
+    
+    // Try to extract section keys from the template (e.g., 2_1_ground_wise_summary, 2_2_annexure_summary, etc.)
+    const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
+    let match;
+    while ((match = sectionPattern.exec(templateText)) !== null) {
+      if (!sectionKeys.includes(match[1])) {
+        sectionKeys.push(match[1]);
+      }
+    }
+    
+    // Also check structured_schema if available
+    if (outputTemplate.structured_schema) {
+      try {
+        const schema = typeof outputTemplate.structured_schema === 'string' 
+          ? JSON.parse(outputTemplate.structured_schema) 
+          : outputTemplate.structured_schema;
+        if (schema.properties && schema.properties.generated_sections && schema.properties.generated_sections.properties) {
+          Object.keys(schema.properties.generated_sections.properties).forEach(key => {
+            if (!sectionKeys.includes(key)) {
+              sectionKeys.push(key);
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Could not parse structured_schema:', e);
+      }
+    }
+    
+    const sectionsList = sectionKeys.length > 0 
+      ? `\n\n📋 REQUIRED SECTIONS (MUST INCLUDE ALL):\n${sectionKeys.map((key, idx) => `   ${idx + 1}. ${key}`).join('\n')}\n`
+      : '';
+
+    jsonFormattingInstructions = `
+
+═══════════════════════════════════════════════════════════════════════
+🚨 CRITICAL OUTPUT FORMATTING REQUIREMENTS - MANDATORY FOR ALL LLMs 🚨
+═══════════════════════════════════════════════════════════════════════
+
+⚠️ ABSOLUTE REQUIREMENT: Your response MUST be valid JSON wrapped in markdown code blocks.
+⚠️ NO EXCEPTIONS: This applies to ALL LLM models (Gemini, Claude, GPT, DeepSeek, etc.)
+⚠️ NO RAW JSON: Never return raw JSON without markdown code blocks
+⚠️ NO EXPLANATIONS: Do not include any text before or after the JSON code block
+
+📋 OUTPUT TEMPLATE STRUCTURE (MUST FOLLOW EXACTLY):
+The output template below shows the EXACT JSON structure you must use. Your response must match this structure EXACTLY with ALL fields populated:
+
+${outputTemplate.extracted_text.substring(0, 3000)}${outputTemplate.extracted_text.length > 3000 ? '\n\n[... template continues ...]' : ''}${sectionsList}
+
+🔒 MANDATORY REQUIREMENTS FOR ALL LLMs:
+1. ✅ Your response MUST start with \`\`\`json and end with \`\`\`
+2. ✅ Follow the EXACT JSON structure shown in the output template above
+3. ✅ Include ALL sections and fields from the template - DO NOT skip any
+4. ✅ Fill ALL fields with ACTUAL content extracted from the documents
+5. ✅ Do NOT use placeholder text - provide real extracted information
+6. ✅ Maintain the exact nesting, field names, and structure from the template
+7. ✅ Use markdown formatting within content strings (bold, italic, lists, tables, etc.)
+8. ✅ Ensure all JSON is valid and parseable
+9. ✅ Include ALL required sections listed above - missing sections will cause errors
+
+📝 CORRECT OUTPUT FORMAT (USE THIS EXACT FORMAT):
+\`\`\`json
+{
+  "schemas": {
+    "output_summary_template": {
+      "metadata": {
+        "document_title": "Actual title from documents",
+        "case_title": "Actual case name",
+        "date": "Actual date",
+        "prepared_by": "Actual preparer name"
+      },
+      "generated_sections": {
+        "2_1_ground_wise_summary": {
+          "generated_text": "Actual comprehensive summary with facts from documents...",
+          "required_summary_type": "Extractive"
+        },
+        "2_2_annexure_summary": {
+          "generated_text": "Actual annexure summary with page references...",
+          "required_summary_type": "Extractive"
+        }
+        [... ALL other sections from template ...]
+      }
+    }
+  }
+}
+\`\`\`
+
+❌ WRONG FORMATS (DO NOT DO THIS):
+- Raw JSON without code blocks: {"key": "value"}
+- Text before JSON: "Here is the analysis: {...}"
+- Text after JSON: {...} "This completes the analysis"
+- Missing sections from template
+- Placeholder text instead of actual content
+
+✅ VALIDATION CHECKLIST:
+Before submitting your response, verify:
+- [ ] Response starts with \`\`\`json
+- [ ] Response ends with \`\`\`
+- [ ] JSON is valid and parseable
+- [ ] ALL sections from template are included
+- [ ] ALL fields are filled with actual content (not placeholders)
+- [ ] Structure matches template exactly
+- [ ] No text outside the code block
+
+🎯 FINAL INSTRUCTION:
+Generate your response NOW following the template structure exactly. Include ALL sections. Use ONLY the JSON format shown above.`;
+  } else {
+    // Default structure when no template is provided
+    jsonFormattingInstructions = `
 
 === CRITICAL OUTPUT FORMATTING REQUIREMENTS ===
 
-You MUST format your response as clean, structured JSON wrapped in a markdown code block. The frontend needs to easily parse and render your response.
+You MUST format your response as clean, structured JSON wrapped in a markdown code block. The frontend needs to easily parse and render your response in a beautiful, document-like format.
 
 REQUIRED FORMAT:
 \`\`\`json
@@ -79,22 +194,22 @@ REQUIRED FORMAT:
   "sections": [
     {
       "heading": "Section heading",
-      "content": "Section content with proper formatting. Use markdown formatting like **bold**, *italic*, lists, etc.",
+      "content": "Section content with proper formatting. Use markdown formatting like **bold**, *italic*, lists, tables, etc.",
       "subsections": [
         {
           "heading": "Subsection heading",
-          "content": "Subsection content"
+          "content": "Subsection content with markdown formatting"
         }
       ]
     }
   ],
   "keyFindings": [
-    "Key finding 1",
-    "Key finding 2"
+    "Key finding 1 with supporting details",
+    "Key finding 2 with supporting details"
   ],
   "recommendations": [
-    "Recommendation 1",
-    "Recommendation 2"
+    "Recommendation 1 with actionable steps",
+    "Recommendation 2 with actionable steps"
   ],
   "metadata": {
     "analysisDate": "Date of analysis if available",
@@ -108,12 +223,19 @@ IMPORTANT GUIDELINES:
 1. Always wrap your JSON response in \`\`\`json ... \`\`\` markdown code blocks
 2. Use proper JSON syntax - all strings must be properly escaped
 3. Structure the content logically with clear sections and subsections
-4. Use markdown formatting within content strings (bold, italic, lists, etc.)
+4. Use markdown formatting within content strings:
+   - **Bold** for emphasis
+   - *Italic* for subtle emphasis
+   - Lists (bulleted or numbered) for multiple items
+   - Tables for structured data (use markdown table syntax)
+   - Headings (##, ###) for subsections within content
 5. Include all relevant information from the document
 6. Make the JSON clean and well-formatted for easy parsing
 7. Ensure all JSON is valid and parseable
+8. Use rich formatting to make the output visually appealing and easy to read
 
 Your response should ONLY contain the JSON wrapped in markdown code blocks. Do not include any additional text before or after the code block.`;
+  }
 
   return secretPrompt + jsonFormattingInstructions;
 }
@@ -4002,8 +4124,11 @@ exports.chatWithDocumentStream = async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: capturedData.session_id })}\n\n`);
       
       // Stream answer character by character for smooth streaming effect
-      // ✅ Ensure answer is plain text, not JSON
-      let answer = ensurePlainTextAnswer(capturedData.answer);
+      // The answer from chatWithDocument is already post-processed correctly:
+      // - For secret prompts with templates: postProcessSecretPromptResponse preserves JSON structure
+      // - For regular queries: ensurePlainTextAnswer converts to plain text
+      // So we use the answer as-is without additional conversion
+      let answer = capturedData.answer;
       const chunkSize = 10; // Stream 10 characters at a time
       for (let i = 0; i < answer.length; i += chunkSize) {
         const chunk = answer.substring(i, Math.min(i + chunkSize, answer.length));

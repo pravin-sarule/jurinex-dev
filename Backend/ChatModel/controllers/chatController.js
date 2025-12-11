@@ -852,6 +852,10 @@ const UserProfileService = require('../services/userProfileService');
 const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+const { 
+  fetchTemplateFilesData, 
+  buildEnhancedSystemPromptWithTemplates 
+} = require('../services/secretPromptTemplateService');
 
 /**
  * Upload document to GCS and store URL in database
@@ -1372,6 +1376,7 @@ exports.askQuestion = async (req, res) => {
         secret_manager_id,
         version,
         llm_name: dbLlmName,
+        input_template_id,
         output_template_id
       } = secretData;
 
@@ -1404,9 +1409,33 @@ exports.askQuestion = async (req, res) => {
 
       console.log(`🔐 [ChatModel] Secret value retrieved (${secretValue.length} chars)`);
 
-      // TODO: Fetch output template if output_template_id exists (similar to document service)
-      // For now, we'll use the basic formatting
-      const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
+      // ✅ Fetch template files and their extracted data
+      let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
+      if (input_template_id || output_template_id) {
+        console.log(`\n📄 [ChatModel] Fetching template files:`);
+        console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
+        console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
+        
+        templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
+        
+        if (templateData.hasTemplates) {
+          console.log(`✅ [ChatModel] Template files fetched successfully`);
+          if (templateData.inputTemplate) {
+            console.log(`   Input: ${templateData.inputTemplate.filename} (${templateData.inputTemplate.extracted_text?.length || 0} chars)`);
+          }
+          if (templateData.outputTemplate) {
+            console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
+          }
+          
+          // Build enhanced prompt with template examples
+          secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
+          console.log(`✅ [ChatModel] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
+        } else {
+          console.log(`⚠️ [ChatModel] No template files found or available\n`);
+        }
+      }
+
+      const formattedSecretValue = secretValue;
       
       // Build final prompt with secret value
       finalQuestion = formattedSecretValue;
@@ -1738,6 +1767,7 @@ exports.askQuestionStream = async (req, res) => {
         secret_manager_id,
         version,
         llm_name: dbLlmName,
+        input_template_id,
         output_template_id
       } = secretData;
 
@@ -1767,9 +1797,33 @@ exports.askQuestionStream = async (req, res) => {
 
       console.log(`🔐 [ChatModel Stream] Secret value retrieved (${secretValue.length} chars)`);
 
-      // TODO: Fetch output template if output_template_id exists (similar to document service)
-      // For now, we'll use the basic formatting
-      const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
+      // ✅ Fetch template files and their extracted data
+      let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
+      if (input_template_id || output_template_id) {
+        console.log(`\n📄 [ChatModel Stream] Fetching template files:`);
+        console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
+        console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
+        
+        templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
+        
+        if (templateData.hasTemplates) {
+          console.log(`✅ [ChatModel Stream] Template files fetched successfully`);
+          if (templateData.inputTemplate) {
+            console.log(`   Input: ${templateData.inputTemplate.filename} (${templateData.inputTemplate.extracted_text?.length || 0} chars)`);
+          }
+          if (templateData.outputTemplate) {
+            console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
+          }
+          
+          // Build enhanced prompt with template examples
+          secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
+          console.log(`✅ [ChatModel Stream] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
+        } else {
+          console.log(`⚠️ [ChatModel Stream] No template files found or available\n`);
+        }
+      }
+
+      const formattedSecretValue = secretValue;
       
       // Build final prompt with secret value
       finalQuestion = formattedSecretValue;
