@@ -23,9 +23,8 @@ const PaymentForm = ({ plan, onClose, onPaymentSuccess }) => {
       }
 
       setSuccess(true);
-      onPaymentSuccess(plan.name); // Call the success callback with the plan name
+      onPaymentSuccess(plan.name);
       console.log(`Payment successful for ${plan.name} plan!`);
-      // Optionally, close the form after a short delay to show success message
       setTimeout(onClose, 1500);
     } catch (err) {
       setError(err.message || 'Payment failed. Please try again.');

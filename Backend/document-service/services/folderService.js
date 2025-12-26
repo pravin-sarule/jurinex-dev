@@ -1,17 +1,6 @@
 const { bucket, fileInputBucket } = require("../config/gcs");
 const path = require("path");
 
-/**
- * Upload a file buffer to Google Cloud Storage
- *
- * @param {string} filenameOrPath - File name OR full object path
- * @param {Buffer} buffer - File buffer
- * @param {string|null} folder - Destination folder in GCS (ignored if full path provided)
- * @param {boolean} isBatch - If true, upload to fileInputBucket (for DocAI)
- * @param {string} mimetype - File MIME type
- * @param {boolean} rawKey - If true, use filenameOrPath as the full GCS object key
- * @returns {Promise<{ gsUri: string, gcsPath: string }>}
- */
 exports.uploadToGCS = async (
   filenameOrPath,
   buffer,
@@ -24,10 +13,8 @@ exports.uploadToGCS = async (
   let destination;
 
   if (rawKey) {
-    // ✅ Use provided string as full GCS key (for things like .keep files)
     destination = filenameOrPath;
   } else {
-    // ✅ Default: put inside folder with timestamp
     const timestamp = Date.now();
     const safeFilename = filenameOrPath.replace(/\s+/g, "_");
     destination = path.posix.join(folder, `${timestamp}_${safeFilename}`);
@@ -49,13 +36,6 @@ exports.uploadToGCS = async (
   };
 };
 
-/**
- * Generate a temporary signed URL for download
- *
- * @param {string} gcsPath - Path inside the main bucket
- * @param {number} expiresInSeconds - Expiry in seconds (default 5 min)
- * @returns {Promise<string>} Signed URL
- */
 exports.getSignedUrl = async (gcsPath, expiresInSeconds = 300) => {
   const file = bucket.file(gcsPath);
 

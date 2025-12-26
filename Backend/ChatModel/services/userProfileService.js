@@ -1,16 +1,6 @@
 const axios = require('axios');
 
-/**
- * Service to fetch user data from Auth Service
- * Similar to document-service implementation
- */
 class UserProfileService {
-  /**
-   * Get user profile from auth service
-   * @param {number} userId - User ID
-   * @param {string} authorizationHeader - Authorization header (Bearer token)
-   * @returns {Promise<Object|null>} - User profile object or null
-   */
   static async getUserProfile(userId, authorizationHeader) {
     try {
       const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';

@@ -1,11 +1,6 @@
 const db = require('../config/db');
 
 class TokenUsageService {
-    /**
-     * Retrieves the current remaining token balance for a user from the latest log entry.
-     * @param {number} userId - The ID of the user.
-     * @returns {Promise<number>} - The current remaining token balance, or 0 if no logs exist.
-     */
     static async getCurrentTokenBalance(userId) {
         try {
             const result = await db.query(
@@ -19,12 +14,6 @@ class TokenUsageService {
         }
     }
 
-    /**
-     * Checks if a user has enough tokens for an operation.
-     * @param {number} userId - The ID of the user.
-     * @param {number} operationCost - The token cost of the impending operation.
-     * @returns {Promise<boolean>} - True if tokens are sufficient, false otherwise.
-     */
     static async checkAndReserveTokens(userId, operationCost) {
         const client = await db.connect();
         try {
@@ -39,9 +28,6 @@ class TokenUsageService {
                 return false; // Insufficient tokens
             }
 
-            // No need to "reserve" by updating user_subscriptions.current_token_balance here.
-            // The actual deduction and logging happens in commitTokens.
-            // This function just checks availability.
 
             await client.query('COMMIT');
             return true;
@@ -54,13 +40,6 @@ class TokenUsageService {
         }
     }
 
-    /**
-     * Records token usage and updates the remaining balance in token_usage_logs.
-     * @param {number} userId - The ID of the user.
-     * @param {number} tokensUsed - The number of tokens consumed.
-     * @param {string} actionDescription - Description of the action for logging.
-     * @returns {Promise<boolean>} - True if committed successfully, false otherwise.
-     */
     static async commitTokens(userId, tokensUsed, actionDescription = 'Operation completed') {
         const client = await db.connect();
         try {
@@ -70,7 +49,6 @@ class TokenUsageService {
             const newRemainingTokens = currentBalance - tokensUsed;
 
             if (newRemainingTokens < 0) {
-                // This should ideally not happen if checkAndReserveTokens was called correctly
                 console.error(`❌ Attempted to commit more tokens than available for user ${userId}. Current: ${currentBalance}, Used: ${tokensUsed}`);
                 await client.query('ROLLBACK');
                 return false;
@@ -93,13 +71,6 @@ class TokenUsageService {
         }
     }
 
-    /**
-     * Rolls back token usage by adding tokens back to the balance and logging the event.
-     * @param {number} userId - The ID of the user.
-     * @param {number} tokensToRollback - The number of tokens to add back.
-     * @param {string} actionDescription - Description of the rollback action.
-     * @returns {Promise<boolean>} - True if rolled back successfully, false otherwise.
-     */
     static async rollbackTokens(userId, tokensToRollback, actionDescription = 'Token rollback due to error') {
         const client = await db.connect();
         try {
@@ -125,14 +96,6 @@ class TokenUsageService {
         }
     }
 
-    /**
-     * Resets a user's token balance to a specified amount and logs the event.
-     * This is used for subscription activation/renewal.
-     * @param {number} userId - The ID of the user.
-     * @param {number} newBalance - The new token balance to set.
-     * @param {string} actionDescription - Description of the reset action.
-     * @returns {Promise<boolean>} - True if reset successfully, false otherwise.
-     */
     static async resetUserUsage(userId, newBalance, actionDescription = 'Subscription token reset') {
         const client = await db.connect();
         try {
@@ -143,8 +106,6 @@ class TokenUsageService {
                 [userId, newBalance - await TokenUsageService.getCurrentTokenBalance(userId), actionDescription, newBalance]
             );
 
-            // Remove current_token_balance and last_reset_date from user_subscriptions
-            // as token_usage_logs is now the authoritative source.
             await client.query(
                 `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE WHERE user_id = $1`,
                 [userId]
@@ -162,11 +123,6 @@ class TokenUsageService {
         }
     }
 
-    /**
-     * Retrieves a user's current token usage (remaining tokens).
-     * @param {number} userId - The ID of the user.
-     * @returns {Promise<number|null>} - The number of remaining tokens, or null if not found.
-     */
     static async getRemainingTokens(userId) {
         try {
             const remaining = await TokenUsageService.getCurrentTokenBalance(userId);
@@ -176,11 +132,6 @@ class TokenUsageService {
             return null;
         }
     }
-    /**
-     * Retrieves the total tokens used by a user.
-     * @param {number} userId - The ID of the user.
-     * @returns {Promise<number>} - The total tokens used, or 0 if no logs exist.
-     */
     static async getTotalTokensUsed(userId) {
         try {
             const result = await db.query(

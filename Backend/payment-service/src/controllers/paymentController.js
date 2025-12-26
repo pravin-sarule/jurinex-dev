@@ -30,7 +30,6 @@ const startSubscription = async (req, res) => {
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized: User ID missing.' });
     if (!plan_id) return res.status(400).json({ success: false, message: 'Missing plan_id.' });
 
-    // 1️⃣ Fetch plan from DB
     const planQuery = await db.query(
       'SELECT * FROM subscription_plans WHERE id = $1 AND is_active = true',
       [plan_id]
@@ -39,13 +38,11 @@ const startSubscription = async (req, res) => {
     const plan = planQuery.rows[0];
     if (!plan.razorpay_plan_id) return res.status(500).json({ success: false, message: `Plan '${plan.name}' is not configured with Razorpay.` });
 
-    // 2️⃣ Fetch user from User Service
     const userServiceURL = `${process.env.USER_SERVICE_API_URL}/api/auth/users/${userId}`;
     const userResponse = await axios.get(userServiceURL, { headers: { Authorization: req.headers['authorization'] } });
     const user = userResponse.data.user || userResponse.data;
     if (!user) return res.status(404).json({ success: false, message: 'User not found in User Service.' });
 
-    // 3️⃣ Create or fetch Razorpay customer
     let customerId = user.razorpay_customer_id;
     if (!customerId) {
       try {
@@ -56,7 +53,6 @@ const startSubscription = async (req, res) => {
         customerId = customer.id;
 
       } catch (err) {
-        // Handle "Customer already exists"
         if (err.error?.code === 'BAD_REQUEST_ERROR' && err.error?.description.includes('already exists')) {
           const existingCustomers = await razorpay.customers.all({ email: user.email });
           if (existingCustomers.items.length > 0) customerId = existingCustomers.items[0].id;
@@ -64,7 +60,6 @@ const startSubscription = async (req, res) => {
         } else throw err;
       }
 
-      // Update User Service
       await axios.put(
         `${process.env.USER_SERVICE_API_URL}/api/auth/users/${userId}/razorpay-customer-id`,
         { razorpay_customer_id: customerId },
@@ -72,7 +67,6 @@ const startSubscription = async (req, res) => {
       );
     }
 
-    // 4️⃣ Create subscription
     const subscriptionData = {
       plan_id: plan.razorpay_plan_id,
       customer_notify: 1,
@@ -84,7 +78,6 @@ const startSubscription = async (req, res) => {
     const subscription = await razorpay.subscriptions.create(subscriptionData);
     if (!subscription?.id) throw new Error('Invalid subscription response');
 
-    // 5️⃣ Save subscription in DB
     await db.query(
       `INSERT INTO user_subscriptions
        (user_id, plan_id, razorpay_subscription_id, status, current_token_balance, last_reset_date, created_at, updated_at)
@@ -140,7 +133,6 @@ const verifySubscription = async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing verification data" });
     }
 
-    // ✅ Check if payment already exists to prevent duplicate processing
     const existingPayment = await db.query(
       'SELECT id FROM payments WHERE razorpay_payment_id = $1',
       [razorpay_payment_id]
@@ -156,7 +148,6 @@ const verifySubscription = async (req, res) => {
       });
     }
 
-    // ✅ Verify Razorpay Signature
     const generatedSignature = crypto
       .createHmac('sha256', process.env.RAZORPAY_SECRET)
       .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
@@ -168,7 +159,6 @@ const verifySubscription = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid payment signature" });
     }
 
-    // ✅ Fetch payment details from Razorpay
     let paymentDetails;
     try {
       paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
@@ -191,7 +181,6 @@ const verifySubscription = async (req, res) => {
       };
     }
 
-    // ✅ Update user subscription status
     const updateResult = await db.query(
       `UPDATE user_subscriptions 
        SET status = 'active', 
@@ -210,7 +199,6 @@ const verifySubscription = async (req, res) => {
 
     const userSubscription = updateResult.rows[0];
 
-    // ✅ Get token limit from plan
     const planQuery = await db.query(
       "SELECT token_limit FROM subscription_plans WHERE id = $1", 
       [userSubscription.plan_id]
@@ -218,7 +206,6 @@ const verifySubscription = async (req, res) => {
 
     const tokenLimit = planQuery.rows.length > 0 ? planQuery.rows[0].token_limit : 0;
 
-    // ✅ Insert payment record (FIXED: Don't specify id column, let it auto-increment)
     try {
       await db.query(
         `INSERT INTO payments (
@@ -248,17 +235,14 @@ const verifySubscription = async (req, res) => {
       );
       console.log(`[verifySubscription] Payment record inserted for payment_id: ${paymentDetails.id}`);
     } catch (insertError) {
-      // If it's a duplicate key error on razorpay_payment_id, it means payment was already processed
       if (insertError.code === '23505' && insertError.constraint === 'payments_razorpay_payment_id_key') {
         console.log(`[verifySubscription] Payment ${razorpay_payment_id} already exists in payments table`);
-        // Continue execution as payment was already processed successfully
       } else {
         console.error(`[verifySubscription] Payment insert error:`, insertError);
         throw insertError; // Re-throw other errors
       }
     }
 
-    // ✅ Reset token usage
     try {
       await TokenUsageService.resetUserUsage(
         userId, 
@@ -268,7 +252,6 @@ const verifySubscription = async (req, res) => {
       console.log(`[verifySubscription] Token usage reset for user ${userId} with limit ${tokenLimit}`);
     } catch (tokenError) {
       console.error(`[verifySubscription] Token reset error:`, tokenError);
-      // Don't fail the entire verification for token reset issues
     }
 
     await db.query('COMMIT');
@@ -293,10 +276,6 @@ const verifySubscription = async (req, res) => {
 };
 
 
-/**
- * @description Handles incoming Razorpay webhook events to update subscription and payment statuses.
- * @route POST /api/webhook/razorpay
- */
 const handleWebhook = async (req, res) => {
   try {
     await db.query('BEGIN');
@@ -345,9 +324,6 @@ const handleWebhook = async (req, res) => {
   }
 };
 
-/**
- * @description Internal function to handle Razorpay `subscription.activated` webhook event.
- */
 const handleSubscriptionActivated = async (subscription) => {
   try {
     console.log(`Activating subscription: ${subscription.id}`);
@@ -371,7 +347,6 @@ const handleSubscriptionActivated = async (subscription) => {
       if (planResult.rows.length > 0) {
         const { token_limit: tokenLimit, interval } = planResult.rows[0];
 
-        // Calculate next renewal date
         const lastResetDate = new Date(last_reset_date);
         let nextResetDate = new Date(lastResetDate);
 
@@ -408,9 +383,6 @@ const handleSubscriptionActivated = async (subscription) => {
   }
 };
 
-/**
- * @description Internal function to handle Razorpay `subscription.charged` webhook event.
- */
 const handleSubscriptionCharged = async (payment, subscription) => {
   try {
     console.log(`Handling charge for subscription: ${subscription.id}, payment: ${payment.id}`);
@@ -435,7 +407,6 @@ const handleSubscriptionCharged = async (payment, subscription) => {
       if (planResult.rows.length > 0) {
         const { token_limit: tokenLimit, interval } = planResult.rows[0];
 
-        // Calculate next renewal date
         const lastResetDate = new Date(last_reset_date);
         let nextResetDate = new Date(lastResetDate);
 
@@ -448,7 +419,6 @@ const handleSubscriptionCharged = async (payment, subscription) => {
         } else if (interval === 'daily') {
           nextResetDate.setUTCDate(nextResetDate.getUTCDate() + 1);
         }
-        // For 'lifetime' or other intervals, no automatic reset based on time
 
         const now = new Date();
         now.setUTCHours(0, 0, 0, 0); // Normalize current time to start of day UTC
@@ -500,9 +470,6 @@ const handleSubscriptionCharged = async (payment, subscription) => {
   }
 };
 
-/**
- * @description Internal function to handle Razorpay `subscription.cancelled` webhook event.
- */
 const handleSubscriptionCancelled = async (subscription) => {
   try {
     await db.query(
@@ -518,9 +485,6 @@ const handleSubscriptionCancelled = async (subscription) => {
   }
 };
 
-/**
- * @description Internal function to handle Razorpay `subscription.completed` webhook event.
- */
 const handleSubscriptionCompleted = async (subscription) => {
   try {
     await db.query(
@@ -536,10 +500,6 @@ const handleSubscriptionCompleted = async (subscription) => {
   }
 };
 
-/**
- * @description Retrieves the payment history for the authenticated user.
- * @route GET /api/payments/history
- */
 const getUserPaymentHistory = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -592,10 +552,6 @@ const getUserPaymentHistory = async (req, res) => {
   }
 };
 
-/**
- * @description Tests the configuration of subscription plans in the database and Razorpay.
- * @route GET /api/payments/test-config
- */
 const testPlans = async (req, res) => {
   try {
     const dbPlans = await db.query("SELECT id, name, razorpay_plan_id, price, interval, is_active FROM subscription_plans ORDER BY id");
@@ -631,10 +587,6 @@ const testPlans = async (req, res) => {
   }
 };
 
-/**
- * @description Tests the connection to the Razorpay API.
- * @route GET /api/payments/test-razorpay-connection
- */
 const testRazorpayConnection = async (req, res) => {
   try {
     const plans = await razorpay.plans.all({ count: 1 });
@@ -653,14 +605,7 @@ const testRazorpayConnection = async (req, res) => {
   }
 };
 
-/**
- * @description Controller to handle token usage check and deduction.
- *              The actual logic is handled by the checkTokenUsage middleware.
- * @route POST /api/payments/token-usage
- */
 const checkAndDeductTokens = async (req, res) => {
-  // If we reach here, the checkTokenUsage middleware has successfully
-  // verified tokens and deducted them.
   return res.status(200).json({
     success: true,
     message: "Tokens checked and deducted successfully.",
@@ -668,10 +613,6 @@ const checkAndDeductTokens = async (req, res) => {
   });
 };
 
-/**
- * @description API endpoint to check and reserve tokens for a user.
- * @route POST /api/payments/token/check-reserve
- */
 const checkAndReserveTokensApi = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -695,10 +636,6 @@ const checkAndReserveTokensApi = async (req, res) => {
   }
 };
 
-/**
- * @description API endpoint to commit tokens for a user.
- * @route POST /api/payments/token/commit
- */
 const commitTokensApi = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -722,10 +659,6 @@ const commitTokensApi = async (req, res) => {
   }
 };
 
-/**
- * @description API endpoint to rollback tokens for a user.
- * @route POST /api/payments/token/rollback
- */
 const rollbackTokensApi = async (req, res) => {
   try {
     const userId = req.user?.id;

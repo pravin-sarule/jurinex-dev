@@ -18,7 +18,7 @@ const ChatSessionList = ({ sessions, selectedSessionId, onSelectSession, onDelet
             </span>
             <button
               onClick={(e) => {
-                e.stopPropagation(); // Prevent selecting session when deleting
+                e.stopPropagation();
                 onDeleteSession(session.sessionId);
               }}
               className="ml-2 text-red-400 hover:text-red-300 p-1 rounded-full hover:bg-gray-600"

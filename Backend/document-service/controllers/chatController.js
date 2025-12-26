@@ -1,7 +1,5 @@
-// controllers/chatController.js
 const pool = require('../config/db'); // your PostgreSQL connection
 
-// Fetch all chats
 const getAllChats = async (req, res) => {
   try {
     const result = await pool.query(
@@ -18,7 +16,6 @@ const getAllChats = async (req, res) => {
 };
 const getUserChats = async (req, res) => {
   try {
-    // Assuming you set req.user when verifying JWT
     const userId = req.user.id;  
 
     const result = await pool.query(
@@ -36,7 +33,6 @@ const getUserChats = async (req, res) => {
   }
 };
 
-// Fetch chats by session ID
 const getChatsBySession = async (req, res) => {
   const { sessionId } = req.params;
   try {

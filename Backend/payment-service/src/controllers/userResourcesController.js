@@ -1,13 +1,10 @@
 const pool = require('../config/db');
 const axios = require('axios'); // Import axios for HTTP requests
 const TokenUsageService = require('../services/tokenUsageService');
+const TokenUsageSyncService = require('../services/tokenUsageSyncService');
 
 const DOCUMENT_SERVICE_URL = process.env.API_GATEWAY_URL || 'http://localhost:5000';
 
-/**
- * @description Retrieves detailed plan and resource information for the authenticated user.
- * @route GET /api/user-resources/plan-details
- */
 exports.getPlanAndResourceDetails = async (req, res) => {
     console.log("DEBUG: getPlanAndResourceDetails - Controller entered.");
     try {
@@ -20,7 +17,6 @@ exports.getPlanAndResourceDetails = async (req, res) => {
 
         const { service } = req.query;
 
-        // Get the active subscription for the user
         const subscriptionQuery = `
             SELECT
                 sp.id AS plan_id,
@@ -50,11 +46,9 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         const subscriptionResult = await pool.query(subscriptionQuery, [userId]);
         const activePlan = subscriptionResult.rows[0] || null;
 
-        // Get all plan configurations
         const allPlansResult = await pool.query(`SELECT * FROM subscription_plans ORDER BY price ASC;`);
         const allPlanConfigurations = allPlansResult.rows;
 
-        // Latest payment for the user
         const latestPaymentQuery = `
             SELECT
                 id,
@@ -74,7 +68,6 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         const latestPaymentResult = await pool.query(latestPaymentQuery, [userId]);
         const latestPayment = latestPaymentResult.rows[0] || null;
 
-        // If no active subscription, return zeroed resource usage
         if (!activePlan) {
             return res.status(200).json({
                 activePlan: null,
@@ -92,13 +85,12 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         const apiGatewayUrl = process.env.API_GATEWAY_URL || "http://localhost:5000";
         const authorizationHeader = req.headers.authorization;
 
-        // Fetch user usage and plan details from Document Service
         let userUsageFromDocumentService = null;
         let userPlanFromDocumentService = null;
         let timeLeftUntilReset = null;
 
         try {
-            const documentServiceResponse = await axios.get(`${apiGatewayUrl}/documents/user-usage-and-plan/${userId}`, {
+            const documentServiceResponse = await axios.get(`${apiGatewayUrl}/files/user-usage-and-plan/${userId}`, {
                 headers: { Authorization: authorizationHeader },
                 timeout: 10000 // 10 seconds
             });
@@ -112,14 +104,35 @@ exports.getPlanAndResourceDetails = async (req, res) => {
             }
         } catch (err) {
             console.error('❌ Error fetching user usage and plan from Document Service:', err.message);
-            // If Document Service is unavailable, we might fall back to local data or return a partial response.
-            // For now, we'll proceed with nulls and handle them in resourceUtilization.
         }
 
-        // Use data from Document Service if available, otherwise fall back to Payment Service's activePlan
         const effectivePlan = userPlanFromDocumentService || activePlan;
-        const currentTokenBalance = userUsageFromDocumentService ? (effectivePlan.token_limit + userUsageFromDocumentService.carry_over_tokens - userUsageFromDocumentService.tokens_used) : 0;
-        const totalTokensUsed = userUsageFromDocumentService ? userUsageFromDocumentService.tokens_used : 0;
+        
+        // Calculate total tokens and cost from llm_usage_logs (source of truth)
+        let totalTokensFromLogs = 0;
+        let totalCostFromLogs = 0;
+        try {
+            const llmUsageQuery = `
+                SELECT 
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(total_cost), 0) as total_cost
+                FROM public.llm_usage_logs
+                WHERE user_id = $1
+            `;
+            const llmUsageResult = await pool.query(llmUsageQuery, [userId]);
+            if (llmUsageResult.rows && llmUsageResult.rows.length > 0) {
+                totalTokensFromLogs = parseInt(llmUsageResult.rows[0].total_tokens) || 0;
+                totalCostFromLogs = parseFloat(llmUsageResult.rows[0].total_cost) || 0;
+            }
+        } catch (err) {
+            console.error('❌ Error fetching total tokens from llm_usage_logs:', err.message);
+            // Fallback to document service if llm_usage_logs query fails
+            totalTokensFromLogs = userUsageFromDocumentService ? userUsageFromDocumentService.tokens_used : 0;
+        }
+        
+        // Use tokens from llm_usage_logs (source of truth) instead of user_usage
+        const totalTokensUsed = totalTokensFromLogs;
+        const currentTokenBalance = effectivePlan ? (effectivePlan.token_limit + (userUsageFromDocumentService?.carry_over_tokens || 0) - totalTokensUsed) : 0;
         const currentDocumentCount = userUsageFromDocumentService ? userUsageFromDocumentService.documents_used : 0;
         const currentAiAnalysisUsed = userUsageFromDocumentService ? userUsageFromDocumentService.ai_analysis_used : 0;
         const totalStorageUsedGB = userUsageFromDocumentService ? userUsageFromDocumentService.storage_used_gb : 0;
@@ -137,7 +150,11 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         };
 
         const resourceUtilization = {
-            tokens: calculateUtilization(totalTokensUsed, planTokenLimit),
+            tokens: {
+                ...calculateUtilization(totalTokensUsed, planTokenLimit),
+                cost: totalCostFromLogs, // Include total cost from llm_usage_logs
+                total_tokens: totalTokensUsed // Include total tokens for reference
+            },
             queries: calculateUtilization(currentAiAnalysisUsed, planAiAnalysisLimit),
             documents: calculateUtilization(currentDocumentCount, planDocumentLimit),
             storage: {
@@ -169,10 +186,6 @@ exports.getPlanAndResourceDetails = async (req, res) => {
     }
 };
 
-/**
- * @description Retrieves all transaction history (token usage and payments) for the authenticated user.
- * @route GET /api/user-resources/transactions
- */
 exports.getUserTransactions = async (req, res) => {
     try {
         const userId = req.user.id;
@@ -240,10 +253,6 @@ exports.getUserTransactions = async (req, res) => {
     }
 };
 
-/**
- * @description Retrieves the resource utilization details for the authenticated user, including token, document, query, and storage usage.
- * @route GET /api/user-resources/resource-utilization
- */
 exports.getUserResourceUtilization = async (req, res) => {
     try {
         const userId = req.user.id;
@@ -259,7 +268,7 @@ exports.getUserResourceUtilization = async (req, res) => {
         let timeLeftUntilReset = null;
 
         try {
-            const documentServiceResponse = await axios.get(`${apiGatewayUrl}/documents/user-usage-and-plan/${userId}`, {
+            const documentServiceResponse = await axios.get(`${apiGatewayUrl}/files/user-usage-and-plan/${userId}`, {
                 headers: { Authorization: authorizationHeader },
                 timeout: 10000 // 10 seconds
             });
@@ -275,8 +284,6 @@ exports.getUserResourceUtilization = async (req, res) => {
             console.error('❌ Error fetching user usage and plan from Document Service:', err.message);
         }
 
-        // Use data from Document Service if available, otherwise fall back to Payment Service's activePlan
-        // Fetch the active subscription for the user if not already fetched by Document Service
         let activePlanFromPaymentService = null;
         if (!userPlanFromDocumentService) {
             const subscriptionQuery = `
@@ -295,8 +302,32 @@ exports.getUserResourceUtilization = async (req, res) => {
             activePlanFromPaymentService = subscriptionResult.rows[0] || null;
         }
         const effectivePlan = userPlanFromDocumentService || activePlanFromPaymentService;
-        const currentTokenBalance = userUsageFromDocumentService ? (effectivePlan.token_limit + userUsageFromDocumentService.carry_over_tokens - userUsageFromDocumentService.tokens_used) : 0;
-        const totalTokensUsed = userUsageFromDocumentService ? userUsageFromDocumentService.tokens_used : 0;
+        
+        // Calculate total tokens and cost from llm_usage_logs (source of truth)
+        let totalTokensFromLogs = 0;
+        let totalCostFromLogs = 0;
+        try {
+            const llmUsageQuery = `
+                SELECT 
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(total_cost), 0) as total_cost
+                FROM public.llm_usage_logs
+                WHERE user_id = $1
+            `;
+            const llmUsageResult = await pool.query(llmUsageQuery, [userId]);
+            if (llmUsageResult.rows && llmUsageResult.rows.length > 0) {
+                totalTokensFromLogs = parseInt(llmUsageResult.rows[0].total_tokens) || 0;
+                totalCostFromLogs = parseFloat(llmUsageResult.rows[0].total_cost) || 0;
+            }
+        } catch (err) {
+            console.error('❌ Error fetching total tokens from llm_usage_logs:', err.message);
+            // Fallback to document service if llm_usage_logs query fails
+            totalTokensFromLogs = userUsageFromDocumentService ? userUsageFromDocumentService.tokens_used : 0;
+        }
+        
+        // Use tokens from llm_usage_logs (source of truth) instead of user_usage
+        const totalTokensUsed = totalTokensFromLogs;
+        const currentTokenBalance = effectivePlan ? (effectivePlan.token_limit + (userUsageFromDocumentService?.carry_over_tokens || 0) - totalTokensUsed) : 0;
         const currentDocumentCount = userUsageFromDocumentService ? userUsageFromDocumentService.documents_used : 0;
         const currentAiAnalysisUsed = userUsageFromDocumentService ? userUsageFromDocumentService.ai_analysis_used : 0;
         const totalStorageUsedGB = userUsageFromDocumentService ? userUsageFromDocumentService.storage_used_gb : 0;
@@ -334,7 +365,11 @@ exports.getUserResourceUtilization = async (req, res) => {
                 expiration_date: end_date
             },
             resourceUtilization: {
-                tokens: calculateUtilization(totalTokensUsed, token_limit),
+                tokens: {
+                    ...calculateUtilization(totalTokensUsed, token_limit),
+                    cost: totalCostFromLogs, // Include total cost from llm_usage_logs
+                    total_tokens: totalTokensUsed // Include total tokens for reference
+                },
                 documents: calculateUtilization(currentDocumentCount, document_limit),
                 queries: calculateUtilization(currentAiAnalysisUsed, ai_analysis_limit),
                 storage: {
@@ -354,11 +389,6 @@ exports.getUserResourceUtilization = async (req, res) => {
     }
 };
 
-/**
- * @description Retrieves the active plan details for a specific user.
- * This endpoint is intended to be called by other services (e.g., Document Service).
- * @route GET /api/user-resources/user-plan/:userId
- */
 exports.getUserPlanById = async (req, res) => {
     try {
         const { userId } = req.params;

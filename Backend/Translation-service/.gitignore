@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Uploads
+uploads/
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.jpg
+*.jpeg
+*.png
+*.tiff
+*.bmp
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Google Cloud credentials
+*.json
+!package.json
+

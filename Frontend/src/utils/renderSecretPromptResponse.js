@@ -1,41 +1,25 @@
-/**
- * Renders structured JSON response from secret prompts into formatted markdown
- * Handles both simple structure and complex output template structure (schemas, generated_sections, etc.)
- * @param {string|object} response - The response text (may contain JSON in markdown code blocks) or parsed JSON object
- * @returns {string} Formatted markdown string ready for ReactMarkdown
- */
-/**
- * Attempts to parse partial/incomplete JSON during streaming
- * Returns the parsed object if successful, or null if parsing fails
- */
 function tryParsePartialJson(text) {
   if (!text || typeof text !== 'string') return null;
   
-  // Try to extract JSON from markdown code blocks first
   const jsonMatch = text.match(/```json\s*([\s\S]*?)(?:\s*```|$)/i);
   const jsonText = jsonMatch ? jsonMatch[1] : text.trim();
   
-  // If it starts with { or [, try to parse it
   if (jsonText.startsWith('{') || jsonText.startsWith('[')) {
     try {
       return JSON.parse(jsonText);
     } catch (e) {
-      // If parsing fails, try to fix common incomplete JSON issues
       let fixedJson = jsonText;
       
-      // Try to close unclosed strings
       const openQuotes = (fixedJson.match(/"/g) || []).length;
       if (openQuotes % 2 !== 0) {
         fixedJson += '"';
       }
       
-      // Try to close unclosed objects/arrays
       const openBraces = (fixedJson.match(/\{/g) || []).length;
       const closeBraces = (fixedJson.match(/\}/g) || []).length;
       const openBrackets = (fixedJson.match(/\[/g) || []).length;
       const closeBrackets = (fixedJson.match(/\]/g) || []).length;
       
-      // Add missing closing braces/brackets
       for (let i = 0; i < openBraces - closeBraces; i++) {
         fixedJson += '}';
       }
@@ -43,11 +27,9 @@ function tryParsePartialJson(text) {
         fixedJson += ']';
       }
       
-      // Try parsing again
       try {
         return JSON.parse(fixedJson);
       } catch (e2) {
-        // Still failed, return null
         return null;
       }
     }
@@ -56,88 +38,311 @@ function tryParsePartialJson(text) {
   return null;
 }
 
+// Helper function to convert markdown formatting to HTML
+function convertMarkdownToHtml(text) {
+  if (!text || typeof text !== 'string') return text;
+  
+  let converted = text;
+  
+  // Step 1: Convert all bold **text** to <strong>text</strong>
+  // Use a more comprehensive regex that handles all cases including:
+  // - **text**
+  // - **text with spaces**
+  // - **text** in the middle of sentences
+  // - Multiple **text** in one line
+  // Process multiple times to catch all instances
+  let previousConverted = '';
+  let iterations = 0;
+  while (converted !== previousConverted && iterations < 10) {
+    previousConverted = converted;
+    // Match ** followed by any characters (non-greedy) followed by **
+    converted = converted.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    iterations++;
+  }
+  
+  // Step 2: Convert italic *text* to <em>text</em> (but not if it's part of **)
+  // Only match single asterisks that are not adjacent to another asterisk
+  // This regex uses negative lookbehind and lookahead to ensure single asterisks
+  converted = converted.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+  
+  // Step 3: Handle any remaining standalone asterisks that might be formatting
+  // Convert any remaining ** that weren't caught (edge cases)
+  converted = converted.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+  
+  // Step 4: Convert section references [SECTION X] to styled spans
+  converted = converted.replace(/\[SECTION\s+(\d+)(?:,\s*SECTION\s+\d+)*\]/gi, '<span style="color: #666; font-size: 9pt;">[Section $1]</span>');
+  
+  // Step 5: Convert page references (Pages X-Y or Page X)
+  converted = converted.replace(/\(Pages?\s+(\d+(?:-\d+)?)\)/gi, '<span style="color: #666; font-size: 9pt;">(Page $1)</span>');
+  converted = converted.replace(/\(Page\s+(\d+)\)/gi, '<span style="color: #666; font-size: 9pt;">(Page $1)</span>');
+  
+  // Step 6: Convert exhibit references **EXHIBIT 'X'** to bold (if any remain)
+  converted = converted.replace(/\*\*EXHIBIT\s+['"]?([A-Z0-9-]+)['"]?\*\*/gi, '<strong>EXHIBIT \'$1\'</strong>');
+  
+  return converted;
+}
+
+// Helper function to convert markdown table to HTML table
+function convertMarkdownTableToHtml(tableLines) {
+  if (!tableLines || tableLines.length < 2) return null;
+  
+  // Filter out separator lines (lines with only dashes and pipes)
+  const validLines = tableLines.filter(line => {
+    const trimmed = line.trim();
+    return trimmed && !/^\|[\s\-:]+\|\s*$/.test(trimmed);
+  });
+  
+  if (validLines.length === 0) return null;
+  
+  // Parse headers (first line)
+  const headerLine = validLines[0];
+  const headers = headerLine.split('|').map(h => h.trim()).filter(h => h);
+  
+  if (headers.length === 0) return null;
+  
+  // Parse data rows (remaining lines)
+  const dataLines = validLines.slice(1);
+  
+  let html = '<table style="width: 100%; border-collapse: collapse; margin: 12pt 0; font-size: 11pt; border: 1px solid #000;">\n';
+  html += '<thead>\n<tr style="background-color: #f0f0f0;">\n';
+  
+  headers.forEach(header => {
+    const formattedHeader = convertMarkdownToHtml(header);
+    html += `<th style="border: 1px solid #000; padding: 8pt; text-align: left; font-weight: bold; background-color: #f0f0f0;">${formattedHeader}</th>\n`;
+  });
+  
+  html += '</tr>\n</thead>\n<tbody>\n';
+  
+  dataLines.forEach((line, index) => {
+    const cells = line.split('|').map(c => c.trim()).filter(c => c);
+    if (cells.length > 0) {
+      // Pad cells if needed to match header count
+      while (cells.length < headers.length) {
+        cells.push('');
+      }
+      html += '<tr>\n';
+      cells.slice(0, headers.length).forEach(cell => {
+        const formattedCell = convertMarkdownToHtml(cell);
+        html += `<td style="border: 1px solid #000; padding: 8pt; vertical-align: top;">${formattedCell}</td>\n`;
+      });
+      html += '</tr>\n';
+    }
+  });
+  
+  html += '</tbody>\n</table>\n';
+  
+  return html;
+}
+
+// Helper function to process text and convert markdown tables to HTML
+function processTextWithTables(text) {
+  if (!text || typeof text !== 'string') return '';
+  
+  const lines = text.split('\n');
+  let result = '';
+  let tableLines = [];
+  let inTable = false;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmedLine = line.trim();
+    
+    // Check if this is a table line (contains | and has proper format)
+    const isTableLine = trimmedLine.includes('|') && trimmedLine.split('|').length >= 2;
+    const isSeparator = /^\|[\s\-:]+\|\s*$/.test(trimmedLine);
+    
+    if (isTableLine || isSeparator) {
+      if (!inTable) {
+        // Start of a table
+        inTable = true;
+        tableLines = [];
+      }
+      tableLines.push(line);
+      
+      // Check if next line is not a table line (end of table)
+      if (i < lines.length - 1) {
+        const nextLine = lines[i + 1].trim();
+        const nextIsTableLine = nextLine.includes('|') && nextLine.split('|').length >= 2;
+        const nextIsSeparator = /^\|[\s\-:]+\|\s*$/.test(nextLine);
+        
+        if (!nextIsTableLine && !nextIsSeparator && nextLine.length > 0) {
+          // End of table
+          const tableHtml = convertMarkdownTableToHtml(tableLines);
+          if (tableHtml) {
+            result += tableHtml + '\n';
+          } else {
+            // If table conversion failed, add lines as-is
+            result += tableLines.join('\n') + '\n';
+          }
+          inTable = false;
+          tableLines = [];
+        }
+      } else {
+        // Last line, end of table
+        const tableHtml = convertMarkdownTableToHtml(tableLines);
+        if (tableHtml) {
+          result += tableHtml + '\n';
+        } else {
+          result += tableLines.join('\n') + '\n';
+        }
+        inTable = false;
+        tableLines = [];
+      }
+    } else {
+      // Not a table line
+      if (inTable && tableLines.length > 0) {
+        // End of table, convert it
+        const tableHtml = convertMarkdownTableToHtml(tableLines);
+        if (tableHtml) {
+          result += tableHtml + '\n';
+        } else {
+          result += tableLines.join('\n') + '\n';
+        }
+        inTable = false;
+        tableLines = [];
+      }
+      
+      // Add regular text line
+      if (trimmedLine) {
+        result += line + '\n';
+      } else {
+        result += '\n';
+      }
+    }
+  }
+  
+  // Handle remaining table if any
+  if (inTable && tableLines.length > 0) {
+    const tableHtml = convertMarkdownTableToHtml(tableLines);
+    if (tableHtml) {
+      result += tableHtml + '\n';
+    } else {
+      result += tableLines.join('\n') + '\n';
+    }
+  }
+  
+  // Now process the result to format paragraphs and lists
+  const paragraphs = result.split(/\n\n+/).filter(p => p.trim());
+  let formattedResult = '';
+  
+  paragraphs.forEach(para => {
+    const trimmedPara = para.trim();
+    
+    // Skip if it's already HTML (table)
+    if (trimmedPara.startsWith('<table')) {
+      formattedResult += trimmedPara + '\n\n';
+    } else if (trimmedPara.startsWith('*') || trimmedPara.startsWith('-')) {
+      // Handle bullet points
+      const bullets = trimmedPara.split(/\n(?=[*-])/).filter(b => b.trim());
+      formattedResult += '<ul style="margin: 6pt 0; padding-left: 24pt;">\n';
+      bullets.forEach(bullet => {
+        let cleanBullet = bullet.replace(/^[*-]\s*/, '').trim();
+        cleanBullet = convertMarkdownToHtml(cleanBullet);
+        formattedResult += `<li style="margin: 3pt 0;">${cleanBullet}</li>\n`;
+      });
+      formattedResult += '</ul>\n\n';
+    } else if (trimmedPara) {
+      // Regular paragraph
+      const formattedPara = convertMarkdownToHtml(trimmedPara);
+      formattedResult += `<p style="margin: 6pt 0; text-indent: 0.5in;">${formattedPara}</p>\n\n`;
+    }
+  });
+  
+  return formattedResult;
+}
+
 export function renderSecretPromptResponse(response) {
   if (!response) {
     return '';
   }
 
-  // If it's already an object, use it directly
   let jsonData = null;
   if (typeof response === 'object' && response !== null) {
     jsonData = response;
+    console.log('[renderSecretPromptResponse] Response is already an object');
   } else if (typeof response === 'string') {
-    // First, try to extract JSON from markdown code blocks (case-insensitive)
-    // This handles responses like: ```json\n{...}\n```
+    // First, try to extract JSON from markdown code blocks
     const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/i);
     if (jsonMatch) {
       try {
         const jsonText = jsonMatch[1].trim();
         jsonData = JSON.parse(jsonText);
-        console.log('[renderSecretPromptResponse] Successfully parsed JSON from markdown code block');
+        console.log('[renderSecretPromptResponse] ✅ Successfully parsed JSON from markdown code block');
       } catch (e) {
-        console.warn('[renderSecretPromptResponse] Failed to parse JSON from code block, trying partial parse:', e);
-        // Try partial JSON parsing for streaming
+        console.warn('[renderSecretPromptResponse] Failed to parse JSON from code block, trying partial parse:', e.message);
         jsonData = tryParsePartialJson(jsonMatch[1]);
         if (!jsonData) {
-          // Try to clean and parse again
           try {
-            // Remove any leading/trailing whitespace or newlines
-            const cleaned = jsonMatch[1].trim().replace(/^\s+|\s+$/g, '');
+            // Try to fix common JSON issues
+            let cleaned = jsonMatch[1].trim();
+            // Remove trailing commas before closing braces/brackets
+            cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
+            // Try to close unclosed strings
+            const openQuotes = (cleaned.match(/"/g) || []).length;
+            if (openQuotes % 2 !== 0) {
+              cleaned += '"';
+            }
             jsonData = JSON.parse(cleaned);
+            console.log('[renderSecretPromptResponse] ✅ Successfully parsed after cleaning');
           } catch (e2) {
-            console.warn('[renderSecretPromptResponse] Failed to parse cleaned JSON:', e2);
+            console.warn('[renderSecretPromptResponse] Failed to parse cleaned JSON:', e2.message);
           }
         }
       }
     } else {
-      // Try to parse as direct JSON (raw JSON without code blocks)
+      // Try to find JSON in the string
       const trimmed = response.trim();
       if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
         try {
           jsonData = JSON.parse(trimmed);
-          console.log('[renderSecretPromptResponse] Successfully parsed direct JSON');
+          console.log('[renderSecretPromptResponse] ✅ Successfully parsed direct JSON');
         } catch (e) {
-          console.warn('[renderSecretPromptResponse] Failed to parse direct JSON, trying partial parse:', e);
-          // Try partial JSON parsing for streaming
+          console.warn('[renderSecretPromptResponse] Failed to parse direct JSON, trying partial parse:', e.message);
           jsonData = tryParsePartialJson(response);
           if (!jsonData) {
-            // Try to find JSON object in the text
-            const jsonPattern = /\{[\s\S]*\}/;
+            // Try to extract JSON from the string
+            const jsonPattern = /\{[\s\S]{50,}\}/;
             const match = trimmed.match(jsonPattern);
             if (match) {
               try {
-                jsonData = JSON.parse(match[0]);
+                let jsonStr = match[0];
+                // Fix common issues
+                jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+                jsonData = JSON.parse(jsonStr);
+                console.log('[renderSecretPromptResponse] ✅ Successfully parsed JSON from pattern match');
               } catch (e2) {
-                // Not JSON, return as is
-                console.warn('[renderSecretPromptResponse] Could not parse JSON from response:', e2);
-                return response;
+                jsonData = tryParsePartialJson(match[0]);
+                if (!jsonData) {
+                  console.warn('[renderSecretPromptResponse] Could not parse JSON from pattern match');
+                  // Return as plain text if we can't parse
+                  return response;
+                }
               }
             } else {
-              // Not JSON format, return as is
-              console.warn('[renderSecretPromptResponse] Response does not appear to be JSON');
+              console.warn('[renderSecretPromptResponse] No JSON pattern found in response');
               return response;
             }
           }
         }
       } else {
-        // Try to find JSON anywhere in the response (for cases where there's extra text)
-        const jsonPattern = /\{[\s\S]{20,}\}/;
+        // Look for JSON anywhere in the string
+        const jsonPattern = /\{[\s\S]{50,}\}/;
         const match = response.match(jsonPattern);
         if (match) {
           try {
-            jsonData = JSON.parse(match[0]);
-            console.log('[renderSecretPromptResponse] Successfully parsed JSON from pattern match');
+            let jsonStr = match[0];
+            // Fix common JSON issues
+            jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+            jsonData = JSON.parse(jsonStr);
+            console.log('[renderSecretPromptResponse] ✅ Successfully parsed JSON from pattern match');
           } catch (e) {
-            // Try partial JSON parsing
             jsonData = tryParsePartialJson(match[0]);
             if (!jsonData) {
-              // Not JSON, return as is
               console.warn('[renderSecretPromptResponse] Could not parse JSON from pattern match');
               return response;
             }
           }
         } else {
-          // Not JSON format, return as is
           console.warn('[renderSecretPromptResponse] No JSON pattern found in response');
           return response;
         }
@@ -146,60 +351,98 @@ export function renderSecretPromptResponse(response) {
   }
 
   if (!jsonData || typeof jsonData !== 'object') {
-    // If we couldn't parse JSON, return the response as-is (might be plain text or incomplete JSON)
-    // For streaming, show what we have so far
-    return response;
+    console.warn('[renderSecretPromptResponse] No valid JSON data found, attempting additional parsing');
+    // If it's a string that looks like JSON but couldn't be parsed, try one more time
+    if (typeof response === 'string') {
+      console.warn('[renderSecretPromptResponse] Attempting final JSON parse attempt');
+      try {
+        // Remove markdown code blocks
+        let cleaned = response.trim()
+          .replace(/```json\s*/gi, '')
+          .replace(/```\s*/g, '')
+          .trim();
+        
+        // Try to extract JSON if it's embedded in text
+        if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+          const jsonPattern = /\{[\s\S]{50,}\}/;
+          const match = cleaned.match(jsonPattern);
+          if (match) {
+            cleaned = match[0];
+          }
+        }
+        
+        // Fix common JSON issues
+        cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
+        
+        jsonData = JSON.parse(cleaned);
+        console.log('[renderSecretPromptResponse] ✅ Successfully parsed on final attempt');
+      } catch (e) {
+        console.error('[renderSecretPromptResponse] Final parse attempt failed:', e.message);
+        // If we still can't parse, but it looks like JSON, show a formatted error message
+        if (response.includes('schemas') || response.includes('generated_sections') || response.includes('output_summary_template')) {
+          console.warn('[renderSecretPromptResponse] Response appears to be JSON but parsing failed, returning formatted error');
+          return `<div style="font-family: 'Times New Roman', serif; padding: 20px; color: #d32f2f;">
+            <h2 style="color: #d32f2f;">⚠️ Error Rendering Document</h2>
+            <p>The response contains structured data but could not be parsed. Please check the console for details.</p>
+            <pre style="background: #f5f5f5; padding: 10px; border: 1px solid #ddd; overflow-x: auto;">${response.substring(0, 500)}...</pre>
+          </div>`;
+        }
+        return response; // Return original if all parsing fails
+      }
+    } else {
+      return response;
+    }
   }
+  
+  console.log('[renderSecretPromptResponse] Processing JSON data structure:', {
+    hasSchemas: !!(jsonData.schemas),
+    hasOutputTemplate: !!(jsonData.schemas?.output_summary_template),
+    hasGeneratedSections: !!(jsonData.generated_sections || jsonData.schemas?.output_summary_template?.generated_sections),
+    keys: Object.keys(jsonData)
+  });
+  
+  console.log('[renderSecretPromptResponse] Processing JSON data structure:', {
+    hasSchemas: !!(jsonData.schemas),
+    hasOutputTemplate: !!(jsonData.schemas?.output_summary_template),
+    hasGeneratedSections: !!(jsonData.generated_sections || jsonData.schemas?.output_summary_template?.generated_sections)
+  });
 
   let markdown = '';
 
-  // Helper function to parse annexure summary into table format
   function parseAnnexureSummary(text) {
     if (!text) return '';
     
     const exhibits = [];
     
-    // Split by lines and process each line
     const lines = text.split('\n').filter(line => line.trim());
     
     lines.forEach(line => {
-      // Match pattern: **Exhibit X:** or **Exhibit X (Colly.):** followed by description
       const exhibitMatch = line.match(/\*\*Exhibit\s+([A-Z0-9-]+(?:\s*\([^)]+\))?):\*\*\s*(.+)/i);
       if (exhibitMatch) {
         const exhibit = exhibitMatch[1].trim();
         let description = exhibitMatch[2].trim();
         
-        // Extract page references from SECTION numbers
         const sectionMatches = description.match(/\[SECTION\s+(\d+)(?:,\s*SECTION\s+\d+)*\]/g);
         let pageRef = 'N/A';
         if (sectionMatches && sectionMatches.length > 0) {
-          // Try to extract actual page numbers from the first few sections
-          // For now, use section numbers as page reference
           const sectionNums = [];
           sectionMatches.forEach(match => {
             const nums = match.match(/\d+/g);
             if (nums) sectionNums.push(...nums);
           });
-          // Use unique section numbers, sorted
           const uniqueSections = [...new Set(sectionNums)].sort((a, b) => parseInt(a) - parseInt(b));
           pageRef = uniqueSections.length > 0 ? uniqueSections.join(', ') : 'N/A';
         }
         
-        // Try to find explicit page numbers in description
         const pageNumMatch = description.match(/(?:page|pages?|pg\.?)\s*(\d+(?:-\d+)?)/i);
         if (pageNumMatch) {
           pageRef = pageNumMatch[1];
         }
         
-        // Clean description (remove section references for cleaner display)
         let cleanDescription = description.replace(/\[SECTION\s+\d+(?:,\s*SECTION\s+\d+)*\]/g, '').trim();
         
-        // Extract key insight - look for patterns that indicate key information
-        // The key insight is usually the main point of the exhibit
         let keyInsight = cleanDescription;
         
-        // If description is long, try to extract the most important part
-        // Look for phrases that indicate importance
         const importantPhrases = [
           /(?:proves?|shows?|demonstrates?|confirms?|establishes?|indicates?)\s+([^.]+)/i,
           /(?:evidence|proof|confirmation|establishment)\s+of\s+([^.]+)/i,
@@ -213,9 +456,7 @@ export function renderSecretPromptResponse(response) {
           }
         }
         
-        // If still too long, truncate intelligently
         if (keyInsight.length > 150) {
-          // Try to find a sentence boundary
           const sentenceMatch = keyInsight.match(/^(.{0,150}[.!?])\s/);
           if (sentenceMatch) {
             keyInsight = sentenceMatch[1];
@@ -224,7 +465,6 @@ export function renderSecretPromptResponse(response) {
           }
         }
         
-        // Clean up description - remove trailing periods and extra spaces
         cleanDescription = cleanDescription.replace(/\s+/g, ' ').trim();
         
         exhibits.push({
@@ -240,7 +480,6 @@ export function renderSecretPromptResponse(response) {
       let table = '| EXHIBIT | DESCRIPTION | PAGE REF. | KEY INSIGHT |\n';
       table += '|---------|-------------|-----------|-------------|\n';
       exhibits.forEach(exp => {
-        // Escape pipe characters in content
         const safeDesc = exp.description.replace(/\|/g, '\\|').replace(/\n/g, ' ');
         const safeInsight = exp.keyInsight.replace(/\|/g, '\\|').replace(/\n/g, ' ');
         table += `| ${exp.exhibit} | ${safeDesc} | ${exp.pageRef} | ${safeInsight} |\n`;
@@ -248,14 +487,12 @@ export function renderSecretPromptResponse(response) {
       return table;
     }
     
-    return text; // Fallback to original text if parsing fails
+    return text;
   }
 
-  // Helper function to format procedural timeline
   function formatProceduralTimeline(text) {
     if (!text) return '';
     
-    // Extract dates and events
     const datePattern = /\*\*(\d{2}\.\d{2}\.\d{4}):\*\*\s*(.+?)(?=\*\*\d{2}\.\d{2}\.\d{4}|$)/g;
     const events = [];
     let match;
@@ -275,31 +512,39 @@ export function renderSecretPromptResponse(response) {
       return formatted;
     }
     
-    return text; // Fallback to original text
+    return text;
   }
 
-  // Handle output template structure (schemas.output_summary_template)
   if (jsonData.schemas && jsonData.schemas.output_summary_template) {
     const template = jsonData.schemas.output_summary_template;
     
-    // Render metadata header
+    // Document Header - Word Document Style
     if (template.metadata) {
+      markdown += '<div style="font-family: \'Times New Roman\', serif; line-height: 1.6; max-width: 8.5in; margin: 0 auto; padding: 1in;">\n\n';
+      
       if (template.metadata.document_title) {
-        markdown += `# ${template.metadata.document_title}\n\n`;
+        const formattedTitle = convertMarkdownToHtml(template.metadata.document_title);
+        markdown += `<h1 style="text-align: center; font-size: 18pt; font-weight: bold; margin-bottom: 12pt; text-transform: uppercase;">${formattedTitle}</h1>\n\n`;
       }
+      
+      markdown += '<div style="margin-bottom: 24pt;">\n';
       if (template.metadata.case_title) {
-        markdown += `**Case:** ${template.metadata.case_title}\n\n`;
+        const formattedCaseTitle = convertMarkdownToHtml(template.metadata.case_title);
+        markdown += `<p style="margin: 6pt 0;"><strong>Case Title:</strong> ${formattedCaseTitle}</p>\n`;
       }
       if (template.metadata.date) {
-        markdown += `**Date:** ${template.metadata.date}\n\n`;
+        const formattedDate = convertMarkdownToHtml(template.metadata.date);
+        markdown += `<p style="margin: 6pt 0;"><strong>Date:</strong> ${formattedDate}</p>\n`;
       }
       if (template.metadata.prepared_by) {
-        markdown += `**Prepared By:** ${template.metadata.prepared_by}\n\n`;
+        const formattedPreparedBy = convertMarkdownToHtml(template.metadata.prepared_by);
+        markdown += `<p style="margin: 6pt 0;"><strong>Prepared By:</strong> ${formattedPreparedBy}</p>\n`;
       }
-      markdown += '---\n\n';
+      markdown += '</div>\n\n';
+      
+      markdown += '<hr style="border: none; border-top: 1px solid #000; margin: 24pt 0;" />\n\n';
     }
 
-    // Render generated sections in order
     if (template.generated_sections) {
       const sectionOrder = [
         { key: '2_1_ground_wise_summary', title: '2.1 Ground-wise Summary with Supporting Facts' },
@@ -318,37 +563,112 @@ export function renderSecretPromptResponse(response) {
         const section = template.generated_sections[key];
         if (section && section.generated_text) {
           const text = section.generated_text.trim();
-          // Skip placeholder text
           if (text && !text.match(/^Summary Type:\s*(Extractive|Abstractive|Extractive \+ Abstractive)$/i)) {
-            markdown += `## ${title}\n\n`;
+            // Section Header - Word Document Style
+            markdown += `<h2 style="font-size: 14pt; font-weight: bold; margin-top: 24pt; margin-bottom: 12pt; color: #1a1a1a; page-break-after: avoid;">${title}</h2>\n\n`;
             
-            // Special formatting for annexure summary (convert to table)
+            // Section Content
+            markdown += '<div style="margin-bottom: 18pt; text-align: justify;">\n';
+            
             if (key === '2_2_annexure_summary') {
               const tableContent = parseAnnexureSummary(text);
-              markdown += tableContent || text;
+              if (tableContent && tableContent.includes('|')) {
+                // Convert markdown table to HTML table for better Word-like formatting
+                const lines = tableContent.split('\n').filter(l => l.trim());
+                const headerLine = lines[0];
+                const separatorLine = lines[1];
+                const dataLines = lines.slice(2);
+                
+                if (headerLine && dataLines.length > 0) {
+                  const headers = headerLine.split('|').map(h => h.trim()).filter(h => h);
+                  markdown += '<table style="width: 100%; border-collapse: collapse; margin: 12pt 0; font-size: 11pt;">\n';
+                  markdown += '<thead>\n<tr style="background-color: #f0f0f0;">\n';
+                  headers.forEach(header => {
+                    const formattedHeader = convertMarkdownToHtml(header);
+                    markdown += `<th style="border: 1px solid #000; padding: 8pt; text-align: left; font-weight: bold;">${formattedHeader}</th>\n`;
+                  });
+                  markdown += '</tr>\n</thead>\n<tbody>\n';
+                  
+                  dataLines.forEach(line => {
+                    const cells = line.split('|').map(c => c.trim()).filter(c => c);
+                    if (cells.length > 0) {
+                      markdown += '<tr>\n';
+                      cells.forEach(cell => {
+                        // Convert markdown formatting in table cells
+                        const formattedCell = convertMarkdownToHtml(cell).replace(/\|/g, '|');
+                        markdown += `<td style="border: 1px solid #000; padding: 8pt; vertical-align: top;">${formattedCell}</td>\n`;
+                      });
+                      markdown += '</tr>\n';
+                    }
+                  });
+                  
+                  markdown += '</tbody>\n</table>\n';
+                } else {
+                  // Convert markdown formatting in text
+                  const formattedText = convertMarkdownToHtml(text);
+                  markdown += `<p style="margin: 6pt 0;">${formattedText.replace(/\n/g, '</p>\n<p style="margin: 6pt 0;">')}</p>\n`;
+                }
+              } else {
+                // Convert markdown formatting in text
+                const formattedText = convertMarkdownToHtml(text);
+                markdown += `<p style="margin: 6pt 0;">${formattedText.replace(/\n/g, '</p>\n<p style="margin: 6pt 0;">')}</p>\n`;
+              }
             }
-            // Special formatting for procedural timeline
             else if (key === '2_7_procedural_timeline_summary') {
               const timelineContent = formatProceduralTimeline(text);
-              markdown += timelineContent || text;
+              if (timelineContent.includes('###')) {
+                // Format timeline as structured list
+                const lines = timelineContent.split('\n');
+                markdown += '<div style="margin-left: 24pt;">\n';
+                lines.forEach(line => {
+                  if (line.trim().startsWith('- **')) {
+                    const dateMatch = line.match(/\*\*([^*]+):\*\*\s*(.+)/);
+                    if (dateMatch) {
+                      const formattedDate = convertMarkdownToHtml(dateMatch[1]);
+                      const formattedEvent = convertMarkdownToHtml(dateMatch[2]);
+                      markdown += `<p style="margin: 6pt 0;"><strong>${formattedDate}:</strong> ${formattedEvent}</p>\n`;
+                    } else {
+                      const formattedLine = convertMarkdownToHtml(line.replace(/^-\s*/, ''));
+                      markdown += `<p style="margin: 6pt 0;">${formattedLine}</p>\n`;
+                    }
+                  } else if (line.trim().startsWith('###')) {
+                    const formattedHeading = convertMarkdownToHtml(line.replace(/^###\s*/, ''));
+                    markdown += `<h3 style="font-size: 12pt; font-weight: bold; margin-top: 12pt; margin-bottom: 6pt;">${formattedHeading}</h3>\n`;
+                  } else if (line.trim()) {
+                    // Convert markdown formatting in timeline text
+                    const formattedLine = convertMarkdownToHtml(line);
+                    markdown += `<p style="margin: 6pt 0;">${formattedLine}</p>\n`;
+                  }
+                });
+                markdown += '</div>\n';
+              } else {
+                const formattedTimeline = convertMarkdownToHtml(timelineContent);
+                markdown += `<p style="margin: 6pt 0;">${formattedTimeline.replace(/\n/g, '</p>\n<p style="margin: 6pt 0;">')}</p>\n`;
+              }
             }
             else {
-              markdown += text;
+              // Process text with table detection and conversion
+              const processedContent = processTextWithTables(text);
+              markdown += processedContent;
             }
             
-            markdown += '\n\n';
+            markdown += '</div>\n\n';
+            
+            // Summary Type Footer
             if (section.required_summary_type) {
-              markdown += `*Summary Type: ${section.required_summary_type}*\n\n`;
+              markdown += `<p style="margin-top: 6pt; font-size: 10pt; font-style: italic; color: #666;"><em>Summary Type: ${section.required_summary_type}</em></p>\n\n`;
             }
-            markdown += '---\n\n';
+            
+            markdown += '<hr style="border: none; border-top: 1px solid #ddd; margin: 18pt 0;" />\n\n';
           }
         }
       });
+      
+      // Close document wrapper
+      markdown += '</div>\n';
     }
   }
-  // Handle direct structure (generated_sections at root level)
   else if (jsonData.generated_sections) {
-    // Render metadata header
     if (jsonData.metadata) {
       if (jsonData.metadata.document_title) {
         markdown += `# ${jsonData.metadata.document_title}\n\n`;
@@ -365,18 +685,15 @@ export function renderSecretPromptResponse(response) {
       markdown += '---\n\n';
     }
 
-    // Render title if present
     if (jsonData.title) {
       markdown += `# ${jsonData.title}\n\n`;
     }
 
-    // Render summary if present
     if (jsonData.summary) {
       markdown += `> ${jsonData.summary}\n\n`;
       markdown += '---\n\n';
     }
 
-    // Render generated sections in order
     const sectionOrder = [
       { key: '2_1_ground_wise_summary', title: 'Ground-wise Summary' },
       { key: '2_2_annexure_summary', title: 'Annexure Summary' },
@@ -394,23 +711,18 @@ export function renderSecretPromptResponse(response) {
       const section = jsonData.generated_sections[key];
       if (section && section.generated_text) {
         const text = section.generated_text.trim();
-        // Skip placeholder text or empty sections
         if (text && !text.match(/^Summary Type:\s*(Extractive|Abstractive|Extractive \+ Abstractive)$/i) && text.length > 10) {
           markdown += `## ${title}\n\n`;
           
-          // Special formatting for annexure summary (convert to table)
           if (key === '2_2_annexure_summary') {
             const tableContent = parseAnnexureSummary(text);
             markdown += tableContent || text;
           }
-          // Special formatting for procedural timeline
           else if (key === '2_7_procedural_timeline_summary') {
             const timelineContent = formatProceduralTimeline(text);
             markdown += timelineContent || text;
           }
-          // Clean up evidence matrix (remove template placeholders)
           else if (key === '2_5_evidence_matrix') {
-            // Remove common template placeholders
             let cleanedText = text.replace(/\[List key documents[^\]]*\]/gi, '');
             cleanedText = cleanedText.replace(/\[Witness Name\]:\s*\[Role[^\]]*\]/gi, '');
             cleanedText = cleanedText.replace(/\[Expert Name\]:\s*\[Expertise[^\]]*\]/gi, '');
@@ -438,7 +750,7 @@ export function renderSecretPromptResponse(response) {
             cleanedText = cleanedText.replace(/\[List of all[^\]]*\]/gi, '');
             cleanedText = cleanedText.replace(/\[Name\]/gi, '');
             cleanedText = cleanedText.replace(/\[Date\]/gi, '');
-            cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n'); // Remove excessive newlines
+            cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n');
             markdown += cleanedText.trim() || text;
           }
           else {
@@ -451,7 +763,6 @@ export function renderSecretPromptResponse(response) {
       }
     });
 
-    // Render key findings
     if (jsonData.keyFindings && Array.isArray(jsonData.keyFindings) && jsonData.keyFindings.length > 0) {
       markdown += '## Key Findings\n\n';
       jsonData.keyFindings.forEach((finding) => {
@@ -462,7 +773,6 @@ export function renderSecretPromptResponse(response) {
       markdown += '\n---\n\n';
     }
 
-    // Render recommendations
     if (jsonData.recommendations && Array.isArray(jsonData.recommendations) && jsonData.recommendations.length > 0) {
       markdown += '## Recommendations\n\n';
       jsonData.recommendations.forEach((recommendation) => {
@@ -473,20 +783,16 @@ export function renderSecretPromptResponse(response) {
       markdown += '\n';
     }
   }
-  // Handle simple structure (title, summary, sections, etc.)
   else {
-    // Render title
     if (jsonData.title) {
       markdown += `# ${jsonData.title}\n\n`;
     }
 
-    // Render summary
     if (jsonData.summary) {
       markdown += `> ${jsonData.summary}\n\n`;
       markdown += '---\n\n';
     }
 
-    // Render sections
     if (jsonData.sections && Array.isArray(jsonData.sections)) {
       jsonData.sections.forEach((section, index) => {
         if (section.heading) {
@@ -497,7 +803,6 @@ export function renderSecretPromptResponse(response) {
           markdown += `${section.content}\n\n`;
         }
 
-        // Render subsections
         if (section.subsections && Array.isArray(section.subsections)) {
           section.subsections.forEach((subsection) => {
             if (subsection.heading) {
@@ -510,14 +815,12 @@ export function renderSecretPromptResponse(response) {
           });
         }
 
-        // Add separator between sections (except last one)
         if (index < jsonData.sections.length - 1) {
           markdown += '---\n\n';
         }
       });
     }
 
-    // Render key findings
     if (jsonData.keyFindings && Array.isArray(jsonData.keyFindings) && jsonData.keyFindings.length > 0) {
       markdown += '## Key Findings\n\n';
       jsonData.keyFindings.forEach((finding) => {
@@ -528,7 +831,6 @@ export function renderSecretPromptResponse(response) {
       markdown += '\n';
     }
 
-    // Render recommendations
     if (jsonData.recommendations && Array.isArray(jsonData.recommendations) && jsonData.recommendations.length > 0) {
       markdown += '## Recommendations\n\n';
       jsonData.recommendations.forEach((recommendation) => {
@@ -539,7 +841,6 @@ export function renderSecretPromptResponse(response) {
       markdown += '\n';
     }
 
-    // Render metadata (optional, at the end)
     if (jsonData.metadata && typeof jsonData.metadata === 'object') {
       const metadataEntries = Object.entries(jsonData.metadata).filter(([_, value]) => value);
       if (metadataEntries.length > 0) {
@@ -553,69 +854,114 @@ export function renderSecretPromptResponse(response) {
     }
   }
 
+  // If markdown contains HTML (Word document style), return as-is
+  // Otherwise, return markdown for ReactMarkdown to process
+  if (markdown.includes('<div style=') || markdown.includes('<h1 style=') || markdown.includes('<h2 style=')) {
+    return markdown.trim();
+  }
+  
   return markdown.trim();
 }
 
-/**
- * Checks if a response is a structured JSON secret prompt response
- * @param {string|object} response - The response to check
- * @returns {boolean} True if it appears to be a structured JSON response
- */
 export function isStructuredJsonResponse(response) {
   if (!response) return false;
   
   if (typeof response === 'object' && response !== null) {
-    // Check for simple structure
+    // Check for structured JSON patterns
     if (response.title || response.sections || response.summary) return true;
-    // Check for output template structure
     if (response.schemas && response.schemas.output_summary_template) return true;
-    // Check for direct generated_sections structure
     if (response.generated_sections) return true;
+    if (response.metadata && response.generated_sections) return true;
+    // Check if it looks like a structured response object
+    if (typeof response === 'object' && Object.keys(response).length > 0) {
+      const keys = Object.keys(response);
+      if (keys.some(k => k.includes('section') || k.includes('metadata') || k.includes('schema'))) {
+        return true;
+      }
+    }
     return false;
   }
   
   if (typeof response === 'string') {
     let jsonToCheck = response;
     
-    // First, try to extract JSON from markdown code blocks (case-insensitive)
+    // Extract JSON from markdown code blocks
     const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/i);
     if (jsonMatch) {
       jsonToCheck = jsonMatch[1].trim();
     } else {
-      // If no code blocks, use the response as-is
       jsonToCheck = response.trim();
     }
     
-    // Check if it looks like JSON (starts with { or [)
+    // Check if it starts with JSON structure
     if (jsonToCheck.startsWith('{') || jsonToCheck.startsWith('[')) {
       try {
         const parsed = JSON.parse(jsonToCheck);
-        // Check for simple structure
         if (parsed.title || parsed.sections || parsed.summary) return true;
-        // Check for output template structure
         if (parsed.schemas && parsed.schemas.output_summary_template) return true;
-        // Check for direct generated_sections structure
         if (parsed.generated_sections) return true;
+        if (parsed.metadata && parsed.generated_sections) return true;
+        // Check for any structured pattern
+        if (typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+          const keys = Object.keys(parsed);
+          if (keys.some(k => k.includes('section') || k.includes('metadata') || k.includes('schema'))) {
+            return true;
+          }
+        }
       } catch (e) {
-        // If parsing fails, try to find JSON object in the text
-        const jsonPattern = /\{[\s\S]{20,}\}/;
+        // Try to find JSON pattern in the string
+        const jsonPattern = /\{[\s\S]{50,}\}/;
         const match = jsonToCheck.match(jsonPattern);
         if (match) {
           try {
-            const parsed = JSON.parse(match[0]);
-            // Check for simple structure
-            if (parsed.title || parsed.sections || parsed.summary) return true;
-            // Check for output template structure
+            let jsonStr = match[0];
+            // Fix common JSON issues
+            jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+            const parsed = JSON.parse(jsonStr);
             if (parsed.schemas && parsed.schemas.output_summary_template) return true;
-            // Check for direct generated_sections structure
             if (parsed.generated_sections) return true;
+            if (parsed.metadata && parsed.generated_sections) return true;
+            // Check for structured pattern
+            if (typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+              const keys = Object.keys(parsed);
+              if (keys.some(k => k.includes('section') || k.includes('metadata') || k.includes('schema'))) {
+                return true;
+              }
+            }
           } catch (e2) {
+            // Try partial parse
+            const partial = tryParsePartialJson(match[0]);
+            if (partial) {
+              if (partial.schemas && partial.schemas.output_summary_template) return true;
+              if (partial.generated_sections) return true;
+            }
             return false;
           }
         }
         return false;
       }
+    } else {
+      // Look for JSON anywhere in the string
+      const jsonPattern = /\{[\s\S]{50,}\}/;
+      const match = jsonToCheck.match(jsonPattern);
+      if (match) {
+        try {
+          let jsonStr = match[0];
+          jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.schemas && parsed.schemas.output_summary_template) return true;
+          if (parsed.generated_sections) return true;
+          if (parsed.metadata && parsed.generated_sections) return true;
+          return true;
+        } catch (e) {
+          const partial = tryParsePartialJson(match[0]);
+          if (partial && (partial.schemas || partial.generated_sections)) {
+            return true;
+          }
+        }
+      }
     }
+    return false;
   }
   
   return false;

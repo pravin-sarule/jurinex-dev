@@ -1,5 +1,3 @@
-
-
 const pool = require('../config/db');
 
 const DocumentModel = {
@@ -35,11 +33,6 @@ const DocumentModel = {
     await pool.query(query, params);
   },
 
-  /**
-   * Updates the current operation status for real-time progress tracking
-   * @param {string} fileId - The file UUID
-   * @param {string} operation - Description of current operation
-   */
   async updateCurrentOperation(fileId, operation) {
     await pool.query(`
       UPDATE user_files 
@@ -48,13 +41,6 @@ const DocumentModel = {
     `, [operation, fileId]);
   },
 
-  /**
-   * Updates both status, progress, and current operation in a single transaction
-   * @param {string} fileId - The file UUID
-   * @param {string} status - Processing status (processing, processed, error, etc.)
-   * @param {number} progress - Progress percentage (0-100)
-   * @param {string} operation - Description of current operation
-   */
   async updateProgressWithOperation(fileId, status, progress, operation) {
     await pool.query(`
       UPDATE user_files 
@@ -77,25 +63,14 @@ const DocumentModel = {
     `, [fileId]);
   },
 
-  /**
-   * Store the Document AI output path in user_files table
-   * @param {string} fileId - The file UUID
-   * @param {string} outputPath - The GCS output URI prefix (gs://bucket/path/)
-   */
   async updateFileOutputPath(fileId, outputPath) {
-    // Try to update a column if it exists, otherwise store in metadata or use a workaround
-    // First check if we have a column for this, if not we'll use a JSONB column or add metadata
     try {
-      // Try to update using a potential output_path column or store in summary/metadata
-      // For now, we'll log it and store in a way that can be retrieved
       await pool.query(`
         UPDATE user_files
         SET updated_at = NOW()
         WHERE id = $1::uuid
       `, [fileId]);
       
-      // Store in processing_jobs table (which already has gcs_output_uri_prefix)
-      // The output path is already stored there, so we just need to ensure it's linked
       console.log(`[DocumentModel] Output path for file ${fileId}: ${outputPath}`);
     } catch (error) {
       console.error(`[DocumentModel] Failed to update output path:`, error.message);
@@ -173,10 +148,6 @@ const DocumentModel = {
     return res.rows;
   },
 
-  /**
-   * Get all files with their processing status for a user
-   * Useful for dashboard/status overview
-   */
   async getFilesWithStatus(userId) {
     const res = await pool.query(`
       SELECT 
@@ -197,10 +168,6 @@ const DocumentModel = {
     return res.rows;
   },
 
-  /**
-   * Get files that are currently being processed
-   * Useful for monitoring active processing jobs
-   */
   async getProcessingFiles(userId) {
     const res = await pool.query(`
       SELECT 

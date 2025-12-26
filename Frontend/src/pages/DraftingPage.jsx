@@ -1,5 +1,3 @@
-
-
 import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   Search, Download, Printer, ArrowLeft, Save, Share2,
@@ -12,7 +10,6 @@ import Templates from "../components/Templates";
 import ApiService from "../services/api";
 import '../styles/ckeditor-a4.css';
 
-// Utility function to generate unique user ID
 const generateUserId = () => {
   const stored = localStorage.getItem('documentEditorUserId') || localStorage.getItem('userId');
   if (stored) return stored;
@@ -22,12 +19,10 @@ const generateUserId = () => {
   return newId;
 };
 
-// Helper function to create user-specific storage keys
 const createStorageKey = (userId, templateId, suffix = '') => {
   return `docEditor_${userId}_${templateId || 'blank'}${suffix ? '_' + suffix : ''}`;
 };
 
-// Helper function to trigger downloads
 const downloadBlob = (filename, blob) => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -39,7 +34,6 @@ const downloadBlob = (filename, blob) => {
   URL.revokeObjectURL(url);
 };
 
-// Auto-save hook with backend integration
 const useAutoSave = (content, storageKey, templateId, delay = 3000) => {
   const timeoutRef = useRef(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -54,11 +48,9 @@ const useAutoSave = (content, storageKey, templateId, delay = 3000) => {
       if (content && typeof content === 'string') {
         setIsSaving(true);
         try {
-          // Save to localStorage immediately
           localStorage.setItem(storageKey, content);
           localStorage.setItem(storageKey + '_lastSaved', new Date().toISOString());
           
-          // Save to backend if template ID exists
           if (typeof templateId === 'string' && !templateId.includes('-')) {
             const blob = new Blob([content], { type: 'text/html' });
             const file = new File([blob], 'document.html', { type: 'text/html' });
@@ -86,10 +78,8 @@ const useAutoSave = (content, storageKey, templateId, delay = 3000) => {
 };
 
 const DraftingPage = () => {
-  // User identification - each user gets unique ID
   const userId = useMemo(() => generateUserId(), []);
   
-  // State management
   const [searchQuery, setSearchQuery] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [documentList, setDocumentList] = useState([]);
@@ -97,13 +87,10 @@ const DraftingPage = () => {
   const [error, setError] = useState(null);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
 
-  // Current session storage keys
   const currentSessionKey = 'drafting_current_session';
   const currentSessionData = JSON.parse(localStorage.getItem(currentSessionKey) || 'null');
 
-  // Initialize state from localStorage or URL params
   const [selectedTemplate, setSelectedTemplate] = useState(() => {
-    // Check if we have a current session
     if (currentSessionData && currentSessionData.selectedTemplate) {
       return currentSessionData.selectedTemplate;
     }
@@ -124,7 +111,6 @@ const DraftingPage = () => {
     return '';
   });
 
-  // Get templateId and editUrl from URL parameters
   const location = window.location;
   const queryParams = new URLSearchParams(location.search);
   const templateIdFromUrl = queryParams.get('templateId');
@@ -133,7 +119,6 @@ const DraftingPage = () => {
   console.log('DraftingPage: Initializing with URL Params:', { templateIdFromUrl, editUrlFromUrl });
   console.log('DraftingPage: Current session data:', currentSessionData);
 
-  // Create user-specific storage key for current document
   const currentStorageKey = useMemo(() => 
     createStorageKey(userId, selectedTemplate?.id, 'content'), 
     [userId, selectedTemplate?.id]
@@ -144,10 +129,8 @@ const DraftingPage = () => {
     [userId, selectedTemplate?.id]
   );
 
-  // Auto-save functionality with backend integration
   const { isSaving, lastSaved } = useAutoSave(editorContent, currentStorageKey, selectedTemplate?.id);
 
-  // Save current session data whenever state changes
   useEffect(() => {
     const sessionData = {
       selectedTemplate,
@@ -158,18 +141,16 @@ const DraftingPage = () => {
     localStorage.setItem(currentSessionKey, JSON.stringify(sessionData));
   }, [selectedTemplate, fileName, editorContent, currentSessionKey]);
 
-  // Effect to load template based on URL params (only if no current session)
   useEffect(() => {
     const loadTemplateFromUrl = async () => {
-      // Only load from URL if we don't have a current session
       if (templateIdFromUrl && !currentSessionData) {
         try {
           setIsLoading(true);
           setError(null);
           let templateToLoad = null;
 
-          if (templateIdFromUrl) { // Always try to fetch from backend if templateIdFromUrl exists
-            const result = await ApiService.openTemplateForEditing(templateIdFromUrl); // Removed editUrlFromUrl
+          if (templateIdFromUrl) {
+            const result = await ApiService.openTemplateForEditing(templateIdFromUrl);
             const htmlContent = result?.html || result || '';
             
             templateToLoad = {
@@ -179,11 +160,9 @@ const DraftingPage = () => {
               isBackendTemplate: true,
             };
             
-            // Ensure we're setting a string value
             setEditorContent(typeof htmlContent === 'string' ? htmlContent : '');
             setFileName(templateToLoad.name?.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase() || 'document');
           } else {
-            // Fallback if no templateIdFromUrl
             setEditorContent('');
             setFileName('Untitled Document');
           }
@@ -202,13 +181,11 @@ const DraftingPage = () => {
     loadTemplateFromUrl();
   }, [templateIdFromUrl, editUrlFromUrl, currentSessionData]);
 
-  // Load saved filename and content from localStorage for the current template
   useEffect(() => {
     if (selectedTemplate && selectedTemplate.id) {
       const savedContent = localStorage.getItem(currentStorageKey);
       const savedFileName = localStorage.getItem(fileNameStorageKey);
       
-      // Only load from localStorage if we don't already have content from session
       if (!currentSessionData || !currentSessionData.editorContent) {
         if (savedContent) {
           setEditorContent(savedContent);
@@ -223,7 +200,6 @@ const DraftingPage = () => {
     }
   }, [selectedTemplate, currentStorageKey, fileNameStorageKey, currentSessionData]);
 
-  // Save individual items to localStorage when they change
   useEffect(() => {
     if (selectedTemplate && selectedTemplate.id && editorContent) {
       localStorage.setItem(currentStorageKey, editorContent);
@@ -236,7 +212,6 @@ const DraftingPage = () => {
     }
   }, [fileName, fileNameStorageKey, selectedTemplate]);
 
-  // Load document list for current user
   useEffect(() => {
     const loadDocumentList = () => {
       const allKeys = Object.keys(localStorage);
@@ -268,24 +243,19 @@ const DraftingPage = () => {
     loadDocumentList();
   }, [userId, editorContent]);
 
-  // Handle template selection with change detection
   const handleTemplateSelection = useCallback(async (template) => {
-    // Check if there are unsaved changes
     const hasChanges = editorContent && editorContent.trim() !== '' && 
                       (!selectedTemplate || editorContent !== (selectedTemplate.content || ''));
     
     if (hasChanges) {
-      // Store the pending template and show discard dialog
       window.pendingTemplate = template;
       setShowDiscardDialog(true);
       return;
     }
     
-    // Proceed with template selection
     await selectTemplate(template);
   }, [editorContent, selectedTemplate]);
 
-  // Function to actually select the template
   const selectTemplate = useCallback(async (template) => {
     try {
       setIsLoading(true);
@@ -293,20 +263,17 @@ const DraftingPage = () => {
       
       console.log('Template selected:', template);
 
-      // For backend templates, fetch the HTML content
       let fetchedHtmlContent = '';
       try {
-        const result = await ApiService.openTemplateForEditing(template.id); // Removed template.editUrl
+        const result = await ApiService.openTemplateForEditing(template.id);
         console.log('Backend template result:', result);
         
-        // Extract HTML content - handle different response formats
         if (typeof result === 'string') {
           fetchedHtmlContent = result;
         } else if (result && typeof result === 'object') {
           fetchedHtmlContent = result.html || result.content || '';
         }
         
-        // Ensure we have a string
         fetchedHtmlContent = typeof fetchedHtmlContent === 'string' ? fetchedHtmlContent : '';
         
         setSelectedTemplate({
@@ -321,7 +288,6 @@ const DraftingPage = () => {
         console.error('Error opening backend template:', err);
         setError('Failed to open backend template. Please try again.');
         
-        // Fallback to template content if available
         fetchedHtmlContent = template.content || '';
         setSelectedTemplate({
           ...template,
@@ -330,7 +296,6 @@ const DraftingPage = () => {
         setFileName(template.name?.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase() || 'document');
       }
 
-        // After fetching/falling back, check localStorage for a saved draft for this specific template
         const specificTemplateStorageKey = createStorageKey(userId, template.id, 'content');
         const savedContent = localStorage.getItem(specificTemplateStorageKey);
         
@@ -346,7 +311,6 @@ const DraftingPage = () => {
       console.error('Error selecting template:', error);
       setError('Failed to load template. Please try again.');
       
-      // Fallback to basic template setup
       const fallbackContent = template.content || '';
       setSelectedTemplate({
         ...template,
@@ -357,17 +321,14 @@ const DraftingPage = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [userId, createStorageKey]); // Added userId and createStorageKey to dependencies
+  }, [userId, createStorageKey]);
 
-  // Handle content changes - FIXED VERSION
   const handleEditorChange = useCallback((content) => {
-    // Ensure content is always a string
     const stringContent = typeof content === 'string' ? content : '';
     setEditorContent(stringContent);
     console.log('Editor content changed:', typeof stringContent, stringContent.substring(0, 100));
   }, []);
 
-  // Export functions with backend integration
   const exportToPDF = useCallback(() => {
     const printWindow = window.open('', '_blank');
     const contentToPrint = typeof editorContent === 'string' ? editorContent : '';
@@ -379,7 +340,6 @@ const DraftingPage = () => {
           <title>${fileName}</title>
           <link rel="stylesheet" href="https://cdn.ckeditor.com/ckeditor5/41.4.2/classic/ckeditor.css">
           <style>
-            /* Basic print styles, can be expanded */
             body {
               font-family: 'Times New Roman', serif;
               margin: 0;
@@ -390,13 +350,11 @@ const DraftingPage = () => {
             }
             @page {
               margin: 1in;
-              size: A4; /* Changed to A4 size */
             }
             @media print {
               body { margin: 0; padding: 0; }
               .no-print { display: none; }
             }
-            /* CKEditor content styles */
             .ck-content {
               word-wrap: break-word;
             }
@@ -405,12 +363,10 @@ const DraftingPage = () => {
               margin-bottom: 0.5em;
               page-break-after: avoid;
             }
-            p { margin-bottom: 1em; page-break-inside: avoid; } /* Added page-break-inside for paragraphs */
             table {
               border-collapse: collapse;
               width: 100%;
               margin: 1em 0;
-              page-break-inside: avoid; /* Prevent tables from breaking across pages */
             }
             th, td {
               border: 1px solid #ccc;
@@ -418,7 +374,6 @@ const DraftingPage = () => {
               text-align: left;
             }
             th { background-color: #f5f5f5; }
-            img { max-width: 100%; height: auto; page-break-inside: avoid; } /* Prevent images from breaking across pages */
             .page-break { page-break-before: always; }
           </style>
         </head>
@@ -447,7 +402,6 @@ const DraftingPage = () => {
           <title>${fileName}</title>
           <link rel="stylesheet" href="https://cdn.ckeditor.com/ckeditor5/41.4.2/classic/ckeditor.css">
           <style>
-            /* Basic HTML export styles, can be expanded */
             body {
               font-family: 'Times New Roman', serif;
               max-width: 800px;
@@ -456,7 +410,6 @@ const DraftingPage = () => {
               line-height: 1.6;
               color: #1a1a1a;
             }
-            /* CKEditor content styles */
             .ck-content {
               word-wrap: break-word;
             }
@@ -479,7 +432,6 @@ const DraftingPage = () => {
 
   const exportToText = useCallback(() => {
     const contentToExport = typeof editorContent === 'string' ? editorContent : '';
-    // Strip HTML tags and convert to plain text
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = contentToExport;
     const textContent = tempDiv.textContent || tempDiv.innerText || '';
@@ -487,32 +439,25 @@ const DraftingPage = () => {
     downloadBlob(`${fileName}.txt`, new Blob([textContent], { type: "text/plain;charset=utf-8" }));
   }, [editorContent, fileName]);
 
-  // Go back to templates with change detection
   const handleBackToTemplates = useCallback(async () => {
-    // Check if there are unsaved changes
     const hasChanges = editorContent && editorContent.trim() !== '' && 
                       (!selectedTemplate || editorContent !== (selectedTemplate.content || ''));
     
     if (hasChanges) {
-      // Store the action and show discard dialog
       window.pendingAction = 'backToTemplates';
       setShowDiscardDialog(true);
       return;
     }
     
-    // Proceed with going back
     await goBackToTemplates();
   }, [editorContent, selectedTemplate]);
 
-  // Function to actually go back to templates
   const goBackToTemplates = useCallback(async () => {
     try {
-      // Save current work
       if (editorContent && selectedTemplate) {
         localStorage.setItem(currentStorageKey, editorContent);
         localStorage.setItem(currentStorageKey + '_lastSaved', new Date().toISOString());
         
-        // Save to backend if it's a backend template
         if (selectedTemplate.id && typeof selectedTemplate.id === 'string' && !selectedTemplate.id.includes('-')) {
           const blob = new Blob([editorContent], { type: 'text/html' });
           const file = new File([blob], fileName + '.html', { type: 'text/html' });
@@ -524,7 +469,6 @@ const DraftingPage = () => {
       console.error('Error saving before exit:', error);
     }
     
-    // Clear current session
     localStorage.removeItem(currentSessionKey);
     
     setSelectedTemplate(null);
@@ -533,16 +477,13 @@ const DraftingPage = () => {
     setError(null);
   }, [editorContent, selectedTemplate, currentStorageKey, fileName, currentSessionKey]);
 
-  // Manual save function with backend integration
   const handleManualSave = useCallback(async () => {
     try {
       setIsLoading(true);
       
-      // Save to localStorage
       localStorage.setItem(currentStorageKey, editorContent);
       localStorage.setItem(currentStorageKey + '_lastSaved', new Date().toISOString());
       
-      // Save to backend if it's a backend template
       if (selectedTemplate?.id && typeof selectedTemplate.id === 'string' && !selectedTemplate.id.includes('-')) {
         const blob = new Blob([editorContent], { type: 'text/html' });
         const file = new File([blob], fileName + '.html', { type: 'text/html' });
@@ -550,7 +491,6 @@ const DraftingPage = () => {
         await ApiService.saveUserDraft(selectedTemplate.id, fileName, file);
       }
       
-      // Show success message briefly
       setError(null);
       
     } catch (error) {
@@ -561,22 +501,18 @@ const DraftingPage = () => {
     }
   }, [editorContent, currentStorageKey, selectedTemplate, fileName]);
 
-  // Handle discard changes
   const handleDiscardChanges = useCallback(async () => {
     setShowDiscardDialog(false);
     
     if (window.pendingTemplate) {
-      // User wanted to select a new template
       await selectTemplate(window.pendingTemplate);
       window.pendingTemplate = null;
     } else if (window.pendingAction === 'backToTemplates') {
-      // User wanted to go back to templates
       await goBackToTemplates();
       window.pendingAction = null;
     }
   }, [selectTemplate, goBackToTemplates]);
 
-  // Handle keep changes
   const handleKeepChanges = useCallback(() => {
     setShowDiscardDialog(false);
     window.pendingTemplate = null;
@@ -586,9 +522,7 @@ const DraftingPage = () => {
   return (
     <div className="flex h-screen bg-gray-50">
       {!selectedTemplate ? (
-        // Template Selection View
         <div className="flex-1 flex flex-col">
-          {/* Header */}
           <header className="bg-white border-b border-gray-200 px-6 py-4">
             <div className="flex items-center justify-between">
               <div>
@@ -650,7 +584,6 @@ const DraftingPage = () => {
             </div>
           </header>
 
-          {/* Search */}
           <div className="bg-white border-b border-gray-200 px-6 py-4">
             <div className="max-w-md">
               <div className="relative">
@@ -666,7 +599,6 @@ const DraftingPage = () => {
             </div>
           </div>
 
-          {/* Error message */}
           {error && (
             <div className="bg-red-50 border-l-4 border-red-400 p-4 mx-6 mt-4">
               <div className="flex">
@@ -677,15 +609,12 @@ const DraftingPage = () => {
             </div>
           )}
 
-          {/* Templates */}
           <div className="flex-1 overflow-auto px-6 py-6">
             <Templates onSelectTemplate={handleTemplateSelection} query={searchQuery} />
           </div>
         </div>
       ) : (
-        // Document Editor View
         <div className="flex-1 flex flex-col">
-          {/* Header */}
           <header className="bg-white border-b border-gray-200 px-6 py-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-4">
@@ -711,7 +640,6 @@ const DraftingPage = () => {
                     disabled={isLoading}
                   />
                   
-                  {/* Save status indicator */}
                   <div className="flex items-center space-x-2 text-xs text-gray-500">
                     {isSaving ? (
                       <>
@@ -735,7 +663,6 @@ const DraftingPage = () => {
                 </div>
               </div>
 
-              {/* Actions */}
               <div className="flex items-center space-x-2">
                 <button
                   onClick={handleManualSave}
@@ -807,7 +734,6 @@ const DraftingPage = () => {
               </div>
             </div>
 
-            {/* Error message in editor */}
             {error && (
               <div className="mt-2 text-sm text-red-600 bg-red-50 px-3 py-1 rounded">
                 {error}
@@ -815,13 +741,11 @@ const DraftingPage = () => {
             )}
           </header>
 
-          {/* Editor */}
           <div className="flex-1 overflow-auto">
             <CKEditor
               editor={ClassicEditor}
               data={typeof editorContent === 'string' ? editorContent : ''}
               onReady={editor => {
-                // You can store the "editor" and use when it is needed.
                 console.log('Editor is ready to use!', editor);
               }}
               onChange={(event, editor) => {
@@ -839,7 +763,6 @@ const DraftingPage = () => {
         </div>
       )}
 
-      {/* Discard Changes Dialog */}
       {showDiscardDialog && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
@@ -877,7 +800,6 @@ const DraftingPage = () => {
         </div>
       )}
 
-      {/* Click outside to close menus */}
       {isMenuOpen && (
         <div
           className="fixed inset-0 z-0"
@@ -885,7 +807,6 @@ const DraftingPage = () => {
         />
       )}
 
-      {/* Loading overlay */}
       {isLoading && (
         <div className="fixed inset-0 bg-black/20 flex items-center justify-center z-50">
           <div className="bg-white p-6 rounded-lg shadow-xl flex items-center space-x-3">

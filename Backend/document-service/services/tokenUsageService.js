@@ -1,4 +1,3 @@
-
 const pool = require('../config/db');
 const axios = require('axios');
 const moment = require('moment-timezone');
@@ -6,33 +5,24 @@ const moment = require('moment-timezone');
 const TIMEZONE = 'Asia/Calcutta'; // IST
 const DEFAULT_TOKEN_RENEWAL_INTERVAL_HOURS = 9.5; // fallback cooldown
 
-// Free tier constants
 const FREE_TIER_DAILY_TOKEN_LIMIT = 100000; // 100,000 tokens total (in + out) per day
 const FREE_TIER_MAX_FILE_SIZE_MB = 10; // 10 MB file size limit
 const FREE_TIER_MAX_FILE_SIZE_BYTES = FREE_TIER_MAX_FILE_SIZE_MB * 1024 * 1024;
 const FREE_TIER_MAX_EYEBALL_USES_PER_DAY = 1; // Only 1 Gemini Eyeball use per day (first prompt)
 const FREE_TIER_FORCED_MODEL = 'gemini-2.5-flash'; // Force gemini-2.5-flash for free users
 
-/**
- * Check if user is on free plan
- * @param {Object} userPlan - User plan object
- * @returns {boolean} - True if user is on free plan
- */
 function isFreePlan(userPlan) {
   if (!userPlan) return false;
   
-  // Check by price (free plans have price = 0)
   if (userPlan.price === 0 || userPlan.price === null) {
     return true;
   }
   
-  // Check by plan name (case-insensitive)
   const planName = (userPlan.name || '').toLowerCase();
   if (planName.includes('free') || planName === 'free') {
     return true;
   }
   
-  // Check by type
   const planType = (userPlan.type || '').toLowerCase();
   if (planType === 'free') {
     return true;
@@ -43,20 +33,17 @@ function isFreePlan(userPlan) {
 
 class TokenUsageService {
 
-    // --- Fetch user's usage and real plan ---
     static async getUserUsageAndPlan(userId, authorizationHeader) {
         let client;
         try {
             client = await pool.connect();
 
-            // 1️⃣ Fetch usage from DB
             const usageRes = await client.query(
                 'SELECT * FROM user_usage WHERE user_id = $1',
                 [userId]
             );
             let userUsage = usageRes.rows[0];
 
-            // 2️⃣ Fetch real plan from API (with Free Plan fallback for 404)
             const gatewayUrl = process.env.API_GATEWAY_URL || 'http://localhost:5000';
             let userPlan;
             try {
@@ -70,7 +57,6 @@ class TokenUsageService {
                     throw new Error(`User plan not found for user ${userId}`);
                 }
             } catch (err) {
-                // If 404 (no active plan), use default free plan
                 if (err.response?.status === 404) {
                     console.warn(`⚠️ No active plan found for user ${userId}, using default free plan`);
                     userPlan = {
@@ -92,7 +78,6 @@ class TokenUsageService {
                 }
             }
 
-            // 3️⃣ Map interval
             const intervalMap = { 'day': 'daily', 'week': 'weekly', 'month': 'monthly', 'year': 'yearly' };
             const planInterval = intervalMap[userPlan.interval] || 'monthly';
 
@@ -122,7 +107,6 @@ class TokenUsageService {
                     periodEnd = nowIST.clone().endOf('month').utc();
             }
 
-            // 4️⃣ Initialize usage record if not exist
             if (!userUsage) {
                 await client.query(
                     `INSERT INTO user_usage (
@@ -156,7 +140,6 @@ class TokenUsageService {
         }
     }
 
-    // --- Enforce token limits: block only if tokens exhausted ---
     static async enforceLimits(userId, userUsage, userPlan, requestedResources = {}) {
         const nowUTC = moment.utc();
         const nowIST = nowUTC.clone().tz(TIMEZONE);
@@ -174,7 +157,6 @@ class TokenUsageService {
 
             if (nowUTC.isSameOrAfter(nextRenewUTC)) {
                 await this.resetTokens(userId);
-                // After resetting, we need to re-fetch the usage to get the correct available tokens
                 const refreshedUsageRes = await pool.query('SELECT * FROM user_usage WHERE user_id = $1', [userId]);
                 const refreshedUsage = refreshedUsageRes.rows[0];
                 const refreshedAvailableTokens = userPlan.token_limit + (refreshedUsage.carry_over_tokens || 0) - refreshedUsage.tokens_used;
@@ -206,7 +188,6 @@ class TokenUsageService {
             }
         }
 
-        // 1️⃣ If requested tokens exceed available → start cooldown
         if (requestedTokens > availableTokens) {
             const exhaustionUTC = nowUTC.toISOString();
             await this.updateLastGrant(userId, exhaustionUTC);
@@ -220,7 +201,6 @@ class TokenUsageService {
             };
         }
 
-        // 2️⃣ Allow usage if tokens remain
         return {
             allowed: true,
             message: `Tokens available: ${availableTokens - requestedTokens}`,
@@ -228,7 +208,6 @@ class TokenUsageService {
         };
     }
 
-    // --- Increment usage after upload ---
     static async incrementUsage(userId, requestedResources = {}) {
         const client = await pool.connect();
         try {
@@ -283,18 +262,15 @@ class TokenUsageService {
         }
     }
 
-    // --- Check if user is on free plan ---
     static isFreePlan(userPlan) {
         return isFreePlan(userPlan);
     }
 
-    // --- Check free tier file size limit ---
     static checkFreeTierFileSize(fileSizeBytes, userPlan) {
         if (!isFreePlan(userPlan)) {
             return { allowed: true, message: "Paid plan - no file size restriction" };
         }
 
-        // Ensure fileSizeBytes is a number
         const fileSize = typeof fileSizeBytes === 'string' ? parseInt(fileSizeBytes, 10) : Number(fileSizeBytes);
         
         if (isNaN(fileSize) || fileSize <= 0) {
@@ -308,7 +284,6 @@ class TokenUsageService {
             const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2);
             const fileSizeGB = (fileSize / (1024 * 1024 * 1024)).toFixed(2);
             
-            // Create user-friendly error message
             let sizeDisplay = fileSizeMB;
             if (parseFloat(fileSizeMB) >= 1024) {
                 sizeDisplay = `${fileSizeGB} GB (${fileSizeMB} MB)`;
@@ -330,7 +305,6 @@ class TokenUsageService {
         return { allowed: true, message: "File size within free tier limit" };
     }
 
-    // --- Check free tier daily token limit ---
     static async checkFreeTierDailyTokenLimit(userId, userPlan, requestedTokens = 0) {
         if (!isFreePlan(userPlan)) {
             return { allowed: true, message: "Paid plan - no daily token restriction" };
@@ -342,7 +316,6 @@ class TokenUsageService {
 
         const client = await pool.connect();
         try {
-            // Get today's token usage for free tier
             const usageQuery = `
                 SELECT COALESCE(SUM(tokens_used), 0) as daily_tokens_used
                 FROM user_usage
@@ -378,7 +351,6 @@ class TokenUsageService {
         }
     }
 
-    // --- Check free tier Gemini Eyeball limit (1 per day) ---
     static async checkFreeTierEyeballLimit(userId, userPlan) {
         if (!isFreePlan(userPlan)) {
             return { allowed: true, message: "Paid plan - no Eyeball restriction" };
@@ -390,7 +362,6 @@ class TokenUsageService {
 
         const client = await pool.connect();
         try {
-            // Count Gemini Eyeball uses today (check folder_chats table for gemini_eyeball method)
             const eyeballQuery = `
                 SELECT COUNT(*) as eyeball_count
                 FROM folder_chats
@@ -423,7 +394,6 @@ class TokenUsageService {
         }
     }
 
-    // --- Check free tier FileController/documentController access limit (1 per day) ---
     static async checkFreeTierControllerAccessLimit(userId, userPlan, controllerName) {
         if (!isFreePlan(userPlan)) {
             return { allowed: true, message: "Paid plan - no controller access restriction" };
@@ -435,8 +405,6 @@ class TokenUsageService {
 
         const client = await pool.connect();
         try {
-            // Count controller accesses today (check folder_chats table for method from specific controller)
-            // We'll track by checking if there's any chat from today
             const accessQuery = `
                 SELECT COUNT(*) as access_count
                 FROM folder_chats
@@ -468,7 +436,6 @@ class TokenUsageService {
         }
     }
 
-    // --- Get forced model for free tier ---
     static getFreeTierForcedModel() {
         return FREE_TIER_FORCED_MODEL;
     }

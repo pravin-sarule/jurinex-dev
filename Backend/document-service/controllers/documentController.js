@@ -1,6 +1,3 @@
-
-
-
 const db = require("../config/db");
 const axios = require("axios"); // Import axios
 const DocumentModel = require("../models/documentModel");
@@ -49,32 +46,34 @@ const {
   buildEnhancedSystemPromptWithTemplates,
   fetchSecretManagerWithTemplates 
 } = require("../services/secretPromptTemplateService"); // NEW: Import template service
+const { processSecretPromptWithTemplates } = require("../services/secretTemplateExtractionService"); // NEW: Import secret template extraction service
 
 const { v4: uuidv4 } = require("uuid");
 
 const CONVERSATION_HISTORY_TURNS = 5;
 
-/**
- * Ensures the answer is plain text, not JSON
- * Converts JSON objects/strings to plain text
- */
-/**
- * Adds structured JSON formatting instructions to secret prompt
- * Ensures LLM output is in clean, structured JSON format wrapped in markdown code blocks
- * @param {string} secretPrompt - The original secret prompt
- * @param {Object} outputTemplate - Optional output template data with structure to follow
- * @returns {string} - The prompt with JSON formatting instructions appended
- */
-function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
+function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outputTemplate = null) {
   let jsonFormattingInstructions = '';
+  
+  if (inputTemplate && inputTemplate.extracted_text && outputTemplate && outputTemplate.extracted_text) {
+    jsonFormattingInstructions += `\n\n`;
+    jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n`;
+    jsonFormattingInstructions += `🔄 WORKFLOW REMINDER - INPUT TO OUTPUT MAPPING\n`;
+    jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n\n`;
+    jsonFormattingInstructions += `📥 STEP 1: EXTRACT FROM INPUT TEMPLATE FORMAT\n`;
+    jsonFormattingInstructions += `   - Study the INPUT TEMPLATE format shown above to understand what information to look for\n`;
+    jsonFormattingInstructions += `   - Identify similar patterns, fields, sections, and data points in the actual documents\n`;
+    jsonFormattingInstructions += `   - Extract all relevant points that match the INPUT TEMPLATE structure\n\n`;
+    jsonFormattingInstructions += `📤 STEP 2: FORMAT USING OUTPUT TEMPLATE STRUCTURE\n`;
+    jsonFormattingInstructions += `   - Take the extracted information and format it according to OUTPUT TEMPLATE structure\n`;
+    jsonFormattingInstructions += `   - Map extracted points to corresponding sections in OUTPUT TEMPLATE\n`;
+    jsonFormattingInstructions += `   - Ensure the final response follows the EXACT OUTPUT TEMPLATE JSON format\n\n`;
+  }
 
-  // If output template exists, reference it in the instructions
   if (outputTemplate && outputTemplate.extracted_text) {
-    // Extract all required sections from the template
     const templateText = outputTemplate.extracted_text;
     const sectionKeys = [];
     
-    // Try to extract section keys from the template (e.g., 2_1_ground_wise_summary, 2_2_annexure_summary, etc.)
     const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
     let match;
     while ((match = sectionPattern.exec(templateText)) !== null) {
@@ -83,7 +82,6 @@ function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
       }
     }
     
-    // Also check structured_schema if available
     if (outputTemplate.structured_schema) {
       try {
         const schema = typeof outputTemplate.structured_schema === 'string' 
@@ -119,7 +117,7 @@ function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
 📋 OUTPUT TEMPLATE STRUCTURE (MUST FOLLOW EXACTLY):
 The output template below shows the EXACT JSON structure you must use. Your response must match this structure EXACTLY with ALL fields populated:
 
-${outputTemplate.extracted_text.substring(0, 3000)}${outputTemplate.extracted_text.length > 3000 ? '\n\n[... template continues ...]' : ''}${sectionsList}
+${outputTemplate.extracted_text}${sectionsList}
 
 🔒 MANDATORY REQUIREMENTS FOR ALL LLMs:
 1. ✅ Your response MUST start with \`\`\`json and end with \`\`\`
@@ -179,7 +177,6 @@ Before submitting your response, verify:
 🎯 FINAL INSTRUCTION:
 Generate your response NOW following the template structure exactly. Include ALL sections. Use ONLY the JSON format shown above.`;
   } else {
-    // Default structure when no template is provided
     jsonFormattingInstructions = `
 
 === CRITICAL OUTPUT FORMATTING REQUIREMENTS ===
@@ -240,13 +237,28 @@ Your response should ONLY contain the JSON wrapped in markdown code blocks. Do n
   return secretPrompt + jsonFormattingInstructions;
 }
 
-/**
- * Post-processes LLM response to extract and validate JSON
- * Ensures response is always in the correct format for frontend rendering
- * @param {string} rawResponse - Raw response from LLM
- * @param {Object} outputTemplate - Output template to validate against
- * @returns {string} Cleaned and validated JSON response wrapped in markdown code blocks
- */
+function fixJsonSyntax(jsonString) {
+  if (!jsonString || typeof jsonString !== 'string') return jsonString;
+  
+  let fixed = jsonString.trim();
+  
+  // Remove trailing commas before } or ]
+  fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
+  
+  // Fix unescaped newlines in strings (replace actual newlines with \n)
+  // But be careful not to break legitimate JSON structure
+  fixed = fixed.replace(/("(?:[^"\\]|\\.)*")/g, (match) => {
+    // Already properly escaped strings, leave them alone
+    return match;
+  });
+  
+  // Try to fix unclosed strings or escaped quotes issues
+  // Remove control characters except \n, \r, \t
+  fixed = fixed.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  
+  return fixed;
+}
+
 function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   if (!rawResponse || typeof rawResponse !== 'string') {
     return rawResponse;
@@ -254,34 +266,60 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
 
   let cleanedResponse = rawResponse.trim();
   
-  // Try to extract JSON from markdown code blocks
+  // Try to extract JSON from markdown code blocks first
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
+    let jsonText = jsonMatch[1].trim();
+    
+    // Try parsing as-is first
     try {
-      const jsonData = JSON.parse(jsonMatch[1].trim());
-      // Validate and re-wrap in code blocks
+      const jsonData = JSON.parse(jsonText);
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
-      console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block:', e);
+      console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block, attempting to fix...', e.message);
+      
+      // Try fixing common JSON issues
+      try {
+        const fixedJson = fixJsonSyntax(jsonText);
+        const jsonData = JSON.parse(fixedJson);
+        console.log('[postProcessSecretPromptResponse] Successfully fixed and parsed JSON');
+        return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
+      } catch (e2) {
+        console.warn('[postProcessSecretPromptResponse] Failed to fix JSON, returning original response');
+        // Return the original response even if parsing failed
+        return cleanedResponse;
+      }
     }
   }
   
-  // Try to extract JSON without code blocks (raw JSON)
+  // Try parsing as raw JSON (without markdown)
   const trimmed = cleanedResponse.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       const jsonData = JSON.parse(trimmed);
-      // Wrap in code blocks if not already wrapped
       if (!cleanedResponse.includes('```json')) {
         return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
       }
       return cleanedResponse;
     } catch (e) {
-      console.warn('[postProcessSecretPromptResponse] Failed to parse raw JSON:', e);
+      console.warn('[postProcessSecretPromptResponse] Failed to parse raw JSON, attempting to fix...', e.message);
+      
+      // Try fixing common JSON issues
+      try {
+        const fixedJson = fixJsonSyntax(trimmed);
+        const jsonData = JSON.parse(fixedJson);
+        console.log('[postProcessSecretPromptResponse] Successfully fixed and parsed raw JSON');
+        if (!cleanedResponse.includes('```json')) {
+          return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
+        }
+        return cleanedResponse;
+      } catch (e2) {
+        console.warn('[postProcessSecretPromptResponse] Failed to fix raw JSON');
+      }
     }
   }
   
-  // If response doesn't contain JSON, try to find JSON anywhere in the text
+  // Try to find JSON pattern in the response
   const jsonPattern = /\{[\s\S]*\}/;
   const jsonMatch2 = cleanedResponse.match(jsonPattern);
   if (jsonMatch2) {
@@ -289,23 +327,28 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       const jsonData = JSON.parse(jsonMatch2[0]);
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
-      // Not valid JSON, return as is
+      // Try fixing
+      try {
+        const fixedJson = fixJsonSyntax(jsonMatch2[0]);
+        const jsonData = JSON.parse(fixedJson);
+        console.log('[postProcessSecretPromptResponse] Successfully fixed and parsed JSON pattern');
+        return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
+      } catch (e2) {
+        // Return original if all attempts fail
+      }
     }
   }
   
-  // Return as is if we can't extract JSON
+  // Return the original response if we couldn't parse it
   return cleanedResponse;
 }
 
 function ensurePlainTextAnswer(answer) {
   if (!answer) return '';
   
-  // If it's already a string, check if it's JSON
   if (typeof answer === 'string') {
-    // Try to parse as JSON
     try {
       const parsed = JSON.parse(answer);
-      // If it's an object with a text field, extract it
       if (typeof parsed === 'object' && parsed !== null) {
         if (parsed.text) {
           return String(parsed.text).trim();
@@ -316,20 +359,16 @@ function ensurePlainTextAnswer(answer) {
         if (parsed.content) {
           return String(parsed.content).trim();
         }
-        // If it's an object without text fields, stringify it (shouldn't happen but handle it)
         return JSON.stringify(parsed);
       }
-      // If parsed is a string, use it
       if (typeof parsed === 'string') {
         return parsed.trim();
       }
     } catch (e) {
-      // Not JSON, return as is
       return answer.trim();
     }
   }
   
-  // If it's an object, try to extract text or stringify
   if (typeof answer === 'object' && answer !== null) {
     if (answer.text) {
       return String(answer.text).trim();
@@ -340,11 +379,9 @@ function ensurePlainTextAnswer(answer) {
     if (answer.content) {
       return String(answer.content).trim();
     }
-    // Last resort: stringify (shouldn't happen)
     return JSON.stringify(answer);
   }
   
-  // Convert to string and trim
   return String(answer || '').trim();
 }
 
@@ -376,10 +413,6 @@ function appendConversationToPrompt(prompt, conversationText) {
   return `You are continuing an existing conversation with the same user. Reference prior exchanges when helpful and keep the narrative consistent.\n\nPrevious Conversation:\n${conversationText}\n\n---\n\n${prompt}`;
 }
 
-/**
- * @description Uploads a document, saves its metadata, and initiates asynchronous processing.
- * @route POST /api/doc/upload
- */
 exports.uploadDocument = async (req, res) => {
  const userId = req.user.id;
  const authorizationHeader = req.headers.authorization;
@@ -391,11 +424,8 @@ exports.uploadDocument = async (req, res) => {
  const { originalname, mimetype, buffer, size } = req.file;
  const { secret_id } = req.body; // NEW: Get secret_id from request body
 
- // Check storage limits
- // Fetch user usage and plan
  const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
 
- // Convert size to number if needed
  const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
  
  if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
@@ -404,7 +434,6 @@ exports.uploadDocument = async (req, res) => {
    });
  }
 
- // Check free tier file size limit BEFORE processing
  const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
  if (!fileSizeCheck.allowed) {
    console.log(`\n${'🆓'.repeat(40)}`);
@@ -427,10 +456,8 @@ exports.uploadDocument = async (req, res) => {
    });
  }
 
- // Check if user is on free plan and controller access limit
  const isFreeUser = TokenUsageService.isFreePlan(userPlan);
  if (isFreeUser) {
-   // Check controller access limit (1 per day)
    const controllerAccessCheck = await TokenUsageService.checkFreeTierControllerAccessLimit(userId, userPlan, 'documentController');
    if (!controllerAccessCheck.allowed) {
      return res.status(403).json({
@@ -442,13 +469,11 @@ exports.uploadDocument = async (req, res) => {
    }
  }
 
- // Check storage limits
  const storageLimitCheck = await checkStorageLimit(userId, size, userPlan);
  if (!storageLimitCheck.allowed) {
  return res.status(403).json({ error: storageLimitCheck.message });
  }
 
- // Calculate requested resources for this upload
  const requestedResources = {
  tokens: DOCUMENT_UPLOAD_COST_TOKENS,
  documents: 1,
@@ -456,7 +481,6 @@ exports.uploadDocument = async (req, res) => {
  storage_gb: size / (1024 ** 3), // convert bytes to GB
  };
 
- // Enforce limits
  const limitCheck = await TokenUsageService.enforceLimits(
  userId,
  userUsage,
@@ -486,10 +510,8 @@ exports.uploadDocument = async (req, res) => {
  "uploaded"
  );
 
- // Increment usage after successful upload
  await TokenUsageService.incrementUsage(userId, requestedResources, userPlan);
 
- // Asynchronously process the document
  processDocument(fileId, buffer, mimetype, userId, secret_id); // NEW: Pass secret_id to processDocument
 
   res.status(202).json({
@@ -503,10 +525,6 @@ exports.uploadDocument = async (req, res) => {
 }
 };
 
-/**
- * @description Generate signed URL for direct upload to GCS (for large files >32MB)
- * @route POST /api/doc/generate-upload-url
- */
 exports.generateUploadUrl = async (req, res) => {
   const userId = req.user.id;
   const authorizationHeader = req.headers.authorization;
@@ -519,17 +537,14 @@ exports.generateUploadUrl = async (req, res) => {
       return res.status(400).json({ error: "Filename is required" });
     }
 
-    // Size is REQUIRED - check file size BEFORE generating signed URL
     if (!size) {
       return res.status(400).json({ 
         error: "File size is required. Please provide the file size in bytes." 
       });
     }
 
-    // Get user plan to check if free tier restrictions apply
     const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
     
-    // Convert size to number if it's a string
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
     
     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
@@ -538,7 +553,6 @@ exports.generateUploadUrl = async (req, res) => {
       });
     }
     
-    // Check free tier file size limit BEFORE generating signed URL
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -563,14 +577,12 @@ exports.generateUploadUrl = async (req, res) => {
     
     console.log(`✅ [generateUploadUrl] File size check passed: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
 
-    // Generate GCS path
     const folderPath = `uploads/${userId}`;
     const path = require('path');
     const timestamp = Date.now();
     const safeFilename = filename.replace(/\s+/g, '_');
     const gcsPath = path.posix.join(folderPath, `${timestamp}_${safeFilename}`);
 
-    // Generate signed URL for upload (15 minutes expiry)
     const signedUrl = await getSignedUploadUrl(
       gcsPath,
       mimetype || 'application/octet-stream',
@@ -593,10 +605,6 @@ exports.generateUploadUrl = async (req, res) => {
   }
 };
 
-/**
- * @description Handle post-upload processing after file is uploaded via signed URL
- * @route POST /api/doc/complete-upload
- */
 exports.completeSignedUpload = async (req, res) => {
   const userId = req.user.id;
   const authorizationHeader = req.headers.authorization;
@@ -609,7 +617,6 @@ exports.completeSignedUpload = async (req, res) => {
       return res.status(400).json({ error: "gcsPath, filename, and size are required" });
     }
 
-    // Verify file exists in GCS
     const { fileInputBucket } = require("../config/gcs");
     const fileRef = fileInputBucket.file(gcsPath);
     const [exists] = await fileRef.exists();
@@ -618,7 +625,6 @@ exports.completeSignedUpload = async (req, res) => {
       return res.status(404).json({ error: "File not found in storage. Upload may have failed." });
     }
     
-    // Verify file metadata
     const [metadata] = await fileRef.getMetadata();
     console.log(`✅ [completeSignedUpload] File found in GCS: ${gcsPath}`);
     console.log(`📋 [completeSignedUpload] File metadata:`, {
@@ -628,26 +634,19 @@ exports.completeSignedUpload = async (req, res) => {
       bucket: fileInputBucket.name
     });
     
-    // Use ACTUAL file size from GCS metadata as source of truth
     const actualFileSize = parseInt(metadata.size) || parseInt(size);
     
-    // Validate file size matches (warn if different, but use actual size)
     if (metadata.size && parseInt(metadata.size) !== parseInt(size)) {
       console.warn(`⚠️ [completeSignedUpload] Size mismatch: expected ${size}, got ${metadata.size}. Using actual size from GCS.`);
     }
     
-    // Validate mime type if provided
     if (mimetype && metadata.contentType && metadata.contentType !== mimetype) {
       console.warn(`⚠️ [completeSignedUpload] MIME type mismatch: expected ${mimetype}, got ${metadata.contentType}`);
-      // Use the actual content type from GCS
       mimetype = metadata.contentType;
     }
 
-    // Check storage limits
     const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
     
-    // CRITICAL: Check free tier file size limit using ACTUAL file size from GCS
-    // This is a backup check in case the frontend bypassed the initial check
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(actualFileSize, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -658,7 +657,6 @@ exports.completeSignedUpload = async (req, res) => {
       console.log(`[FREE TIER] 🗑️ Deleting file from GCS...`);
       console.log(`${'🆓'.repeat(40)}\n`);
       
-      // Delete the uploaded file from GCS
       await fileRef.delete().catch(err => {
         console.error(`❌ Failed to delete oversized file from GCS:`, err.message);
       });
@@ -678,12 +676,10 @@ exports.completeSignedUpload = async (req, res) => {
     
     const storageLimitCheck = await checkStorageLimit(userId, actualFileSize, userPlan);
     if (!storageLimitCheck.allowed) {
-      // Delete the uploaded file if storage limit exceeded
       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
       return res.status(403).json({ error: storageLimitCheck.message });
     }
 
-    // Calculate requested resources (use actual file size from GCS)
     const requestedResources = {
       tokens: DOCUMENT_UPLOAD_COST_TOKENS,
       documents: 1,
@@ -691,7 +687,6 @@ exports.completeSignedUpload = async (req, res) => {
       storage_gb: actualFileSize / (1024 ** 3),
     };
 
-    // Enforce limits
     const limitCheck = await TokenUsageService.enforceLimits(
       userId,
       userUsage,
@@ -700,7 +695,6 @@ exports.completeSignedUpload = async (req, res) => {
     );
 
     if (!limitCheck.allowed) {
-      // Delete the uploaded file if limits exceeded
       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
       return res.status(403).json({
         success: false,
@@ -710,12 +704,9 @@ exports.completeSignedUpload = async (req, res) => {
       });
     }
 
-    // Extract folder path from gcsPath
     const folderPath = `uploads/${userId}`;
     const gsUri = `gs://${fileInputBucket.name}/${gcsPath}`;
 
-    // ✅ CRITICAL: Save file metadata to database FIRST before processing
-    // This ensures the file record exists even if processing fails
     let fileId;
     try {
       console.log(`💾 [completeSignedUpload] Saving file metadata to database...`);
@@ -731,7 +722,6 @@ exports.completeSignedUpload = async (req, res) => {
       console.log(`✅ [completeSignedUpload] File saved to database with ID: ${fileId}`);
     } catch (dbError) {
       console.error(`❌ [completeSignedUpload] Failed to save file to database:`, dbError);
-      // Delete file from GCS if DB save fails
       await fileRef.delete().catch(err => console.error("Failed to delete file after DB error:", err));
       return res.status(500).json({ 
         error: "Failed to save file metadata to database",
@@ -739,22 +729,18 @@ exports.completeSignedUpload = async (req, res) => {
       });
     }
 
-    // Increment usage after successful upload
     try {
       await TokenUsageService.incrementUsage(userId, requestedResources, userPlan);
       console.log(`✅ [completeSignedUpload] Usage incremented successfully`);
     } catch (usageError) {
       console.error(`⚠️ [completeSignedUpload] Failed to increment usage (non-critical):`, usageError.message);
-      // Don't fail the upload if usage increment fails - file is already saved
     }
 
-    // Download file buffer for processing
     console.log(`📥 [completeSignedUpload] Downloading file buffer for processing...`);
     const [fileBuffer] = await fileRef.download();
     
     if (!fileBuffer || fileBuffer.length === 0) {
       console.error(`❌ [completeSignedUpload] Downloaded file buffer is empty!`);
-      // Update file status to error instead of deleting (file is already in DB)
       try {
         await DocumentModel.updateFileStatus(fileId, "error", 0);
         await DocumentModel.updateCurrentOperation(fileId, "File appears to be empty or corrupted");
@@ -770,7 +756,6 @@ exports.completeSignedUpload = async (req, res) => {
     console.log(`✅ [completeSignedUpload] File buffer downloaded: ${fileBuffer.length} bytes`);
     console.log(`🚀 [completeSignedUpload] Starting document processing with mime type: ${mimetype || 'application/octet-stream'}`);
     
-    // Asynchronously process the document
     processDocument(fileId, fileBuffer, mimetype || metadata.contentType || 'application/octet-stream', userId, secret_id)
       .catch(err => {
         console.error(`❌ [completeSignedUpload] Error in processDocument:`, err);
@@ -805,9 +790,6 @@ const updateProcessingProgress = async (
  console.log(`[Progress] File ${fileId}: ${currentOperation} - ${progress}%`);
 };
 
-/**
- * @description Asynchronously processes a document with granular real-time progress tracking
- */
 async function processDocument(
  fileId,
  fileBuffer,
@@ -818,7 +800,6 @@ async function processDocument(
  const jobId = uuidv4();
 
  try {
- // Step 1: Initialize job (0-2%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -842,7 +823,6 @@ async function processDocument(
  "Processing job created"
  );
 
- // Step 2: Initialize processing (2-5%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -859,7 +839,6 @@ async function processDocument(
 
  let chunkingMethod = "recursive";
 
- // Step 3: Fetch chunking method (5-12%)
  if (secretId) {
  await updateProcessingProgress(
  fileId,
@@ -907,7 +886,6 @@ async function processDocument(
  "Configuration ready"
  );
 
- // Step 4: Check if already processed (12-15%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -938,7 +916,6 @@ async function processDocument(
  "Document ready for processing"
  );
 
- // Step 5: Prepare for text extraction (15-18%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -962,8 +939,6 @@ async function processDocument(
  "text/csv",
  ];
 
- // Step 6: Text Extraction (18-42%)
- // Special handling for PDFs: Check if digital-native first
  if (isPDF) {
    console.log(`[processDocument] PDF detected - checking if digital-native...`);
    
@@ -1002,7 +977,6 @@ async function processDocument(
    console.log(`${"=".repeat(80)}\n`);
    
    if (pdfDetection.isDigitalNative) {
-     // Digital-native PDF: Use pdf-parse directly (FREE, no Document AI cost)
      console.log(`\n${"🟢".repeat(40)}`);
      console.log(`[TEXT EXTRACTION METHOD] ✅ DIGITAL-NATIVE PDF DETECTED`);
      console.log(`[TEXT EXTRACTION METHOD] 📦 Using: pdf-parse (FREE - No Document AI cost)`);
@@ -1017,7 +991,6 @@ async function processDocument(
        "Extracting text from digital-native PDF (using pdf-parse)"
      );
      
-     // Extract text with page numbers
      extractedTexts = await extractTextFromPDFWithPages(fileBuffer);
      
      console.log(`[TEXT EXTRACTION] ✅ Successfully extracted ${extractedTexts.length} text segment(s) with page numbers`);
@@ -1025,7 +998,6 @@ async function processDocument(
        console.log(`[TEXT EXTRACTION] 📄 Page range: ${extractedTexts[0].page_start} - ${extractedTexts[0].page_end}`);
      }
      
-     // VALIDATION: Check if extracted text has meaningful content
      const totalExtractedText = extractedTexts.map(t => t.text || '').join(' ').trim();
      const extractedWordCount = totalExtractedText.split(/\s+/).filter(w => w.length > 0).length;
      const extractedCharCount = totalExtractedText.length;
@@ -1043,7 +1015,6 @@ async function processDocument(
        console.log(`[TEXT EXTRACTION] Falling back to Document AI for better extraction`);
        console.log(`${"⚠️".repeat(40)}\n`);
        
-       // Clear extractedTexts to force Document AI processing
        extractedTexts = [];
        
        await updateProcessingProgress(
@@ -1068,7 +1039,6 @@ async function processDocument(
        );
      }
    } else {
-     // Scanned PDF: Use Document AI OCR (costs apply)
      console.log(`\n${"🟡".repeat(40)}`);
      console.log(`[TEXT EXTRACTION METHOD] ⚠️ SCANNED PDF DETECTED`);
      console.log(`[TEXT EXTRACTION METHOD] 📦 Using: Document AI OCR (Google Cloud)`);
@@ -1086,11 +1056,9 @@ async function processDocument(
        "Scanned PDF detected - preparing for Document AI OCR"
      );
      
-     // Fall through to Document AI processing below
    }
  }
  
- // Use OCR for scanned PDFs or other OCR-required file types
  const useOCR = (isPDF && !extractedTexts.length) || ocrMimeTypes.includes(String(mimetype).toLowerCase());
 
  if (useOCR) {
@@ -1125,11 +1093,9 @@ async function processDocument(
 
  console.log(`[processDocument] Processing file with Document AI (${fileSizeMB}MB, mimeType: ${mimetype})`);
 
- // Try inline processing first, fall back to batch if it fails or file is too large
  let useBatchProcessing = isLargeFile;
  
  if (!useBatchProcessing) {
-   // Try inline processing for smaller files
    try {
      extractedTexts = await extractTextFromDocument(fileBuffer, mimetype);
      
@@ -1159,7 +1125,6 @@ async function processDocument(
    }
  }
 
- // Use batch processing for large files or if inline failed
  if (useBatchProcessing) {
    console.log(`[processDocument] Using batch processing (file: ${fileSizeMB}MB)`);
    
@@ -1170,11 +1135,9 @@ async function processDocument(
      "Uploading to GCS for batch processing"
    );
    
-   // Get original filename from database if available
    const fileRecord = await DocumentModel.getFileById(fileId);
    const originalFilename = fileRecord?.originalname || `file_${fileId}`;
    
-   // Upload to GCS for batch processing
    const batchUploadFolder = `batch-uploads/${userId}/${uuidv4()}`;
    const { gsUri: gcsInputUri } = await uploadToGCS(
      originalFilename,
@@ -1202,7 +1165,6 @@ async function processDocument(
    
    console.log(`[processDocument] Batch operation started: ${operationName}`);
    
-   // Update job with batch operation details
    const job = await ProcessingJobModel.getJobByFileId(fileId);
    if (job && job.job_id) {
      await ProcessingJobModel.updateJob(job.job_id, {
@@ -1214,7 +1176,6 @@ async function processDocument(
      });
    }
    
-   // ✅ CRITICAL: Store output path in user_files table for tracking
    try {
      await DocumentModel.updateFileOutputPath(fileId, gcsOutputUriPrefix);
      console.log(`[processDocument] ✅ Stored output path in user_files: ${gcsOutputUriPrefix}`);
@@ -1222,7 +1183,6 @@ async function processDocument(
      console.error(`[processDocument] ⚠️ Failed to store output path (non-critical):`, outputPathError.message);
    }
    
-   // Poll for batch completion and continue processing
    let batchCompleted = false;
    let attempts = 0;
    const maxAttempts = 240; // 20 minutes max
@@ -1242,7 +1202,6 @@ async function processDocument(
            throw new Error(`Batch processing failed: ${JSON.stringify(status.error)}`);
          }
          
-         // Fetch results from GCS
          await updateProcessingProgress(
            fileId,
            "processing",
@@ -1271,7 +1230,6 @@ async function processDocument(
            "Batch OCR processing completed"
          );
        } else {
-         // Update progress
          const progress = Math.min(30 + (attempts * 0.15), 39);
          await updateProcessingProgress(
            fileId,
@@ -1333,7 +1291,6 @@ async function processDocument(
  );
  }
 
- // Step 7: Validate extracted text (42-45%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1355,7 +1312,6 @@ async function processDocument(
  "Text validation completed"
  );
 
- // Step 8: Prepare for chunking (45-48%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1370,7 +1326,6 @@ async function processDocument(
  "Analyzing document structure for optimal chunking"
  );
 
- // Step 9: Chunking (48-58%)
  console.log(
  `[processDocument] Chunking file ID ${fileId} using method: ${chunkingMethod}`
  );
@@ -1417,7 +1372,6 @@ async function processDocument(
  return;
  }
 
- // Step 10: Prepare embeddings (58-62%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1434,7 +1388,6 @@ async function processDocument(
  `Ready to generate embeddings for ${chunks.length} chunks`
  );
 
- // Step 11: Generate Embeddings (62-76%)
  console.log(
  `[processDocument] Generating embeddings for ${chunks.length} chunks...`
  );
@@ -1475,7 +1428,6 @@ async function processDocument(
  );
  }
 
- // Step 12: Prepare database save (76-78%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1484,7 +1436,6 @@ async function processDocument(
  );
 
 const chunksToSave = chunks.map((chunk, i) => {
-  // ✅ CRITICAL: Extract page_start and page_end from metadata (or chunk directly)
   const page_start = chunk.metadata?.page_start !== null && chunk.metadata?.page_start !== undefined
     ? chunk.metadata.page_start
     : (chunk.page_start !== null && chunk.page_start !== undefined ? chunk.page_start : null);
@@ -1510,7 +1461,6 @@ const chunksToSave = chunks.map((chunk, i) => {
  "Data prepared for storage"
  );
 
- // Step 13: Save chunks to database (78-82%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1531,7 +1481,6 @@ const chunksToSave = chunks.map((chunk, i) => {
  `${savedChunks.length} chunks saved successfully`
  );
 
- // Step 14: Prepare vectors (82-84%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1552,7 +1501,6 @@ const chunksToSave = chunks.map((chunk, i) => {
  "Vector data prepared"
  );
 
- // Step 15: Save vectors (84-88%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1569,7 +1517,6 @@ const chunksToSave = chunks.map((chunk, i) => {
  "Vector embeddings stored successfully"
  );
 
- // Step 16: Prepare for summary (88-90%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1586,7 +1533,6 @@ const chunksToSave = chunks.map((chunk, i) => {
  "Ready to generate summary"
  );
 
- // Step 17: Generate Summary (90-95%)
  try {
  if (fullText.trim()) {
  await updateProcessingProgress(
@@ -1637,7 +1583,6 @@ const chunksToSave = chunks.map((chunk, i) => {
  );
  }
 
- // Step 18: Finalization (95-100%)
  await updateProcessingProgress(
  fileId,
  "processing",
@@ -1707,13 +1652,10 @@ exports.analyzeDocument = async (req, res) => {
 
  const { userUsage, userPlan, requestedResources } = req;
 
- // Enforce limits is already handled by middleware. If we reach here, it's allowed.
- // The middleware also handles refetching usage if renewal occurred.
 
  let insights;
  try {
  insights = await analyzeWithGemini(fullText);
- // Increment usage after successful AI analysis
  await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
  } catch (aiError) {
  console.error("❌ Gemini analysis error:", aiError);
@@ -1774,13 +1716,10 @@ exports.getSummary = async (req, res) => {
 
  const { userUsage, userPlan, requestedResources } = req;
 
- // Enforce limits is already handled by middleware. If we reach here, it's allowed.
- // The middleware also handles refetching usage if renewal occurred.
 
  let summary;
  try {
  summary = await getSummaryFromChunks(combinedText);
- // Increment usage after successful summary generation
  await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
  } catch (aiError) {
  console.error("❌ Gemini summary error:", aiError);
@@ -1798,396 +1737,219 @@ exports.getSummary = async (req, res) => {
 };
 
 
-// exports.chatWithDocument = async (req, res) => {
-//   let userId = null;
 
-//   try {
-//     const {
-//       file_id,
-//       question,
-//       used_secret_prompt = false,
-//       prompt_label = null,
-//       session_id = null,
-//       secret_id,
-//       llm_name,
-//       additional_input = '',
-//     } = req.body;
 
-//     userId = req.user.id;
 
-//     // ---------- VALIDATION ----------
-//     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 //     if (!file_id) return res.status(400).json({ error: 'file_id is required.' });
 //     if (!uuidRegex.test(file_id)) return res.status(400).json({ error: 'Invalid file ID format.' });
 
-//     const hasExistingSession = session_id && uuidRegex.test(session_id);
-//     const finalSessionId = hasExistingSession ? session_id : uuidv4();
 
-//     console.log(
-//       `[chatWithDocument] started: used_secret_prompt=${used_secret_prompt}, secret_id=${secret_id}, llm_name=${llm_name}, session_id=${finalSessionId}`
-//     );
 
-//     // ---------- FILE ACCESS ----------
-//     const file = await DocumentModel.getFileById(file_id);
 //     if (!file) return res.status(404).json({ error: 'File not found.' });
 //     if (String(file.user_id) !== String(userId))
-//       return res.status(403).json({ error: 'Access denied.' });
 //     if (file.status !== 'processed') {
-//       return res.status(400).json({
-//         error: 'Document is not yet processed.',
-//         status: file.status,
-//         progress: file.processing_progress,
-//       });
-//     }
 
-//     let previousChats = [];
-//     if (hasExistingSession) {
-//       previousChats = await FileChat.getChatHistory(file_id, finalSessionId);
-//     }
-//     const conversationContext = formatConversationHistory(previousChats);
-//     const historyForStorage = simplifyHistory(previousChats);
-//     if (historyForStorage.length > 0) {
-//       const lastTurn = historyForStorage[historyForStorage.length - 1];
-//       console.log(
-//         `[chatWithDocument] Using ${historyForStorage.length} prior turn(s) for context. Most recent: Q="${(lastTurn.question || '').slice(0, 120)}", A="${(lastTurn.answer || '').slice(0, 120)}"`
-//       );
-//     } else {
-//       console.log('[chatWithDocument] No prior context for this session.');
-//     }
 
-//     // ✅ RAG CONFIGURATION
-//     const SIMILARITY_THRESHOLD = 0.75; // Cosine similarity cutoff
-//     const MIN_CHUNKS = 5; // Minimum chunks to retrieve
-//     const MAX_CHUNKS = 10; // Maximum chunks to retrieve
-//     const MAX_CONTEXT_TOKENS = 4000; // ~15% of model limit
-//     const CHARS_PER_TOKEN = 4; // Average chars per token
-//     const MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN; // ~16,000 chars
 
-//     // ---------- PROMPT BUILDING ----------
-//     let usedChunkIds = [];
-//     let storedQuestion = null;
-//     let finalPromptLabel = prompt_label;
-//     let provider = 'gemini';
-//     let finalPrompt = '';
 
-//     // ================================
-//     // CASE 1: SECRET PROMPT
-//     // ================================
-//     if (used_secret_prompt) {
 //       if (!secret_id)
-//         return res.status(400).json({ error: 'secret_id required for secret prompt.' });
 
-//       const secretQuery = `
-//         SELECT s.id, s.name, s.secret_manager_id, s.version, s.llm_id, l.name AS llm_name
-//         FROM secret_manager s
-//         LEFT JOIN llm_models l ON s.llm_id = l.id
-//         WHERE s.id = $1`;
-//       const secretResult = await db.query(secretQuery, [secret_id]);
 //       if (!secretResult.rows.length)
-//         return res.status(404).json({ error: 'Secret configuration not found.' });
 
-//       const { name: secretName, secret_manager_id, version, llm_name: dbLlmName } =
-//         secretResult.rows[0];
-//       finalPromptLabel = secretName;
-//       provider = resolveProviderName(llm_name || dbLlmName || 'gemini');
 
-//       const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
-//       const client = new SecretManagerServiceClient();
-//       const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
-//       const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
-//       const [accessResponse] = await client.accessSecretVersion({ name: gcpSecretName });
-//       const secretValue = accessResponse.payload.data.toString('utf8');
 
-//       // ✅ Get all chunks and apply smart selection
-//       const allChunks = await FileChunkModel.getChunksByFileId(file_id);
       
 //       if (!allChunks || allChunks.length === 0) {
-//         return res.status(400).json({ error: 'No content found in document.' });
-//       }
 
-//       // ✅ For secret prompts, use embedding-based selection
-//       const secretEmbedding = await generateEmbedding(secretValue);
-//       const rankedChunks = await ChunkVectorModel.findNearestChunks(
-//         secretEmbedding,
-//         MAX_CHUNKS, // Retrieve top 10 candidates
-//         file_id
-//       );
 
-//       // ✅ Filter by similarity threshold
-//       const highQualityChunks = rankedChunks
-//         .filter(chunk => {
-//           const similarity = chunk.similarity || chunk.distance || 0;
-//           const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//           return score >= SIMILARITY_THRESHOLD;
-//         })
-//         .sort((a, b) => {
-//           const scoreA = a.similarity > 1 ? (1 / (1 + a.similarity)) : a.similarity;
-//           const scoreB = b.similarity > 1 ? (1 / (1 + b.similarity)) : b.similarity;
-//           return scoreB - scoreA; // Best first
-//         });
 
-//       console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
 
-//       // ✅ Select 5-10 best chunks within token budget
-//       let selectedChunks = [];
-//       let currentContextLength = 0;
 
-//       const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
-//         ? highQualityChunks 
-//         : rankedChunks; // Fallback if not enough high-quality chunks
 
-//       for (const chunk of chunksToConsider) {
-//         if (selectedChunks.length >= MAX_CHUNKS) break;
         
-//         const chunkLength = chunk.content.length;
-//         if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
-//           selectedChunks.push(chunk);
-//           currentContextLength += chunkLength;
-//         } else if (selectedChunks.length < MIN_CHUNKS) {
-//           // If we haven't reached minimum, truncate this chunk to fit
-//           const remainingSpace = MAX_CONTEXT_CHARS - currentContextLength;
-//           if (remainingSpace > 500) {
-//             selectedChunks.push({
-//               ...chunk,
-//               content: chunk.content.substring(0, remainingSpace - 100) + "..."
-//             });
-//             currentContextLength += remainingSpace;
-//           }
-//           break;
-//         }
-//       }
 
-//       // ✅ Ensure minimum chunks
-//       const finalChunks = selectedChunks.length >= MIN_CHUNKS 
-//         ? selectedChunks 
-//         : chunksToConsider.slice(0, MIN_CHUNKS);
 
-//       console.log(`✅ Selected ${finalChunks.length} chunks for secret prompt | Context: ${currentContextLength} chars (~${Math.ceil(currentContextLength / CHARS_PER_TOKEN)} tokens)`);
 
-//       usedChunkIds = finalChunks.map((c) => c.chunk_id || c.id);
 
-//       // ✅ Build context with separators and metadata
-//       const docContent = finalChunks
-//         .map((c, idx) => {
-//           const similarity = c.similarity || c.distance || 0;
-//           const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//           return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content}`;
-//         })
-//         .join('\n\n');
 
-//       finalPrompt = `You are an expert AI legal assistant using the ${provider.toUpperCase()} model.\n\n${secretValue}\n\n=== DOCUMENT TO ANALYZE ===\n${docContent}`;
       
-//       if (additional_input?.trim()) {
-//         const trimmedInput = additional_input.trim().substring(0, 500);
-//         finalPrompt += `\n\n=== ADDITIONAL USER INSTRUCTIONS ===\n${trimmedInput}`;
-//       }
 
-//       storedQuestion = secretName;
-//     } 
-//     // ================================
-//     // CASE 2: CUSTOM QUESTION
-//     // ================================
-//     else {
 //       if (!question?.trim())
-//         return res.status(400).json({ error: 'question is required.' });
 
-//       storedQuestion = question.trim();
 
-//       // Fetch LLM model from custom_query table for custom queries (always fetch from DB)
-//       let dbLlmName = null;
-//       const customQueryLlm = `
-//         SELECT cq.llm_name, cq.llm_model_id
-//         FROM custom_query cq
-//         ORDER BY cq.id DESC
-//         LIMIT 1;
-//       `;
-//       const customQueryResult = await db.query(customQueryLlm);
-//       if (customQueryResult.rows.length > 0) {
-//         dbLlmName = customQueryResult.rows[0].llm_name;
-//         console.log(`🤖 Using LLM from custom_query table: ${dbLlmName}`);
-//       } else {
-//         console.warn(`⚠️ No LLM found in custom_query table — falling back to gemini`);
-//         dbLlmName = 'gemini';
-//       }
 
-//       // Resolve provider name using the LLM from custom_query table
-//       provider = resolveProviderName(dbLlmName || "gemini");
-//       console.log(`🤖 Resolved LLM provider for custom query: ${provider}`);
       
-//       // Check if provider is available
-//       const availableProviders = getAvailableProviders();
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
-//         console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini`);
-//         provider = 'gemini';
-//       }
 
-//       // ✅ Vector search with similarity scoring
-//       const questionEmbedding = await generateEmbedding(storedQuestion);
-//       const rankedChunks = await ChunkVectorModel.findNearestChunks(
-//         questionEmbedding,
-//         MAX_CHUNKS, // Retrieve top 10 candidates
-//         file_id
-//       );
 
 //       if (!rankedChunks || rankedChunks.length === 0) {
-//         // Fallback: use all chunks if no vector matches
-//         console.log('⚠️ No vector matches found, using all chunks as fallback');
-//         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
-//         const limitedChunks = allChunks.slice(0, MIN_CHUNKS);
-//         usedChunkIds = limitedChunks.map((c) => c.id);
         
-//         const docContent = limitedChunks
-//           .map((c, idx) => `--- Chunk ${idx + 1} ---\n${c.content}`)
-//           .join('\n\n');
         
-//         finalPrompt = `${storedQuestion}\n\n=== DOCUMENT CONTEXT ===\n${docContent}`;
-//       } else {
-//         // ✅ Filter by similarity threshold
-//         const highQualityChunks = rankedChunks
-//           .filter(chunk => {
-//             const similarity = chunk.similarity || chunk.distance || 0;
-//             const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//             return score >= SIMILARITY_THRESHOLD;
-//           })
-//           .sort((a, b) => {
-//             const scoreA = a.similarity > 1 ? (1 / (1 + a.similarity)) : a.similarity;
-//             const scoreB = b.similarity > 1 ? (1 / (1 + b.similarity)) : b.similarity;
-//             return scoreB - scoreA;
-//           });
 
-//         console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
 
-//         // ✅ Select 5-10 best chunks within token budget
-//         let selectedChunks = [];
-//         let currentContextLength = 0;
 
-//         const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
-//           ? highQualityChunks 
-//           : rankedChunks;
 
-//         for (const chunk of chunksToConsider) {
-//           if (selectedChunks.length >= MAX_CHUNKS) break;
           
-//           const chunkLength = chunk.content.length;
-//           if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
-//             selectedChunks.push(chunk);
-//             currentContextLength += chunkLength;
-//           } else if (selectedChunks.length < MIN_CHUNKS) {
-//             const remainingSpace = MAX_CONTEXT_CHARS - currentContextLength;
-//             if (remainingSpace > 500) {
-//               selectedChunks.push({
-//                 ...chunk,
-//                 content: chunk.content.substring(0, remainingSpace - 100) + "..."
-//               });
-//               currentContextLength += remainingSpace;
-//             }
-//             break;
-//           }
-//         }
 
-//         // ✅ Ensure minimum chunks
-//         const finalChunks = selectedChunks.length >= MIN_CHUNKS 
-//           ? selectedChunks 
-//           : chunksToConsider.slice(0, MIN_CHUNKS);
 
-//         console.log(`✅ Selected ${finalChunks.length} chunks | Context: ${currentContextLength} chars (~${Math.ceil(currentContextLength / CHARS_PER_TOKEN)} tokens)`);
 
-//         usedChunkIds = finalChunks.map((c) => c.chunk_id || c.id);
 
-//         // ✅ Build context with separators and metadata
-//         const relevantTexts = finalChunks
-//           .map((c, idx) => {
-//             const similarity = c.similarity || c.distance || 0;
-//             const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//             return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content}`;
-//           })
-//           .join('\n\n');
 
-//         finalPrompt = `${storedQuestion}\n\n=== RELEVANT CONTEXT ===\n${relevantTexts}`;
-//       }
-//     }
 
-//     finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
 
-//     // ---------- CALL LLM ----------
-//     console.log(`[chatWithDocument] Calling LLM provider: ${provider} | Chunks used: ${usedChunkIds.length}`);
-//     const answer = await askLLM(provider, finalPrompt);
 
 //     if (!answer?.trim()) {
-//       return res.status(500).json({ error: 'Empty response from AI.' });
-//     }
 
-//     console.log(`[chatWithDocument] Received answer, length: ${answer.length} characters`);
 
-//     // ---------- SAVE CHAT ----------
-//     const savedChat = await FileChat.saveChat(
-//       file_id,
-//       userId,
-//       storedQuestion,
-//       answer,
-//       finalSessionId,
-//       usedChunkIds,
-//       used_secret_prompt,
-//       finalPromptLabel,
-//       used_secret_prompt ? secret_id : null,
-//       historyForStorage
-//     );
 
-//     console.log(`[chatWithDocument] Chat saved with ID: ${savedChat.id} | Chunks used: ${usedChunkIds.length}`);
 
-//     // ---------- TOKEN USAGE ----------
-//     try {
-//       const { userUsage, userPlan, requestedResources } = req;
-//       await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
-//     } catch (e) {
-//       console.warn('Token usage increment failed:', e.message);
-//     }
 
-//     // ---------- FETCH HISTORY ----------
-//     const historyRows = await FileChat.getChatHistory(file_id, savedChat.session_id);
-//     const history = historyRows.map((row) => ({
-//       id: row.id,
-//       file_id: row.file_id,
-//       session_id: row.session_id,
-//       question: row.question,
-//       answer: row.answer,
-//       used_secret_prompt: row.used_secret_prompt || false,
-//       prompt_label: row.prompt_label || null,
-//       secret_id: row.secret_id || null,
-//       used_chunk_ids: row.used_chunk_ids || [],
-//       confidence: row.confidence || 0.8,
-//       timestamp: row.created_at || row.timestamp,
-//       chat_history: row.chat_history || [],
-//       display_text_left_panel: row.used_secret_prompt
-//         ? `Analysis: ${row.prompt_label || 'Secret Prompt'}`
-//         : row.question,
-//     }));
 
-//     // ---------- RETURN COMPLETE RESPONSE ----------
-//     return res.status(200).json({
-//       success: true,
-//       session_id: savedChat.session_id,
-//       message_id: savedChat.id,
-//       answer,
-//       response: answer,
-//       history,
-//       used_chunk_ids: usedChunkIds,
-//       chunks_used: usedChunkIds.length, // ✅ Show actual count
-//       confidence: used_secret_prompt ? 0.9 : 0.85,
-//       timestamp: savedChat.created_at || new Date().toISOString(),
-//       llm_provider: provider,
-//       used_secret_prompt,
-//     });
-//   } catch (error) {
-//     console.error('❌ Error in chatWithDocument:', error);
-//     console.error('Stack trace:', error.stack);
-//     return res.status(500).json({
-//       error: 'Failed to get AI answer.',
-//       details: error.message,
-//     });
-//   }
-// };
 
+
+
+
+
+    
+//     if (hasFileId && !uuidRegex.test(file_id)) {
+
+
+
+
+
+//     if (!hasFileId) {
+//       if (!question?.trim()) {
+
+
+      
+//       if (!availableProviders[provider] || !availableProviders[provider].available) {
+
+
+      
+
+//       if (!answer?.trim()) {
+
+
+
+
+
+
+    
+
+//     if (!file) return res.status(404).json({ error: 'File not found.' });
+//     if (String(file.user_id) !== String(userId)) {
+//     if (file.status !== 'processed') {
+
+//       const hasUnassignedChats = sessionHistory.some((chat) => !chat.file_id);
+
+
+    
+
+
+
+//       if (!secret_id) {
+
+//       if (!secretResult.rows.length) {
+
+
+
+      
+//       if (!allChunks || allChunks.length === 0) {
+
+
+
+
+
+
+        
+
+
+
+
+
+      
+
+//       if (!question?.trim()) {
+
+
+
+      
+//       if (!availableProviders[provider] || !availableProviders[provider].available) {
+
+
+//       if (!rankedChunks || rankedChunks.length === 0) {
+        
+        
+
+
+
+
+          
+
+
+
+
+
+
+
+
+//     if (!answer?.trim()) {
+
+
+
+
+
+
+
+function analyzeQueryIntent(question) {
+  if (!question || typeof question !== 'string') {
+    return {
+      needsFullDocument: false,
+      threshold: 0.75,
+      strategy: 'TARGETED_RAG',
+      reason: 'Invalid query - defaulting to targeted search'
+    };
+  }
+
+  const queryLower = question.toLowerCase();
+  
+  const fullDocumentKeywords = [
+    'summary', 'summarize', 'overview', 'complete', 'entire', 'all',
+    'comprehensive', 'detailed analysis', 'full details', 'everything',
+    'list all', 'what are all', 'give me all', 'extract all',
+    'analyze', 'review', 'examine', 'timeline', 'chronology',
+    'what is this document', 'what does this document', 'document about',
+    'key points', 'main points', 'important information',
+    'case details', 'petition details', 'contract terms',
+    'parties involved', 'background', 'history'
+  ];
+  
+  const targetedKeywords = [
+    'specific section', 'find where', 'locate', 'search for',
+    'what does it say about', 'mention of', 'reference to',
+    'clause', 'paragraph', 'page', 'section'
+  ];
+  
+  const needsFullDoc = fullDocumentKeywords.some(keyword => 
+    queryLower.includes(keyword)
+  );
+  
+  const isTargeted = targetedKeywords.some(keyword => 
+    queryLower.includes(keyword)
+  );
+  
+  const isShortQuestion = question.trim().split(' ').length <= 5;
+  
+  const isBroadQuestion = /^(what|who|when|where|why|how)\s/i.test(queryLower) && 
+                          !isTargeted;
+  
+  return {
+    needsFullDocument: needsFullDoc || (isBroadQuestion && !isTargeted) || isShortQuestion,
+    threshold: needsFullDoc ? 0.0 : (isTargeted ? 0.80 : 0.75),
+    strategy: needsFullDoc ? 'FULL_DOCUMENT' : 'TARGETED_RAG',
+    reason: needsFullDoc ? 'Query requires comprehensive analysis' : 'Query is specific/targeted'
+  };
+}
 
 // exports.chatWithDocument = async (req, res) => {
 //   let userId = null;
@@ -2202,20 +1964,19 @@ exports.getSummary = async (req, res) => {
 //       secret_id,
 //       llm_name,
 //       additional_input = '',
+//       input_template_id = null,
+//       output_template_id = null,
 //     } = req.body;
 
 //     userId = req.user.id;
 
-//     // ---------- VALIDATION ----------
 //     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 //     const hasFileId = Boolean(file_id);
     
-//     // Only validate file_id format if it's provided
 //     if (hasFileId && !uuidRegex.test(file_id)) {
 //       return res.status(400).json({ error: 'Invalid file ID format.' });
 //     }
 
-//     // Generate or validate session_id
 //     const hasExistingSession = session_id && uuidRegex.test(session_id);
 //     const finalSessionId = hasExistingSession ? session_id : uuidv4();
 
@@ -2223,16 +1984,12 @@ exports.getSummary = async (req, res) => {
 //       `[chatWithDocument] started: used_secret_prompt=${used_secret_prompt}, secret_id=${secret_id}, llm_name=${llm_name}, session_id=${finalSessionId}, has_file=${hasFileId}`
 //     );
 
-//     // Load existing session history (works for both file-based and file-less sessions)
 //     const sessionHistory = hasExistingSession
 //       ? await FileChat.getChatHistoryBySession(userId, finalSessionId)
 //       : [];
 
 //     console.log(`[chatWithDocument] Loaded ${sessionHistory.length} previous messages from session`);
 
-//     // ================================
-//     // CASE 1: NO DOCUMENT YET (PRE-UPLOAD CHAT)
-//     // ================================
 //     if (!hasFileId) {
 //       if (!question?.trim()) {
 //         return res.status(400).json({ error: 'question is required when no document is provided.' });
@@ -2240,9 +1997,27 @@ exports.getSummary = async (req, res) => {
 
 //       console.log(`[chatWithDocument] Pre-upload mode - chatting without document`);
 
-//       // Determine LLM provider
-//       let provider = resolveProviderName(llm_name || 'gemini');
-//       console.log(`[chatWithDocument] Resolved provider: ${provider}`);
+//       let dbLlmName = llm_name; // Use the one from request first
+      
+//       if (!dbLlmName) {
+//         const customQueryLlm = `
+//           SELECT cq.llm_name, cq.llm_model_id
+//           FROM custom_query cq
+//           ORDER BY cq.id DESC
+//           LIMIT 1;
+//         `;
+//         const customQueryResult = await db.query(customQueryLlm);
+//         if (customQueryResult.rows.length > 0) {
+//           dbLlmName = customQueryResult.rows[0].llm_name;
+//           console.log(`🤖 Using LLM from custom_query table: ${dbLlmName}`);
+//         } else {
+//           console.warn(`⚠️ No LLM found in custom_query table — falling back to gemini`);
+//           dbLlmName = 'gemini';
+//         }
+//       }
+
+//       let provider = resolveProviderName(dbLlmName || 'gemini');
+//       console.log(`[chatWithDocument] Resolved provider for pre-upload: ${provider}`);
       
 //       const availableProviders = getAvailableProviders();
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
@@ -2250,16 +2025,43 @@ exports.getSummary = async (req, res) => {
 //         provider = 'gemini';
 //       }
 
-//       // Build prompt with conversation history
 //       const userPrompt = question.trim();
 //       const conversationContext = formatConversationHistory(sessionHistory);
-//       const finalPrompt = appendConversationToPrompt(userPrompt, conversationContext);
+//       let finalPrompt = appendConversationToPrompt(userPrompt, conversationContext);
+
+//       try {
+//         const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
+        
+//         console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion} for question: "${userPrompt}"`);
+        
+//         let profileContext;
+//         if (isProfileQuestion) {
+//           console.log(`[chatWithDocument] Fetching detailed profile context for user ${userId}...`);
+//           profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
+//           if (!profileContext) {
+//             console.log(`[chatWithDocument] Detailed profile context not available, trying regular context...`);
+//             profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//           }
+//         } else {
+//           profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//         }
+        
+//         if (profileContext) {
+//           finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
+//           console.log(`[chatWithDocument] ✅ Added user professional profile context to pre-upload prompt (detailed: ${isProfileQuestion}, length: ${profileContext.length} chars)`);
+//         } else {
+//           console.warn(`[chatWithDocument] ⚠️ No profile context available for user ${userId}`);
+//         }
+//       } catch (profileError) {
+//         console.error(`[chatWithDocument] ❌ Failed to fetch profile context:`, profileError.message);
+//         console.error(`[chatWithDocument] Error stack:`, profileError.stack);
+//       }
 
 //       console.log(`[chatWithDocument] Pre-upload conversation | Provider: ${provider} | Session: ${finalSessionId}`);
 //       console.log(`[chatWithDocument] Prompt length: ${finalPrompt.length} chars | History turns: ${sessionHistory.length}`);
       
-//       // Get AI response
-//       const answer = await askLLM(provider, finalPrompt, ''); // Empty context since it's already in prompt
+//       let answer = await askLLM(provider, finalPrompt, '', '', userPrompt); // Pass original question for web search
+//       answer = ensurePlainTextAnswer(answer);
 
 //       if (!answer?.trim()) {
 //         return res.status(500).json({ error: 'Empty response from AI.' });
@@ -2267,7 +2069,6 @@ exports.getSummary = async (req, res) => {
 
 //       console.log(`✅ [chatWithDocument] Received answer: ${answer.length} chars`);
 
-//       // Save chat without file_id
 //       const savedChat = await FileChat.saveChat(
 //         null,              // No file_id for pre-upload chat
 //         userId,
@@ -2281,7 +2082,6 @@ exports.getSummary = async (req, res) => {
 //         simplifyHistory(sessionHistory)  // Store conversation context
 //       );
 
-//       // Fetch updated history
 //       const updatedHistoryRows = await FileChat.getChatHistoryBySession(userId, finalSessionId);
 //       const history = updatedHistoryRows.map((row) => ({
 //         id: row.id,
@@ -2300,7 +2100,6 @@ exports.getSummary = async (req, res) => {
 //           : row.question,
 //       }));
 
-//       // Increment usage
 //       try {
 //         const { userUsage, userPlan, requestedResources } = req;
 //         await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
@@ -2325,13 +2124,9 @@ exports.getSummary = async (req, res) => {
 //       });
 //     }
 
-//     // ================================
-//     // CASE 2: DOCUMENT PROVIDED (POST-UPLOAD CHAT)
-//     // ================================
     
 //     console.log(`[chatWithDocument] Post-upload mode - chatting with document ${file_id}`);
 
-//     // ---------- FILE ACCESS ----------
 //     const file = await DocumentModel.getFileById(file_id);
 //     if (!file) return res.status(404).json({ error: 'File not found.' });
 //     if (String(file.user_id) !== String(userId)) {
@@ -2345,7 +2140,6 @@ exports.getSummary = async (req, res) => {
 //       });
 //     }
 
-//     // Link pre-upload chats to this file if they exist
 //     if (sessionHistory.length > 0) {
 //       const hasUnassignedChats = sessionHistory.some((chat) => !chat.file_id);
 //       if (hasUnassignedChats) {
@@ -2354,13 +2148,11 @@ exports.getSummary = async (req, res) => {
 //       }
 //     }
 
-//     // Load previous chats for this file + session
 //     let previousChats = [];
 //     if (hasExistingSession) {
 //       previousChats = await FileChat.getChatHistory(file_id, finalSessionId);
 //     }
 
-//     // Build conversation context from ALL chats (pre-upload + post-upload)
 //     const conversationContext = formatConversationHistory(previousChats);
 //     const historyForStorage = simplifyHistory(previousChats);
     
@@ -2373,41 +2165,70 @@ exports.getSummary = async (req, res) => {
 //       console.log('[chatWithDocument] No prior context for this session.');
 //     }
 
-//     // ✅ RAG CONFIGURATION
-//     const SIMILARITY_THRESHOLD = 0.75;
-//     const MIN_CHUNKS = 5;
-//     const MAX_CHUNKS = 10;
-//     const MAX_CONTEXT_TOKENS = 4000;
+//     const questionToAnalyze = question?.trim() || '';
+//     const queryAnalysis = analyzeQueryIntent(questionToAnalyze);
+
+//     let SIMILARITY_THRESHOLD, MIN_CHUNKS, MAX_CHUNKS, MAX_CONTEXT_TOKENS, useFullDocument;
+
+//     if (queryAnalysis.needsFullDocument && !used_secret_prompt) {
+//       console.log(`🔍 Query requires full document analysis: "${questionToAnalyze.substring(0, 100)}..."`);
+//       useFullDocument = true;
+//       MIN_CHUNKS = 999999; // Force all chunks
+//       MAX_CHUNKS = 999999;
+//       MAX_CONTEXT_TOKENS = 25000; // ~100K tokens context (adjust based on your LLM)
+//       SIMILARITY_THRESHOLD = 0.0; // Accept all chunks
+//     } else {
+//       console.log(`🎯 Query is targeted, using RAG with threshold ${queryAnalysis.threshold}`);
+//       useFullDocument = false;
+//       SIMILARITY_THRESHOLD = queryAnalysis.threshold;
+//       MIN_CHUNKS = 5;
+//       MAX_CHUNKS = 10;
+//       MAX_CONTEXT_TOKENS = 4000;
+//     }
+
 //     const CHARS_PER_TOKEN = 4;
 //     const MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
 
-//     // ---------- PROMPT BUILDING ----------
+//     console.log(`
+// ╔════════════════════════════════════════════════════════════════════
+// ║ 📊 QUERY ANALYSIS RESULTS
+// ╠════════════════════════════════════════════════════════════════════
+// ║ Query: "${questionToAnalyze.substring(0, 100)}${questionToAnalyze.length > 100 ? '...' : ''}"
+// ║ Strategy: ${queryAnalysis.strategy}
+// ║ Reason: ${queryAnalysis.reason}
+// ║ Full Document Mode: ${useFullDocument ? '✅ YES' : '❌ NO'}
+// ║ Similarity Threshold: ${SIMILARITY_THRESHOLD}
+// ║ Max Chunks: ${MAX_CHUNKS === 999999 ? 'ALL' : MAX_CHUNKS}
+// ║ Max Context Tokens: ${MAX_CONTEXT_TOKENS}
+// ╚════════════════════════════════════════════════════════════════════
+// `);
+
 //     let usedChunkIds = [];
 //     let storedQuestion = null;
 //     let finalPromptLabel = prompt_label;
 //     let provider = 'gemini';
 //     let finalPrompt = '';
+//     let adaptiveSystemContext = ''; // Will store adaptive instructions to be combined with database system prompt
+//     let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false }; // Initialize templateData for use later
 
-//     // ================================
-//     // SECRET PROMPT HANDLING
-//     // ================================
 //     if (used_secret_prompt) {
 //       if (!secret_id) {
 //         return res.status(400).json({ error: 'secret_id required for secret prompt.' });
 //       }
 
-//       const secretQuery = `
-//         SELECT s.id, s.name, s.secret_manager_id, s.version, s.llm_id, l.name AS llm_name
-//         FROM secret_manager s
-//         LEFT JOIN llm_models l ON s.llm_id = l.id
-//         WHERE s.id = $1`;
-//       const secretResult = await db.query(secretQuery, [secret_id]);
-//       if (!secretResult.rows.length) {
+//       const secretData = await fetchSecretManagerWithTemplates(secret_id);
+//       if (!secretData) {
 //         return res.status(404).json({ error: 'Secret configuration not found.' });
 //       }
 
-//       const { name: secretName, secret_manager_id, version, llm_name: dbLlmName } =
-//         secretResult.rows[0];
+//       const { 
+//         name: secretName, 
+//         secret_manager_id, 
+//         version, 
+//         llm_name: dbLlmName,
+//         input_template_id,
+//         output_template_id
+//       } = secretData;
 //       finalPromptLabel = secretName;
 //       provider = resolveProviderName(llm_name || dbLlmName || 'gemini');
 
@@ -2416,95 +2237,278 @@ exports.getSummary = async (req, res) => {
 //       const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
 //       const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
 //       const [accessResponse] = await client.accessSecretVersion({ name: gcpSecretName });
-//       const secretValue = accessResponse.payload.data.toString('utf8');
+//       let secretValue = accessResponse.payload.data.toString('utf8');
 
-//       // Get all chunks and apply smart selection
-//       const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+//       // NEW: Process secret prompt with input/output templates from document_ai_extractions
+//       let templateProcessingResult = null;
+//       let useTemplateExtraction = false;
       
-//       if (!allChunks || allChunks.length === 0) {
-//         return res.status(400).json({ error: 'No content found in document.' });
-//       }
-
-//       // Use embedding-based selection for secret prompts
-//       const secretEmbedding = await generateEmbedding(secretValue);
-//       const rankedChunks = await ChunkVectorModel.findNearestChunks(
-//         secretEmbedding,
-//         MAX_CHUNKS,
-//         file_id
-//       );
-
-//       // Filter by similarity threshold
-//       const highQualityChunks = rankedChunks
-//         .filter(chunk => {
-//           const similarity = chunk.similarity || chunk.distance || 0;
-//           const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//           return score >= SIMILARITY_THRESHOLD;
-//         })
-//         .sort((a, b) => {
-//           const scoreA = a.similarity > 1 ? (1 / (1 + a.similarity)) : a.similarity;
-//           const scoreB = b.similarity > 1 ? (1 / (1 + b.similarity)) : b.similarity;
-//           return scoreB - scoreA;
-//         });
-
-//       console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
-
-//       // Select 5-10 best chunks within token budget
-//       let selectedChunks = [];
-//       let currentContextLength = 0;
-
-//       const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
-//         ? highQualityChunks 
-//         : rankedChunks;
-
-//       for (const chunk of chunksToConsider) {
-//         if (selectedChunks.length >= MAX_CHUNKS) break;
+//       if (input_template_id || output_template_id) {
+//         useTemplateExtraction = true;
+//         console.log(`\n📄 [Secret Prompt] Processing with templates from document_ai_extractions:`);
+//         console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
+//         console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
         
-//         const chunkLength = chunk.content.length;
-//         if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
-//           selectedChunks.push(chunk);
-//           currentContextLength += chunkLength;
-//         } else if (selectedChunks.length < MIN_CHUNKS) {
-//           const remainingSpace = MAX_CONTEXT_CHARS - currentContextLength;
-//           if (remainingSpace > 500) {
-//             selectedChunks.push({
-//               ...chunk,
-//               content: chunk.content.substring(0, remainingSpace - 100) + "..."
-//             });
-//             currentContextLength += remainingSpace;
-//           }
-//           break;
+//         // Get all chunks for document context (will be used in extraction)
+//         const allChunksForExtraction = await FileChunkModel.getChunksByFileId(file_id);
+//         if (!allChunksForExtraction || allChunksForExtraction.length === 0) {
+//           return res.status(400).json({ error: 'No content found in document.' });
+//         }
+        
+//         const documentContextForExtraction = allChunksForExtraction
+//           .sort((a, b) => {
+//             if ((a.page_start || 0) !== (b.page_start || 0)) {
+//               return (a.page_start || 0) - (b.page_start || 0);
+//             }
+//             return (a.chunk_index || 0) - (b.chunk_index || 0);
+//           })
+//           .map((c, idx) => {
+//             let chunkHeader = `\n${'='.repeat(80)}\n`;
+//             chunkHeader += `SECTION ${idx + 1} of ${allChunksForExtraction.length}`;
+//             if (c.page_start) {
+//               chunkHeader += ` | Page ${c.page_start}`;
+//               if (c.page_end && c.page_end !== c.page_start) {
+//                 chunkHeader += `-${c.page_end}`;
+//               }
+//             }
+//             if (c.heading) {
+//               chunkHeader += `\nHeading: ${c.heading}`;
+//             }
+//             chunkHeader += `\n${'='.repeat(80)}\n\n`;
+//             return chunkHeader + (c.content || '');
+//           })
+//           .join('\n\n');
+        
+//         // Process secret prompt with templates
+//         templateProcessingResult = await processSecretPromptWithTemplates({
+//           secretPrompt: secretValue,
+//           inputTemplateId: input_template_id,
+//           outputTemplateId: output_template_id,
+//           fileId: file_id,
+//           sessionId: finalSessionId,
+//           userId: userId,
+//           documentContext: documentContextForExtraction,
+//           provider: provider
+//         });
+        
+//         console.log(`✅ [Secret Prompt] Template processing completed`);
+//         if (templateProcessingResult.storedInputTemplateId) {
+//           console.log(`   Stored input template ID: ${templateProcessingResult.storedInputTemplateId}`);
 //         }
 //       }
 
-//       const finalChunks = selectedChunks.length >= MIN_CHUNKS 
-//         ? selectedChunks 
-//         : chunksToConsider.slice(0, MIN_CHUNKS);
+//       // Continue with normal secret prompt flow if not using template extraction
+//       // If using template extraction, we'll use the result later
+//       templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
+//       if (!useTemplateExtraction && (input_template_id || output_template_id)) {
+//         console.log(`\n📄 [Secret Prompt] Fetching template files (fallback):`);
+//         templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
+//         if (templateData.hasTemplates) {
+//           secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
+//         }
+//       }
 
-//       console.log(`✅ Selected ${finalChunks.length} chunks for secret prompt | Context: ${currentContextLength} chars (~${Math.ceil(currentContextLength / CHARS_PER_TOKEN)} tokens)`);
+//       const secretQueryAnalysis = analyzeQueryIntent(secretValue);
+//       const useFullDocumentForSecret = secretQueryAnalysis.needsFullDocument;
 
-//       usedChunkIds = finalChunks.map((c) => c.chunk_id || c.id);
+//       console.log(`🔐 Secret prompt analysis mode: ${useFullDocumentForSecret ? 'FULL DOCUMENT' : 'TARGETED'}`);
+//       console.log(`🔐 Secret prompt strategy: ${secretQueryAnalysis.strategy} - ${secretQueryAnalysis.reason}`);
 
-//       // Build context with separators and metadata
-//       const docContent = finalChunks
+//       let rankedChunks;
+
+//       if (useFullDocumentForSecret) {
+//         console.log(`📚 Fetching ALL chunks for secret prompt comprehensive analysis...`);
+//         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+//         if (!allChunks || allChunks.length === 0) {
+//           return res.status(400).json({ error: 'No content found in document.' });
+//         }
+//         rankedChunks = allChunks
+//           .sort((a, b) => {
+//             if ((a.page_start || 0) !== (b.page_start || 0)) {
+//               return (a.page_start || 0) - (b.page_start || 0);
+//             }
+//             return (a.chunk_index || 0) - (b.chunk_index || 0);
+//           })
+//           .map(chunk => ({ 
+//             ...chunk, 
+//             similarity: 1.0, 
+//             chunk_id: chunk.id, 
+//             distance: 0 
+//           }));
+        
+//         console.log(`✅ Using all ${rankedChunks.length} chunks for secret prompt`);
+//       } else {
+//         console.log(`🔍 Performing semantic search for secret prompt...`);
+//         const secretEmbedding = await generateEmbedding(secretValue);
+//         rankedChunks = await ChunkVectorModel.findNearestChunks(
+//           secretEmbedding,
+//           MAX_CHUNKS,
+//           file_id
+//         );
+//       }
+
+//       if (!rankedChunks || rankedChunks.length === 0) {
+//         console.log('⚠️ No chunks retrieved for secret prompt, using all chunks as fallback');
+//         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+//         rankedChunks = allChunks.map(c => ({ 
+//           ...c, 
+//           similarity: 0.5, 
+//           chunk_id: c.id, 
+//           distance: 0.5 
+//         }));
+//       }
+
+//       let selectedChunks;
+
+//       if (useFullDocumentForSecret) {
+//         selectedChunks = rankedChunks;
+//         console.log(`📄 Using ALL ${selectedChunks.length} chunks for secret prompt comprehensive analysis`);
+//       } else {
+//         const highQualityChunks = rankedChunks
+//           .filter(chunk => {
+//             const similarity = chunk.similarity || chunk.distance || 0;
+//             const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
+//             return score >= SIMILARITY_THRESHOLD;
+//           })
+//           .sort((a, b) => {
+//             const scoreA = a.similarity > 1 ? (1 / (1 + a.similarity)) : a.similarity;
+//             const scoreB = b.similarity > 1 ? (1 / (1 + b.similarity)) : b.similarity;
+//             return scoreB - scoreA;
+//           });
+
+//         console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
+
+//         selectedChunks = [];
+//         let currentContextLength = 0;
+
+//         const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
+//           ? highQualityChunks 
+//           : rankedChunks;
+
+//         for (const chunk of chunksToConsider) {
+//           if (selectedChunks.length >= MAX_CHUNKS) break;
+          
+//           const chunkLength = chunk.content?.length || 0;
+//           if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
+//             selectedChunks.push(chunk);
+//             currentContextLength += chunkLength;
+//           } else if (selectedChunks.length < MIN_CHUNKS) {
+//             const remainingSpace = MAX_CONTEXT_CHARS - currentContextLength;
+//             if (remainingSpace > 500) {
+//               selectedChunks.push({
+//                 ...chunk,
+//                 content: chunk.content.substring(0, remainingSpace - 100) + "..."
+//               });
+//               currentContextLength += remainingSpace;
+//             }
+//             break;
+//           }
+//         }
+
+//         if (selectedChunks.length < MIN_CHUNKS && rankedChunks.length >= MIN_CHUNKS) {
+//           selectedChunks = rankedChunks.slice(0, MIN_CHUNKS);
+//         }
+//       }
+
+//       if (useFullDocumentForSecret) {
+//         selectedChunks.sort((a, b) => {
+//           if ((a.page_start || 0) !== (b.page_start || 0)) {
+//             return (a.page_start || 0) - (b.page_start || 0);
+//           }
+//           return (a.chunk_index || 0) - (b.chunk_index || 0);
+//         });
+//       }
+
+//       const totalContextLength = selectedChunks.reduce((sum, c) => sum + (c.content?.length || 0), 0);
+//       const estimatedTokens = Math.ceil(totalContextLength / CHARS_PER_TOKEN);
+
+//       console.log(`✅ Final selection for secret prompt: ${selectedChunks.length} chunks | ${totalContextLength} chars (~${estimatedTokens} tokens)`);
+
+//       usedChunkIds = selectedChunks.map((c) => c.chunk_id || c.id);
+
+//       const documentContext = selectedChunks
 //         .map((c, idx) => {
-//           const similarity = c.similarity || c.distance || 0;
-//           const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//           return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content}`;
+//           let chunkHeader = `\n${'='.repeat(80)}\n`;
+          
+//           if (useFullDocumentForSecret) {
+//             chunkHeader += `SECTION ${idx + 1} of ${selectedChunks.length}`;
+//             if (c.page_start) {
+//               chunkHeader += ` | Page ${c.page_start}`;
+//               if (c.page_end && c.page_end !== c.page_start) {
+//                 chunkHeader += `-${c.page_end}`;
+//               }
+//             }
+//             if (c.heading) {
+//               chunkHeader += `\nHeading: ${c.heading}`;
+//             }
+//           } else {
+//             const similarity = c.similarity || c.distance || 0;
+//             const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
+//             chunkHeader += `CHUNK ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}%`;
+//             if (c.page_start) {
+//               chunkHeader += ` | Page ${c.page_start}`;
+//             }
+//           }
+          
+//           chunkHeader += `\n${'='.repeat(80)}\n\n`;
+          
+//           return chunkHeader + (c.content || '');
 //         })
 //         .join('\n\n');
 
-//       finalPrompt = `You are an expert AI legal assistant using the ${provider.toUpperCase()} model.\n\n${secretValue}\n\n=== DOCUMENT TO ANALYZE ===\n${docContent}`;
+//       const inputTemplate = templateData?.inputTemplate || null;
+//       const outputTemplate = templateData?.outputTemplate || null;
       
-//       if (additional_input?.trim()) {
-//         const trimmedInput = additional_input.trim().substring(0, 500);
-//         finalPrompt += `\n\n=== ADDITIONAL USER INSTRUCTIONS ===\n${trimmedInput}`;
+//       // secretValue already contains enhanced prompt from buildEnhancedSystemPromptWithTemplates
+//       // Add JSON formatting instructions if output template exists
+//       let finalSecretPrompt = secretValue;
+//       if (outputTemplate && outputTemplate.extracted_text) {
+//         const jsonFormatting = addSecretPromptJsonFormatting('', inputTemplate, outputTemplate);
+//         if (jsonFormatting.trim()) {
+//           finalSecretPrompt += jsonFormatting;
+//         }
 //       }
+      
+//       adaptiveSystemContext = `
+// ═══════════════════════════════════════════════════════════════════════
+// SECRET PROMPT ANALYSIS MODE: ${useFullDocumentForSecret ? 'COMPREHENSIVE (Full Document)' : 'TARGETED (Relevant Sections)'}
+// ═══════════════════════════════════════════════════════════════════════
+
+// SECRET PROMPT INSTRUCTIONS:
+// ${finalSecretPrompt}
+
+// ${useFullDocumentForSecret ? `
+// 📚 FULL DOCUMENT ANALYSIS MODE ACTIVATED FOR SECRET PROMPT:
+
+// CRITICAL: You have been provided with the COMPLETE document content below.
+// You MUST:
+// - Analyze ALL sections comprehensively
+// - Extract EVERY relevant detail
+// - Follow the secret prompt instructions above for ALL sections of the document
+// - Extract complete timelines, all parties, all amounts, all legal provisions
+// ` : `
+// 🎯 TARGETED ANALYSIS MODE ACTIVATED FOR SECRET PROMPT:
+
+// CRITICAL: You have been provided with the MOST RELEVANT sections from the document.
+// You MUST:
+// - Focus on the specific question/task in the secret prompt
+// - Extract specific details from the provided sections
+// - If information seems incomplete, note that only relevant sections were provided
+// `}
+
+// ${additional_input?.trim() ? `\n=== ADDITIONAL USER INSTRUCTIONS ===\n${additional_input.trim().substring(0, 500)}` : ''}
+
+// ⚠️ STRICT COMPLIANCE: Follow ALL instructions above. The database system prompt takes precedence, but these secret prompt instructions are MANDATORY enhancements.
+// ═══════════════════════════════════════════════════════════════════════
+// `;
+
+//       finalPrompt = `Analyze the document according to the secret prompt instructions provided in the system context.
+
+// ${useFullDocumentForSecret ? 'COMPLETE DOCUMENT CONTENT:' : 'RELEVANT DOCUMENT SECTIONS:'}
+// ${documentContext}`;
 
 //       storedQuestion = secretName;
 //     } 
-//     // ================================
-//     // CUSTOM QUESTION HANDLING
-//     // ================================
 //     else {
 //       if (!question?.trim()) {
 //         return res.status(400).json({ error: 'question is required.' });
@@ -2512,7 +2516,6 @@ exports.getSummary = async (req, res) => {
 
 //       storedQuestion = question.trim();
 
-//       // Fetch LLM model from custom_query table
 //       let dbLlmName = null;
 //       const customQueryLlm = `
 //         SELECT cq.llm_name, cq.llm_model_id
@@ -2532,35 +2535,59 @@ exports.getSummary = async (req, res) => {
 //       provider = resolveProviderName(dbLlmName || "gemini");
 //       console.log(`🤖 Resolved LLM provider for custom query: ${provider}`);
       
-//       // Check if provider is available
 //       const availableProviders = getAvailableProviders();
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
 //         console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini`);
 //         provider = 'gemini';
 //       }
 
-//       // Vector search with similarity scoring
-//       const questionEmbedding = await generateEmbedding(storedQuestion);
-//       const rankedChunks = await ChunkVectorModel.findNearestChunks(
-//         questionEmbedding,
-//         MAX_CHUNKS,
-//         file_id
-//       );
+//       let rankedChunks;
+
+//       if (useFullDocument) {
+//         console.log(`📚 Fetching ALL chunks for comprehensive analysis...`);
+//         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+        
+//         if (!allChunks || allChunks.length === 0) {
+//           return res.status(400).json({ error: 'No content found in document.' });
+//         }
+        
+//         rankedChunks = allChunks
+//           .sort((a, b) => {
+//             if (a.page_start !== b.page_start) {
+//               return (a.page_start || 0) - (b.page_start || 0);
+//             }
+//             return (a.chunk_index || 0) - (b.chunk_index || 0);
+//           })
+//           .map(chunk => ({
+//             ...chunk,
+//             similarity: 1.0, // Mark as fully relevant
+//             chunk_id: chunk.id,
+//             distance: 0
+//           }));
+        
+//         console.log(`✅ Retrieved ${rankedChunks.length} chunks for full document analysis`);
+//       } else {
+//         console.log(`🔍 Performing semantic search for targeted query...`);
+//         const questionEmbedding = await generateEmbedding(storedQuestion);
+//         rankedChunks = await ChunkVectorModel.findNearestChunks(
+//           questionEmbedding,
+//           MAX_CHUNKS,
+//           file_id
+//         );
+//       }
 
 //       if (!rankedChunks || rankedChunks.length === 0) {
-//         // Fallback: use all chunks if no vector matches
-//         console.log('⚠️ No vector matches found, using all chunks as fallback');
+//         console.log('⚠️ No chunks retrieved, using all chunks as fallback');
 //         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
-//         const limitedChunks = allChunks.slice(0, MIN_CHUNKS);
-//         usedChunkIds = limitedChunks.map((c) => c.id);
-        
-//         const docContent = limitedChunks
-//           .map((c, idx) => `--- Chunk ${idx + 1} ---\n${c.content}`)
-//           .join('\n\n');
-        
-//         finalPrompt = `${storedQuestion}\n\n=== DOCUMENT CONTEXT ===\n${docContent}`;
+//         rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id, distance: 0.5 }));
+//       }
+
+//       let selectedChunks;
+
+//       if (useFullDocument) {
+//         selectedChunks = rankedChunks;
+//         console.log(`📄 Using ALL ${selectedChunks.length} chunks for comprehensive analysis`);
 //       } else {
-//         // Filter by similarity threshold
 //         const highQualityChunks = rankedChunks
 //           .filter(chunk => {
 //             const similarity = chunk.similarity || chunk.distance || 0;
@@ -2575,8 +2602,7 @@ exports.getSummary = async (req, res) => {
 
 //         console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
 
-//         // Select 5-10 best chunks within token budget
-//         let selectedChunks = [];
+//         selectedChunks = [];
 //         let currentContextLength = 0;
 
 //         const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
@@ -2603,33 +2629,253 @@ exports.getSummary = async (req, res) => {
 //           }
 //         }
 
-//         const finalChunks = selectedChunks.length >= MIN_CHUNKS 
-//           ? selectedChunks 
-//           : chunksToConsider.slice(0, MIN_CHUNKS);
+//         if (selectedChunks.length < MIN_CHUNKS && rankedChunks.length >= MIN_CHUNKS) {
+//           selectedChunks = rankedChunks.slice(0, MIN_CHUNKS);
+//         }
+//       }
 
-//         console.log(`✅ Selected ${finalChunks.length} chunks | Context: ${currentContextLength} chars (~${Math.ceil(currentContextLength / CHARS_PER_TOKEN)} tokens)`);
+//       const totalContextLength = selectedChunks.reduce((sum, c) => sum + (c.content?.length || 0), 0);
+//       const estimatedTokens = Math.ceil(totalContextLength / CHARS_PER_TOKEN);
 
-//         usedChunkIds = finalChunks.map((c) => c.chunk_id || c.id);
+//       console.log(`✅ Final selection: ${selectedChunks.length} chunks | ${totalContextLength} chars (~${estimatedTokens} tokens)`);
 
-//         // Build context with separators and metadata
-//         const relevantTexts = finalChunks
+//       if (useFullDocument) {
+//         selectedChunks.sort((a, b) => {
+//           if ((a.page_start || 0) !== (b.page_start || 0)) {
+//             return (a.page_start || 0) - (b.page_start || 0);
+//           }
+//           return (a.chunk_index || 0) - (b.chunk_index || 0);
+//         });
+//       }
+
+//       usedChunkIds = selectedChunks.map((c) => c.chunk_id || c.id);
+
+//       const documentContext = selectedChunks
+//         .map((c, idx) => {
+//           let chunkHeader = `\n${'='.repeat(80)}\n`;
+          
+//           if (useFullDocument) {
+//             chunkHeader += `SECTION ${idx + 1} of ${selectedChunks.length}`;
+//             if (c.page_start) {
+//               chunkHeader += ` | Page ${c.page_start}`;
+//               if (c.page_end && c.page_end !== c.page_start) {
+//                 chunkHeader += `-${c.page_end}`;
+//               }
+//             }
+//             if (c.heading) {
+//               chunkHeader += `\nHeading: ${c.heading}`;
+//             }
+//           } else {
+//             const similarity = c.similarity || c.distance || 0;
+//             const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
+//             chunkHeader += `CHUNK ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}%`;
+//             if (c.page_start) {
+//               chunkHeader += ` | Page ${c.page_start}`;
+//             }
+//           }
+          
+//           chunkHeader += `\n${'='.repeat(80)}\n\n`;
+          
+//           return chunkHeader + (c.content || '');
+//         })
+//         .join('\n\n');
+
+//       const adaptiveInstructions = `
+// ═══════════════════════════════════════════════════════════════════════
+// DOCUMENT ANALYSIS MODE: ${useFullDocument ? 'COMPREHENSIVE (Full Document)' : 'TARGETED (Relevant Sections)'}
+// ═══════════════════════════════════════════════════════════════════════
+
+// ${useFullDocument ? `
+// 📚 FULL DOCUMENT ANALYSIS MODE ACTIVATED:
+
+// You have been provided with the COMPLETE document content below.
+// You MUST:
+// - Analyze ALL sections comprehensively
+// - Extract EVERY relevant detail mentioned in the document
+// - Organize information logically with clear headings and structure
+// - Include ALL dates, amounts, names, references, and specific details
+// - Do NOT skip any important information
+// - Extract complete timelines, all parties, all amounts, all legal provisions
+// ` : `
+// 🎯 TARGETED ANALYSIS MODE ACTIVATED:
+
+// You have been provided with the MOST RELEVANT sections from the document.
+// You MUST:
+// - Focus on answering the specific question asked
+// - Extract specific details from the provided sections
+// - If information seems incomplete, note that only relevant sections were provided
+// `}
+
+// CRITICAL EXTRACTION REQUIREMENTS:
+
+// 1. Extract EXACT information - use direct quotes for:
+//    - Party names (full legal names)
+//    - Case numbers, document references
+//    - Dates (format: DD.MM.YYYY)
+//    - Monetary amounts (with currency)
+//    - Legal provisions, section numbers, clause references
+
+// 2. Structure your response with:
+//    - Clear section headings (use ## for main sections)
+//    - Bullet points for lists
+//    - Tables for comparative data (use markdown tables)
+//    - Chronological timelines for events
+//    - Numbered lists for legal grounds/arguments
+
+// 3. If information is NOT found, explicitly state "NOT MENTIONED IN DOCUMENT"
+
+// 4. Maintain document context:
+//    - Reference page numbers when citing information
+//    - Note which section information came from
+//    - Preserve relationships between facts
+
+// 5. Be comprehensive but organized:
+//    - Start with document identification (type, parties, date)
+//    - Then provide structured analysis
+//    - End with summary of key takeaways
+
+// ⚠️ STRICT COMPLIANCE: Follow ALL instructions above. The database system prompt takes precedence, but these adaptive instructions are MANDATORY enhancements for this query type.
+// ═══════════════════════════════════════════════════════════════════════
+// `;
+
+//       finalPrompt = `${storedQuestion}
+
+// ${useFullDocument ? 'COMPLETE DOCUMENT CONTENT:' : 'RELEVANT DOCUMENT SECTIONS:'}
+// ${documentContext}`;
+      
+//       const adaptiveSystemContext = adaptiveInstructions;
+//     }
+
+//     finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
+
+//     try {
+//       const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(storedQuestion);
+      
+//       console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion} for question: "${storedQuestion}"`);
+      
+//       let profileContext;
+//       if (isProfileQuestion) {
+//         console.log(`[chatWithDocument] Fetching detailed profile context for user ${userId}...`);
+//         profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
+//         if (!profileContext) {
+//           console.log(`[chatWithDocument] Detailed profile context not available, trying regular context...`);
+//           profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//         }
+//       } else {
+//         profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//       }
+      
+//       if (profileContext) {
+//         finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
+//         console.log(`[chatWithDocument] ✅ Added user professional profile context to prompt (detailed: ${isProfileQuestion}, length: ${profileContext.length} chars)`);
+//       } else {
+//         console.warn(`[chatWithDocument] ⚠️ No profile context available for user ${userId}`);
+//       }
+//     } catch (profileError) {
+//       console.error(`[chatWithDocument] ❌ Failed to fetch profile context:`, profileError.message);
+//       console.error(`[chatWithDocument] Error stack:`, profileError.stack);
+//     }
+
+//     const estimatedPromptTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
+//     const MODEL_CONTEXT_LIMITS = {
+//       'gemini': 1000000,      // Gemini 1.5 Pro has 1M context
+//       'gemini-pro-2.5': 2000000, // Gemini 2.5 Pro has 2M context
+//       'gemini-3-pro': 1000000,   // Gemini 3.0 Pro has 1M context
+//       'claude-sonnet-4': 200000, // Claude Sonnet 4 has 200K context
+//       'claude-opus-4-1': 200000, // Claude Opus 4.1 has 200K context
+//       'claude-sonnet-4-5': 200000, // Claude Sonnet 4.5 has 200K context
+//       'claude-haiku-4-5': 200000,  // Claude Haiku 4.5 has 200K context
+//       'claude': 200000,        // Claude has 200K context
+//       'anthropic': 200000,     // Anthropic has 200K context
+//       'gpt-4o': 128000,        // GPT-4 Turbo has 128K context
+//       'openai': 128000,        // OpenAI has 128K context
+//       'default': 8000
+//     };
+
+//     const modelLimit = MODEL_CONTEXT_LIMITS[provider] || MODEL_CONTEXT_LIMITS['default'];
+//     const safeLimit = Math.floor(modelLimit * 0.8); // Use 80% of limit for safety
+
+//     if (estimatedPromptTokens > safeLimit) {
+//       console.warn(`⚠️ Prompt is ${estimatedPromptTokens} tokens, which exceeds safe limit ${safeLimit} for ${provider}`);
+      
+//       if (useFullDocument && !used_secret_prompt) {
+//         console.log(`⚠️ Falling back to targeted mode due to context size`);
+//         useFullDocument = false;
+        
+//         const questionEmbedding = await generateEmbedding(storedQuestion);
+//         const fallbackRankedChunks = await ChunkVectorModel.findNearestChunks(
+//           questionEmbedding,
+//           10,
+//           file_id
+//         );
+        
+//         const fallbackSelectedChunks = fallbackRankedChunks.slice(0, 10);
+//         usedChunkIds = fallbackSelectedChunks.map(c => c.chunk_id || c.id);
+        
+//         const fallbackDocumentContext = fallbackSelectedChunks
 //           .map((c, idx) => {
 //             const similarity = c.similarity || c.distance || 0;
 //             const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-//             return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content}`;
+//             return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content || ''}`;
 //           })
 //           .join('\n\n');
-
-//         finalPrompt = `${storedQuestion}\n\n=== RELEVANT CONTEXT ===\n${relevantTexts}`;
+        
+//         finalPrompt = `${storedQuestion}\n\n=== RELEVANT CONTEXT ===\n${fallbackDocumentContext}`;
+        
+//         finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
+        
+//         try {
+//           const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(storedQuestion);
+//           let profileContext;
+//           if (isProfileQuestion) {
+//             profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
+//             if (!profileContext) {
+//               profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//             }
+//           } else {
+//             profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//           }
+          
+//           if (profileContext) {
+//             finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
+//           }
+//         } catch (profileError) {
+//           console.warn(`⚠️ Failed to re-add profile context in fallback mode`);
+//         }
+        
+//         const newEstimatedTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
+//         console.log(`✅ Fallback prompt: ${newEstimatedTokens} tokens (${((newEstimatedTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
+//       } else {
+//         console.log(`⚠️ Truncating prompt to fit within model limits`);
+//         const maxChars = safeLimit * CHARS_PER_TOKEN;
+//         if (finalPrompt.length > maxChars) {
+//           finalPrompt = finalPrompt.substring(0, maxChars - 200) + '\n\n[Content truncated due to context size limits...]';
+//           const truncatedTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
+//           console.log(`✅ Truncated prompt: ${truncatedTokens} tokens (${((truncatedTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
+//         }
 //       }
+//     } else {
+//       console.log(`📝 Final prompt: ${estimatedPromptTokens} tokens (${((estimatedPromptTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
 //     }
 
-//     // ✅ CRITICAL: Append conversation history to the prompt
-//     finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
-
-//     // ---------- CALL LLM ----------
-//     console.log(`[chatWithDocument] Calling LLM provider: ${provider} | Chunks used: ${usedChunkIds.length}`);
-//     const answer = await askLLM(provider, finalPrompt, '');
+//     // NEW: If template processing was done, use that result directly
+//     let answer;
+//     if (used_secret_prompt && typeof templateProcessingResult !== 'undefined' && templateProcessingResult && templateProcessingResult.response) {
+//       console.log(`[chatWithDocument] Using template-processed response from secretTemplateExtractionService`);
+//       answer = templateProcessingResult.response;
+//     } else {
+//       console.log(`[chatWithDocument] Calling LLM provider: ${provider} | Chunks used: ${usedChunkIds.length}`);
+//       if (adaptiveSystemContext) {
+//         console.log(`[chatWithDocument] ✅ Passing adaptive system context (${adaptiveSystemContext.length} chars) to be combined with database system prompt`);
+//       }
+//       answer = await askLLM(provider, finalPrompt, adaptiveSystemContext || '', '', storedQuestion);
+      
+//       if (used_secret_prompt && templateData?.outputTemplate) {
+//         answer = postProcessSecretPromptResponse(answer, templateData.outputTemplate);
+//       } else {
+//         answer = ensurePlainTextAnswer(answer);
+//       }
+//     }
 
 //     if (!answer?.trim()) {
 //       return res.status(500).json({ error: 'Empty response from AI.' });
@@ -2637,7 +2883,6 @@ exports.getSummary = async (req, res) => {
 
 //     console.log(`[chatWithDocument] Received answer, length: ${answer.length} characters`);
 
-//     // ---------- SAVE CHAT ----------
 //     const savedChat = await FileChat.saveChat(
 //       file_id,
 //       userId,
@@ -2653,7 +2898,6 @@ exports.getSummary = async (req, res) => {
 
 //     console.log(`[chatWithDocument] Chat saved with ID: ${savedChat.id} | Chunks used: ${usedChunkIds.length}`);
 
-//     // ---------- TOKEN USAGE ----------
 //     try {
 //       const { userUsage, userPlan, requestedResources } = req;
 //       await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
@@ -2661,7 +2905,6 @@ exports.getSummary = async (req, res) => {
 //       console.warn('Token usage increment failed:', e.message);
 //     }
 
-//     // ---------- FETCH HISTORY ----------
 //     const historyRows = await FileChat.getChatHistory(file_id, savedChat.session_id);
 //     const history = historyRows.map((row) => ({
 //       id: row.id,
@@ -2681,7 +2924,6 @@ exports.getSummary = async (req, res) => {
 //         : row.question,
 //     }));
 
-//     // ---------- RETURN COMPLETE RESPONSE ----------
 //     return res.status(200).json({
 //       success: true,
 //       session_id: savedChat.session_id,
@@ -2706,67 +2948,8 @@ exports.getSummary = async (req, res) => {
 //     });
 //   }
 // };
-
-/**
- * Analyzes user query to determine if it needs full document or targeted search
- * @param {string} question - The user's question/query
- * @returns {Object} Analysis result with strategy, threshold, and reason
- */
-function analyzeQueryIntent(question) {
-  if (!question || typeof question !== 'string') {
-    return {
-      needsFullDocument: false,
-      threshold: 0.75,
-      strategy: 'TARGETED_RAG',
-      reason: 'Invalid query - defaulting to targeted search'
-    };
-  }
-
-  const queryLower = question.toLowerCase();
-  
-  // Keywords that indicate need for FULL DOCUMENT analysis
-  const fullDocumentKeywords = [
-    'summary', 'summarize', 'overview', 'complete', 'entire', 'all',
-    'comprehensive', 'detailed analysis', 'full details', 'everything',
-    'list all', 'what are all', 'give me all', 'extract all',
-    'analyze', 'review', 'examine', 'timeline', 'chronology',
-    'what is this document', 'what does this document', 'document about',
-    'key points', 'main points', 'important information',
-    'case details', 'petition details', 'contract terms',
-    'parties involved', 'background', 'history'
-  ];
-  
-  // Keywords that indicate TARGETED search is okay
-  const targetedKeywords = [
-    'specific section', 'find where', 'locate', 'search for',
-    'what does it say about', 'mention of', 'reference to',
-    'clause', 'paragraph', 'page', 'section'
-  ];
-  
-  // Check for full document indicators
-  const needsFullDoc = fullDocumentKeywords.some(keyword => 
-    queryLower.includes(keyword)
-  );
-  
-  // Check for targeted search indicators
-  const isTargeted = targetedKeywords.some(keyword => 
-    queryLower.includes(keyword)
-  );
-  
-  // Special handling for short questions (usually broad)
-  const isShortQuestion = question.trim().split(' ').length <= 5;
-  
-  // Questions asking "what/who/when/where/why/how" with no specific target
-  const isBroadQuestion = /^(what|who|when|where|why|how)\s/i.test(queryLower) && 
-                          !isTargeted;
-  
-  return {
-    needsFullDocument: needsFullDoc || (isBroadQuestion && !isTargeted) || isShortQuestion,
-    threshold: needsFullDoc ? 0.0 : (isTargeted ? 0.80 : 0.75),
-    strategy: needsFullDoc ? 'FULL_DOCUMENT' : 'TARGETED_RAG',
-    reason: needsFullDoc ? 'Query requires comprehensive analysis' : 'Query is specific/targeted'
-  };
-}
+// CORRECTED chatWithDocument function
+// This version properly integrates template extraction and removes manual prompt building
 
 exports.chatWithDocument = async (req, res) => {
   let userId = null;
@@ -2781,37 +2964,35 @@ exports.chatWithDocument = async (req, res) => {
       secret_id,
       llm_name,
       additional_input = '',
+      input_template_id = null,
+      output_template_id = null,
     } = req.body;
 
     userId = req.user.id;
 
-    // ---------- VALIDATION ----------
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const hasFileId = Boolean(file_id);
     
-    // Only validate file_id format if it's provided
     if (hasFileId && !uuidRegex.test(file_id)) {
       return res.status(400).json({ error: 'Invalid file ID format.' });
     }
 
-    // Generate or validate session_id
     const hasExistingSession = session_id && uuidRegex.test(session_id);
     const finalSessionId = hasExistingSession ? session_id : uuidv4();
 
     console.log(
-      `[chatWithDocument] started: used_secret_prompt=${used_secret_prompt}, secret_id=${secret_id}, llm_name=${llm_name}, session_id=${finalSessionId}, has_file=${hasFileId}`
+      `[chatWithDocument] started: used_secret_prompt=${used_secret_prompt}, secret_id=${secret_id}, session_id=${finalSessionId}, has_file=${hasFileId}`
     );
 
-    // Load existing session history (works for both file-based and file-less sessions)
     const sessionHistory = hasExistingSession
       ? await FileChat.getChatHistoryBySession(userId, finalSessionId)
       : [];
 
     console.log(`[chatWithDocument] Loaded ${sessionHistory.length} previous messages from session`);
 
-    // ================================
-    // CASE 1: NO DOCUMENT YET (PRE-UPLOAD CHAT)
-    // ================================
+    // ==================================================================================
+    // PRE-UPLOAD MODE (No document yet - just conversation)
+    // ==================================================================================
     if (!hasFileId) {
       if (!question?.trim()) {
         return res.status(400).json({ error: 'question is required when no document is provided.' });
@@ -2819,10 +3000,8 @@ exports.chatWithDocument = async (req, res) => {
 
       console.log(`[chatWithDocument] Pre-upload mode - chatting without document`);
 
-      // For pre-upload chats, use llm_name from request OR fetch from custom_query table
-      let dbLlmName = llm_name; // Use the one from request first
+      let dbLlmName = llm_name;
       
-      // If no llm_name in request, fetch from custom_query table
       if (!dbLlmName) {
         const customQueryLlm = `
           SELECT cq.llm_name, cq.llm_model_id
@@ -2849,74 +3028,58 @@ exports.chatWithDocument = async (req, res) => {
         provider = 'gemini';
       }
 
-      // Build prompt with conversation history
       const userPrompt = question.trim();
       const conversationContext = formatConversationHistory(sessionHistory);
       let finalPrompt = appendConversationToPrompt(userPrompt, conversationContext);
 
-      // ✅ CRITICAL: Append user professional profile context to the prompt
       try {
-        // Check if user is asking about their profile
         const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
         
-        console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion} for question: "${userPrompt}"`);
+        console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion}`);
         
         let profileContext;
         if (isProfileQuestion) {
-          // For profile questions, get detailed profile information
-          console.log(`[chatWithDocument] Fetching detailed profile context for user ${userId}...`);
           profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
           if (!profileContext) {
-            console.log(`[chatWithDocument] Detailed profile context not available, trying regular context...`);
-            // Fallback to regular context if detailed not available
             profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
           }
         } else {
-          // For regular questions, use standard context
           profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
         }
         
         if (profileContext) {
-          // Prepend profile context BEFORE the user question so AI sees it first
           finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
-          console.log(`[chatWithDocument] ✅ Added user professional profile context to pre-upload prompt (detailed: ${isProfileQuestion}, length: ${profileContext.length} chars)`);
-        } else {
-          console.warn(`[chatWithDocument] ⚠️ No profile context available for user ${userId}`);
+          console.log(`[chatWithDocument] ✅ Added profile context (${profileContext.length} chars)`);
         }
       } catch (profileError) {
         console.error(`[chatWithDocument] ❌ Failed to fetch profile context:`, profileError.message);
-        console.error(`[chatWithDocument] Error stack:`, profileError.stack);
-        // Continue without profile context - don't fail the request
       }
 
-      console.log(`[chatWithDocument] Pre-upload conversation | Provider: ${provider} | Session: ${finalSessionId}`);
-      console.log(`[chatWithDocument] Prompt length: ${finalPrompt.length} chars | History turns: ${sessionHistory.length}`);
-      
-      // Get AI response - pass original question for web search
-      let answer = await askLLM(provider, finalPrompt, '', '', userPrompt); // Pass original question for web search
+      let answer = await askLLM(provider, finalPrompt, '', '', userPrompt, {
+        userId: userId,
+        endpoint: '/api/doc/chat',
+        fileId: null,
+        sessionId: finalSessionId
+      });
       answer = ensurePlainTextAnswer(answer);
 
       if (!answer?.trim()) {
         return res.status(500).json({ error: 'Empty response from AI.' });
       }
 
-      console.log(`✅ [chatWithDocument] Received answer: ${answer.length} chars`);
-
-      // Save chat without file_id
       const savedChat = await FileChat.saveChat(
-        null,              // No file_id for pre-upload chat
+        null,
         userId,
         userPrompt,
         answer,
         finalSessionId,
-        [],                // No chunks used
-        false,             // Not a secret prompt
-        null,              // No prompt label
-        null,              // No secret_id
-        simplifyHistory(sessionHistory)  // Store conversation context
+        [],
+        false,
+        null,
+        null,
+        simplifyHistory(sessionHistory)
       );
 
-      // Fetch updated history
       const updatedHistoryRows = await FileChat.getChatHistoryBySession(userId, finalSessionId);
       const history = updatedHistoryRows.map((row) => ({
         id: row.id,
@@ -2935,12 +3098,11 @@ exports.chatWithDocument = async (req, res) => {
           : row.question,
       }));
 
-      // Increment usage
       try {
         const { userUsage, userPlan, requestedResources } = req;
         await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
       } catch (e) {
-        console.warn('Token usage increment failed for pre-upload chat:', e.message);
+        console.warn('Token usage increment failed:', e.message);
       }
 
       return res.status(200).json({
@@ -2956,17 +3118,15 @@ exports.chatWithDocument = async (req, res) => {
         timestamp: savedChat.created_at || new Date().toISOString(),
         llm_provider: provider,
         used_secret_prompt: false,
-        mode: 'pre_document',  // Indicates this is a pre-upload conversation
+        mode: 'pre_document',
       });
     }
 
-    // ================================
-    // CASE 2: DOCUMENT PROVIDED (POST-UPLOAD CHAT)
-    // ================================
-    
-    console.log(`[chatWithDocument] Post-upload mode - chatting with document ${file_id}`);
+    // ==================================================================================
+    // POST-UPLOAD MODE (Document analysis with secret prompts and templates)
+    // ==================================================================================
+    console.log(`[chatWithDocument] Post-upload mode - document ${file_id}`);
 
-    // ---------- FILE ACCESS ----------
     const file = await DocumentModel.getFileById(file_id);
     if (!file) return res.status(404).json({ error: 'File not found.' });
     if (String(file.user_id) !== String(userId)) {
@@ -2980,7 +3140,7 @@ exports.chatWithDocument = async (req, res) => {
       });
     }
 
-    // Link pre-upload chats to this file if they exist
+    // Link pre-upload chats to this file
     if (sessionHistory.length > 0) {
       const hasUnassignedChats = sessionHistory.some((chat) => !chat.file_id);
       if (hasUnassignedChats) {
@@ -2989,88 +3149,36 @@ exports.chatWithDocument = async (req, res) => {
       }
     }
 
-    // Load previous chats for this file + session
     let previousChats = [];
     if (hasExistingSession) {
       previousChats = await FileChat.getChatHistory(file_id, finalSessionId);
     }
 
-    // Build conversation context from ALL chats (pre-upload + post-upload)
     const conversationContext = formatConversationHistory(previousChats);
     const historyForStorage = simplifyHistory(previousChats);
-    
-    if (historyForStorage.length > 0) {
-      const lastTurn = historyForStorage[historyForStorage.length - 1];
-      console.log(
-        `[chatWithDocument] Using ${historyForStorage.length} prior turn(s) for context. Most recent: Q="${(lastTurn.question || '').slice(0, 120)}", A="${(lastTurn.answer || '').slice(0, 120)}"`
-      );
-    } else {
-      console.log('[chatWithDocument] No prior context for this session.');
-    }
 
-    // ✅ ADAPTIVE RAG CONFIGURATION - Detects query type and adjusts strategy
-    // For custom questions, analyze the query intent
-    // For secret prompts, we'll analyze later in the secret prompt section
-    const questionToAnalyze = question?.trim() || '';
-    const queryAnalysis = analyzeQueryIntent(questionToAnalyze);
-
-    let SIMILARITY_THRESHOLD, MIN_CHUNKS, MAX_CHUNKS, MAX_CONTEXT_TOKENS, useFullDocument;
-
-    if (queryAnalysis.needsFullDocument && !used_secret_prompt) {
-      // COMPREHENSIVE ANALYSIS MODE - Use entire document
-      console.log(`🔍 Query requires full document analysis: "${questionToAnalyze.substring(0, 100)}..."`);
-      useFullDocument = true;
-      MIN_CHUNKS = 999999; // Force all chunks
-      MAX_CHUNKS = 999999;
-      MAX_CONTEXT_TOKENS = 25000; // ~100K tokens context (adjust based on your LLM)
-      SIMILARITY_THRESHOLD = 0.0; // Accept all chunks
-    } else {
-      // TARGETED SEARCH MODE - Use semantic search
-      console.log(`🎯 Query is targeted, using RAG with threshold ${queryAnalysis.threshold}`);
-      useFullDocument = false;
-      SIMILARITY_THRESHOLD = queryAnalysis.threshold;
-      MIN_CHUNKS = 5;
-      MAX_CHUNKS = 10;
-      MAX_CONTEXT_TOKENS = 4000;
-    }
-
-    const CHARS_PER_TOKEN = 4;
-    const MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
-
-    // Log query analysis results
-    console.log(`
-╔════════════════════════════════════════════════════════════════════
-║ 📊 QUERY ANALYSIS RESULTS
-╠════════════════════════════════════════════════════════════════════
-║ Query: "${questionToAnalyze.substring(0, 100)}${questionToAnalyze.length > 100 ? '...' : ''}"
-║ Strategy: ${queryAnalysis.strategy}
-║ Reason: ${queryAnalysis.reason}
-║ Full Document Mode: ${useFullDocument ? '✅ YES' : '❌ NO'}
-║ Similarity Threshold: ${SIMILARITY_THRESHOLD}
-║ Max Chunks: ${MAX_CHUNKS === 999999 ? 'ALL' : MAX_CHUNKS}
-║ Max Context Tokens: ${MAX_CONTEXT_TOKENS}
-╚════════════════════════════════════════════════════════════════════
-`);
-
-    // ---------- PROMPT BUILDING ----------
     let usedChunkIds = [];
     let storedQuestion = null;
     let finalPromptLabel = prompt_label;
     let provider = 'gemini';
-    let finalPrompt = '';
-    let adaptiveSystemContext = ''; // Will store adaptive instructions to be combined with database system prompt
-    let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false }; // Initialize templateData for use later
+    let answer = '';
 
-    // ================================
-    // SECRET PROMPT HANDLING
-    // ================================
+    // ==================================================================================
+    // SECRET PROMPT WITH TEMPLATES - USE TEMPLATE EXTRACTION SERVICE
+    // ==================================================================================
     if (used_secret_prompt) {
       if (!secret_id) {
         return res.status(400).json({ error: 'secret_id required for secret prompt.' });
       }
 
-      // Fetch secret metadata including template IDs
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`🔐 SECRET PROMPT MODE ACTIVATED`);
+      console.log(`${'='.repeat(80)}\n`);
+
+      // Fetch secret configuration with template IDs
+      const { fetchSecretManagerWithTemplates } = require('../services/secretPromptTemplateService');
       const secretData = await fetchSecretManagerWithTemplates(secret_id);
+      
       if (!secretData) {
         return res.status(404).json({ error: 'Secret configuration not found.' });
       }
@@ -3080,261 +3188,215 @@ exports.chatWithDocument = async (req, res) => {
         secret_manager_id, 
         version, 
         llm_name: dbLlmName,
-        input_template_id,
-        output_template_id
+        input_template_id: dbInputTemplateId,
+        output_template_id: dbOutputTemplateId
       } = secretData;
+
+      // Use template IDs from database, fallback to request body
+      const finalInputTemplateId = dbInputTemplateId || input_template_id;
+      const finalOutputTemplateId = dbOutputTemplateId || output_template_id;
+
+      console.log(`📋 Secret: ${secretName}`);
+      console.log(`   Input Template ID: ${finalInputTemplateId || 'none'}`);
+      console.log(`   Output Template ID: ${finalOutputTemplateId || 'none'}`);
+
       finalPromptLabel = secretName;
       provider = resolveProviderName(llm_name || dbLlmName || 'gemini');
 
+      const availableProviders = getAvailableProviders();
+      if (!availableProviders[provider] || !availableProviders[provider].available) {
+        console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini`);
+        provider = 'gemini';
+      }
+
+      console.log(`🤖 LLM Provider: ${provider}`);
+
+      // Fetch secret prompt from GCP
       const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
       const client = new SecretManagerServiceClient();
       const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
       const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
+      
+      console.log(`🔐 Fetching secret from GCP...`);
       const [accessResponse] = await client.accessSecretVersion({ name: gcpSecretName });
-      let secretValue = accessResponse.payload.data.toString('utf8');
-
-      // ✅ Fetch template files and their extracted data
-      // templateData is already declared above, just update it here
-      templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
-      if (input_template_id || output_template_id) {
-        console.log(`\n📄 [Secret Prompt] Fetching template files:`);
-        console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
-        console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
-        
-        templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
-        
-        if (templateData.hasTemplates) {
-          console.log(`✅ [Secret Prompt] Template files fetched successfully`);
-          if (templateData.inputTemplate) {
-            console.log(`   Input: ${templateData.inputTemplate.filename} (${templateData.inputTemplate.extracted_text?.length || 0} chars)`);
-          }
-          if (templateData.outputTemplate) {
-            console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
-          }
-          
-          // Build enhanced prompt with template examples
-          secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
-          console.log(`✅ [Secret Prompt] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
-        } else {
-          console.log(`⚠️ [Secret Prompt] No template files found or available\n`);
-        }
+      const secretValue = accessResponse.payload.data.toString('utf8');
+      
+      if (!secretValue?.trim()) {
+        return res.status(500).json({ error: '❌ Secret value is empty in GCP.' });
       }
 
-      // ✅ ADD: Analyze if secret prompt needs full document
-      const secretQueryAnalysis = analyzeQueryIntent(secretValue);
-      const useFullDocumentForSecret = secretQueryAnalysis.needsFullDocument;
+      console.log(`✅ Secret fetched: ${secretValue.length} chars`);
 
-      console.log(`🔐 Secret prompt analysis mode: ${useFullDocumentForSecret ? 'FULL DOCUMENT' : 'TARGETED'}`);
-      console.log(`🔐 Secret prompt strategy: ${secretQueryAnalysis.strategy} - ${secretQueryAnalysis.reason}`);
+      // ==================================================================================
+      // CRITICAL: USE TEMPLATE EXTRACTION SERVICE IF TEMPLATES ARE CONFIGURED
+      // ==================================================================================
+      if (finalInputTemplateId || finalOutputTemplateId) {
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`📄 TEMPLATE EXTRACTION MODE`);
+        console.log(`${'='.repeat(80)}\n`);
 
-      let rankedChunks;
-
-      if (useFullDocumentForSecret) {
-        // GET ALL CHUNKS for secret prompt
-        console.log(`📚 Fetching ALL chunks for secret prompt comprehensive analysis...`);
+        // Get ALL chunks for document context
         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
         if (!allChunks || allChunks.length === 0) {
           return res.status(400).json({ error: 'No content found in document.' });
         }
-        rankedChunks = allChunks
-          .sort((a, b) => {
-            if ((a.page_start || 0) !== (b.page_start || 0)) {
-              return (a.page_start || 0) - (b.page_start || 0);
-            }
-            return (a.chunk_index || 0) - (b.chunk_index || 0);
-          })
-          .map(chunk => ({ 
-            ...chunk, 
-            similarity: 1.0, 
-            chunk_id: chunk.id, 
-            distance: 0 
-          }));
-        
-        console.log(`✅ Using all ${rankedChunks.length} chunks for secret prompt`);
-      } else {
-        // USE EMBEDDING SEARCH - Original logic
-        console.log(`🔍 Performing semantic search for secret prompt...`);
-        const secretEmbedding = await generateEmbedding(secretValue);
-        rankedChunks = await ChunkVectorModel.findNearestChunks(
-          secretEmbedding,
-          MAX_CHUNKS,
-          file_id
-        );
-      }
 
-      if (!rankedChunks || rankedChunks.length === 0) {
-        // Fallback: use all chunks if no vector matches
-        console.log('⚠️ No chunks retrieved for secret prompt, using all chunks as fallback');
-        const allChunks = await FileChunkModel.getChunksByFileId(file_id);
-        rankedChunks = allChunks.map(c => ({ 
-          ...c, 
-          similarity: 0.5, 
-          chunk_id: c.id, 
-          distance: 0.5 
-        }));
-      }
-
-      // ADAPTIVE FILTERING for secret prompts
-      let selectedChunks;
-
-      if (useFullDocumentForSecret) {
-        // USE ALL CHUNKS - No filtering
-        selectedChunks = rankedChunks;
-        console.log(`📄 Using ALL ${selectedChunks.length} chunks for secret prompt comprehensive analysis`);
-      } else {
-        // APPLY SIMILARITY FILTERING
-        const highQualityChunks = rankedChunks
-          .filter(chunk => {
-            const similarity = chunk.similarity || chunk.distance || 0;
-            const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-            return score >= SIMILARITY_THRESHOLD;
-          })
-          .sort((a, b) => {
-            const scoreA = a.similarity > 1 ? (1 / (1 + a.similarity)) : a.similarity;
-            const scoreB = b.similarity > 1 ? (1 / (1 + b.similarity)) : b.similarity;
-            return scoreB - scoreA;
-          });
-
-        console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
-
-        // Select chunks within token budget
-        selectedChunks = [];
-        let currentContextLength = 0;
-
-        const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
-          ? highQualityChunks 
-          : rankedChunks;
-
-        for (const chunk of chunksToConsider) {
-          if (selectedChunks.length >= MAX_CHUNKS) break;
-          
-          const chunkLength = chunk.content?.length || 0;
-          if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
-            selectedChunks.push(chunk);
-            currentContextLength += chunkLength;
-          } else if (selectedChunks.length < MIN_CHUNKS) {
-            const remainingSpace = MAX_CONTEXT_CHARS - currentContextLength;
-            if (remainingSpace > 500) {
-              selectedChunks.push({
-                ...chunk,
-                content: chunk.content.substring(0, remainingSpace - 100) + "..."
-              });
-              currentContextLength += remainingSpace;
-            }
-            break;
-          }
-        }
-
-        // Ensure minimum chunks
-        if (selectedChunks.length < MIN_CHUNKS && rankedChunks.length >= MIN_CHUNKS) {
-          selectedChunks = rankedChunks.slice(0, MIN_CHUNKS);
-        }
-      }
-
-      // Ensure chunks are in document order for full document mode
-      if (useFullDocumentForSecret) {
-        selectedChunks.sort((a, b) => {
+        // Sort chunks by page and position for proper document order
+        const sortedChunks = allChunks.sort((a, b) => {
           if ((a.page_start || 0) !== (b.page_start || 0)) {
             return (a.page_start || 0) - (b.page_start || 0);
           }
           return (a.chunk_index || 0) - (b.chunk_index || 0);
         });
-      }
 
-      const totalContextLength = selectedChunks.reduce((sum, c) => sum + (c.content?.length || 0), 0);
-      const estimatedTokens = Math.ceil(totalContextLength / CHARS_PER_TOKEN);
-
-      console.log(`✅ Final selection for secret prompt: ${selectedChunks.length} chunks | ${totalContextLength} chars (~${estimatedTokens} tokens)`);
-
-      usedChunkIds = selectedChunks.map((c) => c.chunk_id || c.id);
-
-      // Build comprehensive context for secret prompts
-      const documentContext = selectedChunks
-        .map((c, idx) => {
-          let chunkHeader = `\n${'='.repeat(80)}\n`;
-          
-          if (useFullDocumentForSecret) {
-            chunkHeader += `SECTION ${idx + 1} of ${selectedChunks.length}`;
+        // Build complete document context with proper formatting
+        const documentContext = sortedChunks
+          .map((c, idx) => {
+            let header = `\n${'='.repeat(80)}\n`;
+            header += `SECTION ${idx + 1} of ${sortedChunks.length}`;
             if (c.page_start) {
-              chunkHeader += ` | Page ${c.page_start}`;
+              header += ` | Page ${c.page_start}`;
               if (c.page_end && c.page_end !== c.page_start) {
-                chunkHeader += `-${c.page_end}`;
+                header += `-${c.page_end}`;
               }
             }
             if (c.heading) {
-              chunkHeader += `\nHeading: ${c.heading}`;
+              header += `\nHeading: ${c.heading}`;
             }
-          } else {
-            const similarity = c.similarity || c.distance || 0;
-            const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-            chunkHeader += `CHUNK ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}%`;
-            if (c.page_start) {
-              chunkHeader += ` | Page ${c.page_start}`;
-            }
+            header += `\n${'='.repeat(80)}\n\n`;
+            return header + (c.content || '');
+          })
+          .join('\n\n');
+
+        console.log(`📄 Document context prepared: ${documentContext.length} chars from ${sortedChunks.length} chunks`);
+
+        // ==================================================================================
+        // CALL TEMPLATE EXTRACTION SERVICE
+        // ==================================================================================
+        console.log(`\n🚀 Calling processSecretPromptWithTemplates...`);
+        
+        const { processSecretPromptWithTemplates } = require('../services/secretTemplateExtractionService');
+        
+        const templateResult = await processSecretPromptWithTemplates({
+          secretPrompt: secretValue,
+          inputTemplateId: finalInputTemplateId,
+          outputTemplateId: finalOutputTemplateId,
+          fileId: file_id,
+          sessionId: finalSessionId,
+          userId: userId,
+          documentContext: documentContext,
+          provider: provider
+        });
+
+        if (!templateResult || !templateResult.success) {
+          throw new Error('Template extraction failed');
+        }
+
+        console.log(`✅ Template extraction completed successfully`);
+        console.log(`   Response length: ${templateResult.response?.length || 0} chars`);
+        if (templateResult.extractionId) {
+          console.log(`   Extraction ID: ${templateResult.extractionId}`);
+        }
+
+        // Use the template-processed response directly
+        answer = templateResult.response;
+        storedQuestion = secretName;
+        usedChunkIds = sortedChunks.map(c => c.id);
+
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`✅ TEMPLATE EXTRACTION COMPLETE`);
+        console.log(`${'='.repeat(80)}\n`);
+
+      } else {
+        // ==================================================================================
+        // FALLBACK: SECRET PROMPT WITHOUT TEMPLATES (Standard RAG)
+        // ==================================================================================
+        console.log(`\n⚠️ No templates configured - using standard RAG mode`);
+
+        const questionToAnalyze = secretValue;
+        const queryAnalysis = analyzeQueryIntent(questionToAnalyze);
+        const useFullDocument = queryAnalysis.needsFullDocument;
+
+        console.log(`📊 Query analysis: ${queryAnalysis.strategy} - ${queryAnalysis.reason}`);
+        console.log(`📚 Full document mode: ${useFullDocument ? 'YES' : 'NO'}`);
+
+        let rankedChunks;
+
+        if (useFullDocument) {
+          const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+          rankedChunks = allChunks
+            .sort((a, b) => {
+              if ((a.page_start || 0) !== (b.page_start || 0)) {
+                return (a.page_start || 0) - (b.page_start || 0);
+              }
+              return (a.chunk_index || 0) - (b.chunk_index || 0);
+            })
+            .map(chunk => ({ ...chunk, similarity: 1.0, chunk_id: chunk.id }));
+        } else {
+          const secretEmbedding = await generateEmbedding(secretValue);
+          rankedChunks = await ChunkVectorModel.findNearestChunks(
+            secretEmbedding,
+            10,
+            file_id
+          );
+        }
+
+        if (!rankedChunks || rankedChunks.length === 0) {
+          const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+          rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id }));
+        }
+
+        usedChunkIds = rankedChunks.map(c => c.chunk_id || c.id);
+
+        const documentContext = rankedChunks
+          .map((c, idx) => {
+            let header = `\n${'='.repeat(80)}\nSECTION ${idx + 1}`;
+            if (c.page_start) header += ` | Page ${c.page_start}`;
+            header += `\n${'='.repeat(80)}\n\n`;
+            return header + (c.content || '');
+          })
+          .join('\n\n');
+
+        let finalPrompt = `${secretValue}\n\n=== DOCUMENT TO ANALYZE ===\n${documentContext}`;
+        
+        if (additional_input?.trim()) {
+          finalPrompt += `\n\n=== ADDITIONAL INSTRUCTIONS ===\n${additional_input.trim()}`;
+        }
+
+        finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
+
+        // Add profile context if available
+        try {
+          const profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+          if (profileContext) {
+            finalPrompt = `${profileContext}\n\n---\n\n${finalPrompt}`;
           }
-          
-          chunkHeader += `\n${'='.repeat(80)}\n\n`;
-          
-          return chunkHeader + (c.content || '');
-        })
-        .join('\n\n');
+        } catch (profileError) {
+          console.warn(`⚠️ Failed to fetch profile context:`, profileError.message);
+        }
 
-      // Build adaptive system instructions for secret prompts
-      // Add JSON formatting instructions to secret prompt (pass output template if available)
-      const outputTemplate = templateData?.outputTemplate || null;
-      const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
-      adaptiveSystemContext = `
-═══════════════════════════════════════════════════════════════════════
-SECRET PROMPT ANALYSIS MODE: ${useFullDocumentForSecret ? 'COMPREHENSIVE (Full Document)' : 'TARGETED (Relevant Sections)'}
-═══════════════════════════════════════════════════════════════════════
+        console.log(`🚀 Calling LLM without templates...`);
+        answer = await askLLM(provider, finalPrompt, '', '', secretValue, {
+          userId: userId,
+          endpoint: '/api/doc/chat',
+          fileId: file_id,
+          sessionId: finalSessionId
+        });
+        answer = ensurePlainTextAnswer(answer);
+        storedQuestion = secretName;
+      }
 
-SECRET PROMPT INSTRUCTIONS:
-${formattedSecretValue}
-
-${useFullDocumentForSecret ? `
-📚 FULL DOCUMENT ANALYSIS MODE ACTIVATED FOR SECRET PROMPT:
-
-CRITICAL: You have been provided with the COMPLETE document content below.
-You MUST:
-- Analyze ALL sections comprehensively
-- Extract EVERY relevant detail
-- Follow the secret prompt instructions above for ALL sections of the document
-- Extract complete timelines, all parties, all amounts, all legal provisions
-` : `
-🎯 TARGETED ANALYSIS MODE ACTIVATED FOR SECRET PROMPT:
-
-CRITICAL: You have been provided with the MOST RELEVANT sections from the document.
-You MUST:
-- Focus on the specific question/task in the secret prompt
-- Extract specific details from the provided sections
-- If information seems incomplete, note that only relevant sections were provided
-`}
-
-${additional_input?.trim() ? `\n=== ADDITIONAL USER INSTRUCTIONS ===\n${additional_input.trim().substring(0, 500)}` : ''}
-
-⚠️ STRICT COMPLIANCE: Follow ALL instructions above. The database system prompt takes precedence, but these secret prompt instructions are MANDATORY enhancements.
-═══════════════════════════════════════════════════════════════════════
-`;
-
-      // Build user message with secret prompt question and document context only
-      finalPrompt = `Analyze the document according to the secret prompt instructions provided in the system context.
-
-${useFullDocumentForSecret ? 'COMPLETE DOCUMENT CONTENT:' : 'RELEVANT DOCUMENT SECTIONS:'}
-${documentContext}`;
-
-      storedQuestion = secretName;
-    } 
-    // ================================
-    // CUSTOM QUESTION HANDLING
-    // ================================
-    else {
+    } else {
+      // ==================================================================================
+      // REGULAR CHAT (No secret prompt)
+      // ==================================================================================
       if (!question?.trim()) {
         return res.status(400).json({ error: 'question is required.' });
       }
 
       storedQuestion = question.trim();
 
-      // ✅ KEEP ORIGINAL LOGIC: Fetch LLM model from custom_query table for custom queries
+      // Get LLM from custom_query table
       let dbLlmName = null;
       const customQueryLlm = `
         SELECT cq.llm_name, cq.llm_model_id
@@ -3345,392 +3407,75 @@ ${documentContext}`;
       const customQueryResult = await db.query(customQueryLlm);
       if (customQueryResult.rows.length > 0) {
         dbLlmName = customQueryResult.rows[0].llm_name;
-        console.log(`🤖 Using LLM from custom_query table: ${dbLlmName}`);
       } else {
-        console.warn(`⚠️ No LLM found in custom_query table — falling back to gemini`);
         dbLlmName = 'gemini';
       }
 
-      // Resolve provider name using the LLM from custom_query table
       provider = resolveProviderName(dbLlmName || "gemini");
-      console.log(`🤖 Resolved LLM provider for custom query: ${provider}`);
       
-      // Check if provider is available
       const availableProviders = getAvailableProviders();
       if (!availableProviders[provider] || !availableProviders[provider].available) {
-        console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini`);
         provider = 'gemini';
       }
 
-      // ADAPTIVE CHUNK SELECTION based on query intent
+      const queryAnalysis = analyzeQueryIntent(storedQuestion);
+      const useFullDocument = queryAnalysis.needsFullDocument;
+
       let rankedChunks;
 
       if (useFullDocument) {
-        // GET ALL CHUNKS - No embedding search needed
-        console.log(`📚 Fetching ALL chunks for comprehensive analysis...`);
         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
-        
-        if (!allChunks || allChunks.length === 0) {
-          return res.status(400).json({ error: 'No content found in document.' });
-        }
-        
-        // Sort by page/chunk order to maintain document flow
         rankedChunks = allChunks
           .sort((a, b) => {
-            if (a.page_start !== b.page_start) {
+            if ((a.page_start || 0) !== (b.page_start || 0)) {
               return (a.page_start || 0) - (b.page_start || 0);
             }
             return (a.chunk_index || 0) - (b.chunk_index || 0);
           })
-          .map(chunk => ({
-            ...chunk,
-            similarity: 1.0, // Mark as fully relevant
-            chunk_id: chunk.id,
-            distance: 0
-          }));
-        
-        console.log(`✅ Retrieved ${rankedChunks.length} chunks for full document analysis`);
+          .map(chunk => ({ ...chunk, similarity: 1.0, chunk_id: chunk.id }));
       } else {
-        // USE SEMANTIC SEARCH - Original logic
-        console.log(`🔍 Performing semantic search for targeted query...`);
         const questionEmbedding = await generateEmbedding(storedQuestion);
         rankedChunks = await ChunkVectorModel.findNearestChunks(
           questionEmbedding,
-          MAX_CHUNKS,
+          10,
           file_id
         );
       }
 
       if (!rankedChunks || rankedChunks.length === 0) {
-        // Fallback: use all chunks if no vector matches
-        console.log('⚠️ No chunks retrieved, using all chunks as fallback');
         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
-        rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id, distance: 0.5 }));
+        rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id }));
       }
 
-      // ADAPTIVE FILTERING based on query intent
-      let selectedChunks;
+      usedChunkIds = rankedChunks.map(c => c.chunk_id || c.id);
 
-      if (useFullDocument) {
-        // USE ALL CHUNKS - No filtering
-        selectedChunks = rankedChunks;
-        console.log(`📄 Using ALL ${selectedChunks.length} chunks for comprehensive analysis`);
-      } else {
-        // APPLY SIMILARITY FILTERING - Original logic
-        const highQualityChunks = rankedChunks
-          .filter(chunk => {
-            const similarity = chunk.similarity || chunk.distance || 0;
-            const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-            return score >= SIMILARITY_THRESHOLD;
-          })
-          .sort((a, b) => {
-            const scoreA = a.similarity > 1 ? (1 / (1 + a.similarity)) : a.similarity;
-            const scoreB = b.similarity > 1 ? (1 / (1 + b.similarity)) : b.similarity;
-            return scoreB - scoreA;
-          });
-
-        console.log(`🎯 Filtered chunks: ${highQualityChunks.length}/${rankedChunks.length} above similarity threshold ${SIMILARITY_THRESHOLD}`);
-
-        // Select chunks within token budget
-        selectedChunks = [];
-        let currentContextLength = 0;
-
-        const chunksToConsider = highQualityChunks.length >= MIN_CHUNKS 
-          ? highQualityChunks 
-          : rankedChunks;
-
-        for (const chunk of chunksToConsider) {
-          if (selectedChunks.length >= MAX_CHUNKS) break;
-          
-          const chunkLength = chunk.content.length;
-          if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
-            selectedChunks.push(chunk);
-            currentContextLength += chunkLength;
-          } else if (selectedChunks.length < MIN_CHUNKS) {
-            const remainingSpace = MAX_CONTEXT_CHARS - currentContextLength;
-            if (remainingSpace > 500) {
-              selectedChunks.push({
-                ...chunk,
-                content: chunk.content.substring(0, remainingSpace - 100) + "..."
-              });
-              currentContextLength += remainingSpace;
-            }
-            break;
-          }
-        }
-
-        // Ensure minimum chunks
-        if (selectedChunks.length < MIN_CHUNKS && rankedChunks.length >= MIN_CHUNKS) {
-          selectedChunks = rankedChunks.slice(0, MIN_CHUNKS);
-        }
-      }
-
-      // Calculate actual context size
-      const totalContextLength = selectedChunks.reduce((sum, c) => sum + (c.content?.length || 0), 0);
-      const estimatedTokens = Math.ceil(totalContextLength / CHARS_PER_TOKEN);
-
-      console.log(`✅ Final selection: ${selectedChunks.length} chunks | ${totalContextLength} chars (~${estimatedTokens} tokens)`);
-
-      // Ensure chunks are in document order for full document mode
-      if (useFullDocument) {
-        selectedChunks.sort((a, b) => {
-          if ((a.page_start || 0) !== (b.page_start || 0)) {
-            return (a.page_start || 0) - (b.page_start || 0);
-          }
-          return (a.chunk_index || 0) - (b.chunk_index || 0);
-        });
-      }
-
-      usedChunkIds = selectedChunks.map((c) => c.chunk_id || c.id);
-
-      // Build comprehensive document context
-      const documentContext = selectedChunks
+      const documentContext = rankedChunks
         .map((c, idx) => {
-          let chunkHeader = `\n${'='.repeat(80)}\n`;
-          
-          if (useFullDocument) {
-            // For full document mode, show document structure
-            chunkHeader += `SECTION ${idx + 1} of ${selectedChunks.length}`;
-            if (c.page_start) {
-              chunkHeader += ` | Page ${c.page_start}`;
-              if (c.page_end && c.page_end !== c.page_start) {
-                chunkHeader += `-${c.page_end}`;
-              }
-            }
-            if (c.heading) {
-              chunkHeader += `\nHeading: ${c.heading}`;
-            }
-          } else {
-            // For targeted mode, show relevance
-            const similarity = c.similarity || c.distance || 0;
-            const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-            chunkHeader += `CHUNK ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}%`;
-            if (c.page_start) {
-              chunkHeader += ` | Page ${c.page_start}`;
-            }
-          }
-          
-          chunkHeader += `\n${'='.repeat(80)}\n\n`;
-          
-          return chunkHeader + (c.content || '');
+          let header = `\n${'='.repeat(80)}\nSECTION ${idx + 1}`;
+          if (c.page_start) header += ` | Page ${c.page_start}`;
+          header += `\n${'='.repeat(80)}\n\n`;
+          return header + (c.content || '');
         })
         .join('\n\n');
 
-      // Build adaptive system instructions that will be combined with database system prompt
-      // These instructions enhance the database system prompt based on query intent
-      // Store in a variable to pass as context to askLLM
-      const adaptiveInstructions = `
-═══════════════════════════════════════════════════════════════════════
-DOCUMENT ANALYSIS MODE: ${useFullDocument ? 'COMPREHENSIVE (Full Document)' : 'TARGETED (Relevant Sections)'}
-═══════════════════════════════════════════════════════════════════════
+      let finalPrompt = `${storedQuestion}\n\n=== DOCUMENT ===\n${documentContext}`;
+      finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
 
-${useFullDocument ? `
-📚 FULL DOCUMENT ANALYSIS MODE ACTIVATED:
-
-You have been provided with the COMPLETE document content below.
-You MUST:
-- Analyze ALL sections comprehensively
-- Extract EVERY relevant detail mentioned in the document
-- Organize information logically with clear headings and structure
-- Include ALL dates, amounts, names, references, and specific details
-- Do NOT skip any important information
-- Extract complete timelines, all parties, all amounts, all legal provisions
-` : `
-🎯 TARGETED ANALYSIS MODE ACTIVATED:
-
-You have been provided with the MOST RELEVANT sections from the document.
-You MUST:
-- Focus on answering the specific question asked
-- Extract specific details from the provided sections
-- If information seems incomplete, note that only relevant sections were provided
-`}
-
-CRITICAL EXTRACTION REQUIREMENTS:
-
-1. Extract EXACT information - use direct quotes for:
-   - Party names (full legal names)
-   - Case numbers, document references
-   - Dates (format: DD.MM.YYYY)
-   - Monetary amounts (with currency)
-   - Legal provisions, section numbers, clause references
-
-2. Structure your response with:
-   - Clear section headings (use ## for main sections)
-   - Bullet points for lists
-   - Tables for comparative data (use markdown tables)
-   - Chronological timelines for events
-   - Numbered lists for legal grounds/arguments
-
-3. If information is NOT found, explicitly state "NOT MENTIONED IN DOCUMENT"
-
-4. Maintain document context:
-   - Reference page numbers when citing information
-   - Note which section information came from
-   - Preserve relationships between facts
-
-5. Be comprehensive but organized:
-   - Start with document identification (type, parties, date)
-   - Then provide structured analysis
-   - End with summary of key takeaways
-
-⚠️ STRICT COMPLIANCE: Follow ALL instructions above. The database system prompt takes precedence, but these adaptive instructions are MANDATORY enhancements for this query type.
-═══════════════════════════════════════════════════════════════════════
-`;
-
-      // Build user message with question and document context only
-      // Adaptive instructions will be passed as system context to ensure strict compliance with database system prompt
-      finalPrompt = `${storedQuestion}
-
-${useFullDocument ? 'COMPLETE DOCUMENT CONTENT:' : 'RELEVANT DOCUMENT SECTIONS:'}
-${documentContext}`;
-      
-      // Store adaptive instructions to pass as context parameter to askLLM
-      // This ensures database system prompt is used as primary, with our instructions as enhancement
-      const adaptiveSystemContext = adaptiveInstructions;
-    }
-
-    // ✅ CRITICAL: Append conversation history to the prompt
-    finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
-
-    // ✅ CRITICAL: Append user professional profile context to the prompt
-    try {
-      // Check if user is asking about their profile
-      const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(storedQuestion);
-      
-      console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion} for question: "${storedQuestion}"`);
-      
-      let profileContext;
-      if (isProfileQuestion) {
-        // For profile questions, get detailed profile information
-        console.log(`[chatWithDocument] Fetching detailed profile context for user ${userId}...`);
-        profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
-        if (!profileContext) {
-          console.log(`[chatWithDocument] Detailed profile context not available, trying regular context...`);
-          // Fallback to regular context if detailed not available
-          profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+      try {
+        const profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+        if (profileContext) {
+          finalPrompt = `${profileContext}\n\n---\n\n${finalPrompt}`;
         }
-      } else {
-        // For regular questions, use standard context
-        profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+      } catch (profileError) {
+        console.warn(`⚠️ Failed to fetch profile context:`, profileError.message);
       }
-      
-      if (profileContext) {
-        // Prepend profile context BEFORE the question so AI sees it first
-        finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
-        console.log(`[chatWithDocument] ✅ Added user professional profile context to prompt (detailed: ${isProfileQuestion}, length: ${profileContext.length} chars)`);
-      } else {
-        console.warn(`[chatWithDocument] ⚠️ No profile context available for user ${userId}`);
-      }
-    } catch (profileError) {
-      console.error(`[chatWithDocument] ❌ Failed to fetch profile context:`, profileError.message);
-      console.error(`[chatWithDocument] Error stack:`, profileError.stack);
-      // Continue without profile context - don't fail the request
-    }
 
-    // ---------- CONTEXT SIZE VALIDATION ----------
-    const estimatedPromptTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
-    const MODEL_CONTEXT_LIMITS = {
-      'gemini': 1000000,      // Gemini 1.5 Pro has 1M context
-      'gemini-pro-2.5': 2000000, // Gemini 2.5 Pro has 2M context
-      'gemini-3-pro': 1000000,   // Gemini 3.0 Pro has 1M context
-      'claude-sonnet-4': 200000, // Claude Sonnet 4 has 200K context
-      'claude-opus-4-1': 200000, // Claude Opus 4.1 has 200K context
-      'claude-sonnet-4-5': 200000, // Claude Sonnet 4.5 has 200K context
-      'claude-haiku-4-5': 200000,  // Claude Haiku 4.5 has 200K context
-      'claude': 200000,        // Claude has 200K context
-      'anthropic': 200000,     // Anthropic has 200K context
-      'gpt-4o': 128000,        // GPT-4 Turbo has 128K context
-      'openai': 128000,        // OpenAI has 128K context
-      'default': 8000
-    };
-
-    const modelLimit = MODEL_CONTEXT_LIMITS[provider] || MODEL_CONTEXT_LIMITS['default'];
-    const safeLimit = Math.floor(modelLimit * 0.8); // Use 80% of limit for safety
-
-    if (estimatedPromptTokens > safeLimit) {
-      console.warn(`⚠️ Prompt is ${estimatedPromptTokens} tokens, which exceeds safe limit ${safeLimit} for ${provider}`);
-      
-      if (useFullDocument && !used_secret_prompt) {
-        // Fallback: Switch to targeted mode if full document exceeds limits
-        console.log(`⚠️ Falling back to targeted mode due to context size`);
-        useFullDocument = false;
-        
-        // Re-run chunk selection with targeted mode
-        const questionEmbedding = await generateEmbedding(storedQuestion);
-        const fallbackRankedChunks = await ChunkVectorModel.findNearestChunks(
-          questionEmbedding,
-          10,
-          file_id
-        );
-        
-        // Re-select chunks within budget
-        const fallbackSelectedChunks = fallbackRankedChunks.slice(0, 10);
-        usedChunkIds = fallbackSelectedChunks.map(c => c.chunk_id || c.id);
-        
-        // Rebuild prompt with smaller context
-        const fallbackDocumentContext = fallbackSelectedChunks
-          .map((c, idx) => {
-            const similarity = c.similarity || c.distance || 0;
-            const score = similarity > 1 ? (1 / (1 + similarity)) : similarity;
-            return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content || ''}`;
-          })
-          .join('\n\n');
-        
-        finalPrompt = `${storedQuestion}\n\n=== RELEVANT CONTEXT ===\n${fallbackDocumentContext}`;
-        
-        // Re-append conversation history
-        finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
-        
-        // Re-append profile context if it was added
-        try {
-          const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(storedQuestion);
-          let profileContext;
-          if (isProfileQuestion) {
-            profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
-            if (!profileContext) {
-              profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
-            }
-          } else {
-            profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
-          }
-          
-          if (profileContext) {
-            finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
-          }
-        } catch (profileError) {
-          console.warn(`⚠️ Failed to re-add profile context in fallback mode`);
-        }
-        
-        const newEstimatedTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
-        console.log(`✅ Fallback prompt: ${newEstimatedTokens} tokens (${((newEstimatedTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
-      } else {
-        // For secret prompts or targeted mode, just truncate the prompt
-        console.log(`⚠️ Truncating prompt to fit within model limits`);
-        const maxChars = safeLimit * CHARS_PER_TOKEN;
-        if (finalPrompt.length > maxChars) {
-          finalPrompt = finalPrompt.substring(0, maxChars - 200) + '\n\n[Content truncated due to context size limits...]';
-          const truncatedTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
-          console.log(`✅ Truncated prompt: ${truncatedTokens} tokens (${((truncatedTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
-        }
-      }
-    } else {
-      console.log(`📝 Final prompt: ${estimatedPromptTokens} tokens (${((estimatedPromptTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
-    }
-
-    // ---------- CALL LLM ----------
-    console.log(`[chatWithDocument] Calling LLM provider: ${provider} | Chunks used: ${usedChunkIds.length}`);
-    if (adaptiveSystemContext) {
-      console.log(`[chatWithDocument] ✅ Passing adaptive system context (${adaptiveSystemContext.length} chars) to be combined with database system prompt`);
-    }
-    // Pass adaptive system context as the context parameter so it gets combined with database system prompt
-    // Pass the original user question separately so web search only uses that, not the full prompt
-    let answer = await askLLM(provider, finalPrompt, adaptiveSystemContext || '', '', storedQuestion);
-    
-    // For secret prompts, preserve JSON structure; for regular queries, convert to plain text
-    if (used_secret_prompt && templateData?.outputTemplate) {
-      // Post-process to ensure proper JSON format
-      answer = postProcessSecretPromptResponse(answer, templateData.outputTemplate);
-    } else {
+      answer = await askLLM(provider, finalPrompt, '', '', storedQuestion, {
+        userId: userId,
+        endpoint: '/api/doc/chat',
+        fileId: file_id,
+        sessionId: finalSessionId
+      });
       answer = ensurePlainTextAnswer(answer);
     }
 
@@ -3738,9 +3483,9 @@ ${documentContext}`;
       return res.status(500).json({ error: 'Empty response from AI.' });
     }
 
-    console.log(`[chatWithDocument] Received answer, length: ${answer.length} characters`);
+    console.log(`✅ Answer received: ${answer.length} chars`);
 
-    // ---------- SAVE CHAT ----------
+    // Save chat to database
     const savedChat = await FileChat.saveChat(
       file_id,
       userId,
@@ -3751,12 +3496,11 @@ ${documentContext}`;
       used_secret_prompt,
       finalPromptLabel,
       used_secret_prompt ? secret_id : null,
-      historyForStorage  // ✅ This includes both pre-upload and post-upload context
+      historyForStorage
     );
 
-    console.log(`[chatWithDocument] Chat saved with ID: ${savedChat.id} | Chunks used: ${usedChunkIds.length}`);
+    console.log(`✅ Chat saved: ID=${savedChat.id}, chunks=${usedChunkIds.length}`);
 
-    // ---------- TOKEN USAGE ----------
     try {
       const { userUsage, userPlan, requestedResources } = req;
       await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
@@ -3764,7 +3508,6 @@ ${documentContext}`;
       console.warn('Token usage increment failed:', e.message);
     }
 
-    // ---------- FETCH HISTORY ----------
     const historyRows = await FileChat.getChatHistory(file_id, savedChat.session_id);
     const history = historyRows.map((row) => ({
       id: row.id,
@@ -3784,7 +3527,6 @@ ${documentContext}`;
         : row.question,
     }));
 
-    // ---------- RETURN COMPLETE RESPONSE ----------
     return res.status(200).json({
       success: true,
       session_id: savedChat.session_id,
@@ -3798,8 +3540,9 @@ ${documentContext}`;
       timestamp: savedChat.created_at || new Date().toISOString(),
       llm_provider: provider,
       used_secret_prompt,
-      mode: 'post_document',  // Indicates this is a post-upload conversation
+      mode: 'post_document',
     });
+
   } catch (error) {
     console.error('❌ Error in chatWithDocument:', error);
     console.error('Stack trace:', error.stack);
@@ -3809,18 +3552,304 @@ ${documentContext}`;
     });
   }
 };
+// exports.chatWithDocumentStream = async (req, res) => {
+//   let userId = null;
+//   const heartbeat = setInterval(() => {
+//     try {
+//       res.write(`data: [PING]\n\n`);
+//     } catch (err) {
+//       clearInterval(heartbeat);
+//     }
+//   }, 15000);
 
-// ---------------------------
-// SSE Streaming Version of chatWithDocument
-// Handles unlimited length responses with heartbeat to prevent timeout
-// ---------------------------
+//   res.setHeader("Content-Type", "text/event-stream");
+//   res.setHeader("Cache-Control", "no-cache");
+//   res.setHeader("Connection", "keep-alive");
+//   res.flushHeaders();
+
+//   try {
+//     res.write(`data: ${JSON.stringify({ type: 'metadata', status: 'streaming_started' })}\n\n`);
+
+//     const {
+//       file_id,
+//       question,
+//       used_secret_prompt = false,
+//       prompt_label = null,
+//       session_id = null,
+//       secret_id,
+//       llm_name,
+//       additional_input = '',
+//     } = req.body;
+
+//     userId = req.user.id;
+
+    
+//     let capturedPrompt = null;
+//     let capturedProvider = null;
+//     let capturedStoredQuestion = null;
+//     let capturedAdaptiveContext = null;
+//     let capturedUsedChunkIds = [];
+//     let capturedFileId = file_id;
+//     let capturedSessionId = session_id;
+//     let capturedUsedSecretPrompt = used_secret_prompt;
+//     let capturedFinalPromptLabel = prompt_label;
+//     let capturedSecretId = secret_id;
+//     let capturedHistoryForStorage = [];
+
+    
+//     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+//     const hasFileId = Boolean(file_id);
+//     const hasExistingSession = session_id && uuidRegex.test(session_id);
+//     const finalSessionId = hasExistingSession ? session_id : uuidv4();
+
+//     console.log(`[chatWithDocumentStream] Streaming started: file_id=${file_id}, session_id=${finalSessionId}`);
+
+    
+    
+//     let fullAnswer = '';
+//     let streamingError = null;
+
+//     try {
+      
+      
+//       let promptBuilt = false;
+      
+      
+      
+      
+      
+      
+      
+//       if (!hasFileId) {
+//         if (!question?.trim()) {
+//           clearInterval(heartbeat);
+//           res.write(`data: ${JSON.stringify({ type: 'error', message: 'question is required when no document is provided.' })}\n\n`);
+//           res.end();
+//           return;
+//         }
+
+//         let dbLlmName = llm_name;
+//         if (!dbLlmName) {
+//           const customQueryLlm = `
+//             SELECT cq.llm_name, cq.llm_model_id
+//             FROM custom_query cq
+//             ORDER BY cq.id DESC
+//             LIMIT 1;
+//           `;
+//           const customQueryResult = await db.query(customQueryLlm);
+//           if (customQueryResult.rows.length > 0) {
+//             dbLlmName = customQueryResult.rows[0].llm_name;
+//           } else {
+//             dbLlmName = 'gemini';
+//           }
+//         }
+
+//         let provider = resolveProviderName(dbLlmName || 'gemini');
+//         const availableProviders = getAvailableProviders();
+//         if (!availableProviders[provider] || !availableProviders[provider].available) {
+//           provider = 'gemini';
+//         }
+
+//         const userPrompt = question.trim();
+//         const sessionHistory = hasExistingSession
+//           ? await FileChat.getChatHistoryBySession(userId, finalSessionId)
+//           : [];
+//         const conversationContext = formatConversationHistory(sessionHistory);
+//         let finalPrompt = appendConversationToPrompt(userPrompt, conversationContext);
+
+//         try {
+//           const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
+//           let profileContext;
+//           if (isProfileQuestion) {
+//             profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
+//             if (!profileContext) {
+//               profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//             }
+//           } else {
+//             profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+//           }
+//           if (profileContext) {
+//             finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
+//           }
+//         } catch (profileError) {
+//           console.error(`[chatWithDocumentStream] Failed to fetch profile context:`, profileError.message);
+//         }
+
+//         res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
+        
+//         let fullAnswer = '';
+//         try {
+//           for await (const chunk of streamLLM(provider, finalPrompt, '', '', userPrompt)) {
+//             fullAnswer += chunk;
+//             res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+//         if (res.flush && typeof res.flush === 'function') {
+//           res.flush();
+//         }
+//             if (res.flush && typeof res.flush === 'function') {
+//               res.flush();
+//             }
+//           }
+//         } catch (streamError) {
+//           console.error('[chatWithDocumentStream] Streaming error:', streamError);
+//           clearInterval(heartbeat);
+//           res.write(`data: ${JSON.stringify({ type: 'error', message: 'Streaming failed', details: streamError.message })}\n\n`);
+//           res.end();
+//           return;
+//         }
+
+//         const savedChat = await FileChat.saveChat(
+//           null,
+//           userId,
+//           userPrompt,
+//           fullAnswer,
+//           finalSessionId,
+//           [],
+//           false,
+//           null,
+//           null,
+//           simplifyHistory(sessionHistory)
+//         );
+
+//         res.write(`data: ${JSON.stringify({ 
+//           type: 'done', 
+//           session_id: savedChat.session_id, 
+//           message_id: savedChat.id,
+//           answer: fullAnswer,
+//           llm_provider: provider
+//         })}\n\n`);
+//         res.write(`data: [DONE]\n\n`);
+
+//         clearInterval(heartbeat);
+//         res.end();
+//         return;
+//       }
+
+      
+//       const file = await DocumentModel.getFileById(file_id);
+//       if (!file) {
+//         clearInterval(heartbeat);
+//         res.write(`data: ${JSON.stringify({ type: 'error', message: 'File not found.' })}\n\n`);
+//         res.end();
+//         return;
+//       }
+//       if (String(file.user_id) !== String(userId)) {
+//         clearInterval(heartbeat);
+//         res.write(`data: ${JSON.stringify({ type: 'error', message: 'Access denied.' })}\n\n`);
+//         res.end();
+//         return;
+//       }
+//       if (file.status !== 'processed') {
+//         clearInterval(heartbeat);
+//         res.write(`data: ${JSON.stringify({ type: 'error', message: 'Document is not yet processed.', status: file.status })}\n\n`);
+//         res.end();
+//         return;
+//       }
+
+      
+//       console.log('[chatWithDocumentStream] Post-upload: using streaming wrapper');
+      
+//       let capturedData = null;
+//       let captureError = null;
+      
+//       const mockRes = {
+//         status: (code) => {
+//           mockRes.statusCode = code;
+//           return mockRes;
+//         },
+//         json: (data) => {
+//           capturedData = data;
+//           return mockRes;
+//         },
+//         setHeader: () => mockRes,
+//         writeHead: () => mockRes,
+//         end: () => {},
+//         headersSent: false,
+//         statusCode: 200
+//       };
+
+//       const mockReq = {
+//         ...req,
+//         headers: {
+//           ...(req.headers || {}),
+//           authorization: req.headers?.authorization || req.header?.('authorization') || ''
+//         },
+//         user: req.user || {},
+//         body: req.body || {},
+//         params: req.params || {},
+//         query: req.query || {}
+//       };
+
+//       try {
+//         await exports.chatWithDocument(mockReq, mockRes);
+//       } catch (err) {
+//         captureError = err;
+//       }
+
+//       if (captureError) {
+//         clearInterval(heartbeat);
+//         res.write(`data: ${JSON.stringify({ type: 'error', message: 'Failed to process request', details: captureError.message })}\n\n`);
+//         res.end();
+//         return;
+//       }
+
+//       if (!capturedData || !capturedData.answer) {
+//         clearInterval(heartbeat);
+//         res.write(`data: ${JSON.stringify({ type: 'error', message: 'No answer received' })}\n\n`);
+//         res.end();
+//         return;
+//       }
+
+//       res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: capturedData.session_id })}\n\n`);
+      
+//       let answer = capturedData.answer;
+//       const chunkSize = 10; // Stream 10 characters at a time
+//       for (let i = 0; i < answer.length; i += chunkSize) {
+//         const chunk = answer.substring(i, Math.min(i + chunkSize, answer.length));
+//         res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+//         if (res.flush && typeof res.flush === 'function') {
+//           res.flush();
+//         }
+//         await new Promise(resolve => setTimeout(resolve, 10));
+//       }
+      
+//       res.write(`data: ${JSON.stringify({ 
+//         type: 'done', 
+//         session_id: capturedData.session_id, 
+//         message_id: capturedData.message_id,
+//         answer: answer, // ✅ Send plain text answer
+//         llm_provider: capturedData.llm_provider,
+//         used_chunk_ids: capturedData.used_chunk_ids,
+//         chunks_used: capturedData.chunks_used
+//       })}\n\n`);
+//       res.write(`data: [DONE]\n\n`);
+//       clearInterval(heartbeat);
+//       res.end();
+      
+//     } catch (error) {
+//       console.error('❌ Error in chatWithDocumentStream:', error);
+//       clearInterval(heartbeat);
+//       res.write(`data: ${JSON.stringify({ type: 'error', message: 'Failed to get AI answer.', details: error.message })}\n\n`);
+//       res.end();
+//     }
+//   } catch (error) {
+//     console.error('❌ Error in chatWithDocumentStream:', error);
+//     clearInterval(heartbeat);
+//     if (!res.headersSent) {
+//       res.write(`data: ${JSON.stringify({ type: 'error', message: 'Failed to get AI answer.', details: error.message })}\n\n`);
+//     }
+//     res.end();
+//   }
+// };
+
+// CORRECTED chatWithDocumentStream function
+// Properly handles streaming responses with template extraction support
+
 exports.chatWithDocumentStream = async (req, res) => {
   let userId = null;
   const heartbeat = setInterval(() => {
     try {
       res.write(`data: [PING]\n\n`);
     } catch (err) {
-      // Connection closed, stop heartbeat
       clearInterval(heartbeat);
     }
   }, 15000);
@@ -3831,11 +3860,8 @@ exports.chatWithDocumentStream = async (req, res) => {
   res.flushHeaders();
 
   try {
-    // Send initial metadata
     res.write(`data: ${JSON.stringify({ type: 'metadata', status: 'streaming_started' })}\n\n`);
 
-    // Reuse the non-streaming function's logic but intercept the LLM call
-    // We'll build the prompt the same way, then stream instead of waiting for full response
     const {
       file_id,
       question,
@@ -3845,30 +3871,12 @@ exports.chatWithDocumentStream = async (req, res) => {
       secret_id,
       llm_name,
       additional_input = '',
+      input_template_id = null,
+      output_template_id = null,
     } = req.body;
 
     userId = req.user.id;
 
-    // Call a helper that builds the prompt (we'll extract this logic)
-    // For now, let's create a wrapper that calls chatWithDocument but intercepts the LLM call
-    
-    // Create a mock response object to capture the prompt building
-    let capturedPrompt = null;
-    let capturedProvider = null;
-    let capturedStoredQuestion = null;
-    let capturedAdaptiveContext = null;
-    let capturedUsedChunkIds = [];
-    let capturedFileId = file_id;
-    let capturedSessionId = session_id;
-    let capturedUsedSecretPrompt = used_secret_prompt;
-    let capturedFinalPromptLabel = prompt_label;
-    let capturedSecretId = secret_id;
-    let capturedHistoryForStorage = [];
-
-    // We need to duplicate the prompt building logic but use streamLLM
-    // For now, let's create a simplified version that works
-    
-    // Validate and get session
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const hasFileId = Boolean(file_id);
     const hasExistingSession = session_id && uuidRegex.test(session_id);
@@ -3876,198 +3884,219 @@ exports.chatWithDocumentStream = async (req, res) => {
 
     console.log(`[chatWithDocumentStream] Streaming started: file_id=${file_id}, session_id=${finalSessionId}`);
 
-    // For simplicity, let's call the existing chatWithDocument logic but replace askLLM with streamLLM
-    // We'll need to modify the approach - let's create a modified version that streams
-    
-    // Build prompt using existing logic (simplified approach)
-    // Actually, the best approach is to extract prompt building into a helper
-    // But for now, let's use a workaround: call chatWithDocument with a modified askLLM
-    
-    // Temporary: Use the non-streaming version but stream the result
-    // This is not ideal but will work for now
-    let fullAnswer = '';
-    let streamingError = null;
+    // ==================================================================================
+    // PRE-UPLOAD MODE (No document - just conversation)
+    // ==================================================================================
+    if (!hasFileId) {
+      if (!question?.trim()) {
+        clearInterval(heartbeat);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: 'question is required when no document is provided.' })}\n\n`);
+        res.end();
+        return;
+      }
 
-    try {
-      // We need to build the prompt ourselves or extract it
-      // For now, let's use a simpler approach: call the existing function but capture the answer
-      // and stream it chunk by chunk
-      
-      // Actually, the cleanest solution is to extract prompt building
-      // But for immediate fix, let's stream the response from askLLM by wrapping it
-      
-      // Create a streaming wrapper
-      let promptBuilt = false;
-      
-      // We'll need to intercept at the askLLM call level
-      // For now, let's implement a basic streaming version that works
-      
-      // Simplified streaming implementation:
-      // 1. Build prompt (reuse existing logic)
-      // 2. Call streamLLM instead of askLLM
-      // 3. Stream chunks to client
-      // 4. Save chat after completion
-      
-      // For immediate fix, let's use the existing chatWithDocument but modify it to stream
-      // We'll create a custom version that uses streamLLM
-      
-      // Actually, the best approach is to duplicate the prompt building logic
-      // But that's 1000+ lines. Let's use a different strategy:
-      
-      // Strategy: Call chatWithDocument but replace askLLM with a streaming version
-      // We can do this by temporarily replacing the askLLM import
-      
-      // For now, let's implement a minimal working version:
-      // We'll build a simplified prompt and stream it
-      
-      if (!hasFileId) {
-        // Pre-upload chat - simplified
-        if (!question?.trim()) {
-          clearInterval(heartbeat);
-          res.write(`data: ${JSON.stringify({ type: 'error', message: 'question is required when no document is provided.' })}\n\n`);
-          res.end();
-          return;
+      console.log(`[chatWithDocumentStream] Pre-upload mode - streaming without document`);
+
+      let dbLlmName = llm_name;
+      if (!dbLlmName) {
+        const customQueryLlm = `
+          SELECT cq.llm_name, cq.llm_model_id
+          FROM custom_query cq
+          ORDER BY cq.id DESC
+          LIMIT 1;
+        `;
+        const customQueryResult = await db.query(customQueryLlm);
+        if (customQueryResult.rows.length > 0) {
+          dbLlmName = customQueryResult.rows[0].llm_name;
+        } else {
+          dbLlmName = 'gemini';
         }
+      }
 
-        let dbLlmName = llm_name;
-        if (!dbLlmName) {
-          const customQueryLlm = `
-            SELECT cq.llm_name, cq.llm_model_id
-            FROM custom_query cq
-            ORDER BY cq.id DESC
-            LIMIT 1;
-          `;
-          const customQueryResult = await db.query(customQueryLlm);
-          if (customQueryResult.rows.length > 0) {
-            dbLlmName = customQueryResult.rows[0].llm_name;
-          } else {
-            dbLlmName = 'gemini';
-          }
-        }
+      let provider = resolveProviderName(dbLlmName || 'gemini');
+      const availableProviders = getAvailableProviders();
+      if (!availableProviders[provider] || !availableProviders[provider].available) {
+        provider = 'gemini';
+      }
 
-        let provider = resolveProviderName(dbLlmName || 'gemini');
-        const availableProviders = getAvailableProviders();
-        if (!availableProviders[provider] || !availableProviders[provider].available) {
-          provider = 'gemini';
-        }
+      const userPrompt = question.trim();
+      const sessionHistory = hasExistingSession
+        ? await FileChat.getChatHistoryBySession(userId, finalSessionId)
+        : [];
+      const conversationContext = formatConversationHistory(sessionHistory);
+      let finalPrompt = appendConversationToPrompt(userPrompt, conversationContext);
 
-        const userPrompt = question.trim();
-        const sessionHistory = hasExistingSession
-          ? await FileChat.getChatHistoryBySession(userId, finalSessionId)
-          : [];
-        const conversationContext = formatConversationHistory(sessionHistory);
-        let finalPrompt = appendConversationToPrompt(userPrompt, conversationContext);
-
-        // Add profile context
-        try {
-          const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
-          let profileContext;
-          if (isProfileQuestion) {
-            profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
-            if (!profileContext) {
-              profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
-            }
-          } else {
+      try {
+        const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
+        let profileContext;
+        if (isProfileQuestion) {
+          profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
+          if (!profileContext) {
             profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
           }
-          if (profileContext) {
-            finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
-          }
-        } catch (profileError) {
-          console.error(`[chatWithDocumentStream] Failed to fetch profile context:`, profileError.message);
+        } else {
+          profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
         }
+        if (profileContext) {
+          finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
+        }
+      } catch (profileError) {
+        console.error(`[chatWithDocumentStream] Failed to fetch profile context:`, profileError.message);
+      }
 
-        // Stream the response
-        res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
+      
+      let fullAnswer = '';
+      let streamUsageData = null;
+      try {
+        // Create a wrapper to capture usage data from stream
+        const streamWithMetadata = streamLLM(provider, finalPrompt, '', '', userPrompt, {
+          userId: userId,
+          endpoint: '/api/doc/chat/stream',
+          fileId: null,
+          sessionId: finalSessionId
+        });
         
-        let fullAnswer = '';
-        try {
-          for await (const chunk of streamLLM(provider, finalPrompt, '', '', userPrompt)) {
-            fullAnswer += chunk;
-            res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
-        // CRITICAL: Flush immediately to send chunk to frontend without buffering
-        if (res.flush && typeof res.flush === 'function') {
-          res.flush();
-        }
-            // CRITICAL: Flush immediately to send chunk to frontend without buffering
-            // This ensures true streaming (word-by-word) instead of clumped delivery
-            if (res.flush && typeof res.flush === 'function') {
-              res.flush();
-            }
+        for await (const chunk of streamWithMetadata) {
+          fullAnswer += chunk;
+          res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+          if (res.flush && typeof res.flush === 'function') {
+            res.flush();
           }
-        } catch (streamError) {
-          console.error('[chatWithDocumentStream] Streaming error:', streamError);
-          clearInterval(heartbeat);
-          res.write(`data: ${JSON.stringify({ type: 'error', message: 'Streaming failed', details: streamError.message })}\n\n`);
-          res.end();
-          return;
         }
-
-        // Save chat
-        const savedChat = await FileChat.saveChat(
-          null,
-          userId,
-          userPrompt,
-          fullAnswer,
-          finalSessionId,
-          [],
-          false,
-          null,
-          null,
-          simplifyHistory(sessionHistory)
-        );
-
-        // Send completion
-        res.write(`data: ${JSON.stringify({ 
-          type: 'done', 
-          session_id: savedChat.session_id, 
-          message_id: savedChat.id,
-          answer: fullAnswer,
-          llm_provider: provider
-        })}\n\n`);
-        res.write(`data: [DONE]\n\n`);
-
+        
+        // Try to get usage metadata if available
+        if (streamWithMetadata.usageMetadata) {
+          streamUsageData = streamWithMetadata.usageMetadata;
+        }
+      } catch (streamError) {
+        console.error('[chatWithDocumentStream] Streaming error:', streamError);
         clearInterval(heartbeat);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Streaming failed', details: streamError.message })}\n\n`);
         res.end();
         return;
       }
 
-      // Post-upload chat - we need the full prompt building logic
-      // For now, let's use a workaround: call chatWithDocument but stream the result
-      // This requires modifying how we handle the response
+      // Estimate token usage for streaming (approximate: ~4 chars per token)
+      const estimateTokenCount = (text) => Math.ceil((text || '').length / 4);
+      const estimatedInputTokens = estimateTokenCount(finalPrompt);
+      const estimatedOutputTokens = estimateTokenCount(fullAnswer);
       
-      // Better approach: Extract the key parts we need
-      const file = await DocumentModel.getFileById(file_id);
-      if (!file) {
-        clearInterval(heartbeat);
-        res.write(`data: ${JSON.stringify({ type: 'error', message: 'File not found.' })}\n\n`);
-        res.end();
-        return;
+      // Log LLM usage to payment service after streaming completes
+      console.log(`📊 [Streaming] Estimating usage - input: ${estimatedInputTokens}, output: ${estimatedOutputTokens}`);
+      if (userId && provider) {
+      // Get the model name from the provider
+      const { resolveProviderName, getAvailableProviders } = require('../services/aiService');
+      const resolvedProvider = resolveProviderName(provider);
+      
+      // Try to get actual model name - for gemini-pro-2.5, use gemini-2.5-pro
+      let modelName = resolvedProvider;
+      if (resolvedProvider === 'gemini-pro-2.5') {
+        modelName = 'gemini-2.5-pro';
+      } else if (resolvedProvider === 'gemini-3-pro') {
+        modelName = 'gemini-3-pro-preview';
+      } else if (resolvedProvider === 'gemini') {
+        modelName = 'gemini-2.0-flash-exp'; // Default for gemini provider
       }
-      if (String(file.user_id) !== String(userId)) {
-        clearInterval(heartbeat);
-        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Access denied.' })}\n\n`);
-        res.end();
-        return;
-      }
-      if (file.status !== 'processed') {
-        clearInterval(heartbeat);
-        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Document is not yet processed.', status: file.status })}\n\n`);
-        res.end();
-        return;
+        
+        const LLMUsageLogService = require('../services/llmUsageLogService');
+        LLMUsageLogService.logUsage({
+          userId: userId,
+          modelName: modelName,
+          inputTokens: estimatedInputTokens,
+          outputTokens: estimatedOutputTokens,
+          endpoint: '/api/doc/chat/stream',
+          requestId: null,
+          fileId: null,
+          sessionId: finalSessionId
+        }).catch(err => {
+          console.error('⚠️ Failed to log streaming LLM usage:', err.message);
+        });
       }
 
-      // Post-upload chat - use existing logic but stream the response
-      // Strategy: Call chatWithDocument with a mock response that captures the answer
-      // Then stream it back to the client
+      const savedChat = await FileChat.saveChat(
+        null,
+        userId,
+        userPrompt,
+        fullAnswer,
+        finalSessionId,
+        [],
+        false,
+        null,
+        null,
+        simplifyHistory(sessionHistory)
+      );
+
+      res.write(`data: ${JSON.stringify({ 
+        type: 'done', 
+        session_id: savedChat.session_id, 
+        message_id: savedChat.id,
+        answer: fullAnswer,
+        llm_provider: provider
+      })}\n\n`);
+      res.write(`data: [DONE]\n\n`);
+
+      clearInterval(heartbeat);
+      res.end();
+      return;
+    }
+
+    // ==================================================================================
+    // POST-UPLOAD MODE (Document streaming)
+    // ==================================================================================
+    console.log(`[chatWithDocumentStream] Post-upload mode - document streaming`);
+
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file) {
+      clearInterval(heartbeat);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'File not found.' })}\n\n`);
+      res.end();
+      return;
+    }
+    if (String(file.user_id) !== String(userId)) {
+      clearInterval(heartbeat);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Access denied.' })}\n\n`);
+      res.end();
+      return;
+    }
+    if (file.status !== 'processed') {
+      clearInterval(heartbeat);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Document is not yet processed.', status: file.status })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // ==================================================================================
+    // CRITICAL: Template Extraction Does Not Support Streaming
+    // ==================================================================================
+    // Template extraction requires complete response for validation and merging
+    // So we must use non-streaming approach for secret prompts with templates
+    
+    let useTemplateExtraction = false;
+    if (used_secret_prompt && secret_id) {
+      const { fetchSecretManagerWithTemplates } = require('../services/secretPromptTemplateService');
+      const secretData = await fetchSecretManagerWithTemplates(secret_id);
       
-      console.log('[chatWithDocumentStream] Post-upload: using streaming wrapper');
+      if (secretData) {
+        const finalInputTemplateId = secretData.input_template_id || input_template_id;
+        const finalOutputTemplateId = secretData.output_template_id || output_template_id;
+        
+        if (finalInputTemplateId || finalOutputTemplateId) {
+          useTemplateExtraction = true;
+          console.log(`[chatWithDocumentStream] Template extraction detected - using non-streaming mode`);
+        }
+      }
+    }
+
+    // ==================================================================================
+    // APPROACH: Use chatWithDocument for template extraction, then stream the result
+    // ==================================================================================
+    if (useTemplateExtraction || used_secret_prompt) {
+      console.log(`[chatWithDocumentStream] Using non-streaming wrapper for secret prompt/templates`);
       
       let capturedData = null;
       let captureError = null;
       
-      // Create mock response to capture the JSON response
-      // Must have all methods that chatWithDocument might call
       const mockRes = {
         status: (code) => {
           mockRes.statusCode = code;
@@ -4084,9 +4113,6 @@ exports.chatWithDocumentStream = async (req, res) => {
         statusCode: 200
       };
 
-      // Call the non-streaming version to build prompt and get answer
-      // Create a properly structured mock request that preserves all original request properties
-      // CRITICAL: Preserve headers object with all properties including authorization
       const mockReq = {
         ...req,
         headers: {
@@ -4094,13 +4120,16 @@ exports.chatWithDocumentStream = async (req, res) => {
           authorization: req.headers?.authorization || req.header?.('authorization') || ''
         },
         user: req.user || {},
-        body: req.body || {},
+        body: {
+          ...req.body,
+          input_template_id,
+          output_template_id
+        },
         params: req.params || {},
         query: req.query || {}
       };
 
       try {
-        // chatWithDocument expects (req, res) - pass both
         await exports.chatWithDocument(mockReq, mockRes);
       } catch (err) {
         captureError = err;
@@ -4120,49 +4149,252 @@ exports.chatWithDocumentStream = async (req, res) => {
         return;
       }
 
-      // Stream the captured answer
       res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: capturedData.session_id })}\n\n`);
       
-      // Stream answer character by character for smooth streaming effect
-      // The answer from chatWithDocument is already post-processed correctly:
-      // - For secret prompts with templates: postProcessSecretPromptResponse preserves JSON structure
-      // - For regular queries: ensurePlainTextAnswer converts to plain text
-      // So we use the answer as-is without additional conversion
+      // Stream the complete answer character by character for better UX
       let answer = capturedData.answer;
-      const chunkSize = 10; // Stream 10 characters at a time
+      const chunkSize = 50; // Stream 50 characters at a time (faster than before)
+      
       for (let i = 0; i < answer.length; i += chunkSize) {
         const chunk = answer.substring(i, Math.min(i + chunkSize, answer.length));
         res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
-        // CRITICAL: Flush immediately to send chunk to frontend without buffering
         if (res.flush && typeof res.flush === 'function') {
           res.flush();
         }
-        // Small delay for streaming effect
-        await new Promise(resolve => setTimeout(resolve, 10));
+        // Small delay to simulate streaming (adjust as needed)
+        await new Promise(resolve => setTimeout(resolve, 20));
       }
       
-      // Send completion
       res.write(`data: ${JSON.stringify({ 
         type: 'done', 
         session_id: capturedData.session_id, 
         message_id: capturedData.message_id,
-        answer: answer, // ✅ Send plain text answer
+        answer: answer,
         llm_provider: capturedData.llm_provider,
         used_chunk_ids: capturedData.used_chunk_ids,
-        chunks_used: capturedData.chunks_used
+        chunks_used: capturedData.chunks_used,
+        used_secret_prompt: capturedData.used_secret_prompt
       })}\n\n`);
       res.write(`data: [DONE]\n\n`);
       clearInterval(heartbeat);
       res.end();
-      
-    } catch (error) {
-      console.error('❌ Error in chatWithDocumentStream:', error);
-      clearInterval(heartbeat);
-      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Failed to get AI answer.', details: error.message })}\n\n`);
-      res.end();
+      return;
     }
+
+    // ==================================================================================
+    // REGULAR CHAT WITH DOCUMENT - TRUE STREAMING
+    // ==================================================================================
+    console.log(`[chatWithDocumentStream] Regular chat - using true streaming`);
+
+    if (!question?.trim()) {
+      clearInterval(heartbeat);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'question is required.' })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // Link pre-upload chats if any
+    const sessionHistory = hasExistingSession
+      ? await FileChat.getChatHistoryBySession(userId, finalSessionId)
+      : [];
+
+    if (sessionHistory.length > 0) {
+      const hasUnassignedChats = sessionHistory.some((chat) => !chat.file_id);
+      if (hasUnassignedChats) {
+        const linkedCount = await FileChat.assignFileIdToSession(userId, finalSessionId, file_id);
+        console.log(`✅ Linked ${linkedCount} pre-upload chat(s) to file ${file_id}`);
+      }
+    }
+
+    let previousChats = [];
+    if (hasExistingSession) {
+      previousChats = await FileChat.getChatHistory(file_id, finalSessionId);
+    }
+
+    const conversationContext = formatConversationHistory(previousChats);
+    const historyForStorage = simplifyHistory(previousChats);
+
+    const storedQuestion = question.trim();
+
+    // Get LLM provider
+    let dbLlmName = null;
+    const customQueryLlm = `
+      SELECT cq.llm_name, cq.llm_model_id
+      FROM custom_query cq
+      ORDER BY cq.id DESC
+      LIMIT 1;
+    `;
+    const customQueryResult = await db.query(customQueryLlm);
+    if (customQueryResult.rows.length > 0) {
+      dbLlmName = customQueryResult.rows[0].llm_name;
+    } else {
+      dbLlmName = 'gemini';
+    }
+
+    let provider = resolveProviderName(dbLlmName || "gemini");
+    
+    const availableProviders = getAvailableProviders();
+    if (!availableProviders[provider] || !availableProviders[provider].available) {
+      provider = 'gemini';
+    }
+
+    // Analyze query and get chunks
+    const queryAnalysis = analyzeQueryIntent(storedQuestion);
+    const useFullDocument = queryAnalysis.needsFullDocument;
+
+    let rankedChunks;
+
+    if (useFullDocument) {
+      const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+      rankedChunks = allChunks
+        .sort((a, b) => {
+          if ((a.page_start || 0) !== (b.page_start || 0)) {
+            return (a.page_start || 0) - (b.page_start || 0);
+          }
+          return (a.chunk_index || 0) - (b.chunk_index || 0);
+        })
+        .map(chunk => ({ ...chunk, similarity: 1.0, chunk_id: chunk.id }));
+    } else {
+      const questionEmbedding = await generateEmbedding(storedQuestion);
+      rankedChunks = await ChunkVectorModel.findNearestChunks(
+        questionEmbedding,
+        10,
+        file_id
+      );
+    }
+
+    if (!rankedChunks || rankedChunks.length === 0) {
+      const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+      rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id }));
+    }
+
+    const usedChunkIds = rankedChunks.map(c => c.chunk_id || c.id);
+
+    const documentContext = rankedChunks
+      .map((c, idx) => {
+        let header = `\n${'='.repeat(80)}\nSECTION ${idx + 1}`;
+        if (c.page_start) header += ` | Page ${c.page_start}`;
+        header += `\n${'='.repeat(80)}\n\n`;
+        return header + (c.content || '');
+      })
+      .join('\n\n');
+
+    let finalPrompt = `${storedQuestion}\n\n=== DOCUMENT ===\n${documentContext}`;
+    finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
+
+    try {
+      const profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+      if (profileContext) {
+        finalPrompt = `${profileContext}\n\n---\n\n${finalPrompt}`;
+      }
+    } catch (profileError) {
+      console.warn(`⚠️ Failed to fetch profile context:`, profileError.message);
+    }
+
+    // Stream the response
+    res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
+
+    let fullAnswer = '';
+    try {
+      for await (const chunk of streamLLM(provider, finalPrompt, '', '', storedQuestion, {
+        userId: userId,
+        endpoint: '/api/doc/chat/stream',
+        fileId: file_id,
+        sessionId: finalSessionId
+      })) {
+        fullAnswer += chunk;
+        res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+        if (res.flush && typeof res.flush === 'function') {
+          res.flush();
+        }
+      }
+    } catch (streamError) {
+      console.error('[chatWithDocumentStream] Streaming error:', streamError);
+      clearInterval(heartbeat);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Streaming failed', details: streamError.message })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // Ensure plain text answer
+    fullAnswer = ensurePlainTextAnswer(fullAnswer);
+
+    // Estimate token usage for streaming (approximate: ~4 chars per token)
+    const estimateTokenCount = (text) => Math.ceil((text || '').length / 4);
+    const estimatedInputTokens = estimateTokenCount(finalPrompt);
+    const estimatedOutputTokens = estimateTokenCount(fullAnswer);
+    
+    // Log LLM usage to payment service after streaming completes
+    console.log(`📊 [Streaming] Estimating usage - input: ${estimatedInputTokens}, output: ${estimatedOutputTokens}`);
+    if (userId && provider) {
+      // Get the model name from the provider
+      const { resolveProviderName } = require('../services/aiService');
+      const resolvedProvider = resolveProviderName(provider);
+      
+      // Try to get actual model name - for gemini-pro-2.5, use gemini-2.5-pro
+      let modelName = resolvedProvider;
+      if (resolvedProvider === 'gemini-pro-2.5') {
+        modelName = 'gemini-2.5-pro';
+      } else if (resolvedProvider === 'gemini-3-pro') {
+        modelName = 'gemini-3-pro-preview';
+      } else if (resolvedProvider === 'gemini') {
+        modelName = 'gemini-2.0-flash-exp'; // Default for gemini provider
+      }
+      
+      const LLMUsageLogService = require('../services/llmUsageLogService');
+      LLMUsageLogService.logUsage({
+        userId: userId,
+        modelName: modelName,
+        inputTokens: estimatedInputTokens,
+        outputTokens: estimatedOutputTokens,
+        endpoint: '/api/doc/chat/stream',
+        requestId: null,
+        fileId: file_id,
+        sessionId: finalSessionId
+      }).catch(err => {
+        console.error('⚠️ Failed to log streaming LLM usage:', err.message);
+      });
+    }
+
+    // Save to database
+    const savedChat = await FileChat.saveChat(
+      file_id,
+      userId,
+      storedQuestion,
+      fullAnswer,
+      finalSessionId,
+      usedChunkIds,
+      false,
+      null,
+      null,
+      historyForStorage
+    );
+
+    console.log(`✅ Chat saved: ID=${savedChat.id}, chunks=${usedChunkIds.length}`);
+
+    try {
+      const { userUsage, userPlan, requestedResources } = req;
+      await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
+    } catch (e) {
+      console.warn('Token usage increment failed:', e.message);
+    }
+
+    res.write(`data: ${JSON.stringify({ 
+      type: 'done', 
+      session_id: savedChat.session_id, 
+      message_id: savedChat.id,
+      answer: fullAnswer,
+      llm_provider: provider,
+      used_chunk_ids: usedChunkIds,
+      chunks_used: usedChunkIds.length
+    })}\n\n`);
+    res.write(`data: [DONE]\n\n`);
+    clearInterval(heartbeat);
+    res.end();
+
   } catch (error) {
     console.error('❌ Error in chatWithDocumentStream:', error);
+    console.error('Stack trace:', error.stack);
     clearInterval(heartbeat);
     if (!res.headersSent) {
       res.write(`data: ${JSON.stringify({ type: 'error', message: 'Failed to get AI answer.', details: error.message })}\n\n`);
@@ -4214,10 +4446,6 @@ exports.saveEditedDocument = async (req, res) => {
  }
 };
 
-/**
- * @description Generates a signed URL to download a specific format (DOCX or PDF) of an edited document.
- * @route GET /api/doc/download/:file_id/:format
- */
 exports.downloadDocument = async (req, res) => {
  try {
  const { file_id, format } = req.params;
@@ -4256,22 +4484,16 @@ exports.downloadDocument = async (req, res) => {
  }
 };
 
-/**
- * @description Retrieves the chat history for a specific document.
- * @route GET /api/doc/chat-history/:file_id
- */
 exports.getChatHistory = async (req, res) => {
  try {
  const userId = req.user.id;
 
- // ✅ Fetch all chats for this user (grouped by session)
  const chats = await FileChat.getChatHistoryByUserId(userId);
 
  if (!chats || chats.length === 0) {
  return res.status(404).json({ error: "No chat history found for this user." });
  }
 
- // ✅ Group chats by session_id for better organization
  const sessions = chats.reduce((acc, chat) => {
  if (!acc[chat.session_id]) {
  acc[chat.session_id] = {
@@ -4282,8 +4504,6 @@ exports.getChatHistory = async (req, res) => {
  messages: []
  };
  } else {
- // Update filename and file_id if they are null but this chat has them
- // This ensures we get the filename even if the first chat in a session didn't have it
  if (!acc[chat.session_id].filename && chat.filename) {
  acc[chat.session_id].filename = chat.filename;
  }
@@ -4305,22 +4525,16 @@ exports.getChatHistory = async (req, res) => {
  return acc;
  }, {});
 
- // ✅ Final pass: Ensure we have the best filename for each session
- // Look through all chats in each session to find the first non-null filename
  const sessionArray = Object.values(sessions);
  for (const session of sessionArray) {
- // Ensure filename is always a string or null, never undefined
  if (!session.filename || session.filename === undefined) {
- // Find the first chat in this session that has a filename
  const sessionChats = chats.filter(c => c.session_id === session.session_id && c.filename);
  if (sessionChats.length > 0 && sessionChats[0].filename) {
  session.filename = sessionChats[0].filename;
- // Also update file_id if we found a filename but file_id was null
  if (!session.file_id && sessionChats[0].file_id) {
  session.file_id = sessionChats[0].file_id;
  }
  } else {
- // Explicitly set to null if no filename found (not undefined)
  session.filename = null;
  }
  }
@@ -4341,7 +4555,6 @@ async function processBatchResults(file_id, job) {
       `[processBatchResults] Starting background post-processing for file: ${file_id}`
     );
 
-    // Step 7: Validate extracted text (42-45%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4359,13 +4572,11 @@ async function processBatchResults(file_id, job) {
       throw new Error(`No output URI prefix found in job for file ${file_id}`);
     }
     
-    // Extract prefix from gs:// URI
     let prefix = job.gcs_output_uri_prefix;
     if (prefix.startsWith('gs://')) {
       prefix = prefix.replace(`gs://${bucketName}/`, "");
     }
     
-    // Ensure prefix ends with / for proper directory matching
     if (!prefix.endsWith('/')) {
       prefix += '/';
     }
@@ -4375,7 +4586,6 @@ async function processBatchResults(file_id, job) {
     
     const extractedBatchTexts = await fetchBatchResults(bucketName, prefix);
 
-    // Enhanced validation with detailed logging
     console.log(`[processBatchResults] Extracted ${extractedBatchTexts.length} text segments`);
     if (extractedBatchTexts.length > 0) {
       const nonEmptySegments = extractedBatchTexts.filter(item => item.text && item.text.trim());
@@ -4385,9 +4595,7 @@ async function processBatchResults(file_id, job) {
       }
     }
 
-    // ✅ NEW: Extract plain text and save to output bucket with file ID as filename
     try {
-      // Combine all extracted text segments into a single plain text string
       const plainText = extractedBatchTexts
         .map(segment => segment.text || '')
         .filter(text => text.trim())
@@ -4396,10 +4604,8 @@ async function processBatchResults(file_id, job) {
       if (plainText && plainText.trim()) {
         console.log(`[processBatchResults] Saving plain text (${plainText.length} chars) to output bucket`);
         
-        // Get fileOutputBucket from config
         const { fileOutputBucket } = require('../config/gcs');
         
-        // Save to output bucket with file ID as filename
         const outputTextPath = `extracted-text/${file_id}.txt`;
         const outputTextFile = fileOutputBucket.file(outputTextPath);
         
@@ -4414,7 +4620,6 @@ async function processBatchResults(file_id, job) {
         const outputTextUri = `gs://${fileOutputBucket.name}/${outputTextPath}`;
         console.log(`[processBatchResults] ✅ Saved extracted text to: ${outputTextUri}`);
         
-        // Update database with the output path
         try {
           await DocumentModel.updateFileOutputPath(file_id, outputTextUri);
           console.log(`[processBatchResults] ✅ Updated database with output path`);
@@ -4426,7 +4631,6 @@ async function processBatchResults(file_id, job) {
       }
     } catch (saveError) {
       console.error(`[processBatchResults] ❌ Failed to save extracted text (non-critical):`, saveError.message);
-      // Don't throw - this is non-critical, processing can continue
     }
 
     if (
@@ -4451,7 +4655,6 @@ async function processBatchResults(file_id, job) {
       "Text validation completed"
     );
 
-    // Step 8: Prepare for chunking (45-48%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4484,7 +4687,6 @@ async function processBatchResults(file_id, job) {
       `Configuration loaded: ${batchChunkingMethod} chunking`
     );
 
-    // Step 9: Chunking (48-58%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4506,7 +4708,6 @@ async function processBatchResults(file_id, job) {
     );
 
     if (!chunks.length) {
-      // Handle no chunks (same as in processDocument)
       await DocumentModel.updateFileProcessedAt(file_id);
       await updateProcessingProgress(
         file_id,
@@ -4518,7 +4719,6 @@ async function processBatchResults(file_id, job) {
       return; // Stop execution
     }
 
-    // Step 10: Prepare embeddings (58-62%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4534,7 +4734,6 @@ async function processBatchResults(file_id, job) {
       `Ready to generate embeddings for ${chunks.length} chunks`
     );
 
-    // Step 11: Generate Embeddings (62-76%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4555,7 +4754,6 @@ async function processBatchResults(file_id, job) {
       "All embeddings generated successfully"
     );
 
-    // Step 12: Prepare database save (76-78%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4563,7 +4761,6 @@ async function processBatchResults(file_id, job) {
       "Preparing data for database storage"
     );
     const chunksToSave = chunks.map((chunk, i) => {
-      // ✅ CRITICAL: Extract page_start and page_end from metadata (or chunk directly)
       const page_start = chunk.metadata?.page_start !== null && chunk.metadata?.page_start !== undefined
         ? chunk.metadata.page_start
         : (chunk.page_start !== null && chunk.page_start !== undefined ? chunk.page_start : null);
@@ -4582,7 +4779,6 @@ async function processBatchResults(file_id, job) {
       };
     });
 
-    // Step 13: Save chunks to database (78-82%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4597,7 +4793,6 @@ async function processBatchResults(file_id, job) {
       `${savedChunks.length} chunks saved successfully`
     );
 
-    // Step 14: Prepare vectors (82-84%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4610,7 +4805,6 @@ async function processBatchResults(file_id, job) {
       file_id,
     }));
 
-    // Step 15: Save vectors (84-88%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4625,7 +4819,6 @@ async function processBatchResults(file_id, job) {
       "Vector embeddings stored successfully"
     );
 
-    // Step 16: Prepare for summary (88-90%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4640,7 +4833,6 @@ async function processBatchResults(file_id, job) {
       "Ready to generate summary"
     );
 
-    // Step 17: Generate Summary (90-95%)
     try {
       if (fullText.trim()) {
         await updateProcessingProgress(
@@ -4675,7 +4867,6 @@ async function processBatchResults(file_id, job) {
       );
     }
 
-    // Step 18: Finalization (95-100%)
     await updateProcessingProgress(
       file_id,
       "processing",
@@ -4739,7 +4930,6 @@ exports.getDocumentProcessingStatus = async (req, res) => {
 
     const job = await ProcessingJobModel.getJobByFileId(file_id);
 
-    // Prepare base response
     const baseResponse = {
       document_id: file.id,
       filename: file.filename,
@@ -4753,7 +4943,6 @@ exports.getDocumentProcessingStatus = async (req, res) => {
       mime_type: file.mime_type,
     };
 
-    // Case 1: Document is fully processed
     if (file.status === "processed") {
       const chunks = await FileChunkModel.getChunksByFileId(file_id);
       return res.json({
@@ -4767,7 +4956,6 @@ exports.getDocumentProcessingStatus = async (req, res) => {
       });
     }
 
-    // Case 2: Document processing failed
     if (file.status === "error") {
       return res.json({
         ...baseResponse,
@@ -4777,16 +4965,13 @@ exports.getDocumentProcessingStatus = async (req, res) => {
       });
     }
 
-    // Case 3: Synchronous OR *BACKGROUND* processing in progress
     if (file.status === "processing") {
-      // This case now handles all polls *after* the background job is triggered
       return res.json({
         ...baseResponse,
         message: "Document is being processed. Progress updates in real-time.",
       });
     }
 
-    // Case 4: Batch processing (polling the Google operation)
     if (file.status === "batch_processing" || file.status === "batch_queued") {
       if (!job || !job.document_ai_operation_name) {
         return res.json({
@@ -4798,7 +4983,6 @@ exports.getDocumentProcessingStatus = async (req, res) => {
 
       const currentProgress = parseFloat(file.processing_progress) || 0;
      
-      // Only update if we're moving forward from the initial state
       if (currentProgress < 5) {
         await updateProcessingProgress(
           file_id,
@@ -4812,10 +4996,8 @@ exports.getDocumentProcessingStatus = async (req, res) => {
         job.document_ai_operation_name
       );
 
-      // Batch still running
       if (!operationStatus.done) {
         console.log(`[getDocumentProcessingStatus] Batch operation for ${file_id} is still running.`);
-        // Smoothly progress from 5% to 42%
         const newProgress = Math.min(currentProgress + 2, 42);
 
         if (newProgress > currentProgress) {
@@ -4835,7 +5017,6 @@ exports.getDocumentProcessingStatus = async (req, res) => {
         });
       }
 
-      // Batch failed
       if (operationStatus.error) {
         await updateProcessingProgress(
           file_id,
@@ -4858,17 +5039,12 @@ exports.getDocumentProcessingStatus = async (req, res) => {
         });
       }
 
-      // ---=== BATCH IS DONE (operationStatus.done === true) ===---
 
-      // Check if this is the FIRST time we're seeing it 'done'
-      // We check < 100 to prevent re-triggering a completed job.
       if (currentProgress < 100) {
         console.log(
           `[getDocumentProcessingStatus] Batch for ${file_id} is DONE. Triggering background post-processing.`
         );
 
-        // ** THIS IS THE CRITICAL FIX **
-        // Update status to 'processing' so Case 3 handles future polls
         await updateProcessingProgress(
           file_id,
           "processing", // Set status to 'processing'
@@ -4876,12 +5052,8 @@ exports.getDocumentProcessingStatus = async (req, res) => {
           "Batch OCR completed"
         );
 
-        // ** FIRE-AND-FORGET **
-        // Call the worker function but DO NOT await it.
-        // This lets the API request return immediately.
         processBatchResults(file_id, job);
 
-        // Return the 42% status to the client *immediately*
         return res.json({
           ...baseResponse,
           status: "processing", // Reflect the new status
@@ -4891,16 +5063,12 @@ exports.getDocumentProcessingStatus = async (req, res) => {
         });
       }
 
-      // Fallback: If we're here, it's 'done' but progress is somehow 100
-      // (or processing was triggered by a duplicate request).
-      // This shouldn't happen, but if it does, just return the current status.
       return res.json({
         ...baseResponse,
         message: "Post-processing is complete.",
       });
     }
 
-    // Case 5: Just uploaded, not yet started
     return res.json({
       ...baseResponse,
       current_operation: "Queued",
@@ -4950,7 +5118,6 @@ exports.batchUploadDocuments = async (req, res) => {
  if (!req.files || req.files.length === 0)
  return res.status(400).json({ error: "No files uploaded." });
 
- // --- Fetch user usage and plan ---
  let usageAndPlan;
  try {
  usageAndPlan = await TokenUsageService.getUserUsageAndPlan(
@@ -4968,8 +5135,6 @@ exports.batchUploadDocuments = async (req, res) => {
 
  const { usage: userUsage, plan: userPlan } = usageAndPlan;
 
- // --- Calculate requested resources for this batch ---
- // For simplicity, assume each document uses 1 document slot and a fixed number of tokens (adjust as needed)
  const requestedResources = {
  tokens: req.files.length * 100, // Example: each file consumes 100 tokens
  documents: req.files.length,
@@ -4977,7 +5142,6 @@ exports.batchUploadDocuments = async (req, res) => {
  storage_gb: req.files.reduce((acc, f) => acc + f.size / (1024 ** 3), 0), // convert bytes to GB
  };
 
- // --- Enforce limits ---
  const limitCheck = await TokenUsageService.enforceLimits(
  userId,
  userUsage,
@@ -5012,7 +5176,6 @@ exports.batchUploadDocuments = async (req, res) => {
  const outputPrefix = `document-ai-results/${userId}/${uuidv4()}/`;
  const gcsOutputUriPrefix = `gs://${fileOutputBucket.name}/${outputPrefix}`;
 
- // Start DocAI Batch Operation
  console.log(`[batchUploadDocuments] Starting Document AI batch processing for ${originalFilename}`);
  const operationName = await batchProcessDocument(
    [gcsInputUri],
@@ -5020,7 +5183,6 @@ exports.batchUploadDocuments = async (req, res) => {
    mimeType
  );
 
- // Save file metadata
  const fileId = await DocumentModel.saveFileMetadata(
  userId,
  originalFilename,
@@ -5031,7 +5193,6 @@ exports.batchUploadDocuments = async (req, res) => {
  "batch_queued"
  );
 
- // Create job entry
  const jobId = uuidv4();
  await ProcessingJobModel.createJob({
  job_id: jobId,
@@ -5063,7 +5224,6 @@ exports.batchUploadDocuments = async (req, res) => {
  }
  }
 
- // --- Increment usage after successful upload(s) ---
  try {
  await TokenUsageService.incrementUsage(
  userId,
@@ -5089,10 +5249,6 @@ exports.batchUploadDocuments = async (req, res) => {
  }
 };
 
-/**
- * @description Retrieves the total storage utilization for the authenticated user.
- * @route GET /api/doc/user-storage-utilization
- */
 exports.getUserStorageUtilization = async (req, res) => {
  try {
  const userId = req.user.id;
@@ -5116,11 +5272,6 @@ exports.getUserStorageUtilization = async (req, res) => {
  }
 };
 
-/**
- * @description Retrieves user's current usage and plan details from the Document Service.
- * This endpoint is intended to be called by the Payment Service.
- * @route GET /api/doc/user-usage-and-plan/:userId
- */
 exports.getUserUsageAndPlan = async (req, res) => {
  try {
  const { userId } = req.params;
@@ -5130,7 +5281,6 @@ exports.getUserUsageAndPlan = async (req, res) => {
  return res.status(400).json({ error: "User ID is required." });
  }
 
- // Call the TokenUsageService to get the combined usage and plan data
  const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
 
  return res.status(200).json({
@@ -5150,10 +5300,6 @@ exports.getUserUsageAndPlan = async (req, res) => {
 
 
 
-/**
- * @description Delete a single chat by ID
- * @route DELETE /api/doc/chat/:chat_id
- */
 exports.deleteChat = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -5181,10 +5327,6 @@ exports.deleteChat = async (req, res) => {
   }
 };
 
-/**
- * @description Delete multiple selected chats
- * @route DELETE /api/doc/chats/selected
- */
 exports.deleteSelectedChats = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -5214,15 +5356,10 @@ exports.deleteSelectedChats = async (req, res) => {
   }
 };
 
-/**
- * @description Delete all chats for the authenticated user
- * @route DELETE /api/doc/chats/all
- */
 exports.deleteAllChats = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Get statistics first for confirmation message
     const stats = await FileChat.getChatStatistics(userId);
     
     if (stats && stats.totalChats === 0) {
@@ -5248,10 +5385,6 @@ exports.deleteAllChats = async (req, res) => {
   }
 };
 
-/**
- * @description Delete all chats for a specific session
- * @route DELETE /api/doc/chats/session/:session_id
- */
 exports.deleteChatsBySession = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -5283,10 +5416,6 @@ exports.deleteChatsBySession = async (req, res) => {
   }
 };
 
-/**
- * @description Delete all chats for a specific file
- * @route DELETE /api/doc/chats/file/:file_id
- */
 exports.deleteChatsByFile = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -5296,7 +5425,6 @@ exports.deleteChatsByFile = async (req, res) => {
       return res.status(400).json({ error: "file_id is required." });
     }
 
-    // Verify user owns the file (optional check)
     const DocumentModel = require("../models/documentModel");
     const file = await DocumentModel.getFileById(file_id);
     if (file && String(file.user_id) !== String(userId)) {
@@ -5327,10 +5455,6 @@ exports.deleteChatsByFile = async (req, res) => {
   }
 };
 
-/**
- * @description Get chat statistics for the user
- * @route GET /api/doc/chats/statistics
- */
 exports.getChatStatistics = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -5348,10 +5472,6 @@ exports.getChatStatistics = async (req, res) => {
   }
 };
 
-/**
- * @description Get preview of chats that would be deleted
- * @route POST /api/doc/chats/delete-preview
- */
 exports.getDeletePreview = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -5374,10 +5494,6 @@ exports.getDeletePreview = async (req, res) => {
 
 
 
-/**
- * @description Get document with all related data (chunks, chats, metadata) - user-specific
- * @route GET /api/doc/document/:file_id/complete
- */
 exports.getDocumentComplete = async (req, res) => {
   const userId = req.user.id;
   const { file_id } = req.params;
@@ -5386,27 +5502,21 @@ exports.getDocumentComplete = async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
     if (!file_id) return res.status(400).json({ error: "file_id is required" });
 
-    // Get file metadata
     const file = await DocumentModel.getFileById(file_id);
     if (!file) {
       return res.status(404).json({ error: "Document not found" });
     }
 
-    // Verify user owns the document
     if (String(file.user_id) !== String(userId)) {
       return res.status(403).json({ error: "Access denied" });
     }
 
-    // Get all chunks for this file
     const chunks = await FileChunkModel.getChunksByFileId(file_id);
 
-    // Get chat history for this file
     const chats = await FileChat.getChatHistory(file_id);
 
-    // Get processing job if exists
     const processingJob = await ProcessingJobModel.getJobByFileId(file_id);
 
-    // Return complete document data
     return res.status(200).json({
       success: true,
       document: {
@@ -5460,7 +5570,6 @@ exports.getDocumentComplete = async (req, res) => {
   }
 };
 
-// Export processDocument for use in other modules (e.g., documentRoutes)
 exports.processDocument = processDocument;
 
 

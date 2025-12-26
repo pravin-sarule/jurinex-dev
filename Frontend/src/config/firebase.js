@@ -1,4 +1,3 @@
-// src/config/firebase.js
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 
@@ -11,16 +10,13 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Firebase Auth and Google Provider
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-// Optional: Configure Google Provider
 googleProvider.setCustomParameters({
-  prompt: 'select_account' // Forces account selection every time
+  prompt: 'select_account'
 });
 
 export default app;

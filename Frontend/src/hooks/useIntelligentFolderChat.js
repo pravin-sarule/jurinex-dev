@@ -1,12 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
+import { DOCS_BASE_URL } from '../config/apiConfig';
 
-// Get API base URL from environment or default
-const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
-const API_BASE = `${API_BASE_URL}/docs`;
+const API_BASE = DOCS_BASE_URL;
 
-// Helper to get auth token from localStorage
 const getAuthToken = () => {
   const tokenKeys = [
     'authToken',
@@ -26,32 +24,21 @@ const getAuthToken = () => {
   return null;
 };
 
-/**
- * Hook for intelligent folder chat with real-time streaming rendering
- * Renders chunks immediately as they arrive, not buffered
- */
 export function useIntelligentFolderChat(folderName, authToken = null) {
   const [text, setText] = useState('');
-  const [thinking, setThinking] = useState(''); // NEW: Model's thinking/reasoning process
+  const [thinking, setThinking] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [methodUsed, setMethodUsed] = useState(null);
   const [routingDecision, setRoutingDecision] = useState(null);
   const [status, setStatus] = useState(null);
-  const [finalMetadata, setFinalMetadata] = useState(null); // Store final metadata with citations
+  const [finalMetadata, setFinalMetadata] = useState(null);
 
   const abortControllerRef = useRef(null);
   const updateTimeoutRef = useRef(null);
 
-  /**
-   * Send a message and stream the response in real-time
-   * Chunks are rendered immediately as they arrive
-   * @param {string} question - The user's question (optional if secretId is provided)
-   * @param {string} secretId - The secret prompt ID (optional, used instead of question)
-   */
   const sendMessage = useCallback(async (question, secretId = null) => {
-    // Cancel any ongoing request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -59,16 +46,14 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
 
-    // Reset state
     setText('');
-    setThinking(''); // Reset thinking
+    setThinking('');
     setError(null);
     setIsStreaming(true);
     setMethodUsed(null);
     setRoutingDecision(null);
     setStatus(null);
 
-    // Clear any pending UI updates
     if (updateTimeoutRef.current) {
       clearTimeout(updateTimeoutRef.current);
       updateTimeoutRef.current = null;
@@ -78,25 +63,16 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
       const token = authToken || getAuthToken();
       const endpoint = `${API_BASE}/${folderName}/intelligent-chat/stream`;
 
-      // Build request body based on whether using secret prompt or regular question
       const requestBody = {
         session_id: sessionId,
-        llm_name: 'gemini', // Optional
+        llm_name: 'gemini',
       };
 
-      // ✅ Send secret_id for secret prompts, question for regular chat
-      // When secretId is provided, ONLY send secret_id (no question field at all)
-      // Backend will fetch the secret prompt using secret_id
       if (secretId) {
         requestBody.secret_id = secretId;
-        // Explicitly do NOT include question field when using secret_id
-        // Backend handles secret_id and fetches the prompt internally
       } else if (question && question.trim()) {
-        // Only include question if it's provided and not empty
         requestBody.question = question.trim();
       } else {
-        // No secretId and no valid question - this should not happen
-        // This error should not occur if form validation is working correctly
         setError('Please enter a question or select an analysis prompt.');
         setIsStreaming(false);
         return;
@@ -117,7 +93,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         const errorData = await response.json().catch(() => ({}));
         const errorMessage = errorData.error || errorData.message || `HTTP ${response.status}`;
         
-        // If using secret_id and backend says question is required, provide a clearer error
         if (secretId && errorMessage.toLowerCase().includes('question') && errorMessage.toLowerCase().includes('required')) {
           setError('Backend error: Secret prompt could not be processed. Please try again or contact support.');
         } else {
@@ -130,9 +105,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let lineBuffer = '';
-      let accumulatedText = ''; // Track full text for final state
-      let accumulatedThinking = ''; // Track thinking content
-      const isUsingSecretId = !!secretId; // Store flag for error handling
+      let accumulatedText = '';
+      let accumulatedThinking = '';
+      const isUsingSecretId = !!secretId;
 
       while (true) {
         if (signal.aborted) {
@@ -143,10 +118,8 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         const { done, value } = await reader.read();
 
         if (done) {
-          // Stream complete - ensure final text and thinking are set ONCE
           setIsStreaming(false);
           if (accumulatedText) {
-            // ✅ Convert JSON to formatted document before setting final text
             const isStructured = isStructuredJsonResponse(accumulatedText);
             const formattedResponse = isStructured
               ? renderSecretPromptResponse(accumulatedText)
@@ -159,26 +132,20 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
           break;
         }
 
-        // Decode chunk
         lineBuffer += decoder.decode(value, { stream: true });
         const lines = lineBuffer.split('\n');
-        lineBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+        lineBuffer = lines.pop() || '';
 
-        // Process each complete line
         for (const line of lines) {
           if (!line.trim() || !line.startsWith('data: ')) continue;
 
           const data = line.replace(/^data: /, '').trim();
 
-          // Handle heartbeat
           if (data === '[PING]') continue;
 
-          // Handle completion marker
           if (data === '[DONE]') {
             setIsStreaming(false);
-            // Ensure final text is displayed once
             if (accumulatedText) {
-              // ✅ Convert JSON to formatted document before setting final text
               const isStructured = isStructuredJsonResponse(accumulatedText);
               const formattedResponse = isStructured
                 ? renderSecretPromptResponse(accumulatedText)
@@ -191,13 +158,11 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
             return;
           }
 
-          // Parse JSON data
           try {
             const parsed = JSON.parse(data);
 
             switch (parsed.type) {
               case 'metadata':
-                // Initial metadata with session_id and method
                 if (parsed.session_id) {
                   setSessionId(parsed.session_id);
                 }
@@ -210,7 +175,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 break;
 
               case 'status':
-                // Status updates (analyzing, generating, etc.)
                 setStatus({
                   status: parsed.status,
                   message: parsed.message,
@@ -218,52 +182,40 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 break;
 
               case 'thinking':
-                // CRITICAL: Render thinking chunks immediately in real-time
                 const thinkingText = parsed.text || '';
                 if (thinkingText) {
                   accumulatedThinking += thinkingText;
                   
-                  // Update UI immediately for real-time rendering
                   if (updateTimeoutRef.current) {
                     clearTimeout(updateTimeoutRef.current);
                   }
                   
-                  // Immediate update for real-time rendering
                   updateTimeoutRef.current = setTimeout(() => {
                     setThinking(accumulatedThinking);
                     updateTimeoutRef.current = null;
-                  }, 10); // 10ms debounce for smooth rendering
+                  }, 10);
                 }
                 break;
 
               case 'chunk':
-                // ✅ Like AnalysisPage: Accumulate chunks but DON'T show during streaming
-                // Only show complete formatted response after streaming is done
                 const chunkText = parsed.text || '';
                 if (chunkText) {
                   accumulatedText += chunkText;
-                  // Don't update text during streaming
-                  // Wait until streaming is complete (done event) to show formatted content
                 }
                 break;
 
               case 'done':
-                // Final metadata - stream is complete
                 setIsStreaming(false);
                 if (parsed.session_id) setSessionId(parsed.session_id);
                 if (parsed.method) setMethodUsed(parsed.method);
                 if (parsed.routing_decision) {
                   setRoutingDecision(parsed.routing_decision);
                 }
-                // Store final metadata for citations
                 setFinalMetadata(parsed);
-                // Log metadata for debugging
                 console.log('[useIntelligentFolderChat] Done metadata:', parsed);
                 console.log('[useIntelligentFolderChat] used_chunk_ids:', parsed.used_chunk_ids);
                 console.log('[useIntelligentFolderChat] citations:', parsed.citations);
-                // Ensure final text and thinking are set ONCE
                 if (accumulatedText) {
-                  // ✅ Convert JSON to formatted document before setting final text
                   const isStructured = isStructuredJsonResponse(accumulatedText);
                   const formattedResponse = isStructured
                     ? renderSecretPromptResponse(accumulatedText)
@@ -276,7 +228,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 break;
 
               case 'error':
-                // Handle error messages - filter out "question required" when using secret_id
                 const errorMsg = parsed.message || parsed.error || 'An error occurred';
                 if (isUsingSecretId && errorMsg.toLowerCase().includes('question') && errorMsg.toLowerCase().includes('required')) {
                   setError('Backend error: Secret prompt could not be processed. Please try again or contact support.');
@@ -287,11 +238,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 break;
 
               default:
-                // Unknown type - log for debugging
                 console.log('Unknown stream event type:', parsed.type);
             }
           } catch (e) {
-            // Skip invalid JSON (might be partial data)
             console.warn('Failed to parse stream data:', e, data);
           }
         }
@@ -312,9 +261,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     }
   }, [folderName, authToken, sessionId]);
 
-  /**
-   * Stop the current streaming request
-   */
   const stopStreaming = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -323,9 +269,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     setIsStreaming(false);
   }, []);
 
-  /**
-   * Clear the current text and reset state
-   */
   const clear = useCallback(() => {
     setText('');
     setThinking('');
@@ -336,7 +279,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     stopStreaming();
   }, [stopStreaming]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -350,14 +292,14 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
   return {
     text,
-    thinking, // NEW: Expose thinking content
+    thinking,
     isStreaming,
     error,
     sessionId,
     methodUsed,
     routingDecision,
     status,
-    finalMetadata, // Expose final metadata with citations
+    finalMetadata,
     sendMessage,
     stopStreaming,
     clear,

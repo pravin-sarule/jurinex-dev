@@ -1,19 +1,9 @@
-/**
- * Example usage of IntelligentFolderChat component
- * 
- * This file demonstrates how to integrate the Intelligent Folder Chat
- * into your existing pages/components.
- */
-
 import React from 'react';
 import IntelligentFolderChat from './IntelligentFolderChat';
 
-/**
- * Example 1: Basic Usage
- */
 export function BasicIntelligentChatExample() {
   const folderName = 'my-case-folder';
-  const authToken = localStorage.getItem('token'); // or get from context
+  const authToken = localStorage.getItem('token');
 
   return (
     <div style={{ height: '600px', margin: '20px' }}>
@@ -25,9 +15,6 @@ export function BasicIntelligentChatExample() {
   );
 }
 
-/**
- * Example 2: With Completion Callback
- */
 export function IntelligentChatWithCallback() {
   const folderName = 'my-case-folder';
   const authToken = localStorage.getItem('token');
@@ -40,7 +27,6 @@ export function IntelligentChatWithCallback() {
       routingDecision: data.routingDecision,
     });
     
-    // You can save to database, show notification, etc.
   };
 
   return (
@@ -54,9 +40,6 @@ export function IntelligentChatWithCallback() {
   );
 }
 
-/**
- * Example 3: Using the Hook Directly (More Control)
- */
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
 
 export function CustomIntelligentChat() {
@@ -108,22 +91,6 @@ export function CustomIntelligentChat() {
   );
 }
 
-/**
- * Example 4: Integration with FolderDetailPage
- * 
- * Replace your existing folder chat in FolderDetailPage.jsx:
- * 
- * import IntelligentFolderChat from '../components/IntelligentFolderChat';
- * 
- * // In your component:
- * <IntelligentFolderChat 
- *   folderName={folderName}
- *   authToken={authToken}
- *   onMessageComplete={(data) => {
- *     // Handle completion
- *   }}
- * />
- */
 
 export default BasicIntelligentChatExample;
 

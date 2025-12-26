@@ -2,11 +2,9 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
-// Initialize GCS configuration
 const { initializeGCS } = require('./config/gcs');
 const { checkSystemClock } = require('./utils/systemCheck');
 
-// Check system clock first (important for JWT tokens)
 checkSystemClock().then(clockStatus => {
   if (!clockStatus.synchronized && clockStatus.differenceMinutes) {
     console.error(`\n⚠️ CRITICAL: System clock is out of sync by ${clockStatus.differenceMinutes.toFixed(2)} minutes!`);
@@ -15,7 +13,6 @@ checkSystemClock().then(clockStatus => {
   }
 });
 
-// Initialize GCS
 try {
   initializeGCS();
 } catch (error) {
@@ -28,12 +25,10 @@ const chatRoutes = require('./routes/chatRoutes');
 const app = express();
 const PORT = process.env.PORT || 5003;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
     success: true,
@@ -42,10 +37,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API Routes
 app.use('/api/chat', chatRoutes);
 
-// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -53,7 +46,6 @@ app.use((req, res) => {
   });
 });
 
-// Error handler
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err);
   res.status(err.status || 500).json({
@@ -62,7 +54,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`🚀 ChatModel service running on port ${PORT}`);
   console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);

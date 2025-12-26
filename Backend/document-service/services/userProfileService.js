@@ -1,17 +1,6 @@
 const axios = require('axios');
 
-/**
- * Service to fetch user professional profile from Auth Service
- * Since auth service and document service have different databases,
- * we need to make API calls to fetch the profile data.
- */
 class UserProfileService {
-  /**
-   * Get user's full name from users table
-   * @param {number} userId - User ID
-   * @param {string} authorizationHeader - Authorization header (Bearer token)
-   * @returns {Promise<string|null>} - User's full name or null
-   */
   static async getUserName(userId, authorizationHeader) {
     try {
       const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';
@@ -60,34 +49,21 @@ class UserProfileService {
     }
   }
 
-  /**
-   * Get professional profile context string for AI prompts
-   * @param {number} userId - User ID
-   * @param {string} authorizationHeader - Authorization header (Bearer token)
-   * @returns {Promise<string|null>} - Profile context string or null
-   */
   static async getProfileContext(userId, authorizationHeader) {
     try {
-      // Fetch user's full name first
       const userName = await this.getUserName(userId, authorizationHeader);
       
-      // Try multiple endpoints in order: direct auth service first (most reliable for local dev)
       const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';
       const gatewayUrl = process.env.API_GATEWAY_URL || 'http://localhost:5000';
       
-      // Try direct auth service first (more reliable, especially for local development)
-      // Only use gateway if AUTH_SERVICE_URL is not set
       const endpoints = [];
       if (process.env.AUTH_SERVICE_URL || !process.env.API_GATEWAY_URL) {
-        // Prefer direct auth service connection
         endpoints.push(`${authServiceUrl}/api/auth/professional-profile`);
       }
       if (process.env.API_GATEWAY_URL) {
-        // Add gateway as fallback if explicitly configured
         endpoints.push(`${gatewayUrl}/auth/professional-profile`);
       }
       
-      // If no endpoints configured, default to direct auth service
       if (endpoints.length === 0) {
         endpoints.push(`${authServiceUrl}/api/auth/professional-profile`);
       }
@@ -115,10 +91,8 @@ class UserProfileService {
             return null;
           }
 
-          // Build context string from profile data
           const contextParts = [];
 
-          // Always include user's name first if available
           if (userName) {
             contextParts.push(`User Full Name: ${userName}`);
           }
@@ -164,7 +138,6 @@ class UserProfileService {
             return null;
           }
 
-          // Build context string with name first and instructions to use it
           let contextString = `=== USER PROFESSIONAL PROFILE ===
 The following is the authenticated user's professional profile information. Use this context to personalize your responses and answer questions about the user's profile:
 
@@ -184,25 +157,16 @@ ${userName ? `- ALWAYS address the user by their name "${userName}" at the begin
         }
       }
       
-      // If all endpoints failed
       console.error(`[UserProfileService] ❌ All endpoints failed. Last error:`, lastError?.response?.status || lastError?.message);
       return null;
     } catch (error) {
-      // Don't fail the request if profile fetch fails
       console.error(`[UserProfileService] ❌ Unexpected error fetching profile for user ${userId}:`, error.message);
       return null;
     }
   }
 
-  /**
-   * Get detailed profile context for answering profile questions
-   * @param {number} userId - User ID
-   * @param {string} authorizationHeader - Authorization header
-   * @returns {Promise<string|null>} - Detailed profile context or null
-   */
   static async getDetailedProfileContext(userId, authorizationHeader) {
     try {
-      // Fetch user's full name first
       const userName = await this.getUserName(userId, authorizationHeader);
       
       console.log(`[UserProfileService] Fetching detailed profile for user ${userId}...`);
@@ -214,10 +178,8 @@ ${userName ? `- ALWAYS address the user by their name "${userName}" at the begin
         return null;
       }
 
-      // Build detailed profile information
       const details = [];
       
-      // Always include user's name first if available
       if (userName) {
         details.push(`**User Full Name:** ${userName}`);
       }
@@ -265,31 +227,19 @@ ${userName ? `- ALWAYS address the user by their name "${userName}" at the begin
     }
   }
 
-  /**
-   * Get full professional profile object
-   * @param {number} userId - User ID
-   * @param {string} authorizationHeader - Authorization header
-   * @returns {Promise<Object|null>} - Profile object or null
-   */
   static async getProfile(userId, authorizationHeader) {
     try {
-      // Try multiple endpoints in order: direct auth service first (most reliable for local dev)
       const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';
       const gatewayUrl = process.env.API_GATEWAY_URL || 'http://localhost:5000';
       
-      // Try direct auth service first (more reliable, especially for local development)
-      // Only use gateway if AUTH_SERVICE_URL is not set
       const endpoints = [];
       if (process.env.AUTH_SERVICE_URL || !process.env.API_GATEWAY_URL) {
-        // Prefer direct auth service connection
         endpoints.push(`${authServiceUrl}/api/auth/professional-profile`);
       }
       if (process.env.API_GATEWAY_URL) {
-        // Add gateway as fallback if explicitly configured
         endpoints.push(`${gatewayUrl}/auth/professional-profile`);
       }
       
-      // If no endpoints configured, default to direct auth service
       if (endpoints.length === 0) {
         endpoints.push(`${authServiceUrl}/api/auth/professional-profile`);
       }
@@ -317,7 +267,6 @@ ${userName ? `- ALWAYS address the user by their name "${userName}" at the begin
         }
       }
       
-      // If all endpoints failed
       console.error(`[UserProfileService] ❌ All endpoints failed for getProfile. Last error:`, lastError?.response?.status || lastError?.message);
       return null;
     } catch (error) {

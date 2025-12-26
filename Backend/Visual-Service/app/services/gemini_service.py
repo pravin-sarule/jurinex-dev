@@ -2,23 +2,10 @@
 # Gemini AI Service
 # Handles interaction with Google's Gemini 1.5 Flash model for flowchart generation
 # """
-# import os
-# import google.generativeai as genai
-# import re
-
-# # Get Gemini API key from environment
-# GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_GENERATIVE_AI_API_KEY')
-
-# # Initialize Gemini AI if API key is available
-# if GEMINI_API_KEY:
-#     genai.configure(api_key=GEMINI_API_KEY)
-#     model = genai.GenerativeModel('gemini-1.5-flash')
-# else:
-#     model = None
-#     print("⚠️ Warning: GEMINI_API_KEY not found. Flowchart generation will not work.")
 
 
-# class GeminiService:
+
+
 #     """
 #     Service class for interacting with Gemini 1.5 Flash AI model
     
@@ -28,8 +15,6 @@
 #     - Error handling for AI API calls
 #     """
     
-#     @staticmethod
-#     def generate_flowchart(document_content, prompt=None, flowchart_type='process'):
 #         """
 #         Generate flowchart description using Gemini 1.5 Flash
         
@@ -52,16 +37,12 @@
 #         Raises:
 #             ValueError: If Gemini API is not configured or generation fails
 #         """
-#         if not model:
-#             raise ValueError('Gemini API not configured. GEMINI_API_KEY environment variable is required.')
         
-#         # Construct the flowchart generation prompt
 #         flowchart_prompt = prompt or f'''Generate a {flowchart_type} flowchart based on the following document. 
 # Create a clear, structured flowchart that visualizes the key processes, steps, or relationships described in the document.
 # Use standard flowchart symbols (rectangles for processes, diamonds for decisions, arrows for flow).
 # Make it comprehensive and easy to understand.'''
         
-#         # Combine prompt with document content
 #         full_prompt = f'''{flowchart_prompt}
 
 # {document_content}
@@ -69,24 +50,10 @@
 # Please generate a detailed flowchart description in Mermaid syntax or a structured text format that can be used to create a visual flowchart. 
 # Include all key steps, decision points, and relationships from the document.'''
         
-#         try:
-#             # Generate content using Gemini 1.5 Flash
-#             response = model.generate_content(full_prompt)
-#             flowchart_result = response.text
             
-#             # Extract Mermaid syntax if present
-#             mermaid_syntax = GeminiService._extract_mermaid_syntax(flowchart_result)
             
-#             return {
-#                 'flowchart_description': flowchart_result,
-#                 'mermaid_syntax': mermaid_syntax
-#             }
             
-#         except Exception as e:
-#             raise ValueError(f'Failed to generate flowchart with Gemini: {str(e)}')
     
-#     @staticmethod
-#     def _extract_mermaid_syntax(text):
 #         """
 #         Extract Mermaid syntax from AI-generated text
         
@@ -99,59 +66,23 @@
 #         Returns:
 #             str or None: Extracted Mermaid syntax, or None if not found
 #         """
-#         # Pattern 1: Look for ```mermaid code blocks
-#         mermaid_pattern = r'```mermaid\n([\s\S]*?)\n```'
-#         matches = re.findall(mermaid_pattern, text)
         
-#         if matches:
-#             return matches[0]
         
-#         # Pattern 2: Look for generic code blocks that might contain Mermaid
-#         code_block_pattern = r'```\n([\s\S]*?)\n```'
-#         code_matches = re.findall(code_block_pattern, text)
         
-#         if code_matches:
-#             code = code_matches[0]
-#             # Check if it looks like Mermaid syntax
-#             # Mermaid typically contains keywords like 'graph', 'flowchart', or arrows '-->'
-#             if 'graph' in code or 'flowchart' in code or '-->' in code:
-#                 return code
         
-#         # No Mermaid syntax found
-#         return None
 
 """
 Gemini AI Service
 Handles interaction with Google's Gemini models for flowchart generation.
 """
-# import os
-# import re
-# import google.generativeai as genai
-# from google.api_core import exceptions
 
-# class GeminiService:
 #     """
 #     Service class for interacting with Google Gemini AI models.
 #     """
     
-#     # List of preferred models to try in order
-#     PREFERRED_MODELS = [
-#         'gemini-2.0-flash-exp',
-#         'gemini-1.5-flash',
-#         'gemini-1.5-pro',
-#         'gemini-pro'
-#     ]
 
-#     @staticmethod
-#     def _configure_genai():
 #         """Configures the Gemini API with the environment key."""
-#         api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_GENERATIVE_AI_API_KEY')
-#         if not api_key:
-#             raise ValueError("API Key not found. Please set GEMINI_API_KEY environment variable.")
-#         genai.configure(api_key=api_key)
 
-#     @staticmethod
-#     def generate_flowchart(document_content, prompt=None, flowchart_type='process'):
 #         """
 #         Generate flowchart description using Gemini.
         
@@ -163,16 +94,8 @@ Handles interaction with Google's Gemini models for flowchart generation.
 #         Returns:
 #             dict: { 'flowchart_description': str, 'mermaid_syntax': str }
 #         """
-#         GeminiService._configure_genai()
         
-#         # 1. Select a Model
-#         model = GeminiService._get_available_model()
 
-#         # 2. Construct Prompt
-#         base_prompt = prompt or (
-#             f"Create a '{flowchart_type}' flowchart based on the document below. "
-#             "Identify the key actors, steps, and decision points."
-#         )
 
 #         full_prompt = f"""
 #         {base_prompt}
@@ -188,47 +111,17 @@ Handles interaction with Google's Gemini models for flowchart generation.
 #         "{document_content}"
 #         """
         
-#         try:
-#             # 3. Generate Content
-#             response = model.generate_content(full_prompt)
             
-#             if not response.parts:
-#                 raise ValueError("AI returned an empty response.")
 
-#             flowchart_result = response.text
             
-#             # 4. Extract Mermaid
-#             mermaid_syntax = GeminiService._extract_mermaid_syntax(flowchart_result)
             
-#             return {
-#                 'flowchart_description': flowchart_result,
-#                 'mermaid_syntax': mermaid_syntax,
-#                 'model_used': model.model_name
-#             }
             
-#         except exceptions.ResourceExhausted:
-#             raise ValueError("Gemini API Quota Exceeded.")
-#         except Exception as e:
-#             raise ValueError(f"Failed to generate flowchart: {str(e)}")
 
-#     @staticmethod
-#     def _get_available_model():
 #         """
 #         Tries to initialize the first available model from the preferred list.
 #         """
-#         for model_name in GeminiService.PREFERRED_MODELS:
-#             try:
-#                 # We instantiate the model object; actual validity is checked on call usually,
-#                 # but this sets our intent.
-#                 return genai.GenerativeModel(model_name)
-#             except Exception:
-#                 continue
         
-#         # Fallback
-#         return genai.GenerativeModel('gemini-pro')
 
-#     @staticmethod
-#     def _extract_mermaid_syntax(text):
 #         """
 #         Robustly extracts and cleans Mermaid syntax from AI response.
         
@@ -238,36 +131,11 @@ Handles interaction with Google's Gemini models for flowchart generation.
 #         Returns:
 #             str or None: Extracted and cleaned Mermaid syntax, or None if not found
 #         """
-#         if not text:
-#             return None
 
-#         # Regex to find ```mermaid ... ``` or just ``` ... ``` blocks
-#         # Flags: DOTALL to match newlines with .
-#         patterns = [
-#             r"```mermaid\s*(.*?)\s*```",  # Explicit mermaid block
-#             r"```\s*(graph\s+TD.*?)\s*```", # Generic block starting with graph
-#             r"```\s*(flowchart\s+TD.*?)\s*```", # Generic block starting with flowchart
-#             r"```\s*(sequenceDiagram.*?)\s*```", # Generic block starting with sequence
-#             r"```\s*(.*?)\s*```"  # Generic code block (check if it's mermaid)
-#         ]
 
-#         for pattern in patterns:
-#             match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-#             if match:
-#                 code = match.group(1).strip()
-#                 # Basic validation: check for common mermaid keywords
-#                 if any(k in code.lower() for k in ['graph', 'flowchart', 'sequencediagram', 'classdiagram', '-->', '--']):
-#                     return GeminiService._clean_mermaid_syntax(code)
         
-#         # Fallback: If no code blocks, check if the raw text itself is mermaid
-#         text_stripped = text.strip()
-#         if text_stripped.startswith("graph ") or text_stripped.startswith("flowchart "):
-#             return GeminiService._clean_mermaid_syntax(text_stripped)
 
-#         return None
     
-#     @staticmethod
-#     def _clean_mermaid_syntax(code):
 #         """
 #         Clean and validate Mermaid syntax to fix common issues.
         
@@ -277,68 +145,18 @@ Handles interaction with Google's Gemini models for flowchart generation.
 #         Returns:
 #             str: Cleaned Mermaid code
 #         """
-#         if not code:
-#             return None
         
-#         # Remove leading/trailing whitespace
-#         code = code.strip()
         
-#         # Remove any remaining markdown code block markers
-#         code = re.sub(r'^```mermaid\s*', '', code, flags=re.IGNORECASE)
-#         code = re.sub(r'^```\s*', '', code)
-#         code = re.sub(r'\s*```$', '', code)
-#         code = code.strip()
         
-#         # Normalize line breaks
-#         code = re.sub(r'\r\n', '\n', code)
-#         code = re.sub(r'\r', '\n', code)
         
-#         # Remove excessive empty lines (more than 2 consecutive)
-#         code = re.sub(r'\n{3,}', '\n\n', code)
         
-#         # Ensure proper spacing around arrows
-#         code = re.sub(r'\s*-->\s*', ' --> ', code)
-#         code = re.sub(r'\s*--\s+', ' -- ', code)
         
-#         # Fix common issues with node labels containing special characters
-#         # Wrap labels with quotes if they contain colons, slashes, or special chars
-#         lines = code.split('\n')
-#         cleaned_lines = []
-#         for line in lines:
-#             # Skip empty lines
-#             if not line.strip():
-#                 cleaned_lines.append(line)
-#                 continue
             
-#             # Check if line contains node definitions with problematic characters
-#             # Pattern: nodeId[Label] or nodeId(Label) or nodeId{Label}
-#             if re.search(r'[A-Za-z0-9_]+[\[({].*[:/].*[\]})]', line):
-#                 # Try to quote the label content
-#                 line = re.sub(
-#                     r'([A-Za-z0-9_]+)([\[({])([^\]})]+)([\]})])',
-#                     lambda m: f"{m.group(1)}{m.group(2)}\"{m.group(3)}\"{m.group(4)}" if ':' in m.group(3) or '/' in m.group(3) else m.group(0),
-#                     line
-#                 )
             
-#             cleaned_lines.append(line)
         
-#         code = '\n'.join(cleaned_lines)
         
-#         # Ensure it starts with a valid Mermaid keyword
-#         valid_starters = ['graph', 'flowchart', 'sequencediagram', 'classdiagram', 
-#                          'statediagram', 'erdiagram', 'gantt', 'pie', 'gitgraph', 
-#                          'journey', 'requirement']
-#         first_line = code.split('\n')[0].strip().lower()
-#         if not any(first_line.startswith(kw) for kw in valid_starters):
-#             # If it looks like flowchart syntax but missing declaration, add it
-#             if '-->' in code or '--' in code:
-#                 code = 'graph TD\n' + code
         
-#         return code.strip()
 
-# # --- Example Usage (If running directly) ---
-# if __name__ == "__main__":
-#     # Mock Document
 #     sample_text = """
 #     To publish a document, the user first uploads the file. 
 #     If the file is valid, the system saves it to the database. 
@@ -346,13 +164,6 @@ Handles interaction with Google's Gemini models for flowchart generation.
 #     Finally, a notification is sent to the admin.
 #     """
     
-#     try:
-#         # Ensure you set export GEMINI_API_KEY="your_key" in your terminal
-#         result = GeminiService.generate_flowchart(sample_text)
-#         print("--- Mermaid Syntax ---")
-#         print(result['mermaid_syntax'])
-#     except Exception as e:
-#         print(f"Error: {e}")
 
 
 
@@ -530,18 +341,15 @@ class GeminiService:
 
             mindmap_result = response.text.strip()
             
-            # Clean the response - remove markdown code blocks if present
             mindmap_result = re.sub(r'^```json\s*', '', mindmap_result, flags=re.IGNORECASE)
             mindmap_result = re.sub(r'^```\s*', '', mindmap_result)
             mindmap_result = re.sub(r'\s*```$', '', mindmap_result)
             mindmap_result = mindmap_result.strip()
             
-            # Try to parse JSON
             try:
                 import json
                 mindmap_json = json.loads(mindmap_result)
                 
-                # Validate structure
                 if not isinstance(mindmap_json, dict):
                     raise ValueError("Mind map must be a JSON object")
                 if 'title' not in mindmap_json:
@@ -555,7 +363,6 @@ class GeminiService:
                     'model_used': model.model_name
                 }
             except json.JSONDecodeError as e:
-                # If JSON parsing fails, try to extract JSON from the response
                 json_match = re.search(r'\{[\s\S]*\}', mindmap_result)
                 if json_match:
                     try:
@@ -622,23 +429,19 @@ class GeminiService:
         if not code:
             return None
         
-        # Basic cleanup
         code = code.strip()
         code = re.sub(r'^```mermaid\s*', '', code, flags=re.IGNORECASE)
         code = re.sub(r'^```\s*', '', code)
         code = re.sub(r'\s*```$', '', code)
         code = code.strip()
         
-        # Normalize line breaks
         code = re.sub(r'\r\n', '\n', code)
         code = re.sub(r'\r', '\n', code)
         code = re.sub(r'\n{3,}', '\n\n', code)
         
-        # Fix arrows
         code = re.sub(r'\s*-->\s*', ' --> ', code)
         code = re.sub(r'\s*--\s+', ' -- ', code)
         
-        # Process line by line
         lines = code.split('\n')
         cleaned_lines = []
         
@@ -652,7 +455,6 @@ class GeminiService:
         
         code = '\n'.join(cleaned_lines)
         
-        # Ensure proper start
         valid_starters = ['graph', 'flowchart', 'sequencediagram']
         first_line = code.split('\n')[0].strip().lower()
         if not any(first_line.startswith(kw) for kw in valid_starters):
@@ -668,47 +470,37 @@ class GeminiService:
         NO HTML entities - pure clean text only.
         """
         
-        # STEP 1: Remove HTML entities that might be present
         line = line.replace('#quot;', '')
         line = line.replace('&quot;', '')
         line = line.replace('&#34;', '')
         line = line.replace('&#39;', '')
         line = line.replace('&apos;', '')
         
-        # STEP 2: Fix quote patterns in parentheses
-        # Remove ALL quotes before closing parenthesis
         line = re.sub(r'\([^)]*["\'](?=\))', lambda m: m.group(0).replace('"', '').replace("'", ''), line)
-        # Remove ALL quotes after opening parenthesis
         line = re.sub(r'\(["\']+', '(', line)
         
-        # STEP 3: Fix specific patterns
         line = re.sub(r'(\d+)\((["\']?)(\d+)(["\']?)\)', r'\1(\3)', line)
         line = re.sub(r'(\d{1,2}/\d{1,2}/\d{4})(["\']?)\)', r'\1)', line)
         
         def fix_label_content(label_text):
             """Clean label - NO HTML entities, just remove quotes."""
-            # Remove ALL types of quotes
             label_text = label_text.replace('"', '')
             label_text = label_text.replace("'", '')
             label_text = label_text.replace('`', '')
             
-            # Remove HTML entities
             label_text = label_text.replace('#quot;', '')
             label_text = label_text.replace('&quot;', '')
             label_text = label_text.replace('&#34;', '')
             label_text = label_text.replace('&#39;', '')
             label_text = label_text.replace('&apos;', '')
             
-            # Fix embedded patterns
             label_text = re.sub(r'(\d+)\((["\']?)(\d+)(["\']?)\)', r'\1(\3)', label_text)
             label_text = re.sub(r'\(([^)]*)["\'](?=\))', r'(\1', label_text)
             label_text = re.sub(r'["\']\)', ')', label_text)
             label_text = re.sub(r'\(["\']', '(', label_text)
             
-            # Replace backslashes
             label_text = label_text.replace('\\', '/')
             
-            # Clean up whitespace
             label_text = ' '.join(label_text.split())
             
             return label_text.strip()
@@ -720,20 +512,15 @@ class GeminiService:
             label_content = match.group(3)
             close_delim = match.group(4)
             
-            # Clean the label - removes ALL quotes
             cleaned_label = fix_label_content(label_content)
             
-            # Return without quotes - Mermaid handles this fine
             return f'{node_id}{open_delim}{cleaned_label}{close_delim}'
         
-        # REGEX PATTERNS - match all node types
         patterns = [
-            # Compound shapes
             (r'([A-Za-z0-9_]+)(\(\[)([^\]]+)(\]\))', fix_label),
             (r'([A-Za-z0-9_]+)(\[\()([^\)]+)(\)\])', fix_label),
             (r'([A-Za-z0-9_]+)(\(\()([^\)]+)(\)\))', fix_label),
             (r'([A-Za-z0-9_]+)(\[\[)([^\]]+)(\]\])', fix_label),
-            # Single shapes
             (r'([A-Za-z0-9_]+)(\{)([^}]+)(\})', fix_label),
             (r'([A-Za-z0-9_]+)(\[)([^\]]+)(\])', fix_label),
             (r'([A-Za-z0-9_]+)(\()([^\)]+)(\))', fix_label),
@@ -742,13 +529,11 @@ class GeminiService:
         for pattern, replacer in patterns:
             line = re.sub(pattern, replacer, line)
         
-        # Fix edge labels
         def fix_edge_label(match):
             arrow_start = match.group(1)
             label = match.group(2).strip()
             arrow_end = match.group(3)
             
-            # Clean edge label - remove quotes
             label = fix_label_content(label)
             
             return f'{arrow_start} {label} {arrow_end}'
@@ -758,7 +543,6 @@ class GeminiService:
         return line
 
 
-# Test
 if __name__ == "__main__":
     test_code = """graph TD
     A[#quot;Start: Respondent Union alleges illegal termination#quot;] --> B[#quot;Respondent Union issues Demand Notice (30/05/2022#quot;)]

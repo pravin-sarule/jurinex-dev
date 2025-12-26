@@ -48,7 +48,6 @@ const PartiesStep = ({ caseData, setCaseData }) => {
 
   return (
     <div>
-      {/* Header */}
       <div className="flex items-center mb-4">
         <Users className="w-8 h-8 mr-3 text-gray-700" />
         <div>
@@ -57,7 +56,6 @@ const PartiesStep = ({ caseData, setCaseData }) => {
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b mb-6">
         <button
           onClick={() => setActiveTab('petitioner')}
@@ -81,7 +79,6 @@ const PartiesStep = ({ caseData, setCaseData }) => {
         </button>
       </div>
 
-      {/* Petitioner Section */}
       {activeTab === 'petitioner' && (
         <div className="space-y-6">
           {caseData.petitioners.map((petitioner, index) => (
@@ -186,7 +183,6 @@ const PartiesStep = ({ caseData, setCaseData }) => {
         </div>
       )}
 
-      {/* Respondent Section */}
       {activeTab === 'respondent' && (
         <div className="space-y-6">
           {caseData.respondents.map((respondent, index) => (

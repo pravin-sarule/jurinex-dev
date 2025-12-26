@@ -10,13 +10,11 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   const [isSaving, setIsSaving] = useState(false);
   const autoSaveTimeoutRef = useRef(null);
   
-  // Step 1: Basic Info
   const [fullName, setFullName] = useState('');
   const [organizationName, setOrganizationName] = useState('');
   const [workEmail, setWorkEmail] = useState('');
   const [contactNumber, setContactNumber] = useState('');
 
-  // Step 2: Professional Details
   const [primaryRole, setPrimaryRole] = useState('');
   const [primaryRoleOther, setPrimaryRoleOther] = useState('');
   const [yearsOfExperience, setYearsOfExperience] = useState('');
@@ -30,17 +28,14 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   const [organizationTypeOther, setOrganizationTypeOther] = useState('');
   const [barCouncilEnrollment, setBarCouncilEnrollment] = useState('');
 
-  // Search states for multi-selects
   const [jurisdictionSearch, setJurisdictionSearch] = useState('');
   const [practiceAreaSearch, setPracticeAreaSearch] = useState('');
   const [showJurisdictionDropdown, setShowJurisdictionDropdown] = useState(false);
   const [showPracticeAreaDropdown, setShowPracticeAreaDropdown] = useState(false);
 
-  // Refs for dropdowns
   const jurisdictionRef = useRef(null);
   const practiceAreaRef = useRef(null);
 
-  // Step 3: AI Persona Settings
   const [preferredTone, setPreferredTone] = useState('');
   const [verbosity, setVerbosity] = useState(5);
   const [citationStyle, setCitationStyle] = useState('');
@@ -48,7 +43,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   const [myPerspective, setMyPerspective] = useState('');
   const [clientProfile, setClientProfile] = useState('');
 
-  // Step 4: Feature Preferences
   const [summaryHighlights, setSummaryHighlights] = useState({
     parties: false,
     keyDates: false,
@@ -60,30 +54,23 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   });
 
 
-  // Load existing profile data when popup opens
   useEffect(() => {
     const loadProfileData = async () => {
       if (isOpen && user) {
         try {
-          // Pre-fill basic user data
           setFullName(user.displayName || user.username || '');
           setWorkEmail(user.email || '');
           
-          // Load professional profile data
           const response = await api.getProfessionalProfile();
           console.log('Fetched profile data:', response);
           if (response && response.data) {
             const profile = response.data;
             console.log('Profile data to load:', profile);
             
-            // Step 1: Basic Info
-            // Use fullname from profile if available (overrides user context)
             if (profile.fullname) {
               setFullName(profile.fullname);
             }
             if (profile.phone) {
-              // Parse phone number to extract number (+91 is fixed for India)
-              // Remove +91 prefix if present
               let phoneNumber = profile.phone.replace(/^\+91/, '');
               setContactNumber(phoneNumber);
             }
@@ -91,9 +78,7 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
               setOrganizationName(profile.organization_name);
             }
             
-            // Step 2: Professional Details
             if (profile.primary_role) {
-              // Check if it's a custom "Other" value
               if (!primaryRoles.includes(profile.primary_role)) {
                 setPrimaryRole('Other');
                 setPrimaryRoleOther(profile.primary_role);
@@ -103,27 +88,21 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
             }
             if (profile.experience) setYearsOfExperience(profile.experience);
             if (profile.primary_jurisdiction) {
-              // Handle both array and string formats
               let jurisdictions = [];
               if (Array.isArray(profile.primary_jurisdiction)) {
                 jurisdictions = profile.primary_jurisdiction;
               } else if (typeof profile.primary_jurisdiction === 'string') {
-                // Try to parse if it's a JSON string
                 try {
                   const parsed = JSON.parse(profile.primary_jurisdiction);
                   jurisdictions = Array.isArray(parsed) ? parsed : [parsed];
                 } catch {
-                  // If not JSON, it might be a comma-separated string or escaped JSON
-                  // Try to handle escaped quotes and commas
                   let cleaned = profile.primary_jurisdiction
-                    .replace(/^[\{\["']+|[\}\]"']+$/g, '') // Remove outer brackets/quotes
-                    .replace(/\\"/g, '"') // Unescape quotes
-                    .replace(/\\,/g, ',') // Unescape commas
+                    .replace(/^[\{\["']+|[\}\]"']+$/g, '')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\,/g, ',')
                     .trim();
                   
-                  // Try to split by comma if it looks like a list
                   if (cleaned.includes(',') || cleaned.includes('","')) {
-                    // Handle escaped comma-separated values
                     const parts = cleaned.split(/","|",|,/).map(p => 
                       p.replace(/^["']+|["']+$/g, '').trim()
                     );
@@ -133,18 +112,17 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
                   }
                 }
               }
-              // Clean up: remove any remaining curly braces, quotes, or escape characters
               jurisdictions = jurisdictions.map(j => {
                 if (typeof j === 'string') {
                   return j
-                    .replace(/^[\{\["']+|[\}\]"']+$/g, '') // Remove brackets/quotes
-                    .replace(/\\"/g, '"') // Unescape quotes
-                    .replace(/\\,/g, ',') // Unescape commas
-                    .replace(/\\/g, '') // Remove any other escape characters
+                    .replace(/^[\{\["']+|[\}\]"']+$/g, '')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\,/g, ',')
+                    .replace(/\\/g, '')
                     .trim();
                 }
                 return j;
-              }).filter(j => j && j.length > 0); // Remove empty values
+              }).filter(j => j && j.length > 0);
               console.log('Parsed jurisdictions:', jurisdictions);
               setPrimaryJurisdictions(jurisdictions);
             }
@@ -153,22 +131,17 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
               if (Array.isArray(profile.main_areas_of_practice)) {
                 areas = profile.main_areas_of_practice;
               } else if (typeof profile.main_areas_of_practice === 'string') {
-                // Try to parse if it's a JSON string
                 try {
                   const parsed = JSON.parse(profile.main_areas_of_practice);
                   areas = Array.isArray(parsed) ? parsed : [parsed];
                 } catch {
-                  // If not JSON, it might be a comma-separated string or escaped JSON
-                  // Try to handle escaped quotes and commas
                   let cleaned = profile.main_areas_of_practice
-                    .replace(/^[\{\["']+|[\}\]"']+$/g, '') // Remove outer brackets/quotes
-                    .replace(/\\"/g, '"') // Unescape quotes
-                    .replace(/\\,/g, ',') // Unescape commas
+                    .replace(/^[\{\["']+|[\}\]"']+$/g, '')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\,/g, ',')
                     .trim();
                   
-                  // Try to split by comma if it looks like a list
                   if (cleaned.includes(',') || cleaned.includes('","')) {
-                    // Handle escaped comma-separated values
                     const parts = cleaned.split(/","|",|,/).map(p => 
                       p.replace(/^["']+|["']+$/g, '').trim()
                     );
@@ -178,18 +151,17 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
                   }
                 }
               }
-              // Clean up: remove any remaining curly braces, quotes, or escape characters
               areas = areas.map(a => {
                 if (typeof a === 'string') {
                   return a
-                    .replace(/^[\{\["']+|[\}\]"']+$/g, '') // Remove brackets/quotes
-                    .replace(/\\"/g, '"') // Unescape quotes
-                    .replace(/\\,/g, ',') // Unescape commas
-                    .replace(/\\/g, '') // Remove any other escape characters
+                    .replace(/^[\{\["']+|[\}\]"']+$/g, '')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\,/g, ',')
+                    .replace(/\\/g, '')
                     .trim();
                 }
                 return a;
-              }).filter(a => a && a.length > 0); // Remove empty values
+              }).filter(a => a && a.length > 0);
               console.log('Parsed practice areas:', areas);
               setAreasOfPractice(areas);
             }
@@ -203,7 +175,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
             }
             if (profile.bar_enrollment_number) setBarCouncilEnrollment(profile.bar_enrollment_number);
             
-            // Step 3: AI Persona Settings
             if (profile.preferred_tone) setPreferredTone(profile.preferred_tone);
             if (profile.preferred_detail_level !== undefined) {
               setVerbosity(parseInt(profile.preferred_detail_level) || 5);
@@ -220,11 +191,9 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
             if (profile.perspective) setMyPerspective(profile.perspective);
             if (profile.typical_client) setClientProfile(profile.typical_client);
             
-            // Step 4: Feature Preferences
             if (profile.highlights_in_summary) {
               let highlightsData = profile.highlights_in_summary;
               
-              // Parse if it's a JSON string
               if (typeof highlightsData === 'string') {
                 try {
                   highlightsData = JSON.parse(highlightsData);
@@ -234,7 +203,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
                 }
               }
               
-              // Set the highlights if we have valid data
               if (highlightsData && typeof highlightsData === 'object') {
                 setSummaryHighlights({
                   parties: highlightsData.parties || false,
@@ -250,7 +218,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
           }
         } catch (error) {
           console.error('Error loading profile data:', error);
-          // Don't show error toast - just use defaults
         }
       }
     };
@@ -259,7 +226,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   }, [user, isOpen]);
 
 
-  // Options data
   const primaryRoles = [
     'Attorney',
     'Paralegal',
@@ -358,7 +324,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     { value: 'other', label: 'Other' }
   ];
 
-  // Indian State STD Codes
   const indianStateCodes = [
     { code: '011', state: 'Delhi' },
     { code: '022', state: 'Mumbai, Maharashtra' },
@@ -394,7 +359,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
 
 
 
-  // Close dropdowns when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (jurisdictionRef.current && !jurisdictionRef.current.contains(event.target)) {
@@ -408,7 +372,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Filter jurisdictions and practice areas based on search
   const filteredJurisdictions = jurisdictions.filter(j =>
     j.toLowerCase().includes(jurisdictionSearch.toLowerCase())
   );
@@ -417,7 +380,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     p.toLowerCase().includes(practiceAreaSearch.toLowerCase())
   );
 
-  // Handle jurisdiction selection
   const handleJurisdictionSelect = (jurisdiction) => {
     if (jurisdiction === 'Other') {
       setShowJurisdictionDropdown(false);
@@ -431,7 +393,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     setShowJurisdictionDropdown(false);
   };
 
-  // Handle adding custom jurisdiction from "Other" input
   const handleAddCustomJurisdiction = () => {
     if (primaryJurisdictionOther.trim() && !primaryJurisdictions.includes(primaryJurisdictionOther.trim())) {
       setPrimaryJurisdictions([...primaryJurisdictions, primaryJurisdictionOther.trim()]);
@@ -444,7 +405,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     setPrimaryJurisdictions(primaryJurisdictions.filter(j => j !== jurisdiction));
   };
 
-  // Handle practice area selection
   const handlePracticeAreaSelect = (area) => {
     if (area === 'Other') {
       setShowPracticeAreaDropdown(false);
@@ -458,7 +418,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     setShowPracticeAreaDropdown(false);
   };
 
-  // Handle adding custom practice area from "Other" input
   const handleAddCustomPracticeArea = () => {
     if (areaOfPracticeOther.trim() && !areasOfPractice.includes(areaOfPracticeOther.trim())) {
       setAreasOfPractice([...areasOfPractice, areaOfPracticeOther.trim()]);
@@ -471,7 +430,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     setAreasOfPractice(areasOfPractice.filter(a => a !== area));
   };
 
-  // Handle summary highlights toggle
   const toggleHighlight = (key) => {
     setSummaryHighlights(prev => ({
       ...prev,
@@ -479,10 +437,8 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     }));
   };
 
-  // Auto-save function (debounced)
   const autoSave = useCallback(async (skipToast = false) => {
     try {
-      // Clean jurisdictions and practice areas before saving (remove any curly braces)
       const cleanedJurisdictions = primaryJurisdictions.map(j => {
         if (typeof j === 'string') {
           return j.replace(/^[\{\["']+|[\}\]"']+$/g, '').trim();
@@ -497,15 +453,11 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
         return a;
       }).filter(a => a);
       
-      // Prepare phone number (combine +91 country code + number)
       const fullPhoneNumber = contactNumber ? `+91${contactNumber}` : undefined;
       
-      // Map frontend fields to backend field names
       const profileData = {
-        // Users table fields (only phone and location allowed)
         ...(fullPhoneNumber && { phone: fullPhoneNumber }),
         
-        // Professional profile fields
         is_profile_completed: true,
         organization_name: organizationName || undefined,
         primary_role: primaryRole === 'Other' ? primaryRoleOther : (primaryRole || undefined),
@@ -522,23 +474,18 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
         highlights_in_summary: summaryHighlights || undefined,
       };
 
-      // Remove undefined values to avoid sending empty fields
-      // But always keep is_profile_completed
       const isProfileCompleted = profileData.is_profile_completed;
       Object.keys(profileData).forEach(key => {
         if (profileData[key] === undefined || profileData[key] === '') {
           delete profileData[key];
         }
-        // Also remove empty arrays
         if (Array.isArray(profileData[key]) && profileData[key].length === 0) {
           delete profileData[key];
         }
       });
       
-      // Always include is_profile_completed when saving
       profileData.is_profile_completed = isProfileCompleted !== undefined ? isProfileCompleted : true;
 
-      // Only save if there's actual data to save
       if (Object.keys(profileData).length > 1 || profileData.is_profile_completed) {
         await api.updateProfessionalProfile(profileData);
         if (!skipToast) {
@@ -547,7 +494,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
       }
     } catch (error) {
       console.error('Error auto-saving profile:', error);
-      // Don't show toast for auto-save errors to avoid annoying the user
     }
   }, [
     contactNumber, organizationName, primaryRole, primaryRoleOther,
@@ -557,17 +503,15 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     myPerspective, clientProfile, summaryHighlights
   ]);
 
-  // Debounced auto-save function
   const debouncedAutoSave = useCallback(() => {
     if (autoSaveTimeoutRef.current) {
       clearTimeout(autoSaveTimeoutRef.current);
     }
     autoSaveTimeoutRef.current = setTimeout(() => {
-      autoSave(true); // Skip toast for debounced saves
-    }, 2000); // Save 2 seconds after user stops typing
+      autoSave(true);
+    }, 2000);
   }, [autoSave]);
 
-  // Auto-save when fields change
   useEffect(() => {
     if (isOpen) {
       debouncedAutoSave();
@@ -586,9 +530,7 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   ]);
 
 
-  // Navigation
   const handleNext = async () => {
-    // Auto-save before moving to next step
     await autoSave(true);
     if (currentStep < 4) {
       setCurrentStep(currentStep + 1);
@@ -602,7 +544,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   };
 
   const handleSkip = async () => {
-    // Auto-save any entered data before closing
     await autoSave(true);
     if (onComplete) {
       onComplete();
@@ -613,7 +554,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Clean jurisdictions and practice areas before saving (remove any curly braces)
       const cleanedJurisdictions = primaryJurisdictions.map(j => {
         if (typeof j === 'string') {
           return j.replace(/^[\{\["']+|[\}\]"']+$/g, '').trim();
@@ -628,7 +568,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
         return a;
       }).filter(a => a);
       
-      // Prepare phone number (combine +91 country code + number)
       const fullPhoneNumber = contactNumber ? `+91${contactNumber}` : undefined;
       
       const profileData = {
@@ -654,7 +593,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
         if (profileData[key] === undefined || profileData[key] === '') {
           delete profileData[key];
         }
-        // Also remove empty arrays
         if (Array.isArray(profileData[key]) && profileData[key].length === 0) {
           delete profileData[key];
         }
@@ -681,7 +619,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
 
   if (!isOpen) return null;
 
-  // Step indicator component
   const StepIndicator = () => (
     <div className="flex items-center justify-center mb-8">
       {[1, 2, 3, 4].map((step) => (
@@ -711,7 +648,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     </div>
   );
 
-  // Render Step 1
   const renderStep1 = () => (
     <div className="space-y-6">
       <div>
@@ -778,7 +714,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     </div>
   );
 
-  // Render Step 2
   const renderStep2 = () => (
     <div className="space-y-6">
       <div>
@@ -904,7 +839,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
         {primaryJurisdictions.length > 0 && (
           <div className="flex flex-wrap gap-2 mt-2">
             {primaryJurisdictions.map((jurisdiction) => {
-              // Clean up the display value to remove any curly braces
               const cleanValue = typeof jurisdiction === 'string' 
                 ? jurisdiction.replace(/^[\{\["']+|[\}\]"']+$/g, '').trim()
                 : jurisdiction;
@@ -994,7 +928,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
         {areasOfPractice.length > 0 && (
           <div className="flex flex-wrap gap-2 mt-2">
             {areasOfPractice.map((area) => {
-              // Clean up the display value to remove any curly braces
               const cleanValue = typeof area === 'string' 
                 ? area.replace(/^[\{\["']+|[\}\]"']+$/g, '').trim()
                 : area;
@@ -1063,7 +996,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     </div>
   );
 
-  // Render Step 3
   const renderStep3 = () => (
     <div className="space-y-6">
       <div>
@@ -1177,7 +1109,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
     </div>
   );
 
-  // Render Step 4
   const renderStep4 = () => (
     <div className="space-y-6">
       <div>
@@ -1220,7 +1151,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col animate-fadeIn">
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-2xl font-bold text-gray-900">Complete Your Profile</h2>
@@ -1238,12 +1168,10 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
           </button>
         </div>
 
-        {/* Step Indicator */}
         <div className="px-6 pt-6">
           <StepIndicator />
         </div>
 
-        {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 pb-6">
           {currentStep === 1 && renderStep1()}
           {currentStep === 2 && renderStep2()}
@@ -1251,7 +1179,6 @@ const ProfileSetupPopup = ({ isOpen, onClose, onComplete }) => {
           {currentStep === 4 && renderStep4()}
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 bg-gray-50">
           <button
             onClick={handleSkip}

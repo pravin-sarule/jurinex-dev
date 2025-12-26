@@ -9,7 +9,6 @@
   overflow: hidden;
 }
 
-/* Header */
 .chat-header {
   display: flex;
   align-items: center;
@@ -47,7 +46,6 @@
   background: rgba(255, 255, 255, 0.3);
 }
 
-/* Messages Container */
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -75,7 +73,6 @@
   background: #555;
 }
 
-/* Empty State */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -124,7 +121,6 @@
   transform: translateX(4px);
 }
 
-/* Message */
 .message {
   display: flex;
   flex-direction: column;
@@ -166,7 +162,6 @@
   gap: 8px;
 }
 
-/* User Message */
 .user-message {
   background: #667eea;
   color: white;
@@ -179,7 +174,6 @@
   line-height: 1.5;
 }
 
-/* Thinking Section (Gemini-like) */
 .thinking-section {
   background: #f5f5f5;
   border-left: 4px solid #4285f4;
@@ -233,7 +227,6 @@
   word-wrap: break-word;
 }
 
-/* AI Message */
 .ai-message {
   background: white;
   color: #212529;
@@ -245,7 +238,6 @@
   word-wrap: break-word;
   line-height: 1.6;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  white-space: pre-wrap; /* Preserve formatting and line breaks */
 }
 
 .typing-indicator {
@@ -265,7 +257,6 @@
   }
 }
 
-/* Status Display (Gemini-like) - Shows what model is doing */
 .status-display {
   display: flex;
   align-items: center;
@@ -318,7 +309,6 @@
   line-height: 1.4;
 }
 
-/* Method Badge */
 .method-badge {
   display: flex;
   align-items: center;
@@ -360,7 +350,6 @@
   opacity: 1;
 }
 
-/* Routing Info */
 .routing-info {
   display: flex;
   align-items: center;
@@ -388,7 +377,6 @@
   opacity: 0.8;
 }
 
-/* Error Message */
 .error-message {
   display: flex;
   align-items: center;
@@ -405,7 +393,6 @@
   font-size: 18px;
 }
 
-/* Input Form */
 .chat-input-form {
   padding: 16px 20px;
   background: white;
@@ -480,7 +467,6 @@
   box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
 }
 
-/* Responsive */
 @media (max-width: 768px) {
   .intelligent-folder-chat {
     max-height: 100vh;
@@ -504,7 +490,6 @@
   }
 }
 
-/* Secret Prompt Dropdown */
 .secret-dropdown-button {
   display: flex;
   align-items: center;

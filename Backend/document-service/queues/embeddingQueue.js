@@ -18,7 +18,6 @@ const defaultJobOptions = {
   removeOnFail: false,
 };
 
-// Only create queue if Redis is enabled
 let embeddingQueue = null;
 if (!REDIS_DISABLED && redisConnection) {
   try {
@@ -48,7 +47,6 @@ async function warmQueue() {
 async function enqueueEmbeddingJob(payload, options = {}) {
   if (REDIS_DISABLED || !embeddingQueue) {
     console.log('[EmbeddingQueue] ⚠️ Skipping job enqueue (Redis is disabled):', payload.fileId);
-    // Return a mock job object to prevent errors
     return {
       id: `disabled:${payload.fileId}:${Date.now()}`,
       data: payload,

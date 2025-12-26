@@ -29,8 +29,6 @@ const authenticateToken = async (req, res, next) => {
       return res.status(400).json({ message: 'User ID missing from token' });
     }
     
-    // In a microservice architecture, we rely on the token payload for user data
-    // The 'decoded' object should contain sufficient user information (e.g., id, email, role)
     req.user = {
       id: decoded.id || decoded.userId,
       email: decoded.email,

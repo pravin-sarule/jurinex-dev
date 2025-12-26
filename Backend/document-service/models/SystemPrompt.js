@@ -1,17 +1,11 @@
 const pool = require('../config/db');
 
-// Cache for system prompt to avoid repeated database queries
 let systemPromptCache = null;
 let cacheTimestamp = null;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache
 
 const SystemPrompt = {
-  /**
-   * Get the latest system prompt from the database
-   * @returns {Promise<string|null>} The system prompt text or null if not found
-   */
   async getLatestSystemPrompt() {
-    // Check cache first
     const now = Date.now();
     if (systemPromptCache && cacheTimestamp && (now - cacheTimestamp) < CACHE_TTL) {
       console.log('[SystemPrompt] Using cached system prompt');
@@ -34,7 +28,6 @@ const SystemPrompt = {
 
       const prompt = rows[0].system_prompt;
       
-      // Update cache
       systemPromptCache = prompt;
       cacheTimestamp = now;
       
@@ -42,7 +35,6 @@ const SystemPrompt = {
       return prompt;
     } catch (err) {
       console.error('[SystemPrompt] Error fetching system prompt:', err.message);
-      // Return cached value if available, even if expired
       if (systemPromptCache) {
         console.warn('[SystemPrompt] Using expired cache due to database error');
         return systemPromptCache;
@@ -51,9 +43,6 @@ const SystemPrompt = {
     }
   },
 
-  /**
-   * Clear the system prompt cache (useful for testing or when prompt is updated)
-   */
   clearCache() {
     systemPromptCache = null;
     cacheTimestamp = null;

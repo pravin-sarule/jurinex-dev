@@ -12,7 +12,6 @@ const DocumentUploadPage = () => {
             </button>
           </div>
           <div className="space-y-1">
-            {/* Folder Tree will go here */}
           </div>
         </div>
         <div className="md:col-span-2 bg-bg-secondary p-6 rounded-xl border border-border-color flex items-center justify-center">

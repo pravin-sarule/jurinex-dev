@@ -2,10 +2,6 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, CreditCard, X } from 'lucide-react';
 
-/**
- * Modal component to show when user doesn't have a subscription plan
- * and tries to perform an action that requires one
- */
 const SubscriptionRequiredModal = ({ isOpen, onClose, message }) => {
   const navigate = useNavigate();
 
@@ -19,7 +15,6 @@ const SubscriptionRequiredModal = ({ isOpen, onClose, message }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm">
       <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md mx-4 w-full animate-fadeIn">
-        {/* Close button */}
         <button
           onClick={onClose}
           className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 transition-colors"
@@ -28,24 +23,20 @@ const SubscriptionRequiredModal = ({ isOpen, onClose, message }) => {
           <X className="h-5 w-5" />
         </button>
 
-        {/* Icon */}
         <div className="flex justify-center mb-4">
           <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center">
             <AlertCircle className="w-10 h-10 text-red-600" />
           </div>
         </div>
 
-        {/* Title */}
         <h2 className="text-2xl font-bold text-gray-900 text-center mb-2">
           Subscription Required
         </h2>
 
-        {/* Message */}
         <p className="text-gray-600 text-center mb-6">
           {message || 'You need an active subscription plan to upload and process documents. Please subscribe to continue.'}
         </p>
 
-        {/* Buttons */}
         <div className="flex flex-col space-y-3">
           <button
             onClick={handleSubscribe}

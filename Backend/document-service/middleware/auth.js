@@ -1,9 +1,5 @@
-
 const { verifyToken } = require('../utils/jwt');
 
-/**
- * Middleware to authenticate JWT token
- */
 const authenticateToken = (req, res, next) => {
   try {
     console.log("🔐 Checking token...");
@@ -30,7 +26,6 @@ const authenticateToken = (req, res, next) => {
       return res.status(400).json({ message: 'User ID missing from token' });
     }
 
-    // Attach user info from token payload to req
     req.user = {
       id: userId,
       email: decoded.email || null,
@@ -46,10 +41,6 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-/**
- * Middleware to authorize roles
- * @param {string|string[]} roles - Allowed roles
- */
 const authorize = (roles = []) => {
   if (typeof roles === 'string') roles = [roles];
 

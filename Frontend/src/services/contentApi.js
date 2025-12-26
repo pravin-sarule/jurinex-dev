@@ -1,11 +1,11 @@
 import axios from "axios";
+import { CONTENT_SERVICE_URL } from "../config/apiConfig";
 
 const ApiService = axios.create({
-  baseURL: "https://gateway-service-120280829617.asia-south1.run.app/api/content",
+  baseURL: CONTENT_SERVICE_URL,
   withCredentials: false,
 });
 
-// ---- CASE TYPES ----
 export const getCaseTypes = async () => {
   try {
     const res = await ApiService.get("/case-types");
@@ -26,7 +26,6 @@ export const getSubTypesByCaseType = async (caseTypeId) => {
   }
 };
 
-// ---- COURTS ----
 export const getCourts = async () => {
   try {
     const res = await ApiService.get("/courts");

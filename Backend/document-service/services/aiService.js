@@ -4,16 +4,12 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { GoogleGenAI } = require('@google/genai');
 const pool = require('../config/db');
 const SystemPrompt = require('../models/SystemPrompt');
+const LLMUsageLogService = require('./llmUsageLogService');
 
-// Old SDK for legacy Gemini models
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// New SDK for Gemini 3.0 Pro
 const genAI3 = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// ---------------------------
-// Web Search Service using Serper.dev
-// ---------------------------
 async function performWebSearch(query, numResults = 5) {
   try {
     if (!process.env.SERPER_API_KEY) {
@@ -46,7 +42,6 @@ async function performWebSearch(query, numResults = 5) {
       snippet: result.snippet || '',
     }));
 
-    // Format search results for LLM context with clear attribution
     const formattedResults = results
       .map((result, index) => {
         return `[Source ${index + 1}] ${result.title || 'No title'}\nURL: ${result.link || 'No URL'}\nSnippet: ${result.snippet || 'No snippet'}`;
@@ -66,9 +61,6 @@ async function performWebSearch(query, numResults = 5) {
   }
 }
 
-// ---------------------------
-// Fetch Content from URL
-// ---------------------------
 async function fetchUrlContent(url) {
   try {
     console.log(`[URL Fetch] 📄 Fetching content from: ${url}`);
@@ -81,10 +73,8 @@ async function fetchUrlContent(url) {
       maxRedirects: 5
     });
 
-    // Extract text content (basic extraction)
     let content = response.data;
     
-    // Remove HTML tags for basic text extraction
     if (typeof content === 'string') {
       content = content
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
@@ -93,7 +83,6 @@ async function fetchUrlContent(url) {
         .replace(/\s+/g, ' ')
         .trim();
       
-      // Limit content length
       if (content.length > 10000) {
         content = content.substring(0, 10000) + '...';
       }
@@ -116,18 +105,12 @@ async function fetchUrlContent(url) {
   }
 }
 
-// ---------------------------
-// Extract URLs from user message
-// ---------------------------
 function extractUrls(text) {
   const urlRegex = /(https?:\/\/[^\s]+)/g;
   const matches = text.match(urlRegex);
   return matches || [];
 }
 
-// ---------------------------
-// Auto-detect if web search is needed
-// ---------------------------
 function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') {
   if (!userMessage) return false;
 
@@ -135,9 +118,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
   const contextLower = (context || '').toLowerCase();
   const chunksLower = (relevantChunks || '').toLowerCase();
   
-  // ============================================
   // PRIORITY 1: EXPLICIT WEB SEARCH REQUESTS (CHECK FIRST!)
-  // ============================================
   const explicitWebSearchTriggers = [
     'search for',
     'search from web',
@@ -176,7 +157,6 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'give me answer from web',
     'tell me from web',
     'tell from web',
-    // Hinglish triggers
     'web se',
     'web pe',
     'web me',
@@ -195,18 +175,13 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'web pe answer',
   ];
   
-  // Check for explicit web search requests FIRST
   const hasExplicitTrigger = explicitWebSearchTriggers.some(trigger => message.includes(trigger));
   if (hasExplicitTrigger) {
     console.log('[Web Search] ✅ EXPLICIT web search request detected - triggering web search');
     return true;
   }
   
-  // ============================================
-  // PRIORITY 2: DOCUMENT REJECTION PHRASES
-  // ============================================
   const documentRejectionKeywords = [
-    // English phrases
     "don't want from document",
     "don't want from the document",
     "don't want answer from document",
@@ -234,7 +209,6 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     "no document",
     "without using document",
     "without the document",
-    // Hinglish phrases
     "web se search karo",
     "web pe search karo",
     "web me search karo",
@@ -258,7 +232,6 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     "document mat use karo",
   ];
   
-  // Check for document rejection
   const hasDocumentRejection = documentRejectionKeywords.some(keyword => {
     const lowerKeyword = keyword.toLowerCase();
     if (lowerKeyword.length <= 5) {
@@ -271,19 +244,14 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     return message.includes(lowerKeyword);
   });
   
-  // Also check for common patterns like "don't want" + "document"
   const hasDontWant = (message.includes("don't want") || message.includes("dont want") || message.includes("don't want") || message.includes("do not want")) && 
                       (message.includes("document") || message.includes("from document"));
   
-  // If user explicitly rejects documents, ALWAYS trigger web search
   if (hasDocumentRejection || hasDontWant) {
     console.log('[Web Search] ✅ User explicitly rejected documents - ALWAYS triggering web search');
     return true;
   }
   
-  // ============================================
-  // PRIORITY 3: CHECK FOR PERSONAL DATA QUESTIONS (NEVER SEARCH)
-  // ============================================
   const personalPronouns = [
     'my',
     'my own',
@@ -317,27 +285,20 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'my category',
   ];
   
-  // Check if question contains personal pronouns
   const hasPersonalPronoun = personalPronouns.some(pronoun => {
     const regex = new RegExp(`\\b${pronoun}\\b`, 'i');
     return regex.test(userMessage);
   });
   
-  // Check if question is about personal data
   const isPersonalDataQuestion = personalDataKeywords.some(keyword => message.includes(keyword));
   
-  // If question is about user's own data/profile, NEVER trigger web search
   if (hasPersonalPronoun || isPersonalDataQuestion) {
     console.log('[Web Search] Personal data/profile question detected - skipping web search');
     return false;
   }
   
-  // Check if there's substantial document context provided
   const hasDocumentContext = (contextLower.length > 500) || (chunksLower.length > 500);
   
-  // ============================================
-  // PRIORITY 4: CURRENT/REAL-TIME INFORMATION TRIGGERS
-  // ============================================
   const currentInfoTriggers = [
     'latest news',
     'current events',
@@ -365,7 +326,6 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'latest',
   ];
   
-  // Check for current/real-time information requests
   const hasCurrentInfoTrigger = currentInfoTriggers.some(trigger => message.includes(trigger));
   
   if (hasCurrentInfoTrigger) {
@@ -373,9 +333,6 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     return true;
   }
   
-  // ============================================
-  // PRIORITY 5: GENERAL KNOWLEDGE QUESTIONS (NO DOCUMENTS)
-  // ============================================
   const generalKnowledgePatterns = [
     /^what is (.+)\?/i,
     /^who is (.+)\?/i,
@@ -390,7 +347,6 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
   
   const isGeneralKnowledgeQuestion = generalKnowledgePatterns.some(pattern => pattern.test(userMessage));
   
-  // Document-related keywords that suggest question is ABOUT the documents
   const documentRelatedKeywords = [
     'document',
     'this document',
@@ -412,45 +368,34 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
   
   const isDocumentQuestion = documentRelatedKeywords.some(keyword => message.includes(keyword));
   
-  // If question is about documents and we have context, don't search web
   if (isDocumentQuestion && hasDocumentContext) {
     console.log('[Web Search] Question is about documents and context is available - skipping web search');
     return false;
   }
   
-  // If it's a general knowledge question and NO document context, trigger web search
   if (isGeneralKnowledgeQuestion && !hasDocumentContext) {
     console.log('[Web Search] ✅ General knowledge question without document context');
     return true;
   }
   
-  // If there's substantial document context, be conservative
   if (hasDocumentContext) {
     console.log('[Web Search] Document context available - assuming answer is in documents');
     return false;
   }
   
-  // For pre-upload chats (no document context), trigger for knowledge questions
   if (!hasDocumentContext && isGeneralKnowledgeQuestion) {
     console.log('[Web Search] ✅ No document context - triggering for general knowledge question');
     return true;
   }
   
-  // Default: don't trigger web search
   console.log('[Web Search] No web search triggers detected - using available context');
   return false;
 }
 
-// ---------------------------
-// Token Estimation Helper
-// ---------------------------
 function estimateTokenCount(text = '') {
   return Math.ceil(text.length / 4); // ~4 characters per token
 }
 
-// ---------------------------
-// Smart Context Trimmer (adaptive)
-// ---------------------------
 function trimContext(context = '', maxTokens = 20000) {
   if (!context) return '';
   const tokens = estimateTokenCount(context);
@@ -463,23 +408,16 @@ function trimContext(context = '', maxTokens = 20000) {
   );
 }
 
-// ---------------------------
-// Chunk Relevance Filter
-// ---------------------------
 function filterRelevantChunks(chunks, userMessage, maxChunks = 12) {
   if (!chunks) return '';
   
-  // Handle array of chunk objects
   let chunkString;
   if (Array.isArray(chunks)) {
-    // Convert array of chunk objects to string format
     chunkString = chunks
       .map((c) => {
-        // Handle both object format and string format
         if (typeof c === 'string') {
           return c;
         }
-        // Object format: { content, filename, ... }
         const filename = c.filename || c.originalname || 'Document';
         const content = c.content || '';
         return `📄 [${filename}]\n${content}`;
@@ -488,7 +426,6 @@ function filterRelevantChunks(chunks, userMessage, maxChunks = 12) {
   } else if (typeof chunks === 'string') {
     chunkString = chunks;
   } else {
-    // Unknown type, return empty string
     return '';
   }
   
@@ -517,9 +454,6 @@ function filterRelevantChunks(chunks, userMessage, maxChunks = 12) {
     .join('\n\n');
 }
 
-// ---------------------------
-// Retry Helper (resilient)
-// ---------------------------
 async function retryWithBackoff(fn, retries = 3, delay = 3000) {
   for (let i = 1; i <= retries; i++) {
     try {
@@ -541,9 +475,6 @@ async function retryWithBackoff(fn, retries = 3, delay = 3000) {
   }
 }
 
-// ---------------------------
-// Model Configuration
-// ---------------------------
 const GEMINI_MODELS = {
   gemini: ['gemini-2.0-flash-exp', 'gemini-1.5-flash-latest'],
   'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.0-pro-exp'],
@@ -695,7 +626,6 @@ async function getModelMaxTokens(provider, modelName) {
     }
   }
 
-  // Fallback defaults for models not in database
   const defaultMaxTokens = {
     'gemini-3-pro-preview': 8192,
     'gemini-2.5-pro': 8192,
@@ -722,9 +652,6 @@ async function getModelMaxTokens(provider, modelName) {
   );
 }
 
-// ---------------------------
-// Provider Resolver
-// ---------------------------
 const PROVIDER_ALIASES = {
   openai: 'openai',
   'gpt-4o': 'gpt-4o',
@@ -756,9 +683,6 @@ function resolveProviderName(name = '') {
   return resolved;
 }
 
-// ---------------------------
-// Get Available Providers
-// ---------------------------
 function getAvailableProviders() {
   return Object.fromEntries(
     Object.entries(LLM_CONFIGS).map(([provider, cfg]) => {
@@ -782,14 +706,10 @@ function getAvailableProviders() {
   );
 }
 
-// ---------------------------
-// Get System Prompt from Database
-// ---------------------------
 async function getSystemPrompt(baseContext = '') {
   try {
     const dbSystemPrompt = await SystemPrompt.getLatestSystemPrompt();
     
-    // HYBRID APPROACH: Combine database system prompt with adaptive context
     if (dbSystemPrompt && baseContext) {
       const combinedPrompt = `${dbSystemPrompt}
 
@@ -799,7 +719,6 @@ ${baseContext}`;
       return combinedPrompt;
     }
     
-    // STRICT COMPLIANCE: Database system prompt takes PRECEDENCE
     if (dbSystemPrompt && dbSystemPrompt.trim()) {
       console.log('[SystemPrompt] ✅ Using system prompt from database (STRICT COMPLIANCE MODE)');
       console.log(`[SystemPrompt] Database prompt length: ${dbSystemPrompt.length} chars`);
@@ -807,7 +726,6 @@ ${baseContext}`;
       return dbSystemPrompt.trim();
     }
     
-    // Fallback to context or default (only if no database prompt exists)
     console.log('[SystemPrompt] ⚠️ No database prompt found, using fallback system instruction');
     if (baseContext && baseContext.trim()) {
       console.log(`[SystemPrompt] Using context as fallback (${baseContext.length} chars)`);
@@ -825,13 +743,9 @@ ${baseContext}`;
   }
 }
 
-// ---------------------------
-// Build Enhanced System Prompt with Source Attribution
-// ---------------------------
 function buildEnhancedSystemPrompt(baseSystemPrompt, hasDocuments, hasWebSearch, hasUrlContent, isExplicitWebRequest = false) {
   let sourceInfo = '';
   
-  // If explicit web request, prioritize web sources CRITICALLY
   if (isExplicitWebRequest && (hasWebSearch || hasUrlContent)) {
     sourceInfo = `\n\n⚠️ CRITICAL: The user EXPLICITLY requested information from the INTERNET/WEB.
 You MUST prioritize and use WEB SEARCH RESULTS${hasUrlContent ? ' or FETCHED WEBSITE CONTENT' : ''} as your PRIMARY source.
@@ -869,26 +783,20 @@ When answering:
   return baseSystemPrompt + sourceInfo;
 }
 
-// ---------------------------
-// Main Ask Function
-// ---------------------------
-async function askLLM(providerName, userMessage, context = '', relevant_chunks = '', originalQuestion = null) {
+async function askLLM(providerName, userMessage, context = '', relevant_chunks = '', originalQuestion = null, metadata = {}) {
   const provider = resolveProviderName(providerName);
   const config = LLM_CONFIGS[provider];
   if (!config) throw new Error(`❌ Unsupported LLM provider: ${provider}`);
 
   const safeContext = typeof context === 'string' ? context : '';
 
-  // Extract original user question for web search (before context is added)
   let userQuestionForSearch = originalQuestion || userMessage;
   
-  // Try to extract the actual question if userMessage contains context markers
   if (!originalQuestion && userMessage) {
     const userQuestionMatch = userMessage.match(/USER QUESTION:\s*(.+?)(?:\n\n===|$)/s);
     if (userQuestionMatch) {
       userQuestionForSearch = userQuestionMatch[1].trim();
     } else {
-      // If no marker, try to extract the first meaningful line
       const lines = userMessage.split('\n');
       const contextMarkers = ['===', '---', 'Relevant Context', 'DOCUMENT', 'PROFILE'];
       for (let i = 0; i < lines.length; i++) {
@@ -897,14 +805,12 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
           break;
         }
       }
-      // If still no good extraction, use first 200 chars as fallback
       if (!userQuestionForSearch || userQuestionForSearch.length > 500) {
         userQuestionForSearch = userMessage.substring(0, 200).trim();
       }
     }
   }
 
-  // Check if this is an EXPLICIT web/internet request BEFORE processing context
   const messageLower = userQuestionForSearch.toLowerCase();
   const explicitWebKeywords = [
     'search web', 'search online', 'search the web', 'search internet', 'from web', 'from the web',
@@ -916,31 +822,25 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   ];
   const isExplicitWebRequest = explicitWebKeywords.some(keyword => messageLower.includes(keyword));
   
-  // If explicit web request, MINIMIZE document context
   let trimmedContext, filteredChunks, trimmedChunks;
   if (isExplicitWebRequest) {
-    // Minimize document context for explicit web requests
     console.log('[Web Search] 🎯 Explicit web request detected - minimizing document context');
     trimmedContext = ''; // Don't include profile context for explicit web requests
     filteredChunks = ''; // Don't include document chunks for explicit web requests
     trimmedChunks = ''; // No document context
   } else {
-    // Normal processing: large input handling
     trimmedContext = trimContext(safeContext, 20000);
     filteredChunks = filterRelevantChunks(relevant_chunks, userQuestionForSearch, 12);
     trimmedChunks = trimContext(filteredChunks, 20000);
   }
 
-  // Check if web search is needed
   let webSearchData = null;
   let citations = [];
   let sourceInfo = [];
   let urlContents = [];
   
-  // Check for URLs in user message
   const urls = extractUrls(userQuestionForSearch);
   
-  // Determine what sources are available (only if not explicit web request)
   if (!isExplicitWebRequest) {
     if (trimmedChunks) {
       sourceInfo.push('📄 Uploaded Documents');
@@ -950,7 +850,6 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     }
   }
   
-  // Fetch URL content if URLs are present
   if (urls.length > 0) {
     console.log(`[URL Fetch] 🔗 Found ${urls.length} URL(s) in message, fetching content...`);
     for (const url of urls) {
@@ -962,8 +861,6 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     }
   }
   
-  // ✅ WEB SEARCH: Provider-agnostic - works for ALL LLM models (Gemini, Claude, OpenAI, DeepSeek)
-  // Web search is called BEFORE provider-specific LLM calls, so all models receive web search results
   const needsWebSearch = isExplicitWebRequest || shouldTriggerWebSearch(userQuestionForSearch, trimmedContext, trimmedChunks);
   if (needsWebSearch) {
     console.log(`[Web Search] 🔍 ${isExplicitWebRequest ? 'EXPLICIT' : 'Auto'}-triggering web search for user question:`, userQuestionForSearch.substring(0, 100));
@@ -982,14 +879,11 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     console.log(`[Web Search] ⏭️ Web search not needed for provider ${provider}`);
   }
 
-  // Build prompt with prioritized sources based on request type
   let prompt = userMessage.trim();
   
-  // ⚠️ CRITICAL: If explicit web search is requested, prioritize web sources and minimize documents
   if (isExplicitWebRequest && (webSearchData || urlContents.length > 0)) {
     console.log('[Web Search] 🎯 EXPLICIT web search request - prioritizing web sources over documents');
     
-    // Add web sources FIRST (highest priority)
     if (urlContents.length > 0) {
       prompt += `\n\n=== PRIMARY SOURCE: FETCHED WEBSITE CONTENT ===`;
       urlContents.forEach(urlData => {
@@ -1003,13 +897,11 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       prompt += `\n\n⚠️ CRITICAL: These web search results are the PRIMARY source for your answer. Use them as the main source.`;
     }
     
-    // Add document context LAST (secondary/optional reference only)
     if (trimmedChunks) {
       prompt += `\n\n=== SECONDARY REFERENCE: UPLOADED DOCUMENTS (OPTIONAL) ===\n${trimmedChunks}`;
       prompt += `\n\n⚠️ NOTE: The user explicitly requested web/internet information. Use documents ONLY for additional context if needed, but PRIMARY source must be web search results.`;
     }
     
-    // Explicit instructions for web-first response
     prompt += `\n\n🎯 CRITICAL INSTRUCTIONS:
 - The user EXPLICITLY requested information from the INTERNET/WEB
 - You MUST prioritize and use WEB SEARCH RESULTS${urlContents.length > 0 ? ' or FETCHED WEBSITE CONTENT' : ''} as your PRIMARY source
@@ -1019,13 +911,10 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
 - DO NOT rely primarily on documents when the user asked for web/internet information`;
     
   } else {
-    // Normal mode: documents first, then web sources
-    // Add document chunks if available
     if (trimmedChunks) {
       prompt += `\n\n=== UPLOADED DOCUMENTS CONTEXT ===\n${trimmedChunks}`;
     }
     
-    // Add fetched URL content
     if (urlContents.length > 0) {
       prompt += `\n\n=== FETCHED WEBSITE CONTENT ===`;
       urlContents.forEach(urlData => {
@@ -1034,12 +923,10 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       prompt += `\n\n⚠️ IMPORTANT: When using information from fetched websites above, cite the URL and mention "According to ${urlContents[0].url}..."`;
     }
     
-    // Add web search results if available
     if (webSearchData && webSearchData.results) {
       prompt += `\n\n=== WEB SEARCH RESULTS ===\n${webSearchData.results}\n\n⚠️ IMPORTANT: When using information from web sources above, cite them as [Source 1], [Source 2], etc.`;
     }
     
-    // Add instruction about source attribution
     if (sourceInfo.length > 0) {
       prompt += `\n\n📌 Available Information Sources: ${sourceInfo.join(', ')}`;
       prompt += `\n\n🎯 Instructions: 
@@ -1051,12 +938,10 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     }
   }
 
-  // Check if prompt contains comprehensive analysis instructions (from adaptive RAG)
   const hasComprehensiveInstructions = prompt.includes('COMPREHENSIVE (Full Document)') || 
                                        prompt.includes('COMPLETE DOCUMENT CONTENT') ||
                                        prompt.includes('Now provide your comprehensive analysis:');
 
-  // Reinforce extraction instructions if comprehensive analysis is requested
   if (hasComprehensiveInstructions) {
     const reinforcementInstructions = `
 
@@ -1078,7 +963,6 @@ Begin your analysis now:`;
   const totalTokens = estimateTokenCount(prompt + trimmedContext);
   console.log(`[askLLM] Total tokens estimated: ${totalTokens} | Sources: ${sourceInfo.join(', ')}`);
 
-  // Get enhanced system prompt
   const baseSystemPrompt = await getSystemPrompt(trimmedContext);
   const enhancedSystemPrompt = buildEnhancedSystemPrompt(
     baseSystemPrompt,
@@ -1088,15 +972,11 @@ Begin your analysis now:`;
     isExplicitWebRequest
   );
 
-  // ✅ Call LLM - Web search results are already included in the prompt above
-  // This works for ALL providers: Gemini, Claude, OpenAI, DeepSeek
-  // The prompt contains web search results, so all models receive them regardless of provider
   console.log(`[askLLM] 📤 Sending request to ${provider} with ${webSearchData || urlContents.length > 0 ? 'WEB SEARCH/URL DATA' : 'NO web search'}`);
   const response = await retryWithBackoff(() =>
-    callSinglePrompt(provider, prompt, enhancedSystemPrompt, webSearchData !== null || urlContents.length > 0)
+    callSinglePrompt(provider, prompt, enhancedSystemPrompt, webSearchData !== null || urlContents.length > 0, metadata)
   );
 
-  // Append citations if web search was performed
   if (citations.length > 0) {
     const citationsText = '\n\n---\n**📚 Web Sources Referenced:**\n' + 
       citations.map(c => `[Source ${c.index}] [${c.title}](${c.link})`).join('\n');
@@ -1106,18 +986,11 @@ Begin your analysis now:`;
   return response;
 }
 
-// ---------------------------
-// Core API Caller
-// ✅ NOTE: Web search results are already included in the 'prompt' parameter
-// This function handles ALL providers (Gemini, Claude, OpenAI, DeepSeek)
-// All providers receive the same prompt which includes web search results when available
-// ---------------------------
-async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = false) {
+async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = false, metadata = {}) {
   const config = LLM_CONFIGS[provider];
   const isGemini = provider.startsWith('gemini');
   const isClaude = provider.startsWith('claude') || provider === 'anthropic';
 
-  // Validate system prompt
   const hasValidSystemPrompt = systemPrompt && systemPrompt.trim().length > 0;
   if (!hasValidSystemPrompt) {
     console.error(`[SystemPrompt] ❌ CRITICAL: System prompt is missing or empty for ${provider}! Responses may not comply with expected behavior!`);
@@ -1129,7 +1002,6 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
     console.log(`[Web Search] ✅ ${provider} model will receive web search/URL results in prompt`);
   }
 
-  // ---- Gemini ----
   if (isGemini) {
     const models = GEMINI_MODELS[provider] || GEMINI_MODELS['gemini'];
     for (const modelName of models) {
@@ -1137,15 +1009,12 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
         const maxOutputTokens = await getModelMaxTokens(provider, modelName);
         console.log(`[LLM Max Tokens] Gemini model ${modelName} using maxOutputTokens=${maxOutputTokens}`);
         
-        // Check if this is Gemini 3.0 Pro (uses new SDK)
         const isGemini3Pro = modelName === 'gemini-3-pro-preview';
         
         if (isGemini3Pro) {
-          // Use new SDK for Gemini 3.0 Pro
           console.log(`[SystemPrompt] 🎯 Gemini 3.0 Pro ${modelName} using new SDK`);
           
           try {
-            // ✅ VALIDATION: Check request size before sending
             const totalRequestSize = prompt.length + (systemPrompt?.length || 0);
             const maxSafeRequestSize = 3000000; // ~750K tokens (75% of 1M for safety)
             
@@ -1160,7 +1029,6 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               console.log(`[Gemini 3.0 Pro] 📉 Truncated prompt from ${prompt.length} to ${finalPrompt.length} chars`);
             }
             
-            // Build request for new SDK
             const requestPayload = {
               model: modelName,
               contents: [
@@ -1185,7 +1053,6 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               console.error(`[callSinglePrompt] ❌ System prompt NOT applied to Gemini 3.0 Pro ${modelName}`);
             }
             
-            // Add timeout wrapper for the request
             const requestPromise = genAI3.models.generateContent(requestPayload);
             const timeoutPromise = new Promise((_, reject) => 
               setTimeout(() => reject(new Error('Request timeout: Gemini 3.0 Pro API request took too long')), 180000)
@@ -1193,7 +1060,6 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
             
             const response = await Promise.race([requestPromise, timeoutPromise]);
             
-            // Extract text from response
             const text = response.text || 
                         response.candidates?.[0]?.content?.parts?.[0]?.text || 
                         response.response?.text() || '';
@@ -1203,9 +1069,41 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
             }
             
             const usage = response.usageMetadata || {};
+            let inputTokens = usage.promptTokenCount || usage.promptTokenCount || 0;
+            let outputTokens = usage.candidatesTokenCount || 0;
+            
+            // Calculate tokens from text if API didn't return them
+            if (inputTokens === 0 && finalPrompt) {
+              inputTokens = estimateTokenCount(finalPrompt + (finalSystemPrompt || ''));
+              console.log(`⚠️ [Gemini 3.0 Pro] API didn't return input tokens, calculated from text: ${inputTokens}`);
+            }
+            if (outputTokens === 0 && text) {
+              outputTokens = estimateTokenCount(text);
+              console.log(`⚠️ [Gemini 3.0 Pro] API didn't return output tokens, calculated from text: ${outputTokens}`);
+            }
+            
             console.log(
-              `✅ Gemini 3.0 Pro (${modelName}) - Tokens used: ${usage.promptTokenCount || 0} + ${usage.candidatesTokenCount || 0} | max=${maxOutputTokens}`
+              `✅ Gemini 3.0 Pro (${modelName}) - Tokens used: ${inputTokens} + ${outputTokens} | max=${maxOutputTokens}`
             );
+            
+            // Log LLM usage to payment service
+            console.log(`🔍 [DEBUG] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${modelName}, metadata:`, JSON.stringify(metadata));
+            if (metadata && metadata.userId && modelName) {
+              console.log(`🚀 [DEBUG] Calling LLMUsageLogService.logUsage for Gemini 3.0 Pro`);
+              LLMUsageLogService.logUsage({
+                userId: metadata.userId,
+                modelName: modelName,
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                endpoint: metadata.endpoint || '/api/doc/analyze',
+                requestId: metadata.requestId,
+                fileId: metadata.fileId,
+                sessionId: metadata.sessionId
+              }).catch(err => {
+                console.error('⚠️ Failed to log LLM usage:', err.message);
+              });
+            }
+            
             return text;
           } catch (gemini3Error) {
             const isNetworkError = gemini3Error.message?.includes('fetch failed') || 
@@ -1228,7 +1126,6 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
             }
           }
         } else {
-          // Use old SDK for legacy Gemini models
           console.log(`[SystemPrompt] 🎯 Gemini ${modelName} using legacy SDK with systemInstruction`);
           const model = genAI.getGenerativeModel(
             hasValidSystemPrompt
@@ -1247,9 +1144,41 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
           });
           const text = await result.response.text();
           const usage = result.response.usageMetadata || {};
+          let inputTokens = usage.promptTokenCount || 0;
+          let outputTokens = usage.candidatesTokenCount || 0;
+          
+          // Calculate tokens from text if API didn't return them
+          if (inputTokens === 0 && prompt) {
+            inputTokens = estimateTokenCount(prompt + (systemPrompt || ''));
+            console.log(`⚠️ [Gemini Legacy] API didn't return input tokens, calculated from text: ${inputTokens}`);
+          }
+          if (outputTokens === 0 && text) {
+            outputTokens = estimateTokenCount(text);
+            console.log(`⚠️ [Gemini Legacy] API didn't return output tokens, calculated from text: ${outputTokens}`);
+          }
+          
           console.log(
-            `✅ Gemini (${modelName}) - Tokens used: ${usage.promptTokenCount || 0} + ${usage.candidatesTokenCount || 0} | max=${maxOutputTokens}`
+            `✅ Gemini (${modelName}) - Tokens used: ${inputTokens} + ${outputTokens} | max=${maxOutputTokens}`
           );
+          
+          // Log LLM usage to payment service
+          console.log(`🔍 [DEBUG] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${modelName}, metadata:`, JSON.stringify(metadata));
+          if (metadata && metadata.userId && modelName) {
+            console.log(`🚀 [DEBUG] Calling LLMUsageLogService.logUsage for Gemini legacy`);
+            LLMUsageLogService.logUsage({
+              userId: metadata.userId,
+              modelName: modelName,
+              inputTokens: inputTokens,
+              outputTokens: outputTokens,
+              endpoint: metadata.endpoint || '/api/doc/analyze',
+              requestId: metadata.requestId,
+              fileId: metadata.fileId,
+              sessionId: metadata.sessionId
+            }).catch(err => {
+              console.error('⚠️ Failed to log LLM usage:', err.message);
+            });
+          }
+          
           return text;
         }
       } catch (err) {
@@ -1263,7 +1192,6 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
     return '⚠️ Gemini could not process this input.';
   }
 
-  // ---- Claude / OpenAI / DeepSeek ----
   const messages = isClaude
     ? [{ role: 'user', content: prompt }]
     : [
@@ -1301,22 +1229,50 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
   });
 
   const usage = response.data?.usage || {};
+  let inputTokens = usage.prompt_tokens || usage.input_tokens || 0;
+  let outputTokens = usage.completion_tokens || usage.output_tokens || 0;
+  
+  // Get response text for token calculation if needed
+  const responseText = response.data?.choices?.[0]?.message?.content ||
+    response.data?.content?.[0]?.text ||
+    '';
+  
+  // Calculate tokens from text if API didn't return them
+  if (inputTokens === 0 && prompt) {
+    inputTokens = estimateTokenCount(prompt + (systemPrompt || ''));
+    console.log(`⚠️ [${provider}] API didn't return input tokens, calculated from text: ${inputTokens}`);
+  }
+  if (outputTokens === 0 && responseText) {
+    outputTokens = estimateTokenCount(responseText);
+    console.log(`⚠️ [${provider}] API didn't return output tokens, calculated from text: ${outputTokens}`);
+  }
+  
   console.log(
-    `✅ ${provider} - Tokens: ${usage.prompt_tokens || usage.input_tokens || 0} + ${usage.completion_tokens || usage.output_tokens || 0}`
+    `✅ ${provider} - Tokens: ${inputTokens} + ${outputTokens}`
   );
 
-  return (
-    response.data?.choices?.[0]?.message?.content ||
-    response.data?.content?.[0]?.text ||
-    '⚠️ AI returned no text.'
-  );
+  // Log LLM usage to payment service for Claude/OpenAI
+  console.log(`🔍 [DEBUG] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${resolvedModelName}, metadata:`, JSON.stringify(metadata));
+  if (metadata && metadata.userId && resolvedModelName) {
+    console.log(`🚀 [DEBUG] Calling LLMUsageLogService.logUsage for Claude/OpenAI`);
+    LLMUsageLogService.logUsage({
+      userId: metadata.userId,
+      modelName: resolvedModelName,
+      inputTokens: inputTokens,
+      outputTokens: outputTokens,
+      endpoint: metadata.endpoint || '/api/doc/analyze',
+      requestId: metadata.requestId,
+      fileId: metadata.fileId,
+      sessionId: metadata.sessionId
+    }).catch(err => {
+      console.error('⚠️ Failed to log LLM usage:', err.message);
+    });
+  }
+
+  return responseText || '⚠️ AI returned no text.';
 }
 
-// ---------------------------
-// Streaming LLM Caller (SSE Support)
-// Returns async generator that yields text chunks
-// ---------------------------
-async function* streamLLM(providerName, userMessage, context = '', relevant_chunks = '', originalQuestion = null) {
+async function* streamLLM(providerName, userMessage, context = '', relevant_chunks = '', originalQuestion = null, metadata = {}) {
   const provider = resolveProviderName(providerName);
   const config = LLM_CONFIGS[provider];
   if (!config) throw new Error(`❌ Unsupported LLM provider: ${provider}`);
@@ -1324,7 +1280,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   const safeContext = typeof context === 'string' ? context : '';
   let userQuestionForSearch = originalQuestion || userMessage;
   
-  // Extract question for web search (same logic as askLLM)
   if (!originalQuestion && userMessage) {
     const userQuestionMatch = userMessage.match(/USER QUESTION:\s*(.+?)(?:\n\n===|$)/s);
     if (userQuestionMatch) {
@@ -1332,7 +1287,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     }
   }
 
-  // Check for explicit web request
   const messageLower = userQuestionForSearch.toLowerCase();
   const explicitWebKeywords = [
     'search web', 'search online', 'from web', 'web se', 'web pe', 
@@ -1340,7 +1294,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   ];
   const isExplicitWebRequest = explicitWebKeywords.some(keyword => messageLower.includes(keyword));
   
-  // Process context and chunks
   let trimmedContext, filteredChunks, trimmedChunks;
   if (isExplicitWebRequest) {
     trimmedContext = '';
@@ -1352,7 +1305,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     trimmedChunks = trimContext(filteredChunks, 20000);
   }
 
-  // Handle web search and URL fetching
   let webSearchData = null;
   let urlContents = [];
   const urls = extractUrls(userQuestionForSearch);
@@ -1371,7 +1323,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     webSearchData = await performWebSearch(userQuestionForSearch, 5);
   }
 
-  // Build prompt
   let prompt = userMessage.trim();
   if (trimmedChunks && !isExplicitWebRequest) {
     prompt += `\n\n=== UPLOADED DOCUMENTS CONTEXT ===\n${trimmedChunks}`;
@@ -1386,7 +1337,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     prompt += `\n\n=== WEB SEARCH RESULTS ===\n${webSearchData.results}`;
   }
 
-  // Get system prompt
   const baseSystemPrompt = await getSystemPrompt(trimmedContext);
   const enhancedSystemPrompt = buildEnhancedSystemPrompt(
     baseSystemPrompt,
@@ -1399,7 +1349,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   const isGemini = provider.startsWith('gemini');
   const isClaude = provider.startsWith('claude') || provider === 'anthropic';
 
-  // Stream based on provider
   if (isGemini) {
     const models = GEMINI_MODELS[provider] || GEMINI_MODELS['gemini'];
     for (const modelName of models) {
@@ -1455,7 +1404,6 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     }
   }
 
-  // Claude / OpenAI / DeepSeek streaming
   const hasValidSystemPrompt = enhancedSystemPrompt && enhancedSystemPrompt.trim().length > 0;
   const messages = isClaude
     ? [{ role: 'user', content: prompt }]
@@ -1465,11 +1413,25 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   const resolvedModelName = config.model;
   const maxTokens = await getModelMaxTokens(provider, resolvedModelName);
-
+  
   const payload = isClaude
-    ? { model: config.model, max_tokens: maxTokens, messages, system: hasValidSystemPrompt ? enhancedSystemPrompt.trim() : undefined, stream: true }
-    : { model: config.model, messages, max_tokens: maxTokens, temperature: 0.7, stream: true };
+    ? { 
+        model: config.model, 
+        max_tokens: maxTokens, 
+        messages, 
+        system: hasValidSystemPrompt ? enhancedSystemPrompt.trim() : undefined, 
+        stream: true 
+      }
+    : { 
+        model: config.model, 
+        messages, 
+        max_tokens: maxTokens, 
+        temperature: 0.7, 
+        stream: true 
+      };
 
+  console.log(`[Claude Stream] Starting stream with max_tokens=${maxTokens}, timeout=240s`);
+  
   const response = await axios.post(config.apiUrl, payload, {
     headers: config.headers,
     responseType: 'stream',
@@ -1477,31 +1439,102 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   });
 
   let buffer = '';
-  for await (const chunk of response.data) {
-    buffer += chunk.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    
-    for (const line of lines) {
-      if (!line.trim() || !line.startsWith('data: ')) continue;
-      const data = line.replace(/^data: /, '').trim();
-      if (data === '[DONE]') return;
-      try {
-        const json = JSON.parse(data);
-        const text = isClaude
-          ? json.delta?.text || json.content_block_delta?.text || ''
-          : json.choices?.[0]?.delta?.content || '';
-        if (text) yield text;
-      } catch (e) {
-        // Skip invalid JSON
+  let lastChunkTime = Date.now();
+  const CHUNK_TIMEOUT = 30000; // 30 seconds timeout between chunks
+  let hasReceivedData = false;
+  
+  try {
+    for await (const chunk of response.data) {
+      const now = Date.now();
+      const timeSinceLastChunk = now - lastChunkTime;
+      
+      // If we've received data before and it's been too long, break
+      if (hasReceivedData && timeSinceLastChunk > CHUNK_TIMEOUT) {
+        console.warn(`[Claude Stream] Timeout: No data received for ${timeSinceLastChunk}ms, ending stream`);
+        break;
+      }
+      
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        
+        // Handle Claude SSE format: "data: {...}" or "event: ..."
+        if (line.startsWith('data: ')) {
+          const data = line.replace(/^data: /, '').trim();
+          if (data === '[DONE]') {
+            console.log('[Claude Stream] Received [DONE] signal');
+            return;
+          }
+          
+          try {
+            const json = JSON.parse(data);
+            
+            // Claude streaming format: content_block_delta or delta
+            let text = '';
+            if (json.type === 'content_block_delta' && json.delta?.text) {
+              text = json.delta.text;
+            } else if (json.type === 'content_block_delta' && json.content_block_delta?.text) {
+              text = json.content_block_delta.text;
+            } else if (json.delta?.text) {
+              text = json.delta.text;
+            } else if (json.content_block_delta?.text) {
+              text = json.content_block_delta.text;
+            } else if (!isClaude && json.choices?.[0]?.delta?.content) {
+              text = json.choices[0].delta.content;
+            }
+            
+            if (text) {
+              hasReceivedData = true;
+              lastChunkTime = now;
+              yield text;
+            }
+          } catch (e) {
+            // Skip invalid JSON lines (might be event: ping or other non-data lines)
+            if (!line.startsWith('event:')) {
+              console.warn(`[Claude Stream] Failed to parse line: ${line.substring(0, 100)}`);
+            }
+          }
+        } else if (line.startsWith('event: ')) {
+          // Handle SSE events (e.g., "event: ping")
+          const eventType = line.replace(/^event: /, '').trim();
+          if (eventType === 'ping') {
+            lastChunkTime = now; // Reset timeout on ping
+          }
+        }
       }
     }
+    
+    // Process any remaining buffer
+    if (buffer.trim()) {
+      const lines = buffer.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.replace(/^data: /, '').trim();
+          if (data === '[DONE]') return;
+          try {
+            const json = JSON.parse(data);
+            const text = isClaude
+              ? json.delta?.text || json.content_block_delta?.text || ''
+              : json.choices?.[0]?.delta?.content || '';
+            if (text) yield text;
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[Claude Stream] Error during streaming:`, error.message);
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Request timeout: Claude API took too long to respond');
+    }
+    throw error;
   }
 }
 
-// ---------------------------
-// Get Summary from Chunks
-// ---------------------------
 async function getSummaryFromChunks(chunks) {
   if (!chunks || chunks.length === 0) {
     return null;
@@ -1513,9 +1546,6 @@ async function getSummaryFromChunks(chunks) {
   return summary;
 }
 
-// ---------------------------
-// Exports
-// ---------------------------
 module.exports = {
   askLLM,
   streamLLM,

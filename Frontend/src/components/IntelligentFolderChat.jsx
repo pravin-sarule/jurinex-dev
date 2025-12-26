@@ -10,11 +10,8 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
+import { API_BASE_URL } from '../config/apiConfig';
 
-/**
- * Complete Intelligent Folder Chat Component
- * Renders streaming responses in real-time as chunks arrive
- */
 export default function IntelligentFolderChat({
   folderName,
   authToken = null,
@@ -29,7 +26,6 @@ export default function IntelligentFolderChat({
   const [loadingCitations, setLoadingCitations] = useState(false);
   const [selectedMessageForCitations, setSelectedMessageForCitations] = useState(null);
 
-  // Secret prompt states
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
   const [selectedSecretId, setSelectedSecretId] = useState(null);
@@ -40,27 +36,24 @@ export default function IntelligentFolderChat({
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const dropdownRef = useRef(null);
-  const finalizedMessageIds = useRef(new Set()); // Track finalized messages to prevent duplicate rendering
+  const finalizedMessageIds = useRef(new Set());
 
   const {
     text,
-    thinking, // NEW: Model's thinking process
+    thinking,
     isStreaming,
     error,
     sessionId,
     methodUsed,
     routingDecision,
     status,
-    finalMetadata, // Final metadata with citations
+    finalMetadata,
     sendMessage,
     stopStreaming,
     clear,
   } = useIntelligentFolderChat(folderName, authToken);
 
-  // API Configuration
-  const API_BASE_URL = import.meta.env.VITE_APP_API_URL || import.meta.env.REACT_APP_API_BASE_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
 
-  // Helper to get auth token from localStorage
   const getAuthToken = () => {
     const tokenKeys = [
       'authToken', 'token', 'accessToken', 'jwt', 'bearerToken',
@@ -73,7 +66,6 @@ export default function IntelligentFolderChat({
     return null;
   };
 
-  // 🔹 Fetch secrets list
   const fetchSecrets = async () => {
     try {
       setIsLoadingSecrets(true);
@@ -105,7 +97,6 @@ export default function IntelligentFolderChat({
     }
   };
 
-  // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -114,20 +105,16 @@ export default function IntelligentFolderChat({
     scrollToBottom();
   }, [messages, text]);
 
-  // Update current streaming message in real-time
   useEffect(() => {
-    // Only update if we have an active message being streamed
     if (!currentMessageId) return;
 
     if (isStreaming) {
-      // Streaming in progress - update message in real-time
       setMessages(prev => {
         const newMessages = [...prev];
         const lastMessage = newMessages.find(m => m.id === currentMessageId);
         if (lastMessage && lastMessage.role === 'assistant') {
-          // Only update if this is the current streaming message
           lastMessage.text = text || '';
-          lastMessage.thinking = thinking || ''; // Update thinking in real-time
+          lastMessage.thinking = thinking || '';
           lastMessage.isStreaming = true;
           lastMessage.method = methodUsed;
           lastMessage.status = status;
@@ -135,22 +122,18 @@ export default function IntelligentFolderChat({
         return newMessages;
       });
     } else {
-      // Stream completed - finalize message ONCE
-      // Check if this message has already been finalized
       if (currentMessageId && !finalizedMessageIds.current.has(currentMessageId)) {
         setMessages(prev => {
           const newMessages = [...prev];
           const lastMessage = newMessages.find(m => m.id === currentMessageId);
           if (lastMessage && lastMessage.role === 'assistant' && lastMessage.isStreaming) {
-            // Only finalize if message is still marked as streaming (prevents duplicate updates)
             lastMessage.text = text || '';
-            lastMessage.thinking = thinking || ''; // Final thinking content
+            lastMessage.thinking = thinking || '';
             lastMessage.isStreaming = false;
             lastMessage.method = methodUsed;
             lastMessage.routingDecision = routingDecision;
             lastMessage.status = null;
             
-            // Store metadata with citations and used_chunk_ids
             if (finalMetadata) {
               lastMessage.used_chunk_ids = finalMetadata.used_chunk_ids || [];
               lastMessage.citations = finalMetadata.citations || null;
@@ -160,13 +143,11 @@ export default function IntelligentFolderChat({
               });
             }
             
-            // Mark this message as finalized
             finalizedMessageIds.current.add(currentMessageId);
           }
           return newMessages;
         });
 
-        // Call completion callback
         if (onMessageComplete) {
           onMessageComplete({
             text,
@@ -177,13 +158,11 @@ export default function IntelligentFolderChat({
           });
         }
 
-        // Clear current message ID to prevent further updates
         setCurrentMessageId(null);
       }
     }
   }, [text, thinking, isStreaming, methodUsed, routingDecision, status, currentMessageId, sessionId, onMessageComplete, finalMetadata]);
 
-  // Fetch citations when a message is clicked/selected
   useEffect(() => {
     const fetchCitationsForMessage = async (message) => {
       if (!message || !folderName) {
@@ -191,7 +170,6 @@ export default function IntelligentFolderChat({
         return;
       }
 
-      // Check if citations are already in the message
       if (message.citations && Array.isArray(message.citations) && message.citations.length > 0) {
         console.log('[IntelligentFolderChat] Using citations from message:', message.citations);
         const formattedCitations = message.citations.map((citation) => {
@@ -227,7 +205,6 @@ export default function IntelligentFolderChat({
         return;
       }
 
-      // Fallback: fetch using used_chunk_ids
       if (!message.used_chunk_ids || message.used_chunk_ids.length === 0) {
         setCitations([]);
         return;
@@ -279,30 +256,21 @@ export default function IntelligentFolderChat({
     }
   }, [selectedMessageForCitations, folderName]);
 
-  // Handle form submission
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    // Prevent submission if streaming
     if (isStreaming) return;
 
-    // Check if using secret prompt or regular input
     if (isSecretPromptSelected && selectedSecretId) {
-      // Secret prompt selected - only send secret_id, no question required
-      // Backend will fetch the secret prompt using secret_id
       await handleSecretPromptSubmit();
-      return; // Exit early to prevent any further validation
+      return;
     } else if (input && input.trim()) {
-      // Regular input - require question
       await handleRegularSubmit();
       return;
     }
-    // If neither condition is met, do nothing (button should be disabled anyway)
   };
 
-  // Handle regular chat submission
   const handleRegularSubmit = async () => {
-    // Clear any previous streaming state before starting new message
     if (currentMessageId) {
       setCurrentMessageId(null);
     }
@@ -335,22 +303,18 @@ export default function IntelligentFolderChat({
       await sendMessage(input.trim(), null);
     } catch (err) {
       console.error('Error sending message:', err);
-      // Reset current message ID on error
       if (currentMessageId === aiMessageId) {
         setCurrentMessageId(null);
       }
     }
   };
 
-  // Handle secret prompt submission
   const handleSecretPromptSubmit = async () => {
-    // Validate that we have a secret ID
     if (!selectedSecretId) {
       console.error('No secret ID selected');
       return;
     }
 
-    // Clear any previous streaming state before starting new message
     if (currentMessageId) {
       setCurrentMessageId(null);
     }
@@ -383,19 +347,15 @@ export default function IntelligentFolderChat({
     setTimeout(() => inputRef.current?.focus(), 100);
 
     try {
-      // ✅ Send ONLY secret_id - no question field at all
-      // Backend will fetch the secret prompt using secret_id
       await sendMessage(null, selectedSecretId);
     } catch (err) {
       console.error('Error sending secret prompt:', err);
-      // Reset current message ID on error
       if (currentMessageId === aiMessageId) {
         setCurrentMessageId(null);
       }
     }
   };
 
-  // Handle dropdown selection
   const handleDropdownSelect = (secretName, secretId) => {
     setActiveDropdown(secretName);
     setSelectedSecretId(secretId);
@@ -404,14 +364,12 @@ export default function IntelligentFolderChat({
     setShowDropdown(false);
   };
 
-  // Handle input change
   const handleInputChange = (e) => {
     setInput(e.target.value);
     setIsSecretPromptSelected(false);
     setActiveDropdown('Custom Query');
   };
 
-  // Handle stop streaming
   const handleStop = () => {
     stopStreaming();
     if (currentMessageId) {
@@ -427,22 +385,19 @@ export default function IntelligentFolderChat({
     }
   };
 
-  // Handle clear chat
   const handleClear = () => {
     if (window.confirm('Are you sure you want to clear the chat?')) {
       setMessages([]);
       setCurrentMessageId(null);
-      finalizedMessageIds.current.clear(); // Clear finalized messages tracking
+      finalizedMessageIds.current.clear();
       clear();
     }
   };
 
-  // Load secrets on mount
   useEffect(() => {
     fetchSecrets();
   }, []);
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
@@ -458,7 +413,6 @@ export default function IntelligentFolderChat({
 
   return (
     <div className={`intelligent-folder-chat ${className}`}>
-      {/* Header */}
       <div className="chat-header">
         <h3>Intelligent Folder Chat</h3>
         {sessionId && (
@@ -477,7 +431,6 @@ export default function IntelligentFolderChat({
         )}
       </div>
 
-      {/* Messages */}
       <div className="chat-messages">
         {messages.length === 0 && (
           <div className="empty-state">
@@ -516,7 +469,6 @@ export default function IntelligentFolderChat({
                 <div className="user-message">{msg.text}</div>
               ) : (
                 <>
-                  {/* Thinking Section (Like Gemini) */}
                   {msg.thinking && (
                     <div className="thinking-section">
                       <div className="thinking-header">
@@ -532,7 +484,6 @@ export default function IntelligentFolderChat({
                     </div>
                   )}
 
-                  {/* Answer Section */}
                   <div className="ai-message">
                     {msg.text ? (
                       <ReactMarkdown
@@ -577,13 +528,11 @@ export default function IntelligentFolderChat({
                           const rawResponse = msg.text || '';
                           if (!rawResponse) return '';
                           
-                          // Check if it's structured JSON and format it accordingly
                           const isStructured = isStructuredJsonResponse(rawResponse);
                           if (isStructured) {
                             return renderSecretPromptResponse(rawResponse);
                           }
                           
-                          // Convert any JSON to plain text
                           return convertJsonToPlainText(rawResponse);
                         })()}
                       </ReactMarkdown>
@@ -595,7 +544,6 @@ export default function IntelligentFolderChat({
                     )}
                   </div>
 
-                  {/* Status Display (Gemini-like) - Shows what model is doing */}
                   {msg.status && (
                     <div className="status-display">
                       <div className="status-spinner"></div>
@@ -610,7 +558,6 @@ export default function IntelligentFolderChat({
                     </div>
                   )}
 
-                  {/* Method badge */}
                   {msg.method && (
                     <div className="method-badge">
                       {msg.method === 'gemini_eyeball' ? (
@@ -633,7 +580,6 @@ export default function IntelligentFolderChat({
                     </div>
                   )}
 
-                  {/* Routing decision info */}
                   {msg.routingDecision && (
                     <div className="routing-info">
                       <span className="info-icon">ℹ️</span>
@@ -651,7 +597,6 @@ export default function IntelligentFolderChat({
           </div>
         ))}
 
-        {/* Error message */}
         {error && (
           <div className="error-message">
             <span className="error-icon">⚠️</span>
@@ -662,7 +607,6 @@ export default function IntelligentFolderChat({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input form */}
       <form onSubmit={handleSubmit} className="chat-input-form">
         <div className="input-container">
           <input
@@ -676,7 +620,6 @@ export default function IntelligentFolderChat({
             autoFocus
           />
           <div className="input-actions">
-            {/* Secret Prompt Dropdown */}
             <div className="relative" ref={dropdownRef} style={{ marginRight: '8px' }}>
               <button
                 type="button"
@@ -735,7 +678,6 @@ export default function IntelligentFolderChat({
         </div>
       </form>
 
-      {/* Citations Panel */}
       {showCitations && citations && citations.length > 0 && (
         <CitationsPanel
           citations={citations}

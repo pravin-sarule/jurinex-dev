@@ -1,8 +1,8 @@
-// services/draftService.js
-const API_BASE_URL = import.meta.env.REACT_APP_API_BASE_URL || 'https://document-service-120280829617.asia-south1.run.app/api/content';
+import { CONTENT_SERVICE_DIRECT } from '../config/apiConfig';
+
+const API_BASE_URL = CONTENT_SERVICE_DIRECT;
 
 export const draftService = {
-  // Save or update case draft
   saveDraft: async (userId, draftData, lastStep) => {
     try {
       const response = await fetch(`${API_BASE_URL}/case-draft/save`, {
@@ -28,7 +28,6 @@ export const draftService = {
     }
   },
 
-  // Get existing draft for user
   getDraft: async (userId) => {
     try {
       const response = await fetch(`${API_BASE_URL}/case-draft/${userId}`, {
@@ -39,7 +38,7 @@ export const draftService = {
       });
 
       if (response.status === 404) {
-        return null; // No draft found
+        return null;
       }
 
       if (!response.ok) {
@@ -59,7 +58,6 @@ export const draftService = {
     }
   },
 
-  // Delete draft after case creation
   deleteDraft: async (userId) => {
     try {
       const response = await fetch(`${API_BASE_URL}/case-draft/${userId}`, {
@@ -81,9 +79,7 @@ export const draftService = {
   },
 };
 
-// API service for other content (case types, courts, judges)
 export const contentService = {
-  // Case Types
   getCaseTypes: async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/case-types`);
@@ -106,7 +102,6 @@ export const contentService = {
     }
   },
 
-  // Courts
   getCourts: async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/courts`);
@@ -140,7 +135,6 @@ export const contentService = {
     }
   },
 
-  // Judges
   getJudgesByBench: async (courtId, benchName) => {
     try {
       const response = await fetch(`${API_BASE_URL}/judges?courtId=${courtId}&benchName=${encodeURIComponent(benchName)}`);

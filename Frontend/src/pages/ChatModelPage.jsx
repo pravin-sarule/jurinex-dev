@@ -1,7 +1,6 @@
-
-
 import '../styles/AnalysisPage.css';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { API_BASE_URL } from '../config/apiConfig';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
@@ -18,6 +17,7 @@ import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup'
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import { isUserFreeTier, FREE_TIER_MAX_FILE_SIZE_BYTES, FREE_TIER_MAX_FILE_SIZE_MB, formatFileSize } from '../utils/planUtils';
 import {
   Search,
   Send,
@@ -47,6 +47,7 @@ import {
   Circle,
   CreditCard,
   Square,
+  Zap,
 } from 'lucide-react';
 
 const PROGRESS_STAGES = {
@@ -242,7 +243,6 @@ const ChatModelPage = () => {
   const { setIsSidebarHidden, setIsSidebarCollapsed } = useSidebar();
   const navigate = useNavigate();
 
-  // State Management
   const [activeDropdown, setActiveDropdown] = useState('Custom Query');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false);
@@ -251,8 +251,8 @@ const ChatModelPage = () => {
   const [success, setSuccess] = useState(null);
   const [hasResponse, setHasResponse] = useState(false);
   const [isSecretPromptSelected, setIsSecretPromptSelected] = useState(false);
+  const [fileSizeLimitError, setFileSizeLimitError] = useState(null);
 
-  // Document and Analysis Data
   const [documentData, setDocumentData] = useState(null);
   const [messages, setMessages] = useState([]);
   const [fileId, setFileId] = useState(paramFileId || null);
@@ -268,36 +268,29 @@ const ChatModelPage = () => {
   const [showAllChats, setShowAllChats] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
 
-  // Secrets state
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
   const [selectedSecretId, setSelectedSecretId] = useState(null);
   const [selectedLlmName, setSelectedLlmName] = useState(null);
 
-  // Batch upload state
   const [batchUploads, setBatchUploads] = useState([]);
   const [uploadedDocuments, setUploadedDocuments] = useState([]);
   const [showInsufficientFundsAlert, setShowInsufficientFundsAlert] = useState(false);
   const [activePollingFiles, setActivePollingFiles] = useState(new Set());
 
-  // Processing status state
   const [processingStatus, setProcessingStatus] = useState(null);
   const [progressPercentage, setProgressPercentage] = useState(0);
 
-  // Chat API upload state
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadedFileId, setUploadedFileId] = useState(null);
   const [isChatUploading, setIsChatUploading] = useState(false);
  
-  // ChatModel streaming status state
   const [streamingStatus, setStreamingStatus] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState('');
  
-  // ChatModel files and history state
   const [chatModelFiles, setChatModelFiles] = useState([]);
   const [chatModelHistory, setChatModelHistory] = useState([]);
 
-  // Refs
   const fileInputRef = useRef(null);
   const dropdownRef = useRef(null);
   const responseRef = useRef(null);
@@ -309,9 +302,6 @@ const ChatModelPage = () => {
   const pollingIntervalRef = useRef(null);
   const batchPollingIntervalsRef = useRef({});
   const uploadIntervalRef = useRef(null);
-
-  // API Configuration
-  const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -381,7 +371,6 @@ const ChatModelPage = () => {
     }
   };
 
-  // Upload document to chat API with progress tracking
   const uploadDocumentToChat = async (file) => {
     try {
       setIsChatUploading(true);
@@ -399,9 +388,8 @@ const ChatModelPage = () => {
 
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        const CHAT_MODEL_BASE_URL = "https://gateway-service-120280829617.asia-south1.run.app";
+        const CHAT_MODEL_BASE_URL = API_BASE_URL;
 
-        // Track upload progress
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
             const percentComplete = Math.round((e.loaded / e.total) * 100);
@@ -416,7 +404,6 @@ const ChatModelPage = () => {
               const response = JSON.parse(xhr.responseText);
               console.log('[uploadDocumentToChat] Upload response:', response);
              
-              // Extract file_id from response
               let fileId = response.data?.file_id || response.file_id;
              
               if (!fileId) {
@@ -429,26 +416,21 @@ const ChatModelPage = () => {
              
               console.log('[uploadDocumentToChat] Extracted file_id:', fileId);
              
-              // Store file_id in both state variables to ensure it's available for questions
               setUploadedFileId(fileId);
               setFileId(fileId);
               setUploadProgress(100);
              
-              // Small delay to show 100% before hiding
               setTimeout(() => {
                 setIsChatUploading(false);
                 setSuccess('Document uploaded successfully! You can now ask questions about it.');
                
-                // Open both panels when document uploads successfully
                 setShowSplitView(true);
                 setHasResponse(true);
                
-                // Set initial LLM status to show in right panel
                 setStreamingStatus('ready');
                 setStreamingMessage('Document ready. You can now ask questions about it.');
               }, 500);
              
-              // Fetch user files to update the list
               fetchChatModelFiles();
              
               resolve({ file_id: fileId, ...response });
@@ -510,7 +492,6 @@ const ChatModelPage = () => {
     }
   };
  
-  // Helper function to get status message
   const getStatusMessage = (status) => {
     const statusMessages = {
       'initializing': 'Starting chat request...',
@@ -523,7 +504,6 @@ const ChatModelPage = () => {
     return statusMessages[status] || 'Processing...';
   };
 
-  // Fetch ChatModel files
   const fetchChatModelFiles = async () => {
     try {
       const response = await apiService.getChatModelFiles();
@@ -535,7 +515,6 @@ const ChatModelPage = () => {
     }
   };
  
-  // Fetch ChatModel history
   const fetchChatModelHistory = async (fileId, sessionId = null) => {
     try {
       const response = await apiService.getChatModelHistory(fileId, sessionId);
@@ -560,7 +539,6 @@ const ChatModelPage = () => {
         if (history.length > 0) {
           const lastMessage = history[history.length - 1];
           setSelectedMessageId(lastMessage.id);
-          // ✅ For secret prompts, render structured JSON; otherwise convert to plain text
           const rawAnswer = lastMessage.answer || '';
           const isStructured = lastMessage.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
           const responseToDisplay = isStructured
@@ -575,7 +553,6 @@ const ChatModelPage = () => {
     }
   };
 
-  // Ask question using chat API with streaming
   const askQuestionToChat = async (question, fileId) => {
     try {
       setIsLoading(true);
@@ -583,16 +560,13 @@ const ChatModelPage = () => {
       setError(null);
       setCurrentResponse('');
       streamBufferRef.current = '';
-      // Set initial status
       setStreamingStatus('initializing');
       setStreamingMessage('Starting chat request...');
 
-      // Close existing stream if any
       if (streamReaderRef.current) {
         try {
           await streamReaderRef.current.cancel();
         } catch (e) {
-          // Ignore cancel errors
         }
         streamReaderRef.current = null;
       }
@@ -602,7 +576,6 @@ const ChatModelPage = () => {
         streamUpdateTimeoutRef.current = null;
       }
 
-      // Clean file_id if it has braces
       let cleanFileId = fileId;
       if (fileId && typeof fileId === 'string') {
         cleanFileId = fileId.replace(/\{\{|\}\}/g, '').replace(/\{|\}/g, '').trim();
@@ -615,45 +588,38 @@ const ChatModelPage = () => {
       let newSessionId = sessionId;
       let finalMetadata = null;
      
-      // Create message immediately when question is asked (before streaming starts)
       const messageId = Date.now();
       const newChat = {
         id: messageId,
         file_id: cleanFileId,
         session_id: sessionId,
         question: question.trim(),
-        answer: '', // Will be updated as streaming progresses
+        answer: '',
         display_text_left_panel: question.trim(),
         timestamp: new Date().toISOString(),
         type: 'chat',
         used_secret_prompt: false,
-        isStreaming: true, // Mark as streaming
+        isStreaming: true,
       };
      
-      // Add message to chat history immediately
       setMessages((prev) => [...prev, newChat]);
       setSelectedMessageId(messageId);
       setHasResponse(true);
-      setShowSplitView(true); // Open split view to show response
-      setChatInput(''); // Clear input immediately
+      setShowSplitView(true);
+      setChatInput('');
 
-      // Use streaming API
       await apiService.askChatModelQuestionStream(
         question.trim(),
         cleanFileId,
         sessionId,
-        // onChunk - Update in real-time as chunks arrive
         (text) => {
           if (text) {
             streamBufferRef.current += text;
            
-            // Update response in real-time for immediate display
             const currentText = streamBufferRef.current;
             setCurrentResponse(currentText);
-            // Also update animatedResponseContent for immediate display (like AnalysisPage)
             setAnimatedResponseContent(currentText);
            
-            // Update the message in the messages array with streaming content
             setMessages((prev) => {
               const updated = prev.map((msg) =>
                 msg.id === messageId
@@ -663,30 +629,25 @@ const ChatModelPage = () => {
               return updated;
             });
            
-            // Auto-scroll to bottom during streaming
             if (responseRef.current) {
               responseRef.current.scrollTop = responseRef.current.scrollHeight;
             }
            
-            // Update status to generating when we start receiving chunks
             if (!streamingStatus || streamingStatus !== 'generating') {
               setStreamingStatus('generating');
               setStreamingMessage('Generating response from AI...');
             }
           }
         },
-        // onStatus
         (status, message) => {
           setStreamingStatus(status);
           setStreamingMessage(message || getStatusMessage(status));
           console.log('[askQuestionToChat] Status:', status, message);
         },
-        // onMetadata
         (metadata) => {
           console.log('[askQuestionToChat] Metadata:', metadata);
           if (metadata.session_id) {
             newSessionId = metadata.session_id;
-            // Update session ID in the message
             setMessages((prev) => {
               const updated = prev.map((msg) =>
                 msg.id === messageId
@@ -698,7 +659,6 @@ const ChatModelPage = () => {
             setSessionId(metadata.session_id);
           }
         },
-        // onDone
         (doneData) => {
           console.log('[askQuestionToChat] Stream complete:', doneData);
           finalMetadata = doneData;
@@ -708,11 +668,9 @@ const ChatModelPage = () => {
             newSessionId = doneData.session_id;
           }
          
-          // Clear status first, then set response
           setStreamingStatus(null);
           setStreamingMessage('');
          
-          // Update the message with final response (mark as not streaming)
           setMessages((prev) => {
             const updated = prev.map((msg) =>
               msg.id === messageId
@@ -730,24 +688,20 @@ const ChatModelPage = () => {
           setSelectedMessageId(messageId);
           setSessionId(newSessionId);
           setCurrentResponse(finalResponse);
-          // Ensure animatedResponseContent is set to final response (already set during streaming, but ensure it's complete)
           setAnimatedResponseContent(finalResponse);
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setSuccess('Question answered!');
          
-          // Clear streaming status
           setStreamingStatus(null);
           setStreamingMessage('');
          
-          // Final scroll to bottom to ensure all content is visible
           if (responseRef.current) {
             setTimeout(() => {
               responseRef.current.scrollTop = responseRef.current.scrollHeight;
             }, 100);
           }
         },
-        // onError
         (errorMessage, details) => {
           console.error('[askQuestionToChat] Stream error:', errorMessage, details);
           setError(`Failed to get answer: ${errorMessage}`);
@@ -756,7 +710,6 @@ const ChatModelPage = () => {
           setStreamingStatus(null);
           setStreamingMessage('');
          
-          // Remove or mark the message as errored
           setMessages((prev) => {
             return prev.filter((msg) => msg.id !== messageId);
           });
@@ -775,7 +728,6 @@ const ChatModelPage = () => {
     }
   };
 
-  // Fetch secrets
   const fetchSecrets = async () => {
     try {
       setIsLoadingSecrets(true);
@@ -795,7 +747,6 @@ const ChatModelPage = () => {
       const secretsList = secretsData || [];
       setSecrets(secretsList);
      
-      // Validate and clear selectedSecretId if it no longer exists
       if (selectedSecretId) {
         const secretExists = secretsList.find((s) => s.id === selectedSecretId);
         if (!secretExists) {
@@ -807,7 +758,6 @@ const ChatModelPage = () => {
           setSelectedLlmName(null);
         }
       } else {
-        // Always start with "Custom Query" instead of auto-selecting first secret
         setActiveDropdown('Custom Query');
         setSelectedSecretId(null);
         setSelectedLlmName(null);
@@ -821,10 +771,7 @@ const ChatModelPage = () => {
     }
   };
 
-  // Enhanced getProcessingStatus function
-  // Processing status functions removed - ChatModel doesn't show processing indicators
 
-  // Batch file upload (triggers polling on success)
   const batchUploadDocuments = async (files, secretId = null, llmName = null) => {
     const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
     const environment = isProduction ? 'PRODUCTION' : 'LOCALHOST';
@@ -835,7 +782,7 @@ const ChatModelPage = () => {
    
     setIsUploading(true);
     setError(null);
-    const LARGE_FILE_THRESHOLD = 32 * 1024 * 1024; // 32MB in bytes
+    const LARGE_FILE_THRESHOLD = 32 * 1024 * 1024;
    
     const initialBatchUploads = files.map((file, index) => {
       const isLarge = file.size > LARGE_FILE_THRESHOLD;
@@ -860,14 +807,12 @@ const ChatModelPage = () => {
       const headers = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
      
-      // Separate large and small files
       const largeFiles = files.filter(f => f.size > LARGE_FILE_THRESHOLD);
       const smallFiles = files.filter(f => f.size <= LARGE_FILE_THRESHOLD);
       const uploadedFileIds = [];
      
       console.log(`[batchUploadDocuments] 📊 Summary: ${largeFiles.length} large file(s) (signed URL), ${smallFiles.length} small file(s) (regular upload)`);
      
-      // Upload large files individually using signed URLs
       for (let i = 0; i < largeFiles.length; i++) {
         const file = largeFiles[i];
         const matchingUpload = initialBatchUploads.find(u => u.file === file);
@@ -885,7 +830,6 @@ const ChatModelPage = () => {
             )
           );
          
-          // Step 1: Get signed URL
           const generateUrlEndpoint = `${API_BASE_URL}/files/generate-upload-url`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 1/3: Requesting signed URL from: ${generateUrlEndpoint}`);
          
@@ -906,7 +850,6 @@ const ChatModelPage = () => {
             const errorData = await urlResponse.json().catch(() => ({}));
             const errorMessage = errorData.error || errorData.message || `Failed to get upload URL: ${urlResponse.statusText}`;
            
-            // Check for subscription-related errors
             const isSubscriptionError = urlResponse.status === 500 ||
               errorMessage.toLowerCase().includes('subscription') ||
               errorMessage.toLowerCase().includes('insufficient') ||
@@ -928,14 +871,11 @@ const ChatModelPage = () => {
           console.log(`[📤 SIGNED URL UPLOAD] Signed URL (first 100 chars): ${signedUrl.substring(0, 100)}...`);
          
          
-          // Step 2: Upload file directly to GCS with progress tracking
           console.log(`[📤 SIGNED URL UPLOAD] Step 2/3: Uploading file directly to GCS (PUT request)`);
          
-          // Use XMLHttpRequest for progress tracking
           await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
            
-            // No progress tracking - ChatModel doesn't show progress indicators
            
             xhr.addEventListener('load', () => {
               if (xhr.status >= 200 && xhr.status < 300) {
@@ -959,7 +899,6 @@ const ChatModelPage = () => {
             xhr.send(file);
           });
          
-          // Step 3: Complete upload
           const completeEndpoint = `${API_BASE_URL}/files/complete-upload`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 3/3: Notifying backend to process file: ${completeEndpoint}`);
          
@@ -982,7 +921,6 @@ const ChatModelPage = () => {
             const errorData = await completeResponse.json();
             const errorMessage = errorData.error || errorData.message || `Failed to complete upload: ${completeResponse.statusText}`;
            
-            // Check for subscription-related errors
             const isSubscriptionError = completeResponse.status === 500 ||
               errorMessage.toLowerCase().includes('subscription') ||
               errorMessage.toLowerCase().includes('insufficient') ||
@@ -1022,7 +960,6 @@ const ChatModelPage = () => {
          
           uploadedFileIds.push(fileId);
          
-          // Set first file as the active document
           if (i === 0 && largeFiles.length > 0) {
             setFileId(fileId);
                 setDocumentData({
@@ -1047,7 +984,6 @@ const ChatModelPage = () => {
         }
       }
      
-      // Upload small files using batch upload endpoint
       if (smallFiles.length > 0) {
         console.log(`\n[📦 REGULAR UPLOAD] Starting batch upload for ${smallFiles.length} small file(s)`);
         console.log(`[📦 REGULAR UPLOAD] Environment: ${environment}`);
@@ -1072,11 +1008,9 @@ const ChatModelPage = () => {
           })
         );
        
-        // Use XMLHttpRequest for upload (no progress tracking)
         const data = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
          
-          // No progress tracking - ChatModel doesn't show progress indicators
          
           xhr.addEventListener('load', () => {
             if (xhr.status >= 200 && xhr.status < 300) {
@@ -1089,7 +1023,6 @@ const ChatModelPage = () => {
             } else {
               try {
                 const errorData = JSON.parse(xhr.responseText);
-                // Check for subscription-related errors
                 const errorMessage = errorData.error || errorData.message || '';
                 const isSubscriptionError = xhr.status === 500 ||
                   errorMessage.toLowerCase().includes('subscription') ||
@@ -1105,7 +1038,6 @@ const ChatModelPage = () => {
                   reject(new Error(errorMessage || `Upload failed with status ${xhr.status}`));
                 }
               } catch {
-                // If status is 500, treat as potential subscription error
                 if (xhr.status === 500) {
                   const error = new Error('Subscription required to upload files');
                   error.isSubscriptionError = true;
@@ -1170,7 +1102,6 @@ const ChatModelPage = () => {
               ]);
               uploadedFileIds.push(fileId);
              
-              // Set first file as the active document if no large file was set
               if (uploadedFileIds.length === largeFiles.length + 1) {
                 setFileId(fileId);
                 setDocumentData({
@@ -1187,7 +1118,6 @@ const ChatModelPage = () => {
         }
       }
      
-      // No processing status polling - ChatModel doesn't show processing indicators
      
       const successCount = uploadedFileIds.length;
       const failCount = initialBatchUploads.length - successCount;
@@ -1201,7 +1131,6 @@ const ChatModelPage = () => {
     } catch (error) {
       console.error('[batchUploadDocuments] Batch upload error:', error);
      
-      // Check if this is a subscription error
       if (error.isSubscriptionError) {
         setShowInsufficientFundsAlert(true);
         setBatchUploads((prev) =>
@@ -1218,21 +1147,17 @@ const ChatModelPage = () => {
     }
   };
 
-  // Animation that reveals the response in a ChatGPT-like fashion (word-by-word)
   const animateResponse = (text = '', isAlreadyFormatted = false) => {
     console.log('[animateResponse] Starting ChatGPT-style word-by-word animation. Length:', text.length);
 
-    // Cancel any existing animation
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       clearTimeout(animationFrameRef.current);
       animationFrameRef.current = null;
     }
 
-    // ✅ Convert JSON to plain text only if not already formatted (like AnalysisPage)
     const plainText = isAlreadyFormatted ? text : convertJsonToPlainText(text);
 
-    // Handle empty or invalid responses
     if (!plainText || typeof plainText !== 'string') {
       setIsAnimatingResponse(false);
       setAnimatedResponseContent(plainText || '');
@@ -1243,12 +1168,10 @@ const ChatModelPage = () => {
     setIsAnimatingResponse(true);
     setShowSplitView(true);
 
-    // Split text into words while preserving spaces and newlines
     const words = plainText.split(/(\s+)/);
     let currentIndex = 0;
     let displayedText = '';
 
-    // If response is very short, show it immediately
     if (words.length <= 3) {
         setIsAnimatingResponse(false);
       setAnimatedResponseContent(plainText);
@@ -1257,62 +1180,45 @@ const ChatModelPage = () => {
 
     const animateWord = () => {
       if (currentIndex < words.length) {
-        // Add the next word to displayed text
         displayedText += words[currentIndex];
         setAnimatedResponseContent(displayedText);
         currentIndex++;
 
-        // Auto-scroll during animation
         if (responseRef.current) {
           responseRef.current.scrollTop = responseRef.current.scrollHeight;
         }
 
-        // Calculate delay based on word length and type
         const word = words[currentIndex - 1];
-        let delay = 15; // Base delay in milliseconds
+        let delay = 15;
        
         if (word.trim().length === 0) {
-          // For whitespace/newlines, use minimal delay
           delay = 3;
         } else if (word.length > 15) {
-          // Very long words get a bit more time
           delay = 25;
         } else if (word.length > 10) {
-          // Longer words get slightly more time
           delay = 20;
         } else if (/[.!?]\s*$/.test(word)) {
-          // Sentences ending with punctuation get a pause (like ChatGPT)
           delay = 40;
         } else if (/[,;:]\s*$/.test(word)) {
-          // Commas and semicolons get a small pause
           delay = 20;
         } else if (/^[#*`\-]/.test(word)) {
-          // Markdown syntax characters render quickly
           delay = 8;
         }
 
-        // Continue animation with calculated delay
         animationFrameRef.current = setTimeout(animateWord, delay);
       } else {
-        // Animation complete
         setIsAnimatingResponse(false);
         setAnimatedResponseContent(plainText);
         animationFrameRef.current = null;
       }
     };
 
-    // Start animation with a small initial delay for smoother start
     animationFrameRef.current = setTimeout(animateWord, 20);
   };
 
-  // Show response immediately
   const showResponseImmediately = (text = '') => {
-    // ✅ Convert JSON to plain text first (like AnalysisPage)
-    // Note: If text is already formatted markdown (from renderSecretPromptResponse),
-    // convertJsonToPlainText will return it as-is since it doesn't start with { or [
     const plainText = convertJsonToPlainText(text);
    
-    // Cancel any ongoing animation
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       clearTimeout(animationFrameRef.current);
@@ -1370,21 +1276,17 @@ const ChatModelPage = () => {
     return <Send className={baseClass} />;
   };
 
-  // Chat with document - Streaming version
   const chatWithDocument = async (file_id, question, currentSessionId, llm_name = null) => {
-    // Clear previous state
     setCurrentResponse('');
     streamBufferRef.current = '';
     setError(null);
     setIsLoading(true);
     setIsAnimatingResponse(false);
    
-    // Close existing stream if any
     if (streamReaderRef.current) {
       try {
         await streamReaderRef.current.cancel();
       } catch (e) {
-        // Ignore cancel errors
       }
       streamReaderRef.current = null;
     }
@@ -1434,7 +1336,6 @@ const ChatModelPage = () => {
        
         if (done) {
           setIsLoading(false);
-          // Create message with final response
           const finalResponse = streamBufferRef.current;
           if (finalMetadata) {
             newSessionId = finalMetadata.session_id || newSessionId;
@@ -1460,26 +1361,23 @@ const ChatModelPage = () => {
           setCurrentResponse(finalResponse);
           setHasResponse(true);
           setSuccess('Question answered!');
-          // Animate the complete response word-by-word
           animateResponse(finalResponse);
           break;
         }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (!line.trim() || !line.startsWith('data: ')) continue;
          
           const data = line.replace(/^data: /, '').trim();
          
-          // Handle heartbeat
           if (data === '[PING]') {
-            continue; // Ignore heartbeat
+            continue;
           }
          
-          // Handle completion
           if (data === '[DONE]') {
             setIsLoading(false);
             const finalResponse = streamBufferRef.current;
@@ -1507,45 +1405,36 @@ const ChatModelPage = () => {
             setCurrentResponse(finalResponse);
             setHasResponse(true);
             setSuccess('Question answered!');
-            // Animate the complete response word-by-word
             animateResponse(finalResponse);
             return;
           }
 
-          // Parse JSON data
           try {
             const parsed = JSON.parse(data);
            
             if (parsed.type === 'metadata') {
-              // Handle metadata (session_id, etc.)
               console.log('Stream metadata:', parsed);
               newSessionId = parsed.session_id || newSessionId;
             } else if (parsed.type === 'chunk') {
-              // Append chunk to buffer (don't show during streaming - wait for completion)
               streamBufferRef.current += parsed.text || '';
             } else if (parsed.type === 'done') {
-              // Final metadata - stream complete, now animate the response
               finalMetadata = parsed;
               const finalResponse = streamBufferRef.current;
               setCurrentResponse(finalResponse);
               setIsLoading(false);
-              // Animate the complete response word-by-word
               animateResponse(finalResponse);
             } else if (parsed.type === 'error') {
               setError(parsed.error);
               setIsLoading(false);
             }
           } catch (e) {
-            // Skip invalid JSON - might be partial data
           }
         }
       }
     } catch (error) {
       console.error('[chatWithDocument] Streaming error:', error);
-      // Handle specific error cases
       if (error.message && error.message.includes('No content found')) {
         setError('Document is still processing. Please wait a few moments and try again.');
-        // Processing status tracking removed - ChatModel doesn't show processing indicators
       } else {
         setError(`Chat failed: ${error.message}`);
       }
@@ -1562,6 +1451,9 @@ const ChatModelPage = () => {
     console.log('Files selected:', files.length);
     if (files.length === 0) return;
    
+    const isFreeUser = isUserFreeTier();
+    console.log('Is free user:', isFreeUser);
+   
     const allowedTypes = [
       'application/pdf',
       'application/msword',
@@ -1571,25 +1463,51 @@ const ChatModelPage = () => {
       'image/jpeg',
       'image/tiff',
     ];
-    const maxSize = 300 * 1024 * 1024;
+    
+    const maxSize = isFreeUser ? FREE_TIER_MAX_FILE_SIZE_BYTES : 300 * 1024 * 1024;
+    
+    let hasFileSizeError = false;
     const validFiles = files.filter((file) => {
       if (!allowedTypes.includes(file.type)) {
         setError(`File "${file.name}" has an unsupported type.`);
         return false;
       }
-      if (file.size > maxSize) {
+      
+      if (isFreeUser && file.size > maxSize) {
+        const fileSizeFormatted = formatFileSize(file.size);
+        console.log('File size limit exceeded:', { fileName: file.name, fileSize: fileSizeFormatted, maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB` });
+        hasFileSizeError = true;
+        setFileSizeLimitError({
+          fileName: file.name,
+          fileSize: fileSizeFormatted,
+          maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB`
+        });
+        return false;
+      } else if (!isFreeUser && file.size > maxSize) {
         setError(`File "${file.name}" is too large (max 300MB).`);
         return false;
       }
+      
       return true;
     });
    
+    if (validFiles.length > 0) {
+      setFileSizeLimitError(null);
+    }
+   
     if (validFiles.length === 0) {
-      event.target.value = '';
+      if (!hasFileSizeError) {
+        event.target.value = '';
+      } else {
+        setTimeout(() => {
+          if (event.target) {
+            event.target.value = '';
+          }
+        }, 100);
+      }
       return;
     }
 
-    // Use new chat upload API - upload first file
     if (validFiles.length > 0) {
       const fileToUpload = validFiles[0];
       if (validFiles.length > 1) {
@@ -1619,7 +1537,6 @@ const ChatModelPage = () => {
   const handleDropdownSelect = (secretName, secretId, llmName) => {
     console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
    
-    // Validate that the secret ID exists in the current secrets list
     const secret = secrets.find((s) => s.id === secretId);
     if (!secret) {
       console.error('[handleDropdownSelect] Secret ID not found in secrets list:', secretId);
@@ -1640,7 +1557,6 @@ const ChatModelPage = () => {
     setChatInput('');
     setShowDropdown(false);
    
-    // Find and display the most recent message for this specific secret prompt, or clear if none exists
     console.log('[handleDropdownSelect] Looking for messages with secret_id:', secretId, 'file_id:', fileId);
     console.log('[handleDropdownSelect] Total messages:', messages.length);
     console.log('[handleDropdownSelect] Messages with secret prompts:', messages.filter(m => m.used_secret_prompt).map(m => ({
@@ -1669,12 +1585,11 @@ const ChatModelPage = () => {
    
     console.log('[handleDropdownSelect] Found', messagesForThisPrompt.length, 'messages for this secret prompt');
    
-    // Get the most recent message (by timestamp)
     const messageForThisPrompt = messagesForThisPrompt.length > 0
       ? messagesForThisPrompt.sort((a, b) => {
           const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
           const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
-          return timeB - timeA; // Most recent first
+          return timeB - timeA;
         })[0]
       : null;
    
@@ -1685,7 +1600,6 @@ const ChatModelPage = () => {
         prompt_label: messageForThisPrompt.prompt_label,
         answer_length: (messageForThisPrompt.answer || '').length
       });
-      // Display the most recent message for this specific prompt
       setSelectedMessageId(messageForThisPrompt.id);
       const rawAnswer = messageForThisPrompt.answer || messageForThisPrompt.response || '';
       const isStructured = messageForThisPrompt.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
@@ -1697,7 +1611,6 @@ const ChatModelPage = () => {
       setHasResponse(true);
     } else {
       console.log('[handleDropdownSelect] No message found for this secret prompt, clearing response');
-      // Clear previous response when switching to a different secret prompt with no existing message
       setCurrentResponse('');
       setAnimatedResponseContent('');
       setSelectedMessageId(null);
@@ -1709,14 +1622,12 @@ const ChatModelPage = () => {
 
   const handleChatInputChange = (e) => {
     setChatInput(e.target.value);
-    // When user types in the input box, switch to custom query mode
     if (e.target.value && isSecretPromptSelected) {
       setIsSecretPromptSelected(false);
       setActiveDropdown('Custom Query');
       setSelectedSecretId(null);
       setSelectedLlmName(null);
     }
-    // If input is empty and no secret is selected, show Custom Query
     if (!e.target.value && !isSecretPromptSelected) {
       setActiveDropdown('Custom Query');
     }
@@ -1737,13 +1648,11 @@ const ChatModelPage = () => {
         return;
       }
      
-      // Validate that the selected secret ID exists in the current secrets list
       const selectedSecret = secrets.find((s) => s.id === selectedSecretId);
       if (!selectedSecret) {
         console.error('[handleSend] Selected secret ID not found in secrets list:', selectedSecretId);
         console.error('[handleSend] Available secrets:', secrets.map(s => ({ id: s.id, name: s.name })));
         setError(`Selected analysis prompt is no longer available. Please select a different one.`);
-        // Clear the invalid selection
         setSelectedSecretId(null);
         setIsSecretPromptSelected(false);
         setActiveDropdown('Custom Query');
@@ -1762,16 +1671,13 @@ const ChatModelPage = () => {
           llmName: selectedLlmName,
         });
        
-        // Clear previous state
         setCurrentResponse('');
         streamBufferRef.current = '';
        
-        // Close existing stream if any
         if (streamReaderRef.current) {
           try {
             await streamReaderRef.current.cancel();
           } catch (e) {
-            // Ignore cancel errors
           }
           streamReaderRef.current = null;
         }
@@ -1781,13 +1687,11 @@ const ChatModelPage = () => {
           streamUpdateTimeoutRef.current = null;
         }
 
-        // Clear previous state
         streamBufferRef.current = '';
         let newSessionId = sessionId;
         let finalMetadata = null;
         const messageId = Date.now();
 
-        // Create message placeholder immediately
         const newChat = {
           id: messageId,
           file_id: fileId,
@@ -1808,30 +1712,21 @@ const ChatModelPage = () => {
         setShowSplitView(true);
         setChatInput('');
        
-        // For secret prompts, don't show streaming text - only show final result
-        // Keep response area empty during streaming
         setCurrentResponse('');
         setAnimatedResponseContent('');
 
-        // Use ChatModel streaming API with secret prompt parameters
         await apiService.askChatModelQuestionStream(
-          '', // Empty question for secret prompts
+          '',
           fileId,
           sessionId,
-          // onChunk - For secret prompts, accumulate but don't show during streaming
           (text) => {
             if (text) {
-              // Only accumulate in buffer, don't update UI during streaming for secret prompts
               streamBufferRef.current += text;
-              // Don't call setCurrentResponse or setAnimatedResponseContent here
-              // We'll show everything at once when streaming completes
             }
           },
-          // onStatus
           (status, message) => {
             console.log('[Secret Prompt] Status:', status, message);
           },
-          // onMetadata
           (metadata) => {
             console.log('[Secret Prompt] Metadata:', metadata);
             if (metadata.session_id) {
@@ -1839,12 +1734,9 @@ const ChatModelPage = () => {
               setSessionId(metadata.session_id);
             }
           },
-          // onDone
           (doneData) => {
             console.log('[Secret Prompt] Stream complete:', doneData);
             finalMetadata = doneData;
-            // Use answer from doneData if available, otherwise use streamBufferRef
-            // The backend sends the full answer in doneData.answer
             const finalResponse = (doneData && doneData.answer) ? doneData.answer : (streamBufferRef.current || '');
             console.log('[Secret Prompt] Final response length:', finalResponse.length);
             console.log('[Secret Prompt] Response preview:', finalResponse.substring(0, 200));
@@ -1860,33 +1752,24 @@ const ChatModelPage = () => {
               return;
             }
            
-            // ✅ For secret prompts, always try to format as structured JSON
-            // The response might be wrapped in markdown code blocks (```json ... ```)
-            // or be raw JSON, so we need to check and format accordingly
             let cleanedResponse = finalResponse;
            
-            // Extract JSON from markdown code blocks if present
             const jsonMatch = finalResponse.match(/```json\s*([\s\S]*?)\s*```/i);
             if (jsonMatch) {
               cleanedResponse = jsonMatch[1].trim();
               console.log('[Secret Prompt] Extracted JSON from markdown code block');
             }
            
-            // Check if it's structured JSON
             const isStructured = isStructuredJsonResponse(cleanedResponse) || isStructuredJsonResponse(finalResponse);
             console.log('[Secret Prompt] Final response is structured JSON:', isStructured);
             console.log('[Secret Prompt] Final response preview (first 500 chars):', finalResponse.substring(0, 500));
            
-            // Store the raw response (with code blocks if present) for later retrieval
             const responseToStore = finalResponse;
            
-            // Format for display - try cleaned response first, fallback to original
             let responseToDisplay;
             if (isStructured) {
-              // Try with cleaned response first (without code blocks)
               try {
                 responseToDisplay = renderSecretPromptResponse(cleanedResponse);
-                // If that didn't work, try with original response
                 if (!responseToDisplay || responseToDisplay.trim().length < 50) {
                   responseToDisplay = renderSecretPromptResponse(finalResponse);
                 }
@@ -1895,14 +1778,12 @@ const ChatModelPage = () => {
                 responseToDisplay = renderSecretPromptResponse(finalResponse);
               }
             } else {
-              // Not structured, convert to plain text
               responseToDisplay = convertJsonToPlainText(finalResponse);
             }
            
             console.log('[Secret Prompt] Response formatted, length:', responseToDisplay.length);
             console.log('[Secret Prompt] Formatted response preview (first 500 chars):', responseToDisplay.substring(0, 500));
            
-            // Update the message with final response (mark as not streaming)
             console.log('[Secret Prompt] Updating message:', {
               messageId,
               selectedSecretId,
@@ -1920,7 +1801,7 @@ const ChatModelPage = () => {
                     isStreaming: false,
                     used_secret_prompt: true,
                     prompt_label: promptLabel,
-                    secret_id: selectedSecretId, // Ensure secret_id is set correctly
+                    secret_id: selectedSecretId,
                   };
                 }
                 return msg;
@@ -1937,32 +1818,28 @@ const ChatModelPage = () => {
             setSessionId(newSessionId);
             setCurrentResponse(responseToDisplay);
             setAnimatedResponseContent(responseToDisplay);
-            animateResponse(responseToDisplay, true); // true = already formatted
+            animateResponse(responseToDisplay, true);
             setHasResponse(true);
             setSuccess('Analysis completed successfully!');
             setIsGeneratingInsights(false);
             setIsSecretPromptSelected(false);
             setActiveDropdown('Custom Query');
           },
-          // onError
           (error) => {
             console.error('[Secret Prompt] Error:', error);
             setError(`Analysis failed: ${error}`);
             setIsGeneratingInsights(false);
           },
-          // Secret prompt parameters
           selectedSecretId,
-          true, // usedSecretPrompt
+          true,
           promptLabel,
-          chatInput.trim() || '', // additionalInput
-          selectedLlmName // llmName
+          chatInput.trim() || '',
+          selectedLlmName
         );
       } catch (error) {
         console.error('[handleSend] Analysis error:', error);
-        // Handle specific error cases
         if (error.message && error.message.includes('No content found')) {
           setError('Document is still processing. Please wait a few moments and try again.');
-          // Processing status tracking removed - ChatModel doesn't show processing indicators
         } else {
           setError(`Analysis failed: ${error.message}`);
         }
@@ -1976,7 +1853,6 @@ const ChatModelPage = () => {
         return;
       }
 
-      // Get current processing status
       const currentStatus = processingStatus?.status;
       const currentProgress = progressPercentage || 0;
       const isActivelyProcessing =
@@ -2000,16 +1876,13 @@ const ChatModelPage = () => {
       }
 
       try {
-        // Use new chat ask API if we have an uploaded file
         const currentFileId = uploadedFileId || fileId;
         if (currentFileId) {
           console.log('[handleSend] Using new chat ask API');
           console.log('[handleSend] file_id:', currentFileId);
           console.log('[handleSend] question:', chatInput.trim());
-          // Ensure file_id is sent with each question
           await askQuestionToChat(chatInput, currentFileId);
         } else {
-          // No file uploaded - show error
           setError('Please upload a document first before asking questions.');
           console.warn('[handleSend] No file_id available. uploadedFileId:', uploadedFileId, 'fileId:', fileId);
         }
@@ -2024,18 +1897,14 @@ const ChatModelPage = () => {
   const handleMessageClick = async (message) => {
     setSelectedMessageId(message.id);
    
-    // If this is a secret prompt message, update the selected secret to match
     if (message.used_secret_prompt && message.secret_id) {
-      // Validate that the secret_id from the message exists in the current secrets list
       const secret = secrets.find((s) => s.id === message.secret_id);
       if (secret) {
-        // Secret exists, use it
         setSelectedSecretId(message.secret_id);
         setIsSecretPromptSelected(true);
         setActiveDropdown(secret.name);
         setSelectedLlmName(secret.llm_name);
       } else {
-        // Secret no longer exists, clear selection but still show the message
         console.warn('[handleMessageClick] Secret ID from message not found in current secrets:', message.secret_id);
         console.warn('[handleMessageClick] Available secrets:', secrets.map(s => ({ id: s.id, name: s.name })));
         setSelectedSecretId(null);
@@ -2044,14 +1913,12 @@ const ChatModelPage = () => {
         setSelectedLlmName(null);
       }
     } else {
-      // If it's not a secret prompt, clear secret selection
       setIsSecretPromptSelected(false);
       setActiveDropdown('Custom Query');
       setSelectedSecretId(null);
       setSelectedLlmName(null);
     }
    
-    // ✅ For secret prompts, render structured JSON; otherwise convert to plain text
     const rawAnswer = message.answer || message.response || '';
     const isStructured = message.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
     const responseToDisplay = isStructured
@@ -2061,28 +1928,21 @@ const ChatModelPage = () => {
     setCurrentResponse(responseToDisplay);
     showResponseImmediately(responseToDisplay);
    
-    // If message has a file_id, verify and update the document processing status
-    // Messages can only exist if document was processed, so set status to processed
     if (message.file_id) {
-      // Check current status to ensure it's accurate
       const currentFileId = fileId || message.file_id;
       if (currentFileId) {
         try {
           const status = await getProcessingStatus(currentFileId);
           if (status) {
-            // If we have messages, the document must be processed (messages can't exist without processed content)
-            // So ensure status reflects this
             const finalStatus = status.status === 'processed' ? status : { ...status, status: 'processed', processing_progress: 100 };
             setProcessingStatus(finalStatus);
             setProgressPercentage(finalStatus.processing_progress || 100);
           } else {
-            // If status check fails but we have messages, assume processed
             setProcessingStatus({ status: 'processed', processing_progress: 100 });
             setProgressPercentage(100);
           }
         } catch (error) {
           console.error('[handleMessageClick] Error checking status:', error);
-          // If we have messages, document must be processed
           setProcessingStatus({ status: 'processed', processing_progress: 100 });
           setProgressPercentage(100);
         }
@@ -2150,7 +2010,6 @@ const ChatModelPage = () => {
     }
   };
 
-  // Function to map backend status to user-friendly display text
   const getStatusDisplayText = (status, progress = 0) => {
     switch (status) {
       case 'queued':
@@ -2212,10 +2071,8 @@ const ChatModelPage = () => {
     );
   };
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      // Cleanup streaming
       if (streamReaderRef.current) {
         streamReaderRef.current.cancel().catch(() => {});
       }
@@ -2225,11 +2082,9 @@ const ChatModelPage = () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      // Polling interval refs removed - ChatModel doesn't track processing status
     };
   }, []);
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
@@ -2247,9 +2102,7 @@ const ChatModelPage = () => {
   }, []);
 
 
-  // Processing status tracking removed - ChatModel doesn't show processing indicators
 
-  // Main loading effect
   useEffect(() => {
     const fetchChatHistory = async (currentFileId, currentSessionId, selectedChatId = null) => {
       try {
@@ -2272,20 +2125,16 @@ const ChatModelPage = () => {
             });
           });
         });
-        // ✅ FIXED: Filter messages by the selected session ID to show only messages from that session
         if (currentSessionId) {
           allMessages = allMessages.filter((msg) => msg.session_id === currentSessionId);
         }
         allMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
         setMessages(allMessages);
         if (allMessages.length > 0) {
-          // Check actual file status first
           const fileStatus = await getProcessingStatus(currentFileId);
-          // If we have messages, the document must be processed (messages can't exist without processed content)
-          const actualStatus = 'processed'; // Always processed if messages exist
-          const actualProgress = 100; // Always 100% if messages exist
+          const actualStatus = 'processed';
+          const actualProgress = 100;
          
-          // Use the fetched status but ensure it's marked as processed
           const finalStatus = fileStatus ? { ...fileStatus, status: 'processed', processing_progress: 100 } : { status: 'processed', processing_progress: 100 };
          
           setDocumentData({
@@ -2308,7 +2157,6 @@ const ChatModelPage = () => {
             ? allMessages.find((chat) => chat.id === selectedChatId)
             : allMessages[allMessages.length - 1];
           if (chatToDisplay) {
-            // ✅ For secret prompts, render structured JSON; otherwise convert to plain text
             const rawAnswer = chatToDisplay.answer || chatToDisplay.response || '';
             const isStructured = chatToDisplay.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
             const responseToDisplay = isStructured
@@ -2326,7 +2174,6 @@ const ChatModelPage = () => {
       }
     };
 
-    // ✅ NEW: Fetch chat history by session ID only (for session-only routes)
     const fetchChatHistoryBySessionId = async (currentSessionId, selectedChatId = null) => {
       try {
         console.log('[AnalysisPage] Fetching chat history for sessionId:', currentSessionId);
@@ -2334,10 +2181,8 @@ const ChatModelPage = () => {
           method: 'GET',
         });
        
-        // Handle different response structures
         let allMessages = [];
         if (Array.isArray(response)) {
-          // If response is an array of messages
           allMessages = response.map((message) => ({
             ...message,
             session_id: message.session_id || currentSessionId,
@@ -2348,7 +2193,6 @@ const ChatModelPage = () => {
                 : message.question,
           }));
         } else if (response.messages && Array.isArray(response.messages)) {
-          // If response has a messages array
           allMessages = response.messages.map((message) => ({
             ...message,
             session_id: message.session_id || currentSessionId,
@@ -2359,7 +2203,6 @@ const ChatModelPage = () => {
                 : message.question,
           }));
         } else if (response.sessions && Array.isArray(response.sessions)) {
-          // If response has sessions array (similar to file-based history)
           response.sessions.forEach((session) => {
             if (session.messages && Array.isArray(session.messages)) {
               session.messages.forEach((message) => {
@@ -2377,7 +2220,6 @@ const ChatModelPage = () => {
           });
         }
        
-        // Extract file_id from the first message if available
         const extractedFileId = allMessages.length > 0
           ? (allMessages[0].file_id || response.file_id || null)
           : null;
@@ -2386,7 +2228,6 @@ const ChatModelPage = () => {
         setMessages(allMessages);
        
         if (allMessages.length > 0) {
-          // If we have a file_id, set it; otherwise leave it null
           if (extractedFileId) {
             setFileId(extractedFileId);
             const fileStatus = await getProcessingStatus(extractedFileId);
@@ -2413,7 +2254,6 @@ const ChatModelPage = () => {
             ? allMessages.find((chat) => chat.id === selectedChatId)
             : allMessages[allMessages.length - 1];
           if (chatToDisplay) {
-            // ✅ For secret prompts, render structured JSON; otherwise convert to plain text
             const rawAnswer = chatToDisplay.answer || chatToDisplay.response || '';
             const isStructured = chatToDisplay.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
             const responseToDisplay = isStructured
@@ -2431,7 +2271,6 @@ const ChatModelPage = () => {
       }
     };
 
-    // ✅ Clean up stale processing state on page refresh
     try {
       const savedProcessingStatus = localStorage.getItem('processingStatus');
       if (savedProcessingStatus) {
@@ -2448,7 +2287,6 @@ const ChatModelPage = () => {
       console.error('Error cleaning up processing state:', err);
     }
 
-    // Load from localStorage first
     try {
       const savedMessages = localStorage.getItem('messages');
       if (savedMessages) {
@@ -2505,7 +2343,6 @@ const ChatModelPage = () => {
       }
     }
 
-    // Apply navigation overrides - Load ChatModel history from URL params
     if (location.state?.newChat) {
       clearAllChatData();
       window.history.replaceState({}, document.title);
@@ -2530,16 +2367,12 @@ const ChatModelPage = () => {
         setSessionId(chatData.session_id);
         setShowSplitView(true);
         setHasResponse(true);
-        // ✅ FIXED: Pass specific chat.id to select the exact message
         fetchChatHistory(chatData.file_id, chatData.session_id, chatData.id);
       } else if (chatData.session_id) {
-        // ✅ NEW: Handle case where only session_id is available
         console.log('[AnalysisPage] Loading chat with session_id only:', chatData.session_id);
         setSessionId(chatData.session_id);
-        // ✅ Set showSplitView immediately to prevent welcome screen flash
         setShowSplitView(true);
         setHasResponse(true);
-        // ✅ FIXED: Pass specific chat.id to select the exact message
         fetchChatHistoryBySessionId(chatData.session_id, chatData.id);
       } else {
         setError('Unable to load chat: Missing required information (session_id or file_id)');
@@ -2568,11 +2401,8 @@ const ChatModelPage = () => {
     }
   }, [success]);
 
-  // Upload progress simulation removed - ChatModel doesn't show progress indicators
 
-  // Overall progress calculation removed - ChatModel doesn't show processing indicators
 
-  // Progress bar related useMemo hooks removed - ChatModel doesn't show processing indicators
 
   useEffect(() => {
     if (error) {
@@ -2581,7 +2411,6 @@ const ChatModelPage = () => {
     }
   }, [error]);
 
-  // Enhanced Markdown Components
   const markdownComponents = {
     h1: ({ node, ...props }) => (
       <h1
@@ -2678,7 +2507,6 @@ const ChatModelPage = () => {
     img: ({ node, ...props }) => <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />,
   };
 
-  // Function to get proper placeholder text based on current state
   const getInputPlaceholder = () => {
     if (isSecretPromptSelected) {
       return `Analysis : ${activeDropdown}...`;
@@ -2686,8 +2514,6 @@ const ChatModelPage = () => {
     if (!fileId) {
       return 'Upload a document to get started';
     }
-    // Check if document is still processing
-    // Only show processing message if actively processing (has status, not processed, and progress < 100)
     if (processingStatus?.status && processingStatus.status !== 'processed' && progressPercentage < 100) {
       return `${processingStatus.current_operation || 'Processing document...'} (${Math.round(progressPercentage)}%)`;
     }
@@ -2696,9 +2522,6 @@ const ChatModelPage = () => {
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
-      {/* Real-time Progress Panel */}
-      {/* <RealTimeProgressPanel processingStatus={processingStatus} /> */}
-      {/* Error Messages */}
       {error && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
           <div className="bg-red-50 border border-red-200 text-red-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-start space-x-2">
@@ -2712,7 +2535,6 @@ const ChatModelPage = () => {
           </div>
         </div>
       )}
-      {/* Success Messages */}
       {success && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
           <div className="bg-green-50 border border-green-200 text-green-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-center space-x-2">
@@ -2724,7 +2546,6 @@ const ChatModelPage = () => {
           </div>
         </div>
       )}
-      {/* Insufficient Funds Alert */}
       {showInsufficientFundsAlert && (
         <div className="fixed top-4 right-4 z-50 max-w-md">
           <div className="bg-red-50 border-2 border-red-300 rounded-lg shadow-2xl p-4 animate-fadeIn">
@@ -2766,11 +2587,8 @@ const ChatModelPage = () => {
           </div>
         </div>
       )}
-      {/* Conditional Rendering */}
       {!showSplitView ? (
-        // Single Page View with bottom panel
         <div className="flex flex-col h-full w-full">
-          {/* Top Content Area */}
           <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 overflow-y-auto">
             <div className="text-center max-w-2xl mb-8 sm:mb-12">
               <h3 className="text-2xl sm:text-3xl lg:text-4xl font-bold mb-3 sm:mb-4 text-gray-900">Welcome to Smart Legal Insights</h3>
@@ -2906,12 +2724,51 @@ const ChatModelPage = () => {
                     </button>
                   </div>
                 </div>
+                )}
+              </form>
+              
+              {fileSizeLimitError && (
+                <div className="mt-2 animate-fadeIn">
+                  <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
+                          <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setFileSizeLimitError(null);
+                              navigate('/subscription-plans');
+                            }}
+                            className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
+                          >
+                            <Zap className="h-3 w-3 mr-1.5" />
+                            Upgrade Plan
+                          </button>
+                          <button
+                            onClick={() => setFileSizeLimitError(null)}
+                            className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setFileSizeLimitError(null)}
+                        className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-0.5"
+                        aria-label="Close"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
               )}
-            </form>
           </div>
           </div>
          
-          {/* Bottom Static Questions Panel */}
           {messages.length > 0 && (
             <div className="border-t border-gray-200 bg-white flex-shrink-0" style={{ height: '30vh', minHeight: '250px' }}>
               <div className="h-full flex flex-col">
@@ -2965,9 +2822,7 @@ const ChatModelPage = () => {
       ) : (
 
 
-        // Split View
         <>
-          {/* Left Panel */}
           <div className="w-full lg:w-2/5 border-r-0 lg:border-r border-b lg:border-b-0 border-gray-200 flex flex-col bg-white h-1/3 lg:h-full">
             <div className="p-2 sm:p-3 border-b border-black border-opacity-20">
               <div className="flex items-center justify-between mb-2 sm:mb-3">
@@ -3141,14 +2996,52 @@ const ChatModelPage = () => {
                   </div>
                 )}
               </form>
+              
+              {fileSizeLimitError && (
+                <div className="mt-2 animate-fadeIn">
+                  <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
+                          <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setFileSizeLimitError(null);
+                              navigate('/subscription-plans');
+                            }}
+                            className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
+                          >
+                            <Zap className="h-3 w-3 mr-1.5" />
+                            Upgrade Plan
+                          </button>
+                          <button
+                            onClick={() => setFileSizeLimitError(null)}
+                            className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setFileSizeLimitError(null)}
+                        className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-0.5"
+                        aria-label="Close"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Right Panel */}
           <div className="w-full lg:w-3/5 flex flex-col h-2/3 lg:h-full bg-gray-50">
             <div className="flex-1 p-2 sm:p-4 min-h-0">
               <div className="h-full flex flex-col">
-                {/* Streaming Status Display - Show prominently when streaming */}
                 {(streamingStatus && streamingMessage) || (isLoading || isGeneratingInsights) ? (
                   <div className="flex-shrink-0 mb-4">
                     <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border-2 border-blue-200 shadow-lg animate-fade-in">
@@ -3165,7 +3058,6 @@ const ChatModelPage = () => {
                               ).join(' ')
                               : (isGeneratingInsights ? 'Generating...' : 'Initializing...')}
                           </p>
-                          {/* Progress indicator dots */}
                           <div className="flex items-center space-x-1 mt-2">
                             <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0ms' }}></div>
                             <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '150ms' }}></div>

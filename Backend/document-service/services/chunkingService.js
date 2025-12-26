@@ -1,19 +1,10 @@
-
-
 const { RecursiveCharacterTextSplitter } = require('@langchain/textsplitters');
 
-/* ────────────────────────────────────────────────
- * Utility: Estimate token count
- * Rough rule of thumb: 1 token ≈ 4 characters (English)
- * ──────────────────────────────────────────────── */
 function estimateTokenCount(text) {
   if (!text) return 0;
   return Math.ceil(text.length / 4);
 }
 
-/* ────────────────────────────────────────────────
- * Utility: Merge small chunks to reduce token cost
- * ──────────────────────────────────────────────── */
 function mergeSmallChunks(chunks, minChunkSize = 300) {
   if (!Array.isArray(chunks)) return [];
   const merged = [];
@@ -35,9 +26,6 @@ function mergeSmallChunks(chunks, minChunkSize = 300) {
   return merged;
 }
 
-/* ────────────────────────────────────────────────
- * Detect headings (for structural / agentic chunking)
- * ──────────────────────────────────────────────── */
 function isHeading(line) {
   const trimmed = line.trim();
   const headingPatterns = [
@@ -50,9 +38,6 @@ function isHeading(line) {
   return headingPatterns.some((pattern) => pattern.test(trimmed));
 }
 
-/* ────────────────────────────────────────────────
- * Utility: Split text by structural elements
- * ──────────────────────────────────────────────── */
 function splitByStructuralElements(text) {
   const sections = [];
   const lines = text.split('\n');
@@ -71,9 +56,6 @@ function splitByStructuralElements(text) {
   return sections;
 }
 
-/* ────────────────────────────────────────────────
- * Line type detector (for agentic chunking)
- * ──────────────────────────────────────────────── */
 function detectLineType(line) {
   if (!line) return null;
   const trimmed = line.trim();
@@ -87,9 +69,6 @@ function detectLineType(line) {
   return 'paragraph';
 }
 
-/* ────────────────────────────────────────────────
- * Split large paragraph into smaller ones
- * ──────────────────────────────────────────────── */
 function splitLargeUnit(content, maxSize) {
   const sentences = content.match(/[^.!?]+[.!?]+/g) || [content];
   const chunks = [];
@@ -106,9 +85,6 @@ function splitLargeUnit(content, maxSize) {
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * 1️⃣ FIXED SIZE CHUNKER
- * ──────────────────────────────────────────────── */
 async function fixedSizeChunker(structuredContent, chunkSize, chunkOverlap, formatChunk) {
   const chunks = [];
   const step = Math.max(1, chunkSize - chunkOverlap);
@@ -130,9 +106,6 @@ async function fixedSizeChunker(structuredContent, chunkSize, chunkOverlap, form
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * 2️⃣ RECURSIVE CHUNKER (optimized for cost)
- * ──────────────────────────────────────────────── */
 async function recursiveChunker(structuredContent, chunkSize, chunkOverlap, formatChunk) {
   const splitter = new RecursiveCharacterTextSplitter({
     chunkSize,
@@ -161,9 +134,6 @@ async function recursiveChunker(structuredContent, chunkSize, chunkOverlap, form
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * 3️⃣ STRUCTURAL CHUNKER
- * ──────────────────────────────────────────────── */
 async function structuralChunker(structuredContent, formatChunk) {
   const chunks = [];
 
@@ -185,9 +155,6 @@ async function structuralChunker(structuredContent, formatChunk) {
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * 4️⃣ SEMANTIC CHUNKER (enhanced recursive)
- * ──────────────────────────────────────────────── */
 async function semanticChunker(structuredContent, chunkSize, chunkOverlap, formatChunk) {
   const splitter = new RecursiveCharacterTextSplitter({
     chunkSize,
@@ -218,9 +185,6 @@ async function semanticChunker(structuredContent, chunkSize, chunkOverlap, forma
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * 5️⃣ AGENTIC CHUNKER (intelligent)
- * ──────────────────────────────────────────────── */
 async function agenticChunker(structuredContent, chunkSize, formatChunk) {
   const chunks = [];
 
@@ -247,7 +211,6 @@ async function agenticChunker(structuredContent, chunkSize, formatChunk) {
         current.content += line + '\n';
       }
 
-      // Split if too long
       if (current.content.length > chunkSize * 1.2) {
         const parts = splitLargeUnit(current.content, chunkSize);
         parts.forEach((p) =>
@@ -275,9 +238,6 @@ async function agenticChunker(structuredContent, chunkSize, formatChunk) {
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * MAIN ENTRYPOINT
- * ──────────────────────────────────────────────── */
 async function chunkDocument(
   structuredContent,
   documentId,
@@ -324,9 +284,6 @@ async function chunkDocument(
   return chunks;
 }
 
-/* ────────────────────────────────────────────────
- * EXPORTS
- * ──────────────────────────────────────────────── */
 module.exports = {
   chunkDocument,
   fixedSizeChunker,

@@ -1,18 +1,12 @@
-/* Basic Claude AI-like styling */
-
 body {
-  background-color: #1a1a1a; /* Dark background */
-  color: #e0e0e0; /* Light text color */
 }
 
-/* General container styling */
 .container {
   max-width: 1400px;
   margin: 0 auto;
   padding: 1rem;
 }
 
-/* Specific styles for the DocumentAnalysisPage layout */
 .document-analysis-page {
   display: flex;
   height: 100vh;
@@ -46,10 +40,8 @@ body {
   background-color: #1f1f1f;
 }
 
-/* Component specific styling (adjust as needed) */
 .folder-item, .chat-session-item {
   padding: 0.75rem;
-  border-radius: 0.375rem; /* Tailwind 'rounded-md' */
   cursor: pointer;
   transition: background-color 0.2s ease-in-out;
 }
@@ -63,7 +55,6 @@ body {
 }
 
 .button-primary {
-  background-color: #6366f1; /* Indigo 500 */
   color: white;
   padding: 0.5rem 1rem;
   border-radius: 0.375rem;
@@ -71,7 +62,6 @@ body {
 }
 
 .button-primary:hover {
-  background-color: #4f46e5; /* Indigo 600 */
 }
 
 .input-field {
@@ -89,7 +79,6 @@ body {
   box-shadow: 0 0 0 1px #6366f1;
 }
 
-/* Chat specific */
 .chat-message-user {
   background-color: #333;
   padding: 0.75rem;

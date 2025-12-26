@@ -19,7 +19,7 @@ class MindMapModel:
             file_id: Associated document file ID
             title: Mind map title
             nodes_data: JSON structure with nodes (from Gemini)
-            session_id: Optional session ID to link mindmap to a chat session
+            session_id: Optional session ID to link mindmap to a chat session (must be valid UUID or None)
             
         Returns:
             dict: Created mind map with ID
@@ -29,28 +29,25 @@ class MindMapModel:
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # Generate mind map ID
             mindmap_id = str(uuid.uuid4())
             
-            # Insert mind map record
-            # Convert user_id to string if it's an integer (for UUID compatibility)
-            # If database expects UUID, we need to handle conversion
-            user_id_value = user_id
-            if isinstance(user_id, int):
-                # If database expects UUID but we have integer, convert to string
-                # Or if database expects integer, keep as is
-                # We'll let PostgreSQL handle the type conversion
-                user_id_value = str(user_id)
+            validated_session_id = None
+            if session_id:
+                try:
+                    validated_uuid = uuid.UUID(str(session_id))
+                    validated_session_id = str(validated_uuid)
+                except (ValueError, AttributeError):
+                    print(f"⚠️ Invalid session_id format '{session_id}', setting to None")
+                    validated_session_id = None
             
             cur.execute("""
                 INSERT INTO mindmaps (id, user_id, file_id, title, session_id, created_at, updated_at)
                 VALUES (%s, %s::INTEGER, %s, %s, %s, %s, %s)
                 RETURNING id, user_id, file_id, title, session_id, created_at, updated_at
-            """, (mindmap_id, user_id, file_id, title, session_id, datetime.utcnow(), datetime.utcnow()))
+            """, (mindmap_id, user_id, file_id, title, validated_session_id, datetime.utcnow(), datetime.utcnow()))
             
             mindmap = dict(cur.fetchone())
             
-            # Insert nodes recursively
             MindMapModel._insert_nodes_recursive(cur, mindmap_id, None, nodes_data.get('children', []), 0)
             
             conn.commit()
@@ -84,13 +81,11 @@ class MindMapModel:
             content = child.get('text', '')
             order = order_offset + idx
             
-            # Insert node
             cursor.execute("""
                 INSERT INTO mindmap_nodes (id, mindmap_id, parent_id, content, "order", created_at)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (node_id, mindmap_id, parent_id, content, order, datetime.utcnow()))
             
-            # Recursively insert children
             if child.get('children'):
                 MindMapModel._insert_nodes_recursive(
                     cursor, mindmap_id, node_id, child['children'], 0
@@ -113,7 +108,6 @@ class MindMapModel:
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # Get mind map
             cur.execute("""
                 SELECT id, user_id, file_id, title, session_id, created_at, updated_at
                 FROM mindmaps
@@ -126,7 +120,6 @@ class MindMapModel:
             
             mindmap = dict(mindmap_row)
             
-            # Get all nodes with user state
             cur.execute("""
                 SELECT 
                     n.id,
@@ -143,7 +136,6 @@ class MindMapModel:
             
             nodes = [dict(row) for row in cur.fetchall()]
             
-            # Build tree structure
             mindmap['nodes'] = MindMapModel._build_tree(nodes)
             
             cur.close()
@@ -167,10 +159,8 @@ class MindMapModel:
         Returns:
             list: Nested tree structure
         """
-        # Create lookup dictionary
         node_dict = {node['id']: {**node, 'children': []} for node in nodes}
         
-        # Build tree
         root_nodes = []
         for node in nodes:
             node_obj = node_dict[node['id']]
@@ -180,7 +170,6 @@ class MindMapModel:
                 if node['parent_id'] in node_dict:
                     node_dict[node['parent_id']]['children'].append(node_obj)
         
-        # Sort children by order
         def sort_children(node):
             node['children'].sort(key=lambda x: x.get('order', 0))
             for child in node['children']:
@@ -295,7 +284,6 @@ class MindMapModel:
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # Step 1: Get mind map metadata by session_id
             cur.execute("""
                 SELECT id, user_id, file_id, title, session_id, created_at, updated_at
                 FROM mindmaps
@@ -312,8 +300,6 @@ class MindMapModel:
             mindmap = dict(mindmap_row)
             mindmap_id = mindmap['id']
             
-            # Step 2: Get all nodes with user state using efficient LEFT JOIN
-            # This aggregates node data and user state in a single query
             cur.execute("""
                 SELECT 
                     n.id,
@@ -331,7 +317,6 @@ class MindMapModel:
             
             nodes = [dict(row) for row in cur.fetchall()]
             
-            # Step 3: Build tree structure
             mindmap['nodes'] = MindMapModel._build_tree(nodes)
             
             cur.close()
@@ -363,7 +348,6 @@ class MindMapModel:
             cur = conn.cursor()
             
             if is_collapsed:
-                # Insert or update state
                 cur.execute("""
                     INSERT INTO user_node_state (user_id, node_id, is_collapsed, last_updated)
                     VALUES (%s, %s, %s, %s)
@@ -372,7 +356,6 @@ class MindMapModel:
                     RETURNING user_id, node_id, is_collapsed, last_updated
                 """, (user_id, node_id, is_collapsed, datetime.utcnow(), is_collapsed, datetime.utcnow()))
             else:
-                # Delete state (revert to default expanded)
                 cur.execute("""
                     DELETE FROM user_node_state
                     WHERE user_id = %s AND node_id = %s
@@ -383,7 +366,6 @@ class MindMapModel:
                 if result:
                     return dict(result)
                 else:
-                    # Return default state if no record existed
                     return {
                         'user_id': user_id,
                         'node_id': node_id,
@@ -421,7 +403,6 @@ class MindMapModel:
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # Delete user states for nodes in this mind map
             cur.execute("""
                 DELETE FROM user_node_state
                 WHERE node_id IN (
@@ -429,12 +410,10 @@ class MindMapModel:
                 )
             """, (mindmap_id,))
             
-            # Delete nodes
             cur.execute("""
                 DELETE FROM mindmap_nodes WHERE mindmap_id = %s
             """, (mindmap_id,))
             
-            # Delete mind map
             cur.execute("""
                 DELETE FROM mindmaps
                 WHERE id = %s AND user_id = %s

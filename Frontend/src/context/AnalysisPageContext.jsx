@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
+import { API_BASE_URL } from '../config/apiConfig';
 import {
   Search, Send, FileText, Layers, Trash2, RotateCcw,
   ArrowRight, ChevronRight, AlertTriangle, Clock, Loader2,
@@ -30,7 +31,6 @@ export const AnalysisPageProvider = ({
   setIsSidebarHidden, 
   setIsSidebarCollapsed 
 }) => {
-  // ALL STATES
   const [activeDropdown, setActiveDropdown] = useState('Summary');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false);
@@ -64,7 +64,6 @@ export const AnalysisPageProvider = ({
   const [batchUploads, setBatchUploads] = useState([]);
   const [uploadedDocuments, setUploadedDocuments] = useState([]);
   
-  // ALL REFS
   const fileInputRef = useRef(null);
   const dropdownRef = useRef(null);
   const responseRef = useRef(null);
@@ -72,10 +71,7 @@ export const AnalysisPageProvider = ({
   const pollingIntervalRef = useRef(null);
   const animationFrameRef = useRef(null);
 
-  // API CONFIG
-  const API_BASE_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
   
-  // ✅ FUNCTION 1: getAuthToken
   const getAuthToken = () => {
     const tokenKeys = [
       'authToken', 'token', 'accessToken', 'jwt', 'bearerToken',
@@ -88,7 +84,6 @@ export const AnalysisPageProvider = ({
     return null;
   };
 
-  // ✅ FUNCTION 2: apiRequest
   const apiRequest = async (url, options = {}) => {
     try {
       const token = getAuthToken();
@@ -126,7 +121,6 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 3: fetchSecrets
   const fetchSecrets = async () => {
     try {
       setIsLoadingSecrets(true);
@@ -155,7 +149,6 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 4: batchUploadDocuments
   const batchUploadDocuments = async (files) => {
     console.log('Starting batch upload for', files.length, 'files');
     setIsUploading(true);
@@ -189,7 +182,6 @@ export const AnalysisPageProvider = ({
         const errorData = await response.json().catch(() => ({}));
         const errorMessage = errorData.error || errorData.message || `Upload failed with status ${response.status}`;
         
-        // Check for subscription-related errors
         const isSubscriptionError = response.status === 500 || 
           errorMessage.toLowerCase().includes('subscription') ||
           errorMessage.toLowerCase().includes('insufficient') ||
@@ -259,7 +251,6 @@ export const AnalysisPageProvider = ({
     } catch (error) {
       console.error('Batch upload error:', error);
       
-      // Check if this is a subscription error
       if (error.isSubscriptionError) {
         setError('Subscription required: You need an active subscription plan to upload and process documents. Please visit the Subscription Plans page to continue.');
         setBatchUploads(prev => prev.map(upload => ({
@@ -276,7 +267,6 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 5: getProcessingStatus
   const getProcessingStatus = async (fileId) => {
     try {
       const response = await apiRequest(`/files/${fileId}/status`);
@@ -287,7 +277,6 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 6: startProcessingStatusPolling
   const startProcessingStatusPolling = (fileId) => {
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -318,16 +307,13 @@ export const AnalysisPageProvider = ({
     }, 3000);
   };
 
-  // ✅ FUNCTION 7: animateResponse - ChatGPT-style word-by-word animation
   const animateResponse = (responseText) => {
-    // Handle empty or invalid responses
     if (!responseText || typeof responseText !== 'string') {
       setIsAnimatingResponse(false);
       setAnimatedResponseContent(responseText || '');
       return;
     }
 
-    // Cancel any existing animation
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       clearTimeout(animationFrameRef.current);
@@ -336,13 +322,10 @@ export const AnalysisPageProvider = ({
     setIsAnimatingResponse(true);
     setAnimatedResponseContent('');
 
-    // Split text into words while preserving spaces and newlines
-    // This regex splits on word boundaries but keeps the separators
     const words = responseText.split(/(\s+)/);
     let currentIndex = 0;
     let displayedText = '';
 
-    // If response is very short, show it immediately
     if (words.length <= 3) {
       setIsAnimatingResponse(false);
       setAnimatedResponseContent(responseText);
@@ -351,53 +334,39 @@ export const AnalysisPageProvider = ({
 
     const animateWord = () => {
       if (currentIndex < words.length) {
-        // Add the next word to displayed text
         displayedText += words[currentIndex];
         setAnimatedResponseContent(displayedText);
         currentIndex++;
 
-        // Calculate delay based on word length and type
-        // Longer words get slightly more time, punctuation gets less
         const word = words[currentIndex - 1];
-        let delay = 15; // Base delay in milliseconds (faster for smoother feel)
+        let delay = 15;
         
         if (word.trim().length === 0) {
-          // For whitespace/newlines, use minimal delay
           delay = 3;
         } else if (word.length > 15) {
-          // Very long words get a bit more time
           delay = 25;
         } else if (word.length > 10) {
-          // Longer words get slightly more time
           delay = 20;
         } else if (/[.!?]\s*$/.test(word)) {
-          // Sentences ending with punctuation get a pause (like ChatGPT)
           delay = 40;
         } else if (/[,;:]\s*$/.test(word)) {
-          // Commas and semicolons get a small pause
           delay = 20;
         } else if (/^[#*`\-]/.test(word)) {
-          // Markdown syntax characters render quickly
           delay = 8;
         }
 
-        // Continue animation with calculated delay
         animationFrameRef.current = setTimeout(animateWord, delay);
       } else {
-        // Animation complete
         setIsAnimatingResponse(false);
         setAnimatedResponseContent(responseText);
         animationFrameRef.current = null;
       }
     };
 
-    // Start animation with a small initial delay for smoother start
     animationFrameRef.current = setTimeout(animateWord, 20);
   };
 
-  // ✅ FUNCTION 8: showResponseImmediately
   const showResponseImmediately = (responseText) => {
-    // Cancel any ongoing animation
     if (animationFrameRef.current) {
       clearTimeout(animationFrameRef.current);
       cancelAnimationFrame(animationFrameRef.current);
@@ -408,14 +377,12 @@ export const AnalysisPageProvider = ({
     setCurrentResponse(responseText);
   };
 
-  // ✅ FUNCTION 8.5: stopGeneration - Stop the animation and show full response
   const stopGeneration = () => {
     if (isAnimatingResponse && currentResponse) {
       showResponseImmediately(currentResponse);
     }
   };
 
-  // ✅ FUNCTION 9: chatWithDocument
   const chatWithDocument = async (userMessage, secretId = selectedSecretId) => {
     if (!fileId || !secretId) {
       setError('Please upload a document and select an analysis prompt.');
@@ -461,7 +428,6 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 10: handleFileUpload
   const handleFileUpload = async (file) => {
     setIsUploading(true);
     setError(null);
@@ -492,7 +458,6 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 11: handleDropdownSelect
   const handleDropdownSelect = (secret) => {
     setActiveDropdown(secret.name);
     setSelectedSecretId(secret.id);
@@ -501,23 +466,19 @@ export const AnalysisPageProvider = ({
     setIsSecretPromptSelected(true);
   };
 
-  // ✅ FUNCTION 12: handleChatInputChange
   const handleChatInputChange = (e) => {
     setChatInput(e.target.value);
   };
 
-  // ✅ FUNCTION 13: handleSend
   const handleSend = () => {
     if (!chatInput.trim()) return;
     chatWithDocument(chatInput);
   };
 
-  // ✅ FUNCTION 14: handleMessageClick
   const handleMessageClick = (messageId) => {
     setSelectedMessageId(messageId === selectedMessageId ? null : messageId);
   };
 
-  // ✅ FUNCTION 15: clearAllChatData
   const clearAllChatData = () => {
     setMessages([]);
     setCurrentResponse('');
@@ -531,13 +492,11 @@ export const AnalysisPageProvider = ({
     localStorage.removeItem('sessionId');
   };
 
-  // ✅ FUNCTION 16: startNewChat
   const startNewChat = () => {
     clearAllChatData();
     setSessionId(Date.now().toString());
   };
 
-  // ✅ FUNCTION 17: formatFileSize
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -546,12 +505,10 @@ export const AnalysisPageProvider = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  // ✅ FUNCTION 18: formatDate
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleString();
   };
 
-  // ✅ FUNCTION 19: handleCopyResponse
   const handleCopyResponse = async () => {
     try {
       await navigator.clipboard.writeText(currentResponse);
@@ -561,14 +518,12 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  // ✅ FUNCTION 20: highlightText
   const highlightText = (text, query) => {
     if (!query) return text;
     const regex = new RegExp(`(${query})`, 'gi');
     return text.replace(regex, '<mark class="bg-yellow-200 px-1 rounded">$1</mark>');
   };
 
-  // ✅ MARKDOWN COMPONENTS (YOUR CSS WORKS PERFECTLY)
   const markdownComponents = {
     h1: ({node, ...props}) => (
       <h1 className="text-3xl font-bold mb-6 mt-8 text-gray-900 border-b-2 border-gray-300 pb-3 analysis-page-ai-response" {...props} />
@@ -601,12 +556,10 @@ export const AnalysisPageProvider = ({
     ),
   };
 
-  // ALL USE EFFECTS
   useEffect(() => {
     return () => {
       if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
       if (animationFrameRef.current) {
-        // Handle both setTimeout and requestAnimationFrame
         if (typeof animationFrameRef.current === 'number') {
           clearTimeout(animationFrameRef.current);
           cancelAnimationFrame(animationFrameRef.current);
@@ -646,7 +599,6 @@ export const AnalysisPageProvider = ({
     }
   }, [currentResponse, animatedResponseContent]);
 
-  // MAIN LOADING EFFECT
   useEffect(() => {
     const initializePage = async () => {
       const storedMessages = localStorage.getItem('messages');
@@ -690,7 +642,6 @@ export const AnalysisPageProvider = ({
     initializePage();
   }, [paramFileId]);
 
-  // CONTEXT VALUE
   const value = {
     activeDropdown, isLoading, isGeneratingInsights, isUploading, error, success, hasResponse, 
     isSecretPromptSelected, documentData, messages, fileId, sessionId, processingStatus, 

@@ -28,20 +28,6 @@ function normalizeHistory(history = []) {
 }
 
 const FileChat = {
-  /**
-   * Save a new chat entry (with or without a document).
-   * @param {string|null} fileId - Can be null for pre-upload conversations
-   * @param {string} userId
-   * @param {string} question
-   * @param {string} answer
-   * @param {string|null} sessionId
-   * @param {number[]} usedChunkIds
-   * @param {boolean} usedSecretPrompt
-   * @param {string|null} promptLabel
-   * @param {string|null} secretId
-   * @param {array} chatHistory
-   * @returns {object} { id, session_id, created_at, chat_history }
-   */
   async saveChat(
     fileId,
     userId,
@@ -55,21 +41,16 @@ const FileChat = {
     chatHistory = []
   ) {
     try {
-      // Generate or validate session ID
       const currentSessionId = isValidUUID(sessionId) ? sessionId : uuidv4();
       
-      // Validate and normalize file_id (can be null for pre-upload chats)
       const normalizedFileId = fileId && isValidUUID(fileId) ? fileId : null;
       
-      // Validate and normalize secret_id (can be null)
       const normalizedSecretId = secretId && isValidUUID(secretId) ? secretId : null;
 
-      // Ensure usedChunkIds is always an array of integers
       const chunkIdsArray = Array.isArray(usedChunkIds) 
         ? usedChunkIds.filter(id => Number.isInteger(id)) 
         : [];
 
-      // Normalize existing history
       const existingHistory = normalizeHistory(chatHistory);
 
       console.log(`💾 [FileChat.saveChat] Preparing to insert chat into database...`);
@@ -81,7 +62,6 @@ const FileChat = {
       console.log(`   - Used chunk IDs: ${chunkIdsArray.length} chunks`);
       console.log(`   - History items: ${existingHistory.length}`);
 
-      // Insert the new chat
       const res = await pool.query(
         `
         INSERT INTO file_chats
@@ -109,7 +89,6 @@ const FileChat = {
 
       const insertedChat = res.rows[0];
 
-      // Update chat_history to include the newly inserted chat
       const updatedHistory = [
         ...existingHistory,
         {
@@ -151,12 +130,6 @@ const FileChat = {
     }
   },
 
-  /**
-   * Fetch chat history for a given file (optionally filtered by session).
-   * @param {string} fileId
-   * @param {string|null} sessionId
-   * @returns {array} rows
-   */
   async getChatHistory(fileId, sessionId = null) {
     try {
       if (!fileId || !isValidUUID(fileId)) {
@@ -192,13 +165,6 @@ const FileChat = {
     }
   },
 
-  /**
-   * Fetch full chat history for a session, regardless of file association.
-   * This includes pre-upload chats (where file_id is NULL).
-   * @param {string} userId
-   * @param {string} sessionId
-   * @returns {array} rows
-   */
   async getChatHistoryBySession(userId, sessionId) {
     try {
       if (!userId) {
@@ -233,11 +199,6 @@ const FileChat = {
     }
   },
 
-  /**
-   * Fetch all chat history for a specific user.
-   * @param {string} userId
-   * @returns {array} rows
-   */
   async getChatHistoryByUserId(userId) {
     try {
       if (!userId) {

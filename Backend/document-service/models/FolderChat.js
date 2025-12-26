@@ -1,6 +1,3 @@
-
-
-
 const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
@@ -31,7 +28,6 @@ function normalizeHistory(history = []) {
 }
 
 const FolderChat = {
-  // Save a folder chat entry
   async saveFolderChat(
     userId,
     folderName,
@@ -49,13 +45,10 @@ const FolderChat = {
     const id = uuidv4();
     const currentSessionId = isValidUUID(sessionId) ? sessionId : uuidv4();
 
-    // ✅ Convert chunk IDs to numbers (BIGINT-compatible)
     const numericChunkIds = usedChunkIds.map(id => Number(id)).filter(Boolean);
     const existingHistory = normalizeHistory(chatHistory);
     
-    // ✅ Ensure citations is a valid array and normalize it
     const normalizedCitations = Array.isArray(citations) ? citations : [];
-    // Remove any null/undefined citations and ensure they have required fields
     const validCitations = normalizedCitations.filter(c => c && (c.fileId || c.page || c.filename));
 
     const res = await pool.query(
@@ -176,7 +169,6 @@ const FolderChat = {
     return res.rows;
   },
 
-  // Delete folder chat records (matching Sequelize destroy pattern)
   async destroy(options = {}) {
     let query = `DELETE FROM folder_chats`;
     const params = [];

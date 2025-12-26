@@ -1,11 +1,7 @@
-
-
-
 const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid'); // Import uuid
 
 class File {
-  // Create a new file or folder
   static async create({ user_id, originalname, gcs_path, folder_path, mimetype, size, is_folder = false, status = 'uploaded', processing_progress = 0.00 }) {
     const id = uuidv4(); // Generate a UUID for the new file/folder
     const result = await pool.query(
@@ -16,7 +12,6 @@ class File {
     return result.rows[0];
   }
 
-  // Find all files and folders by user ID
   static async findByUserId(user_id) {
     const result = await pool.query(
       'SELECT * FROM user_files WHERE user_id = $1 ORDER BY is_folder DESC, created_at DESC', 
@@ -25,9 +20,7 @@ class File {
     return result.rows;
   }
 
-  // Find files and folders in a specific folder path
   static async findByUserIdAndFolderPath(user_id, folder_path) {
-    // Handle null/empty folder_path for root level
     let query, params;
     
     if (!folder_path || folder_path === '') {
@@ -50,13 +43,11 @@ class File {
     return result.rows;
   }
 
-  // Find a specific file by ID
   static async getFileById(id) { // Renamed from findById
     const result = await pool.query('SELECT * FROM user_files WHERE id = $1::uuid', [id]); // Cast to UUID
     return result.rows[0];
   }
 
-  // Update file summary
   static async updateSummary(fileId, summary) {
     await pool.query(`
       UPDATE user_files
@@ -65,7 +56,6 @@ class File {
     `, [summary, fileId]);
   }
 
-  // Find a folder by name and path
   static async findFolderByPath(user_id, folder_name, parent_path = '') {
     const folder_path = parent_path ? `${parent_path}/${folder_name}` : folder_name;
     
@@ -76,13 +66,11 @@ class File {
     return result.rows[0];
   }
 
-  // Check if folder exists
   static async folderExists(user_id, folder_name, parent_path = '') {
     const folder = await this.findFolderByPath(user_id, folder_name, parent_path);
     return !!folder;
   }
 
-  // Get all files in a folder and its subfolders (recursive)
   static async getFilesInFolderRecursive(user_id, folder_path) {
     const result = await pool.query(
       `SELECT * FROM user_files 
@@ -93,7 +81,6 @@ class File {
     return result.rows;
   }
 
-  // Get folder statistics (file count, total size)
   static async getFolderStats(user_id, folder_path) {
     const result = await pool.query(
       `SELECT 
@@ -113,13 +100,11 @@ class File {
     };
   }
 
-  // Delete a file or folder
   static async delete(id) {
     const result = await pool.query('DELETE FROM user_files WHERE id = $1::uuid RETURNING *', [id]); // Cast to UUID
     return result.rows[0];
   }
 
-  // Delete all files in a folder (for folder deletion)
   static async deleteFilesInFolder(user_id, folder_path) {
     const result = await pool.query(
       'DELETE FROM user_files WHERE user_id = $1 AND (folder_path = $2 OR folder_path LIKE $3) RETURNING *',
@@ -128,7 +113,6 @@ class File {
     return result.rows;
   }
 
-  // Update file information
   static async update(id, updates) {
     const fields = Object.keys(updates);
     const values = Object.values(updates);
@@ -141,7 +125,6 @@ class File {
     return result.rows[0];
   }
 
-  // Move file to different folder
   static async moveToFolder(id, new_folder_path) {
     const result = await pool.query(
       'UPDATE user_files SET folder_path = $2, updated_at = NOW() WHERE id = $1::uuid RETURNING *',
@@ -150,7 +133,6 @@ class File {
     return result.rows[0];
   }
 
-  // Get total storage used by user
   static async getTotalStorageUsed(user_id) {
     const result = await pool.query(
       'SELECT COALESCE(SUM(size), 0) AS total_size FROM user_files WHERE user_id = $1 AND is_folder = false',
@@ -159,7 +141,6 @@ class File {
     return parseInt(result.rows[0].total_size, 10);
   }
 
-  // Get storage used in specific folder
   static async getFolderStorageUsed(user_id, folder_path) {
     const result = await pool.query(
       `SELECT COALESCE(SUM(size), 0) AS total_size 
@@ -170,7 +151,6 @@ class File {
     return parseInt(result.rows[0].total_size, 10);
   }
 
-  // Search files by name
   static async searchFiles(user_id, searchTerm) {
     const result = await pool.query(
       `SELECT * FROM user_files 
@@ -181,7 +161,6 @@ class File {
     return result.rows;
   }
 
-  // Get recent files
   static async getRecentFiles(user_id, limit = 10) {
     const result = await pool.query(
       `SELECT * FROM user_files 
@@ -193,7 +172,6 @@ class File {
     return result.rows;
   }
 
-  // Get files by type
   static async getFilesByType(user_id, mimetype_pattern) {
     const result = await pool.query(
       `SELECT * FROM user_files 
@@ -204,7 +182,6 @@ class File {
     return result.rows;
   }
 
-  // Get folder tree structure
   static async getFolderTree(user_id) {
     const result = await pool.query(
       `SELECT * FROM user_files 
@@ -215,7 +192,6 @@ class File {
     return result.rows;
   }
 
-  // Rename file or folder
   static async rename(id, new_name) {
     const result = await pool.query(
       'UPDATE user_files SET originalname = $2, updated_at = NOW() WHERE id = $1::uuid RETURNING *',
@@ -224,7 +200,6 @@ class File {
     return result.rows[0];
   }
 
-  // Get duplicate files (same name in same folder)
   static async findDuplicates(user_id, originalname, folder_path) {
     let query, params;
     
@@ -246,9 +221,7 @@ class File {
     return result.rows;
   }
 
-  // Batch delete files
   static async batchDelete(ids) {
-    // Ensure all IDs are cast to UUID
     const uuidIds = ids.map(id => `${id}::uuid`);
     const result = await pool.query(
       `DELETE FROM user_files WHERE id = ANY(ARRAY[${uuidIds.join(', ')}]) RETURNING *`,
@@ -257,7 +230,6 @@ class File {
     return result.rows;
   }
 
-  // Get file count by folder
   static async getFileCountByFolder(user_id) {
     const result = await pool.query(
       `SELECT 
@@ -273,7 +245,6 @@ class File {
     return result.rows;
   }
 
-  // Get file metadata with signed URL info
   static async getFileWithMetadata(id) {
     const result = await pool.query(
       `SELECT *,
@@ -285,7 +256,6 @@ class File {
     return result.rows[0];
   }
 
-  // Update processing status and progress
   static async updateProcessingStatus(id, status, progress, operation = null) {
     const result = await pool.query(
       `UPDATE user_files
@@ -300,11 +270,8 @@ class File {
     return result.rows[0];
   }
 
-  // Update file output path (for Document AI extracted text)
   static async updateFileOutputPath(fileId, outputPath) {
     try {
-      // Try to update gcs_output_path column if it exists
-      // If column doesn't exist, we'll catch and handle gracefully
       await pool.query(`
         UPDATE user_files
         SET gcs_output_path = $2,
@@ -314,10 +281,8 @@ class File {
       
       console.log(`[File.updateFileOutputPath] ✅ Updated output path for file ${fileId}: ${outputPath}`);
     } catch (error) {
-      // If column doesn't exist, try storing in metadata or just log it
       if (error.message.includes('column') && error.message.includes('does not exist')) {
         console.warn(`[File.updateFileOutputPath] ⚠️ gcs_output_path column doesn't exist, storing in processing_jobs table instead`);
-        // Store in processing_jobs table which has gcs_output_uri_prefix
         try {
           await pool.query(`
             UPDATE processing_jobs

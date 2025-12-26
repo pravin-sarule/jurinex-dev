@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import documentApi from "../../services/documentApi"; // Corrected import path
+import documentApi from "../../services/documentApi";
 import { Trash2, MoreVertical } from "lucide-react";
 import { toast } from "react-toastify";
 
@@ -14,8 +14,7 @@ const ChatCardList = ({ folderName, onSelectChat }) => {
     try {
       setLoading(true);
       const data = await documentApi.getFolderChats(folderName);
-      console.log("Chats fetched by ChatCardList:", data); // Added logging
-      // backend returns { success, folderName, chats }
+      console.log("Chats fetched by ChatCardList:", data);
       setChats(data.chats || []);
     } catch (err) {
       console.error("❌ Error fetching chats:", err.message);
@@ -33,17 +32,16 @@ const ChatCardList = ({ folderName, onSelectChat }) => {
 
   const handleDeleteChat = async (chatId, e) => {
     if (e) {
-      e.stopPropagation(); // Prevent triggering the onClick for the card
+      e.stopPropagation();
     }
     
-    setOpenMenuId(null); // Close the menu
+    setOpenMenuId(null);
     
     if (!window.confirm('Are you sure you want to delete this chat? This action cannot be undone.')) {
       return;
     }
 
     try {
-      // Use toast.promise for async operation
       const deletePromise = documentApi.deleteSingleFolderChat(folderName, chatId);
       
       toast.promise(deletePromise, {
@@ -59,20 +57,17 @@ const ChatCardList = ({ folderName, onSelectChat }) => {
       
       await deletePromise;
       console.log(`✅ Successfully deleted chat ${chatId}`);
-      // Reload chats after deletion
       loadChats();
     } catch (err) {
       console.error("❌ Error deleting chat:", err);
-      // Error is handled by toast.promise
     }
   };
 
   const handleMenuToggle = (chatId, e) => {
-    e.stopPropagation(); // Prevent triggering the onClick for the card
+    e.stopPropagation();
     setOpenMenuId(openMenuId === chatId ? null : chatId);
   };
 
-  // Close menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (openMenuId && menuRefs.current[openMenuId]) {

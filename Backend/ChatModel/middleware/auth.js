@@ -1,8 +1,5 @@
 const { verifyToken } = require('../utils/jwt');
 
-/**
- * Middleware to authenticate JWT token
- */
 const authenticateToken = (req, res, next) => {
   try {
     console.log("🔐 ChatModel: Checking token...");
@@ -29,7 +26,6 @@ const authenticateToken = (req, res, next) => {
       return res.status(400).json({ message: 'User ID missing from token' });
     }
 
-    // Attach user info from token payload to req
     req.user = {
       id: userId,
       email: decoded.email || null,

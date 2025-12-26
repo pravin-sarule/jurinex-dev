@@ -1,4 +1,3 @@
-
 const express = require('express');
 const {
   startSubscription,
@@ -16,7 +15,6 @@ const { checkTokenUsage } = require('../middleware/tokenAuth'); // Import checkT
 const {getAllPlans} = require('../controllers/userplanController');
 const router = express.Router();
 
-// 🔔 Middleware to log all payment-related requests
 router.use((req, res, next) => {
   console.log(`🔔 Payment route accessed: ${req.method} ${req.originalUrl}`);
   console.log('Headers:', req.headers);
@@ -28,7 +26,6 @@ router.use((req, res, next) => {
 router.route('/plans')
     .get(getAllPlans);
 
-// ✅ Open Test Routes
 router.get('/test', (req, res) => {
   res.json({
     success: true,
@@ -51,22 +48,16 @@ router.get('/ping', (req, res) => {
   });
 });
 
-// ✅ Razorpay Configuration & Plan Debug (protected where needed)
 router.get('/test-config', protect, testPlans); // DB + Razorpay plan sync check
 router.get('/test-razorpay-connection', testRazorpayConnection); // Razorpay API check
 
-// ✅ Main Subscription Flow
 router.post('/subscription/start', protect, startSubscription);
 router.post('/subscription/verify', protect, verifySubscription);
 
-// ✅ User Payment History
 router.get('/history', protect, getUserPaymentHistory);
 
-// ✅ Token Usage Endpoint
-// This endpoint will use the checkTokenUsage middleware to validate and deduct tokens
 router.post('/token-usage', protect, checkTokenUsage, checkAndDeductTokens);
 
-// New Token Usage Endpoints for external services
 router.post('/token/check-reserve', protect, checkAndReserveTokensApi);
 router.post('/token/commit', protect, commitTokensApi);
 router.post('/token/rollback', protect, rollbackTokensApi);

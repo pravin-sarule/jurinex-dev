@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Database connection pool
 connection_pool = None
 
 def init_db_pool():

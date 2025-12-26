@@ -33,7 +33,6 @@ const ProgressStagesPopup = ({
 
   return (
     <div className="mt-3 bg-white rounded-lg border border-gray-200 shadow-lg max-w-md w-full max-h-[400px] overflow-y-auto">
-      {/* Header */}
       <div className="flex items-center justify-between p-2 border-b border-gray-200">
         <div className="flex items-center space-x-2">
           {isError ? (
@@ -64,7 +63,6 @@ const ProgressStagesPopup = ({
         </button>
       </div>
 
-      {/* Error State */}
       {isError && (
         <div className="p-2">
           <div className="p-2 bg-red-50 rounded border border-red-200">
@@ -76,7 +74,6 @@ const ProgressStagesPopup = ({
         </div>
       )}
 
-      {/* Processing Stages */}
       {!isError && (
         <div className="p-2">
           <div className="flex items-center space-x-1.5 mb-2">
@@ -99,7 +96,6 @@ const ProgressStagesPopup = ({
                       : 'bg-gray-50 border-gray-200'
                   }`}
                 >
-                  {/* Status Icon */}
                   <div className="flex-shrink-0">
                     {status === 'completed' ? (
                       <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center">
@@ -116,7 +112,6 @@ const ProgressStagesPopup = ({
                     )}
                   </div>
                   
-                  {/* Stage Info */}
                   <div className="flex-1 min-w-0">
                     <h5 className={`text-xs font-medium ${
                       status === 'completed'

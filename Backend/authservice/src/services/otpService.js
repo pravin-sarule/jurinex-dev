@@ -1,73 +1,3 @@
-// const OTPModel = require('../models/OTPModel');
-// const nodemailer = require('nodemailer');
-// const dotenv = require('dotenv');
-
-// dotenv.config();
-
-// const transporter = nodemailer.createTransport({
-//     service: 'gmail',
-//     auth: {
-//         user: process.env.EMAIL_USER,
-//         pass: process.env.EMAIL_PASS,
-//     },
-// });
-
-// const generateOTP = () => {
-//     return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
-// };
-
-// const sendOTPEmail = async (email, otp) => {
-//     const mailOptions = {
-//         from: process.env.EMAIL_USER,
-//         to: email,
-//         subject: 'Your OTP for Login',
-//         html: `
-//             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; border-radius: 8px;">
-//                 <h2 style="color: #333; text-align: center;">One-Time Password (OTP)</h2>
-//                 <p style="font-size: 16px; color: #555;">Dear User,</p>
-//                 <p style="font-size: 16px; color: #555;">Your One-Time Password (OTP) for logging in is:</p>
-//                 <p style="font-size: 24px; font-weight: bold; color: #007bff; text-align: center; background-color: #f0f8ff; padding: 10px; border-radius: 5px;">${otp}</p>
-//                 <p style="font-size: 14px; color: #777;">This OTP is valid for 5 minutes. Please do not share it with anyone.</p>
-//                 <p style="font-size: 14px; color: #777;">If you did not request this, please ignore this email.</p>
-//                 <p style="font-size: 16px; color: #555;">Regards,</p>
-//                 <p style="font-size: 16px; color: #555;">The Auth Service Team</p>
-//             </div>
-//         `,
-//     };
-
-//     await transporter.sendMail(mailOptions);
-// };
-
-// const createAndSendOTP = async (email) => {
-//     const otp = generateOTP();
-//     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now
-
-//     // Delete any existing OTPs for this email
-//     await OTPModel.deleteOTP(email, null); // Pass null for otp to delete all for email
-
-//     await OTPModel.createOTP(email, otp, expiresAt);
-//     await sendOTPEmail(email, otp);
-//     return otp;
-// };
-
-// const verifyOTP = async (email, otp) => {
-//     const storedOTP = await OTPModel.findOTP(email, otp);
-//     if (storedOTP) {
-//         await OTPModel.deleteOTP(email, otp);
-//         return true;
-//     }
-//     return false;
-// };
-
-// module.exports = {
-//     generateOTP,
-//     sendOTPEmail,
-//     createAndSendOTP,
-//     verifyOTP,
-// };
-
-
-
 const OTPModel = require('../models/OTPModel');
 const nodemailer = require('nodemailer');
 const dotenv = require('dotenv');
@@ -229,7 +159,6 @@ const createAndSendOTP = async (email) => {
     const otp = generateOTP();
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now
 
-    // Delete any existing OTPs for this email
     await OTPModel.deleteOTP(email, null); // Pass null for otp to delete all for email
 
     await OTPModel.createOTP(email, otp, expiresAt);

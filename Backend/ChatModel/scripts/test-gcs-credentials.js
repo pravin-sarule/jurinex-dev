@@ -1,8 +1,3 @@
-/**
- * Test script to verify GCS credentials
- * Run: node scripts/test-gcs-credentials.js
- */
-
 require('dotenv').config();
 const { Storage } = require('@google-cloud/storage');
 const { checkSystemClock, validateCredentials } = require('../utils/systemCheck');
@@ -10,7 +5,6 @@ const { checkSystemClock, validateCredentials } = require('../utils/systemCheck'
 async function testGCSCredentials() {
   console.log('🔍 Testing GCS Credentials...\n');
 
-  // Step 0: Check system clock
   console.log('📝 Step 0: Checking system clock synchronization...');
   const clockStatus = await checkSystemClock();
   if (!clockStatus.synchronized && clockStatus.differenceMinutes) {
@@ -24,26 +18,22 @@ async function testGCSCredentials() {
   }
   console.log('');
 
-  // Check if GCS_KEY_BASE64 is set
   if (!process.env.GCS_KEY_BASE64) {
     console.error('❌ GCS_KEY_BASE64 is not set in .env file');
     process.exit(1);
   }
 
-  // Check if GCS_BUCKET_NAME is set
   if (!process.env.GCS_BUCKET_NAME) {
     console.error('❌ GCS_BUCKET_NAME is not set in .env file');
     process.exit(1);
   }
 
   try {
-    // Decode and parse credentials
     console.log('📝 Step 1: Decoding base64 credentials...');
     const jsonString = Buffer.from(process.env.GCS_KEY_BASE64, 'base64').toString('utf-8');
     const credentials = JSON.parse(jsonString);
     console.log('✅ Credentials decoded successfully');
 
-    // Validate credentials structure
     console.log('\n📝 Step 2: Validating credentials structure...');
     const validation = validateCredentials(credentials);
     if (!validation.valid) {
@@ -55,7 +45,6 @@ async function testGCSCredentials() {
     console.log(`   Client Email: ${credentials.client_email}`);
     console.log(`   Type: ${credentials.type}`);
 
-    // Initialize Storage client
     console.log('\n📝 Step 3: Initializing GCS Storage client...');
     const storage = new Storage({
       credentials,
@@ -63,7 +52,6 @@ async function testGCSCredentials() {
     });
     console.log('✅ Storage client initialized');
 
-    // Test bucket access
     console.log(`\n📝 Step 4: Testing access to bucket: ${process.env.GCS_BUCKET_NAME}`);
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     const [exists] = await bucket.exists();
@@ -74,7 +62,6 @@ async function testGCSCredentials() {
     }
     console.log('✅ Bucket exists and is accessible');
 
-    // Test listing files (read permission)
     console.log('\n📝 Step 5: Testing read permission...');
     try {
       const [files] = await bucket.getFiles({ maxResults: 1 });
@@ -83,7 +70,6 @@ async function testGCSCredentials() {
       console.warn(`⚠️ Read permission test failed: ${error.message}`);
     }
 
-    // Test write permission (create a test file)
     console.log('\n📝 Step 6: Testing write permission...');
     const testFileName = `test-${Date.now()}.txt`;
     const testFile = bucket.file(testFileName);
@@ -96,7 +82,6 @@ async function testGCSCredentials() {
       });
       console.log('✅ Write permission verified');
       
-      // Clean up test file
       await testFile.delete();
       console.log('✅ Test file cleaned up');
     } catch (error) {
@@ -148,7 +133,6 @@ async function testGCSCredentials() {
   }
 }
 
-// Run the test
 testGCSCredentials().catch(error => {
   console.error('Unexpected error:', error);
   process.exit(1);

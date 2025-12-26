@@ -1,60 +1,3 @@
-// import React from 'react';
-// import { Link } from 'react-router-dom';
-// import NexintelLogo from '../assets/nexintel.jpg'; // Assuming this is the correct path for the logo
-
-// const Footer = () => {
-//   return (
-//     <footer className="bg-gray-900 text-gray-300 py-12">
-//       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
-//         <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
-//           <div>
-//             <div className="flex items-center space-x-2 mb-4">
-//               <img src={NexintelLogo} alt="Nexintel AI Logo" className="h-8 w-auto" />
-//             </div>
-//             <p className="text-gray-400 text-sm leading-relaxed">
-//               Transforming legal workflows with AI-powered intelligence.
-//             </p>
-//           </div>
-
-//           <div>
-//             <h4 className="text-white font-semibold mb-4 text-sm">Quick Links</h4>
-//             <ul className="space-y-2 text-sm">
-//               <li><Link to="/" className="text-gray-400 hover:text-white transition-colors">Home</Link></li>
-//               <li><Link to="/services" className="text-gray-400 hover:text-white transition-colors">Services</Link></li>
-//               <li><Link to="/pricing" className="text-gray-400 hover:text-white transition-colors">Pricing</Link></li>
-//             </ul>
-//           </div>
-
-//           <div>
-//             <h4 className="text-white font-semibold mb-4 text-sm">Contact Us</h4>
-//             <p className="text-sm text-gray-400 leading-relaxed">
-//               B-11, near Railway Station Road,<br />
-//               MIDC Chhtraptisambhajinagar,<br />
-//               Aurangabad
-//             </p>
-//           </div>
-
-//           <div>
-//             <h4 className="text-white font-semibold mb-4 text-sm">Legal</h4>
-//             <ul className="space-y-2 text-sm">
-//               <li><Link to="/terms-of-use" className="text-gray-400 hover:text-white transition-colors">Terms of Use</Link></li>
-//               <li><Link to="/privacy-policy" className="text-gray-400 hover:text-white transition-colors">Privacy Policy</Link></li>
-//             </ul>
-//           </div>
-//         </div>
-
-//         <div className="border-t border-gray-800 mt-8 pt-8 text-center text-sm text-gray-400">
-//           <p>&copy; 2025 Nexintel AI. All rights reserved.</p>
-//         </div>
-//       </div>
-//     </footer>
-//   );
-// };
-
-// export default Footer;
-
-
-
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { Mail, Phone, MapPin } from 'lucide-react';
@@ -79,7 +22,6 @@ const Footer = () => {
     <footer className="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-gray-300 py-12 border-t border-gray-700">
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 lg:gap-12">
-          {/* Brand Section */}
           <div className="flex flex-col items-center sm:items-start">
             <Link 
               to="/" 
@@ -95,7 +37,6 @@ const Footer = () => {
               Transforming legal document analysis with cutting-edge AI technology.
             </p>
             
-            {/* Trust Badges */}
             <div className="flex items-center space-x-4 text-xs text-gray-500 mt-4">
               <span className="flex items-center">
                 <div className="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></div>
@@ -108,7 +49,6 @@ const Footer = () => {
             </div>
           </div>
 
-          {/* Quick Links */}
           <div className="flex flex-col items-center sm:items-start">
             <h4 className="text-white font-semibold mb-4 text-sm uppercase tracking-wider">
               Quick Links
@@ -130,7 +70,6 @@ const Footer = () => {
             </nav>
           </div>
 
-          {/* Contact Us */}
           <div className="flex flex-col items-center sm:items-start">
             <h4 className="text-white font-semibold mb-4 text-sm uppercase tracking-wider">
               Contact Us
@@ -171,7 +110,6 @@ const Footer = () => {
             </address>
           </div>
 
-          {/* Legal */}
           <div className="flex flex-col items-center sm:items-start">
             <h4 className="text-white font-semibold mb-4 text-sm uppercase tracking-wider">
               Legal
@@ -194,7 +132,6 @@ const Footer = () => {
           </div>
         </div>
 
-        {/* Bottom Copyright Bar */}
         <div className="border-t border-gray-700 mt-10 pt-8 text-center">
           <p className="text-sm text-gray-400">
             &copy; {currentYear} NexintelAi. All rights reserved.

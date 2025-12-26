@@ -1,11 +1,5 @@
 const pool = require('../config/db');
 
-/**
- * Fetches template files and their document AI extractions for a secret prompt
- * @param {string} inputTemplateId - UUID of the input template file
- * @param {string} outputTemplateId - UUID of the output template file
- * @returns {Promise<Object>} Object containing input and output template data with extracted text and structured schema
- */
 async function fetchTemplateFilesData(inputTemplateId, outputTemplateId) {
   const result = {
     inputTemplate: null,
@@ -14,7 +8,6 @@ async function fetchTemplateFilesData(inputTemplateId, outputTemplateId) {
   };
 
   try {
-    // Fetch input template file and its extraction if input_template_id exists
     if (inputTemplateId) {
       const inputQuery = `
         SELECT 
@@ -56,7 +49,6 @@ async function fetchTemplateFilesData(inputTemplateId, outputTemplateId) {
       }
     }
 
-    // Fetch output template file and its extraction if output_template_id exists
     if (outputTemplateId) {
       const outputQuery = `
         SELECT 
@@ -102,44 +94,32 @@ async function fetchTemplateFilesData(inputTemplateId, outputTemplateId) {
   } catch (error) {
     console.error(`❌ [ChatModel Template Service] Error fetching template files:`, error.message);
     console.error(`   Stack:`, error.stack);
-    // Return empty result on error, don't throw - allow secret prompt to work without templates
     return result;
   }
 }
 
-/**
- * Builds an enhanced system prompt by combining secret prompt with template examples
- * @param {string} secretPrompt - The secret prompt from GCP Secret Manager
- * @param {Object} templateData - Template data from fetchTemplateFilesData
- * @returns {string} Enhanced system prompt with template examples
- */
 function buildEnhancedSystemPromptWithTemplates(secretPrompt, templateData) {
   let enhancedPrompt = secretPrompt;
 
-  // Add input template example if available
   if (templateData.inputTemplate && templateData.inputTemplate.extracted_text) {
     enhancedPrompt += `\n\n=== INPUT TEMPLATE EXAMPLE ===\n`;
     enhancedPrompt += `Filename: ${templateData.inputTemplate.filename}\n`;
     enhancedPrompt += `File Type: ${templateData.inputTemplate.file_type || 'input'}\n\n`;
     enhancedPrompt += `Extracted Text:\n${templateData.inputTemplate.extracted_text}`;
     
-    // Add structured schema if available
     if (templateData.inputTemplate.structured_schema) {
       enhancedPrompt += `\n\nStructured Schema:\n${JSON.stringify(templateData.inputTemplate.structured_schema, null, 2)}`;
     }
     
-    // Add form fields if available
     if (templateData.inputTemplate.form_fields && templateData.inputTemplate.form_fields.length > 0) {
       enhancedPrompt += `\n\nForm Fields:\n${JSON.stringify(templateData.inputTemplate.form_fields, null, 2)}`;
     }
     
-    // Add tables if available
     if (templateData.inputTemplate.tables && templateData.inputTemplate.tables.length > 0) {
       enhancedPrompt += `\n\nTables:\n${JSON.stringify(templateData.inputTemplate.tables, null, 2)}`;
     }
   }
 
-  // Add output template example if available
   if (templateData.outputTemplate && templateData.outputTemplate.extracted_text) {
     enhancedPrompt += `\n\n=== OUTPUT TEMPLATE EXAMPLE (STRUCTURE TO FOLLOW) ===\n`;
     enhancedPrompt += `Filename: ${templateData.outputTemplate.filename}\n`;
@@ -148,7 +128,6 @@ function buildEnhancedSystemPromptWithTemplates(secretPrompt, templateData) {
     enhancedPrompt += `NOTE: The example below shows the STRUCTURE - you must fill it with ACTUAL content from the documents.\n\n`;
     enhancedPrompt += `Template Structure:\n${templateData.outputTemplate.extracted_text}`;
     
-    // Add structured schema if available - this is the key format guide
     if (templateData.outputTemplate.structured_schema) {
       enhancedPrompt += `\n\n=== REQUIRED OUTPUT SCHEMA (MUST FOLLOW EXACTLY) ===\n`;
       enhancedPrompt += `This JSON schema defines the exact structure your response must have:\n`;
@@ -156,12 +135,10 @@ function buildEnhancedSystemPromptWithTemplates(secretPrompt, templateData) {
       enhancedPrompt += `⚠️ CRITICAL: This schema shows the STRUCTURE. You must fill each field with ACTUAL content extracted from the documents.\n`;
     }
     
-    // Add form fields if available
     if (templateData.outputTemplate.form_fields && templateData.outputTemplate.form_fields.length > 0) {
       enhancedPrompt += `\n\nForm Fields Structure:\n${JSON.stringify(templateData.outputTemplate.form_fields, null, 2)}`;
     }
     
-    // Add tables if available
     if (templateData.outputTemplate.tables && templateData.outputTemplate.tables.length > 0) {
       enhancedPrompt += `\n\nTables Structure:\n${JSON.stringify(templateData.outputTemplate.tables, null, 2)}`;
     }
@@ -218,4 +195,13 @@ module.exports = {
   fetchTemplateFilesData,
   buildEnhancedSystemPromptWithTemplates
 };
+
+
+
+
+
+
+
+
+
 

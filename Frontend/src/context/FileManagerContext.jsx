@@ -12,7 +12,7 @@ export const FileManagerProvider = ({ children }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [hasAiResponse, setHasAiResponse] = useState(false); // New state for AI response
+  const [hasAiResponse, setHasAiResponse] = useState(false);
 
   useEffect(() => {
     if (error) {
@@ -84,8 +84,8 @@ export const FileManagerProvider = ({ children }) => {
     success,
     setError,
     setSuccess,
-    hasAiResponse, // Expose hasAiResponse
-    setHasAiResponse, // Expose setHasAiResponse
+    hasAiResponse,
+    setHasAiResponse,
     loadFoldersAndFiles,
     createFolder,
     uploadDocuments,

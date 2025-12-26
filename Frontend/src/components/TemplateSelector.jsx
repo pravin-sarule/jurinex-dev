@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
-import Templates from './Templates'; // Import the Templates component
-import ApiService from "../services/api"; // Import ApiService
+import Templates from './Templates';
+import ApiService from "../services/api";
 
 const TemplateSelector = ({ onSelectTemplate, selectedTemplateId, showToast }) => {
   const [templates, setTemplates] = useState([]);
@@ -11,7 +11,7 @@ const TemplateSelector = ({ onSelectTemplate, selectedTemplateId, showToast }) =
   const fetchTemplates = async () => {
     try {
       setLoading(true);
-      const data = await ApiService.getDraftingTemplates(); // Use ApiService
+      const data = await ApiService.getDraftingTemplates();
       setTemplates(Array.isArray(data) ? data : []);
       showToast('Templates loaded successfully', 'success');
     } catch (error) {

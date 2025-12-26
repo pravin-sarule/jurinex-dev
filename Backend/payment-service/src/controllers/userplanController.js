@@ -1,9 +1,5 @@
 const db = require('../config/db');
 
-/**
- * @description Retrieves all subscription plans, with optional filtering by type and interval.
- * @route GET /api/plans
- */
 exports.getAllPlans = async (req, res) => {
     const { type, interval } = req.query;
 

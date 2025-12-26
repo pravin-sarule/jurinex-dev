@@ -1,10 +1,5 @@
-
 const db = require('../config/db');
 
-/**
- * @desc Middleware to check and deduct tokens from a user
- * @param {number} tokensRequired
- */
 const checkTokenUsage = async (req, res, next) => {
   const userId = req.user?.id || req.userId;
   const { tokensRequired } = req.body; // Get tokensRequired from request body
@@ -20,7 +15,6 @@ const checkTokenUsage = async (req, res, next) => {
   }
 
   try {
-    // Fetch user's subscription
     const result = await db.query(`
       SELECT current_token_balance, status 
       FROM user_subscriptions 
@@ -36,14 +30,12 @@ const checkTokenUsage = async (req, res, next) => {
     if (userSub.current_token_balance >= tokensRequired) {
       const newBalance = userSub.current_token_balance - tokensRequired;
 
-      // Update token balance
       await db.query(`
         UPDATE user_subscriptions
         SET current_token_balance = $1, updated_at = CURRENT_TIMESTAMP
         WHERE user_id = $2
       `, [newBalance, userId]);
 
-      // Log token usage
       await db.query(`
         INSERT INTO token_usage_logs (user_id, tokens_used, action_description)
         VALUES ($1, $2, $3)

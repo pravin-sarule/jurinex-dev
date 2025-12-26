@@ -1,119 +1,25 @@
-
-
-// const pool = require('../config/db');
-
-// const ChunkVector = {
-//   async saveChunkVector(chunkId, embedding, fileId) {
-//     const embeddingPgVector = `[${embedding.join(',')}]`;
-//     const res = await pool.query(`
-//       INSERT INTO chunk_vectors (chunk_id, embedding, file_id)
-//       VALUES ($1, $2::vector, $3::uuid)
-//       ON CONFLICT (chunk_id) DO UPDATE
-//         SET embedding = EXCLUDED.embedding,
-//             updated_at = NOW()
-//       RETURNING id, chunk_id
-//     `, [chunkId, embeddingPgVector, fileId]);
-//     return res.rows[0].id;
-//   },
-
-//   async saveMultipleChunkVectors(vectorsData) {
 //     if (!vectorsData || vectorsData.length === 0) return [];
 
-//     const values = [];
-//     const placeholders = [];
-//     let paramIndex = 1;
 
-//     vectorsData.forEach(vector => {
-//       placeholders.push(`($${paramIndex}, $${paramIndex + 1}::vector, $${paramIndex + 2}::uuid)`);
-//       values.push(
-//         vector.chunk_id,
-//         `[${vector.embedding.join(',')}]`,
-//         vector.file_id
-//       );
-//       paramIndex += 3;
-//     });
 
-//     const query = `
-//       INSERT INTO chunk_vectors (chunk_id, embedding, file_id)
-//       VALUES ${placeholders.join(', ')}
-//       ON CONFLICT (chunk_id) DO UPDATE
-//         SET embedding = EXCLUDED.embedding,
-//             updated_at = NOW()
-//       RETURNING id, chunk_id;
-//     `;
 
-//     const res = await pool.query(query, values);
-//     return res.rows;
-//   },
 
-//   async getExistingChunkIds(chunkIds) {
-//     const ids = Array.isArray(chunkIds) ? chunkIds : [chunkIds];
-//     const { rows } = await pool.query(
-//       `
-//         SELECT chunk_id
-//         FROM chunk_vectors
-//         WHERE chunk_id = ANY($1::int[])
-//       `,
-//       [ids]
-//     );
-//     return rows.map((row) => row.chunk_id);
-//   },
 
-//   async getVectorsByChunkIds(chunkIds) {
 //     if (!Array.isArray(chunkIds)) chunkIds = [chunkIds]; // Ensure array
-//     const res = await pool.query(`
-//       SELECT id, chunk_id, embedding
-//       FROM chunk_vectors
-//       WHERE chunk_id = ANY($1::int[])
-//     `, [chunkIds]);
-//     return res.rows;
-//   },
 
-//   async findNearestChunks(embedding, limit = 5, fileIds = null) {
-//     const embeddingPgVector = `[${embedding.join(',')}]`;
-//     let query = `
-//       SELECT
-//         cv.chunk_id,
-//         cv.embedding,
-//         fc.content,
-//         fc.file_id,
-//         (cv.embedding <=> $1::vector) AS distance
-//       FROM chunk_vectors cv
-//       JOIN file_chunks fc ON cv.chunk_id = fc.id
-//     `;
 
-//     const params = [embeddingPgVector, limit]; // $1 = embedding, $2 = limit
 
-//     if (fileIds && fileIds.length > 0) {
 //       if (!Array.isArray(fileIds)) fileIds = [fileIds];
-//       query += ` WHERE fc.file_id = ANY($3::uuid[])`;
-//       params.push(fileIds); // $3 = fileIds array
-//     }
 
-//     query += `
-//       ORDER BY distance ASC
-//       LIMIT $2
-//     `;
 
-//     const res = await pool.query(query, params);
-//     return res.rows;
-//   },
 
-//   async findNearestChunksAcrossFiles(embedding, limit = 5, fileIds = null) {
-//     return this.findNearestChunks(embedding, limit, fileIds);
-//   }
-// };
 
-// module.exports = ChunkVector;
 
 
 
 const pool = require('../config/db');
 
 const ChunkVector = {
-  /**
-   * Save a single chunk vector
-   */
   async saveChunkVector(chunkId, embedding, fileId) {
     if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
       throw new Error(`Invalid embedding for chunk ${chunkId}`);
@@ -133,17 +39,12 @@ const ChunkVector = {
     return res.rows[0].id;
   },
 
-  /**
-   * Save multiple chunk vectors in a single transaction
-   * ✅ FIXED: Better error handling and validation
-   */
   async saveMultipleChunkVectors(vectorsData) {
     if (!vectorsData || vectorsData.length === 0) {
       console.warn('[ChunkVector] saveMultipleChunkVectors: No vectors to save');
       return [];
     }
 
-    // ✅ CRITICAL FIX: Validate all embeddings before attempting to save
     console.log(`[ChunkVector] Validating ${vectorsData.length} vectors before save...`);
     for (let i = 0; i < vectorsData.length; i++) {
       const vector = vectorsData[i];
@@ -156,7 +57,6 @@ const ChunkVector = {
       if (!vector.embedding || !Array.isArray(vector.embedding) || vector.embedding.length === 0) {
         throw new Error(`Vector ${i} (chunk_id: ${vector.chunk_id}): Invalid embedding - ${JSON.stringify(vector.embedding)}`);
       }
-      // Validate embedding values are numbers
       for (let j = 0; j < vector.embedding.length; j++) {
         if (typeof vector.embedding[j] !== 'number' || isNaN(vector.embedding[j])) {
           throw new Error(`Vector ${i} (chunk_id: ${vector.chunk_id}): Invalid embedding value at index ${j}: ${vector.embedding[j]}`);
@@ -201,9 +101,6 @@ const ChunkVector = {
     }
   },
 
-  /**
-   * Check which chunk IDs already have vectors
-   */
   async getExistingChunkIds(chunkIds) {
     const ids = Array.isArray(chunkIds) ? chunkIds : [chunkIds];
     if (ids.length === 0) return [];
@@ -219,10 +116,6 @@ const ChunkVector = {
     return rows.map((row) => row.chunk_id);
   },
 
-  /**
-   * Get vectors by chunk IDs
-   * ✅ FIXED: Better error handling
-   */
   async getVectorsByChunkIds(chunkIds) {
     if (!chunkIds || chunkIds.length === 0) {
       console.warn('[ChunkVector] getVectorsByChunkIds: No chunk IDs provided');
@@ -248,10 +141,6 @@ const ChunkVector = {
     }
   },
 
-  /**
-   * Find nearest chunks using vector similarity search
-   * ✅ FIXED: Better error handling and fallback mechanism
-   */
   async findNearestChunks(embedding, limit = 5, fileIds = null) {
     if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
       throw new Error('Invalid embedding for vector search');
@@ -306,16 +195,10 @@ const ChunkVector = {
     }
   },
 
-  /**
-   * Find nearest chunks across multiple files
-   */
   async findNearestChunksAcrossFiles(embedding, limit = 5, fileIds = null) {
     return this.findNearestChunks(embedding, limit, fileIds);
   },
 
-  /**
-   * ✅ NEW: Get all vectors for a file (for debugging)
-   */
   async getVectorsByFileId(fileId) {
     try {
       const res = await pool.query(`
@@ -342,9 +225,6 @@ const ChunkVector = {
     }
   },
 
-  /**
-   * ✅ NEW: Verify embeddings exist for all chunks
-   */
   async verifyEmbeddingsForFile(fileId) {
     try {
       const res = await pool.query(`

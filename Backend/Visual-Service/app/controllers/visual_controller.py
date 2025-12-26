@@ -51,13 +51,11 @@ class VisualController:
             - user_id: str
         """
         try:
-            # Get user ID from authenticated request
             user_id = request.user.get('id')
             if not user_id:
                 print("[VisualController] Error: No user ID in request")
                 return jsonify({'error': 'Unauthorized'}), 401
             
-            # Parse request body
             data = request.get_json()
             if not data:
                 print("[VisualController] Error: No request body provided")
@@ -69,18 +67,15 @@ class VisualController:
             
             print(f"[VisualController] Request - file_id: {file_id}, user_id: {user_id}, type: {flowchart_type}")
             
-            # Validate required fields
             if not file_id:
                 print("[VisualController] Error: file_id is missing")
                 return jsonify({'error': 'file_id is required'}), 400
             
-            # Get authorization token for Document Service API call
             auth_header = request.headers.get('Authorization', '')
             if not auth_header:
                 print("[VisualController] Error: No Authorization header")
                 return jsonify({'error': 'Authorization header is required'}), 401
             
-            # Step 1: Fetch document data from Document Service
             try:
                 document_data = DocumentService.get_file_complete(file_id, auth_header)
                 
@@ -88,7 +83,6 @@ class VisualController:
                     return jsonify({'error': 'Document not found or access denied'}), 404
                     
             except ValueError as e:
-                # Handle specific error cases
                 error_message = str(e)
                 print(f"[VisualController] Document Service Error: {error_message}")
                 
@@ -119,7 +113,6 @@ class VisualController:
                         'details': error_message
                     }), 500
             except Exception as e:
-                # Catch any unexpected errors
                 error_message = str(e)
                 print(f"[VisualController] Unexpected Error fetching document: {error_message}")
                 return jsonify({
@@ -127,10 +120,8 @@ class VisualController:
                     'details': error_message
                 }), 500
             
-            # Step 2: Process document content
             document_content = ContentProcessor.extract_document_content(document_data)
             
-            # Step 3: Generate flowchart using Gemini AI
             try:
                 flowchart_result = GeminiService.generate_flowchart(
                     document_content=document_content,
@@ -143,7 +134,6 @@ class VisualController:
                     'details': str(e)
                 }), 500
             
-            # Step 4: Format and return response
             file = document_data.get('file', {})
             return jsonify({
                 'success': True,
@@ -158,7 +148,6 @@ class VisualController:
             }), 200
             
         except Exception as e:
-            # Catch any unexpected errors
             print(f"❌ generate_flowchart error: {str(e)}")
             return jsonify({
                 'error': 'Failed to generate flowchart',
@@ -173,13 +162,11 @@ class VisualController:
         Returns JSON structure compatible with frontend mind map renderers
         """
         try:
-            # Get user ID from authenticated request
             user_id = request.user.get('id')
             if not user_id:
                 print("[VisualController] Error: No user ID in request")
                 return jsonify({'error': 'Unauthorized'}), 401
             
-            # Parse request body
             data = request.get_json()
             if not data:
                 print("[VisualController] Error: No request body provided")
@@ -191,18 +178,15 @@ class VisualController:
             
             print(f"[VisualController] Mind map request - file_id: {file_id}, user_id: {user_id}, session_id: {session_id}")
             
-            # Validate required fields
             if not file_id:
                 print("[VisualController] Error: file_id is missing")
                 return jsonify({'error': 'file_id is required'}), 400
             
-            # Get authorization token for Document Service API call
             auth_header = request.headers.get('Authorization', '')
             if not auth_header:
                 print("[VisualController] Error: No Authorization header")
                 return jsonify({'error': 'Authorization header is required'}), 401
             
-            # Step 1: Fetch document data from Document Service
             try:
                 document_data = DocumentService.get_file_complete(file_id, auth_header)
                 
@@ -236,10 +220,8 @@ class VisualController:
                     'details': error_message
                 }), 500
             
-            # Step 2: Process document content
             document_content = ContentProcessor.extract_document_content(document_data)
             
-            # Step 3: Generate mind map using Gemini AI
             try:
                 mindmap_result = GeminiService.generate_mindmap(
                     document_content=document_content,
@@ -249,7 +231,6 @@ class VisualController:
                 mindmap_data = mindmap_result.get('mindmap_data', {})
                 title = mindmap_data.get('title', f"Mind Map - {document_data.get('file', {}).get('originalname', 'Document')}")
                 
-                # Step 4: Save mind map to database
                 from app.models.mindmap_model import MindMapModel
                 saved_mindmap = MindMapModel.create_mindmap(
                     user_id=user_id,
@@ -259,10 +240,8 @@ class VisualController:
                     session_id=session_id
                 )
                 
-                # Step 5: Get full mind map with user state (NotebookLM format)
                 full_mindmap = MindMapModel.get_mindmap(saved_mindmap['id'], user_id)
                 
-                # Format response like NotebookLM
                 formatted_response = VisualController._format_mindmap_response(full_mindmap)
                 
                 return jsonify({
@@ -313,12 +292,10 @@ class VisualController:
         if not mindmap or not mindmap.get('nodes'):
             return None
         
-        # Get root node (first node, or create one from title)
         root_nodes = mindmap['nodes']
         if not root_nodes:
             return None
         
-        # Format nodes recursively
         def format_node(node):
             formatted = {
                 'id': node['id'],
@@ -327,17 +304,14 @@ class VisualController:
                 'children': []
             }
             
-            # Format children
             for child in node.get('children', []):
                 formatted['children'].append(format_node(child))
             
             return formatted
         
-        # If there's a single root, use it; otherwise create a wrapper
         if len(root_nodes) == 1:
             return format_node(root_nodes[0])
         else:
-            # Multiple roots - create a wrapper node
             return {
                 'id': mindmap['id'],
                 'label': mindmap.get('title', 'Mind Map'),
@@ -359,13 +333,10 @@ class VisualController:
             if not user_id:
                 return jsonify({'error': 'Unauthorized'}), 401
             
-            # Check if request is by session_id (for loading previous chats)
             session_id = request.args.get('session_id')
             if session_id:
-                # Delegate to session-based endpoint
                 return VisualController.get_mindmap_by_session()
             
-            # Otherwise, get by mindmap_id
             mindmap_id = request.args.get('mindmap_id') or request.view_args.get('mindmap_id')
             if not mindmap_id:
                 return jsonify({'error': 'mindmap_id or session_id is required'}), 400
@@ -378,7 +349,6 @@ class VisualController:
             
             formatted_response = VisualController._format_mindmap_response(mindmap)
             
-            # Format timestamps
             created_at = mindmap.get('created_at')
             updated_at = mindmap.get('updated_at')
             if hasattr(created_at, 'isoformat'):
@@ -485,10 +455,8 @@ class VisualController:
             if not user_id:
                 return jsonify({'error': 'Unauthorized'}), 401
             
-            # Get session_id from query params (primary method)
             session_id = request.args.get('session_id')
             
-            # Also support user_id in query for explicit requests (though usually from auth)
             query_user_id = request.args.get('user_id')
             if query_user_id and query_user_id != str(user_id):
                 return jsonify({'error': 'User ID mismatch'}), 403
@@ -498,11 +466,9 @@ class VisualController:
             
             from app.models.mindmap_model import MindMapModel
             
-            # Get full mindmap structure with nodes and user state
             mindmap = MindMapModel.get_mindmap_by_session(session_id, user_id)
             
             if not mindmap:
-                # Return success with empty data if no mindmap found for session
                 return jsonify({
                     'success': True,
                     'session_id': session_id,
@@ -510,10 +476,8 @@ class VisualController:
                     'message': 'No mindmap found for this session'
                 }), 200
             
-            # Format response in NotebookLM format
             formatted_response = VisualController._format_mindmap_response(mindmap)
             
-            # Format timestamps
             created_at = mindmap.get('created_at')
             updated_at = mindmap.get('updated_at')
             if hasattr(created_at, 'isoformat'):
@@ -581,7 +545,6 @@ class VisualController:
             if not user_id:
                 return jsonify({'error': 'Unauthorized'}), 401
             
-            # Get mindmap_id from URL parameter or request args
             mindmap_id = request.view_args.get('mindmap_id') if hasattr(request, 'view_args') and request.view_args else request.args.get('mindmap_id')
             if not mindmap_id:
                 return jsonify({'error': 'mindmap_id is required'}), 400
@@ -635,36 +598,28 @@ class VisualController:
             - user_id: str
         """
         try:
-            # Get user ID from authenticated request
             user_id = request.user.get('id')
             if not user_id:
                 return jsonify({'error': 'Unauthorized'}), 401
             
-            # Parse request body
             data = request.get_json()
             file_ids = data.get('file_ids')
             prompt = data.get('prompt')
             flowchart_type = data.get('flowchart_type', 'process')
             
-            # Validate required fields
             if not file_ids or not isinstance(file_ids, list) or len(file_ids) == 0:
                 return jsonify({'error': 'file_ids array is required'}), 400
             
-            # Get authorization token for Document Service API calls
             auth_header = request.headers.get('Authorization', '')
             
-            # Step 1: Fetch data for all documents
             valid_documents = DocumentService.get_multiple_files_complete(file_ids, auth_header)
             
             if not valid_documents:
                 return jsonify({'error': 'No valid documents found'}), 404
             
-            # Step 2: Combine content from all documents
             combined_content = ContentProcessor.combine_multiple_documents(valid_documents)
             
-            # Step 3: Generate unified flowchart using Gemini AI
             try:
-                # Create custom prompt for multi-document flowchart
                 multi_doc_prompt = prompt or f'''Generate a comprehensive {flowchart_type} flowchart that combines information from multiple documents. 
 Create a unified flowchart that visualizes the relationships, processes, and key information across all documents.'''
                 
@@ -679,7 +634,6 @@ Create a unified flowchart that visualizes the relationships, processes, and key
                     'details': str(e)
                 }), 500
             
-            # Step 4: Format and return response
             documents_metadata = [
                 {
                     'id': doc.get('file', {}).get('id'),
@@ -700,7 +654,6 @@ Create a unified flowchart that visualizes the relationships, processes, and key
             }), 200
             
         except Exception as e:
-            # Catch any unexpected errors
             print(f"❌ generate_flowchart_multi error: {str(e)}")
             return jsonify({
                 'error': 'Failed to generate flowchart',

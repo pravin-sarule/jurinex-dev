@@ -2,7 +2,6 @@ const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
 class File {
-  // Create a new file record
   static async create({ user_id, originalname, gcs_path, mimetype, size, status = 'uploaded' }) {
     const id = uuidv4();
     const result = await pool.query(
@@ -13,13 +12,11 @@ class File {
     return result.rows[0];
   }
 
-  // Find file by ID
   static async findById(id) {
     const result = await pool.query('SELECT * FROM user_files WHERE id = $1::uuid', [id]);
     return result.rows[0];
   }
 
-  // Find all files by user ID
   static async findByUserId(user_id) {
     const result = await pool.query(
       'SELECT * FROM user_files WHERE user_id = $1 AND is_folder = false ORDER BY created_at DESC',
@@ -28,7 +25,6 @@ class File {
     return result.rows;
   }
 
-  // Update file status
   static async updateStatus(id, status) {
     const result = await pool.query(
       'UPDATE user_files SET status = $1, updated_at = NOW() WHERE id = $2::uuid RETURNING *',

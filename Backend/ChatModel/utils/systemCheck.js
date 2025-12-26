@@ -1,18 +1,7 @@
-/**
- * System check utilities
- * Helps diagnose JWT token issues
- */
-
-/**
- * Check if system clock is synchronized (within 5 minutes of actual time)
- * This is critical for JWT token generation
- */
 async function checkSystemClock() {
   try {
-    // Get current system time
     const systemTime = Date.now();
     
-    // Try to get time from a reliable source (using a simple HTTP request)
     const https = require('https');
     const http = require('http');
     
@@ -99,9 +88,6 @@ async function checkSystemClock() {
   }
 }
 
-/**
- * Validate GCS credentials structure
- */
 function validateCredentials(credentials) {
   const requiredFields = ['project_id', 'private_key', 'client_email', 'type'];
   const missingFields = requiredFields.filter(field => !credentials[field]);
@@ -113,7 +99,6 @@ function validateCredentials(credentials) {
     };
   }
   
-  // Check if private_key looks valid (should start with -----BEGIN PRIVATE KEY-----)
   if (!credentials.private_key.includes('BEGIN PRIVATE KEY')) {
     return {
       valid: false,

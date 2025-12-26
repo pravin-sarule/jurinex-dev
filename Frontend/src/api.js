@@ -1,7 +1,8 @@
 import axios from 'axios';
+import { API_BASE_URL } from './config/apiConfig';
 
 const API = axios.create({
-  baseURL: 'https://gateway-service-120280829617.asia-south1.run.app', // Adjust if your backend runs on a different port
+  baseURL: API_BASE_URL,
   withCredentials: true,
 });
 

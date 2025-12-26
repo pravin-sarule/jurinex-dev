@@ -2,8 +2,6 @@ const { bucket } = require('../config/gcs');
 const File = require('../models/File');
 const db = require('../config/db'); // Import db for querying user subscriptions
 
-// MAX_STORAGE_BYTES will now come from the user's subscription plan
-// const MAX_STORAGE_BYTES = 15 * 1024 * 1024 * 1024; // 15 GB in bytes
 
 const uploadFileToGCS = (file, userId, folderPath = '') => {
   return new Promise(async (resolve, reject) => {
@@ -35,7 +33,6 @@ const uploadFileToGCS = (file, userId, folderPath = '') => {
         resolve(newFile);
       } catch (dbError) {
         console.error('Database Error after GCS upload:', dbError);
-        // Optionally delete the file from GCS if DB insertion fails
         await blob.delete().catch(console.error);
         reject(dbError);
       }

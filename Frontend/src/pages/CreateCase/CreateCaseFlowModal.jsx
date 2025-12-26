@@ -1,186 +1,3 @@
-// import React, { useState } from 'react';
-// import { X, Scale, Building2, Users, Tag, FolderPlus, Upload, CheckCircle } from 'lucide-react';
-// import OverviewStep from './steps/OverviewStep';
-// import JurisdictionStep from './steps/JurisdictionStep';
-// import PartiesStep from './steps/PartiesStep';
-// import CategoryStep from './steps/CategoryStep';
-// import DatesStep from './steps/DatesStep';
-// // import DocumentsStep from './steps/DocumentsStep';
-// import ReviewStep from './steps/ReviewStep';
-
-// const CreateCaseFlowModal = ({ isOpen, onClose, onComplete }) => {
-//   const [currentStep, setCurrentStep] = useState(1);
-//   const [caseData, setCaseData] = useState({
-//     // Overview step
-//     caseTitle: '',
-//     caseType: '',
-//     subType: '',
-//     caseNumber: '',
-//     courtName: '',
-//     filingDate: '',
-    
-//     // Category step
-//     category: '',
-//     primaryCategory: '',
-//     subCategory: '',
-//     complexity: '',
-//     monetaryValue: '',
-//     priorityLevel: 'Medium',
-    
-//     // Jurisdiction step
-//     courtLevel: 'High Court',
-//     benchDivision: '',
-//     jurisdiction: 'Delhi',
-//     state: 'Delhi',
-//     judges: [],
-//     courtRoom: '',
-    
-//     // Parties step
-//     petitioners: [{ fullName: '', role: '', advocateName: '', barRegistration: '', contact: '' }],
-//     respondents: [{ fullName: '', role: '', advocateName: '', barRegistration: '', contact: '' }],
-    
-//     // Documents
-//     uploadedFiles: []
-//   });
-
-//   const steps = [
-//     { number: 1, name: 'Overview', icon: Scale },
-//     { number: 2, name: 'Jurisdiction', icon: Building2 },
-//     { number: 3, name: 'Parties', icon: Users },
-//     { number: 4, name: 'Category', icon: Tag },
-//     { number: 5, name: 'Dates', icon: FolderPlus },
-//     // { number: 6, name: 'Documents', icon: Upload },
-//     { number: 7, name: 'Review', icon: CheckCircle }
-//   ];
-
-//   const handleNext = () => {
-//     if (currentStep < 7) {
-//       setCurrentStep(currentStep + 1);
-//     } else {
-//       // Complete the flow
-//       onComplete(caseData);
-//     }
-//   };
-
-//   const handleBack = () => {
-//     if (currentStep > 1) {
-//       setCurrentStep(currentStep - 1);
-//     }
-//   };
-
-//   const handleSkip = () => {
-//     handleNext();
-//   };
-
-//   if (!isOpen) return null;
-
-//   return (
-//     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-//       <div className="bg-white rounded-lg w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-//         {/* Header with Progress */}
-//         <div className="border-b bg-gray-50 px-6 py-4">
-//           <div className="flex items-center justify-between mb-4">
-//             <h2 className="text-2xl font-bold text-gray-800">Create New Case</h2>
-//             <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-//               <X className="w-6 h-6" />
-//             </button>
-//           </div>
-          
-//           {/* Progress Steps */}
-//           <div className="flex items-center justify-between">
-//             {steps.map((step, index) => (
-//               <React.Fragment key={step.number}>
-//                 <div className="flex flex-col items-center">
-//                   <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-//                     currentStep >= step.number 
-//                       ? 'bg-[#21C1B6] text-white' 
-//                       : 'bg-gray-200 text-gray-400'
-//                   }`}>
-//                     <step.icon className="w-5 h-5" />
-//                   </div>
-//                   <span className={`text-xs mt-1 ${
-//                     currentStep >= step.number ? 'text-gray-700 font-medium' : 'text-gray-400'
-//                   }`}>
-//                     {step.name}
-//                   </span>
-//                 </div>
-//                 {index < steps.length - 1 && (
-//                   <div className={`flex-1 h-1 mx-2 ${
-//                     currentStep > step.number ? 'bg-[#21C1B6]' : 'bg-gray-200'
-//                   }`} />
-//                 )}
-//               </React.Fragment>
-//             ))}
-//           </div>
-//         </div>
-
-//         {/* Content Area */}
-//         <div className="flex-1 overflow-y-auto p-6">
-//           {currentStep === 1 && (
-//             <OverviewStep caseData={caseData} setCaseData={setCaseData} />
-//           )}
-//           {currentStep === 2 && (
-//             <JurisdictionStep caseData={caseData} setCaseData={setCaseData} />
-//           )}
-//           {currentStep === 3 && (
-//             <PartiesStep caseData={caseData} setCaseData={setCaseData} />
-//           )}
-//           {currentStep === 4 && (
-//             <CategoryStep caseData={caseData} setCaseData={setCaseData} />
-//           )}
-//           {currentStep === 5 && (
-//             <DatesStep caseData={caseData} setCaseData={setCaseData} />
-//           )}
-//           {/* {currentStep === 6 && (
-//             <DocumentsStep caseData={caseData} setCaseData={setCaseData} />
-//           )} */}
-//           {currentStep === 7 && (
-//             <ReviewStep caseData={caseData} />
-//           )}
-//         </div>
-
-//         {/* Footer */}
-//         <div className="border-t bg-gray-50 px-6 py-4 flex justify-between items-center">
-//           <div className="text-sm text-gray-500">
-//             <span className="inline-flex items-center text-green-600">
-//               <CheckCircle className="w-4 h-4 mr-1" />
-//               Auto-saved
-//             </span>
-//           </div>
-//           <div className="flex space-x-3">
-//             {currentStep > 1 && (
-//               <button
-//                 onClick={handleBack}
-//                 className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
-//               >
-//                 Back
-//               </button>
-//             )}
-//             {currentStep < 7 && (
-//               <button
-//                 onClick={handleSkip}
-//                 className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
-//               >
-//                 Skip
-//               </button>
-//             )}
-//             <button
-//               onClick={handleNext}
-//               className="px-6 py-2 bg-[#EF4444] text-white rounded-md hover:bg-[#DC2626] flex items-center"
-//             >
-//               {currentStep === 7 ? 'Create Case' : 'Continue'}
-//               <span className="ml-2">→</span>
-//             </button>
-//           </div>
-//         </div>
-//       </div>
-//     </div>
-//   );
-// };
-
-// export default CreateCaseFlowModal;
-
-
 import React, { useState, useEffect } from 'react';
 import { Scale, Building2, Users, Tag, FolderPlus, CheckCircle, AlertCircle, RotateCcw, Clock, Save, LogOut } from 'lucide-react';
 import OverviewStep from './steps/OverviewStep';
@@ -225,15 +42,13 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     uploadedFiles: []
   });
 
-  // The hook now extracts user ID from JWT token
   const { saveStatus, lastSaveTime, actualUserId, tokenError, manualSave, loadDraft, deleteDraft } = useAutoSave(
     caseData, 
     currentStep, 
-    userId, // Can be null, hook will extract from JWT token
-    true // Force enable
+    userId,
+    true
   );
 
-  // Debug logging for component state
   useEffect(() => {
     console.log('🎯 CaseCreationFlow State:', {
       providedUserId: userId,
@@ -248,36 +63,26 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     });
   }, [userId, actualUserId, tokenError, draftLoaded, currentStep, saveStatus, caseData]);
 
-  // Handle token errors by redirecting to login
   const handleTokenError = () => {
-    // Clear the invalid token
     localStorage.removeItem('token');
     
-    // You can redirect to login page here
-    // For example: window.location.href = '/login';
-    // Or use your router: navigate('/login');
     
     console.log('🔄 Redirecting to login due to token error');
     alert('Your session has expired. Please log in again.');
     
-    // For demo purposes, just reload the page
-    // In a real app, you'd redirect to your login page
     window.location.reload();
   };
 
-  // Load existing draft on component mount
   useEffect(() => {
     const loadExistingDraft = async () => {
       console.log('🔄 Loading existing draft for user ID:', actualUserId);
       
-      // Check for token errors first
       if (tokenError) {
         console.error('❌ Token error:', tokenError);
         setIsLoading(false);
         return;
       }
       
-      // Validate user ID before proceeding
       if (!Number.isInteger(actualUserId) || actualUserId <= 0) {
         console.error('❌ Invalid user ID:', actualUserId);
         setIsLoading(false);
@@ -298,7 +103,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
       } catch (error) {
         console.error('❌ Error loading draft:', error);
         
-        // If it's a token error, don't set draftLoaded
         if (error.message && error.message.includes('token')) {
           console.log('🚫 Token error detected in draft loading');
           return;
@@ -349,7 +153,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     setDraftLoaded(true);
   };
 
-  // Manual save test function
   const handleManualSave = async () => {
     console.log('👆 Manual save button clicked');
     const result = await manualSave();
@@ -482,7 +285,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     }
   };
 
-  // Show token error state
   if (tokenError) {
     return (
       <div className="min-h-screen bg-[#FDFCFB] flex items-center justify-center">
@@ -506,7 +308,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     );
   }
 
-  // Show loading state for invalid user ID
   if (!actualUserId || !Number.isInteger(actualUserId) || actualUserId <= 0) {
     return (
       <div className="min-h-screen bg-[#FDFCFB] flex items-center justify-center">
@@ -527,7 +328,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     );
   }
 
-  // Loading state
   if (isLoading) {
     return (
       <div className="min-h-screen bg-[#FDFCFB] flex items-center justify-center">
@@ -540,7 +340,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     );
   }
 
-  // Draft prompt modal
   if (showDraftPrompt) {
     return (
       <div className="min-h-screen bg-[#FDFCFB] flex items-center justify-center">
@@ -575,7 +374,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
 
   return (
     <div className="min-h-screen bg-[#FDFCFB]">
-      {/* Header Section */}
       <div className="bg-white border-b shadow-sm sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-8 py-6">
           <div className="flex items-center justify-between mb-6">
@@ -593,7 +391,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
             </button>
           </div>
 
-          {/* Step Bar */}
           <div className="flex items-center justify-between">
             {steps.map((step, index) => (
               <React.Fragment key={step.number}>
@@ -630,7 +427,6 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
         </div>
       </div>
 
-      {/* Step Content */}
       <div className="max-w-4xl mx-auto px-8 py-8">
         <div className="bg-white rounded-lg shadow-sm p-8 min-h-[500px]">
           {currentStep === 1 && <OverviewStep caseData={caseData} setCaseData={setCaseData} />}
@@ -647,17 +443,14 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
           )}
         </div>
 
-        {/* Bottom Buttons - Only show for steps 1-5 */}
         {currentStep < 6 && (
           <div className="mt-6 flex justify-between items-center">
             <div className="flex items-center space-x-4">
-              {/* Auto-save status */}
               <span className={`inline-flex items-center text-sm ${getAutoSaveColor()}`}>
                 {getAutoSaveIcon()}
                 {getAutoSaveText()}
               </span>
               
-              {/* Manual save button for testing */}
               <button
                 onClick={handleManualSave}
                 disabled={!!tokenError}

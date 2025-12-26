@@ -7,8 +7,6 @@ from datetime import datetime
 from app.middleware.auth import token_required
 from app.controllers.visual_controller import VisualController
 
-# Create Blueprint for visual routes
-# Blueprint allows organizing routes into modules
 visual_bp = Blueprint('visual', __name__)
 
 

@@ -1,35 +1,20 @@
-// services/gcsService.js
-
 const { getBucket } = require('../config/gcs');
 const path = require('path');
 
-/**
- * Uploads a file buffer to GCS
- * Uses the singleton Storage client from config/gcs.js
- *
- * @param {string} bucketName - Target GCS bucket name
- * @param {string} gcsFilePath - GCS file path (e.g., 'chat-uploads/user1/file.pdf')
- * @param {Buffer} fileBuffer - File buffer (from req.file.buffer)
- * @param {string} mimeType - File MIME type (e.g., 'application/pdf')
- * @returns {Promise<string>} Uploaded file's GCS URI ('gs://bucket/path')
- */
 async function uploadFileToGCS(bucketName, gcsFilePath, fileBuffer, mimeType) {
     if (!bucketName || !gcsFilePath || !fileBuffer) {
         throw new Error("Missing GCS service parameters. Required: bucketName, gcsFilePath, fileBuffer");
     }
 
     try {
-        // Validate buffer
         if (!Buffer.isBuffer(fileBuffer)) {
             throw new Error('fileBuffer must be a Buffer object');
         }
 
         console.log(`📤 Initializing GCS upload: ${bucketName}/${gcsFilePath}`);
         
-        // Get bucket using singleton storage client
         const bucket = getBucket(bucketName);
         
-        // Check if bucket exists
         const [bucketExists] = await bucket.exists();
         if (!bucketExists) {
             throw new Error(`Bucket '${bucketName}' does not exist or you don't have access to it`);
@@ -37,7 +22,6 @@ async function uploadFileToGCS(bucketName, gcsFilePath, fileBuffer, mimeType) {
 
         const file = bucket.file(gcsFilePath);
         
-        // Upload file using save() method (more reliable than streams)
         console.log(`📤 Uploading file to GCS...`);
         await file.save(fileBuffer, {
             resumable: false,
@@ -55,7 +39,6 @@ async function uploadFileToGCS(bucketName, gcsFilePath, fileBuffer, mimeType) {
         console.error('❌ GCS Upload error:', error.message);
         console.error('❌ Error stack:', error.stack);
         
-        // Provide more helpful error messages
         if (error.message.includes('invalid_grant') || error.message.includes('JWT') || error.message.includes('Token')) {
             throw new Error(
                 `GCS Authentication failed: Invalid or expired service account key. ` +

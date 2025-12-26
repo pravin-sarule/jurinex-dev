@@ -1,9 +1,6 @@
-
-
 const pool = require('../config/db');
 
 const FileChunk = {
-  // Save a single chunk
   async saveChunk(fileId, chunkIndex, content, tokenCount, pageStart = null, pageEnd = null, heading = null) {
     const res = await pool.query(
       `
@@ -17,7 +14,6 @@ const FileChunk = {
     return res.rows[0].id;
   },
 
-  // Save multiple chunks in a batch
   async saveMultipleChunks(chunksData) {
     if (!chunksData || chunksData.length === 0) return [];
 
@@ -52,7 +48,6 @@ const FileChunk = {
     return res.rows;
   },
 
-  // Get all chunks by file ID
   async getChunksByFileId(fileId) {
     const res = await pool.query(
       `
@@ -66,9 +61,7 @@ const FileChunk = {
     return res.rows;
   },
 
-  // Get chunk content by an array of chunk IDs
   async getChunkContentByIds(chunkIds) {
-    // Ensure chunkIds is an array of integers
     const idsArray = Array.isArray(chunkIds) ? chunkIds.map(Number) : [Number(chunkIds)];
 
     const res = await pool.query(

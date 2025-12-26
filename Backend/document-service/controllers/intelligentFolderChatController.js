@@ -1,12 +1,3 @@
-/**
- * Intelligent Folder Chat Controller
- * Combines Gemini Eyeball (ChatModel service) and RAG (Document service) approaches
- * Routes queries intelligently to minimize token consumption and cost:
- * - Complete summaries → Gemini Eyeball (considers all folder documents)
- * - Specific queries → RAG method (document service)
- * All chats are stored in folder_chat table
- */
-
 const FolderChat = require('../models/FolderChat');
 const File = require('../models/File');
 const { askGeminiWithMultipleGCS, streamGeminiWithMultipleGCS } = require('../services/folderGeminiService');
@@ -27,13 +18,6 @@ const {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * Post-processes LLM response to extract and validate JSON
- * Ensures response is always in the correct format for frontend rendering
- * @param {string} rawResponse - Raw response from LLM
- * @param {Object} outputTemplate - Output template to validate against
- * @returns {string} Cleaned and validated JSON response wrapped in markdown code blocks
- */
 function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   if (!rawResponse || typeof rawResponse !== 'string') {
     return rawResponse;
@@ -41,24 +25,20 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
 
   let cleanedResponse = rawResponse.trim();
   
-  // Try to extract JSON from markdown code blocks
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
     try {
       const jsonData = JSON.parse(jsonMatch[1].trim());
-      // Validate and re-wrap in code blocks
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block:', e);
     }
   }
   
-  // Try to extract JSON without code blocks (raw JSON)
   const trimmed = cleanedResponse.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       const jsonData = JSON.parse(trimmed);
-      // Wrap in code blocks if not already wrapped
       if (!cleanedResponse.includes('```json')) {
         return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
       }
@@ -68,7 +48,6 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
     }
   }
   
-  // If response doesn't contain JSON, try to find JSON anywhere in the text
   const jsonPattern = /\{[\s\S]*\}/;
   const jsonMatch2 = cleanedResponse.match(jsonPattern);
   if (jsonMatch2) {
@@ -76,31 +55,34 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       const jsonData = JSON.parse(jsonMatch2[0]);
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
-      // Not valid JSON, return as is
     }
   }
   
-  // Return as is if we can't extract JSON
   return cleanedResponse;
 }
 
-/**
- * Adds structured JSON formatting instructions to secret prompt
- * Ensures LLM output is in clean, structured JSON format wrapped in markdown code blocks
- * @param {string} secretPrompt - The original secret prompt
- * @param {Object} outputTemplate - Optional output template data with structure to follow
- * @returns {string} - The prompt with JSON formatting instructions appended
- */
-function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
+function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outputTemplate = null) {
   let jsonFormattingInstructions = '';
+  
+  if (inputTemplate && inputTemplate.extracted_text && outputTemplate && outputTemplate.extracted_text) {
+    jsonFormattingInstructions += `\n\n`;
+    jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n`;
+    jsonFormattingInstructions += `🔄 WORKFLOW REMINDER - INPUT TO OUTPUT MAPPING\n`;
+    jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n\n`;
+    jsonFormattingInstructions += `📥 STEP 1: EXTRACT FROM INPUT TEMPLATE FORMAT\n`;
+    jsonFormattingInstructions += `   - Study the INPUT TEMPLATE format shown above to understand what information to look for\n`;
+    jsonFormattingInstructions += `   - Identify similar patterns, fields, sections, and data points in the actual documents\n`;
+    jsonFormattingInstructions += `   - Extract all relevant points that match the INPUT TEMPLATE structure\n\n`;
+    jsonFormattingInstructions += `📤 STEP 2: FORMAT USING OUTPUT TEMPLATE STRUCTURE\n`;
+    jsonFormattingInstructions += `   - Take the extracted information and format it according to OUTPUT TEMPLATE structure\n`;
+    jsonFormattingInstructions += `   - Map extracted points to corresponding sections in OUTPUT TEMPLATE\n`;
+    jsonFormattingInstructions += `   - Ensure the final response follows the EXACT OUTPUT TEMPLATE JSON format\n\n`;
+  }
 
-  // If output template exists, reference it in the instructions
   if (outputTemplate && outputTemplate.extracted_text) {
-    // Extract all required sections from the template
     const templateText = outputTemplate.extracted_text;
     const sectionKeys = [];
     
-    // Try to extract section keys from the template (e.g., 2_1_ground_wise_summary, 2_2_annexure_summary, etc.)
     const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
     let match;
     while ((match = sectionPattern.exec(templateText)) !== null) {
@@ -109,7 +91,6 @@ function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
       }
     }
     
-    // Also check structured_schema if available
     if (outputTemplate.structured_schema) {
       try {
         const schema = typeof outputTemplate.structured_schema === 'string' 
@@ -145,7 +126,7 @@ function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
 📋 OUTPUT TEMPLATE STRUCTURE (MUST FOLLOW EXACTLY):
 The output template below shows the EXACT JSON structure you must use. Your response must match this structure EXACTLY with ALL fields populated:
 
-${outputTemplate.extracted_text.substring(0, 3000)}${outputTemplate.extracted_text.length > 3000 ? '\n\n[... template continues ...]' : ''}${sectionsList}
+${outputTemplate.extracted_text}${sectionsList}
 
 🔒 MANDATORY REQUIREMENTS FOR ALL LLMs:
 1. ✅ Your response MUST start with \`\`\`json and end with \`\`\`
@@ -205,7 +186,6 @@ Before submitting your response, verify:
 🎯 FINAL INSTRUCTION:
 Generate your response NOW following the template structure exactly. Include ALL sections. Use ONLY the JSON format shown above.`;
   } else {
-    // Default structure when no template is provided
     jsonFormattingInstructions = `
 
 === CRITICAL OUTPUT FORMATTING REQUIREMENTS ===
@@ -266,19 +246,12 @@ Your response should ONLY contain the JSON wrapped in markdown code blocks. Do n
   return secretPrompt + jsonFormattingInstructions;
 }
 
-/**
- * Ensures the answer is plain text, not JSON
- * Converts JSON objects/strings to plain text
- */
 function ensurePlainText(answer) {
   if (!answer) return '';
   
-  // If it's already a string, check if it's JSON
   if (typeof answer === 'string') {
-    // Try to parse as JSON
     try {
       const parsed = JSON.parse(answer);
-      // If it's an object with a text field, extract it
       if (typeof parsed === 'object' && parsed !== null) {
         if (parsed.text) {
           return String(parsed.text).trim();
@@ -289,20 +262,16 @@ function ensurePlainText(answer) {
         if (parsed.content) {
           return String(parsed.content).trim();
         }
-        // If it's an object without text fields, stringify it (shouldn't happen but handle it)
         return JSON.stringify(parsed);
       }
-      // If parsed is a string, use it
       if (typeof parsed === 'string') {
         return parsed.trim();
       }
     } catch (e) {
-      // Not JSON, return as is
       return answer.trim();
     }
   }
   
-  // If it's an object, try to extract text or stringify
   if (typeof answer === 'object' && answer !== null) {
     if (answer.text) {
       return String(answer.text).trim();
@@ -313,18 +282,12 @@ function ensurePlainText(answer) {
     if (answer.content) {
       return String(answer.content).trim();
     }
-    // Last resort: stringify (shouldn't happen)
     return JSON.stringify(answer);
   }
   
-  // Convert to string and trim
   return String(answer || '').trim();
 }
 
-/**
- * Analyze query intent to determine if it needs full summary or specific answer
- * Returns routing decision: 'gemini_eyeball' for summaries, 'rag' for specific queries
- */
 function analyzeQueryForRouting(question) {
   if (!question || typeof question !== 'string') {
     return {
@@ -336,8 +299,6 @@ function analyzeQueryForRouting(question) {
 
   const queryLower = question.toLowerCase().trim();
 
-  // Use GEMINI EYEBALL for complete summary requests
-  // These keywords indicate need for full document/complete summary
   const explicitSummaryKeywords = [
     'complete summary', 'complete document summary', 'complete folder summary',
     'summarize all', 'summarize the all', 'summarize all documents', 'summarize all the documents',
@@ -351,7 +312,6 @@ function analyzeQueryForRouting(question) {
     'give me a summary', 'provide a summary', 'create a summary',
     'summary of all', 'summary of everything', 'summary of the folder',
     'what is the summary', 'what is the overview', 'what is the complete picture',
-    // Case-specific summary keywords
     'summarize this case', 'summarize the case', 'summarize case', 'summarize this',
     'case summary', 'this case summary', 'the case summary',
     'summary of this case', 'summary of the case', 'summary of case',
@@ -359,11 +319,8 @@ function analyzeQueryForRouting(question) {
     'summarize', 'summary' // Generic summarize/summary at the start
   ];
 
-  // Check if query starts with "summarize" or "summary" (high priority for eyeball)
   const startsWithSummarize = /^(summarize|summary)/i.test(question.trim());
 
-  // Keywords that indicate SPECIFIC/TARGETED questions - Use RAG
-  // These should use RAG (semantic search with chunks) for precise answers
   const specificQuestionKeywords = [
     'what is', 'what are', 'what does', 'what did', 'what was', 'what were',
     'who is', 'who are', 'who did', 'who was',
@@ -378,7 +335,6 @@ function analyzeQueryForRouting(question) {
     'evidence about', 'case about', 'section about'
   ];
 
-  // Patterns that indicate specific content lookup (use RAG)
   const specificPatterns = [
     /\b(page|paragraph|clause|section|article)\s+\d+/i,  // "page 5", "clause 3"
     /\b(find|locate|search|show)\s+(me\s+)?(the|a|an)\s+/i,  // "find the", "show me the"
@@ -387,11 +343,8 @@ function analyzeQueryForRouting(question) {
     /\b(amount|date|time|value|number|name|person|party)\s+(is|are|was|were)/i  // "amount is", "date was"
   ];
 
-  // Check for explicit complete summary request
   const isExplicitSummary = explicitSummaryKeywords.some(keyword => queryLower.includes(keyword));
 
-  // PRIORITY: If query starts with "summarize" or "summary", prioritize Eyeball
-  // This catches "summarize this case", "summarize the documents", etc.
   if (startsWithSummarize && !queryLower.includes('what') && !queryLower.includes('which') && !queryLower.includes('where')) {
     return {
       method: 'gemini_eyeball',
@@ -400,7 +353,6 @@ function analyzeQueryForRouting(question) {
     };
   }
 
-  // Check for explicit complete summary request
   if (isExplicitSummary) {
     return {
       method: 'gemini_eyeball',
@@ -409,20 +361,12 @@ function analyzeQueryForRouting(question) {
     };
   }
 
-  // Check for specific question patterns
   const hasSpecificKeyword = specificQuestionKeywords.some(keyword => queryLower.includes(keyword));
   const hasSpecificPattern = specificPatterns.some(pattern => pattern.test(question));
 
-  // Check if it's asking about specific content (not complete summary)
   const isAskingSpecific = hasSpecificKeyword || hasSpecificPattern;
 
-  // DECISION LOGIC:
-  // 1. If query starts with "summarize/summary" → Use GEMINI EYEBALL (HIGH PRIORITY)
-  // 2. If EXPLICIT complete summary request → Use GEMINI EYEBALL
-  // 3. If specific question (what, who, where, find, etc.) → Use RAG
-  // 4. Default → Use RAG (for specific answers)
 
-  // Use RAG for specific questions and targeted queries
   if (isAskingSpecific) {
     return {
       method: 'rag',
@@ -433,7 +377,6 @@ function analyzeQueryForRouting(question) {
     };
   }
 
-  // Default to RAG for everything else (better for specific answers)
   return {
     method: 'rag',
     reason: 'Query requires specific information - using RAG for precise chunk-based search',
@@ -441,9 +384,6 @@ function analyzeQueryForRouting(question) {
   };
 }
 
-/**
- * Format conversation history for context
- */
 function formatConversationHistory(chats = [], limit = 5) {
   if (!Array.isArray(chats) || chats.length === 0) return '';
   const recentChats = chats.slice(-limit);
@@ -455,9 +395,6 @@ function formatConversationHistory(chats = [], limit = 5) {
     .join('\n\n');
 }
 
-/**
- * Simplify chat history for storage
- */
 function simplifyHistory(chats = []) {
   if (!Array.isArray(chats)) return [];
   return chats
@@ -470,9 +407,6 @@ function simplifyHistory(chats = []) {
     .filter((entry) => typeof entry.question === 'string' && typeof entry.answer === 'string');
 }
 
-/**
- * Helper function to ensure page_start and page_end are preserved in chunk mapping
- */
 function preservePageInfo(chunk) {
   return {
     ...chunk,
@@ -481,17 +415,6 @@ function preservePageInfo(chunk) {
   };
 }
 
-/**
- * Extract citations from chunks with page numbers and file URLs
- * Returns array of citation objects with page numbers, file IDs, and view URLs
- * @param {Array} chunks - Array of chunk objects with file_id, filename, page_start, etc.
- * @param {string} baseUrl - Base URL for API (optional, for generating view URLs)
- * @returns {Array} Array of citation objects
- */
-/**
- * Extract citations from files (for Gemini Eyeball method)
- * Creates citations for entire documents
- */
 async function extractCitationsFromFiles(files = [], baseUrl = '') {
   if (!Array.isArray(files) || files.length === 0) {
     console.log(`[extractCitationsFromFiles] No files provided`);
@@ -513,12 +436,10 @@ async function extractCitationsFromFiles(files = [], baseUrl = '') {
     }
 
     try {
-      // Get first chunk of the file to find the first page
       const chunks = await FileChunk.getChunksByFileId(fileId);
       let firstPage = 1;
       
       if (chunks && chunks.length > 0) {
-        // Find the minimum page_start from all chunks
         const pages = chunks
           .map(c => c.page_start)
           .filter(p => p !== null && p !== undefined && p > 0);
@@ -528,11 +449,9 @@ async function extractCitationsFromFiles(files = [], baseUrl = '') {
         }
       }
 
-      // Create citation for this file
       const citationKey = fileId; // Unique key: fileId
 
       if (!citationsMap.has(citationKey)) {
-        // Get a preview text from first chunk if available
         let text = 'Full document analysis';
         if (chunks && chunks.length > 0 && chunks[0].content) {
           const contentSnippet = chunks[0].content.substring(0, 150).trim();
@@ -541,7 +460,6 @@ async function extractCitationsFromFiles(files = [], baseUrl = '') {
             : 'Full document analysis';
         }
 
-        // Generate view URL
         const viewUrl = fileId
           ? `${baseUrl}/api/files/file/${fileId}/view?page=${firstPage}`
           : null;
@@ -565,7 +483,6 @@ async function extractCitationsFromFiles(files = [], baseUrl = '') {
     }
   }
 
-  // Convert Map to array and sort by filename
   const citations = Array.from(citationsMap.values())
     .sort((a, b) => a.filename.localeCompare(b.filename));
 
@@ -589,7 +506,6 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
   chunks.forEach((chunk, index) => {
     const filename = chunk.filename || 'document.pdf';
     const fileId = chunk.file_id || chunk.fileId || null;
-    // Try multiple possible field names for page_start
     const pageStart = chunk.page_start !== null && chunk.page_start !== undefined 
       ? chunk.page_start 
       : (chunk.pageStart !== null && chunk.pageStart !== undefined ? chunk.pageStart : null);
@@ -597,26 +513,20 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
       ? chunk.page_end
       : (chunk.pageEnd !== null && chunk.pageEnd !== undefined ? chunk.pageEnd : null);
     
-    // Debug logging for first few chunks
     if (index < 3) {
       console.log(`[extractCitationsFromChunks] Chunk ${index}: fileId=${fileId}, page_start=${pageStart}, page_end=${pageEnd}, filename=${filename}`);
     }
     
-    // If page_start is available, create citation
     if (pageStart !== null && pageStart !== undefined && fileId) {
       const pageNumber = parseInt(pageStart, 10) || pageStart; // Ensure it's a number
       const citationKey = `${fileId}:${pageNumber}`; // Unique key: fileId:pageNumber
       
-      // Only add if we haven't seen this citation before
       if (!citationsMap.has(citationKey)) {
-        // Get a snippet of the chunk content for preview
         const contentSnippet = (chunk.content || '').substring(0, 150).trim();
         const text = contentSnippet.length > 0 
           ? `${contentSnippet}${contentSnippet.length >= 150 ? '...' : ''}`
           : 'Content from page';
         
-            // Generate view URL - frontend should call this endpoint to get signed URL
-            // Format: /api/files/file/:fileId/view?page=5 (preferred) or /api/files/:fileId/view?page=5
             const viewUrl = fileId
               ? `${baseUrl}/api/files/file/${fileId}/view?page=${pageNumber}`
               : null;
@@ -628,20 +538,15 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
           filename: filename,
           fileId: fileId,
           text: text,
-          // Display-friendly page label (e.g., "Page 5" or "Pages 5-7")
           pageLabel: pageEnd && pageEnd !== pageStart 
             ? `Pages ${pageStart}-${pageEnd}`
             : `Page ${pageNumber}`,
-          // Link format for PDF viewer: filename.pdf#page=5 (frontend can use this with viewUrl)
           link: `${filename}#page=${pageNumber}`,
-          // API endpoint to get signed URL for viewing the document at this page
           viewUrl: viewUrl,
-          // Source identifier for UI display
           source: `${filename} - ${pageEnd && pageEnd !== pageStart ? `Pages ${pageStart}-${pageEnd}` : `Page ${pageNumber}`}`,
         });
       }
     } else {
-      // Track why chunks are being skipped
       if (!fileId) {
         chunksWithoutFileId++;
       }
@@ -651,7 +556,6 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
     }
   });
   
-  // Log statistics
   console.log(`[extractCitationsFromChunks] Citations extracted: ${citationsMap.size}`);
   if (chunksWithoutPages > 0) {
     console.warn(`[extractCitationsFromChunks] ⚠️ ${chunksWithoutPages} chunks skipped - missing page_start`);
@@ -660,10 +564,8 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
     console.warn(`[extractCitationsFromChunks] ⚠️ ${chunksWithoutFileId} chunks skipped - missing file_id`);
   }
   
-  // Convert Map to array and sort by filename, then page number
   const citations = Array.from(citationsMap.values())
     .sort((a, b) => {
-      // Sort by filename first, then by page number
       if (a.filename !== b.filename) {
         return a.filename.localeCompare(b.filename);
       }
@@ -673,10 +575,6 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
   return citations;
 }
 
-/**
- * Unified Folder Chat Endpoint - Intelligent Routing
- * POST /api/files/:folderName/intelligent-chat
- */
 exports.intelligentFolderChat = async (req, res) => {
   try {
     console.log('🚀 [intelligentFolderChat] Controller called');
@@ -704,8 +602,6 @@ exports.intelligentFolderChat = async (req, res) => {
       return res.status(400).json({ error: "folderName is required in URL path" });
     }
 
-    // For secret prompts, question is optional (secret value will be used as prompt)
-    // For regular queries, question is required
     const hasSecretId = secret_id && (secret_id !== null && secret_id !== undefined && secret_id !== '');
     if (!hasSecretId && (!question || !question.trim())) {
       return res.status(400).json({ error: "question is required when secret_id is not provided." });
@@ -718,7 +614,6 @@ exports.intelligentFolderChat = async (req, res) => {
     console.log(`💬 Query: "${(question || '').substring(0, 100)}..."`);
     console.log(`🔐 Secret ID: ${secret_id || 'none'}`);
 
-    // Check if secret prompt is being used
     let used_secret_prompt = false;
     let secretLlmName = null;
     let secretProvider = null;
@@ -730,7 +625,6 @@ exports.intelligentFolderChat = async (req, res) => {
       console.log(`🔐 [Secret Prompt] Fetching secret configuration for secret_id: ${secret_id}`);
 
       try {
-        // Use secretManagerController to fetch secret details
         const secretDetails = await getSecretDetailsById(secret_id);
         
         if (!secretDetails) {
@@ -749,7 +643,6 @@ exports.intelligentFolderChat = async (req, res) => {
           secretName = dbSecretName;
           secretLlmName = dbLlmName;
 
-          // Resolve provider name using LLM from secret_manager table
           const { resolveProviderName } = require('../services/folderAiService');
           secretProvider = resolveProviderName(secretLlmName || 'gemini');
           isSecretGemini = secretProvider.startsWith('gemini');
@@ -760,7 +653,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.log(`🔐 [Secret Prompt] Is Gemini: ${isSecretGemini}`);
           console.log(`🔐 [Secret Prompt] Chunking method: ${dbChunkingMethod || 'none'}`);
 
-          // Fetch secret value from GCP Secret Manager
           if (secret_manager_id && version) {
             try {
               const secretClient = new SecretManagerServiceClient();
@@ -799,7 +691,6 @@ exports.intelligentFolderChat = async (req, res) => {
                 console.log(`🔐 [Secret Prompt] Secret value fetched successfully (${secretValue.length} characters)`);
               }
 
-              // ✅ Fetch template files and their extracted data
               if (input_template_id || output_template_id) {
                 console.log(`\n📄 [Secret Prompt] Fetching template files:`);
                 console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
@@ -816,8 +707,8 @@ exports.intelligentFolderChat = async (req, res) => {
                     console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
                   }
                   
-                  // Build enhanced prompt with template examples
                   secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
+                  secretTemplateData = templateData; // Store for later use
                   console.log(`✅ [Secret Prompt] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
                 } else {
                   console.log(`⚠️ [Secret Prompt] No template files found or available\n`);
@@ -840,13 +731,11 @@ exports.intelligentFolderChat = async (req, res) => {
       }
     }
 
-    // 1. Get user plan & usage
     const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(
       userId,
       authorizationHeader
     );
 
-    // Check if user is on free plan
     const isFreeUser = TokenUsageService.isFreePlan(plan);
     if (isFreeUser) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -859,8 +748,6 @@ exports.intelligentFolderChat = async (req, res) => {
       console.log(`${'🆓'.repeat(40)}\n`);
     }
 
-    // 2. Fetch all processed files in folder
-    // ✅ CRITICAL FIX: First find the folder to get its actual folder_path value
     const folderQuery = `
       SELECT id, originalname, folder_path
       FROM user_files
@@ -883,11 +770,8 @@ exports.intelligentFolderChat = async (req, res) => {
     const folderRow = folderRows[0];
     const actualFolderPath = folderRow.folder_path; // This could be null, empty string, or a path
     
-    // ✅ Use the folder's actual folder_path value for matching files
-    // Handle null/empty folder_path (root-level folders)
     let filesQuery, queryParams;
     if (!actualFolderPath || actualFolderPath === '') {
-      // Root-level folder: files with null or empty folder_path
       filesQuery = `
         SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
         FROM user_files
@@ -899,7 +783,6 @@ exports.intelligentFolderChat = async (req, res) => {
       `;
       queryParams = [userId];
     } else {
-      // Nested folder: files with matching folder_path
       filesQuery = `
         SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
         FROM user_files
@@ -923,7 +806,6 @@ exports.intelligentFolderChat = async (req, res) => {
         status: f.status, 
         folder_path: f.folder_path || '(null)'
       })));
-      // ✅ Verify all files belong to the correct folder
       const wrongFolderFiles = files.filter(f => (f.folder_path || '') !== (actualFolderPath || ''));
       if (wrongFolderFiles.length > 0) {
         console.error(`❌ [FOLDER ISOLATION] CRITICAL ERROR: Found ${wrongFolderFiles.length} files from wrong folder!`);
@@ -934,7 +816,6 @@ exports.intelligentFolderChat = async (req, res) => {
         })));
       }
     } else {
-      // ✅ Helpful debugging: Check what folder_path values exist in the database
       const debugQuery = `
         SELECT DISTINCT folder_path, COUNT(*) as file_count
         FROM user_files
@@ -965,13 +846,10 @@ exports.intelligentFolderChat = async (req, res) => {
 
     console.log(`📄 Found ${processedFiles.length} processed files in folder`);
 
-    // 3. Determine routing based on secret prompt or query analysis
     let routingDecision;
     let finalProvider = null; // Will be set based on secret prompt or DB fetch
 
     if (used_secret_prompt && secret_id) {
-      // 🔒 CRITICAL POLICY: Secret prompts ALWAYS use RAG with their specified LLM
-      // No Gemini Eyeball routing for secret prompts
       routingDecision = {
         method: 'rag',
         reason: 'Secret prompt - always use RAG with specified LLM (policy enforced)',
@@ -992,12 +870,9 @@ exports.intelligentFolderChat = async (req, res) => {
       console.log(`   - Method: RAG (enforced)`);
       console.log(`${'='.repeat(80)}\n`);
     } else {
-      // Regular query - analyze routing
       routingDecision = analyzeQueryForRouting(question);
 
-      // FREE TIER: Enforce restrictions
       if (isFreeUser) {
-        // Check Gemini Eyeball limit (only 1 use per day)
         if (routingDecision.method === 'gemini_eyeball') {
           const eyeballLimitCheck = await TokenUsageService.checkFreeTierEyeballLimit(userId, plan);
           if (!eyeballLimitCheck.allowed) {
@@ -1006,7 +881,6 @@ exports.intelligentFolderChat = async (req, res) => {
             console.log(`[FREE TIER] ${eyeballLimitCheck.message}`);
             console.log(`${'🆓'.repeat(40)}\n`);
             
-            // Force RAG for free users after first Eyeball use
             routingDecision = {
               method: 'rag',
               reason: 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead',
@@ -1018,14 +892,12 @@ exports.intelligentFolderChat = async (req, res) => {
             console.log(`${'🆓'.repeat(40)}\n`);
           }
         } else if (routingDecision.method === 'rag') {
-          // RAG is allowed for subsequent chats after first Eyeball use
           console.log(`\n${'🆓'.repeat(40)}`);
           console.log(`[FREE TIER] Using RAG retrieval (subsequent chat after first Eyeball use)`);
           console.log(`${'🆓'.repeat(40)}\n`);
         }
       }
 
-      // For RAG method, fetch LLM from custom_query table (same as FileController.queryFolderDocuments)
       if (routingDecision.method === 'rag') {
         let dbLlmName = null;
         const customQueryLlm = `
@@ -1043,19 +915,16 @@ exports.intelligentFolderChat = async (req, res) => {
           dbLlmName = 'gemini';
         }
 
-        // Resolve provider name using the LLM from custom_query table (same as FileController)
         const { resolveProviderName, getAvailableProviders } = require('../services/folderAiService');
         finalProvider = resolveProviderName(dbLlmName || 'gemini');
         console.log(`🤖 [RAG] Resolved LLM provider for custom query: ${finalProvider}`);
 
-        // Check if provider is available (same as FileController)
         const availableProviders = getAvailableProviders();
         if (!availableProviders[finalProvider] || !availableProviders[finalProvider].available) {
           console.warn(`⚠️ [RAG] Provider '${finalProvider}' unavailable — falling back to gemini`);
           finalProvider = 'gemini';
         }
       } else {
-        // For Gemini Eyeball, always use Gemini (it's Gemini-specific)
         finalProvider = 'gemini';
         console.log(`👁️ [Gemini Eyeball] Using Gemini (Eyeball is Gemini-specific)`);
       }
@@ -1074,7 +943,6 @@ exports.intelligentFolderChat = async (req, res) => {
       console.log(`${'='.repeat(80)}\n`);
     }
 
-    // 4. Get conversation history
     let previousChats = [];
     if (hasExistingSession) {
       previousChats = await FolderChat.getFolderChatHistory(userId, folderName, finalSessionId);
@@ -1082,9 +950,7 @@ exports.intelligentFolderChat = async (req, res) => {
     const conversationContext = formatConversationHistory(previousChats);
     const historyForStorage = simplifyHistory(previousChats);
 
-    // 5. Check free tier daily token limit before processing
     if (isFreeUser) {
-      // Estimate tokens (rough estimate: ~4 chars per token for input, ~3 chars per token for output)
       const inputTokens = Math.ceil((question?.length || 0) / 4);
       const estimatedOutputTokens = Math.ceil(inputTokens * 1.5); // Estimate output tokens
       const estimatedTokens = inputTokens + estimatedOutputTokens;
@@ -1102,7 +968,6 @@ exports.intelligentFolderChat = async (req, res) => {
       console.log(`[FREE TIER] Token check passed: ${tokenLimitCheck.message}`);
     }
 
-    // 6. Route to appropriate method
     let answer;
     let usedChunkIds = [];
     let usedFileIds = processedFiles.map(f => f.id);
@@ -1110,7 +975,6 @@ exports.intelligentFolderChat = async (req, res) => {
     let usedChunksForCitations = []; // Store chunks used for citation extraction
     let secretTemplateData = null; // Store template data for post-processing
 
-    // FREE TIER: Force gemini-2.5-flash model
     if (isFreeUser) {
       finalProvider = 'gemini';
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -1119,10 +983,6 @@ exports.intelligentFolderChat = async (req, res) => {
     }
 
     if (routingDecision.method === 'gemini_eyeball') {
-      // ========================================
-      // GEMINI EYEBALL METHOD (Complete Summary)
-      // ========================================
-      // Note: Gemini Eyeball always uses Gemini models (it's Gemini-specific)
       console.log(`👁️ [Gemini Eyeball] Starting complete folder summary...`);
       console.log(`👁️ [Gemini Eyeball] Files to process: ${processedFiles.length}`);
       console.log(`👁️ [Gemini Eyeball] Note: Using Gemini models (Eyeball is Gemini-specific, ignoring llm_name="${llm_name}")`);
@@ -1134,7 +994,6 @@ exports.intelligentFolderChat = async (req, res) => {
       }
       console.log(`👁️ [Gemini Eyeball] Using bucket: ${bucketName}`);
 
-      // Build documents array with GCS URIs
       const documents = processedFiles.map((file, index) => {
         const gcsUri = `gs://${bucketName}/${file.gcs_path}`;
         console.log(`👁️ [Gemini Eyeball] Document ${index + 1}/${processedFiles.length}: ${file.originalname}`);
@@ -1150,31 +1009,27 @@ exports.intelligentFolderChat = async (req, res) => {
 
       console.log(`👁️ [Gemini Eyeball] Built ${documents.length} document objects`);
 
-      // Build prompt with conversation context
       let promptText = question;
       if (conversationContext) {
         console.log(`👁️ [Gemini Eyeball] Adding conversation context (${conversationContext.length} chars)`);
         promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
       }
 
-      // If secret prompt, prepend secret value (already fetched above) with JSON formatting instructions
       if (used_secret_prompt && secretValue) {
+        const inputTemplate = secretTemplateData?.inputTemplate || null;
         const outputTemplate = secretTemplateData?.outputTemplate || null;
-        const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
+        const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
         promptText = `${formattedSecretValue}\n\n=== USER QUESTION ===\n${promptText}`;
         console.log(`🔐 [Gemini Eyeball] Added secret prompt with JSON formatting: "${secretName}" (${formattedSecretValue.length} chars)`);
       }
 
       console.log(`👁️ [Gemini Eyeball] Final prompt length: ${promptText.length} chars`);
 
-      // Use Gemini Eyeball with all folder documents
       console.log(`👁️ [Gemini Eyeball] Calling askGeminiWithMultipleGCS...`);
       console.log(`👁️ [Gemini Eyeball] Request started at: ${new Date().toISOString()}`);
       const startTime = Date.now();
 
       try {
-        // Add a wrapper timeout to ensure we don't hang forever
-        // FREE TIER: Force gemini-2.5-flash model
         const forcedModel = isFreeUser ? TokenUsageService.getFreeTierForcedModel() : null;
         const geminiPromise = askGeminiWithMultipleGCS(promptText, documents, '', forcedModel);
         const overallTimeout = new Promise((_, reject) => {
@@ -1185,9 +1040,7 @@ exports.intelligentFolderChat = async (req, res) => {
 
         answer = await Promise.race([geminiPromise, overallTimeout]);
         
-        // For secret prompts, preserve JSON structure; for regular queries, convert to plain text
         if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-          // Post-process to ensure proper JSON format
           answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
         } else {
           answer = ensurePlainText(answer);
@@ -1209,7 +1062,6 @@ exports.intelligentFolderChat = async (req, res) => {
         console.error(`❌ [Gemini Eyeball] Error message: ${geminiError.message || 'No message'}`);
         console.error(`❌ [Gemini Eyeball] Error stack:`, geminiError.stack);
 
-        // Check if it's a timeout error
         const isTimeout = geminiError.message && (
           geminiError.message.includes('timeout') ||
           geminiError.message.includes('exceeded maximum timeout') ||
@@ -1222,45 +1074,41 @@ exports.intelligentFolderChat = async (req, res) => {
 
         console.error(`${'='.repeat(80)}\n`);
 
-        // Fallback to RAG if Gemini fails (e.g., permission issues, timeouts)
         console.log(`\n${'='.repeat(80)}`);
         console.log(`🔄 [FALLBACK] Gemini Eyeball failed, falling back to RAG method...`);
         console.log(`🔄 [FALLBACK] Reason: ${isTimeout ? 'Request timeout' : geminiError.message}`);
         console.log(`${'='.repeat(80)}\n`);
         methodUsed = 'rag';
 
-        // Continue with RAG method below
         routingDecision.method = 'rag';
         routingDecision.reason = isTimeout ? 'Gemini Eyeball timeout, using RAG fallback' : 'Gemini Eyeball failed, using RAG fallback';
       }
 
-      // For Gemini Eyeball, we don't have specific chunk IDs (all documents are processed)
       if (methodUsed === 'gemini_eyeball') {
         usedChunkIds = [];
       }
 
     }
 
-    // If Gemini failed, or if RAG was the original choice, use RAG method
     if (routingDecision.method === 'rag' || methodUsed === 'rag') {
-      // ========================================
-      // RAG METHOD (Specific Queries or Fallback)
-      // ========================================
       console.log(`🔍 [RAG] Using RAG method for ${methodUsed === 'rag' ? 'targeted query' : 'fallback after Gemini error'}...`);
       console.log(`🔍 [RAG] Processing ${processedFiles.length} files`);
 
-      // For secret prompts, use secret value as the prompt with JSON formatting; otherwise use question
-      const basePrompt = (used_secret_prompt && secretValue) ? addSecretPromptJsonFormatting(secretValue) : question;
+      let basePrompt;
+      if (used_secret_prompt && secretValue) {
+        const inputTemplate = secretTemplateData?.inputTemplate || null;
+        const outputTemplate = secretTemplateData?.outputTemplate || null;
+        basePrompt = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
+      } else {
+        basePrompt = question;
+      }
       
-      // Build prompt with conversation context
       let promptText = basePrompt;
       if (conversationContext) {
         console.log(`🔍 [RAG] Adding conversation context (${conversationContext.length} chars)`);
         promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
       }
 
-      // Perform semantic search across all files
-      // Use secret value for embedding if secret prompt is used, otherwise use question
       const embeddingSource = (used_secret_prompt && secretValue) ? secretValue : question;
       console.log(`🔍 [RAG] Generating embedding for ${used_secret_prompt ? 'secret prompt' : 'question'}...`);
       const questionEmbedding = await generateEmbedding(embeddingSource);
@@ -1271,7 +1119,6 @@ exports.intelligentFolderChat = async (req, res) => {
       for (let i = 0; i < processedFiles.length; i++) {
         const file = processedFiles[i];
         
-        // ✅ CRITICAL: Verify file belongs to the correct folder before processing
         if (file.folder_path !== folderName) {
           console.error(`❌ [FOLDER ISOLATION] SKIPPING FILE: "${file.originalname}" - Wrong folder!`);
           console.error(`   Expected folder: "${folderName}"`);
@@ -1284,7 +1131,6 @@ exports.intelligentFolderChat = async (req, res) => {
         console.log(`   File Status: ${file.status}`);
         console.log(`   ✅ Folder verified: ${file.folder_path}`);
         
-        // First, verify chunks exist for this file
         const debugChunks = await FileChunk.getChunksByFileId(file.id);
         console.log(`   📋 Chunks in database: ${debugChunks.length}`);
         
@@ -1293,7 +1139,6 @@ exports.intelligentFolderChat = async (req, res) => {
           continue;
         }
         
-        // Check if embeddings exist
         const chunkIds = debugChunks.map(c => c.id);
         const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
         console.log(`   🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
@@ -1301,7 +1146,6 @@ exports.intelligentFolderChat = async (req, res) => {
         if (debugVectors.length === 0) {
           console.log(`   ⚠️ WARNING: Chunks exist but no embeddings found!`);
           console.log(`   💡 Using chunks directly as fallback.`);
-          // Use chunks directly as fallback
           const fallbackChunks = debugChunks.map(c => ({
             ...preservePageInfo(c), // Ensure page_start/page_end are preserved
             filename: file.originalname,
@@ -1316,13 +1160,11 @@ exports.intelligentFolderChat = async (req, res) => {
           continue;
         }
         
-        // Ensure file.id is a valid UUID string
         const fileIdStr = String(file.id).trim();
         const isValidUUID = UUID_REGEX.test(fileIdStr);
         
         if (!isValidUUID) {
           console.error(`   ❌ Invalid file ID format: ${file.id} (expected UUID)`);
-          // Still try to use chunks as fallback
           const fallbackChunks = debugChunks.map(c => ({
             ...preservePageInfo(c), // Ensure page_start/page_end are preserved
             filename: file.originalname,
@@ -1337,7 +1179,6 @@ exports.intelligentFolderChat = async (req, res) => {
           continue;
         }
         
-        // Perform vector search with proper UUID
         console.log(`   🔎 Performing vector search with embedding...`);
         const relevant = await ChunkVector.findNearestChunks(
           questionEmbedding,
@@ -1348,7 +1189,6 @@ exports.intelligentFolderChat = async (req, res) => {
         console.log(`   📊 Vector search found: ${relevant.length} relevant chunks`);
 
         if (relevant.length > 0) {
-          // Convert distance to similarity if not already present
           const chunksWithSimilarity = relevant.map((r) => {
             const distance = parseFloat(r.distance) || 2.0;
             const similarity = r.similarity || (1 / (1 + distance));
@@ -1366,7 +1206,6 @@ exports.intelligentFolderChat = async (req, res) => {
         } else {
           console.log(`   ⚠️ Vector search returned 0 results, but ${debugChunks.length} chunks exist`);
           console.log(`   💡 Using all chunks as fallback since embeddings exist but don't match query`);
-          // Use all chunks as fallback if vector search fails but chunks exist
           const fallbackChunks = debugChunks.map(c => ({
             ...c,
             filename: file.originalname,
@@ -1383,12 +1222,10 @@ exports.intelligentFolderChat = async (req, res) => {
 
       console.log(`\n🔍 [RAG] Total relevant chunks found: ${allRelevantChunks.length}`);
 
-      // FALLBACK: If no chunks found via vector search, try using all chunks from processed files
       if (allRelevantChunks.length === 0) {
         console.warn(`\n⚠️ [RAG] No chunks found via vector search - trying fallback...`);
         console.warn(`   - Files searched: ${processedFiles.length}`);
         
-        // Check if files are still processing
         const processingFiles = processedFiles.filter(f => f.status !== 'processed');
         if (processingFiles.length > 0) {
           console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
@@ -1396,7 +1233,6 @@ exports.intelligentFolderChat = async (req, res) => {
           return;
         }
         
-        // Fallback: Get all chunks from processed files
         console.log(`   - Attempting fallback: Using all chunks from processed files...`);
         const fallbackChunks = [];
         for (const file of processedFiles) {
@@ -1426,7 +1262,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.error(`   - Files status: ${processedFiles.map(f => `${f.originalname}: ${f.status}`).join(', ')}`);
           console.log(`⚠️ [RAG] No relevant chunks found - using conversation history + user context + case data`);
 
-          // Fetch user profile context
         let profileContext = '';
         try {
           profileContext = await UserProfileService.getProfileContext(userId, authorizationHeader) || '';
@@ -1437,7 +1272,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.warn(`🔍 [RAG] Failed to fetch profile context:`, profileError.message);
         }
 
-        // Fetch case data for this folder
         let caseContext = '';
         try {
           const { fetchCaseDataForFolder, formatCaseDataAsContext } = require('./FileController');
@@ -1450,7 +1284,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.warn(`🔍 [RAG] Failed to fetch case data:`, caseError.message);
         }
 
-        // Build context from conversation history, profile, and case data
         let contextParts = [];
         if (conversationContext) {
           contextParts.push(`=== PREVIOUS CONVERSATION ===\n${conversationContext}`);
@@ -1474,33 +1307,29 @@ exports.intelligentFolderChat = async (req, res) => {
 
         console.log(`🔍 [RAG] Using context-based answer (no chunks): ${combinedContext.length} chars`);
 
-        // Build prompt with available context
-        // For secret prompts, secret value is already the prompt with JSON formatting; for regular queries, use question
         let contextPrompt = promptText;
         if (combinedContext) {
           if (used_secret_prompt && secretValue) {
-            // Secret prompt: use secret value as the main prompt with JSON formatting instructions
-            const formattedSecretValue = addSecretPromptJsonFormatting(secretValue);
+            const inputTemplate = secretTemplateData?.inputTemplate || null;
+            const outputTemplate = secretTemplateData?.outputTemplate || null;
+            const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
             contextPrompt = `${combinedContext}\n\n=== SECRET PROMPT ===\n${formattedSecretValue}`;
           } else {
-            // Regular query: use question
             contextPrompt = `${combinedContext}\n\n=== USER QUESTION ===\n${promptText}`;
           }
         } else {
-          // If no combined context, still format secret prompt if used
           if (used_secret_prompt && secretValue) {
+            const inputTemplate = secretTemplateData?.inputTemplate || null;
             const outputTemplate = secretTemplateData?.outputTemplate || null;
-            const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
+            const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
             contextPrompt = formattedSecretValue;
           }
         }
 
-        // Use RAG LLM service with context (no chunks)
         const provider = finalProvider || 'gemini';
         console.log(`🔍 [RAG] Calling LLM with provider: ${provider} (context-based, no chunks)`);
         const { askLLM, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
 
-        // Get model config and token limits
         const modelConfig = ALL_LLM_CONFIGS[provider];
         const modelName = modelConfig?.model || 'unknown';
         let maxTokens = null;
@@ -1512,13 +1341,15 @@ exports.intelligentFolderChat = async (req, res) => {
         }
 
         try {
-          // For secret prompts, pass secret value; for regular queries, pass question
           const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : question;
-          answer = await askLLM(provider, contextPrompt, '', null, llmQuestion);
+          answer = await askLLM(provider, contextPrompt, '', null, llmQuestion, {
+            userId: userId,
+            endpoint: '/api/doc/folder-chat',
+            fileId: null,
+            sessionId: sessionId
+          });
           
-          // For secret prompts, preserve JSON structure; for regular queries, convert to plain text
           if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-            // Post-process to ensure proper JSON format
             answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
           } else {
             answer = ensurePlainText(answer);
@@ -1532,10 +1363,8 @@ exports.intelligentFolderChat = async (req, res) => {
           console.log(`✅ [RAG] Provider: ${provider}`);
           console.log(`${'='.repeat(80)}\n`);
 
-          // Set empty chunk IDs since we didn't use any chunks
           usedChunkIds = [];
 
-          // Skip to saving chat (skip the chunk-based processing below)
           if (!answer || !answer.trim()) {
             console.error(`❌ [RAG] Empty answer from context-based response`);
             return res.status(500).json({
@@ -1544,8 +1373,6 @@ exports.intelligentFolderChat = async (req, res) => {
             });
           }
 
-          // Continue to save chat below (will skip the chunk processing)
-          // We'll need to handle this differently - let me check the flow
         } catch (contextError) {
           console.error(`❌ [RAG] Error in context-based LLM call:`, contextError.message);
           return res.status(500).json({
@@ -1555,9 +1382,7 @@ exports.intelligentFolderChat = async (req, res) => {
         }
         }
       } else {
-        // ✅ CRITICAL: Filter out chunks from wrong folders before sorting
         const validFolderChunks = allRelevantChunks.filter(chunk => {
-          // Verify chunk belongs to a file in the correct folder
           const chunkFile = processedFiles.find(f => f.id === (chunk.file_id || chunk.fileId));
           if (!chunkFile) {
             console.warn(`⚠️ [FOLDER ISOLATION] Chunk ${chunk.chunk_id || chunk.id} has unknown file_id, skipping`);
@@ -1575,7 +1400,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.warn(`⚠️ [FOLDER ISOLATION] Filtered out ${allRelevantChunks.length - validFolderChunks.length} chunks from wrong folders`);
         }
         
-        // Sort by similarity and take top chunks
         const topChunks = validFolderChunks
           .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
           .slice(0, 10); // Top 10 chunks
@@ -1586,7 +1410,6 @@ exports.intelligentFolderChat = async (req, res) => {
         usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
         usedChunksForCitations = topChunks; // Store chunks for citation extraction
         
-        // ✅ Print each selected chunk with page information for response
         console.log(`\n${'='.repeat(80)}`);
         console.log(`📋 [RAG RESPONSE] CHUNKS WITH CITATIONS (${topChunks.length} chunks):`);
         console.log(`${'='.repeat(80)}`);
@@ -1601,7 +1424,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.log(`   📏 Distance: ${(chunk.distance || 0).toFixed(4)}`);
           console.log(`   🆔 Chunk ID: ${chunk.chunk_id || chunk.id || 'N/A'}`);
           console.log(`   📝 Content Preview: ${(chunk.content || '').substring(0, 120)}${(chunk.content || '').length > 120 ? '...' : ''}`);
-          // Citation format for frontend
           if (chunk.page_start !== null && chunk.page_start !== undefined && chunk.filename) {
             console.log(`   🔗 Citation: ${chunk.filename} - ${pageInfo}`);
           }
@@ -1610,7 +1432,6 @@ exports.intelligentFolderChat = async (req, res) => {
         
         console.log(`🔍 [RAG] Using chunk IDs: ${usedChunkIds.slice(0, 5).join(', ')}${usedChunkIds.length > 5 ? '...' : ''}`);
 
-        // Build context from chunks with page numbers visible
         const chunkContext = topChunks
           .map((c) => {
             const pageInfo = c.page_start !== null && c.page_start !== undefined
@@ -1622,12 +1443,10 @@ exports.intelligentFolderChat = async (req, res) => {
 
         console.log(`🔍 [RAG] Built context: ${chunkContext.length} chars from ${topChunks.length} chunks`);
 
-        // Use RAG LLM service - use finalProvider (from secret or DB fetch)
         const provider = finalProvider || 'gemini';
         console.log(`🔍 [RAG] Calling LLM with provider: ${provider}`);
         const { askLLM, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
 
-        // Get model config and token limits
         const modelConfig = ALL_LLM_CONFIGS[provider];
         const modelName = modelConfig?.model || 'unknown';
         let maxTokens = null;
@@ -1638,9 +1457,6 @@ exports.intelligentFolderChat = async (req, res) => {
           console.warn(`🔍 [RAG] Could not fetch token limits: ${tokenError.message}`);
         }
 
-        // Build the full prompt with chunks
-        // For secret prompts, the secret value is already the prompt (basePrompt) with JSON formatting
-        // For regular queries, use the question
         let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
 
         if (used_secret_prompt && secretValue) {
@@ -1650,13 +1466,15 @@ exports.intelligentFolderChat = async (req, res) => {
         console.log(`🔍 [RAG] Final prompt length: ${fullPrompt.length} chars`);
 
         try {
-          // For secret prompts, pass secret value; for regular queries, pass question
           const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : question;
-          answer = await askLLM(provider, fullPrompt, '', topChunks, llmQuestion);
+          answer = await askLLM(provider, fullPrompt, '', topChunks, llmQuestion, {
+            userId: userId,
+            endpoint: '/api/doc/folder-chat',
+            fileId: null,
+            sessionId: sessionId
+          });
           
-          // For secret prompts, preserve JSON structure; for regular queries, convert to plain text
           if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-            // Post-process to ensure proper JSON format
             answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
           } else {
             answer = ensurePlainText(answer);
@@ -1695,24 +1513,18 @@ exports.intelligentFolderChat = async (req, res) => {
     console.log(`✅ [FINAL RESULT] Chunks used: ${usedChunkIds.length} ${methodUsed === 'gemini_eyeball' ? '(full document vision, no chunks)' : ''}`);
     console.log(`${'='.repeat(80)}\n`);
 
-    // ✅ CRITICAL: Extract citations BEFORE saving to database so they can be stored permanently
-    // Generate base URL for API endpoints
     const protocol = req.protocol || 'http';
     const host = req.get('host') || '';
     const baseUrl = `${protocol}://${host}`;
     
-    // Extract citations based on method used
     let citations = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
-      // ✅ Gemini Eyeball: Create citations from all processed files
       console.log(`👁️ [Gemini Eyeball] Extracting citations from ${processedFiles.length} files`);
       citations = await extractCitationsFromFiles(processedFiles, baseUrl);
     } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
-      // ✅ RAG: Extract citations from chunks used
       citations = await extractCitationsFromChunks(usedChunksForCitations, baseUrl);
     }
 
-    // ✅ Print each chunk/file with citation information for response
     console.log(`\n${'='.repeat(80)}`);
     console.log(`📑 [RESPONSE CITATIONS] Total citations: ${citations.length}`);
     console.log(`${'='.repeat(80)}`);
@@ -1752,21 +1564,15 @@ exports.intelligentFolderChat = async (req, res) => {
     
     console.log(`${'='.repeat(80)}\n`);
 
-    // 6. Store chat in folder_chat table WITH citations
     console.log(`💾 [intelligentFolderChat] Saving chat to folder_chat table with ${citations.length} citations...`);
-    // ✅ For secret prompts, ALWAYS store secret name as the question; for regular queries, store the question
-    // This ensures prompt_label is always stored in question column for secret prompts
     let storedQuestion;
     if (used_secret_prompt) {
-      // For secret prompts, use secretName if available, otherwise use a fallback
       storedQuestion = secretName || question?.trim() || 'Secret Prompt';
       console.log(`💾 [intelligentFolderChat] Secret prompt detected - storing question as: "${storedQuestion}"`);
     } else {
-      // For regular queries, use the question
       storedQuestion = question?.trim() || '';
       console.log(`💾 [intelligentFolderChat] Regular query - storing question as: "${storedQuestion}"`);
     }
-    // ✅ Store citations permanently in database
     const savedChat = await FolderChat.saveFolderChat(
       userId,
       folderName,
@@ -1784,7 +1590,6 @@ exports.intelligentFolderChat = async (req, res) => {
 
     console.log(`✅ [intelligentFolderChat] Chat saved to folder_chat: ${savedChat.id} with ${citations.length} citations stored`);
 
-    // 7. Get updated history
     console.log(`📜 [intelligentFolderChat] Fetching updated chat history...`);
     const updatedHistoryRows = await FolderChat.getFolderChatHistory(userId, folderName, finalSessionId);
     const updatedHistory = updatedHistoryRows.map(row => ({
@@ -1795,7 +1600,6 @@ exports.intelligentFolderChat = async (req, res) => {
     }));
     console.log(`📜 [intelligentFolderChat] Retrieved ${updatedHistory.length} history entries`);
 
-    // ✅ Print each chunk with citation information for response
     console.log(`\n${'='.repeat(80)}`);
     console.log(`📑 [RESPONSE CITATIONS] Total citations: ${citations.length}`);
     console.log(`${'='.repeat(80)}`);
@@ -1832,10 +1636,8 @@ exports.intelligentFolderChat = async (req, res) => {
     
     console.log(`${'='.repeat(80)}\n`);
 
-    // ✅ Add chunk/file details with page numbers for user visibility (non-streaming)
     let chunkDetails = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
-      // For Gemini Eyeball: Create details from files showing ALL pages
       const FileChunk = require('../models/FileChunk');
       for (const file of processedFiles) {
         try {
@@ -1845,7 +1647,6 @@ exports.intelligentFolderChat = async (req, res) => {
             continue;
           }
 
-          // Extract all unique pages from all chunks
           const pageSet = new Set();
           chunks.forEach(chunk => {
             if (chunk.page_start !== null && chunk.page_start !== undefined && chunk.page_start > 0) {
@@ -1883,7 +1684,6 @@ exports.intelligentFolderChat = async (req, res) => {
               is_full_document: false, // Changed to false since we now show specific pages
             });
           } else {
-            // Fallback if no page info
             chunkDetails.push({
               file_id: file.id,
               filename: file.originalname,
@@ -1903,7 +1703,6 @@ exports.intelligentFolderChat = async (req, res) => {
         }
       }
     } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
-      // For RAG: Create details from chunks
       chunkDetails = usedChunksForCitations.map(chunk => ({
         chunk_id: chunk.chunk_id || chunk.id,
         content_preview: (chunk.content || '').substring(0, 200) + ((chunk.content || '').length > 200 ? '...' : ''),
@@ -1930,7 +1729,6 @@ exports.intelligentFolderChat = async (req, res) => {
       historyEntries: updatedHistory.length
     });
 
-    // ✅ Ensure answer is plain text before sending to frontend
     const plainTextAnswer = ensurePlainText(answer);
     
     return res.json({
@@ -1954,13 +1752,11 @@ exports.intelligentFolderChat = async (req, res) => {
     console.error('❌ [intelligentFolderChat] Error message:', error.message || 'No message');
     console.error('❌ [intelligentFolderChat] Error stack:', error.stack);
 
-    // Check if response was already sent
     if (res.headersSent) {
       console.error('❌ [intelligentFolderChat] Response already sent, cannot send error response');
       return;
     }
 
-    // Send error response
     return res.status(500).json({
       error: "Failed to process folder chat",
       details: error.message || 'Unknown error occurred',
@@ -1972,12 +1768,7 @@ exports.intelligentFolderChat = async (req, res) => {
 };
 
 
-/**
- * Streaming version of Intelligent Folder Chat
- * POST /api/files/:folderName/intelligent-chat/stream
- */
 exports.intelligentFolderChatStream = async (req, res) => {
-  // Set up SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -1985,7 +1776,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
 
-  // Heartbeat - Increased interval to reduce unnecessary writes
   const heartbeat = setInterval(() => {
     try {
       res.write(`data: [PING]\n\n`);
@@ -1994,7 +1784,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
     }
   }, 30000); // 30 seconds instead of 15
 
-  // Chunk buffer for batching writes to reduce UI blinking
   let chunkBuffer = '';
   let chunkBufferTimer = null;
   const CHUNK_BUFFER_DELAY = 50; // ms - batch chunks every 50ms
@@ -2020,13 +1809,11 @@ exports.intelligentFolderChatStream = async (req, res) => {
     
     chunkBuffer += text;
     
-    // If buffer is getting large, flush immediately
     if (chunkBuffer.length >= MAX_CHUNK_BUFFER_SIZE) {
       flushChunkBuffer();
       return;
     }
     
-    // Otherwise, schedule a flush (will batch small chunks)
     if (!chunkBufferTimer) {
       chunkBufferTimer = setTimeout(() => {
         flushChunkBuffer();
@@ -2036,7 +1823,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
   const sendStatus = (status, message = '') => {
     try {
-      // Flush any pending chunks before sending status
       flushChunkBuffer();
       res.write(`data: ${JSON.stringify({ type: 'status', status, message })}\n\n`);
       if (res.flush) res.flush();
@@ -2047,7 +1833,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
   const sendError = (message, details = '') => {
     try {
-      // Flush any pending chunks before sending error
       flushChunkBuffer();
       if (chunkBufferTimer) {
         clearTimeout(chunkBufferTimer);
@@ -2080,12 +1865,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
       return;
     }
 
-    // Fix: Handle case where question might not be in body (could be in query or form data)
     const actualQuestion = question || req.query.question || '';
     const hasSecretId = secret_id && (secret_id !== null && secret_id !== undefined && secret_id !== '');
     
-    // For secret prompts, question is optional (secret value will be used as prompt)
-    // For regular queries, question is required
     if (!hasSecretId && (!actualQuestion || !actualQuestion.trim())) {
       sendError('question is required when secret_id is not provided');
       return;
@@ -2099,10 +1881,8 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     sendStatus('analyzing', 'Analyzing query intent...');
 
-    // Get user plan & usage
     const { usage, plan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
 
-    // Check if user is on free plan
     const isFreeUser = TokenUsageService.isFreePlan(plan);
     if (isFreeUser) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -2110,7 +1890,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
       console.log(`${'🆓'.repeat(40)}\n`);
     }
 
-    // Fetch processed files - ✅ CRITICAL FIX: First find the folder to get its actual folder_path value
     const folderQuery = `
       SELECT id, originalname, folder_path
       FROM user_files
@@ -2131,11 +1910,8 @@ exports.intelligentFolderChatStream = async (req, res) => {
     const folderRow = folderRows[0];
     const actualFolderPath = folderRow.folder_path; // This could be null, empty string, or a path
     
-    // ✅ Use the folder's actual folder_path value for matching files
-    // Handle null/empty folder_path (root-level folders)
     let filesQuery, queryParams;
     if (!actualFolderPath || actualFolderPath === '') {
-      // Root-level folder: files with null or empty folder_path
       filesQuery = `
         SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
         FROM user_files
@@ -2147,7 +1923,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
       `;
       queryParams = [userId];
     } else {
-      // Nested folder: files with matching folder_path
       filesQuery = `
         SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
         FROM user_files
@@ -2166,7 +1941,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Folder "${folderName}" has folder_path: "${actualFolderPath || '(root)'}"`);
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Found ${processedFiles.length} processed files in folder "${folderName}"`);
     if (processedFiles.length > 0) {
-      // ✅ Verify all files belong to the correct folder
       const wrongFolderFiles = processedFiles.filter(f => (f.folder_path || '') !== (actualFolderPath || ''));
       if (wrongFolderFiles.length > 0) {
         console.error(`❌ [Streaming] [FOLDER ISOLATION] CRITICAL ERROR: Found ${wrongFolderFiles.length} files from wrong folder!`);
@@ -2181,7 +1955,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
     }
 
     if (processedFiles.length === 0) {
-      // ✅ Helpful debugging: Check what folder_path values exist in the database
       const debugQuery = `
         SELECT DISTINCT folder_path, COUNT(*) as file_count
         FROM user_files
@@ -2201,7 +1974,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
       return;
     }
 
-    // Check if secret prompt is being used
     let used_secret_prompt = false;
     let secretLlmName = null;
     let secretProvider = null;
@@ -2209,13 +1981,13 @@ exports.intelligentFolderChatStream = async (req, res) => {
     let finalProvider = null; // Will be set based on secret prompt or DB fetch
     let secretValue = null;
     let secretName = null;
+    let secretTemplateData = null; // Store template data for streaming route
 
     if (hasSecretId) {
       used_secret_prompt = true;
       console.log(`🔐 [Streaming Secret Prompt] Fetching secret configuration for secret_id: ${secret_id}`);
 
       try {
-        // Use secretManagerController to fetch secret details
         const secretDetails = await getSecretDetailsById(secret_id);
         
         if (!secretDetails) {
@@ -2237,7 +2009,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         secretName = dbSecretName;
         secretLlmName = dbLlmName;
 
-        // Resolve provider name using LLM from secret_manager table
         const { resolveProviderName } = require('../services/folderAiService');
         secretProvider = resolveProviderName(secretLlmName || 'gemini');
         isSecretGemini = secretProvider.startsWith('gemini');
@@ -2249,7 +2020,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.log(`🔐 [Streaming Secret Prompt] Is Gemini: ${isSecretGemini}`);
         console.log(`🔐 [Streaming Secret Prompt] Chunking method: ${dbChunkingMethod || 'none'}`);
 
-        // Fetch secret value from GCP Secret Manager
         if (secret_manager_id && version) {
           try {
             const secretClient = new SecretManagerServiceClient();
@@ -2319,7 +2089,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
               console.log(`${'='.repeat(80)}\n`);
             }
 
-            // ✅ Fetch template files and their extracted data
             if (input_template_id || output_template_id) {
               console.log(`\n📄 [Streaming Secret Prompt] Fetching template files:`);
               console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
@@ -2336,12 +2105,13 @@ exports.intelligentFolderChatStream = async (req, res) => {
                   console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
                 }
                 
-                // Build enhanced prompt with template examples
                 secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
                 console.log(`✅ [Streaming Secret Prompt] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
               } else {
                 console.log(`⚠️ [Streaming Secret Prompt] No template files found or available\n`);
               }
+              
+              secretTemplateData = templateData; // Store for later use in streaming route
             }
           } catch (gcpError) {
             console.error(`\n${'='.repeat(80)}`);
@@ -2369,12 +2139,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
       }
     }
 
-    // Determine routing based on secret prompt or query analysis
     let routingDecision;
 
     if (used_secret_prompt && secret_id) {
-      // 🔒 CRITICAL POLICY: Secret prompts ALWAYS use RAG with their specified LLM
-      // No Gemini Eyeball routing for secret prompts
       routingDecision = {
         method: 'rag',
         reason: 'Secret prompt - always use RAG with specified LLM (policy enforced)',
@@ -2395,12 +2162,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
       console.log(`   - Method: RAG (enforced)`);
       console.log(`${'='.repeat(80)}\n`);
     } else {
-      // Regular query - analyze routing
       routingDecision = analyzeQueryForRouting(actualQuestion);
 
-      // FREE TIER: Enforce restrictions
       if (isFreeUser) {
-        // Check Gemini Eyeball limit (only 1 use per day)
         if (routingDecision.method === 'gemini_eyeball') {
           const eyeballLimitCheck = await TokenUsageService.checkFreeTierEyeballLimit(userId, plan);
           if (!eyeballLimitCheck.allowed) {
@@ -2410,7 +2174,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
             console.log(`${'🆓'.repeat(40)}\n`);
             sendStatus('info', eyeballLimitCheck.message);
             
-            // Force RAG for free users after first Eyeball use
             routingDecision = {
               method: 'rag',
               reason: 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead',
@@ -2422,14 +2185,12 @@ exports.intelligentFolderChatStream = async (req, res) => {
             console.log(`${'🆓'.repeat(40)}\n`);
           }
         } else if (routingDecision.method === 'rag') {
-          // RAG is allowed for subsequent chats after first Eyeball use
           console.log(`\n${'🆓'.repeat(40)}`);
           console.log(`[FREE TIER STREAM] Using RAG retrieval (subsequent chat after first Eyeball use)`);
           console.log(`${'🆓'.repeat(40)}\n`);
         }
       }
 
-      // For RAG method, fetch LLM from custom_query table (same as FileController.queryFolderDocuments)
       if (routingDecision.method === 'rag') {
         let dbLlmName = null;
         const customQueryLlm = `
@@ -2447,19 +2208,16 @@ exports.intelligentFolderChatStream = async (req, res) => {
           dbLlmName = 'gemini';
         }
 
-        // Resolve provider name using the LLM from custom_query table (same as FileController)
         const { resolveProviderName, getAvailableProviders } = require('../services/folderAiService');
         finalProvider = resolveProviderName(dbLlmName || 'gemini');
         console.log(`🤖 [STREAMING RAG] Resolved LLM provider for custom query: ${finalProvider}`);
 
-        // Check if provider is available (same as FileController)
         const availableProviders = getAvailableProviders();
         if (!availableProviders[finalProvider] || !availableProviders[finalProvider].available) {
           console.warn(`⚠️ [STREAMING RAG] Provider '${finalProvider}' unavailable — falling back to gemini`);
           finalProvider = 'gemini';
         }
       } else {
-        // For Gemini Eyeball, always use Gemini (it's Gemini-specific)
         finalProvider = 'gemini';
         console.log(`👁️ [STREAMING Gemini Eyeball] Using Gemini (Eyeball is Gemini-specific)`);
       }
@@ -2480,9 +2238,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     sendStatus('routing', `Using ${routingDecision.method.toUpperCase()} method: ${routingDecision.reason}`);
 
-    // Check free tier daily token limit before processing (streaming)
     if (isFreeUser) {
-      // Estimate tokens (rough estimate: ~4 chars per token)
       const estimatedTokens = Math.ceil((actualQuestion?.length || 0) / 4) + 1000; // Add buffer for response
       const tokenLimitCheck = await TokenUsageService.checkFreeTierDailyTokenLimit(userId, plan, estimatedTokens);
       if (!tokenLimitCheck.allowed) {
@@ -2492,7 +2248,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
       sendStatus('info', `Free tier: ${tokenLimitCheck.remaining.toLocaleString()} tokens remaining today`);
     }
 
-    // Get conversation history
     let previousChats = [];
     if (hasExistingSession) {
       previousChats = await FolderChat.getFolderChatHistory(userId, folderName, finalSessionId);
@@ -2510,9 +2265,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId, method: methodUsed })}\n\n`);
 
     if (routingDecision.method === 'gemini_eyeball') {
-      // Gemini Eyeball Streaming
-      // Note: Gemini Eyeball always uses Gemini models (it's Gemini-specific)
-      // Reduced logging during streaming - only log start
       console.log(`👁️ [STREAMING Gemini Eyeball] Processing ${processedFiles.length} files...`);
 
       const bucketName = process.env.GCS_BUCKET_NAME;
@@ -2526,8 +2278,14 @@ exports.intelligentFolderChatStream = async (req, res) => {
         mimeType: file.mimetype
       }));
 
-      // For secret prompts, use secret value as the prompt with JSON formatting; otherwise use question
-      const basePrompt = (used_secret_prompt && secretValue) ? addSecretPromptJsonFormatting(secretValue) : actualQuestion;
+      let basePrompt;
+      if (used_secret_prompt && secretValue) {
+        const inputTemplate = secretTemplateData?.inputTemplate || null;
+        const outputTemplate = secretTemplateData?.outputTemplate || null;
+        basePrompt = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
+      } else {
+        basePrompt = actualQuestion;
+      }
       
       let promptText = basePrompt;
       if (conversationContext) {
@@ -2535,24 +2293,17 @@ exports.intelligentFolderChatStream = async (req, res) => {
       }
 
       if (used_secret_prompt && secretValue) {
-        // Reduced logging during streaming
-        // console.log(`🔐 [Streaming Gemini Eyeball] Using secret prompt with JSON formatting as base: "${secretName}"`);
       }
 
-      // Reduced logging during streaming
-      // console.log(`👁️ [STREAMING Gemini Eyeball] Streaming response...`);
       
       try {
-        // FREE TIER: Force gemini-2.5-flash model
         const forcedModel = isFreeUser ? TokenUsageService.getFreeTierForcedModel() : null;
         for await (const chunk of streamGeminiWithMultipleGCS(promptText, documents, '', forcedModel)) {
-          // Handle both old format (string) and new format (object with type)
           if (typeof chunk === 'string' && chunk.trim()) {
             fullAnswer += chunk;
             writeChunk(chunk); // Use buffered write instead of immediate
           } else if (typeof chunk === 'object' && chunk.type) {
             if (chunk.type === 'thinking' && chunk.text) {
-              // Send thinking/reasoning tokens immediately (these are rare)
               flushChunkBuffer(); // Flush any pending content chunks first
               res.write(`data: ${JSON.stringify({ type: 'thinking', text: chunk.text })}\n\n`);
               if (res.flush) res.flush();
@@ -2562,7 +2313,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
             }
           }
         }
-        // Flush any remaining buffered chunks
         flushChunkBuffer();
       } catch (streamError) {
         console.error(`\n${'='.repeat(80)}`);
@@ -2574,22 +2324,17 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.error(`   Stack: ${streamError.stack}`);
         console.error(`${'='.repeat(80)}\n`);
         
-        // Check if it's a network/fetch error
         if (streamError.message && streamError.message.includes('fetch failed')) {
           sendError('Network error: Failed to connect to Gemini service. Please check your internet connection and GCP credentials.', streamError.message);
           return;
         }
         
-        // Re-throw to be caught by outer catch block
         throw streamError;
       }
 
-      // Reduced logging - only log summary after streaming completes
       console.log(`✅ [STREAMING Gemini Eyeball] Complete: ${fullAnswer.length} chars, ${documents.length} documents`);
 
-      // For secret prompts, preserve JSON structure; for regular queries, convert to plain text
       if (used_secret_prompt) {
-        // Try to get template data from the secret details
         let streamingTemplateData = null;
         try {
           const secretDetails = await getSecretDetailsById(secret_id);
@@ -2601,35 +2346,27 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
         
         if (streamingTemplateData?.outputTemplate) {
-          // Post-process to ensure proper JSON format
           fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
         } else {
-          // No template, but still try to preserve JSON structure
           fullAnswer = postProcessSecretPromptResponse(fullAnswer, null);
         }
       } else {
-        // ✅ Ensure fullAnswer is plain text, not JSON
         fullAnswer = ensurePlainText(fullAnswer);
       }
 
       usedChunkIds = [];
 
     } else {
-      // RAG Streaming
       console.log(`🔍 [STREAMING RAG] Using RAG method for targeted query...`);
       console.log(`🔍 [STREAMING RAG] Processing ${processedFiles.length} files`);
 
-      // For secret prompts, use secret value for embedding; otherwise use question
       const embeddingSource = (used_secret_prompt && secretValue) ? secretValue : actualQuestion;
-      // Reduced logging - only log important steps
       const questionEmbedding = await generateEmbedding(embeddingSource);
       const allRelevantChunks = [];
 
       for (let i = 0; i < processedFiles.length; i++) {
         const file = processedFiles[i];
         
-        // ✅ CRITICAL: Verify file belongs to the correct folder before processing
-        // Compare with actualFolderPath (handles null/empty for root folders)
         const fileFolderPath = file.folder_path || '';
         if (fileFolderPath !== (actualFolderPath || '')) {
           console.error(`❌ [STREAMING] [FOLDER ISOLATION] SKIPPING FILE: "${file.originalname}" - Wrong folder!`);
@@ -2638,12 +2375,10 @@ exports.intelligentFolderChatStream = async (req, res) => {
           continue; // Skip files from wrong folder
         }
         
-        // Reduced logging during streaming to prevent terminal blinking
         if (i === 0 || i === processedFiles.length - 1) {
           console.log(`🔍 [STREAMING RAG] Searching file ${i + 1}/${processedFiles.length}: ${file.originalname}`);
         }
         
-        // First, verify chunks exist for this file
         const debugChunks = await FileChunk.getChunksByFileId(file.id);
         console.log(`   📋 Chunks in database: ${debugChunks.length}`);
         
@@ -2652,7 +2387,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
           continue;
         }
         
-        // Check if embeddings exist
         const chunkIds = debugChunks.map(c => c.id);
         const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
         console.log(`   🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
@@ -2660,7 +2394,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         if (debugVectors.length === 0) {
           console.log(`   ⚠️ WARNING: Chunks exist but no embeddings found!`);
           console.log(`   💡 Using chunks directly as fallback.`);
-          // Use chunks directly as fallback
           const fallbackChunks = debugChunks.map(c => ({
             ...preservePageInfo(c), // Ensure page_start/page_end are preserved
             filename: file.originalname,
@@ -2675,13 +2408,11 @@ exports.intelligentFolderChatStream = async (req, res) => {
           continue;
         }
         
-        // Ensure file.id is a valid UUID string
         const fileIdStr = String(file.id).trim();
         const isValidUUID = UUID_REGEX.test(fileIdStr);
         
         if (!isValidUUID) {
           console.error(`   ❌ Invalid file ID format: ${file.id} (expected UUID)`);
-          // Still try to use chunks as fallback
           const fallbackChunks = debugChunks.map(c => ({
             ...preservePageInfo(c), // Ensure page_start/page_end are preserved
             filename: file.originalname,
@@ -2696,7 +2427,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
           continue;
         }
         
-        // Perform vector search with proper UUID
         console.log(`   🔎 Performing vector search with embedding...`);
         const relevant = await ChunkVector.findNearestChunks(
           questionEmbedding,
@@ -2707,7 +2437,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.log(`   📊 Vector search found: ${relevant.length} relevant chunks`);
 
         if (relevant.length > 0) {
-          // Convert distance to similarity if not already present
           const chunksWithSimilarity = relevant.map((r) => {
             const distance = parseFloat(r.distance) || 2.0;
             const similarity = r.similarity || (1 / (1 + distance));
@@ -2725,7 +2454,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         } else {
           console.log(`   ⚠️ Vector search returned 0 results, but ${debugChunks.length} chunks exist`);
           console.log(`   💡 Using all chunks as fallback since embeddings exist but don't match query`);
-          // Use all chunks as fallback if vector search fails but chunks exist
           const fallbackChunks = debugChunks.map(c => ({
             ...c,
             filename: file.originalname,
@@ -2742,12 +2470,10 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
       console.log(`\n🔍 [STREAMING RAG] Total relevant chunks found: ${allRelevantChunks.length}`);
 
-      // FALLBACK: If no chunks found via vector search, try using all chunks from processed files
       if (allRelevantChunks.length === 0) {
         console.warn(`\n⚠️ [STREAMING RAG] No chunks found via vector search - trying fallback...`);
         console.warn(`   - Files searched: ${processedFiles.length}`);
         
-        // Check if files are still processing
         const processingFiles = processedFiles.filter(f => f.status !== 'processed');
         if (processingFiles.length > 0) {
           console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
@@ -2755,7 +2481,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
           return;
         }
         
-        // Fallback: Get all chunks from processed files
         console.log(`   - Attempting fallback: Using all chunks from processed files...`);
         const fallbackChunks = [];
         for (const file of processedFiles) {
@@ -2788,9 +2513,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
       }
 
-      // ✅ CRITICAL: Filter out chunks from wrong folders before sorting
       const validFolderChunks = allRelevantChunks.filter(chunk => {
-        // Verify chunk belongs to a file in the correct folder
         const chunkFile = processedFiles.find(f => f.id === (chunk.file_id || chunk.fileId));
         if (!chunkFile) {
           console.warn(`⚠️ [STREAMING] [FOLDER ISOLATION] Chunk ${chunk.chunk_id || chunk.id} has unknown file_id, skipping`);
@@ -2818,7 +2541,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
       usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
       usedChunksForCitations = topChunks; // Store chunks for citation extraction
       
-      // ✅ Print each selected chunk with page information for streaming response
       console.log(`\n${'='.repeat(80)}`);
       console.log(`📋 [STREAMING RAG RESPONSE] CHUNKS WITH CITATIONS (${topChunks.length} chunks):`);
       console.log(`${'='.repeat(80)}`);
@@ -2833,7 +2555,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.log(`   📏 Distance: ${(chunk.distance || 0).toFixed(4)}`);
         console.log(`   🆔 Chunk ID: ${chunk.chunk_id || chunk.id || 'N/A'}`);
         console.log(`   📝 Content Preview: ${(chunk.content || '').substring(0, 120)}${(chunk.content || '').length > 120 ? '...' : ''}`);
-        // Citation format for frontend
         if (chunk.page_start !== null && chunk.page_start !== undefined && chunk.filename) {
           console.log(`   🔗 Citation: ${chunk.filename} - ${pageInfo}`);
         }
@@ -2842,7 +2563,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
       
       console.log(`🔍 [STREAMING RAG] Selected top ${topChunks.length} chunks`);
 
-      // Build context from chunks with page numbers visible
       const chunkContext = topChunks
         .map((c) => {
           const pageInfo = c.page_start !== null && c.page_start !== undefined
@@ -2852,16 +2572,20 @@ exports.intelligentFolderChatStream = async (req, res) => {
         })
         .join('\n\n');
 
-      // For secret prompts, use secret value as the prompt with JSON formatting; otherwise use question
-      const basePrompt = (used_secret_prompt && secretValue) ? addSecretPromptJsonFormatting(secretValue) : actualQuestion;
+      let basePrompt;
+      if (used_secret_prompt && secretValue) {
+        const inputTemplate = secretTemplateData?.inputTemplate || null;
+        const outputTemplate = secretTemplateData?.outputTemplate || null;
+        basePrompt = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
+      } else {
+        basePrompt = actualQuestion;
+      }
       
       let promptText = basePrompt;
       if (conversationContext) {
         promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
       }
 
-      // Build full prompt with chunks
-      // For secret prompts, the secret value is already the prompt (basePrompt) with JSON formatting
       let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
 
       if (used_secret_prompt && secretValue) {
@@ -2872,33 +2596,23 @@ exports.intelligentFolderChatStream = async (req, res) => {
       console.log(`🔍 [STREAMING RAG] Using provider: ${provider}`);
       const { streamLLM: streamLLMFunc, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
 
-      // Get model config and token limits
       const modelConfig = ALL_LLM_CONFIGS[provider];
       const modelName = modelConfig?.model || 'unknown';
       let maxTokens = null;
       try {
         maxTokens = await getModelMaxTokens(provider, modelName);
-        // Reduced logging during streaming
-        // console.log(`🔍 [STREAMING RAG] Model: ${modelName}, Max tokens: ${maxTokens || 'default'}`);
       } catch (tokenError) {
-        // Only log warnings, not info
-        // console.warn(`🔍 [STREAMING RAG] Could not fetch token limits: ${tokenError.message}`);
       }
 
-      // Reduced logging during streaming - only log start
-      // console.log(`🔍 [STREAMING RAG] Streaming response with ${topChunks.length} chunks, Provider: ${provider}`);
       
       try {
-        // For secret prompts, pass secret value; for regular queries, pass question
         const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : actualQuestion;
         for await (const chunk of streamLLMFunc(provider, fullPrompt, '', topChunks, llmQuestion)) {
-          // Handle both old format (string) and new format (object with type)
           if (typeof chunk === 'string' && chunk.trim()) {
             fullAnswer += chunk;
             writeChunk(chunk); // Use buffered write instead of immediate
           } else if (typeof chunk === 'object' && chunk.type) {
             if (chunk.type === 'thinking' && chunk.text) {
-              // Send thinking/reasoning tokens immediately (these are rare)
               flushChunkBuffer(); // Flush any pending content chunks first
               res.write(`data: ${JSON.stringify({ type: 'thinking', text: chunk.text })}\n\n`);
               if (res.flush) res.flush();
@@ -2908,7 +2622,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
             }
           }
         }
-        // Flush any remaining buffered chunks
         flushChunkBuffer();
       } catch (streamError) {
         console.error(`\n${'='.repeat(80)}`);
@@ -2920,22 +2633,17 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.error(`   Stack: ${streamError.stack}`);
         console.error(`${'='.repeat(80)}\n`);
         
-        // Check if it's a network/fetch error
         if (streamError.message && streamError.message.includes('fetch failed')) {
           sendError('Network error: Failed to connect to LLM service. Please check your internet connection and API credentials.', streamError.message);
           return;
         }
         
-        // Re-throw to be caught by outer catch block
         throw streamError;
       }
 
-      // Reduced logging - only log summary after streaming completes
       console.log(`✅ [STREAMING RAG] Complete: ${fullAnswer.length} chars, ${topChunks.length} chunks, ${processedFiles.length} files, ${provider}`);
 
-      // For secret prompts, preserve JSON structure; for regular queries, convert to plain text
       if (used_secret_prompt) {
-        // Try to get template data from the secret details
         let streamingTemplateData = null;
         try {
           const secretDetails = await getSecretDetailsById(secret_id);
@@ -2947,36 +2655,27 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
         
         if (streamingTemplateData?.outputTemplate) {
-          // Post-process to ensure proper JSON format
           fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
         } else {
-          // No template, but still try to preserve JSON structure
           fullAnswer = postProcessSecretPromptResponse(fullAnswer, null);
         }
       } else {
-        // ✅ Ensure fullAnswer is plain text, not JSON
         fullAnswer = ensurePlainText(fullAnswer);
       }
     }
 
-    // Extract citations based on method used
-    // Generate base URL for API endpoints (for streaming, use request origin)
     const protocol = req.protocol || req.headers['x-forwarded-proto'] || 'http';
     const host = req.get('host') || req.headers.host || '';
     const baseUrl = `${protocol}://${host}`;
     
-    // Extract citations based on method used
     let citations = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
-      // ✅ Gemini Eyeball: Create citations from all processed files
       console.log(`👁️ [STREAMING Gemini Eyeball] Extracting citations from ${processedFiles.length} files`);
       citations = await extractCitationsFromFiles(processedFiles, baseUrl);
     } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
-      // ✅ RAG: Extract citations from chunks used
       citations = await extractCitationsFromChunks(usedChunksForCitations, baseUrl);
     }
 
-    // Reduced logging during streaming - only log summary
     if (citations.length > 0) {
       console.log(`📑 [STREAMING] ${citations.length} citations extracted (${methodUsed})`);
     } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
@@ -2985,20 +2684,14 @@ exports.intelligentFolderChatStream = async (req, res) => {
     
     console.log(`${'='.repeat(80)}\n`);
 
-    // Save chat
-    // ✅ For secret prompts, ALWAYS store secret name as the question; for regular queries, store the question
-    // This ensures prompt_label is always stored in question column for secret prompts
     let storedQuestion;
     if (used_secret_prompt) {
-      // For secret prompts, use secretName if available, otherwise use a fallback
       storedQuestion = secretName || actualQuestion?.trim() || 'Secret Prompt';
       console.log(`💾 [Streaming] Secret prompt detected - storing question as: "${storedQuestion}"`);
     } else {
-      // For regular queries, use the question
       storedQuestion = actualQuestion?.trim() || '';
       console.log(`💾 [Streaming] Regular query - storing question as: "${storedQuestion}"`);
     }
-    // ✅ Store citations permanently in database
     const savedChat = await FolderChat.saveFolderChat(
       userId,
       folderName,
@@ -3014,10 +2707,8 @@ exports.intelligentFolderChatStream = async (req, res) => {
       citations // ✅ Store citations in database for permanent access
     );
 
-    // ✅ Add chunk/file details with page numbers for user visibility
     let chunkDetails = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
-      // For Gemini Eyeball: Create details from files showing ALL pages
       const FileChunk = require('../models/FileChunk');
       for (const file of processedFiles) {
         try {
@@ -3027,7 +2718,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
             continue;
           }
 
-          // Extract all unique pages from all chunks
           const pageSet = new Set();
           chunks.forEach(chunk => {
             if (chunk.page_start !== null && chunk.page_start !== undefined && chunk.page_start > 0) {
@@ -3065,7 +2755,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
               is_full_document: false, // Changed to false since we now show specific pages
             });
           } else {
-            // Fallback if no page info
             chunkDetails.push({
               file_id: file.id,
               filename: file.originalname,
@@ -3085,7 +2774,6 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
       }
     } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
-      // For RAG: Create details from chunks
       chunkDetails = usedChunksForCitations.map(chunk => ({
         chunk_id: chunk.chunk_id || chunk.id,
         content_preview: (chunk.content || '').substring(0, 200) + ((chunk.content || '').length > 200 ? '...' : ''),
@@ -3100,14 +2788,12 @@ exports.intelligentFolderChatStream = async (req, res) => {
       }));
     }
 
-    // Flush any remaining chunks before sending done
     flushChunkBuffer();
     if (chunkBufferTimer) {
       clearTimeout(chunkBufferTimer);
       chunkBufferTimer = null;
     }
 
-    // Send completion with citations and chunk details
     res.write(`data: ${JSON.stringify({
       type: 'done',
       session_id: finalSessionId,

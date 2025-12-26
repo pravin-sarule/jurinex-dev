@@ -1,166 +1,6 @@
-
-
-
-// import React, { createContext, useContext, useState, useEffect } from 'react';
-// import api from '../services/api'; // Import the API service
-
-// const AuthContext = createContext(null);
-
-// export const AuthProvider = ({ children }) => {
-//   const [user, setUser] = useState(null);
-//   const [token, setToken] = useState(null);
-//   const [loading, setLoading] = useState(true);
-
-//   // Initialize auth state from localStorage on component mount
-//   useEffect(() => {
-//     const initializeAuth = () => {
-//       const storedToken = localStorage.getItem('token');
-//       const storedUser = localStorage.getItem('user');
-
-//       console.log('AuthContext: Initializing from localStorage - Token:', storedToken ? 'Present' : 'Not Present');
-
-//       if (storedToken) {
-//         setToken(storedToken);
-        
-//         if (storedUser) {
-//           try {
-//             const parsedUser = JSON.parse(storedUser);
-//             setUser(parsedUser);
-//             console.log('AuthContext: User restored from localStorage:', parsedUser.email);
-//           } catch (e) {
-//             console.error('AuthContext: Failed to parse user from localStorage', e);
-//             // Clear invalid data
-//             localStorage.removeItem('user');
-//             localStorage.removeItem('token');
-//             setToken(null);
-//             setUser(null);
-//           }
-//         }
-//       }
-      
-//       setLoading(false);
-//     };
-
-//     initializeAuth();
-//   }, []); // Empty dependency array - only run once on mount
-
-//   const login = async (email, password) => {
-//     try {
-//       const response = await api.login({ email, password });
-      
-//       // Check if OTP is required (remove the forced true condition)
-//       if (response.requiresOtp) {
-//         console.log('AuthContext: OTP required for login.');
-//         return { 
-//           success: false, 
-//           requiresOtp: true, 
-//           email: email, 
-//           message: response.message || 'OTP required. Please check your email.' 
-//         };
-//       }
-      
-//       // If login is successful and token is provided
-//       if (response.token) {
-//         setToken(response.token);
-//         setUser(response.user);
-        
-//         // Store in localStorage
-//         localStorage.setItem('token', response.token);
-//         localStorage.setItem('user', JSON.stringify(response.user));
-        
-//         console.log('AuthContext: Login successful, token stored:', response.token);
-//         return { success: true, user: response.user, token: response.token };
-//       }
-      
-//       return { success: false, message: response.message || 'Login failed: No token received.' };
-//     } catch (error) {
-//       console.error('AuthContext: Login failed:', error);
-//       return { success: false, message: error.message || 'Login failed.' };
-//     }
-//   };
-
-//   const verifyOtp = async (email, otp) => {
-//     try {
-//       const response = await api.verifyOtp(email, otp);
-      
-//       if (response.success && response.token) {
-//         setToken(response.token);
-//         setUser(response.user);
-        
-//         // Store in localStorage
-//         localStorage.setItem('token', response.token);
-//         localStorage.setItem('user', JSON.stringify(response.user));
-        
-//         console.log('AuthContext: OTP verification successful, token stored:', response.token);
-//         return { success: true, user: response.user, token: response.token };
-//       }
-      
-//       return { success: false, message: response.message || 'OTP verification failed.' };
-//     } catch (error) {
-//       console.error('AuthContext: OTP verification failed:', error);
-//       return { success: false, message: error.message || 'OTP verification failed.' };
-//     }
-//   };
-
-//   // NEW METHOD: Manually set authentication state (for Google Sign-In and other OAuth providers)
-//   const setAuthState = (authToken, userData) => {
-//     console.log('AuthContext: Manually setting auth state for user:', userData.email);
-    
-//     setToken(authToken);
-//     setUser(userData);
-    
-//     // Store in localStorage
-//     localStorage.setItem('token', authToken);
-//     localStorage.setItem('user', JSON.stringify(userData));
-    
-//     console.log('AuthContext: Auth state manually updated');
-//   };
-
-//   const logout = () => {
-//     setUser(null);
-//     setToken(null);
-    
-//     // Clear localStorage
-//     localStorage.removeItem('token');
-//     localStorage.removeItem('user');
-    
-//     console.log('AuthContext: User logged out, all data cleared.');
-//   };
-
-//   // Check if user is authenticated
-//   const isAuthenticated = !loading && token && user;
-
-//   const value = {
-//     user,
-//     token,
-//     loading,
-//     isAuthenticated,
-//     login,
-//     logout,
-//     verifyOtp,
-//     setAuthState // Export the new method
-//   };
-
-//   return (
-//     <AuthContext.Provider value={value}>
-//       {children}
-//     </AuthContext.Provider>
-//   );
-// };
-
-// export const useAuth = () => {
-//   const context = useContext(AuthContext);
-//   if (!context) {
-//     throw new Error('useAuth must be used within an AuthProvider');
-//   }
-//   return context;
-// };
-
-
-
-
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import api from '../services/api'; // Import the API service
+import api from '../services/api';
+import { USER_RESOURCES_SERVICE_URL } from '../config/apiConfig';
 
 const AuthContext = createContext(null);
 
@@ -168,9 +8,8 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [planInfo, setPlanInfo] = useState(null); // Store plan data in RAM
+  const [planInfo, setPlanInfo] = useState(null);
 
-  // Function to fetch and store plan data in RAM
   const fetchAndStorePlan = async (authToken) => {
     try {
       if (!authToken) {
@@ -179,7 +18,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       console.log('🔄 AuthContext: Fetching plan from API...');
-      const response = await fetch('https://gateway-service-120280829617.asia-south1.run.app/user-resources/plan-details', {
+      const response = await fetch(`${USER_RESOURCES_SERVICE_URL}/plan-details`, {
         headers: {
           'Authorization': `Bearer ${authToken}`,
           'Content-Type': 'application/json'
@@ -204,10 +43,8 @@ export const AuthProvider = ({ children }) => {
           subscription: activePlan
         };
         
-        // Store in RAM (context state)
         setPlanInfo(planData);
         
-        // Also update localStorage for persistence
         try {
           const existingUserInfo = localStorage.getItem('userInfo');
           const userInfoData = existingUserInfo ? JSON.parse(existingUserInfo) : {};
@@ -231,7 +68,6 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  // Initialize auth state from localStorage on component mount
   useEffect(() => {
     const initializeAuth = async () => {
       const storedToken = localStorage.getItem('token');
@@ -250,7 +86,6 @@ export const AuthProvider = ({ children }) => {
             console.log('AuthContext: User restored from localStorage:', parsedUser.email);
           } catch (e) {
             console.error('AuthContext: Failed to parse user from localStorage', e);
-            // Clear invalid data
             localStorage.removeItem('user');
             localStorage.removeItem('token');
             setToken(null);
@@ -258,7 +93,6 @@ export const AuthProvider = ({ children }) => {
           }
         }
 
-        // Restore plan from localStorage to RAM immediately
         if (storedPlanInfo) {
           try {
             const parsedPlanInfo = JSON.parse(storedPlanInfo);
@@ -271,7 +105,6 @@ export const AuthProvider = ({ children }) => {
           }
         }
 
-        // Fetch fresh plan data in background (non-blocking)
         fetchAndStorePlan(storedToken).catch(err => {
           console.error('AuthContext: Background plan fetch failed:', err);
         });
@@ -281,13 +114,12 @@ export const AuthProvider = ({ children }) => {
     };
 
     initializeAuth();
-  }, []); // Empty dependency array - only run once on mount
+  }, []);
 
   const login = async (email, password) => {
     try {
       const response = await api.login({ email, password });
       
-      // Check if OTP is required (remove the forced true condition)
       if (response.requiresOtp) {
         console.log('AuthContext: OTP required for login.');
         return { 
@@ -298,18 +130,15 @@ export const AuthProvider = ({ children }) => {
         };
       }
       
-      // If login is successful and token is provided
       if (response.token) {
         setToken(response.token);
         setUser(response.user);
         
-        // Store in localStorage
         localStorage.setItem('token', response.token);
         localStorage.setItem('user', JSON.stringify(response.user));
         
         console.log('AuthContext: Login successful, token stored:', response.token);
         
-        // Fetch and store plan data in RAM immediately (non-blocking)
         fetchAndStorePlan(response.token).catch(err => {
           console.error('AuthContext: Plan fetch after login failed:', err);
         });
@@ -332,13 +161,11 @@ export const AuthProvider = ({ children }) => {
         setToken(response.token);
         setUser(response.user);
         
-        // Store in localStorage
         localStorage.setItem('token', response.token);
         localStorage.setItem('user', JSON.stringify(response.user));
         
         console.log('AuthContext: OTP verification successful, token stored:', response.token);
         
-        // Fetch and store plan data in RAM immediately (non-blocking)
         fetchAndStorePlan(response.token).catch(err => {
           console.error('AuthContext: Plan fetch after OTP verification failed:', err);
         });
@@ -353,18 +180,15 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  // NEW METHOD: Manually set authentication state (for Google Sign-In and other OAuth providers)
   const setAuthState = (authToken, userData) => {
     console.log('AuthContext: Manually setting auth state for user:', userData.email);
     
     setToken(authToken);
     setUser(userData);
     
-    // Store in localStorage
     localStorage.setItem('token', authToken);
     localStorage.setItem('user', JSON.stringify(userData));
     
-    // Fetch and store plan data in RAM immediately (non-blocking)
     fetchAndStorePlan(authToken).catch(err => {
       console.error('AuthContext: Plan fetch after setAuthState failed:', err);
     });
@@ -375,16 +199,14 @@ export const AuthProvider = ({ children }) => {
   const logout = () => {
     setUser(null);
     setToken(null);
-    setPlanInfo(null); // Clear plan from RAM
+    setPlanInfo(null);
     
-    // Clear localStorage
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     
     console.log('AuthContext: User logged out, all data cleared.');
   };
 
-  // Check if user is authenticated
   const isAuthenticated = !loading && token && user;
 
   const value = {
@@ -392,12 +214,12 @@ export const AuthProvider = ({ children }) => {
     token,
     loading,
     isAuthenticated,
-    planInfo, // Export plan data from RAM
+    planInfo,
     login,
     logout,
     verifyOtp,
-    setAuthState, // Export the new method
-    fetchAndStorePlan // Export function to manually refresh plan
+    setAuthState,
+    fetchAndStorePlan
   };
 
   return (

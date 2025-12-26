@@ -1,9 +1,6 @@
 import axios from 'axios';
+import { API_BASE_URL, VISUAL_SERVICE_URL } from '../config/apiConfig';
 
-const API_BASE_URL = import.meta.env.VITE_APP_API_URL || 'https://gateway-service-120280829617.asia-south1.run.app';
-const VISUAL_SERVICE_URL = `${API_BASE_URL}/visual`;
-
-// Get auth token from your auth system
 const getAuthToken = () => {
   return localStorage.getItem('token') || sessionStorage.getItem('token');
 };
@@ -14,20 +11,13 @@ const getHeaders = () => ({
 });
 
 export const mindmapService = {
-  /**
-   * Generate a new mind map from a document
-   * @param {string} fileId - Document file ID
-   * @param {string} sessionId - Optional session ID to link mindmap to chat session
-   * @param {string} prompt - Optional custom prompt
-   * @returns {Promise} Mind map data in NotebookLM format
-   */
   async generateMindmap(fileId, sessionId = null, prompt = null) {
     try {
       const response = await axios.post(
         `${VISUAL_SERVICE_URL}/generate-mindmap`,
         {
           file_id: fileId,
-          session_id: sessionId,  // Link to chat session
+          session_id: sessionId,
           prompt: prompt
         },
         { headers: getHeaders() }
@@ -39,13 +29,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Generate mindmap for multiple files
-   * @param {Array<string>} fileIds - Array of file IDs
-   * @param {string} sessionId - Optional session ID
-   * @param {string} prompt - Optional custom prompt
-   * @returns {Promise} Mind map data
-   */
   async generateMindmapMulti(fileIds, sessionId = null, prompt = null) {
     try {
       const response = await axios.post(
@@ -64,11 +47,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Get mind map by ID
-   * @param {string} mindmapId - Mind map ID
-   * @returns {Promise} Mind map data with user state
-   */
   async getMindmap(mindmapId) {
     try {
       const response = await axios.get(
@@ -85,12 +63,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Get all mind maps for a file
-   * @param {string} fileId - Document file ID
-   * @param {string} sessionId - Optional session ID to filter by session
-   * @returns {Promise} List of mind maps
-   */
   async getMindmapsByFile(fileId, sessionId = null) {
     try {
       const params = { file_id: fileId };
@@ -111,12 +83,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Get full mindmap by session ID (RECOMMENDED - returns complete structure with nodes and user state)
-   * Use this when loading previous chat sessions to get the complete mindmap ready for rendering
-   * @param {string} sessionId - Chat session ID
-   * @returns {Promise} Full mindmap data ready for rendering
-   */
   async getMindmapBySession(sessionId) {
     try {
       console.log('[mindmapService] Fetching mindmap for session:', sessionId);
@@ -141,18 +107,16 @@ export const mindmapService = {
       
       return response.data;
     } catch (error) {
-      // If 404, no mindmap exists for this session (not an error)
       if (error.response?.status === 404) {
         console.log('[mindmapService] No mindmap found for session (404):', sessionId);
         return { success: false, data: null };
       }
       
-      // Try alternative endpoint path if first attempt fails
       if (error.response?.status === 404 || error.code === 'ERR_BAD_REQUEST') {
         console.log('[mindmapService] Trying alternative endpoint path...');
         try {
           const altResponse = await axios.get(
-            `${API_BASE_URL}/api/visual/mindmap`,
+            `${VISUAL_SERVICE_URL}/mindmap`,
             {
               params: { session_id: sessionId },
               headers: getHeaders()
@@ -176,12 +140,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Get mindmap metadata list for a specific chat session (returns list without full node structure)
-   * Use this to check which sessions have mindmaps or get a list of mindmaps
-   * @param {string} sessionId - Chat session ID
-   * @returns {Promise} List of mind map metadata for the session
-   */
   async getMindmapsMetadataBySession(sessionId) {
     try {
       const response = await axios.get(
@@ -198,12 +156,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Update node collapse state
-   * @param {string} nodeId - Node ID
-   * @param {boolean} isCollapsed - Collapse state
-   * @returns {Promise} Updated state
-   */
   async updateNodeState(nodeId, isCollapsed) {
     try {
       const response = await axios.put(
@@ -221,11 +173,6 @@ export const mindmapService = {
     }
   },
 
-  /**
-   * Delete a mind map
-   * @param {string} mindmapId - Mind map ID
-   * @returns {Promise} Deletion result
-   */
   async deleteMindmap(mindmapId) {
     try {
       const response = await axios.delete(

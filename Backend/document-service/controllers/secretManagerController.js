@@ -1,6 +1,3 @@
-
-
-//
 const db = require('../config/db');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const fs = require('fs');
@@ -27,23 +24,28 @@ function simplifyFolderChatHistory(chats = []) {
     .slice(-MAX_STORED_HISTORY);
 }
 
-/**
- * Adds structured JSON formatting instructions to secret prompt
- * Ensures LLM output is in clean, structured JSON format wrapped in markdown code blocks
- * @param {string} secretPrompt - The original secret prompt
- * @param {Object} outputTemplate - Optional output template data with structure to follow
- * @returns {string} - The prompt with JSON formatting instructions appended
- */
-function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
+function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outputTemplate = null) {
   let jsonFormattingInstructions = '';
+  
+  if (inputTemplate && inputTemplate.extracted_text && outputTemplate && outputTemplate.extracted_text) {
+    jsonFormattingInstructions += `\n\n`;
+    jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n`;
+    jsonFormattingInstructions += `🔄 WORKFLOW REMINDER - INPUT TO OUTPUT MAPPING\n`;
+    jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n\n`;
+    jsonFormattingInstructions += `📥 STEP 1: EXTRACT FROM INPUT TEMPLATE FORMAT\n`;
+    jsonFormattingInstructions += `   - Study the INPUT TEMPLATE format shown above to understand what information to look for\n`;
+    jsonFormattingInstructions += `   - Identify similar patterns, fields, sections, and data points in the actual documents\n`;
+    jsonFormattingInstructions += `   - Extract all relevant points that match the INPUT TEMPLATE structure\n\n`;
+    jsonFormattingInstructions += `📤 STEP 2: FORMAT USING OUTPUT TEMPLATE STRUCTURE\n`;
+    jsonFormattingInstructions += `   - Take the extracted information and format it according to OUTPUT TEMPLATE structure\n`;
+    jsonFormattingInstructions += `   - Map extracted points to corresponding sections in OUTPUT TEMPLATE\n`;
+    jsonFormattingInstructions += `   - Ensure the final response follows the EXACT OUTPUT TEMPLATE JSON format\n\n`;
+  }
 
-  // If output template exists, reference it in the instructions
   if (outputTemplate && outputTemplate.extracted_text) {
-    // Extract all required sections from the template
     const templateText = outputTemplate.extracted_text;
     const sectionKeys = [];
     
-    // Try to extract section keys from the template (e.g., 2_1_ground_wise_summary, 2_2_annexure_summary, etc.)
     const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
     let match;
     while ((match = sectionPattern.exec(templateText)) !== null) {
@@ -52,7 +54,6 @@ function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
       }
     }
     
-    // Also check structured_schema if available
     if (outputTemplate.structured_schema) {
       try {
         const schema = typeof outputTemplate.structured_schema === 'string' 
@@ -88,7 +89,7 @@ function addSecretPromptJsonFormatting(secretPrompt, outputTemplate = null) {
 📋 OUTPUT TEMPLATE STRUCTURE (MUST FOLLOW EXACTLY):
 The output template below shows the EXACT JSON structure you must use. Your response must match this structure EXACTLY with ALL fields populated:
 
-${outputTemplate.extracted_text.substring(0, 3000)}${outputTemplate.extracted_text.length > 3000 ? '\n\n[... template continues ...]' : ''}${sectionsList}
+${outputTemplate.extracted_text}${sectionsList}
 
 🔒 MANDATORY REQUIREMENTS FOR ALL LLMs:
 1. ✅ Your response MUST start with \`\`\`json and end with \`\`\`
@@ -148,7 +149,6 @@ Before submitting your response, verify:
 🎯 FINAL INSTRUCTION:
 Generate your response NOW following the template structure exactly. Include ALL sections. Use ONLY the JSON format shown above.`;
   } else {
-    // Default structure when no template is provided
     jsonFormattingInstructions = `
 
 === CRITICAL OUTPUT FORMATTING REQUIREMENTS ===
@@ -209,32 +209,160 @@ Your response should ONLY contain the JSON wrapped in markdown code blocks. Do n
   return secretPrompt + jsonFormattingInstructions;
 }
 
-/**
- * Validates and ensures JSON structure matches output template requirements
- * @param {Object} jsonData - Parsed JSON data
- * @param {Object} outputTemplate - Output template to validate against
- * @returns {Object} Validated and potentially enhanced JSON data
- */
 function validateAndEnhanceJsonStructure(jsonData, outputTemplate = null) {
   if (!jsonData || typeof jsonData !== 'object') {
     return jsonData;
   }
 
-  // If we have an output template with structured schema, validate against it
+  // First, try to use the output template JSON structure as the base
+  if (outputTemplate && outputTemplate.extracted_text) {
+    try {
+      // Helper function to safely parse JSON from text
+      const safeParseJson = (text) => {
+        if (!text || typeof text !== 'string') return null;
+        
+        // Try direct JSON parse
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          // Try extracting JSON from markdown code blocks
+          const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/i) || 
+                           text.match(/```\s*([\s\S]*?)\s*```/i);
+          if (jsonMatch) {
+            try {
+              return JSON.parse(jsonMatch[1].trim());
+            } catch (e2) {
+              // Ignore
+            }
+          }
+          
+          // Try if it starts with { or [
+          if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
+            try {
+              return JSON.parse(text.trim());
+            } catch (e3) {
+              // Ignore
+            }
+          }
+        }
+        return null;
+      };
+      
+      const templateJson = typeof outputTemplate.extracted_text === 'string'
+        ? safeParseJson(outputTemplate.extracted_text)
+        : outputTemplate.extracted_text;
+      
+      // If extracted_text is not JSON, try using structured_schema
+      if (!templateJson && outputTemplate.structured_schema) {
+        try {
+          const schema = typeof outputTemplate.structured_schema === 'string'
+            ? JSON.parse(outputTemplate.structured_schema)
+            : outputTemplate.structured_schema;
+          
+          // Build template structure from schema
+          if (schema && schema.properties) {
+            const builtTemplate = {};
+            if (schema.properties.generated_sections && schema.properties.generated_sections.properties) {
+              builtTemplate.generated_sections = {};
+              const sectionKeys = Object.keys(schema.properties.generated_sections.properties);
+              sectionKeys.forEach(key => {
+                builtTemplate.generated_sections[key] = {
+                  generated_text: '',
+                  required_summary_type: schema.properties.generated_sections.properties[key]?.properties?.required_summary_type?.default || 'Extractive'
+                };
+              });
+            }
+            // Use the built template structure
+            const mergedData = JSON.parse(JSON.stringify(builtTemplate)); // Deep clone template
+            const mergeDataIntoTemplate = (template, data) => {
+              for (const key in template) {
+                if (data && data.hasOwnProperty(key)) {
+                  if (typeof template[key] === 'object' && template[key] !== null && !Array.isArray(template[key])) {
+                    if (typeof data[key] === 'object' && data[key] !== null && !Array.isArray(data[key])) {
+                      mergeDataIntoTemplate(template[key], data[key]);
+                    } else {
+                      template[key] = data[key];
+                    }
+                  } else {
+                    template[key] = data[key];
+                  }
+                }
+              }
+            };
+            mergeDataIntoTemplate(mergedData, jsonData);
+            console.log('[validateAndEnhanceJsonStructure] ✅ Merged response into template structure built from schema');
+            return mergedData;
+          }
+        } catch (schemaError) {
+          console.warn('[validateAndEnhanceJsonStructure] Could not build template from structured_schema:', schemaError);
+        }
+      }
+      
+      if (templateJson && typeof templateJson === 'object') {
+        // If templateJson is a JSON schema (has properties), extract example structure
+        if (templateJson.properties) {
+          // It's a JSON schema - we need to build an example structure from it
+          const buildExampleFromSchema = (schema) => {
+            if (!schema.properties) return {};
+            
+            const example = {};
+            for (const key in schema.properties) {
+              const prop = schema.properties[key];
+              if (prop.type === 'object' && prop.properties) {
+                example[key] = buildExampleFromSchema(prop);
+              } else if (prop.type === 'array' && prop.items) {
+                example[key] = prop.items.properties ? [buildExampleFromSchema(prop.items)] : [];
+              } else {
+                // Use default value if available, otherwise use empty string or null
+                example[key] = prop.default !== undefined ? prop.default : (prop.type === 'string' ? '' : null);
+              }
+            }
+            return example;
+          };
+          
+          templateJson = buildExampleFromSchema(templateJson);
+          console.log('[validateAndEnhanceJsonStructure] ✅ Built example structure from JSON schema');
+        }
+        
+        // Merge response data into template structure
+        const mergedData = JSON.parse(JSON.stringify(templateJson)); // Deep clone template
+        
+        // Recursively merge response data into template structure
+        const mergeDataIntoTemplate = (template, data) => {
+          for (const key in template) {
+            if (data && data.hasOwnProperty(key)) {
+              if (typeof template[key] === 'object' && template[key] !== null && !Array.isArray(template[key])) {
+                if (typeof data[key] === 'object' && data[key] !== null && !Array.isArray(data[key])) {
+                  mergeDataIntoTemplate(template[key], data[key]);
+                } else {
+                  template[key] = data[key];
+                }
+              } else {
+                template[key] = data[key];
+              }
+            }
+          }
+        };
+        
+        mergeDataIntoTemplate(mergedData, jsonData);
+        console.log('[validateAndEnhanceJsonStructure] ✅ Merged response into template structure');
+        jsonData = mergedData;
+      }
+    } catch (e) {
+      console.warn('[validateAndEnhanceJsonStructure] Could not merge with template structure:', e);
+    }
+  }
+
   if (outputTemplate && outputTemplate.structured_schema) {
     try {
       const schema = typeof outputTemplate.structured_schema === 'string'
         ? JSON.parse(outputTemplate.structured_schema)
         : outputTemplate.structured_schema;
 
-      // Ensure the structure matches the expected schema
-      // For output_summary_template structure
       if (schema.properties && schema.properties.generated_sections) {
-        // If jsonData doesn't have the expected structure, try to restructure it
+        // Normalize the structure - ensure it's in the schemas.output_summary_template format
         if (!jsonData.schemas || !jsonData.schemas.output_summary_template) {
-          // Check if it has generated_sections at root level
           if (jsonData.generated_sections) {
-            // Restructure to match expected format
             jsonData = {
               ...jsonData,
               schemas: {
@@ -244,28 +372,54 @@ function validateAndEnhanceJsonStructure(jsonData, outputTemplate = null) {
                 }
               }
             };
+          } else if (jsonData.metadata) {
+            // If only metadata exists, create the full structure
+            jsonData = {
+              schemas: {
+                output_summary_template: {
+                  metadata: jsonData.metadata,
+                  generated_sections: {}
+                }
+              }
+            };
           }
         }
 
-        // Ensure all required sections from template are present
         const requiredSections = Object.keys(schema.properties.generated_sections.properties || {});
+        console.log(`[validateAndEnhanceJsonStructure] Required sections from schema: ${requiredSections.length} sections`);
+        console.log(`[validateAndEnhanceJsonStructure] Required sections: ${requiredSections.join(', ')}`);
+        
         if (jsonData.schemas && jsonData.schemas.output_summary_template) {
           const existingSections = Object.keys(jsonData.schemas.output_summary_template.generated_sections || {});
+          console.log(`[validateAndEnhanceJsonStructure] Existing sections in response: ${existingSections.length} sections`);
+          console.log(`[validateAndEnhanceJsonStructure] Existing sections: ${existingSections.join(', ')}`);
+          
           const missingSections = requiredSections.filter(section => !existingSections.includes(section));
           
           if (missingSections.length > 0) {
-            console.warn(`[validateAndEnhanceJsonStructure] Missing sections: ${missingSections.join(', ')}`);
-            // Add placeholder sections for missing ones
+            console.warn(`[validateAndEnhanceJsonStructure] ⚠️ MISSING ${missingSections.length} REQUIRED SECTIONS: ${missingSections.join(', ')}`);
+            console.warn(`[validateAndEnhanceJsonStructure] Adding placeholder sections. The LLM should have generated these!`);
+            
             missingSections.forEach(section => {
               if (!jsonData.schemas.output_summary_template.generated_sections) {
                 jsonData.schemas.output_summary_template.generated_sections = {};
               }
+              // Get the section schema to determine the required_summary_type
+              const sectionSchema = schema.properties.generated_sections.properties[section];
+              const summaryType = sectionSchema?.properties?.required_summary_type?.default || 
+                                   sectionSchema?.properties?.required_summary_type?.enum?.[0] || 
+                                   'Extractive';
+              
               jsonData.schemas.output_summary_template.generated_sections[section] = {
-                generated_text: 'Section content pending...',
-                required_summary_type: 'Extractive'
+                generated_text: `⚠️ WARNING: This section was missing from the LLM response. Expected section "${section}" with content extracted from documents.`,
+                required_summary_type: summaryType
               };
             });
+          } else {
+            console.log(`[validateAndEnhanceJsonStructure] ✅ All required sections are present!`);
           }
+        } else {
+          console.warn(`[validateAndEnhanceJsonStructure] ⚠️ Response structure is missing schemas.output_summary_template.generated_sections`);
         }
       }
     } catch (e) {
@@ -276,13 +430,6 @@ function validateAndEnhanceJsonStructure(jsonData, outputTemplate = null) {
   return jsonData;
 }
 
-/**
- * Post-processes LLM response to extract and validate JSON
- * Ensures response is always in the correct format for frontend rendering
- * @param {string} rawResponse - Raw response from LLM
- * @param {Object} outputTemplate - Output template to validate against
- * @returns {string} Cleaned and validated JSON response wrapped in markdown code blocks
- */
 function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   if (!rawResponse || typeof rawResponse !== 'string') {
     return rawResponse;
@@ -291,7 +438,6 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   let cleanedResponse = rawResponse.trim();
   let jsonData = null;
   
-  // Try to extract JSON from markdown code blocks
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
     try {
@@ -299,9 +445,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       jsonData = JSON.parse(jsonText);
     } catch (e) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block:', e);
-      // Try to fix common JSON issues
       try {
-        // Remove trailing commas
         let fixedJson = jsonText.replace(/,(\s*[}\]])/g, '$1');
         jsonData = JSON.parse(fixedJson);
       } catch (e2) {
@@ -310,7 +454,6 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
     }
   }
   
-  // If not found in code blocks, try to extract raw JSON
   if (!jsonData) {
     const trimmed = cleanedResponse.trim();
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
@@ -318,7 +461,6 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
         jsonData = JSON.parse(trimmed);
       } catch (e) {
         console.warn('[postProcessSecretPromptResponse] Failed to parse raw JSON:', e);
-        // Try to fix common JSON issues
         try {
           let fixedJson = trimmed.replace(/,(\s*[}\]])/g, '$1');
           jsonData = JSON.parse(fixedJson);
@@ -329,7 +471,6 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
     }
   }
   
-  // If still not found, try to find JSON anywhere in the text
   if (!jsonData) {
     const jsonPattern = /\{[\s\S]{50,}\}/; // At least 50 chars to avoid false matches
     const jsonMatch2 = cleanedResponse.match(jsonPattern);
@@ -337,7 +478,6 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       try {
         jsonData = JSON.parse(jsonMatch2[0]);
       } catch (e) {
-        // Try to fix common JSON issues
         try {
           let fixedJson = jsonMatch2[0].replace(/,(\s*[}\]])/g, '$1');
           jsonData = JSON.parse(fixedJson);
@@ -348,29 +488,23 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
     }
   }
   
-  // If we successfully parsed JSON, validate and enhance it
   if (jsonData && typeof jsonData === 'object') {
-    // Validate and enhance structure against template
     jsonData = validateAndEnhanceJsonStructure(jsonData, outputTemplate);
     
-    // Format JSON with proper indentation and wrap in markdown code blocks
     const formattedJson = JSON.stringify(jsonData, null, 2);
     return `\`\`\`json\n${formattedJson}\n\`\`\``;
   }
   
-  // If we couldn't extract JSON but have a template, log warning
   if (outputTemplate && outputTemplate.structured_schema) {
     console.warn('[postProcessSecretPromptResponse] Response does not contain valid JSON, but template exists');
     console.warn('[postProcessSecretPromptResponse] Raw response preview:', cleanedResponse.substring(0, 200));
   }
   
-  // Return as is if we can't extract JSON (might be plain text or incomplete)
   return cleanedResponse;
 }
 
 let secretClient;
 
-// 🔐 Setup Google Secret Manager Client
 function setupGCPClientFromBase64() {
   const base64Key = process.env.GCS_KEY_BASE64;
   if (!base64Key) throw new Error('❌ GCS_KEY_BASE64 is not set');
@@ -390,10 +524,6 @@ if (!secretClient) {
 const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
 if (!GCLOUD_PROJECT_ID) throw new Error('❌ GCLOUD_PROJECT_ID not set in env');
 
-/**
- * 🧩 Fetch a single secret with its LLM model name
- * @route GET /api/secrets/:id
- */
 const fetchSecretValueFromGCP = async (req, res) => {
   const { id } = req.params;
 
@@ -451,10 +581,6 @@ const fetchSecretValueFromGCP = async (req, res) => {
   }
 };
 
-/**
- * 🧩 Create secret with optional LLM and chunking method mapping
- * @route POST /api/secrets/create
- */
 const createSecretInGCP = async (req, res) => {
   const {
     name,
@@ -477,7 +603,6 @@ const createSecretInGCP = async (req, res) => {
     const parent = `projects/${GCLOUD_PROJECT_ID}`;
     const secretName = `${parent}/secrets/${secret_manager_id}`;
 
-    // 🔍 Check if secret exists
     const [secrets] = await secretClient.listSecrets({ parent });
     const exists = secrets.find((s) => s.name === secretName);
 
@@ -492,14 +617,12 @@ const createSecretInGCP = async (req, res) => {
       console.log(`ℹ️ Secret already exists: ${secret_manager_id}`);
     }
 
-    // ➕ Add secret version
     const [versionResponse] = await secretClient.addSecretVersion({
       parent: secretName,
       payload: { data: Buffer.from(secret_value, 'utf8') },
     });
     const versionId = versionResponse.name.split('/').pop();
 
-    // 💾 Insert into DB (with llm_id)
     const insertQuery = `
       INSERT INTO secret_manager (
         id, name, description, template_type, status,
@@ -545,10 +668,6 @@ const createSecretInGCP = async (req, res) => {
   }
 };
 
-/**
- * 🧩 Get all secrets with their LLM names
- * @route GET /api/secrets
- */
 const getAllSecrets = async (req, res) => {
   const includeValues = req.query.fetch === 'true';
 
@@ -591,7 +710,6 @@ const getAllSecrets = async (req, res) => {
 
 
 
-// -----------------------------------------------------------
 const triggerSecretLLM = async (req, res) => {
   const { secretId, fileId, additionalInput = "", sessionId, llm_name: requestLlmName } = req.body;
 
@@ -603,9 +721,6 @@ const triggerSecretLLM = async (req, res) => {
     additionalInput: additionalInput ? additionalInput.substring(0, 50) + '...' : '(empty)',
   });
 
-  // -------------------------------
-  // 1️⃣ Input Validation
-  // -------------------------------
   if (!secretId) return res.status(400).json({ error: '❌ secretId is required.' });
   if (!fileId) return res.status(400).json({ error: '❌ fileId is required.' });
 
@@ -617,9 +732,6 @@ const triggerSecretLLM = async (req, res) => {
   try {
     console.log(`[triggerSecretLLM] Starting process for secretId: ${secretId}, fileId: ${fileId}`);
 
-    // -------------------------------
-    // 2️⃣ Fetch secret configuration from DB (including template IDs)
-    // -------------------------------
     const { fetchSecretManagerWithTemplates, fetchTemplateFilesData, buildEnhancedSystemPromptWithTemplates } = require('../services/secretPromptTemplateService');
     const secretData = await fetchSecretManagerWithTemplates(secretId);
     if (!secretData)
@@ -639,9 +751,6 @@ const triggerSecretLLM = async (req, res) => {
       `[triggerSecretLLM] Found secret: ${secretName}, LLM from DB: ${dbLlmName || 'none'}, Chunking Method from DB: ${dbChunkingMethod || 'none'}`
     );
 
-    // -------------------------------
-    // 3️⃣ Resolve provider name dynamically
-    // -------------------------------
     let provider = resolveProviderName(requestLlmName || dbLlmName);
     console.log(`[triggerSecretLLM] Resolved LLM provider: ${provider}`);
     const availableProviders = getAvailableProviders();
@@ -650,9 +759,6 @@ const triggerSecretLLM = async (req, res) => {
       provider = 'gemini';
     }
 
-    // -------------------------------
-    // 4️⃣ Fetch secret value from GCP Secret Manager
-    // -------------------------------
     const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
     console.log(`[triggerSecretLLM] Fetching secret from GCP: ${gcpSecretName}`);
 
@@ -662,13 +768,13 @@ const triggerSecretLLM = async (req, res) => {
 
     console.log(`[triggerSecretLLM] Secret value length: ${secretValue.length} characters`);
 
-    // ✅ Fetch template files and their extracted data
+    let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
     if (input_template_id || output_template_id) {
       console.log(`[triggerSecretLLM] Fetching template files:`);
       console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
       console.log(`   Output Template ID: ${output_template_id || 'not set'}`);
       
-      const templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
+      templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
       
       if (templateData.hasTemplates) {
         console.log(`[triggerSecretLLM] ✅ Template files fetched successfully`);
@@ -679,7 +785,6 @@ const triggerSecretLLM = async (req, res) => {
           console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
         }
         
-        // Build enhanced prompt with template examples
         secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
         console.log(`[triggerSecretLLM] ✅ Enhanced prompt built with template examples (${secretValue.length} chars)`);
       } else {
@@ -687,9 +792,6 @@ const triggerSecretLLM = async (req, res) => {
       }
     }
 
-    // -------------------------------
-    // 5️⃣ Fetch document content from DB
-    // -------------------------------
     const FileChunkModel = require('../models/FileChunk');
     const allChunks = await FileChunkModel.getChunksByFileId(fileId);
     if (!allChunks?.length)
@@ -698,19 +800,20 @@ const triggerSecretLLM = async (req, res) => {
     const documentContent = allChunks.map((c) => c.content).join('\n\n');
     console.log(`[triggerSecretLLM] Document content length: ${documentContent.length} characters`);
 
-    // -------------------------------
-    // 6️⃣ Construct final prompt
-    // -------------------------------
     let finalPrompt = `You are an expert AI legal assistant using the ${provider.toUpperCase()} model.\n\n`;
     
-    // Add JSON formatting instructions to secret prompt (pass output template if available)
+    const inputTemplate = templateData?.inputTemplate || null;
     const outputTemplate = templateData?.outputTemplate || null;
-    const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
+    const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
     finalPrompt += `${formattedSecretValue}\n\n=== DOCUMENT TO ANALYZE ===\n${documentContent}`;
+    
+    if (inputTemplate && inputTemplate.extracted_text) {
+      finalPrompt += `\n\n💡 REMINDER: Extract points from these documents based on the INPUT TEMPLATE format shown above, `;
+      finalPrompt += `and format your response according to the OUTPUT TEMPLATE structure shown above.`;
+    }
     if (additionalInput?.trim().length > 0)
       finalPrompt += `\n\n=== ADDITIONAL USER INSTRUCTIONS ===\n${additionalInput.trim()}`;
 
-    // ✅ CRITICAL: Append user professional profile context to the prompt
     try {
       const UserProfileService = require('../services/userProfileService');
       const userId = req.user?.id;
@@ -724,28 +827,26 @@ const triggerSecretLLM = async (req, res) => {
       }
     } catch (profileError) {
       console.warn(`[triggerSecretLLM] Failed to fetch profile context:`, profileError.message);
-      // Continue without profile context - don't fail the request
     }
 
-    console.log(`[triggerSecretLLM] Final prompt length: ${finalPrompt.length}`);
+    console.log(`[triggerSecretLLM] Final prompt length: ${finalPrompt.length} characters`);
+    console.log(`[triggerSecretLLM] Prompt includes secret prompt: ${secretValue.length} chars + document content: ${documentContent.length} chars`);
 
-    // -------------------------------
-    // 7️⃣ Trigger the LLM
-    // -------------------------------
     console.log(`[triggerSecretLLM] Calling askLLM with provider: ${provider}...`);
-    // Use additionalInput as the original question for web search (if provided)
+    console.log(`[triggerSecretLLM] Token logging: Input tokens will be calculated from full prompt (includes secret prompt), output tokens from response`);
     const originalQuestion = additionalInput?.trim() || secretName;
-    let llmResponse = await askLLM(provider, finalPrompt, '', '', originalQuestion);
+    let llmResponse = await askLLM(provider, finalPrompt, '', '', originalQuestion, {
+      userId: userId,
+      endpoint: '/api/doc/secret/trigger',
+      fileId: fileId,
+      sessionId: finalSessionId
+    });
     if (!llmResponse?.trim()) throw new Error(`Empty response received from ${provider}`);
     console.log(`[triggerSecretLLM] ✅ LLM response received (${llmResponse.length} characters)`);
     
-    // Post-process response to ensure proper JSON format (reuse outputTemplate from above)
     llmResponse = postProcessSecretPromptResponse(llmResponse, outputTemplate);
     console.log(`[triggerSecretLLM] ✅ Post-processed response (${llmResponse.length} characters)`);
 
-    // -------------------------------
-    // 8️⃣ ✅ Link secret_id to the processing job
-    // -------------------------------
     try {
       const linkedJob = await ProcessingJobModel.linkSecretToJob(fileId, secretId);
       if (linkedJob) {
@@ -757,9 +858,6 @@ const triggerSecretLLM = async (req, res) => {
       console.error(`[triggerSecretLLM] ⚠️ Failed to link secret_id to job: ${linkErr.message}`);
     }
 
-    // -------------------------------
-    // 9️⃣ Store chat record in file_chats
-    // -------------------------------
     console.log(`[triggerSecretLLM] Storing chat in database...`);
     const chunkIds = allChunks.map((c) => c.id);
 
@@ -774,8 +872,9 @@ const triggerSecretLLM = async (req, res) => {
         prompt_label,
         secret_id,
         used_chunk_ids,
+        chat_type,
         created_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::int[],NOW())
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::int[],$10,NOW())
       RETURNING id, created_at
     `;
     const chatResult = await db.query(insertChatQuery, [
@@ -788,14 +887,12 @@ const triggerSecretLLM = async (req, res) => {
       secretName,
       secretId,
       chunkIds,
+      'analysis', // chat_type: 'analysis' for document analysis chats
     ]);
 
     const messageId = chatResult.rows[0].id;
     const createdAt = chatResult.rows[0].created_at;
 
-    // -------------------------------
-    // 🔟 Return full chat history
-    // -------------------------------
     const historyQuery = `
       SELECT 
         id, file_id, session_id, question, answer, used_secret_prompt,
@@ -845,10 +942,6 @@ const triggerSecretLLM = async (req, res) => {
   }
 };
 
-/**
- * 🧩 Trigger LLM with a secret-based prompt for a folder.
- * @route POST /api/secrets/trigger-llm-folder
- */
 const triggerAskLlmForFolder = async (req, res) => {
   const { secretId, folderName, additionalInput = "", sessionId, llm_name: requestLlmName } = req.body;
 
@@ -860,9 +953,6 @@ const triggerAskLlmForFolder = async (req, res) => {
     additionalInput: additionalInput ? additionalInput.substring(0, 50) + '...' : '(empty)',
   });
 
-  // -------------------------------
-  // 1️⃣ Input Validation
-  // -------------------------------
   if (!secretId) return res.status(400).json({ error: '❌ secretId is required.' });
   if (!folderName) return res.status(400).json({ error: '❌ folderName is required.' });
 
@@ -874,9 +964,6 @@ const triggerAskLlmForFolder = async (req, res) => {
   try {
     console.log(`[triggerAskLlmForFolder] Starting process for secretId: ${secretId}, folderName: ${folderName}`);
 
-    // -------------------------------
-    // 2️⃣ Fetch secret configuration from DB
-    // -------------------------------
     const query = `
       SELECT
         s.id,
@@ -907,9 +994,6 @@ const triggerAskLlmForFolder = async (req, res) => {
       `[triggerAskLlmForFolder] Found secret: ${secretName}, LLM from DB: ${dbLlmName || 'none'}, Chunking Method from DB: ${dbChunkingMethod || 'none'}`
     );
 
-    // -------------------------------
-    // 3️⃣ Resolve provider name dynamically
-    // -------------------------------
     let provider = resolveProviderName(requestLlmName || dbLlmName);
     console.log(`[triggerAskLlmForFolder] Resolved LLM provider: ${provider}`);
     const availableProviders = getAvailableProviders();
@@ -918,9 +1002,6 @@ const triggerAskLlmForFolder = async (req, res) => {
       provider = 'gemini';
     }
 
-    // -------------------------------
-    // 4️⃣ Fetch secret value from GCP Secret Manager
-    // -------------------------------
     const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
     console.log(`[triggerAskLlmForFolder] Fetching secret from GCP: ${gcpSecretName}`);
 
@@ -930,9 +1011,6 @@ const triggerAskLlmForFolder = async (req, res) => {
 
     console.log(`[triggerAskLlmForFolder] Secret value length: ${secretValue.length} characters`);
 
-    // -------------------------------
-    // 5️⃣ Fetch all processed files in folder
-    // -------------------------------
     const files = await File.findByUserIdAndFolderPath(userId, folderName);
     const processedFiles = files.filter(f => !f.is_folder && f.status === "processed");
 
@@ -942,9 +1020,6 @@ const triggerAskLlmForFolder = async (req, res) => {
 
     console.log(`[triggerAskLlmForFolder] Found ${processedFiles.length} processed files in folder "${folderName}"`);
 
-    // -------------------------------
-    // 6️⃣ Collect all chunks across all files
-    // -------------------------------
     let allChunks = [];
     const FileChunk = require('../models/FileChunk'); // Dynamically require FileChunk
     for (const file of processedFiles) {
@@ -965,27 +1040,31 @@ const triggerAskLlmForFolder = async (req, res) => {
     const documentContent = allChunks.map((c) => `📄 [${c.filename}]\n${c.content}`).join('\n\n');
     console.log(`[triggerAskLlmForFolder] Combined document content length: ${documentContent.length} characters`);
 
-    // -------------------------------
-    // 7️⃣ Construct final prompt
-    // -------------------------------
     let finalPrompt = `You are an expert AI legal assistant using the ${provider.toUpperCase()} model.\n\n`;
     
-    // Fetch template data if available
     let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
-    const { fetchTemplateFilesData } = require('../services/secretPromptTemplateService');
+    const { fetchTemplateFilesData, buildEnhancedSystemPromptWithTemplates } = require('../services/secretPromptTemplateService');
     const secretData = await fetchSecretManagerWithTemplates(secretId);
     if (secretData && (secretData.input_template_id || secretData.output_template_id)) {
       templateData = await fetchTemplateFilesData(secretData.input_template_id, secretData.output_template_id);
+      
+      if (templateData.hasTemplates) {
+        secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
+      }
     }
     
-    // Add JSON formatting instructions to secret prompt (pass output template if available)
+    const inputTemplate = templateData?.inputTemplate || null;
     const outputTemplate = templateData?.outputTemplate || null;
-    const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, outputTemplate);
+    const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
     finalPrompt += `${formattedSecretValue}\n\n=== DOCUMENTS TO ANALYZE (FOLDER: "${folderName}") ===\n${documentContent}`;
+    
+    if (inputTemplate && inputTemplate.extracted_text) {
+      finalPrompt += `\n\n💡 REMINDER: Extract points from these documents based on the INPUT TEMPLATE format shown above, `;
+      finalPrompt += `and format your response according to the OUTPUT TEMPLATE structure shown above.`;
+    }
     if (additionalInput?.trim().length > 0)
       finalPrompt += `\n\n=== ADDITIONAL USER INSTRUCTIONS ===\n${additionalInput.trim()}`;
 
-    // ✅ CRITICAL: Append user professional profile context to the prompt
     try {
       const UserProfileService = require('../services/userProfileService');
       const userId = req.user?.id;
@@ -999,28 +1078,27 @@ const triggerAskLlmForFolder = async (req, res) => {
       }
     } catch (profileError) {
       console.warn(`[triggerAskLlmForFolder] Failed to fetch profile context:`, profileError.message);
-      // Continue without profile context - don't fail the request
     }
 
-    console.log(`[triggerAskLlmForFolder] Final prompt length: ${finalPrompt.length}`);
+    console.log(`[triggerAskLlmForFolder] Final prompt length: ${finalPrompt.length} characters`);
+    console.log(`[triggerAskLlmForFolder] Prompt includes secret prompt: ${secretValue.length} chars + document content: ${documentContent.length} chars`);
 
-    // -------------------------------
-    // 8️⃣ Trigger the LLM via askFolderLLM
-    // -------------------------------
     console.log(`[triggerAskLlmForFolder] Calling askFolderLLM with provider: ${provider}...`);
-    // Use additionalInput as the original question for web search (if provided)
+    console.log(`[triggerAskLlmForFolder] Token logging: Input tokens will be calculated from full prompt (includes secret prompt), output tokens from response`);
     const originalQuestion = additionalInput?.trim() || secretName;
-    let llmResponse = await askFolderLLM(provider, finalPrompt, '', null, originalQuestion); // Pass original question for web search
+    const userId = req.user?.id || req.userId;
+    let llmResponse = await askFolderLLM(provider, finalPrompt, '', null, originalQuestion, {
+      userId: userId,
+      endpoint: '/api/doc/secret/trigger-folder',
+      fileId: null, // No specific file for folder chat
+      sessionId: finalSessionId
+    }); // Pass original question for web search and metadata for logging
     if (!llmResponse?.trim()) throw new Error(`Empty response received from ${provider}`);
     console.log(`[triggerAskLlmForFolder] ✅ LLM response received (${llmResponse.length} characters)`);
     
-    // Post-process response to ensure proper JSON format (reuse outputTemplate from above)
     llmResponse = postProcessSecretPromptResponse(llmResponse, outputTemplate);
     console.log(`[triggerAskLlmForFolder] ✅ Post-processed response (${llmResponse.length} characters)`);
 
-    // -------------------------------
-    // 9️⃣ Store chat record in folder_chats
-    // -------------------------------
     console.log(`[triggerAskLlmForFolder] Storing chat in database...`);
     const summarizedFileIds = processedFiles.map((f) => f.id);
 
@@ -1054,9 +1132,6 @@ const triggerAskLlmForFolder = async (req, res) => {
 
     console.log(`[triggerAskLlmForFolder] ✅ Chat stored in DB with ID: ${messageId}`);
 
-    // -------------------------------
-    // 🔟 Return full chat history for this session
-    // -------------------------------
     const historyRows = await FolderChat.getFolderChatHistory(userId, folderName, finalSessionId);
 
     const history = historyRows.map((row) => ({
@@ -1100,7 +1175,6 @@ const triggerAskLlmForFolder = async (req, res) => {
 };
 
 
-// Helper
 const getSecretDetailsById = async (secretId) => {
   try {
     const query = `
@@ -1135,7 +1209,7 @@ module.exports = {
   triggerSecretLLM,
   triggerAskLlmForFolder, // Export the new function
   getSecretDetailsById,
+  postProcessSecretPromptResponse, // Export postProcessSecretPromptResponse
 };
 
 
-// const pool//

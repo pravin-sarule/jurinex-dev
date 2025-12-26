@@ -1,4 +1,3 @@
-
 const { DocumentProcessorServiceClient } = require('@google-cloud/documentai');
 const { Storage } = require('@google-cloud/storage');
 const { credentials } = require('../config/gcs');
@@ -10,9 +9,6 @@ const processorId = process.env.DOCUMENT_AI_PROCESSOR_ID;
 const client = new DocumentProcessorServiceClient({ credentials });
 const storage = new Storage({ credentials });
 
-/**
- * Process small documents (<20MB inline)
- */
 async function extractTextFromDocument(fileBuffer, mimeType) {
   const name = `projects/${projectId}/locations/${location}/processors/${processorId}`;
   const request = {
@@ -27,16 +23,12 @@ async function extractTextFromDocument(fileBuffer, mimeType) {
   return extractText(result.document);
 }
 
-/**
- * Batch process large documents asynchronously
- */
 async function batchProcessDocument(inputUris, outputUriPrefix, mimeType = 'application/pdf') {
   const name = `projects/${projectId}/locations/${location}/processors/${processorId}`;
   const uris = Array.isArray(inputUris) ? inputUris : [inputUris];
 
   if (!outputUriPrefix.endsWith('/')) outputUriPrefix += '/';
 
-  // Validate all input files exist
   await Promise.all(
     uris.map(async (uri) => {
       const { bucketName, prefix } = parseGcsUri(uri);
@@ -59,9 +51,6 @@ async function batchProcessDocument(inputUris, outputUriPrefix, mimeType = 'appl
   return operation.name;
 }
 
-/**
- * Get operation status
- */
 async function getOperationStatus(operationName) {
   const [operation] = await client.operationsClient.getOperation({ name: operationName });
   return {
@@ -71,9 +60,6 @@ async function getOperationStatus(operationName) {
   };
 }
 
-/**
- * Fetch batch results from GCS asynchronously and extract text only
- */
 async function fetchBatchResults(bucketName, prefix) {
   console.log(`[fetchBatchResults] Looking for files in bucket: ${bucketName}, prefix: ${prefix}`);
   
@@ -88,7 +74,6 @@ async function fetchBatchResults(bucketName, prefix) {
   const [files] = await bucket.getFiles({ prefix });
   console.log(`[fetchBatchResults] Found ${files.length} total files with prefix "${prefix}"`);
   
-  // Log all file names for debugging
   if (files.length > 0) {
     console.log(`[fetchBatchResults] Files found:`);
     files.slice(0, 10).forEach((file, i) => {
@@ -99,7 +84,6 @@ async function fetchBatchResults(bucketName, prefix) {
     }
   } else {
     console.warn(`[fetchBatchResults] ⚠️ No files found with prefix "${prefix}"`);
-    // Try to list files in parent directory to see what's there
     const parentPrefix = prefix.substring(0, prefix.lastIndexOf('/'));
     if (parentPrefix) {
       console.log(`[fetchBatchResults] Checking parent directory: ${parentPrefix}`);
@@ -119,7 +103,6 @@ async function fetchBatchResults(bucketName, prefix) {
     return [];
   }
 
-  // Download and process files in parallel
   const texts = await Promise.all(
     jsonFiles.map(async (file) => {
       try {
@@ -127,7 +110,6 @@ async function fetchBatchResults(bucketName, prefix) {
         const [contents] = await file.download();
         const json = JSON.parse(contents.toString());
         
-        // Log JSON structure for debugging
         console.log(`[fetchBatchResults] JSON keys: ${Object.keys(json).join(', ')}`);
         if (json.document) {
           console.log(`[fetchBatchResults] Document keys: ${Object.keys(json.document).join(', ')}`);
@@ -143,7 +125,6 @@ async function fetchBatchResults(bucketName, prefix) {
         const extracted = extractText(doc); // returns array of page texts
         console.log(`[fetchBatchResults] Extracted ${extracted.length} text segments from ${file.name}`);
         
-        // If extraction failed, log the structure for debugging
         if (extracted.length === 0) {
           console.error(`[fetchBatchResults] ⚠️ No text extracted from ${file.name}`);
           console.error(`[fetchBatchResults] Document structure:`, JSON.stringify({
@@ -164,19 +145,11 @@ async function fetchBatchResults(bucketName, prefix) {
     })
   );
 
-  // Flatten array of arrays into a single array
   const flattened = texts.flat();
   console.log(`[fetchBatchResults] ✅ Total extracted text segments: ${flattened.length}`);
   return flattened;
 }
 
-/**
- * Extracts text from a Document AI document object using simplified logic.
- * 1. First tries page-based extraction (structured)
- * 2. Falls back to root text field if structured extraction fails
- * @param {object} document - The Document AI document object.
- * @returns {Array<object>} An array of objects, each with 'text', 'page_start', and 'page_end'.
- */
 function extractText(document) {
   if (!document) {
     console.warn(`[extractText] Document is null or undefined`);
@@ -185,7 +158,6 @@ function extractText(document) {
 
   let extractedText = "";
 
-  // 1. Try page-based extraction (structured logic)
   if (document.pages && Array.isArray(document.pages) && document.pages.length > 0) {
     console.log(`[extractText] Processing ${document.pages.length} pages from pages array`);
     
@@ -196,10 +168,8 @@ function extractText(document) {
         ? page.pageNumber
         : (i + 1);
       
-      // Try to extract text from page
       let pageText = null;
       
-      // Try paragraphs first
       if (page.paragraphs && Array.isArray(page.paragraphs)) {
         const paragraphTexts = page.paragraphs
           .map(para => {
@@ -214,7 +184,6 @@ function extractText(document) {
         }
       }
       
-      // Try lines if paragraphs didn't work
       if (!pageText && page.lines && Array.isArray(page.lines)) {
         const lineTexts = page.lines
           .map(line => {
@@ -229,7 +198,6 @@ function extractText(document) {
         }
       }
       
-      // Try blocks if lines didn't work
       if (!pageText && page.blocks && Array.isArray(page.blocks)) {
         const blockTexts = page.blocks
           .map(block => {
@@ -244,7 +212,6 @@ function extractText(document) {
         }
       }
       
-      // Try direct page.text field
       if (!pageText && page.text && page.text.trim()) {
         pageText = page.text;
       }
@@ -259,26 +226,20 @@ function extractText(document) {
       }
     }
     
-    // If we got text from pages, return it
     if (pageTexts.length > 0) {
       console.log(`[extractText] ✅ Extracted ${pageTexts.length} pages with structured extraction`);
       return pageTexts;
     }
   }
 
-  // 2. CRITICAL FIX: Fallback to root text
-  // If structured extraction failed, or returned empty, take the raw text.
   if (!extractedText.trim() && document.text) {
     console.log(`[extractText] Structured extraction failed. Falling back to root text (Length: ${document.text.length})`);
     extractedText = document.text;
   }
 
-  // If we have extracted text but no page structure, return as single block
   if (extractedText && extractedText.trim()) {
-    // Try to estimate page count based on text length (~2000 chars per page)
     const estimatedPageCount = Math.max(1, Math.ceil(extractedText.length / 2000));
     
-    // If it's a single page worth of text, return as one block
     if (estimatedPageCount === 1) {
       return [{
         text: extractedText.trim(),
@@ -287,7 +248,6 @@ function extractText(document) {
       }];
     }
     
-    // Otherwise, split into estimated pages
     const charsPerPage = Math.ceil(extractedText.length / estimatedPageCount);
     const pageTexts = [];
     for (let i = 0; i < estimatedPageCount; i++) {
@@ -308,7 +268,6 @@ function extractText(document) {
     return pageTexts;
   }
 
-  // Last resort: try to find any text field
   console.warn(`[extractText] ⚠️ No text found in pages or root text field`);
   console.warn(`[extractText] Available keys: ${Object.keys(document).join(', ')}`);
   
@@ -328,9 +287,6 @@ function extractText(document) {
   return [];
 }
 
-/**
- * Parse gs:// URI into bucket + prefix
- */
 function parseGcsUri(gcsUri) {
   if (!gcsUri.startsWith('gs://')) throw new Error(`Invalid GCS URI: ${gcsUri}`);
   const parts = gcsUri.replace('gs://', '').split('/');

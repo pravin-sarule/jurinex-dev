@@ -1,10 +1,5 @@
-
 const db = require('../config/db');
 
-/**
- * 🧩 Create new processing job
- * Includes optional secret_id (to link with secret_manager)
- */
 async function createJob(job) {
   const query = `
     INSERT INTO processing_jobs (
@@ -36,9 +31,6 @@ async function createJob(job) {
   return rows[0];
 }
 
-/**
- * 🧩 Update only job status
- */
 async function updateJobStatus(jobId, status, errorMessage = null) {
   const query = `
     UPDATE processing_jobs
@@ -52,9 +44,6 @@ async function updateJobStatus(jobId, status, errorMessage = null) {
   return rows[0];
 }
 
-/**
- * 🧩 Fetch latest job by file_id
- */
 async function getJobByFileId(fileId) {
   const query = `
     SELECT *
@@ -67,9 +56,6 @@ async function getJobByFileId(fileId) {
   return rows[0];
 }
 
-/**
- * 🧩 Update multiple fields dynamically (status, secret_id, etc.)
- */
 async function updateJob(jobId, updates) {
   const fields = Object.keys(updates);
   if (fields.length === 0) return null;
@@ -88,10 +74,6 @@ async function updateJob(jobId, updates) {
   return rows[0];
 }
 
-/**
- * 🧩 Link a secret_id to latest job by file_id
- * Used by triggerSecretLLM or document controller.
- */
 async function linkSecretToJob(fileId, secretId) {
   const query = `
     UPDATE processing_jobs

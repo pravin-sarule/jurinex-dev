@@ -18,14 +18,6 @@ const QuickTools = ({ isCollapsed }) => {
         <MagnifyingGlassCircleIcon className={`h-6 w-6 text-gray-500 group-hover:text-blue-600 ${isCollapsed ? '' : 'mr-3'}`} />
         {!isCollapsed && <span>Case Search</span>}
       </Link>
-      {/* <Link
-        to="/templates"
-        className={`flex items-center px-2 py-2 text-sm font-medium text-gray-700 rounded-md hover:bg-gray-100 hover:text-blue-600 group ${isCollapsed ? 'justify-center' : ''}`}
-        title={isCollapsed ? 'Templates' : undefined}
-      >
-        <DocumentDuplicateIcon className={`h-6 w-6 text-gray-500 group-hover:text-blue-600 ${isCollapsed ? '' : 'mr-3'}`} />
-        {!isCollapsed && <span>Templates</span>}
-      </Link> */}
       <Link
         to="/calendar"
         className={`flex items-center px-2 py-2 text-sm font-medium text-gray-700 rounded-md hover:bg-gray-100 hover:text-blue-600 group ${isCollapsed ? 'justify-center' : ''}`}
@@ -34,14 +26,6 @@ const QuickTools = ({ isCollapsed }) => {
         <CalendarIcon className={`h-6 w-6 text-gray-500 group-hover:text-blue-600 ${isCollapsed ? '' : 'mr-3'}`} />
         {!isCollapsed && <span>Court Calendar</span>}
       </Link>
-      {/* <Link
-        to="/billing"
-        className={`flex items-center px-2 py-2 text-sm font-medium text-gray-700 rounded-md hover:bg-gray-100 hover:text-blue-600 group ${isCollapsed ? 'justify-center' : ''}`}
-        title={isCollapsed ? 'Billing & Usage' : undefined}
-      >
-        <CreditCardIcon className={`h-6 w-6 text-gray-500 group-hover:text-blue-600 ${isCollapsed ? '' : 'mr-3'}`} />
-        {!isCollapsed && <span>Billing & Usage</span>}
-      </Link> */}
     </div>
   );
 };
