@@ -25,18 +25,56 @@ const ChunkVector = {
       throw new Error(`Invalid embedding for chunk ${chunkId}`);
     }
     
-    const embeddingPgVector = `[${embedding.join(',')}]`;
-    const res = await pool.query(`
-      INSERT INTO chunk_vectors (chunk_id, embedding, file_id)
-      VALUES ($1, $2::vector, $3::uuid)
-      ON CONFLICT (chunk_id) DO UPDATE
-        SET embedding = EXCLUDED.embedding,
-            file_id = EXCLUDED.file_id,
-            updated_at = NOW()
-      RETURNING id, chunk_id
-    `, [chunkId, embeddingPgVector, fileId]);
+    // Generate ID in application code to avoid schema dependency
+    let vectorId;
+    try {
+      const maxIdResult = await pool.query('SELECT COALESCE(MAX(id), 0) as max_id FROM chunk_vectors');
+      vectorId = (maxIdResult.rows[0]?.max_id || 0) + 1;
+    } catch (maxIdError) {
+      // Try to use sequence if it exists
+      try {
+        const seqResult = await pool.query("SELECT nextval('chunk_vectors_id_seq') as next_id");
+        vectorId = seqResult.rows[0]?.next_id || 1;
+      } catch (seqError) {
+        // Fallback: start from 1
+        vectorId = 1;
+      }
+    }
     
-    return res.rows[0].id;
+    const embeddingPgVector = `[${embedding.join(',')}]`;
+    
+    try {
+      const res = await pool.query(`
+        INSERT INTO chunk_vectors (id, chunk_id, embedding, file_id)
+        VALUES ($1, $2, $3::vector, $4::uuid)
+        ON CONFLICT (chunk_id) DO UPDATE
+          SET embedding = EXCLUDED.embedding,
+              file_id = EXCLUDED.file_id,
+              updated_at = NOW()
+        RETURNING id, chunk_id
+      `, [vectorId, chunkId, embeddingPgVector, fileId]);
+      
+      return res.rows[0].id;
+    } catch (insertError) {
+      // If there's a unique constraint violation (duplicate ID), retry with a higher ID
+      if (insertError.code === '23505' || (insertError.code === '23502' && insertError.column === 'id')) {
+        const maxIdResult = await pool.query('SELECT COALESCE(MAX(id), 0) as max_id FROM chunk_vectors');
+        const newVectorId = (maxIdResult.rows[0]?.max_id || 0) + 1;
+        
+        const retryRes = await pool.query(`
+          INSERT INTO chunk_vectors (id, chunk_id, embedding, file_id)
+          VALUES ($1, $2, $3::vector, $4::uuid)
+          ON CONFLICT (chunk_id) DO UPDATE
+            SET embedding = EXCLUDED.embedding,
+                file_id = EXCLUDED.file_id,
+                updated_at = NOW()
+          RETURNING id, chunk_id
+        `, [newVectorId, chunkId, embeddingPgVector, fileId]);
+        
+        return retryRes.rows[0].id;
+      }
+      throw insertError;
+    }
   },
 
   async saveMultipleChunkVectors(vectorsData) {
@@ -65,22 +103,48 @@ const ChunkVector = {
     }
     console.log(`[ChunkVector] ✅ All ${vectorsData.length} vectors validated successfully`);
 
+    // Generate IDs in application code to avoid schema dependency
+    let startId = 1;
+    try {
+      const maxIdResult = await pool.query('SELECT COALESCE(MAX(id), 0) as max_id FROM chunk_vectors');
+      startId = (maxIdResult.rows[0]?.max_id || 0) + 1;
+    } catch (maxIdError) {
+      console.warn('⚠️ [ChunkVector.saveMultipleChunkVectors] Could not get max ID, starting from 1:', maxIdError.message);
+      // If we can't get max ID, try to use sequence if it exists
+      try {
+        const seqResult = await pool.query("SELECT nextval('chunk_vectors_id_seq') as next_id");
+        startId = seqResult.rows[0]?.next_id || 1;
+        // Reset sequence to start from the correct value for remaining vectors
+        if (vectorsData.length > 1) {
+          await pool.query(`SELECT setval('chunk_vectors_id_seq', $1, false)`, [startId + vectorsData.length - 1]);
+        }
+      } catch (seqError) {
+        // Sequence doesn't exist, continue with max_id approach
+        console.warn('⚠️ [ChunkVector.saveMultipleChunkVectors] Sequence not found, using max_id approach');
+      }
+    }
+
     const values = [];
     const placeholders = [];
     let paramIndex = 1;
 
-    vectorsData.forEach(vector => {
-      placeholders.push(`($${paramIndex}, $${paramIndex + 1}::vector, $${paramIndex + 2}::uuid)`);
+    // Generate IDs for each vector
+    for (let i = 0; i < vectorsData.length; i++) {
+      const vector = vectorsData[i];
+      const vectorId = startId + i;
+      
+      placeholders.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}::vector, $${paramIndex + 3}::uuid)`);
       values.push(
+        vectorId, // Explicitly provide the id
         vector.chunk_id,
         `[${vector.embedding.join(',')}]`,
         vector.file_id
       );
-      paramIndex += 3;
-    });
+      paramIndex += 4;
+    }
 
     const query = `
-      INSERT INTO chunk_vectors (chunk_id, embedding, file_id)
+      INSERT INTO chunk_vectors (id, chunk_id, embedding, file_id)
       VALUES ${placeholders.join(', ')}
       ON CONFLICT (chunk_id) DO UPDATE
         SET embedding = EXCLUDED.embedding,
@@ -94,9 +158,50 @@ const ChunkVector = {
       console.log(`[ChunkVector] ✅ Saved ${res.rows.length} vectors to database`);
       return res.rows;
     } catch (error) {
+      // If there's a unique constraint violation (duplicate ID), retry with a higher start ID
+      if (error.code === '23505' || (error.code === '23502' && error.column === 'id')) {
+        console.warn('⚠️ [ChunkVector.saveMultipleChunkVectors] ID conflict detected, retrying with higher start ID');
+        // Get the actual max ID again (in case another process inserted)
+        const maxIdResult = await pool.query('SELECT COALESCE(MAX(id), 0) as max_id FROM chunk_vectors');
+        const newStartId = (maxIdResult.rows[0]?.max_id || 0) + 1;
+        
+        // Regenerate placeholders and values with new start ID
+        const retryValues = [];
+        const retryPlaceholders = [];
+        let retryParamIndex = 1;
+        
+        for (let i = 0; i < vectorsData.length; i++) {
+          const vector = vectorsData[i];
+          const vectorId = newStartId + i;
+          
+          retryPlaceholders.push(`($${retryParamIndex}, $${retryParamIndex + 1}, $${retryParamIndex + 2}::vector, $${retryParamIndex + 3}::uuid)`);
+          retryValues.push(
+            vectorId,
+            vector.chunk_id,
+            `[${vector.embedding.join(',')}]`,
+            vector.file_id
+          );
+          retryParamIndex += 4;
+        }
+        
+        const retryQuery = `
+          INSERT INTO chunk_vectors (id, chunk_id, embedding, file_id)
+          VALUES ${retryPlaceholders.join(', ')}
+          ON CONFLICT (chunk_id) DO UPDATE
+            SET embedding = EXCLUDED.embedding,
+                file_id = EXCLUDED.file_id,
+                updated_at = NOW()
+          RETURNING id, chunk_id;
+        `;
+        
+        const retryRes = await pool.query(retryQuery, retryValues);
+        console.log(`[ChunkVector] ✅ Saved ${retryRes.rows.length} vectors to database (after retry)`);
+        return retryRes.rows;
+      }
+      
       console.error(`[ChunkVector] ❌ Error saving vectors:`, error.message);
       console.error(`[ChunkVector] Query:`, query);
-      console.error(`[ChunkVector] Values (first 3):`, values.slice(0, 9));
+      console.error(`[ChunkVector] Values (first 4):`, values.slice(0, 12));
       throw error;
     }
   },

@@ -122,6 +122,24 @@ async function fetchBatchResults(bucketName, prefix) {
         }
         
         const doc = json.document || json;
+        
+        // Enhanced logging for debugging
+        if (doc.pages && doc.pages.length > 0) {
+          const firstPage = doc.pages[0];
+          console.log(`[fetchBatchResults] First page structure:`, JSON.stringify({
+            keys: Object.keys(firstPage),
+            hasParagraphs: !!firstPage.paragraphs,
+            hasLines: !!firstPage.lines,
+            hasBlocks: !!firstPage.blocks,
+            hasTokens: !!firstPage.tokens,
+            hasTextSegments: !!firstPage.textSegments,
+            hasText: !!firstPage.text,
+            paragraphCount: firstPage.paragraphs?.length || 0,
+            lineCount: firstPage.lines?.length || 0,
+            blockCount: firstPage.blocks?.length || 0
+          }, null, 2));
+        }
+        
         const extracted = extractText(doc); // returns array of page texts
         console.log(`[fetchBatchResults] Extracted ${extracted.length} text segments from ${file.name}`);
         
@@ -132,7 +150,8 @@ async function fetchBatchResults(bucketName, prefix) {
             pagesLength: doc.pages?.length || 0,
             hasText: !!doc.text,
             textLength: doc.text?.length || 0,
-            keys: Object.keys(doc)
+            keys: Object.keys(doc),
+            firstPageKeys: doc.pages?.[0] ? Object.keys(doc.pages[0]) : []
           }, null, 2));
         }
         
@@ -170,50 +189,196 @@ function extractText(document) {
       
       let pageText = null;
       
+      // Log page structure for debugging
+      if (i === 0) {
+        console.log(`[extractText] First page structure - keys: ${Object.keys(page).join(', ')}`);
+        if (page.layout) {
+          console.log(`[extractText] Page layout keys: ${Object.keys(page.layout || {}).join(', ')}`);
+        }
+      }
+      
+      // Method 1: Try paragraphs with layout.textAnchor.content
       if (page.paragraphs && Array.isArray(page.paragraphs)) {
         const paragraphTexts = page.paragraphs
           .map(para => {
             if (para.layout && para.layout.textAnchor && para.layout.textAnchor.content) {
               return para.layout.textAnchor.content;
             }
+            // Try alternative structure: para.textAnchor.content
+            if (para.textAnchor && para.textAnchor.content) {
+              return para.textAnchor.content;
+            }
+            // Try direct text field
+            if (para.text && typeof para.text === 'string') {
+              return para.text;
+            }
             return null;
           })
           .filter(Boolean);
         if (paragraphTexts.length > 0) {
           pageText = paragraphTexts.join('\n');
+          console.log(`[extractText] Extracted text from paragraphs (${paragraphTexts.length} paragraphs)`);
         }
       }
       
+      // Method 2: Try lines with layout.textAnchor.content
       if (!pageText && page.lines && Array.isArray(page.lines)) {
         const lineTexts = page.lines
           .map(line => {
             if (line.layout && line.layout.textAnchor && line.layout.textAnchor.content) {
               return line.layout.textAnchor.content;
             }
+            // Try alternative structure: line.textAnchor.content
+            if (line.textAnchor && line.textAnchor.content) {
+              return line.textAnchor.content;
+            }
+            // Try direct text field
+            if (line.text && typeof line.text === 'string') {
+              return line.text;
+            }
             return null;
           })
           .filter(Boolean);
         if (lineTexts.length > 0) {
           pageText = lineTexts.join('\n');
+          console.log(`[extractText] Extracted text from lines (${lineTexts.length} lines)`);
         }
       }
       
+      // Method 3: Try blocks with layout.textAnchor.content
       if (!pageText && page.blocks && Array.isArray(page.blocks)) {
         const blockTexts = page.blocks
           .map(block => {
             if (block.layout && block.layout.textAnchor && block.layout.textAnchor.content) {
               return block.layout.textAnchor.content;
             }
+            // Try alternative structure: block.textAnchor.content
+            if (block.textAnchor && block.textAnchor.content) {
+              return block.textAnchor.content;
+            }
+            // Try direct text field
+            if (block.text && typeof block.text === 'string') {
+              return block.text;
+            }
             return null;
           })
           .filter(Boolean);
         if (blockTexts.length > 0) {
           pageText = blockTexts.join('\n');
+          console.log(`[extractText] Extracted text from blocks (${blockTexts.length} blocks)`);
         }
       }
       
-      if (!pageText && page.text && page.text.trim()) {
+      // Method 4: Try tokens array (Document AI sometimes uses tokens)
+      if (!pageText && page.tokens && Array.isArray(page.tokens)) {
+        const tokenTexts = page.tokens
+          .map(token => {
+            if (token.layout && token.layout.textAnchor && token.layout.textAnchor.content) {
+              return token.layout.textAnchor.content;
+            }
+            if (token.textAnchor && token.textAnchor.content) {
+              return token.textAnchor.content;
+            }
+            if (token.text && typeof token.text === 'string') {
+              return token.text;
+            }
+            return null;
+          })
+          .filter(Boolean);
+        if (tokenTexts.length > 0) {
+          pageText = tokenTexts.join(' ');
+          console.log(`[extractText] Extracted text from tokens (${tokenTexts.length} tokens)`);
+        }
+      }
+      
+      // Method 5: Try direct page.text field
+      if (!pageText && page.text && typeof page.text === 'string' && page.text.trim()) {
         pageText = page.text;
+        console.log(`[extractText] Extracted text from page.text field`);
+      }
+      
+      // Method 6: Try textSegments (some Document AI formats use this)
+      if (!pageText && page.textSegments && Array.isArray(page.textSegments)) {
+        const segmentTexts = page.textSegments
+          .map(seg => {
+            if (seg.text && typeof seg.text === 'string') {
+              return seg.text;
+            }
+            if (seg.content && typeof seg.content === 'string') {
+              return seg.content;
+            }
+            return null;
+          })
+          .filter(Boolean);
+        if (segmentTexts.length > 0) {
+          pageText = segmentTexts.join('\n');
+          console.log(`[extractText] Extracted text from textSegments (${segmentTexts.length} segments)`);
+        }
+      }
+      
+      // Method 7: Try extracting from textAnchor using document.text (Document AI pattern)
+      // Some Document AI responses store text in document.text and reference it via textAnchor
+      if (!pageText && document.text && typeof document.text === 'string') {
+        // Check if page has any elements with textAnchor
+        const textAnchors = [];
+        
+        // Collect all textAnchor references from page elements
+        const collectTextAnchors = (element) => {
+          if (element.textAnchor) {
+            textAnchors.push(element.textAnchor);
+          }
+          if (element.layout && element.layout.textAnchor) {
+            textAnchors.push(element.layout.textAnchor);
+          }
+          // Recursively check nested elements
+          if (Array.isArray(element)) {
+            element.forEach(collectTextAnchors);
+          } else if (typeof element === 'object' && element !== null) {
+            Object.values(element).forEach(val => {
+              if (typeof val === 'object' && val !== null) {
+                collectTextAnchors(val);
+              }
+            });
+          }
+        };
+        
+        // Try to extract text from page using textAnchor if available
+        if (page.paragraphs || page.lines || page.blocks || page.tokens) {
+          [page.paragraphs, page.lines, page.blocks, page.tokens].forEach(arr => {
+            if (Array.isArray(arr)) {
+              arr.forEach(collectTextAnchors);
+            }
+          });
+        }
+        
+        // If we have textAnchors, try to extract text segments
+        if (textAnchors.length > 0 && document.text) {
+          try {
+            const extractedSegments = textAnchors
+              .map(anchor => {
+                if (anchor.textSegments && Array.isArray(anchor.textSegments)) {
+                  return anchor.textSegments
+                    .map(seg => {
+                      if (seg.startIndex !== undefined && seg.endIndex !== undefined) {
+                        return document.text.substring(seg.startIndex, seg.endIndex);
+                      }
+                      return null;
+                    })
+                    .filter(Boolean)
+                    .join('');
+                }
+                return null;
+              })
+              .filter(Boolean);
+            
+            if (extractedSegments.length > 0) {
+              pageText = extractedSegments.join('\n');
+              console.log(`[extractText] Extracted text from textAnchor references (${extractedSegments.length} segments)`);
+            }
+          } catch (anchorError) {
+            console.warn(`[extractText] Error extracting from textAnchor:`, anchorError.message);
+          }
+        }
       }
       
       if (pageText && pageText.trim()) {
@@ -223,12 +388,39 @@ function extractText(document) {
           page_end: pageNumber,
         });
         extractedText += pageText.trim() + '\n\n';
+      } else {
+        console.warn(`[extractText] ⚠️ No text extracted from page ${pageNumber}. Page keys: ${Object.keys(page).join(', ')}`);
       }
     }
     
     if (pageTexts.length > 0) {
       console.log(`[extractText] ✅ Extracted ${pageTexts.length} pages with structured extraction`);
       return pageTexts;
+    }
+  }
+
+  // Try to extract from textAnchor segments if available (Document AI format)
+  if (!extractedText.trim() && document.text && document.textSegments) {
+    console.log(`[extractText] Attempting to extract from textAnchor segments`);
+    try {
+      // Document AI uses textSegments with textAnchor references
+      const textSegments = document.textSegments || [];
+      if (Array.isArray(textSegments) && textSegments.length > 0) {
+        const segmentTexts = textSegments
+          .map(seg => {
+            if (seg.text && typeof seg.text === 'string') {
+              return seg.text;
+            }
+            return null;
+          })
+          .filter(Boolean);
+        if (segmentTexts.length > 0) {
+          extractedText = segmentTexts.join('\n');
+          console.log(`[extractText] ✅ Extracted text from textSegments (${segmentTexts.length} segments)`);
+        }
+      }
+    } catch (segError) {
+      console.warn(`[extractText] Error processing textSegments:`, segError.message);
     }
   }
 
