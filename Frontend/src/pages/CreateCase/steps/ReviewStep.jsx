@@ -513,7 +513,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
   
       console.log("Creating case with request body:", requestBody);
   
-      const response = await fetch("https://gateway-service-110685455967.asia-south1.run.app/docs/create", {
+      const response = await fetch("https://gateway-service-120280829617.asia-south1.run.app/docs/create", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
