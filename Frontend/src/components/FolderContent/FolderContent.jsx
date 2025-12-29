@@ -135,7 +135,6 @@ const FolderContent = ({ onDocumentClick }) => {
  const checkProcessingStatus = async (documentId) => {
  try {
  const headers = getAuthHeaders();
- const API_BASE_URL = getApiBaseUrl();
  const response = await fetch(`${API_BASE_URL}/docs/status/${documentId}`, {
  method: "GET",
  headers: {

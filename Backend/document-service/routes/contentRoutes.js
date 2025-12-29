@@ -10,13 +10,17 @@ router.get('/case-types/:caseTypeId/sub-types', contentController.getSubTypesByC
 
 
 
-router.get('/courts', contentController.getCourts);
+// router.get('/courts', contentController.getCourts);
 
-router.get('/courts/:id', contentController.getCourtById);
+// router.get('/courts/:id', contentController.getCourtById);
 
-router.get('/courts/level/:level', contentController.getCourtsByLevel);
+// router.get('/courts/level/:level', contentController.getCourtsByLevel);
 
+router.get('/jurisdictions', contentController.getAllJurisdictions);
 
+router.get('/jurisdictions/:jurisdictionId/courts', contentController.getCourtsByJurisdiction);
+
+router.get('/courts/:courtId/benches', contentController.getBenchesByCourt);
 
 router.get('/judges', contentController.getJudgesByBench);
 

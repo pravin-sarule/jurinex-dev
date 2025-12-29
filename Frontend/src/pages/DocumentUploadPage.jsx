@@ -144,8 +144,47 @@ const DocumentUploadPage = () => {
     }
   };
 
+  // const handleCaseFlowComplete = (data) => {
+  //   setCaseData(data);
+  //   setShowCaseFlow(false);
+  //   setIsCreatingFolder(true);
+  //   loadDraft();
+  // };
+ 
+ 
   const handleCaseFlowComplete = (data) => {
-    setCaseData(data);
+    // Generate case name from petitioners vs respondents
+    let caseName = data.caseTitle;
+    
+    if (!caseName || caseName === "Untitled Case") {
+      const petitionerNames = data.petitioners && data.petitioners.length > 0
+        ? data.petitioners.map(p => p.fullName).filter(Boolean)
+        : [];
+      
+      const respondentNames = data.respondents && data.respondents.length > 0
+        ? data.respondents.map(r => r.fullName).filter(Boolean)
+        : [];
+  
+      if (petitionerNames.length > 0 && respondentNames.length > 0) {
+        const petitionerPart = petitionerNames.length === 1
+          ? petitionerNames[0]
+          : `${petitionerNames[0]} & ${petitionerNames.length - 1} Other${petitionerNames.length - 1 > 1 ? 's' : ''}`;
+        
+        const respondentPart = respondentNames.length === 1
+          ? respondentNames[0]
+          : `${respondentNames[0]} & ${respondentNames.length - 1 > 1 ? 's' : ''}`;
+        
+        caseName = `${petitionerPart} vs ${respondentPart}`;
+      } else if (petitionerNames.length > 0) {
+        caseName = `${petitionerNames[0]} (Petitioner)`;
+      } else if (respondentNames.length > 0) {
+        caseName = `${respondentNames[0]} (Respondent)`;
+      } else {
+        caseName = "Untitled Case";
+      }
+    }
+    
+    setCaseData({ ...data, caseTitle: caseName });
     setShowCaseFlow(false);
     setIsCreatingFolder(true);
     loadDraft();

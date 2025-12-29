@@ -123,10 +123,22 @@ const DocumentModel = {
   },
 
   async getChunkVectors(chunkIds) {
+    // Filter and validate chunk IDs as UUIDs
+    const idsArray = Array.isArray(chunkIds) ? chunkIds : [chunkIds];
+    const validIds = idsArray.filter(id => {
+      if (!id) return false;
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      return uuidRegex.test(String(id));
+    });
+    
+    if (validIds.length === 0) {
+      return [];
+    }
+    
     const res = await pool.query(`
       SELECT id, chunk_id, embedding FROM chunk_vectors
-      WHERE chunk_id = ANY($1::int[])
-    `, [chunkIds]);
+      WHERE chunk_id = ANY($1::uuid[])
+    `, [validIds]);
     return res.rows;
   },
 

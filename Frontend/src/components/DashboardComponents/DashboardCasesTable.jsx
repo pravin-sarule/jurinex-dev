@@ -47,6 +47,42 @@ const DashboardCasesTable = () => {
     return 'N/A';
   };
 
+  const getCaseName = (caseItem) => {
+    // First check if case_title exists and is not "Untitled Case"
+    if (caseItem.case_title && caseItem.case_title !== "Untitled Case") {
+      return caseItem.case_title;
+    }
+    
+    // Generate case name from petitioners vs respondents (same format as DocumentUploadPage)
+    const petitionerNames = caseItem.petitioners && Array.isArray(caseItem.petitioners) && caseItem.petitioners.length > 0
+      ? caseItem.petitioners.map(p => p.fullName || p.name).filter(Boolean)
+      : [];
+      
+    const respondentNames = caseItem.respondents && Array.isArray(caseItem.respondents) && caseItem.respondents.length > 0
+      ? caseItem.respondents.map(r => r.fullName || r.name).filter(Boolean)
+      : [];
+
+    if (petitionerNames.length > 0 && respondentNames.length > 0) {
+      const petitionerPart = petitionerNames.length === 1
+        ? petitionerNames[0]
+        : `${petitionerNames[0]} & ${petitionerNames.length - 1} Other${petitionerNames.length - 1 > 1 ? 's' : ''}`;
+        
+      const respondentPart = respondentNames.length === 1
+        ? respondentNames[0]
+        : `${respondentNames[0]} & ${respondentNames.length - 1} Other${respondentNames.length - 1 > 1 ? 's' : ''}`;
+        
+      return `${petitionerPart} vs ${respondentPart}`;
+    } else if (petitionerNames.length > 0) {
+      return `${petitionerNames[0]} (Petitioner)`;
+    } else if (respondentNames.length > 0) {
+      return `${respondentNames[0]} (Respondent)`;
+    } else if (caseItem.case_title) {
+      return caseItem.case_title;
+    } else {
+      return "Untitled Case";
+    }
+  };
+
   const getPartiesDisplay = (caseItem) => {
     let display = '';
     
@@ -102,7 +138,8 @@ const DashboardCasesTable = () => {
         ...caseItem,
         _courtDisplay: getCourtDisplay(caseItem),
         _caseTypeDisplay: getCaseTypeDisplay(caseItem),
-        _partiesDisplay: getPartiesDisplay(caseItem)
+        _partiesDisplay: getPartiesDisplay(caseItem),
+        _caseName: getCaseName(caseItem)
       }));
       
       setCases(processedCases);
@@ -200,7 +237,7 @@ const DashboardCasesTable = () => {
       <div className="flex justify-between items-start mb-3">
         <div className="flex-1 min-w-0 pr-2">
           <h3 className="text-sm font-semibold text-gray-900 truncate">
-            {caseItem.case_number || 'N/A'}
+            {caseItem._caseName || 'Untitled Case'}
           </h3>
           <p className="text-xs text-gray-500 mt-1">
             {caseItem._courtDisplay}
@@ -324,7 +361,7 @@ const DashboardCasesTable = () => {
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
-                    Case No.
+                    Case Name
                   </th>
                   <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
                     Court/Bench
@@ -353,8 +390,10 @@ const DashboardCasesTable = () => {
                 ) : (
                   filteredCases.map((caseItem) => (
                     <tr key={caseItem.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                        {caseItem.case_number || 'N/A'}
+                      <td className="px-4 lg:px-6 py-4 text-sm font-medium text-gray-900 max-w-xs">
+                        <div className="truncate" title={caseItem._caseName || 'Untitled Case'}>
+                          {caseItem._caseName || 'Untitled Case'}
+                        </div>
                       </td>
                       <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                         {caseItem._courtDisplay}

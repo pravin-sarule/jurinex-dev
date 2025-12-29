@@ -45,7 +45,17 @@ const FolderChat = {
     const id = uuidv4();
     const currentSessionId = isValidUUID(sessionId) ? sessionId : uuidv4();
 
-    const numericChunkIds = usedChunkIds.map(id => Number(id)).filter(Boolean);
+    // Filter and validate chunk IDs as UUIDs
+    // Ensure we always pass an array (not null) since column has no default
+    const validChunkIds = Array.isArray(usedChunkIds) 
+      ? usedChunkIds.filter(id => id && isValidUUID(String(id)))
+      : [];
+    
+    // Ensure summarized_file_ids is also an array
+    const validSummarizedFileIds = Array.isArray(summarizedFileIds)
+      ? summarizedFileIds.filter(id => id && isValidUUID(String(id)))
+      : [];
+    
     const existingHistory = normalizeHistory(chatHistory);
     
     const normalizedCitations = Array.isArray(citations) ? citations : [];
@@ -57,7 +67,7 @@ const FolderChat = {
         (id, user_id, folder_name, question, answer, summarized_file_ids, used_chunk_ids, session_id,
          used_secret_prompt, prompt_label, secret_id, chat_history, citations, created_at)
       VALUES
-        ($1::uuid, $2, $3, $4, $5, $6::uuid[], $7::bigint[], $8::uuid, $9, $10, $11::uuid, $12::jsonb, $13::jsonb, NOW())
+        ($1::uuid, $2, $3, $4, $5, $6::uuid[], $7::uuid[], $8::uuid, $9, $10, $11::uuid, $12::jsonb, $13::jsonb, NOW())
       RETURNING id, session_id, created_at
       `,
       [
@@ -66,8 +76,8 @@ const FolderChat = {
         folderName,
         question,
         answer,
-        summarizedFileIds,
-        numericChunkIds, // ✅ now numeric array
+        validSummarizedFileIds, // ✅ validated UUID array
+        validChunkIds, // ✅ validated UUID array
         currentSessionId,
         usedSecretPrompt,
         promptLabel,

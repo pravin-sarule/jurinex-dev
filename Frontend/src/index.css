@@ -29,3 +29,11 @@ code {
 .animate-fadeIn {
   animation: fadeIn 0.3s ease-out;
 }
+select {
+  color: black;
+}
+
+select option {
+  color: black;
+  background-color: white;
+}
