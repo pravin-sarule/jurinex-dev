@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { TrendingUp, DollarSign, Hash, Calendar, AlertCircle, RefreshCw, ChevronDown } from 'lucide-react';
+import { TrendingUp, DollarSign, Hash, AlertCircle, RefreshCw, ChevronDown } from 'lucide-react';
 import { USER_RESOURCES_SERVICE_URL } from '../config/apiConfig';
 
 const AVAILABLE_MODELS = [
@@ -79,22 +79,6 @@ const LLMUsageComponent = () => {
     return new Intl.NumberFormat('en-IN').format(num);
   };
 
-  const formatDate = (dateString) => {
-    if (!dateString) return 'N/A';
-    try {
-      const date = new Date(dateString);
-      return date.toLocaleString('en-IN', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    } catch (error) {
-      return 'Invalid Date';
-    }
-  };
-
   const handleFilterChange = (field, value) => {
     setFilters(prev => ({ ...prev, [field]: value }));
     
@@ -154,8 +138,6 @@ const LLMUsageComponent = () => {
   }
 
       const summary = usageData?.summary || {};
-      const byModel = usageData?.by_model || [];
-      const logs = usageData?.logs || [];
 
   return (
     <div className="space-y-6">
@@ -272,110 +254,6 @@ const LLMUsageComponent = () => {
           </div>
           <div className="text-3xl font-bold text-gray-900">{formatNumber(summary.unique_models)}</div>
         </div>
-      </div>
-
-      {/* Usage by Model */}
-      {byModel.length > 0 && (
-        <div className="bg-white border border-gray-300 rounded-lg p-6">
-          <h3 className="text-xl font-bold text-gray-900 mb-4">Usage by Model</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-3 text-left text-sm font-bold text-gray-900 uppercase">Model</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Requests</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Input Tokens</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Output Tokens</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Total Tokens</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Total Cost</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {byModel.map((model, index) => (
-                  <tr key={index} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 font-medium">
-                      {model.model_name}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right">
-                      {formatNumber(model.request_count)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right">
-                      {formatNumber(model.total_input_tokens)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right">
-                      {formatNumber(model.total_output_tokens)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right font-semibold">
-                      {formatNumber(model.total_tokens)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right font-bold">
-                      {formatCurrency(model.total_cost)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Recent Usage Logs */}
-      <div className="bg-white border border-gray-300 rounded-lg p-6">
-        <h3 className="text-xl font-bold text-gray-900 mb-4">Recent Usage Logs</h3>
-        {logs.length === 0 ? (
-          <div className="text-center py-12">
-            <Calendar size={48} className="mx-auto text-gray-400 mb-4" />
-            <h3 className="text-xl font-semibold text-gray-900 mb-2">No Usage Data</h3>
-            <p className="text-gray-900">Start using the system to see LLM usage logs</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-3 text-left text-sm font-bold text-gray-900 uppercase">Date</th>
-                  <th className="px-6 py-3 text-left text-sm font-bold text-gray-900 uppercase">User</th>
-                  <th className="px-6 py-3 text-left text-sm font-bold text-gray-900 uppercase">Model</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Input Tokens</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Output Tokens</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Total Tokens</th>
-                  <th className="px-6 py-3 text-right text-sm font-bold text-gray-900 uppercase">Cost</th>
-                  <th className="px-6 py-3 text-left text-sm font-bold text-gray-900 uppercase">Endpoint</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {logs.map((log) => (
-                  <tr key={log.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900">
-                      {formatDate(log.used_at)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 font-medium">
-                      {log.username || `User ${log.user_id}`}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 font-medium">
-                      {log.model_name}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right">
-                      {formatNumber(log.input_tokens)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right">
-                      {formatNumber(log.output_tokens)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right font-semibold">
-                      {formatNumber(log.total_tokens)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-base text-gray-900 text-right font-bold">
-                      {formatCurrency(log.total_cost)}
-                    </td>
-                    <td className="px-6 py-4 text-base text-gray-900">
-                      {log.endpoint || 'N/A'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
     </div>

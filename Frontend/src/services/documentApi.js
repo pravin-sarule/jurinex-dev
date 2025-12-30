@@ -205,6 +205,144 @@ const documentApi = {
     return response.data;
   },
 
+  // Upload files for processing (separate from extraction)
+  uploadDocumentsForProcessing: async (files) => {
+    try {
+      console.log(`[uploadDocumentsForProcessing] 🚀 Uploading ${files.length} file(s)...`);
+      
+      const formData = new FormData();
+      files.forEach(file => {
+        formData.append('files', file);
+      });
+
+      const response = await axios.post(
+        `${API_BASE_URL}/upload-for-processing`,
+        formData,
+        {
+          headers: {
+            ...getAuthHeader(),
+            'Content-Type': 'multipart/form-data',
+          },
+          timeout: 60000, // 1 minute for upload
+        }
+      );
+
+      console.log(`[uploadDocumentsForProcessing] ✅ Upload completed`);
+      
+      return {
+        success: true,
+        folderName: response.data.folderName,
+        uploadedFiles: response.data.uploadedFiles || []
+      };
+    } catch (error) {
+      console.error('[uploadDocumentsForProcessing] ❌ Error:', error);
+      throw new Error(error.response?.data?.message || error.response?.data?.error || error.message || 'Failed to upload documents');
+    }
+  },
+
+  // Get processing status of folder
+  getFolderProcessingStatus: async (folderName) => {
+    try {
+      // URL encode the folderName to handle paths with slashes
+      const encodedFolderName = encodeURIComponent(folderName);
+      const response = await axios.get(
+        `${API_BASE_URL}/${encodedFolderName}/status`,
+        { 
+          headers: getAuthHeader(),
+          timeout: 30000, // 30 second timeout for status check
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.error('[getFolderProcessingStatus] ❌ Error:', error);
+      console.error('[getFolderProcessingStatus] Error details:', error.response?.data);
+      console.error('[getFolderProcessingStatus] Folder name:', folderName);
+      
+      // Don't throw for timeout errors - let the caller handle retries
+      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+        throw new Error('Request timeout - will retry');
+      }
+      
+      throw new Error(error.response?.data?.message || error.response?.data?.error || 'Failed to get processing status');
+    }
+  },
+
+  // Extract case fields from processed folder
+  extractCaseFieldsFromFolder: async (folderName) => {
+    try {
+      console.log(`[extractCaseFieldsFromFolder] 🔍 Extracting fields from folder: ${folderName}`);
+      
+      // URL encode the folderName to handle paths with slashes
+      const encodedFolderName = encodeURIComponent(folderName);
+      const response = await axios.post(
+        `${API_BASE_URL}/extract-case-fields/${encodedFolderName}`,
+        {},
+        {
+          headers: getAuthHeader(),
+          timeout: 120000, // 2 minutes for extraction
+        }
+      );
+
+      console.log(`[extractCaseFieldsFromFolder] ✅ Extraction completed`);
+      
+      return {
+        success: true,
+        extractedData: response.data.extractedData || {},
+      };
+    } catch (error) {
+      console.error('[extractCaseFieldsFromFolder] ❌ Error:', error);
+      throw new Error(error.response?.data?.message || error.response?.data?.error || error.message || 'Failed to extract case fields');
+    }
+  },
+
+  // Legacy combined function (kept for backward compatibility)
+  uploadAndExtractCaseFields: async (files) => {
+    try {
+      // Use new backend endpoint that handles upload, processing, and extraction
+      // POST /upload-and-extract-case-fields
+      console.log(`[uploadAndExtractCaseFields] 🚀 Starting upload and extraction for ${files.length} file(s)...`);
+      
+      const formData = new FormData();
+      files.forEach(file => {
+        formData.append('files', file);
+      });
+
+      const response = await axios.post(
+        `${API_BASE_URL}/upload-and-extract-case-fields`,
+        formData,
+        {
+          headers: {
+            ...getAuthHeader(),
+            'Content-Type': 'multipart/form-data',
+          },
+          timeout: 300000, // 5 minutes timeout for processing
+        }
+      );
+
+      console.log(`[uploadAndExtractCaseFields] ✅ Upload and extraction completed successfully`);
+      
+      return {
+        success: true,
+        folderName: response.data.folderName,
+        extractedData: response.data.extractedData || {},
+        uploadedFiles: response.data.uploadedFiles || []
+      };
+    } catch (error) {
+      console.error('[uploadAndExtractCaseFields] ❌ Error:', error);
+      console.error('[uploadAndExtractCaseFields] Error response:', error.response?.data);
+      
+      if (error.code === 'ECONNABORTED') {
+        throw new Error('Request timed out. Processing may still be in progress.');
+      }
+      
+      if (error.response?.data) {
+        throw new Error(error.response.data.message || error.response.data.error || 'Failed to upload and extract case fields');
+      }
+      
+      throw new Error(error.message || 'Failed to upload and extract case fields. Please try again.');
+    }
+  },
+
   queryTestDocuments: async (question, sessionId = null) => {
     const payload = { question };
     if (sessionId) {

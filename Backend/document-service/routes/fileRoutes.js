@@ -82,11 +82,27 @@ router.get("/:folderName/summary", authMiddleware.protect, fileController.getFol
 
 router.get("/status/:file_id", authMiddleware.protect, fileController.getFileProcessingStatus);
 
-router.get("/:folderName/status", authMiddleware.protect, fileController.getFolderProcessingStatus);
+// Handle folder status - decode folderName to support paths with slashes
+router.get("/:folderName/status", authMiddleware.protect, (req, res, next) => {
+  // Decode the folderName parameter to handle URL-encoded paths
+  req.params.folderName = decodeURIComponent(req.params.folderName);
+  fileController.getFolderProcessingStatus(req, res);
+});
 
 router.post("/:folderName/query", authMiddleware.protect, fileController.queryFolderDocuments);
 
 router.post("/:folderName/query/stream", authMiddleware.protect, fileController.queryFolderDocumentsStream);
+
+router.post("/upload-and-extract-case-fields", authMiddleware.protect, checkDocumentUploadLimits, upload.array("files", 10), fileController.uploadAndExtractCaseFields);
+
+// New separate endpoints for case creation workflow
+router.post("/upload-for-processing", authMiddleware.protect, checkDocumentUploadLimits, upload.array("files", 10), fileController.uploadForProcessing);
+// Handle extract case fields - decode folderName to support paths with slashes
+router.post("/extract-case-fields/:folderName", authMiddleware.protect, (req, res, next) => {
+  // Decode the folderName parameter to handle URL-encoded paths
+  req.params.folderName = decodeURIComponent(req.params.folderName);
+  fileController.extractCaseFieldsFromFolder(req, res);
+});
 
 router.post("/:folderName/intelligent-chat", authMiddleware.protect, intelligentChatController.intelligentFolderChat);
 router.post("/:folderName/intelligent-chat/stream", authMiddleware.protect, intelligentChatController.intelligentFolderChatStream);

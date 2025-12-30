@@ -4,7 +4,7 @@ const { redisConnection, REDIS_DISABLED } = require('../config/redis');
 const EMBEDDING_QUEUE_NAME = process.env.EMBEDDING_QUEUE_NAME || 'document-embedding-jobs';
 
 const limiter = {
-  max: Number(process.env.EMBEDDING_QUEUE_RATE_MAX || 8),
+  max: Number(process.env.EMBEDDING_QUEUE_RATE_MAX || 20), // Increased from 8 to 20 for faster processing
   duration: Number(process.env.EMBEDDING_QUEUE_RATE_DURATION_MS || 1000),
 };
 

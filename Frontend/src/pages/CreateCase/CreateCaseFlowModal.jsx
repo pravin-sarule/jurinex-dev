@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Scale, Building2, Users, Tag, FolderPlus, CheckCircle, AlertCircle, RotateCcw, Clock, Save, LogOut } from 'lucide-react';
+import { Upload, Scale, Building2, Users, Tag, FolderPlus, CheckCircle, AlertCircle, RotateCcw, Clock, Save, LogOut } from 'lucide-react';
+import UploadStep from './steps/UploadStep';
 import OverviewStep from './steps/OverviewStep';
 import JurisdictionStep from './steps/JurisdictionStep';
 import PartiesStep from './steps/PartiesStep';

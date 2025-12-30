@@ -1454,6 +1454,77 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
     : response.data?.choices?.[0]?.message?.content || '';
 }
 
+async function getSummaryFromChunks(chunks) {
+  if (!chunks || chunks.length === 0) {
+    return null;
+  }
+  
+  // Optimize: Limit input size to prevent huge prompts and speed up processing
+  const MAX_INPUT_CHARS = 50000; // Limit to 50k chars for faster processing
+  const MAX_OUTPUT_TOKENS = 1000; // Limit summary length
+  
+  let combinedText = chunks.join('\n\n');
+  
+  // Truncate if too long
+  if (combinedText.length > MAX_INPUT_CHARS) {
+    console.log(`[getSummaryFromChunks] ⚡ Truncating text from ${combinedText.length} to ${MAX_INPUT_CHARS} chars for faster processing`);
+    combinedText = combinedText.substring(0, MAX_INPUT_CHARS) + '\n\n[...content truncated for summary...]';
+  }
+  
+  const prompt = `Provide a concise summary (2-3 paragraphs) of the following text:\n\n${combinedText}`;
+  
+  // Optimize: Use direct Gemini API call instead of full askLLM for speed
+  // This avoids web search, system prompts, and other overhead
+  try {
+    // Try multiple models with fallback - attempt API call with each until one succeeds
+    const modelNames = ['gemini-2.0-flash-exp', 'gemini-1.5-flash-latest', 'gemini-1.5-pro', 'gemini-1.5-flash-002'];
+    let lastError = null;
+    let summaryText = null;
+    let successfulModel = null;
+    
+    for (const modelName of modelNames) {
+      try {
+        console.log(`[getSummaryFromChunks] ⚡ Trying model: ${modelName}`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        
+        // Create timeout promise (60 seconds max for summaries)
+        const requestPromise = model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            temperature: 0.3, // Lower temperature for more consistent summaries
+          },
+        });
+        
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Summary generation timeout')), 60000)
+        );
+        
+        const result = await Promise.race([requestPromise, timeoutPromise]);
+        summaryText = await result.response.text();
+        successfulModel = modelName;
+        console.log(`[getSummaryFromChunks] ✅ Summary generated using ${modelName} (${summaryText.length} chars)`);
+        break; // Success, exit loop
+      } catch (err) {
+        lastError = err;
+        console.warn(`[getSummaryFromChunks] ⚠️ Model ${modelName} failed: ${err.message}, trying next...`);
+        continue; // Try next model
+      }
+    }
+    
+    if (!summaryText || !successfulModel) {
+      throw new Error(`All Gemini models failed. Last error: ${lastError?.message || 'Unknown'}`);
+    }
+    
+    const summary = summaryText;
+    
+    return summary;
+  } catch (error) {
+    console.error('[getSummaryFromChunks] ❌ Error generating summary:', error.message);
+    // Fallback: return first part of text if summary generation fails
+    return combinedText.substring(0, 500) + '...';
+  }
+}
+
 async function* streamLLM(providerName, userMessage, context = '', relevant_chunks = null, originalQuestion = null) {
   const provider = resolveProviderName(providerName);
   const config = ALL_LLM_CONFIGS[provider];
@@ -1719,4 +1790,5 @@ module.exports = {
   getAvailableProviders,
   getModelMaxTokens,
   ALL_LLM_CONFIGS,
+  getSummaryFromChunks,
 };

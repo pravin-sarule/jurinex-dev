@@ -1,13 +1,16 @@
 const crypto = require('crypto');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const ChunkEmbeddingCache = require('../models/ChunkEmbeddingCache');
+const embeddingRateLimiter = require('../utils/embeddingRateLimiter');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const MAX_CHARS = Number(process.env.GEMINI_EMBEDDING_MAX_CHARS || 8000);
-const BATCH_SIZE = Number(process.env.GEMINI_EMBEDDING_BATCH_SIZE || 32);
-const PRIMARY_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'embedding-001';
-const FALLBACK_MODELS = (process.env.GEMINI_EMBEDDING_FALLBACKS || 'text-embedding-004').split(',').map((m) => m.trim()).filter(Boolean);
+const BATCH_SIZE = Number(process.env.GEMINI_EMBEDDING_BATCH_SIZE || 100); // Gemini supports up to 100 per batch
+const PRIMARY_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-1.5-flash-002';
+const FALLBACK_MODELS = (process.env.GEMINI_EMBEDDING_FALLBACKS || 'embedding-001,text-embedding-004').split(',').map((m) => m.trim()).filter(Boolean);
+const MAX_RETRIES = 3; // Maximum retries for rate limit errors
+const RETRY_DELAY_BASE = 1000; // Base delay in milliseconds for exponential backoff
 
 function cleanText(text) {
   if (!text) return '';
@@ -18,13 +21,49 @@ function computeContentHash(text) {
   return crypto.createHash('sha256').update(text || '', 'utf8').digest('hex');
 }
 
-async function embedBatchWithModel(modelName, texts) {
+async function embedBatchWithModel(modelName, texts, retryCount = 0) {
   const model = genAI.getGenerativeModel({ model: modelName });
   const requests = texts.map((text) => ({
     content: { parts: [{ text: cleanText(text) }] },
   }));
-  const response = await model.batchEmbedContents({ requests });
-  return response.embeddings.map((item) => item.values);
+  
+  try {
+    // Use rate limiter to ensure we don't exceed API limits
+    const response = await embeddingRateLimiter.addRequest(async () => {
+      return await model.batchEmbedContents({ requests });
+    });
+    
+    return response.embeddings.map((item) => item.values);
+  } catch (error) {
+    const errorMessage = error?.message || String(error);
+    const isRateLimitError = errorMessage.includes('429') || 
+                             errorMessage.includes('Too Many Requests') ||
+                             errorMessage.includes('quota') ||
+                             errorMessage.includes('rate limit');
+    
+    // Handle rate limit errors with exponential backoff
+    if (isRateLimitError && retryCount < MAX_RETRIES) {
+      // Extract retry delay from error if available (Gemini provides this)
+      let retryDelay = RETRY_DELAY_BASE * Math.pow(2, retryCount);
+      
+      // Try to extract retry delay from error details
+      if (error?.errorDetails) {
+        const retryInfo = error.errorDetails.find(detail => detail['@type']?.includes('RetryInfo'));
+        if (retryInfo?.retryDelay) {
+          // Convert seconds to milliseconds
+          retryDelay = parseFloat(retryInfo.retryDelay) * 1000 || retryDelay;
+        }
+      }
+      
+      console.warn(`[EmbeddingService] Rate limit hit for model "${modelName}". Retrying in ${retryDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+      
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+      
+      return embedBatchWithModel(modelName, texts, retryCount + 1);
+    }
+    
+    throw error;
+  }
 }
 
 async function tryModelsSequentially(texts, models) {
@@ -56,15 +95,33 @@ async function generateEmbeddingsWithMeta(texts) {
   const models = [PRIMARY_MODEL, ...FALLBACK_MODELS.filter((m) => m !== PRIMARY_MODEL)];
   const results = [];
   let lastModel = PRIMARY_MODEL;
+  const totalBatches = Math.ceil(texts.length / BATCH_SIZE);
 
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const batch = texts.slice(i, i + BATCH_SIZE);
-    const { embeddings, model } = await tryModelsSequentially(batch, models);
-    results.push(...embeddings);
-    lastModel = model;
-    console.log(`[EmbeddingService] ✅ Embedded batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(texts.length / BATCH_SIZE)} using ${model}`);
+  console.log(`[EmbeddingService] Processing ${texts.length} texts in ${totalBatches} batches (batch size: ${BATCH_SIZE})`);
+
+  // Process batches sequentially through rate limiter (which handles internal parallelization)
+  // This ensures we stay within rate limits even for very large files (1200+ pages)
+  for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+    const batchStart = batchIndex * BATCH_SIZE;
+    const batch = texts.slice(batchStart, batchStart + BATCH_SIZE);
+    
+    if (batch.length === 0) continue;
+
+    try {
+      const { embeddings, model } = await tryModelsSequentially(batch, models);
+      results.push(...embeddings);
+      lastModel = model;
+      
+      if ((batchIndex + 1) % 10 === 0 || batchIndex === totalBatches - 1) {
+        console.log(`[EmbeddingService] ✅ Embedded batch ${batchIndex + 1}/${totalBatches} using ${model} (${((batchIndex + 1) / totalBatches * 100).toFixed(1)}%)`);
+      }
+    } catch (error) {
+      console.error(`[EmbeddingService] ❌ Failed to embed batch ${batchIndex + 1}/${totalBatches}:`, error.message);
+      throw error;
+    }
   }
 
+  console.log(`[EmbeddingService] ✅ Completed embedding ${texts.length} texts using ${lastModel}`);
   return { embeddings: results, model: lastModel };
 }
 
@@ -111,5 +168,6 @@ module.exports = {
   getCachedEmbedding,
   cacheEmbedding,
   BATCH_SIZE,
+  embeddingRateLimiter,
 };
 

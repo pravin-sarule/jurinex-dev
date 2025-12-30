@@ -151,19 +151,35 @@
 // export default DatesStep;
 
 
-import React, { useState, useRef } from 'react';
-import { FolderPlus, Calendar, Upload } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { FolderPlus, Calendar } from 'lucide-react';
 
 const DatesStep = ({ caseData, setCaseData }) => {
+  // Sync local state with caseData updates (especially from auto-fill)
   const [documentType, setDocumentType] = useState(caseData.documentType || '');
   const [filedByPlaintiff, setFiledByPlaintiff] = useState(caseData.filedByPlaintiff || false);
   const [filedByDefendant, setFiledByDefendant] = useState(caseData.filedByDefendant || false);
   const [documentDate, setDocumentDate] = useState(caseData.documentDate || '');
   const [displayDocumentDate, setDisplayDocumentDate] = useState(caseData.displayDocumentDate || '');
   const [autoRemind, setAutoRemind] = useState(caseData.autoRemind || false);
-  const [selectedFiles, setSelectedFiles] = useState([]);
-  const [isDragging, setIsDragging] = useState(false);
-  const fileInputRef = useRef(null);
+
+  // Sync local state when caseData updates (e.g., from auto-fill)
+  React.useEffect(() => {
+    if (caseData.documentType) setDocumentType(caseData.documentType);
+    if (caseData.filedByPlaintiff !== undefined) setFiledByPlaintiff(caseData.filedByPlaintiff);
+    if (caseData.filedByDefendant !== undefined) setFiledByDefendant(caseData.filedByDefendant);
+    if (caseData.documentDate) {
+      setDocumentDate(caseData.documentDate);
+      setDisplayDocumentDate(caseData.displayDocumentDate || formatDateToIndian(caseData.documentDate));
+    }
+    if (caseData.nextHearingDate && !caseData.displayNextHearingDate) {
+      const formatted = formatDateToIndian(caseData.nextHearingDate);
+      setCaseData(prev => ({
+        ...prev,
+        displayNextHearingDate: formatted
+      }));
+    }
+  }, [caseData.documentType, caseData.filedByPlaintiff, caseData.filedByDefendant, caseData.documentDate, caseData.nextHearingDate]);
 
   // Format date to Indian dd/mm/yyyy
   const formatDateToIndian = (isoDate) => {
@@ -208,47 +224,6 @@ const DatesStep = ({ caseData, setCaseData }) => {
     const checked = e.target.checked;
     setAutoRemind(checked);
     setCaseData({ ...caseData, autoRemind: checked });
-  };
-
-  // Handle file selection
-  const handleFileChange = (e) => {
-    const files = Array.from(e.target.files);
-    setSelectedFiles(files);
-    // Update caseData with files
-    setCaseData({
-      ...caseData,
-      uploadedFiles: [...(caseData.uploadedFiles || []), ...files],
-    });
-  };
-
-  // Handle drag and drop
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-
-    const files = Array.from(e.dataTransfer.files);
-    setSelectedFiles(files);
-    setCaseData({
-      ...caseData,
-      uploadedFiles: [...(caseData.uploadedFiles || []), ...files],
-    });
-  };
-
-  const handleBrowseClick = () => {
-    fileInputRef.current?.click();
   };
 
   return (
@@ -373,65 +348,6 @@ const DatesStep = ({ caseData, setCaseData }) => {
               Get notifications 24 hours before scheduled hearings
             </p>
           </label>
-        </div>
-
-        {/* Upload Documents - Drag & drop / Browse */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Upload Documents
-          </label>
-          <div
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={handleBrowseClick}
-            className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
-              isDragging
-                ? 'border-[#9CDFE1] bg-[#E6F8F7]'
-                : 'border-gray-300 hover:border-[#9CDFE1] hover:bg-gray-50'
-            }`}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                handleBrowseClick();
-              }
-            }}
-            aria-label="Upload Documents"
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              onChange={handleFileChange}
-              className="hidden"
-              accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
-              aria-label="File Input"
-            />
-            <Upload className="mx-auto h-12 w-12 text-gray-400 mb-3" />
-            <p className="text-sm text-gray-600 mb-1">
-              Drag and drop files here, or{' '}
-              <span className="text-[#9CDFE1] font-medium">click to browse</span>
-            </p>
-            <p className="text-xs text-gray-500">
-              Supported formats: PDF, DOC, DOCX, TXT, PNG, JPG, JPEG, TIFF
-            </p>
-            {selectedFiles.length > 0 && (
-              <div className="mt-4 text-sm text-gray-700">
-                <p className="font-medium mb-2">
-                  Selected files ({selectedFiles.length}):
-                </p>
-                <ul className="list-disc list-inside space-y-1 text-left max-h-32 overflow-y-auto">
-                  {selectedFiles.map((file, index) => (
-                    <li key={index} className="text-xs">
-                      {file.name} ({(file.size / 1024).toFixed(2)} KB)
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
         </div>
       </div>
 

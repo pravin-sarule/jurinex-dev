@@ -14,6 +14,7 @@ const {
 
 const MAX_BATCH_SIZE = Number(process.env.EMBEDDING_WORKER_BATCH_SIZE || BATCH_SIZE);
 const CACHE_ONLY_MODE = process.env.EMBEDDING_WORKER_CACHE_ONLY === 'true';
+const PARALLEL_BATCHES = Number(process.env.EMBEDDING_PARALLEL_BATCHES || 3); // Process multiple batches in parallel
 
 function parseVector(raw) {
   if (Array.isArray(raw)) return raw;
@@ -94,35 +95,62 @@ async function processJob(job) {
   }
 
   console.log(`[EmbeddingWorker] Cache hits: ${cacheHits.length}/${chunks.length}`);
+  console.log(`[EmbeddingWorker] Processing ${toEmbed.length} chunks in batches of ${MAX_BATCH_SIZE} (parallel: ${PARALLEL_BATCHES})`);
 
   if (toEmbed.length) {
-    for (let i = 0; i < toEmbed.length; i += MAX_BATCH_SIZE) {
-      const batch = toEmbed.slice(i, i + MAX_BATCH_SIZE);
-      const texts = batch.map((item) => item.content);
-
-      const { embeddings, model } = await generateEmbeddingsWithMeta(texts);
-      if (!embeddings || embeddings.length !== batch.length) {
-        throw new Error(`Embedding count mismatch (expected ${batch.length}, got ${embeddings?.length || 0})`);
+    const totalBatches = Math.ceil(toEmbed.length / MAX_BATCH_SIZE);
+    
+    // Process batches in parallel groups for faster processing
+    for (let batchStart = 0; batchStart < toEmbed.length; batchStart += MAX_BATCH_SIZE * PARALLEL_BATCHES) {
+      const parallelPromises = [];
+      
+      // Create parallel batch processing promises
+      for (let i = 0; i < PARALLEL_BATCHES && (batchStart + i * MAX_BATCH_SIZE) < toEmbed.length; i++) {
+        const batchIndex = batchStart + i * MAX_BATCH_SIZE;
+        const batch = toEmbed.slice(batchIndex, batchIndex + MAX_BATCH_SIZE);
+        if (batch.length > 0) {
+          const texts = batch.map((item) => item.content);
+          parallelPromises.push(
+            generateEmbeddingsWithMeta(texts).then(({ embeddings, model }) => ({
+              embeddings,
+              model,
+              batch,
+              batchIndex,
+            }))
+          );
+        }
       }
 
-      embeddings.forEach((embedding, idx) => {
-        const chunk = batch[idx];
-        vectors.push({
-          chunk_id: chunk.chunkId,
-          embedding,
-          file_id: fileId,
+      // Wait for all parallel batches to complete
+      const batchResults = await Promise.all(parallelPromises);
+      
+      // Process results
+      for (const { embeddings, model, batch, batchIndex } of batchResults) {
+        if (!embeddings || embeddings.length !== batch.length) {
+          throw new Error(`Embedding count mismatch (expected ${batch.length}, got ${embeddings?.length || 0})`);
+        }
+
+        embeddings.forEach((embedding, idx) => {
+          const chunk = batch[idx];
+          vectors.push({
+            chunk_id: chunk.chunkId,
+            embedding,
+            file_id: fileId,
+          });
+
+          cacheEmbedding({
+            hash: chunk.hash,
+            embedding,
+            model,
+            tokenCount: chunk.tokenCount,
+          }).catch(() => {});
         });
 
-        cacheEmbedding({
-          hash: chunk.hash,
-          embedding,
-          model,
-          tokenCount: chunk.tokenCount,
-        }).catch(() => {});
-      });
-
-      const progress = progressBase + Math.min(8, Math.round(((i + batch.length) / chunks.length) * 10));
-      await updateFileStatus(fileId, 'embedding_processing', progress);
+        const currentBatch = Math.floor(batchIndex / MAX_BATCH_SIZE) + 1;
+        const progress = progressBase + Math.min(8, Math.round((currentBatch / totalBatches) * 10));
+        await updateFileStatus(fileId, 'embedding_processing', progress);
+        console.log(`[EmbeddingWorker] ✅ Processed batch ${currentBatch}/${totalBatches} (${batch.length} chunks)`);
+      }
     }
   }
 
@@ -149,7 +177,7 @@ function startEmbeddingWorker() {
   try {
     workerInstance = new Worker(EMBEDDING_QUEUE_NAME, processJob, {
       connection: redisConnection,
-      concurrency: Number(process.env.EMBEDDING_WORKER_CONCURRENCY || 2),
+      concurrency: Number(process.env.EMBEDDING_WORKER_CONCURRENCY || 4), // Increased from 2 to 4 for faster processing
     });
 
     workerInstance.on('completed', (job) => {

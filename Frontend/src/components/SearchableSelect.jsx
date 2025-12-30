@@ -13,6 +13,7 @@ const SearchableSelect = ({
   className = '',
   label = '',
   required = false,
+  isAutoFilled = false, // New prop to indicate if field was auto-filled
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isOpen, setIsOpen] = useState(false);
@@ -114,8 +115,9 @@ const SearchableSelect = ({
             onClick={handleInputClick}
             placeholder={!value ? placeholder : ''}
             disabled={disabled || loading}
-            className={`w-full px-3 py-2 pr-10 border border-gray-300 rounded-md text-sm
-              ${disabled || loading ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white text-gray-900 cursor-text'}
+            className={`w-full px-3 py-2 pr-10 border rounded-md text-sm
+              ${isAutoFilled ? 'border-[#21C1B6] bg-[#E0F7F6] ring-2 ring-[#21C1B6] ring-opacity-30' : 'border-gray-300'}
+              ${disabled || loading ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : isAutoFilled ? 'bg-[#E0F7F6] text-gray-900 cursor-text' : 'bg-white text-gray-900 cursor-text'}
               placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none
               ${!value && !isOpen ? 'text-gray-500' : ''}`}
             readOnly={!isOpen && !!value}

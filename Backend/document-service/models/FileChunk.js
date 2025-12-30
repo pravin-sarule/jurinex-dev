@@ -37,69 +37,83 @@ const FileChunk = {
   async saveMultipleChunks(chunksData) {
     if (!chunksData || chunksData.length === 0) return [];
 
-    // Let PostgreSQL generate UUIDs automatically via DEFAULT gen_random_uuid()
-    const values = [];
-    const placeholders = [];
-    let paramIndex = 1;
+    // Optimize: Split large batches into smaller chunks to prevent slow queries and avoid hitting PostgreSQL parameter limits
+    const BATCH_SIZE = 100; // Insert 100 chunks at a time for better performance
+    const allSavedChunks = [];
+    const totalChunks = chunksData.length;
+    
+    console.log(`[FileChunk.saveMultipleChunks] ⚡ Processing ${totalChunks} chunks in batches of ${BATCH_SIZE}`);
 
-    // Generate placeholders for each chunk (without id - let DB generate it)
-    for (let i = 0; i < chunksData.length; i++) {
-      const chunk = chunksData[i];
+    for (let batchStart = 0; batchStart < totalChunks; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, totalChunks);
+      const batch = chunksData.slice(batchStart, batchEnd);
       
-      placeholders.push(
-        `($${paramIndex}::uuid, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4}, $${paramIndex + 5}, $${paramIndex + 6})`
-      );
-      values.push(
-        chunk.file_id,
-        chunk.chunk_index,
-        chunk.content,
-        chunk.token_count,
-        chunk.page_start,
-        chunk.page_end,
-        chunk.heading
-      );
-      paramIndex += 7;
-    }
+      // Let PostgreSQL generate UUIDs automatically via DEFAULT gen_random_uuid()
+      const values = [];
+      const placeholders = [];
+      let paramIndex = 1;
 
-    const query = `
-      INSERT INTO file_chunks
-        (file_id, chunk_index, content, token_count, page_start, page_end, heading)
-      VALUES ${placeholders.join(', ')}
-      RETURNING id, chunk_index
-    `;
-
-    try {
-      const res = await pool.query(query, values);
-      console.log(`✅ [FileChunk.saveMultipleChunks] Successfully saved ${res.rows.length} chunks`);
-      return res.rows;
-    } catch (insertError) {
-      // If there's a unique constraint violation (duplicate file_id + chunk_index)
-      if (insertError.code === '23505') {
-        console.warn('⚠️ [FileChunk.saveMultipleChunks] Duplicate chunk_index detected, handling conflicts');
+      // Generate placeholders for each chunk in this batch
+      for (let i = 0; i < batch.length; i++) {
+        const chunk = batch[i];
         
-        // For conflicts, we'll insert chunks one by one, updating existing ones
-        const savedChunks = [];
-        for (const chunk of chunksData) {
-          try {
-            const saved = await this.saveChunk(
-              chunk.file_id,
-              chunk.chunk_index,
-              chunk.content,
-              chunk.token_count,
-              chunk.page_start,
-              chunk.page_end,
-              chunk.heading
-            );
-            savedChunks.push({ id: saved, chunk_index: chunk.chunk_index });
-          } catch (chunkError) {
-            console.error(`❌ [FileChunk.saveMultipleChunks] Failed to save chunk ${chunk.chunk_index}:`, chunkError.message);
-            throw chunkError;
-          }
-        }
-        return savedChunks;
+        placeholders.push(
+          `($${paramIndex}::uuid, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4}, $${paramIndex + 5}, $${paramIndex + 6})`
+        );
+        values.push(
+          chunk.file_id,
+          chunk.chunk_index,
+          chunk.content,
+          chunk.token_count,
+          chunk.page_start,
+          chunk.page_end,
+          chunk.heading
+        );
+        paramIndex += 7;
       }
-      throw insertError;
+
+      const query = `
+        INSERT INTO file_chunks
+          (file_id, chunk_index, content, token_count, page_start, page_end, heading)
+        VALUES ${placeholders.join(', ')}
+        RETURNING id, chunk_index
+      `;
+
+      try {
+        const res = await pool.query(query, values);
+        allSavedChunks.push(...res.rows);
+        console.log(`✅ [FileChunk.saveMultipleChunks] Saved batch ${Math.floor(batchStart / BATCH_SIZE) + 1}/${Math.ceil(totalChunks / BATCH_SIZE)} (${batchStart + 1}-${batchEnd}/${totalChunks} chunks)`);
+      } catch (insertError) {
+        // If there's a unique constraint violation (duplicate file_id + chunk_index)
+        if (insertError.code === '23505') {
+          console.warn(`⚠️ [FileChunk.saveMultipleChunks] Duplicate chunk_index detected in batch ${Math.floor(batchStart / BATCH_SIZE) + 1}, handling conflicts`);
+          
+          // For conflicts, we'll insert chunks one by one in this batch, updating existing ones
+          for (const chunk of batch) {
+            try {
+              const saved = await this.saveChunk(
+                chunk.file_id,
+                chunk.chunk_index,
+                chunk.content,
+                chunk.token_count,
+                chunk.page_start,
+                chunk.page_end,
+                chunk.heading
+              );
+              allSavedChunks.push({ id: saved, chunk_index: chunk.chunk_index });
+            } catch (chunkError) {
+              console.error(`❌ [FileChunk.saveMultipleChunks] Failed to save chunk ${chunk.chunk_index}:`, chunkError.message);
+              throw chunkError;
+            }
+          }
+        } else {
+          throw insertError;
+        }
+      }
     }
+    
+    console.log(`✅ [FileChunk.saveMultipleChunks] Successfully saved ${allSavedChunks.length} chunks in ${Math.ceil(totalChunks / BATCH_SIZE)} batches`);
+    return allSavedChunks;
   },
 
   async getChunksByFileId(fileId) {

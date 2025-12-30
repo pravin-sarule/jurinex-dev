@@ -373,12 +373,13 @@ import {
 } from "lucide-react";
 import { DOCS_BASE_URL } from "../../../config/apiConfig";
 
-const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditStep }) => {
+const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditStep, creationMode }) => {
   const navigate = useNavigate();
   const [isCreating, setIsCreating] = useState(false);
   const [isCreated, setIsCreated] = useState(false);
   const [createdCase, setCreatedCase] = useState(null);
   const [error, setError] = useState(null);
+  const [generatedCaseTitle, setGeneratedCaseTitle] = useState(null); // Store the generated case title
 
   // Format date helper function
   const formatDate = (dateString) => {
@@ -410,20 +411,30 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
 
   const handleEditStep = (stepNumber) => {
     if (onEditStep) {
-      onEditStep(stepNumber);
-    } else if (onBack) {
-      // Fallback: go back until we reach the desired step
-      // This is a simple implementation - in practice, you'd want onEditStep prop
-      for (let i = 0; i < 4 - stepNumber; i++) {
-        // This won't work perfectly, but it's a fallback
+      // Map Review step numbers to actual step numbers based on creation mode
+      // In auto-fill: Overview=2, Parties=3, Dates=4
+      // In manual: Overview=1, Parties=2, Dates=3
+      let actualStepNumber;
+      if (creationMode === 'auto-fill') {
+        actualStepNumber = stepNumber; // Already correct (2, 3, 4)
+      } else {
+        actualStepNumber = stepNumber - 1; // Manual mode (1, 2, 3)
       }
-      // For now, just go back - parent should provide onEditStep
+      onEditStep(actualStepNumber);
+    } else if (onBack) {
+      // Fallback: go back
       onBack();
     }
   };
 
  
   const handleCreateCase = async () => {
+    // Prevent duplicate case creation
+    if (isCreated || isCreating) {
+      console.warn('Case creation already in progress or completed');
+      return;
+    }
+
     setIsCreating(true);
     setError(null);
   
@@ -453,7 +464,8 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
       // Generate case title from petitioners vs respondents if not provided
       let generatedCaseTitle = caseData.caseTitle;
       
-      if (!generatedCaseTitle || generatedCaseTitle === "Untitled Case") {
+      // Only generate if caseTitle is empty, null, undefined, or "Untitled Case"
+      if (!generatedCaseTitle || generatedCaseTitle.trim() === "" || generatedCaseTitle === "Untitled Case") {
         const petitionerNames = caseData.petitioners && caseData.petitioners.length > 0
           ? caseData.petitioners.map(p => p.fullName).filter(Boolean)
           : [];
@@ -477,7 +489,10 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
         } else if (respondentNames.length > 0) {
           generatedCaseTitle = `${respondentNames[0]} (Respondent)`;
         } else {
-          generatedCaseTitle = "Untitled Case";
+          // Last resort: use case number if available, otherwise default
+          generatedCaseTitle = caseData.caseNumber 
+            ? `Case ${caseData.caseNumber}`
+            : "Untitled Case";
         }
       }
   
@@ -509,6 +524,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
         next_hearing_date: caseData.nextHearingDate || null,
         document_type: caseData.documentType || null,
         filed_by: filedByValue,
+        temp_folder_name: caseData.tempFolderName || null, // Include temp folder name for file migration
       };
   
       console.log("Creating case with request body:", requestBody);
@@ -530,7 +546,31 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
       }
   
       setCreatedCase(data.case);
+      setGeneratedCaseTitle(generatedCaseTitle); // Store the generated title
       setIsCreated(true);
+  
+      // Delete any existing draft when case is successfully created
+      try {
+        // Extract userId from token
+        const tokenParts = token.split('.');
+        if (tokenParts.length === 3) {
+          const payload = JSON.parse(atob(tokenParts[1]));
+          const userId = payload.userId || payload.user_id || payload.id || payload.sub;
+          if (userId) {
+            const draftResponse = await fetch(`https://document-service-120280829617.asia-south1.run.app/api/content/case-draft/${userId}`, {
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+              },
+            });
+            if (draftResponse.ok || draftResponse.status === 404) {
+              console.log('✅ Draft deleted after case creation');
+            }
+          }
+        }
+      } catch (draftError) {
+        console.warn('⚠️ Error deleting draft (non-critical):', draftError);
+      }
   
       if (onComplete) {
         onComplete(data.case);
@@ -601,7 +641,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
             </div>
             {onEditStep && (
               <button
-                onClick={() => handleEditStep(1)}
+                onClick={() => handleEditStep(2)}
                 className="flex items-center px-3 py-1.5 text-sm text-[#21C1B6] border border-[#21C1B6] rounded hover:bg-[#E6F8F7] transition-colors"
               >
                 <Edit className="w-4 h-4 mr-1.5" />
@@ -794,7 +834,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
             </div>
             {onEditStep && (
               <button
-                onClick={() => handleEditStep(2)}
+                onClick={() => handleEditStep(3)}
                 className="flex items-center px-3 py-1.5 text-sm text-[#21C1B6] border border-[#21C1B6] rounded hover:bg-[#E6F8F7] transition-colors"
               >
                 <Edit className="w-4 h-4 mr-1.5" />
@@ -1039,7 +1079,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
             </div>
             {onEditStep && (
               <button
-                onClick={() => handleEditStep(3)}
+                onClick={() => handleEditStep(4)}
                 className="flex items-center px-3 py-1.5 text-sm text-[#21C1B6] border border-[#21C1B6] rounded hover:bg-[#E6F8F7] transition-colors"
               >
                 <Edit className="w-4 h-4 mr-1.5" />
@@ -1197,13 +1237,18 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
           </button>
           <button
             onClick={handleCreateCase}
-            disabled={isCreating}
+            disabled={isCreating || isCreated}
             className="flex-1 px-4 py-3 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA89E] transition-colors flex items-center justify-center text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isCreating ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                 Creating Case...
+              </>
+            ) : isCreated ? (
+              <>
+                <CheckCircle className="w-4 h-4 mr-2" />
+                Case Created
               </>
             ) : (
               <>
@@ -1255,7 +1300,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
             <div>
               <p className="text-xs text-gray-500 mb-1">Case Title</p>
               <p className="text-sm font-medium text-gray-900">
-                {createdCase?.case_title || caseData.caseTitle || "Rajesh Kumar Singh vs State"}
+                {createdCase?.case_title || generatedCaseTitle || caseData.caseTitle || "Case Title"}
               </p>
             </div>
             <div>

@@ -1019,6 +1019,103 @@ const OverviewStep = ({ caseData, setCaseData }) => {
     }
   }, [caseData.courtId]);
 
+  // Handle caseTypeId when set from auto-fill (to fetch subTypes)
+  useEffect(() => {
+    if (caseData.caseTypeId && caseTypes.length > 0) {
+      const foundType = caseTypes.find(t => t.id.toString() === caseData.caseTypeId.toString());
+      if (foundType && !caseData.caseType) {
+        // Update caseType name if only ID was set
+        setCaseData(prev => ({
+          ...prev,
+          caseType: foundType.name
+        }));
+      }
+      // Fetch subTypes if not already fetched
+      if (subTypes.length === 0) {
+        fetchSubTypes(caseData.caseTypeId);
+      }
+    }
+  }, [caseData.caseTypeId, caseTypes]);
+
+  // Handle jurisdictionId when set from auto-fill (to fetch courts)
+  useEffect(() => {
+    if (caseData.jurisdictionId && jurisdictions.length > 0) {
+      const foundJurisdiction = jurisdictions.find(j => j.id.toString() === caseData.jurisdictionId.toString());
+      if (foundJurisdiction && !caseData.jurisdictionName) {
+        // Update jurisdiction name if only ID was set
+        setCaseData(prev => ({
+          ...prev,
+          jurisdictionName: foundJurisdiction.jurisdiction_name || foundJurisdiction.name || '',
+          jurisdiction: foundJurisdiction.jurisdiction_name || foundJurisdiction.name || ''
+        }));
+      }
+      // Fetch courts if not already fetched
+      if (filteredCourts.length === 0) {
+        fetchCourtsByJurisdiction(caseData.jurisdictionId);
+      }
+    }
+  }, [caseData.jurisdictionId, jurisdictions]);
+
+  // Handle courtId when set from auto-fill (to fetch benches)
+  useEffect(() => {
+    if (caseData.courtId && filteredCourts.length > 0) {
+      const foundCourt = filteredCourts.find(c => c.id.toString() === caseData.courtId.toString());
+      if (foundCourt && !caseData.courtName) {
+        // Update court name if only ID was set
+        setCaseData(prev => ({
+          ...prev,
+          courtName: foundCourt.court_name || foundCourt.name || '',
+          courtLevel: foundCourt.court_level || prev.courtLevel || ''
+        }));
+      }
+      // Fetch benches if not already fetched
+      if (benches.length === 0) {
+        fetchBenchesByCourt(caseData.courtId);
+      }
+    }
+  }, [caseData.courtId, filteredCourts]);
+
+  // Handle subTypeId when set from auto-fill
+  useEffect(() => {
+    if (caseData.subTypeId && subTypes.length > 0) {
+      const foundSubType = subTypes.find(st => st.id.toString() === caseData.subTypeId.toString());
+      if (foundSubType && !caseData.subType) {
+        // Update subType name if only ID was set
+        setCaseData(prev => ({
+          ...prev,
+          subType: foundSubType.name
+        }));
+      }
+    }
+  }, [caseData.subTypeId, subTypes]);
+
+  // Format dates when set from auto-fill
+  useEffect(() => {
+    if (caseData.filingDate && !caseData.displayFilingDate) {
+      const [year, month, day] = caseData.filingDate.split('-');
+      if (year && month && day) {
+        const formatted = `${day}/${month}/${year}`;
+        setCaseData(prev => ({
+          ...prev,
+          displayFilingDate: formatted
+        }));
+      }
+    }
+  }, [caseData.filingDate, caseData.displayFilingDate]);
+
+  useEffect(() => {
+    if (caseData.nextHearingDate && !caseData.displayNextHearingDate) {
+      const [year, month, day] = caseData.nextHearingDate.split('-');
+      if (year && month && day) {
+        const formatted = `${day}/${month}/${year}`;
+        setCaseData(prev => ({
+          ...prev,
+          displayNextHearingDate: formatted
+        }));
+      }
+    }
+  }, [caseData.nextHearingDate, caseData.displayNextHearingDate]);
+
   const fetchJurisdictions = async () => {
     try {
       setLoading(true);
@@ -1156,7 +1253,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
     }
   };
 
-  // Handle jurisdiction change
+  // Handle jurisdiction change (Adjudicating Authority) - Step 1 in dependency chain
   const handleJurisdictionChange = (e) => {
     const selectedJurisdictionId = e.target.value;
     const selectedJurisdiction = jurisdictions.find(j => j.id.toString() === selectedJurisdictionId);
@@ -1165,7 +1262,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
       ? (selectedJurisdiction.jurisdiction_name || selectedJurisdiction.name || "")
       : "";
     
-    console.log("Selected jurisdiction:", {
+    console.log("Selected Adjudicating Authority (Jurisdiction):", {
       id: selectedJurisdictionId,
       jurisdiction: selectedJurisdiction,
       jurisdictionName: jurisdictionName
@@ -1176,16 +1273,19 @@ const OverviewStep = ({ caseData, setCaseData }) => {
       jurisdictionId: selectedJurisdictionId,
       jurisdictionName: jurisdictionName,
       jurisdiction: jurisdictionName, // Also set jurisdiction for backward compatibility
-      // Clear dependent fields when jurisdiction changes
+      // Clear ALL dependent fields when jurisdiction changes (strict dependency chain)
       courtId: "",
       courtName: "",
-      courtLevel: "", // Also clear court level when jurisdiction changes
+      courtLevel: "",
       benchId: "",
       benchName: "",
+      benchDivision: "",
+      // Note: casePrefix is INDEPENDENT - don't clear it when jurisdiction changes
+      // caseNumber and caseYear may depend on bench, but we'll keep them for now
     });
   };
 
-  // Handle Court change
+  // Handle Court change - Step 2 in dependency chain (depends on Adjudicating Authority)
   const handleCourtChange = (e) => {
     const selectedCourtId = e.target.value;
     const selectedCourt = filteredCourts.find(c => c.id.toString() === selectedCourtId);
@@ -1195,13 +1295,16 @@ const OverviewStep = ({ caseData, setCaseData }) => {
       courtId: selectedCourtId,
       courtName: selectedCourt ? selectedCourt.court_name : "",
       courtLevel: selectedCourt ? selectedCourt.court_level : null,
-      // Clear bench when court changes
+      // Clear dependent fields when court changes (strict dependency chain)
       benchId: "",
       benchName: "",
+      benchDivision: "",
+      // Note: casePrefix is INDEPENDENT - don't clear it when court changes
+      // caseNumber and caseYear may depend on bench, but we'll keep them for now
     });
   };
 
-  // Handle Bench change
+  // Handle Bench change - Step 3 in dependency chain (depends on Court)
   const handleBenchChange = (e) => {
     const selectedBenchId = e.target.value;
     const selectedBench = benches.find(b => b.id.toString() === selectedBenchId);
@@ -1210,7 +1313,9 @@ const OverviewStep = ({ caseData, setCaseData }) => {
       ...caseData,
       benchId: selectedBenchId,
       benchName: selectedBench ? selectedBench.bench_name : "",
+      benchDivision: selectedBench ? selectedBench.bench_name : "", // Use bench name as division
     });
+    // After bench selection, Case Prefix, Case Number, and Case Year fields become available
   };
 
   return (
@@ -1240,56 +1345,32 @@ const OverviewStep = ({ caseData, setCaseData }) => {
         </div>
       </div>
 
-      {/* Form Fields */}
+      {/* Form Fields - Strict Dependency-Based Flow */}
       <div className="space-y-6">
-        {/* Jurisdiction */}
-        {/* <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Adjudicating Authority<span className="text-red-500">*</span>
-          </label>
-          <select
+        {/* Step 1: Adjudicating Authority (Jurisdiction) - First field in dependency chain */}
+        <div>
+          <SearchableSelect
+            label="Adjudicating Authority"
+            required
+            options={jurisdictions}
             value={caseData.jurisdictionId || ""}
-            onChange={handleJurisdictionChange}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm 
-            placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none bg-white"
+            onChange={(value) => {
+              const selectedJurisdiction = jurisdictions.find(j => j.id.toString() === value.toString());
+              handleJurisdictionChange({ target: { value: value.toString() } });
+            }}
+            placeholder="Select adjudicating authority..."
             disabled={loading}
-            style={{ color: '#000000' }}
-          >
-            <option value="" style={{ color: '#6B7280', backgroundColor: '#ffffff' }}>Select jurisdiction...</option>
-            {Array.isArray(jurisdictions) && jurisdictions.map((jurisdiction) => (
-              <option 
-                key={jurisdiction.id} 
-                value={jurisdiction.id} 
-                style={{ color: '#000000', backgroundColor: '#ffffff' }}
-              >
-                {jurisdiction.jurisdiction_name}
-              </option>
-            ))}
-          </select>
-        </div> */}
-        
-        <SearchableSelect
-          label="Adjudicating Authority"
-          required
-          options={jurisdictions}
-          value={caseData.jurisdictionId || ""}
-          onChange={(value) => {
-            const selectedJurisdiction = jurisdictions.find(j => j.id.toString() === value.toString());
-            handleJurisdictionChange({ target: { value: value.toString() } });
-          }}
-          placeholder="Select jurisdiction..."
-          disabled={loading}
-          loading={loading}
-          getOptionLabel={(option) => option.jurisdiction_name || option.name || `Jurisdiction ${option.id}`}
-          getOptionValue={(option) => option.id}
-        />
-        {!loading && jurisdictions.length === 0 && (
-          <p className="text-xs text-amber-600 mt-1">No jurisdictions available. Please check backend connection.</p>
-        )}
+            loading={loading}
+            getOptionLabel={(option) => option.jurisdiction_name || option.name || `Jurisdiction ${option.id}`}
+            getOptionValue={(option) => option.id}
+            isAutoFilled={caseData.autoFilledFields?.includes('jurisdictionId')}
+          />
+          {!loading && jurisdictions.length === 0 && (
+            <p className="text-xs text-amber-600 mt-1">No jurisdictions available. Please check backend connection.</p>
+          )}
+        </div>
 
-
-
-        {/* Court dropdown (conditional - shows when jurisdiction is selected) */}
+        {/* Step 2: Court - Shows only when Adjudicating Authority is selected */}
         {caseData.jurisdictionId && (
           <SearchableSelect
             label="Court"
@@ -1304,10 +1385,11 @@ const OverviewStep = ({ caseData, setCaseData }) => {
             loading={loading}
             getOptionLabel={(option) => option.court_name}
             getOptionValue={(option) => option.id}
+            isAutoFilled={caseData.autoFilledFields?.includes('courtId')}
           />
         )}
 
-        {/* Bench dropdown (conditional - only shows when court is selected and has benches) */}
+        {/* Step 3: Bench - Shows only when Court is selected */}
         {caseData.courtId && benches.length > 0 && (
           <SearchableSelect
             label="Bench"
@@ -1322,10 +1404,11 @@ const OverviewStep = ({ caseData, setCaseData }) => {
             loading={loading}
             getOptionLabel={(option) => `${option.bench_name}${option.is_principal ? " (Principal Bench)" : ""}`}
             getOptionValue={(option) => option.id}
+            isAutoFilled={caseData.autoFilledFields?.includes('benchId')}
           />
         )}
 
-        {/* Case Prefix */}
+        {/* Case Prefix - INDEPENDENT field (not dependent on bench) */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
             Case Prefix
@@ -1337,53 +1420,62 @@ const OverviewStep = ({ caseData, setCaseData }) => {
             onChange={(e) =>
               setCaseData({ ...caseData, casePrefix: e.target.value })
             }
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-700 
-            placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none"
+            className={`w-full px-3 py-2 border rounded-md text-sm text-gray-700 
+            placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none
+            ${caseData.autoFilledFields?.includes('casePrefix') ? 'border-[#21C1B6] bg-[#E0F7F6] ring-2 ring-[#21C1B6] ring-opacity-30' : 'border-gray-300'}`}
           />
         </div>
 
-        {/* Case Number and Year */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Case Number<span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              placeholder="Enter case number..."
-              value={caseData.caseNumber}
-              onChange={(e) =>
-                setCaseData({ ...caseData, caseNumber: e.target.value })
-              }
-              required
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-700 
-              placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Year<span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              placeholder="YYYY"
-              maxLength="4"
-              value={caseData.caseYear || ""}
-              onChange={(e) => {
-                const value = e.target.value.replace(/\D/g, '').slice(0, 4);
-                setCaseData({ ...caseData, caseYear: value });
-              }}
-              required
-              pattern="\d{4}"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-700 
-              placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none"
-            />
-          </div>
-        </div>
+        {/* Step 4: Case Details - Show only when Bench is selected */}
+        {caseData.benchId && (
+          <>
+            {/* Case Number and Year */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Case Number<span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="Enter case number..."
+                  value={caseData.caseNumber}
+                  onChange={(e) =>
+                    setCaseData({ ...caseData, caseNumber: e.target.value })
+                  }
+                  required
+                  className={`w-full px-3 py-2 border rounded-md text-sm text-gray-700 
+                  placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none
+                  ${caseData.autoFilledFields?.includes('caseNumber') ? 'border-[#21C1B6] bg-[#E0F7F6] ring-2 ring-[#21C1B6] ring-opacity-30' : 'border-gray-300'}`}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Year<span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="YYYY"
+                  maxLength="4"
+                  value={caseData.caseYear || ""}
+                  onChange={(e) => {
+                    const value = e.target.value.replace(/\D/g, '').slice(0, 4);
+                    setCaseData({ ...caseData, caseYear: value });
+                  }}
+                  required
+                  pattern="\d{4}"
+                  className={`w-full px-3 py-2 border rounded-md text-sm text-gray-700 
+                  placeholder-gray-400 focus:ring-1 focus:ring-[#9CDFE1] focus:border-[#9CDFE1] outline-none
+                  ${caseData.autoFilledFields?.includes('caseYear') ? 'border-[#21C1B6] bg-[#E0F7F6] ring-2 ring-[#21C1B6] ring-opacity-30' : 'border-gray-300'}`}
+                />
+              </div>
+            </div>
+          </>
+        )}
 
-        {/* Case Type */}
+        {/* Step 5: Case Type - Independent field (starts new dependency chain) */}
         <SearchableSelect
           label="Case Type"
+          required
           options={caseTypes}
           value={caseData.caseTypeId || caseData.caseType || ""}
           onChange={(value) => {
@@ -1393,7 +1485,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
               ...caseData, 
               caseType: selectedType ? selectedType.name : "",
               caseTypeId: selectedTypeId,
-              // Clear subtype and caseNature when case type changes
+              // Clear dependent fields when case type changes (strict dependency chain)
               subType: "",
               subTypeId: "",
               caseNature: ""
@@ -1404,9 +1496,10 @@ const OverviewStep = ({ caseData, setCaseData }) => {
           loading={loading}
           getOptionLabel={(option) => option.name}
           getOptionValue={(option) => option.id}
+          isAutoFilled={caseData.autoFilledFields?.includes('caseType')}
         />
 
-        {/* Subtype and Case Nature (conditional - shows when case type is selected and has subtypes) */}
+        {/* Step 6: Case Sub-Type and Case Nature - Show only when Case Type is selected */}
         {caseData.caseTypeId && subTypes.length > 0 && (
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -1428,11 +1521,13 @@ const OverviewStep = ({ caseData, setCaseData }) => {
                 loading={loading}
                 getOptionLabel={(option) => option.name}
                 getOptionValue={(option) => option.id}
+                isAutoFilled={caseData.autoFilledFields?.includes('subType')}
               />
             </div>
             <div>
               <SearchableSelect
                 label="Case Nature"
+                isAutoFilled={caseData.autoFilledFields?.includes('caseNature')}
                 options={[
                   // Basic Categories
                   { value: "Civil", label: "Civil", group: "Basic Categories" },
@@ -1535,10 +1630,10 @@ const OverviewStep = ({ caseData, setCaseData }) => {
           </div>
         </div>
 
-        {/* Next Hearing */}
+        {/* Next Hearing Date */}
         <div className="relative">
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Next Hearing
+            Next Hearing Date
           </label>
           <div className="relative">
             <input

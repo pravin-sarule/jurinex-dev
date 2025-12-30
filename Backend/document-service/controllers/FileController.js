@@ -5678,8 +5678,11 @@ const {
 const { getSignedUrl } = require("../services/folderService"); // Import from folderService
 const { checkStorageLimit } = require("../utils/storage");
 const { bucket } = require("../config/gcs");
-const { askGemini, getSummaryFromChunks, askLLM, getAvailableProviders, resolveProviderName } = require("../services/aiService");
-const { askLLM: askFolderLLMService, streamLLM: streamFolderLLM, resolveProviderName: resolveFolderProviderName, getAvailableProviders: getFolderAvailableProviders } = require("../services/folderAiService"); // Import askLLM, streamLLM, resolveProviderName, and getAvailableProviders from folderAiService
+// Using folderAiService for all AI operations in this project
+const { askLLM: askFolderLLMService, streamLLM: streamFolderLLM, resolveProviderName: resolveFolderProviderName, getAvailableProviders: getFolderAvailableProviders, getSummaryFromChunks } = require("../services/folderAiService"); // Import askLLM, streamLLM, resolveProviderName, getAvailableProviders, and getSummaryFromChunks from folderAiService
+// Legacy aiService import (only used for getSummaryFromChunks, now using folderAiService instead)
+// const { askGemini, getSummaryFromChunks, askLLM, getAvailableProviders, resolveProviderName } = require("../services/aiService");
+const summaryQueue = require("../utils/summaryQueue"); // Rate-limited queue for summary generation
 const UserProfileService = require("../services/userProfileService");
 const { extractText, detectDigitalNativePDF, extractTextFromPDFWithPages } = require("../utils/textExtractor");
 const {
@@ -5689,8 +5692,7 @@ const {
   fetchBatchResults,
 } = require("../services/documentAiService");
 const { chunkDocument } = require("../services/chunkingService");
-const { generateEmbedding, generateEmbeddings } = require("../services/embeddingService");
-const { enqueueEmbeddingJob } = require("../queues/embeddingQueue");
+const { generateEmbedding, generateEmbeddings, generateEmbeddingsWithMeta, computeContentHash, getCachedEmbedding, cacheEmbedding } = require("../services/embeddingService");
 const { fileInputBucket, fileOutputBucket } = require("../config/gcs");
 const TokenUsageService = require("../services/tokenUsageService"); // Import TokenUsageService
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager'); // NEW
@@ -6524,7 +6526,12 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
       if (chunks.length > 0) {
         const fullText = chunks.map(c => c.content).join("\n\n");
         if (fullText.length > 0) {
-          summary = await getSummaryFromChunks(chunks.map(c => c.content));
+          // Use rate-limited queue to avoid API rate limits
+          const chunkContents = chunks.map(c => c.content);
+          summary = await summaryQueue.add(async () => {
+            console.log(`[SummaryQueue] Processing summary for file ${fileId}`);
+            return await getSummaryFromChunks(chunkContents);
+          });
           await File.updateSummary(fileId, summary);
           console.log(`[processDigitalNativePDF] ✅ Generated and saved summary`);
         }
@@ -6753,49 +6760,155 @@ async function processBatchResults(file_id, job) {
 
     await smoothProgressIncrement(file_id, "processing", 73, 78, `${savedChunks.length} chunks saved`, 100);
 
-    const embeddingQueuePayload = savedChunks.map((savedChunk) => {
-      const source = chunks[savedChunk.chunk_index];
-      return {
-        chunkId: savedChunk.id,
-        chunkIndex: savedChunk.chunk_index,
-        content: source.content,
-        tokenCount: source.token_count,
-      };
-    });
-
-    await enqueueEmbeddingJob({
-      fileId: file_id,
-      jobId: job.job_id,
-      chunks: embeddingQueuePayload,
-      progressBase: 78,
-    });
-
-    await updateProgress(file_id, "embedding_pending", 78, "Embeddings queued for background worker");
-
-    await updateProgress(file_id, "embedding_pending", 79, "Preparing summary generation");
+    await updateProgress(file_id, "processing", 79, "Preparing summary generation");
 
     const fullText = chunks.map(c => c.content).join("\n\n");
     let summary = null;
 
     try {
       if (fullText.length > 0) {
-        await smoothProgressIncrement(file_id, "embedding_pending", 80, 86, "Generating AI summary", 150);
+        await smoothProgressIncrement(file_id, "processing", 80, 86, "Generating AI summary", 150);
 
-        summary = await getSummaryFromChunks(chunks.map(c => c.content));
+        // Use rate-limited queue to avoid API rate limits
+        const chunkContents = chunks.map(c => c.content);
+        summary = await summaryQueue.add(async () => {
+          console.log(`[SummaryQueue] Processing summary for file ${file_id}`);
+          return await getSummaryFromChunks(chunkContents);
+        });
         await File.updateSummary(file_id, summary);
 
         console.log(`[Summary] ✅ Generated and saved`);
-        await updateProgress(file_id, "embedding_pending", 88, "Summary saved");
+        await updateProgress(file_id, "processing", 88, "Summary saved");
       } else {
-        await updateProgress(file_id, "embedding_pending", 88, "Summary skipped (empty content)");
+        await updateProgress(file_id, "processing", 88, "Summary skipped (empty content)");
       }
     } catch (summaryError) {
       console.warn(`⚠️ [Warning] Summary generation failed:`, summaryError.message);
-      await updateProgress(file_id, "embedding_pending", 88, "Summary skipped (error)");
+      await updateProgress(file_id, "processing", 88, "Summary skipped (error)");
     }
 
-    await updateProgress(file_id, "embedding_pending", 89, "Waiting for background embeddings to complete");
-    console.log(`[Embeddings] Background task enqueued for file ${file_id}`);
+    // Process embeddings synchronously (not in background)
+    await updateProgress(file_id, "processing", 89, "Generating embeddings");
+    console.log(`[Embeddings] Starting synchronous embedding generation for file ${file_id}`);
+
+    // Helper function to parse cached embedding
+    const parseCachedEmbedding = (raw) => {
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw === 'string') {
+        try {
+          // Try JSON parse first
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return parsed;
+        } catch (e) {
+          // If not JSON, try parsing as comma-separated string
+          return raw.replace(/[\[\]]/g, '').split(',').map(x => parseFloat(x.trim())).filter(x => !isNaN(x));
+        }
+      }
+      return null;
+    };
+
+    const vectors = [];
+    const toEmbed = [];
+    const cacheHits = [];
+
+    // Check cache for each chunk
+    for (const savedChunk of savedChunks) {
+      const source = chunks[savedChunk.chunk_index];
+      const hash = computeContentHash(source.content);
+      const cached = await getCachedEmbedding(hash);
+
+      if (cached && cached.embedding) {
+        const embedding = parseCachedEmbedding(cached.embedding);
+        if (embedding && Array.isArray(embedding) && embedding.length > 0) {
+          vectors.push({ 
+            chunk_id: savedChunk.id, 
+            embedding, 
+            file_id: file_id 
+          });
+          cacheHits.push(savedChunk.chunk_index);
+          continue;
+        }
+      }
+
+      toEmbed.push({
+        chunkId: savedChunk.id,
+        chunkIndex: savedChunk.chunk_index,
+        content: source.content,
+        tokenCount: source.token_count,
+        hash,
+      });
+    }
+
+    console.log(`[Embeddings] Cache hits: ${cacheHits.length}/${savedChunks.length}`);
+    console.log(`[Embeddings] Processing ${toEmbed.length} chunks in batches`);
+
+    // Process embeddings in batches
+    if (toEmbed.length > 0) {
+      const { BATCH_SIZE, PARALLEL_BATCHES } = require("../services/embeddingService");
+      const totalBatches = Math.ceil(toEmbed.length / BATCH_SIZE);
+      
+      for (let batchStart = 0; batchStart < toEmbed.length; batchStart += BATCH_SIZE * PARALLEL_BATCHES) {
+        const parallelPromises = [];
+        
+        // Create parallel batch processing promises
+        for (let i = 0; i < PARALLEL_BATCHES && (batchStart + i * BATCH_SIZE) < toEmbed.length; i++) {
+          const batchIndex = batchStart + i * BATCH_SIZE;
+          const batch = toEmbed.slice(batchIndex, batchIndex + BATCH_SIZE);
+          if (batch.length > 0) {
+            const texts = batch.map((item) => item.content);
+            parallelPromises.push(
+              generateEmbeddingsWithMeta(texts).then(({ embeddings, model }) => ({
+                embeddings,
+                model,
+                batch,
+              }))
+            );
+          }
+        }
+
+        // Wait for all parallel batches to complete
+        const batchResults = await Promise.all(parallelPromises);
+        
+        // Process results
+        for (const { embeddings, model, batch } of batchResults) {
+          if (!embeddings || embeddings.length !== batch.length) {
+            throw new Error(`Embedding count mismatch (expected ${batch.length}, got ${embeddings?.length || 0})`);
+          }
+
+          embeddings.forEach((embedding, idx) => {
+            const chunk = batch[idx];
+            vectors.push({
+              chunk_id: chunk.chunkId,
+              embedding,
+              file_id: file_id,
+            });
+
+            // Cache embedding (fire and forget)
+            cacheEmbedding({
+              hash: chunk.hash,
+              embedding,
+              model,
+              tokenCount: chunk.tokenCount,
+            }).catch(() => {});
+          });
+
+          const currentBatch = Math.floor(batchStart / BATCH_SIZE) + 1;
+          const progress = 89 + Math.min(8, Math.round((currentBatch / totalBatches) * 10));
+          await updateProgress(file_id, "processing", progress, `Generating embeddings (${currentBatch}/${totalBatches} batches)`);
+          console.log(`[Embeddings] ✅ Processed batch ${currentBatch}/${totalBatches} (${batch.length} chunks)`);
+        }
+      }
+    }
+
+    // Save all vectors to database
+    await updateProgress(file_id, "processing", 97, "Saving embeddings to database");
+    console.log(`[Embeddings] Saving ${vectors.length} vectors to database`);
+    
+    await ChunkVector.saveMultipleChunkVectors(vectors);
+    
+    console.log(`[Embeddings] ✅ Saved ${vectors.length} vectors for file ${file_id}`);
+    await updateProgress(file_id, "processed", 100, "Processing complete");
+    await ProcessingJob.updateJobStatus(job.job_id, "completed");
 
   } catch (error) {
     console.error(`\n❌ [ERROR] Post-processing failed for ${file_id}:`, error.message);
@@ -7067,13 +7180,14 @@ exports.createCase = async (req, res) => {
       next_hearing_date,
       document_type,
       filed_by,
+      temp_folder_name, // Temporary folder name for file migration
     } = req.body;
 
-    if (!case_title || !case_type || !court_name) {
-      return res.status(400).json({
-        error: "Missing required fields: case_title, case_type, court_name",
-      });
-    }
+    // Fields are now optional - allow case creation even if these fields are missing
+    // Use default values if missing
+    const finalCaseTitle = case_title || "Untitled Case";
+    const finalCaseType = case_type || "";
+    const finalCourtName = court_name || "";
 
     await client.query("BEGIN");
 
@@ -7104,12 +7218,12 @@ exports.createCase = async (req, res) => {
 
     const values = [
       userIdInt,
-      case_title,
-      case_number,
-      filing_date,
-      case_type,
-      sub_type,
-      court_name,
+      finalCaseTitle,
+      case_number || null,
+      filing_date || null,
+      finalCaseType,
+      sub_type || null,
+      finalCourtName,
       court_level,
       bench_division,
       jurisdiction,
@@ -7135,7 +7249,8 @@ exports.createCase = async (req, res) => {
     const { rows: caseRows } = await client.query(insertQuery, values);
     const newCase = caseRows[0];
 
-    const safeCaseName = sanitizeName(case_title);
+    // Use finalCaseTitle for folder name (handles empty case_title)
+    const safeCaseName = sanitizeName(finalCaseTitle || "Untitled Case");
     const parentPath = `${userId}/cases`;
     const folder = await createFolderInternal(userId, safeCaseName, parentPath);
 
@@ -7150,6 +7265,78 @@ exports.createCase = async (req, res) => {
       newCase.id,
     ]);
     const updatedCase = updatedRows[0];
+
+    // Step 4: Move files from temp folder to case folder if temp_folder_name is provided
+    if (temp_folder_name) {
+      console.log(`📁 Moving files from temp folder "${temp_folder_name}" to case folder "${folder.folder_path}"`);
+      
+      try {
+        // Find files by temp folder_path (no folder record exists, just find files by folder_path string)
+        const tempFiles = await File.findByUserIdAndFolderPath(userId, temp_folder_name);
+        const documents = tempFiles.filter(f => !f.is_folder); // No folder record, just filter files
+
+        if (documents.length > 0) {
+          console.log(`  📄 Found ${documents.length} file(s) to move from temp folder_path "${temp_folder_name}"`);
+
+          // Move each file from temp folder to case folder in GCS
+          for (const doc of documents) {
+            const oldGcsPath = doc.gcs_path;
+            const fileName = path.basename(oldGcsPath);
+            const newGcsPath = `${folder.gcs_path}${fileName}`;
+
+            try {
+              // Check if file exists in GCS
+              const oldFile = bucket.file(oldGcsPath);
+              const [exists] = await oldFile.exists();
+              
+              if (exists) {
+                // Copy file to new location
+                const newFile = bucket.file(newGcsPath);
+                await oldFile.copy(newFile);
+                console.log(`  ✅ Copied ${fileName} from ${oldGcsPath} to ${newGcsPath}`);
+
+                // Update file record in database
+                await client.query(
+                  `UPDATE user_files SET gcs_path = $1, folder_path = $2 WHERE id = $3::uuid AND user_id = $4`,
+                  [newGcsPath, folder.folder_path, doc.id, userId]
+                );
+                console.log(`  ✅ Updated file record ${doc.id} with new folder_path`);
+
+                // Delete old file from temp location (optional - keep for now, can be cleaned up later)
+                // await oldFile.delete().catch(err => console.warn(`⚠️ Failed to delete old file: ${err.message}`));
+              } else {
+                console.warn(`  ⚠️ File not found in GCS: ${oldGcsPath}`);
+              }
+            } catch (fileError) {
+              console.error(`  ❌ Error moving file ${doc.originalname}:`, fileError.message);
+              // Continue with other files even if one fails
+            }
+          }
+
+          // Delete temp files from GCS after copying (optional - can keep for backup)
+          // Uncomment if you want to delete temp files from GCS after moving:
+          /*
+          for (const doc of documents) {
+            try {
+              const oldFile = bucket.file(doc.gcs_path);
+              await oldFile.delete();
+              console.log(`  🗑️ Deleted temp file from GCS: ${doc.gcs_path}`);
+            } catch (deleteError) {
+              console.warn(`  ⚠️ Failed to delete temp file:`, deleteError.message);
+            }
+          }
+          */
+
+          console.log(`  ✅ File migration complete. Temp folder_path "${temp_folder_name}" cleaned up.`);
+        } else {
+          console.log(`  ℹ️ No files found with temp folder_path "${temp_folder_name}"`);
+        }
+      } catch (moveError) {
+        console.error(`❌ Error moving files from temp folder:`, moveError.message);
+        // Don't fail case creation if file move fails - files are already in temp folder
+        // They can be manually moved or cleaned up later
+      }
+    }
 
     await client.query("COMMIT");
 
@@ -9374,7 +9561,29 @@ exports.getFolderProcessingStatus = async (req, res) => {
     const { folderName } = req.params;
     const userId = req.user.id;
 
-    const files = await File.findByUserIdAndFolderPath(userId, folderName);
+    console.log(`[getFolderProcessingStatus] Getting status for folder: ${folderName}, user: ${userId}`);
+
+    // folderName could be either folder_path or originalname
+    // Try to find by folder_path first (which is what we return from uploadForProcessing)
+    let files = await File.findByUserIdAndFolderPath(userId, folderName);
+    
+    // If not found, try to find by originalname (for backward compatibility)
+    if (files.length === 0) {
+      console.log(`[getFolderProcessingStatus] No files found with folder_path, trying to find by originalname...`);
+      // Query to find folder by originalname
+      const folderQuery = `
+        SELECT folder_path FROM user_files
+        WHERE user_id = $1 AND is_folder = true AND originalname = $2
+        LIMIT 1;
+      `;
+      const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
+      if (folderRows.length > 0) {
+        const foundFolderPath = folderRows[0].folder_path;
+        console.log(`[getFolderProcessingStatus] Found folder with path: ${foundFolderPath}`);
+        files = await File.findByUserIdAndFolderPath(userId, foundFolderPath);
+      }
+    }
+
     const documents = files.filter(f => !f.is_folder);
 
     if (documents.length === 0) {
@@ -9414,6 +9623,714 @@ exports.getFolderProcessingStatus = async (req, res) => {
       error: "Failed to get folder processing status",
       details: error.message
     });
+  }
+};
+
+// New endpoint: Upload files, wait for processing, and extract case fields
+exports.uploadAndExtractCaseFields = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const username = req.user.username;
+    
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`📤 UPLOAD AND EXTRACT CASE FIELDS - START`);
+    console.log(`User ID: ${userId}, Username: ${username}`);
+    console.log(`Files count: ${req.files ? req.files.length : 0}`);
+    console.log(`${'='.repeat(80)}\n`);
+    
+    if (!req.files || req.files.length === 0) {
+      console.error('❌ No files provided in request');
+      return res.status(400).json({ 
+        success: false,
+        error: "No files uploaded",
+        message: "Please select at least one file to upload."
+      });
+    }
+
+    // Step 1: Create temporary folder
+    const tempFolderName = `case-creation-${Date.now()}`;
+    console.log(`📁 Step 1/4: Creating temporary folder: ${tempFolderName}`);
+    
+    const tempFolder = await createFolderInternal(userId, tempFolderName, '');
+    console.log(`✅ Folder created: ${tempFolder.originalname}`);
+
+    // Step 2: Upload files (reuse existing upload logic)
+    console.log(`📤 Step 2/4: Uploading ${req.files.length} file(s)...`);
+    const uploadedFiles = [];
+    
+    for (const file of req.files) {
+      try {
+        const ext = path.extname(file.originalname);
+        const baseName = path.basename(file.originalname, ext);
+        const safeName = sanitizeName(baseName) + ext;
+        const key = `${tempFolder.gcs_path}${safeName}`;
+        const uniqueKey = await ensureUniqueKey(key);
+
+        console.log(`  📄 Uploading: ${safeName}`);
+
+        const fileRef = bucket.file(uniqueKey);
+        await fileRef.save(file.buffer, {
+          resumable: false,
+          metadata: { contentType: file.mimetype },
+        });
+
+        const savedFile = await File.create({
+          user_id: userId,
+          originalname: safeName,
+          gcs_path: uniqueKey,
+          folder_path: tempFolder.folder_path,
+          mimetype: file.mimetype,
+          size: file.size,
+          is_folder: false,
+          status: "queued",
+          processing_progress: 0,
+        });
+
+        // Start processing
+        processDocumentWithAI(
+          savedFile.id,
+          file.buffer,
+          file.mimetype,
+          userId,
+          safeName,
+          null
+        ).catch(err => console.error(`❌ Processing failed for ${savedFile.id}:`, err.message));
+
+        uploadedFiles.push(savedFile);
+        console.log(`  ✅ Uploaded: ${safeName} (ID: ${savedFile.id})`);
+      } catch (fileError) {
+        console.error(`❌ Error uploading ${file.originalname}:`, fileError);
+        console.error(`❌ Error details:`, fileError.message, fileError.stack);
+      }
+    }
+
+    if (uploadedFiles.length === 0) {
+      console.error('❌ No files were successfully uploaded');
+      return res.status(500).json({ 
+        success: false,
+        error: "Failed to upload any files",
+        message: "All file uploads failed. Please check file formats and try again."
+      });
+    }
+
+    // Step 3: Wait for files to be processed
+    console.log(`⏳ Step 3/4: Waiting for files to be processed...`);
+    let allProcessed = false;
+    let attempts = 0;
+    const maxAttempts = 60; // 60 attempts * 3 seconds = 3 minutes max
+    const pollInterval = 3000; // 3 seconds
+
+    while (!allProcessed && attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      
+      // Use folder_path (not originalname) to find files
+      const files = await File.findByUserIdAndFolderPath(userId, tempFolder.folder_path);
+      const documents = files.filter(f => !f.is_folder);
+      
+      if (documents.length === 0) {
+        attempts++;
+        continue;
+      }
+
+      const processedCount = documents.filter(f => f.status === 'processed').length;
+      const failedCount = documents.filter(f => f.status === 'error').length;
+      const totalCount = documents.length;
+
+      console.log(`  📊 Status: ${processedCount}/${totalCount} processed, ${failedCount} failed`);
+
+      allProcessed = processedCount === totalCount || (processedCount + failedCount) === totalCount;
+      attempts++;
+
+      if (attempts >= maxAttempts) {
+        console.warn(`⚠️ Processing timeout after ${maxAttempts} attempts`);
+        break;
+      }
+    }
+
+    if (!allProcessed) {
+      console.warn(`⚠️ Some files may not be processed yet, proceeding with extraction...`);
+    }
+
+    // Step 4: Extract case fields using query
+    console.log(`🔍 Step 4/4: Extracting case fields from documents...`);
+    
+    const extractionPrompt = `Extract all case information from the uploaded documents. Return a JSON object with the following fields:
+- caseTitle (case title or name)
+- caseNumber (case number if available)
+- casePrefix (case prefix like WP, CR, etc. if available)
+- caseYear (case year if available, extract from case number or date)
+- caseType (type of case)
+- caseNature (case nature: Civil, Criminal, Constitutional/Writ, Arbitration, etc.)
+- subType (subtype if available)
+- courtName (court name)
+- courtLevel (court level: High Court, District Court, etc.)
+- benchDivision (bench/division if mentioned)
+- jurisdiction (jurisdiction area or adjudicating authority - these are the same thing)
+- state (state if mentioned)
+- filingDate (filing date in YYYY-MM-DD format if available)
+- judges (array of judge names if available)
+- courtRoom (court room number if available)
+- petitioners (array of objects with fullName, role, advocateName, barRegistration, contact if available)
+- respondents (array of objects with fullName, role, advocateName, barRegistration, contact if available)
+- categoryType (category type if mentioned)
+- primaryCategory (primary category if available)
+- subCategory (sub category if available)
+- complexity (complexity level if mentioned)
+- monetaryValue (monetary value if mentioned, extract numeric value only)
+- priorityLevel (priority: Low, Medium, High if mentioned)
+- currentStatus (current status if mentioned: Active, Pending, Closed, etc.)
+- nextHearingDate (next hearing date in YYYY-MM-DD format if available)
+- documentType (type of document if mentioned)
+- filedBy (who filed: Plaintiff, Defendant, Both, or advocate name if mentioned)
+
+Return ONLY valid JSON without markdown formatting. If a field is not found, use null or empty string.`;
+
+    // Step 4: Extract case fields - query processed documents
+    let extractedData = {};
+    try {
+      // Use folder_path (not originalname) to find processed files
+      const filesQuery = `
+        SELECT id, originalname, folder_path, status, gcs_path, mimetype
+        FROM user_files
+        WHERE user_id = $1
+          AND is_folder = false
+          AND status = 'processed'
+          AND folder_path = $2
+        ORDER BY created_at DESC;
+      `;
+      const { rows: processedFiles } = await pool.query(filesQuery, [userId, tempFolder.folder_path]);
+
+      if (processedFiles.length === 0) {
+        console.warn('⚠️ No processed files found for extraction');
+        return res.status(200).json({
+          success: true,
+          folderName: tempFolderName,
+          extractedData: {},
+          uploadedFiles: uploadedFiles.map(f => ({
+            id: f.id,
+            name: f.originalname,
+            status: f.status
+          })),
+          message: 'Files uploaded but not yet processed. Please try extraction again later.'
+        });
+      }
+
+      console.log(`  📄 Found ${processedFiles.length} processed files for extraction`);
+
+      // Get chunks from processed files
+      const allChunks = [];
+      for (const file of processedFiles) {
+        const chunks = await FileChunk.getChunksByFileId(file.id);
+        if (chunks && chunks.length > 0) {
+          allChunks.push(...chunks.map(c => c.content));
+        }
+      }
+
+      if (allChunks.length === 0) {
+        console.warn('⚠️ No chunks found in processed files');
+        extractedData = {};
+      } else {
+        try {
+          // Use AI to extract case fields from chunks
+          const documentContext = allChunks.join('\n\n');
+          const provider = 'gemini';
+          
+          console.log(`  🤖 Querying AI to extract case fields (${allChunks.length} chunks, ${documentContext.length} chars)...`);
+          
+          // Limit context to avoid token limits
+          const limitedContext = documentContext.substring(0, 50000);
+          const fullPrompt = extractionPrompt + '\n\nDocument Content:\n' + limitedContext;
+          
+          let answer;
+          try {
+            // Wrap AI call in Promise.race with timeout to prevent hanging
+            const aiCallPromise = askFolderLLMService(
+              provider,
+              fullPrompt,
+              '',
+              '',
+              'Extract case fields'
+            );
+            
+            const timeoutPromise = new Promise((_, reject) => {
+              setTimeout(() => reject(new Error('AI extraction timed out after 120 seconds')), 120000);
+            });
+            
+            answer = await Promise.race([aiCallPromise, timeoutPromise]);
+            
+            if (!answer || typeof answer !== 'string') {
+              console.warn(`  ⚠️ Invalid AI response:`, typeof answer);
+              answer = null;
+            }
+          } catch (aiCallError) {
+            console.error(`  ❌ AI service call failed:`, aiCallError.message);
+            console.error(`  ❌ Error name:`, aiCallError.name);
+            if (aiCallError.stack) {
+              console.error(`  ❌ Error stack:`, aiCallError.stack);
+            }
+            // Continue with empty extractedData if AI fails - don't fail the entire request
+            answer = null;
+          }
+
+          // Parse the extracted data
+          if (answer) {
+            const jsonMatch = answer.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) || answer.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                extractedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+                console.log(`  ✅ Successfully parsed extracted JSON`);
+              } catch (parseErr) {
+                console.error(`  ❌ JSON parse error:`, parseErr.message);
+                extractedData = {};
+              }
+            } else if (answer.trim().startsWith('{')) {
+              try {
+                extractedData = JSON.parse(answer);
+                console.log(`  ✅ Successfully parsed direct JSON`);
+              } catch (parseErr) {
+                console.error(`  ❌ JSON parse error:`, parseErr.message);
+                extractedData = {};
+              }
+            } else {
+              console.warn(`  ⚠️ Could not find JSON in AI response`);
+              console.warn(`  Response preview: ${answer.substring(0, 200)}...`);
+              extractedData = {};
+            }
+          } else {
+            console.warn(`  ⚠️ Invalid answer format:`, typeof answer);
+            extractedData = {};
+          }
+        } catch (aiError) {
+          console.error('❌ Error in AI extraction:', aiError);
+          console.error('❌ Error stack:', aiError.stack);
+          // Continue with empty extractedData if AI fails
+          extractedData = {};
+        }
+      }
+    } catch (extractError) {
+      console.error('❌ Error extracting case fields:', extractError);
+      console.error('❌ Error stack:', extractError.stack);
+      // Continue with empty extractedData
+      extractedData = {};
+    }
+
+    console.log(`✅ Extraction complete! Extracted ${Object.keys(extractedData).length} fields`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    // IMPORTANT: This endpoint ONLY extracts and returns data - it does NOT create a case
+    // The case is only created when user submits the final form in ReviewStep (handleCreateCase)
+    // This ensures users can review and edit all fields before case creation
+    
+    const responseData = {
+      success: true,
+      folderName: tempFolderName,
+      extractedData: extractedData || {},
+      uploadedFiles: uploadedFiles.map(f => ({
+        id: f.id,
+        name: f.originalname,
+        status: f.status
+      })),
+      message: 'Files uploaded and fields extracted. Review and edit fields as needed. No case has been created yet.'
+    };
+
+    console.log(`📤 Sending response with ${Object.keys(extractedData).length} extracted fields`);
+    return res.status(200).json(responseData);
+
+  } catch (error) {
+    console.error('❌ uploadAndExtractCaseFields error:', error);
+    console.error('❌ Error name:', error.name);
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    
+    // Ensure we always send a response even if something goes wrong
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        error: "Internal server error",
+        details: error.message || 'Unknown error occurred',
+        message: 'Failed to process documents. Please try again or contact support if the issue persists.'
+      });
+    } else {
+      console.error('⚠️ Response already sent, cannot send error response');
+    }
+  }
+};
+
+// Upload files for processing (separate from extraction)
+exports.uploadForProcessing = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const username = req.user.username;
+    
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`📤 UPLOAD FOR PROCESSING - START`);
+    console.log(`User ID: ${userId}, Username: ${username}`);
+    console.log(`Files count: ${req.files ? req.files.length : 0}`);
+    console.log(`${'='.repeat(80)}\n`);
+    
+    if (!req.files || req.files.length === 0) {
+      console.error('❌ No files provided in request');
+      return res.status(400).json({ 
+        success: false,
+        error: "No files uploaded",
+        message: "Please select at least one file to upload."
+      });
+    }
+
+    // Step 1: Create temporary folder_path identifier (NO folder record in database)
+    const tempFolderPath = `temp-case-${Date.now()}`;
+    const tempGcsPrefix = `${userId}/temp-uploads/${Date.now()}/`;
+    console.log(`📁 Using temporary path: ${tempFolderPath} (NO folder record will be created)`);
+
+    // Step 2: Upload files and initiate processing in parallel
+    console.log(`📤 Processing ${req.files.length} file(s) in parallel...`);
+    const uploadPromises = req.files.map(async (file) => {
+      try {
+        const ext = path.extname(file.originalname);
+        const baseName = path.basename(file.originalname, ext);
+        const safeName = sanitizeName(baseName) + ext;
+        const key = `${tempGcsPrefix}${safeName}`;
+        const uniqueKey = await ensureUniqueKey(key);
+
+        console.log(`  📄 Uploading: ${safeName} to temp path: ${uniqueKey}`);
+
+        const fileRef = bucket.file(uniqueKey);
+        await fileRef.save(file.buffer, {
+          resumable: false,
+          metadata: { contentType: file.mimetype },
+        });
+
+        // Store file with temp folder_path (string value only, no folder record)
+        const savedFile = await File.create({
+          user_id: userId,
+          originalname: safeName,
+          gcs_path: uniqueKey,
+          folder_path: tempFolderPath, // Use temp folder_path identifier (no folder record)
+          mimetype: file.mimetype,
+          size: file.size,
+          is_folder: false,
+          status: "queued",
+          processing_progress: 0,
+        });
+
+        // Start processing in background (files will process in parallel)
+        processDocumentWithAI(
+          savedFile.id,
+          file.buffer,
+          file.mimetype,
+          userId,
+          safeName,
+          null
+        ).catch(err => console.error(`❌ Processing failed for ${savedFile.id}:`, err.message));
+
+        console.log(`  ✅ Uploaded: ${safeName} (ID: ${savedFile.id})`);
+        
+        return {
+          id: savedFile.id,
+          name: savedFile.originalname,
+          status: savedFile.status
+        };
+      } catch (fileError) {
+        console.error(`❌ Error uploading ${file.originalname}:`, fileError);
+        return null;
+      }
+    });
+
+    // Wait for all uploads to complete in parallel
+    const uploadResults = await Promise.all(uploadPromises);
+    const uploadedFiles = uploadResults.filter(file => file !== null);
+
+    if (uploadedFiles.length === 0) {
+      console.error('❌ No files were successfully uploaded');
+      return res.status(500).json({ 
+        success: false,
+        error: "Failed to upload any files",
+        message: "All file uploads failed. Please check file formats and try again."
+      });
+    }
+
+    console.log(`✅ Upload complete! ${uploadedFiles.length} file(s) uploaded to temp path: ${tempFolderPath}`);
+    console.log(`📁 Temp folder_path: ${tempFolderPath} (NO folder record created)`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    // Return temp folder_path (string identifier, not a folder record)
+    return res.status(200).json({
+      success: true,
+      folderName: tempFolderPath, // Return temp folder_path so files can be found later
+      uploadedFiles: uploadedFiles,
+      message: 'Files uploaded successfully. Processing has started.'
+    });
+
+  } catch (error) {
+    console.error('❌ uploadForProcessing error:', error);
+    console.error('❌ Error stack:', error.stack);
+    
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        error: "Internal server error",
+        details: error.message || 'Unknown error occurred',
+        message: 'Failed to upload files. Please try again or contact support if the issue persists.'
+      });
+    }
+  }
+};
+
+// Extract case fields from processed folder (called after 100% processing)
+exports.extractCaseFieldsFromFolder = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    let { folderName } = req.params;
+    
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🔍 EXTRACT CASE FIELDS FROM FOLDER - START`);
+    console.log(`User ID: ${userId}`);
+    console.log(`Folder: ${folderName}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!folderName) {
+      return res.status(400).json({
+        success: false,
+        error: "Folder name is required"
+      });
+    }
+
+    // Find files by folder_path (folderName is a folder_path identifier, not a folder record)
+    // Since we no longer create folder records for temp uploads, just find files directly by folder_path
+    let files = await File.findByUserIdAndFolderPath(userId, folderName);
+    
+    // If not found, try to find by originalname (backward compatibility for old folder records)
+    if (files.length === 0) {
+      console.log(`[extractCaseFieldsFromFolder] No files found with folder_path "${folderName}", trying to find by originalname...`);
+      const folderQuery = `
+        SELECT folder_path FROM user_files
+        WHERE user_id = $1 AND is_folder = true AND originalname = $2
+        LIMIT 1;
+      `;
+      const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
+      if (folderRows.length > 0) {
+        const foundFolderPath = folderRows[0].folder_path;
+        console.log(`[extractCaseFieldsFromFolder] Found folder record with path: ${foundFolderPath}`);
+        folderName = foundFolderPath; // Update for later use
+        files = await File.findByUserIdAndFolderPath(userId, folderName);
+      }
+    }
+
+    // Filter out folder records (we only care about actual files)
+    const documents = files.filter(f => !f.is_folder);
+
+    if (documents.length === 0) {
+      console.log(`[extractCaseFieldsFromFolder] No files found with folder_path "${folderName}"`);
+      return res.status(404).json({
+        success: false,
+        error: "No files found for the specified folder path"
+      });
+    }
+
+    console.log(`[extractCaseFieldsFromFolder] Found ${documents.length} file(s) with folder_path "${folderName}"`);
+
+    // Get all processed files (use folderName directly as folder_path, since we don't create folder records anymore)
+    const filesQuery = `
+      SELECT id, originalname, folder_path, status, gcs_path, mimetype
+      FROM user_files
+      WHERE user_id = $1
+        AND is_folder = false
+        AND status = 'processed'
+        AND folder_path = $2
+      ORDER BY created_at DESC;
+    `;
+    const { rows: processedFiles } = await pool.query(filesQuery, [userId, folderName]);
+
+    if (processedFiles.length === 0) {
+      return res.status(200).json({
+        success: true,
+        extractedData: {},
+        message: 'No processed files found. Please wait for files to finish processing.'
+      });
+    }
+
+    console.log(`  📄 Found ${processedFiles.length} processed files for extraction`);
+
+    // Get chunks from processed files - prioritize relevant chunks for better extraction
+    const allChunks = [];
+    const chunkMetadata = []; // Store metadata for semantic search if needed
+    for (const file of processedFiles) {
+      const chunks = await FileChunk.getChunksByFileId(file.id);
+      if (chunks && chunks.length > 0) {
+        chunks.forEach(chunk => {
+          allChunks.push(chunk.content);
+          chunkMetadata.push({
+            fileId: file.id,
+            fileName: file.originalname,
+            content: chunk.content,
+            chunkId: chunk.id
+          });
+        });
+      }
+    }
+
+    let extractedData = {};
+    
+    if (allChunks.length === 0) {
+      console.warn('⚠️ No chunks found in processed files');
+      extractedData = {};
+    } else {
+      try {
+        // Combine all chunks with page/file separators for better context
+        const documentContext = chunkMetadata.map((meta, idx) => {
+          return `[Document: ${meta.fileName} - Section ${idx + 1}]\n${meta.content}`;
+        }).join('\n\n---\n\n');
+        
+        const provider = 'gemini';
+        
+        console.log(`  🤖 Querying AI to extract case fields (${allChunks.length} chunks from ${processedFiles.length} files, ${documentContext.length} chars)...`);
+        
+        const extractionPrompt = `You are an expert legal document analyst. Extract ALL case information from the documents using semantic understanding and intelligent field matching.
+
+INSTRUCTIONS:
+1. Read the entire document carefully and understand the context
+2. Look for fields even if they are written with different names, synonyms, or abbreviations
+3. Use semantic understanding to match field names - for example:
+   - "Case Title" could be: "Title", "Subject Matter", "Matter Title", "Case Name", "Cause Title", "Petition Title"
+   - "Case Number" could be: "Case No.", "Suit No.", "Petition No.", "Application No.", "Writ Petition No.", "Criminal Case No."
+   - "Court" could be: "Court Name", "Forum", "Adjudicating Forum", "Court of", "Before", "Hon'ble Court"
+   - "Jurisdiction" could be: "Jurisdiction", "Adjudicating Authority", "Territorial Jurisdiction", "Jurisdictional Area"
+   - "Petitioner" could be: "Petitioner", "Plaintiff", "Applicant", "Appellant", "Complainant", "Party"
+   - "Respondent" could be: "Respondent", "Defendant", "Opposite Party", "Opponent", "Accused"
+   - "Filing Date" could be: "Date of Filing", "Date Filed", "Filed On", "Instituted On", "Registration Date"
+   - "Hearing Date" could be: "Next Date", "Next Date of Hearing", "Date of Hearing", "Listed On", "Posted On"
+   - "Judge" could be: "Judge", "Hon'ble Justice", "Hon'ble Judge", "Bench", "Presiding Officer"
+   - "Advocate" could be: "Advocate", "Counsel", "Lawyer", "Attorney", "Legal Representative"
+
+4. Extract ALL available information - be thorough and comprehensive
+5. For dropdown fields (caseType, jurisdiction, courtName, etc.), extract the EXACT value even if written differently
+6. For dates, convert to YYYY-MM-DD format
+7. For monetary values, extract numeric value only (remove currency symbols, commas)
+8. For arrays (petitioners, respondents, judges), extract ALL entries
+
+EXTRACT THE FOLLOWING FIELDS:
+{
+  "caseTitle": "IMPORTANT: Generate case title as 'Plaintiff Name vs Defendant Name' format. If case title exists in document, use it; otherwise, construct it from petitioners and respondents as 'Petitioner Name vs Respondent Name'. Look for: Title, Subject Matter, Matter Title, Case Name, Cause Title",
+  "caseNumber": "Case number (look for: Case No., Suit No., Petition No., Application No., WP No., Criminal Case No.)",
+  "casePrefix": "Case prefix like WP, CR, WP(C), SLP, etc. (extract from case number or separately - this is INDEPENDENT field, not dependent on bench)",
+  "caseYear": "Year from case number or filing date (YYYY format)",
+  "caseType": "Type of case (Civil, Criminal, Writ, Arbitration, etc.) - must match dropdown values exactly",
+  "caseNature": "Case nature (Civil, Criminal, Constitutional/Writ, Arbitration, Commercial, etc.) - must match dropdown values exactly",
+  "subType": "Subtype or category of the case - must match dropdown values exactly",
+  "courtName": "Full court name (look for: Court Name, Forum, Before, Hon'ble Court) - use exact court name for dropdown matching",
+  "courtLevel": "Court level (High Court, District Court, Supreme Court, etc.)",
+  "benchDivision": "Bench or division name (e.g., Aurangabad Bench, Principal Bench, Mumbai Bench) - use exact bench name",
+  "jurisdiction": "Jurisdiction or Adjudicating Authority (territorial area) - use exact name for dropdown matching",
+  "state": "State name if mentioned",
+  "filingDate": "Filing date in YYYY-MM-DD format (look for: Date of Filing, Filed On, Instituted On)",
+  "judges": ["Array of judge names (look for: Judge, Hon'ble Justice, Hon'ble Judge)"],
+  "courtRoom": "Court room number if mentioned (can be just a number like '12' or text like 'Room 12')",
+  "petitioners": [{"fullName": "Petitioner/Plaintiff name (REQUIRED - extract all petitioners)", "role": "Individual/Company/Government", "advocateName": "Advocate name", "barRegistration": "Bar registration number", "contact": "Contact info"}],
+  "respondents": [{"fullName": "Respondent/Defendant name (REQUIRED - extract all respondents)", "role": "Individual/Company/Government", "advocateName": "Advocate name", "barRegistration": "Bar registration number", "contact": "Contact info"}],
+  "categoryType": "Category type if mentioned",
+  "primaryCategory": "Primary category",
+  "subCategory": "Sub category",
+  "complexity": "Complexity level (Simple, Medium, Complex)",
+  "monetaryValue": "Monetary value (numeric only, no currency symbols)",
+  "priorityLevel": "Priority level (Low, Medium, High)",
+  "currentStatus": "Current status (Active, Pending, Closed, Disposed, etc.)",
+  "nextHearingDate": "Next hearing date in YYYY-MM-DD format (look for: Next Date, Date of Hearing, Listed On)",
+  "documentType": "Type of document (Petition, Affidavit, Notice, Order, etc.)",
+  "filedBy": "Who filed the case (Plaintiff, Defendant, Both, or advocate name)"
+}
+
+CRITICAL REQUIREMENTS:
+- Extract ALL fields that are present in the document
+- Use semantic matching to find fields even with different names
+- Be exhaustive - check multiple sections of the document
+- For dropdown fields, extract the value as written (we will match it later)
+- Return COMPLETE JSON with all found fields
+- If a field has multiple possible values, use the most relevant one
+- For arrays, include ALL items found in the document
+
+Return ONLY valid JSON without markdown formatting. If a field is not found, use null or empty string.`;
+
+        // Use more context for better extraction (increased from 50k to 100k chars)
+        const limitedContext = documentContext.substring(0, 100000);
+        const fullPrompt = extractionPrompt + '\n\n=== DOCUMENT CONTENT ===\n' + limitedContext + '\n\n=== EXTRACTION INSTRUCTIONS ===\nExtract ALL fields comprehensively. Use semantic understanding to find fields even with different names. Be thorough and leave no field empty if the information exists in the document.';
+        
+        let answer;
+        try {
+          const aiCallPromise = askFolderLLMService(
+            provider,
+            fullPrompt,
+            '',
+            '',
+            'Extract case fields'
+          );
+          
+          const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('AI extraction timed out after 120 seconds')), 120000);
+          });
+          
+          answer = await Promise.race([aiCallPromise, timeoutPromise]);
+          
+          if (!answer || typeof answer !== 'string') {
+            console.warn(`  ⚠️ Invalid AI response:`, typeof answer);
+            answer = null;
+          }
+        } catch (aiCallError) {
+          console.error(`  ❌ AI service call failed:`, aiCallError.message);
+          answer = null;
+        }
+
+        // Parse the extracted data
+        if (answer) {
+          const jsonMatch = answer.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) || answer.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            try {
+              extractedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+              console.log(`  ✅ Successfully parsed extracted JSON`);
+            } catch (parseErr) {
+              console.error(`  ❌ JSON parse error:`, parseErr.message);
+              extractedData = {};
+            }
+          } else if (answer.trim().startsWith('{')) {
+            try {
+              extractedData = JSON.parse(answer);
+              console.log(`  ✅ Successfully parsed direct JSON`);
+            } catch (parseErr) {
+              console.error(`  ❌ JSON parse error:`, parseErr.message);
+              extractedData = {};
+            }
+          } else {
+            console.warn(`  ⚠️ Could not find JSON in AI response`);
+            extractedData = {};
+          }
+        }
+      } catch (aiError) {
+        console.error('❌ Error in AI extraction:', aiError);
+        extractedData = {};
+      }
+    }
+
+    console.log(`✅ Extraction complete! Extracted ${Object.keys(extractedData).length} fields`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    // IMPORTANT: This endpoint ONLY extracts and returns data - it does NOT create a case
+    return res.status(200).json({
+      success: true,
+      extractedData: extractedData || {},
+      message: 'Fields extracted successfully. Review and edit fields as needed. No case has been created yet.'
+    });
+
+  } catch (error) {
+    console.error('❌ extractCaseFieldsFromFolder error:', error);
+    console.error('❌ Error stack:', error.stack);
+    
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        error: "Internal server error",
+        details: error.message || 'Unknown error occurred',
+        message: 'Failed to extract case fields. Please try again.'
+      });
+    }
   }
 };
 
@@ -9633,7 +10550,12 @@ exports.getFileProcessingStatus = async (req, res) => {
     let summary = null;
     try {
       if (chunks.length > 0) {
-        summary = await getSummaryFromChunks(chunks.map(c => c.content));
+        // Use rate-limited queue to avoid API rate limits
+        const chunkContents = chunks.map(c => c.content);
+        summary = await summaryQueue.add(async () => {
+          console.log(`[SummaryQueue] Processing summary for file ${file_id}`);
+          return await getSummaryFromChunks(chunkContents);
+        });
         await File.updateSummary(file_id, summary);
       }
     } catch (summaryError) {
