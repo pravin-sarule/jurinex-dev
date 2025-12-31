@@ -654,10 +654,10 @@ const CaseDetailView = () => {
  </div>
  </div>
 
- <div className="bg-gray-50 px-4 sm:px-6 py-2.5 sm:py-3 border-b border-gray-200">
+ {/* <div className="bg-gray-50 px-4 sm:px-6 py-2.5 sm:py-3 border-b border-gray-200">
  <h2 className="text-base sm:text-lg font-semibold text-gray-900">Additional Information</h2>
- </div>
- <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
+ </div> */}
+ {/* <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
  <div>
  <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1.5 sm:mb-2">
  Folder ID
@@ -689,7 +689,7 @@ const CaseDetailView = () => {
  </label>
  <p className="text-gray-900 text-xs sm:text-sm break-all">{caseData?.user_id || 'N/A'}</p>
  </div>
- </div>
+ </div> */}
  </div>
  </div>
  </div>

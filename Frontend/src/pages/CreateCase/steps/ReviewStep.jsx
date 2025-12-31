@@ -380,6 +380,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
   const [createdCase, setCreatedCase] = useState(null);
   const [error, setError] = useState(null);
   const [generatedCaseTitle, setGeneratedCaseTitle] = useState(null); // Store the generated case title
+  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false); // Disclaimer checkbox state
 
   // Format date helper function
   const formatDate = (dateString) => {
@@ -1226,6 +1227,33 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
           </div>
         </div>
 
+        {/* Disclaimer Section */}
+        <div className="bg-[#E6F8F7] border border-[#21C1B6] border-opacity-30 rounded-xl p-5">
+          <div className="mb-4">
+            <p className="text-sm text-gray-800">
+              <span className="font-semibold text-[#1AA89E]">Disclaimer:</span>{" "}
+              <span className="text-gray-700">
+                This information is AI-generated and must be reviewed before case creation.
+              </span>
+            </p>
+          </div>
+          <div className="flex items-center">
+            <input
+              type="checkbox"
+              id="disclaimer-checkbox"
+              checked={disclaimerAccepted}
+              onChange={(e) => setDisclaimerAccepted(e.target.checked)}
+              className="w-5 h-5 text-[#21C1B6] border-gray-300 rounded focus:ring-[#21C1B6] focus:ring-2 cursor-pointer"
+            />
+            <label
+              htmlFor="disclaimer-checkbox"
+              className="ml-3 text-sm font-medium text-gray-800 cursor-pointer"
+            >
+            Read and Confirm
+            </label>
+          </div>
+        </div>
+
         {/* Action Buttons */}
         <div className="flex gap-3 pt-4">
           <button
@@ -1237,7 +1265,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
           </button>
           <button
             onClick={handleCreateCase}
-            disabled={isCreating || isCreated}
+            disabled={isCreating || isCreated || !disclaimerAccepted}
             className="flex-1 px-4 py-3 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA89E] transition-colors flex items-center justify-center text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isCreating ? (

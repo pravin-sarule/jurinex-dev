@@ -11,7 +11,7 @@ import {
   matchCourtLevel
 } from '../../../utils/fieldMatcher.js';
 
-const UploadStep = ({ caseData, setCaseData, onComplete }) => {
+const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange }) => {
   const [selectedFiles, setSelectedFiles] = useState(caseData.uploadedFiles || []);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -32,6 +32,13 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
   useEffect(() => {
     fetchDropdownOptions();
   }, []);
+
+  // Notify parent component when upload status changes
+  useEffect(() => {
+    if (onUploadStatusChange && uploadStatus) {
+      onUploadStatusChange(uploadStatus);
+    }
+  }, [uploadStatus, onUploadStatusChange]);
   
   const fetchDropdownOptions = async () => {
     try {
@@ -133,6 +140,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
       setUploadStatus('uploading');
       setUploadMessage('Uploading files to server...');
       setProcessingProgress(10);
+      console.log('[UploadStep] Initial progress set to 10%');
       
       const uploadResult = await documentApi.uploadDocumentsForProcessing(selectedFiles);
       
@@ -141,6 +149,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
       }
 
       setProcessingProgress(20);
+      console.log('[UploadStep] Upload complete, progress set to 20%');
       const folderName = uploadResult.folderName;
       const uploadedFiles = uploadResult.uploadedFiles || [];
 
@@ -182,13 +191,17 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
           const processingProgressPercent = totalFiles > 0 && filesInFolder.length > 0
             ? Math.round((processedCount / totalFiles) * 70)
             : 0;
-          setProcessingProgress(20 + processingProgressPercent);
+          const newProgress = 20 + processingProgressPercent;
+          
+          // Force state update with explicit value
+          setProcessingProgress(newProgress);
+          console.log(`[UploadStep] Progress update: ${newProgress}% (${processedCount}/${totalFiles} files processed)`);
           
           // Update status message with more detail
           if (processingCount > 0) {
-            setUploadMessage(`Processing documents... ${processedCount}/${totalFiles} completed, ${processingCount} in progress (${Math.round(20 + processingProgressPercent)}%)`);
+            setUploadMessage(`Processing documents... ${processedCount}/${totalFiles} completed, ${processingCount} in progress`);
           } else {
-            setUploadMessage(`Processing documents... ${processedCount}/${totalFiles} completed (${Math.round(20 + processingProgressPercent)}%)`);
+            setUploadMessage(`Processing documents... ${processedCount}/${totalFiles} completed`);
           }
           
           allProcessed = processedCount === totalFiles && processedCount > 0 && totalFiles > 0;
@@ -247,6 +260,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
       }
 
       setProcessingProgress(90);
+      console.log('[UploadStep] Processing complete, progress set to 90%');
       
       // Step 3: Extract fields only after 100% processing (90-100% progress)
       setUploadStatus('extracting');
@@ -259,6 +273,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
       }
       
       setProcessingProgress(100);
+      console.log('[UploadStep] Extraction complete, progress set to 100%');
 
       // Step 4: Auto-fill form with extracted data (only populate, don't create case)
       const extracted = extractResult.extractedData || {};
@@ -549,9 +564,12 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
   };
 
   return (
-    <div>
+    <div className="space-y-6">
       {/* Header */}
-      <h2 className="text-xl font-semibold text-gray-800 mb-6">Upload Documents</h2>
+      <div className="mb-8">
+        <h2 className="text-2xl font-semibold text-gray-900 mb-2">Upload Documents</h2>
+        <p className="text-sm text-gray-600">Upload your case documents to automatically extract and fill case information</p>
+      </div>
 
       {/* Upload Area */}
       <div
@@ -559,10 +577,10 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={handleBrowseClick}
-        className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+        className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-300 ease-in-out ${
           isDragging
-            ? 'border-[#9CDFE1] bg-[#E6F8F7]'
-            : 'border-gray-300 hover:border-[#9CDFE1] hover:bg-gray-50'
+            ? 'border-[#21C1B6] bg-gradient-to-br from-[#E6F8F7] to-[#F0FDFC] shadow-lg scale-[1.01]'
+            : 'border-gray-300 hover:border-[#21C1B6] hover:bg-gradient-to-br hover:from-gray-50 hover:to-[#F9FAFB] hover:shadow-md'
         }`}
         role="button"
         tabIndex={0}
@@ -583,33 +601,39 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
           accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
           aria-label="File Input"
         />
-        {/* Upload Icon in a square box */}
-        <div className="flex justify-center mb-4">
-          <div className="w-16 h-16 border-2 border-gray-700 rounded flex items-center justify-center">
-            <Upload className="h-8 w-8 text-gray-700" />
+        {/* Upload Icon */}
+        <div className="flex justify-center mb-6">
+          <div className={`w-20 h-20 rounded-2xl flex items-center justify-center transition-all duration-300 ${
+            isDragging
+              ? 'bg-[#21C1B6] shadow-lg'
+              : 'bg-gradient-to-br from-[#E6F8F7] to-[#F0FDFC] border-2 border-[#21C1B6] border-opacity-20'
+          }`}>
+            <Upload className={`h-10 w-10 transition-colors duration-300 ${
+              isDragging ? 'text-white' : 'text-[#21C1B6]'
+            }`} />
           </div>
         </div>
-        <p className="text-sm text-gray-700 mb-1">
+        <p className="text-base text-gray-700 mb-2 font-medium">
           Drag and drop files here, or{' '}
-          <span className="text-[#9CDFE1] font-medium cursor-pointer hover:underline">click to browse</span>
+          <span className="text-[#21C1B6] font-semibold cursor-pointer hover:underline transition-all">click to browse</span>
         </p>
-        <p className="text-xs text-gray-500 mt-2">
+        <p className="text-sm text-gray-500 mt-3">
           Supported formats: PDF, DOC, DOCX, TXT, PNG, JPG, JPEG, TIFF
         </p>
         {selectedFiles.length > 0 && (
-          <div className="mt-6 text-left">
-            <p className="text-sm font-medium text-gray-700 mb-3">
-              Selected files ({selectedFiles.length}):
+          <div className="mt-8 text-left">
+            <p className="text-sm font-semibold text-gray-800 mb-4">
+              Selected files ({selectedFiles.length})
             </p>
-            <div className="space-y-2 max-h-48 overflow-y-auto">
+            <div className="space-y-3 max-h-64 overflow-y-auto">
               {selectedFiles.map((file, index) => (
                 <div
                   key={index}
-                  className="flex items-center justify-between bg-gray-50 p-2 rounded border border-gray-200"
+                  className="flex items-center justify-between bg-white p-4 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200"
                 >
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-700 truncate">{file.name}</p>
-                    <p className="text-xs text-gray-500">
+                    <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
+                    <p className="text-xs text-gray-500 mt-1">
                       {(file.size / 1024).toFixed(2)} KB
                     </p>
                   </div>
@@ -619,7 +643,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
                       removeFile(index);
                     }}
                     disabled={isUploading}
-                    className="ml-2 text-red-500 hover:text-red-700 text-sm px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="ml-4 text-red-500 hover:text-red-700 hover:bg-red-50 text-sm px-3 py-1.5 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                     aria-label={`Remove ${file.name}`}
                   >
                     Remove
@@ -633,10 +657,10 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
 
       {/* Upload Button */}
       {selectedFiles.length > 0 && !isUploading && (
-        <div className="mt-6 flex justify-center">
+        <div className="flex justify-center">
           <button
             onClick={handleUploadAndExtract}
-            className="px-6 py-2.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA89E] transition-colors font-medium flex items-center"
+            className="px-12 py-4 bg-[#21C1B6] text-white rounded-xl hover:bg-[#1AA89E] transition-all duration-300 font-semibold flex items-center shadow-md hover:shadow-lg transform hover:scale-105 text-base"
           >
             <Upload className="w-5 h-5 mr-2" />
             Upload & Extract Information
@@ -646,36 +670,54 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
 
       {/* Upload Status with Progress Bar */}
       {isUploading && (
-        <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-          <div className="flex items-center mb-3">
-            <Loader2 className="w-5 h-5 mr-3 text-blue-600 animate-spin" />
+        <div className="mt-6 p-6 bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl shadow-sm">
+          <div className="flex items-center mb-4">
+            <Loader2 className="w-6 h-6 mr-4 text-[#21C1B6] animate-spin" />
             <div className="flex-1">
-              <p className="text-sm font-medium text-blue-900">{uploadMessage}</p>
-              <p className="text-xs text-blue-700 mt-1">
+              <p className="text-sm font-semibold text-gray-900">{uploadMessage}</p>
+              <p className="text-xs text-gray-600 mt-1.5">
                 {uploadStatus === 'uploading' && 'Please wait while files are being uploaded...'}
                 {uploadStatus === 'processing' && 'Documents are being processed. This may take a few minutes...'}
                 {uploadStatus === 'extracting' && 'Extracting case information from processed documents...'}
               </p>
             </div>
-            <span className="text-sm font-semibold text-blue-900">{processingProgress}%</span>
+            <span className="text-lg font-bold text-[#21C1B6] ml-4 min-w-[60px] text-right">
+              {Math.round(processingProgress)}%
+            </span>
           </div>
-          {/* Progress Bar */}
-          <div className="w-full bg-blue-200 rounded-full h-2.5">
+          {/* Progress Bar with Percentage */}
+          <div className="relative w-full bg-blue-200 rounded-full h-5 overflow-hidden shadow-inner">
             <div
-              className="bg-[#21C1B6] h-2.5 rounded-full transition-all duration-300"
-              style={{ width: `${processingProgress}%` }}
-            ></div>
+              className="bg-gradient-to-r from-[#21C1B6] to-[#1AA89E] h-5 rounded-full transition-all duration-500 ease-out shadow-sm relative flex items-center justify-center"
+              style={{ 
+                width: `${Math.max(0, Math.min(100, Math.round(processingProgress)))}%`,
+                minWidth: processingProgress > 0 ? '2%' : '0%'
+              }}
+            >
+              {/* Percentage text inside progress bar - always show when there's progress */}
+              {Math.round(processingProgress) > 8 && (
+                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow-sm">
+                  {Math.round(processingProgress)}%
+                </span>
+              )}
+            </div>
+            {/* Percentage text outside progress bar (when percentage is low) */}
+            {Math.round(processingProgress) <= 8 && Math.round(processingProgress) > 0 && (
+              <span className="absolute inset-0 flex items-center justify-start pl-3 text-xs font-bold text-[#21C1B6]">
+                {Math.round(processingProgress)}%
+              </span>
+            )}
           </div>
         </div>
       )}
 
       {uploadStatus === 'success' && (
-        <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+        <div className="mt-6 p-6 bg-gradient-to-br from-green-50 to-emerald-50 border border-green-200 rounded-2xl shadow-sm">
           <div className="flex items-start">
-            <CheckCircle className="w-5 h-5 mr-3 text-green-600 mt-0.5" />
+            <CheckCircle className="w-6 h-6 mr-4 text-green-600 mt-0.5 flex-shrink-0" />
             <div>
-              <p className="text-sm font-medium text-green-900">{uploadMessage}</p>
-              <p className="text-xs text-green-700 mt-1">
+              <p className="text-sm font-semibold text-green-900">{uploadMessage}</p>
+              <p className="text-xs text-green-700 mt-2">
                 Please review and edit the auto-filled fields in the following steps to ensure accuracy.
               </p>
             </div>
@@ -684,25 +726,18 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
       )}
 
       {uploadStatus === 'error' && (
-        <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+        <div className="mt-6 p-6 bg-gradient-to-br from-red-50 to-rose-50 border border-red-200 rounded-2xl shadow-sm">
           <div className="flex items-center">
-            <AlertCircle className="w-5 h-5 mr-3 text-red-600" />
-            <p className="text-sm font-medium text-red-900">{uploadMessage}</p>
+            <AlertCircle className="w-6 h-6 mr-4 text-red-600 flex-shrink-0" />
+            <p className="text-sm font-semibold text-red-900">{uploadMessage}</p>
           </div>
         </div>
       )}
 
       {/* Info Note */}
-      <div className="mt-4">
-        <p className="text-sm text-gray-600 italic">
-          <span className="font-medium">Note:</span> Upload the document here to automatically populate all form fields. If you prefer to enter the details manually, you may skip this step.
-        </p>
-      </div>
-
-      {/* Footer note */}
-      <div className="mt-6">
+      <div className="mt-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
         <p className="text-sm text-gray-700">
-          All fields marked with * are required
+          <span className="font-semibold text-gray-900">Note:</span> Upload your case documents to automatically populate all form fields. You can review and edit the extracted information in the subsequent steps.
         </p>
       </div>
     </div>
@@ -710,4 +745,3 @@ const UploadStep = ({ caseData, setCaseData, onComplete }) => {
 };
 
 export default UploadStep;
-

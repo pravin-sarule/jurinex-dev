@@ -55,3 +55,4 @@ const InitialChoiceStep = ({ onSelectAutoFill, onSelectManual }) => {
 };
 
 export default InitialChoiceStep;
+
