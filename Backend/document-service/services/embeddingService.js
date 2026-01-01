@@ -7,8 +7,13 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const MAX_CHARS = Number(process.env.GEMINI_EMBEDDING_MAX_CHARS || 8000);
 const BATCH_SIZE = Number(process.env.GEMINI_EMBEDDING_BATCH_SIZE || 100); // Gemini supports up to 100 per batch
-const PRIMARY_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-1.5-flash-002';
-const FALLBACK_MODELS = (process.env.GEMINI_EMBEDDING_FALLBACKS || 'embedding-001,text-embedding-004').split(',').map((m) => m.trim()).filter(Boolean);
+// Use text-embedding-004 as primary (dedicated embedding model that supports batchEmbedContents)
+// Note: gemini-1.5-flash-002 and gemini-2.0-flash-exp do NOT support embeddings
+const PRIMARY_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'text-embedding-004';
+const FALLBACK_MODELS = (process.env.GEMINI_EMBEDDING_FALLBACKS || 'embedding-001').split(',').map((m) => m.trim()).filter(Boolean);
+
+console.log(`[EmbeddingService] Initialized with PRIMARY_MODEL: ${PRIMARY_MODEL}`);
+console.log(`[EmbeddingService] FALLBACK_MODELS: ${FALLBACK_MODELS.join(', ')}`);
 const MAX_RETRIES = 3; // Maximum retries for rate limit errors
 const RETRY_DELAY_BASE = 1000; // Base delay in milliseconds for exponential backoff
 
@@ -22,6 +27,9 @@ function computeContentHash(text) {
 }
 
 async function embedBatchWithModel(modelName, texts, retryCount = 0) {
+  console.log(`[EmbeddingService] Using model: ${modelName} for ${texts.length} texts`);
+  
+  // For embedding models, use getGenerativeModel (works for text-embedding-004)
   const model = genAI.getGenerativeModel({ model: modelName });
   const requests = texts.map((text) => ({
     content: { parts: [{ text: cleanText(text) }] },
@@ -33,8 +41,10 @@ async function embedBatchWithModel(modelName, texts, retryCount = 0) {
       return await model.batchEmbedContents({ requests });
     });
     
+    console.log(`[EmbeddingService] ✅ Successfully embedded ${texts.length} texts using ${modelName}`);
     return response.embeddings.map((item) => item.values);
   } catch (error) {
+    console.error(`[EmbeddingService] ❌ Error with model ${modelName}:`, error.message);
     const errorMessage = error?.message || String(error);
     const isRateLimitError = errorMessage.includes('429') || 
                              errorMessage.includes('Too Many Requests') ||
@@ -67,9 +77,11 @@ async function embedBatchWithModel(modelName, texts, retryCount = 0) {
 }
 
 async function tryModelsSequentially(texts, models) {
+  console.log(`[EmbeddingService] Trying models sequentially:`, models);
   const errors = [];
   for (const modelName of models) {
     try {
+      console.log(`[EmbeddingService] Attempting model: ${modelName}`);
       const embeddings = await embedBatchWithModel(modelName, texts);
       return { embeddings, model: modelName };
     } catch (error) {

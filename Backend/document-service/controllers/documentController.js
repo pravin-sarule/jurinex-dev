@@ -49,6 +49,16 @@ const {
 const { processSecretPromptWithTemplates } = require("../services/secretTemplateExtractionService"); // NEW: Import secret template extraction service
 
 const { v4: uuidv4 } = require("uuid");
+const { 
+  extractUrlsFromQuery, 
+  isPdfUrl, 
+  isWebPageUrl,
+  fetchWebPageContent,
+  processWebPageFromUrl,
+  streamWebPageFromUrl,
+  processPdfFromUrl,
+  streamPdfFromUrl
+} = require("../services/webSearchService");
 
 const CONVERSATION_HISTORY_TURNS = 5;
 
@@ -3395,6 +3405,279 @@ exports.chatWithDocument = async (req, res) => {
       }
 
       storedQuestion = question.trim();
+      
+      // ==================================================================================
+      // WEB SEARCH / URL PROCESSING (Check if query contains URLs or needs web search)
+      // ==================================================================================
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`🌐 [chatWithDocument] Checking for web search/URL in query`);
+      console.log(`${'='.repeat(80)}`);
+      
+      const urlsInQuery = extractUrlsFromQuery(storedQuestion);
+      const hasPdfUrl = urlsInQuery.some(url => isPdfUrl(url));
+      const hasWebPageUrl = urlsInQuery.some(url => isWebPageUrl(url));
+      const queryLower = storedQuestion.toLowerCase();
+      const searchKeywords = ['find', 'search', 'locate', 'get', 'fetch', 'retrieve', 'report', 'document', 'pdf', 'whitepaper', 'paper', 'study', 'analysis', 'research', 'publication', 'website', 'webpage', 'article', 'blog'];
+      const needsWebSearch = searchKeywords.some(keyword => queryLower.includes(keyword));
+      
+      console.log(`   URLs found: ${urlsInQuery.length}`);
+      console.log(`   Has PDF URL: ${hasPdfUrl}`);
+      console.log(`   Has Web Page URL: ${hasWebPageUrl}`);
+      console.log(`   Needs Web Search: ${needsWebSearch}`);
+      
+      if (hasPdfUrl || hasWebPageUrl || needsWebSearch) {
+        console.log(`\n🌐 [chatWithDocument] Web search/URL processing detected`);
+        
+        try {
+          let webSearchContent = '';
+          let webSearchCitations = [];
+          
+          if (hasPdfUrl) {
+            const urlToProcess = urlsInQuery.find(url => isPdfUrl(url));
+            console.log(`📄 [chatWithDocument] Processing PDF from URL: ${urlToProcess}`);
+            console.log(`   Question: "${storedQuestion}"`);
+            
+            try {
+              const pdfResult = await processPdfFromUrl(urlToProcess, storedQuestion);
+              console.log(`   PDF processing result:`, {
+                success: pdfResult.success,
+                contentLength: pdfResult.content?.length || 0,
+                error: pdfResult.error
+              });
+              
+              if (pdfResult.success && pdfResult.content) {
+                webSearchContent = pdfResult.content;
+                webSearchCitations = [pdfResult.citation];
+                console.log(`✅ [chatWithDocument] PDF processed successfully: ${webSearchContent.length} chars`);
+              } else {
+                const errorMsg = pdfResult.error || 'Failed to process PDF - no content returned';
+                console.error(`❌ [chatWithDocument] PDF processing failed: ${errorMsg}`);
+                throw new Error(`Unable to access PDF content from URL: ${errorMsg}`);
+              }
+            } catch (pdfError) {
+              console.error(`❌ [chatWithDocument] PDF processing exception:`, pdfError);
+              console.error(`   Error stack:`, pdfError.stack);
+              throw new Error(`Failed to process PDF from URL (${urlToProcess}): ${pdfError.message}`);
+            }
+          } else if (hasWebPageUrl) {
+            const urlToProcess = urlsInQuery.find(url => isWebPageUrl(url));
+            console.log(`🌐 [chatWithDocument] Processing web page from URL: ${urlToProcess}`);
+            console.log(`   Question: "${storedQuestion}"`);
+            
+            try {
+              const webResult = await processWebPageFromUrl(urlToProcess, storedQuestion);
+              console.log(`   Web page processing result:`, {
+                success: webResult.success,
+                contentLength: webResult.content?.length || 0,
+                error: webResult.error
+              });
+              
+              if (webResult.success && webResult.content) {
+                webSearchContent = webResult.content;
+                webSearchCitations = [webResult.citation];
+                console.log(`✅ [chatWithDocument] Web page processed successfully: ${webSearchContent.length} chars`);
+              } else {
+                const errorMsg = webResult.error || 'Failed to process web page - no content returned';
+                console.error(`❌ [chatWithDocument] Web page processing failed: ${errorMsg}`);
+                throw new Error(`Unable to access web page content from URL: ${errorMsg}`);
+              }
+            } catch (webError) {
+              console.error(`❌ [chatWithDocument] Web page processing exception:`, webError);
+              console.error(`   Error stack:`, webError.stack);
+              throw new Error(`Failed to process web page from URL (${urlToProcess}): ${webError.message}`);
+            }
+          } else if (needsWebSearch) {
+            console.log(`🔍 [chatWithDocument] Performing web search for: "${storedQuestion}"`);
+            
+            try {
+              // Use Gemini's Google Search tool
+              const { searchForPdfs, analyzeAndProcessPdfQuery } = require('../services/webSearchService');
+              
+              // Try PDF search first
+              let searchResult = await analyzeAndProcessPdfQuery(storedQuestion, storedQuestion);
+              console.log(`   Search result:`, {
+                success: searchResult.success,
+                hasContent: !!searchResult.processedContent,
+                contentLength: searchResult.processedContent?.length || 0,
+                citationsCount: searchResult.citations?.length || 0,
+                error: searchResult.error
+              });
+              
+              if (searchResult.success && searchResult.processedContent) {
+                webSearchContent = searchResult.processedContent;
+                webSearchCitations = searchResult.citations || [];
+                console.log(`✅ [chatWithDocument] PDF search successful: ${webSearchContent.length} chars`);
+              } else {
+                const errorMsg = searchResult.error || 'No PDFs found or processing failed';
+                console.warn(`⚠️ [chatWithDocument] Web search failed: ${errorMsg}`);
+                // Continue with document-only processing if search fails
+              }
+            } catch (searchError) {
+              console.error(`❌ [chatWithDocument] Web search exception:`, searchError);
+              console.error(`   Error stack:`, searchError.stack);
+              // Continue with document-only processing if search throws
+            }
+          }
+          
+          // If we have web search content, incorporate it into the prompt
+          if (webSearchContent && webSearchContent.trim().length > 0) {
+            console.log(`📝 [chatWithDocument] Incorporating web content into document context`);
+            
+            // Get document chunks as usual
+            const queryAnalysis = analyzeQueryIntent(storedQuestion);
+            const useFullDocument = queryAnalysis.needsFullDocument;
+            
+            let rankedChunks;
+            if (useFullDocument) {
+              const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+              rankedChunks = allChunks
+                .sort((a, b) => {
+                  if ((a.page_start || 0) !== (b.page_start || 0)) {
+                    return (a.page_start || 0) - (b.page_start || 0);
+                  }
+                  return (a.chunk_index || 0) - (b.chunk_index || 0);
+                })
+                .map(chunk => ({ ...chunk, similarity: 1.0, chunk_id: chunk.id }));
+            } else {
+              const questionEmbedding = await generateEmbedding(storedQuestion);
+              rankedChunks = await ChunkVectorModel.findNearestChunks(
+                questionEmbedding,
+                10,
+                file_id
+              );
+            }
+            
+            if (!rankedChunks || rankedChunks.length === 0) {
+              const allChunks = await FileChunkModel.getChunksByFileId(file_id);
+              rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id }));
+            }
+            
+            usedChunkIds = rankedChunks.map(c => c.chunk_id || c.id);
+            
+            const documentContext = rankedChunks
+              .map((c, idx) => {
+                let header = `\n${'='.repeat(80)}\nSECTION ${idx + 1}`;
+                if (c.page_start) header += ` | Page ${c.page_start}`;
+                header += `\n${'='.repeat(80)}\n\n`;
+                return header + (c.content || '');
+              })
+              .join('\n\n');
+            
+            // Combine document context with web search content
+            let finalPrompt = `${storedQuestion}\n\n=== DOCUMENT ===\n${documentContext}\n\n=== ADDITIONAL WEB CONTEXT ===\n${webSearchContent}`;
+            finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
+            
+            try {
+              const profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
+              if (profileContext) {
+                finalPrompt = `${profileContext}\n\n---\n\n${finalPrompt}`;
+              }
+            } catch (profileError) {
+              console.warn(`⚠️ Failed to fetch profile context:`, profileError.message);
+            }
+            
+            answer = await askLLM(provider, finalPrompt, '', '', storedQuestion, {
+              userId: userId,
+              endpoint: '/api/doc/chat',
+              fileId: file_id,
+              sessionId: finalSessionId
+            });
+            answer = ensurePlainTextAnswer(answer);
+            
+            // Add web citations to the response
+            if (webSearchCitations.length > 0) {
+              // Store citations in chat metadata if needed
+              console.log(`📚 [chatWithDocument] Web citations: ${webSearchCitations.length}`);
+            }
+            
+            console.log(`✅ [chatWithDocument] Response generated with web content`);
+            console.log(`${'='.repeat(80)}\n`);
+            
+            // Skip the regular document processing below
+            if (!answer?.trim()) {
+              return res.status(500).json({ error: 'Empty response from AI.' });
+            }
+            
+            const savedChat = await FileChat.saveChat(
+              file_id,
+              userId,
+              storedQuestion,
+              answer,
+              finalSessionId,
+              usedChunkIds,
+              used_secret_prompt,
+              finalPromptLabel,
+              used_secret_prompt ? secret_id : null,
+              historyForStorage
+            );
+            
+            console.log(`✅ Chat saved: ID=${savedChat.id}, chunks=${usedChunkIds.length}`);
+            
+            try {
+              const { userUsage, userPlan, requestedResources } = req;
+              await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
+            } catch (e) {
+              console.warn('Token usage increment failed:', e.message);
+            }
+            
+            const historyRows = await FileChat.getChatHistory(file_id, savedChat.session_id);
+            const history = historyRows.map((row) => ({
+              id: row.id,
+              file_id: row.file_id,
+              session_id: row.session_id,
+              question: row.question,
+              answer: row.answer,
+              used_secret_prompt: row.used_secret_prompt || false,
+              prompt_label: row.prompt_label || null,
+              secret_id: row.secret_id || null,
+              used_chunk_ids: row.used_chunk_ids || [],
+              confidence: row.confidence || 0.8,
+              timestamp: row.created_at || row.timestamp,
+              chat_history: row.chat_history || [],
+              display_text_left_panel: row.used_secret_prompt
+                ? `Analysis: ${row.prompt_label || 'Secret Prompt'}`
+                : row.question,
+            }));
+            
+            return res.status(200).json({
+              success: true,
+              session_id: savedChat.session_id,
+              message_id: savedChat.id,
+              answer,
+              response: answer,
+              history,
+              used_chunk_ids: usedChunkIds,
+              chunks_used: usedChunkIds.length,
+              confidence: 0.85,
+              timestamp: savedChat.created_at || new Date().toISOString(),
+              llm_provider: provider,
+              used_secret_prompt,
+              mode: 'post_document_with_web',
+              web_citations: webSearchCitations
+            });
+          }
+        } catch (webSearchError) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`❌ [chatWithDocument] Web search/URL processing error`);
+          console.error(`${'='.repeat(80)}`);
+          console.error(`   Error: ${webSearchError.message}`);
+          console.error(`   Stack: ${webSearchError.stack}`);
+          console.error(`${'='.repeat(80)}\n`);
+          
+          // If a URL was provided, we should fail rather than silently fall back
+          if (hasPdfUrl || hasWebPageUrl) {
+            return res.status(500).json({
+              error: 'Failed to process URL content',
+              details: webSearchError.message,
+              url: urlsInQuery[0],
+              suggestion: 'Please ensure the URL is publicly accessible and try again.'
+            });
+          }
+          
+          // For search queries, continue with document-only processing
+          console.warn(`⚠️ [chatWithDocument] Continuing with document-only processing...`);
+        }
+      }
 
       // Get LLM from custom_query table
       let dbLlmName = null;

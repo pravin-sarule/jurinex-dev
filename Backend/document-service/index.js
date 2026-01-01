@@ -10,6 +10,7 @@ const secretManagerRoutes = require('./routes/secretManagerRoutes');
 const fileRoutes = require('./routes/fileRoutes');
 const contentRoutes = require('./routes/contentRoutes');
 const mindmapRoutes = require('./routes/mindmapRoutes');
+const multimodalRagRoutes = require('./routes/multimodalRagRoutes');
 
 const { warmQueue } = require('./queues/embeddingQueue');
 const { startEmbeddingWorker } = require('./workers/embeddingWorker');
@@ -55,6 +56,7 @@ app.use('/api/doc', secretManagerRoutes);
 app.use('/api/files', fileRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/mindmap', mindmapRoutes);
+app.use('/api/multimodal-rag', multimodalRagRoutes);
 
 app.get('/api/test-route', (req, res) => {
     res.send('✅ Test route is working!');

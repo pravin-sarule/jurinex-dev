@@ -15,6 +15,12 @@ const {
   fetchTemplateFilesData, 
   buildEnhancedSystemPromptWithTemplates
 } = require('../services/secretPromptTemplateService'); // NEW: Import template service
+const {
+  analyzeAndProcessPdfQuery,
+  streamAnalyzeAndProcessPdfQuery,
+  extractUrlsFromQuery,
+  isPdfUrl
+} = require('../services/webSearchService'); // NEW: Import web search service
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1858,6 +1864,14 @@ exports.intelligentFolderChatStream = async (req, res) => {
       secret_id = null,
     } = req.body;
 
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🚀 [STREAMING] Intelligent Folder Chat Controller Called`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`   Folder: ${folderName}`);
+    console.log(`   Question: "${question || ''}"`);
+    console.log(`   User ID: ${userId}`);
+    console.log(`${'='.repeat(80)}\n`);
+
     sendStatus('initializing', 'Starting intelligent folder chat...');
 
     if (!folderName) {
@@ -1875,6 +1889,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     console.log(`📁 [Streaming] Folder: ${folderName} | Question: "${actualQuestion.substring(0, 100)}..."`);
     console.log(`🔐 [Streaming] Secret ID: ${secret_id || 'none'}`);
+    console.log(`📝 [Streaming] Full Question: "${actualQuestion}"`);
 
     const hasExistingSession = session_id && UUID_REGEX.test(session_id);
     const finalSessionId = hasExistingSession ? session_id : uuidv4();
@@ -2238,6 +2253,402 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     sendStatus('routing', `Using ${routingDecision.method.toUpperCase()} method: ${routingDecision.reason}`);
 
+    // Check for web search / URL processing
+    // Declare at function scope so it's available throughout
+    let webSearchResult = null;
+    let webSearchCitations = [];
+    let webSearchContent = ''; // Initialize at function scope
+    let webSearchStreamCitations = []; // Initialize at function scope
+    
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🔍 [URL DETECTION] Starting URL detection`);
+    console.log(`   Query: "${actualQuestion}"`);
+    console.log(`${'='.repeat(80)}`);
+    
+    const urlsInQuery = extractUrlsFromQuery(actualQuestion);
+    console.log(`[URL DETECTION] Extracted URLs:`, urlsInQuery);
+    
+    // Check for any URL (PDF or web page)
+    const { isPdfUrl, isWebPageUrl } = require('../services/webSearchService');
+    
+    let hasUrl = urlsInQuery.length > 0 && urlsInQuery.some(url => {
+      const isPdf = isPdfUrl(url);
+      const isWeb = isWebPageUrl(url);
+      const lowerUrl = url.toLowerCase();
+      const isGoogleDrive = lowerUrl.includes('googleusercontent.com') || 
+                            lowerUrl.includes('drive.google.com') ||
+                            lowerUrl.includes('viewer') ||
+                            lowerUrl.includes('/pdf/');
+      
+      console.log(`[URL DETECTION] Checking URL: ${url}`);
+      console.log(`   - Is PDF: ${isPdf}`);
+      console.log(`   - Is Web Page: ${isWeb}`);
+      console.log(`   - Is Google Drive: ${isGoogleDrive}`);
+      
+      return isPdf || isWeb || isGoogleDrive;
+    });
+    
+      const queryLower = actualQuestion.toLowerCase();
+      // ONLY trigger web search when user EXPLICITLY requests it
+      const explicitWebSearchKeywords = [
+        'search from the web', 'search on web', 'search on the web', 'search online',
+        'search the internet', 'search the web', 'search web', 'find on web',
+        'find on the web', 'find online', 'look up online', 'look up on web',
+        'google search', 'web search', 'internet search', 'use web search',
+        'check online', 'check the web', 'get from web', 'get from internet',
+        'from web', 'from the web', 'from internet', 'answer from web',
+        'answer from the web', 'tell me from web', 'web se', 'web pe',
+        'online search', 'internet se', 'web par search', 'web se dekh',
+        'web pe dekh', 'web se batao', 'web pe batao'
+      ];
+      const needsWebSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
+
+    console.log(`[URL DETECTION] Results:`);
+    console.log(`   - URLs found: ${urlsInQuery.length}`);
+    console.log(`   - Has URL: ${hasUrl}`);
+    console.log(`   - Needs Search: ${needsWebSearch}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (hasUrl || needsWebSearch) {
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`🌐 [WEB SEARCH] URL/Web Processing Detected`);
+      console.log(`${'='.repeat(80)}`);
+      console.log(`   Has URL: ${hasUrl}`);
+      console.log(`   Needs Search: ${needsWebSearch}`);
+      console.log(`   URLs in query: ${urlsInQuery.join(', ')}`);
+      console.log(`   Query: "${actualQuestion.substring(0, 100)}${actualQuestion.length > 100 ? '...' : ''}"`);
+      console.log(`${'='.repeat(80)}\n`);
+
+      sendStatus('searching', hasUrl ? 'Processing content from URL...' : 'Searching for relevant documents...');
+
+      try {
+        // Use streaming version for real-time response
+        // webSearchContent and webSearchStreamCitations already declared at function scope
+
+        if (hasUrl) {
+          const url = urlsInQuery.find(url => {
+            if (isPdfUrl(url)) return true;
+            if (isWebPageUrl(url)) return true;
+            const lowerUrl = url.toLowerCase();
+            return lowerUrl.includes('googleusercontent.com') || 
+                   lowerUrl.includes('drive.google.com') ||
+                   lowerUrl.includes('viewer') ||
+                   lowerUrl.includes('/pdf/');
+          });
+          
+          const isPdf = isPdfUrl(url) || 
+                        url.toLowerCase().includes('googleusercontent.com') || 
+                        url.toLowerCase().includes('drive.google.com') ||
+                        url.toLowerCase().includes('viewer') ||
+                        url.toLowerCase().includes('/pdf/');
+          const isWeb = isWebPageUrl(url);
+          
+          if (isPdf) {
+            console.log(`📄 [WEB SEARCH] Processing PDF/Document directly from URL: ${url}`);
+            console.log(`📄 [WEB SEARCH] URL type: ${url?.includes('google') ? 'Google Drive/Viewer' : 'Direct PDF'}`);
+            
+            const { streamPdfFromUrl } = require('../services/webSearchService');
+            try {
+              for await (const chunk of streamPdfFromUrl(url, actualQuestion)) {
+                webSearchContent += chunk;
+                writeChunk(chunk);
+              }
+              
+              webSearchStreamCitations = [{
+                title: 'PDF Document',
+                url: url, // CRITICAL: Full URL must be included
+                link: url, // Also include as 'link' for compatibility
+                snippet: '',
+                text: '',
+                content: '',
+                source: 'web_pdf',
+                sourceType: 'web_pdf',
+                type: 'pdf',
+                isWebSource: true,
+                domain: url ? (() => {
+                  try {
+                    return new URL(url).hostname;
+                  } catch (e) {
+                    return '';
+                  }
+                })() : ''
+              }];
+            } catch (streamError) {
+              console.error(`❌ [WEB SEARCH] Error streaming PDF:`, streamError.message);
+              console.error(`❌ [WEB SEARCH] Error stack:`, streamError.stack);
+              sendStatus('error', `Failed to process PDF from URL. The URL may require authentication or may not be accessible. Error: ${streamError.message}`);
+              
+              if (url && url.includes('google')) {
+                sendStatus('info', 'Note: Google Drive links may require the file to be publicly accessible. Try sharing the file with "Anyone with the link" permission.');
+              }
+              
+              webSearchContent = '';
+              webSearchResult = null;
+            }
+          } else if (isWeb) {
+            console.log(`🌐 [WEB SEARCH] Processing web page from URL: ${url}`);
+            console.log(`🌐 [WEB SEARCH] Question: "${actualQuestion}"`);
+            
+            const { streamWebPageFromUrl } = require('../services/webSearchService');
+            try {
+              console.log(`🌐 [WEB SEARCH] Starting to stream web page content...`);
+              let chunkCount = 0;
+              for await (const chunk of streamWebPageFromUrl(url, actualQuestion)) {
+                chunkCount++;
+                webSearchContent += chunk;
+                writeChunk(chunk);
+                if (chunkCount % 10 === 0) {
+                  console.log(`🌐 [WEB SEARCH] Streamed ${chunkCount} chunks, ${webSearchContent.length} total chars`);
+                }
+              }
+              console.log(`🌐 [WEB SEARCH] ✅ Completed streaming: ${chunkCount} chunks, ${webSearchContent.length} total chars`);
+              
+              webSearchStreamCitations = [{
+                title: 'Web Page',
+                url: url, // CRITICAL: Full URL must be included
+                link: url, // Also include as 'link' for compatibility
+                snippet: '',
+                text: '',
+                content: '',
+                source: 'web_page',
+                sourceType: 'web_page',
+                type: 'web',
+                isWebSource: true,
+                domain: url ? (() => {
+                  try {
+                    return new URL(url).hostname;
+                  } catch (e) {
+                    return '';
+                  }
+                })() : ''
+              }];
+            } catch (streamError) {
+              console.error(`❌ [WEB SEARCH] Error streaming web page:`, streamError.message);
+              console.error(`❌ [WEB SEARCH] Error stack:`, streamError.stack);
+              sendStatus('error', `Failed to process web page from URL. Error: ${streamError.message}`);
+              webSearchContent = '';
+              webSearchResult = null;
+            }
+          } else {
+            console.warn(`⚠️ [WEB SEARCH] URL detected but neither PDF nor Web page: ${url}`);
+            console.warn(`   - Is PDF check: ${isPdfUrl(url)}`);
+            console.warn(`   - Is Web Page check: ${isWebPageUrl(url)}`);
+          }
+        } else {
+          // Check if user EXPLICITLY requested web search
+          const explicitWebSearchKeywords = [
+            'search from the web', 'search on web', 'search on the web', 'search online',
+            'search the internet', 'search the web', 'search web', 'find on web',
+            'find on the web', 'find online', 'look up online', 'look up on web',
+            'google search', 'web search', 'internet search', 'use web search',
+            'check online', 'check the web', 'get from web', 'get from internet',
+            'from web', 'from the web', 'from internet', 'answer from web',
+            'answer from the web', 'tell me from web', 'web se', 'web pe',
+            'online search', 'internet se', 'web par search', 'web se dekh',
+            'web pe dekh', 'web se batao', 'web pe batao'
+          ];
+          
+          const queryLower = actualQuestion.toLowerCase();
+          const explicitlyRequestedWebSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
+          
+          if (!explicitlyRequestedWebSearch) {
+            console.log(`⚠️ [WEB SEARCH] User did not explicitly request web search - skipping`);
+            console.log(`   Query: "${actualQuestion}"`);
+            console.log(`   Web search will only be used when user explicitly requests it`);
+            // Don't perform web search - use only RAG documents
+            webSearchContent = '';
+            webSearchStreamCitations = [];
+          } else {
+            // Search and process using Gemini's Google Search tool
+            console.log(`🔍 [WEB SEARCH] User explicitly requested web search`);
+            console.log(`   Query: "${actualQuestion}"`);
+            
+            const { searchForPdfs, processPdfFromUrl, processWebPageFromUrl, isPdfUrl, isWebPageUrl } = require('../services/webSearchService');
+            
+            // Use Gemini's Google Search to find relevant URLs (PDFs and web pages)
+            const searchResults = await searchForPdfs(actualQuestion, 5); // Get top 5 results
+            
+            if (searchResults.success && searchResults.results && searchResults.results.length > 0) {
+              console.log(`✅ [WEB SEARCH] Found ${searchResults.results.length} results from Google Search`);
+              
+              // Separate PDFs from HTML pages
+              const pdfResults = searchResults.results.filter(result => isPdfUrl(result.link));
+              const htmlResults = searchResults.results.filter(result => isWebPageUrl(result.link) && !isPdfUrl(result.link));
+              
+              console.log(`📄 [WEB SEARCH] Found ${pdfResults.length} PDF(s) and ${htmlResults.length} HTML page(s)`);
+              
+              // Initialize variables for processing
+              const processedContents = [];
+              const allWebCitations = [];
+              
+              // If PDFs are found, process them via URL streaming flow (same as direct URL processing)
+              if (pdfResults.length > 0) {
+                console.log(`📄 [WEB SEARCH] Found ${pdfResults.length} PDF(s) - processing via URL streaming flow`);
+                const { streamPdfFromUrl } = require('../services/webSearchService');
+                
+                // Process the first PDF (or all PDFs if multiple)
+                for (let pdfIdx = 0; pdfIdx < Math.min(pdfResults.length, 2); pdfIdx++) {
+                  const pdfResult = pdfResults[pdfIdx];
+                  const pdfUrl = pdfResult.link;
+                  
+                  try {
+                    console.log(`📄 [WEB SEARCH] Processing PDF ${pdfIdx + 1}/${Math.min(pdfResults.length, 2)}: ${pdfUrl}`);
+                    
+                    for await (const chunk of streamPdfFromUrl(pdfUrl, actualQuestion)) {
+                      webSearchContent += chunk;
+                      writeChunk(chunk);
+                    }
+                    
+                    // Add PDF citation with full URL information
+                    allWebCitations.push({
+                      title: pdfResult.title || 'PDF Document',
+                      url: pdfUrl, // CRITICAL: Full URL must be included
+                      link: pdfUrl, // Also include as 'link' for compatibility
+                      snippet: pdfResult.snippet || '',
+                      text: '', // PDF content is streamed, not stored here
+                      content: '', // PDF content is streamed, not stored here
+                      source: 'web_search',
+                      sourceType: 'web_search',
+                      type: 'pdf',
+                      isWebSource: true,
+                      domain: pdfUrl ? (() => {
+                        try {
+                          return new URL(pdfUrl).hostname;
+                        } catch (e) {
+                          return '';
+                        }
+                      })() : '',
+                      note: 'Processed via URL streaming'
+                    });
+                    
+                    console.log(`✅ [WEB SEARCH] Processed PDF ${pdfIdx + 1} via URL streaming`);
+                  } catch (streamError) {
+                    console.error(`❌ [WEB SEARCH] Error streaming PDF ${pdfUrl}:`, streamError.message);
+                    // Add citation even if processing failed
+                    allWebCitations.push({
+                      title: pdfResult.title || 'PDF Document',
+                      url: pdfUrl,
+                      snippet: pdfResult.snippet || '',
+                      source: 'web_search',
+                      type: 'pdf',
+                      isWebSource: true,
+                      note: 'Processing failed'
+                    });
+                  }
+                }
+              }
+              
+              // Process HTML pages directly (only HTML pages, not PDFs)
+              
+              // Process top 3 HTML results (if any)
+              const htmlResultsToProcess = htmlResults.slice(0, 3);
+              
+              if (htmlResultsToProcess.length > 0) {
+                console.log(`🌐 [WEB SEARCH] Processing ${htmlResultsToProcess.length} HTML page(s) directly`);
+                
+                for (let i = 0; i < htmlResultsToProcess.length; i++) {
+                  const result = htmlResultsToProcess[i];
+                  const url = result.link;
+                  
+                  try {
+                    console.log(`🌐 [WEB SEARCH] Processing HTML page ${i + 1}/${htmlResultsToProcess.length}: ${url}`);
+                    
+                    const webResult = await processWebPageFromUrl(url, actualQuestion);
+                    if (webResult.success && webResult.content) {
+                      processedContents.push({
+                        source: 'web_page',
+                        url: url,
+                        title: webResult.citation?.title || result.title || 'Web Page',
+                        content: webResult.content,
+                        snippet: result.snippet || webResult.citation?.snippet
+                      });
+                      // Use citation from webResult if available, otherwise create one
+                      allWebCitations.push({
+                        title: webResult.citation?.title || result.title || 'Web Page',
+                        url: url,
+                        snippet: result.snippet || webResult.citation?.snippet || webResult.content?.substring(0, 300) || '',
+                        text: webResult.content?.substring(0, 500) || result.snippet || '', // Include content preview
+                        content: webResult.content?.substring(0, 1000) || '', // Full content preview for display
+                        source: webResult.citation?.source || 'web_search',
+                        type: 'web',
+                        isWebSource: true,
+                        domain: webResult.citation?.domain || (url ? new URL(url).hostname : ''),
+                        sourceType: webResult.citation?.source || 'web_search',
+                        ...webResult.citation // Spread to include all citation fields
+                      });
+                      console.log(`✅ [WEB SEARCH] Processed HTML page ${i + 1}: ${webResult.content.length} chars`);
+                    }
+                  } catch (error) {
+                    console.warn(`⚠️ [WEB SEARCH] Failed to process HTML page ${url}:`, error.message);
+                    // Add citation even if processing failed
+                    allWebCitations.push({
+                      title: result.title || 'Web Resource',
+                      url: url,
+                      snippet: result.snippet,
+                      source: 'web_search',
+                      type: 'web',
+                      isWebSource: true,
+                      note: 'Content processing failed'
+                    });
+                  }
+                }
+              }
+              
+              // Combine all processed content (PDFs are already streamed to webSearchContent, HTML needs to be added)
+              if (processedContents.length > 0) {
+                // Add HTML content to existing webSearchContent (which may already contain PDF content)
+                const htmlContent = processedContents
+                  .map((item, idx) => {
+                    return `=== WEB SOURCE ${idx + 1}: ${item.title} ===\nURL: ${item.url}\n${item.snippet ? `Snippet: ${item.snippet}\n` : ''}\nContent:\n${item.content}\n\n`;
+                  })
+                  .join('\n');
+                
+                // Append HTML content to PDF content (if any)
+                if (webSearchContent) {
+                  webSearchContent += '\n\n' + htmlContent;
+                } else {
+                  webSearchContent = htmlContent;
+                }
+                
+                webSearchStreamCitations = allWebCitations;
+                
+                console.log(`✅ [WEB SEARCH] Combined content: ${pdfResults.length > 0 ? 'PDF(s) + ' : ''}${processedContents.length} HTML source(s) = ${webSearchContent.length} chars`);
+                console.log(`📚 [WEB SEARCH] Total citations: ${allWebCitations.length} (${pdfResults.length} PDF(s) + ${htmlResultsToProcess.length} HTML page(s))`);
+              } else if (pdfResults.length > 0) {
+                // Only PDFs found and processed
+                console.log(`📄 [WEB SEARCH] Only PDFs found and processed via URL streaming`);
+                webSearchStreamCitations = allWebCitations;
+                // webSearchContent is already set from PDF streaming above
+              } else {
+                console.warn(`⚠️ [WEB SEARCH] No content successfully processed from search results`);
+                // Still add citations even if processing failed
+                webSearchStreamCitations = allWebCitations;
+              }
+            } else {
+              console.warn(`⚠️ [WEB SEARCH] No results found from Google Search: ${searchResults.error || 'Unknown error'}`);
+              sendStatus('info', 'No relevant web sources found. Using document analysis instead...');
+              webSearchResult = null; // Fall through to normal processing
+            }
+          }
+        }
+
+        // If we have web search content, we should combine it with RAG content if available
+        // Don't exit early - continue to RAG processing to combine both sources
+        if (webSearchContent && webSearchStreamCitations.length > 0) {
+          console.log(`📝 [WEB SEARCH] Web content ready: ${webSearchContent.length} chars, ${webSearchStreamCitations.length} citations`);
+          console.log(`📝 [WEB SEARCH] Will combine with RAG content if available`);
+          // Continue to RAG processing below to combine web + RAG
+        } else {
+          console.log(`📝 [WEB SEARCH] No web content to combine, proceeding with RAG only`);
+        }
+      } catch (webSearchError) {
+        console.error(`❌ [WEB SEARCH] Error during web search processing:`, webSearchError.message);
+        console.error(`   Stack:`, webSearchError.stack);
+        sendStatus('info', 'Web search failed. Using document analysis instead...');
+        // Fall through to normal processing
+      }
+    }
+
     if (isFreeUser) {
       const estimatedTokens = Math.ceil((actualQuestion?.length || 0) / 4) + 1000; // Add buffer for response
       const tokenLimitCheck = await TokenUsageService.checkFreeTierDailyTokenLimit(userId, plan, estimatedTokens);
@@ -2586,7 +2997,30 @@ exports.intelligentFolderChatStream = async (req, res) => {
         promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
       }
 
+      // Combine RAG content with web search content if available
       let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
+      
+      if (webSearchContent && webSearchContent.trim().length > 0) {
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`🌐 [COMBINING SOURCES] Adding web search content to RAG prompt`);
+        console.log(`${'='.repeat(80)}`);
+        console.log(`   Web content length: ${webSearchContent.length} chars`);
+        console.log(`   Web citations: ${webSearchStreamCitations.length}`);
+        console.log(`   RAG chunks: ${topChunks.length}`);
+        console.log(`${'='.repeat(80)}\n`);
+        
+        // Build web sources list for clarity
+        const webSourcesList = webSearchStreamCitations.map((cite, idx) => {
+          const sourceName = cite.sourceType === 'indiankanoon' ? 'Indian Kanoon' :
+                           cite.sourceType === 'manupatra' ? 'Manupatra' :
+                           cite.sourceType === 'scconline' ? 'SCC Online' :
+                           cite.sourceType === 'legalcrystal' ? 'Legal Crystal' :
+                           cite.domain || cite.url || 'Web Source';
+          return `${idx + 1}. ${cite.title || 'Web Source'} (${sourceName}) - ${cite.url || 'N/A'}`;
+        }).join('\n');
+        
+        fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS FROM YOUR UPLOADED FILES (FOLDER: "${folderName}") ===\n${chunkContext}\n\n=== WEB CONTENT (ALREADY FETCHED AND PROVIDED BELOW) ===\n**IMPORTANT**: The following content has been successfully retrieved from the web sources listed below. You HAVE access to this content and should use it to answer the user's question.\n\n**Web Sources Accessed:**\n${webSourcesList}\n\n**Content from Web Sources:**\n${webSearchContent}\n\n=== INSTRUCTIONS ===\n1. The web content above has been successfully fetched and is available for you to use.\n2. You CAN and SHOULD use this web content to answer the user's question.\n3. Do NOT say you cannot access websites - the content has already been provided above.\n4. Combine information from both:\n   - Your uploaded documents (cited with page numbers)\n   - Web sources (cited with URLs)\n5. When referencing information, clearly indicate which source you're using (e.g., "According to Indian Kanoon..." or "Based on the web source...").\n6. If the user asked to check a specific website (like Indian Kanoon), use the provided content from that website to answer.`;
+      }
 
       if (used_secret_prompt && secretValue) {
         console.log(`🔐 [Streaming RAG] Using secret prompt with JSON formatting as base: "${secretName}" (${promptText.length} chars)`);
@@ -2668,17 +3102,93 @@ exports.intelligentFolderChatStream = async (req, res) => {
     const host = req.get('host') || req.headers.host || '';
     const baseUrl = `${protocol}://${host}`;
     
-    let citations = [];
+    // Extract citations from RAG (uploaded documents)
+    let ragCitations = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
       console.log(`👁️ [STREAMING Gemini Eyeball] Extracting citations from ${processedFiles.length} files`);
-      citations = await extractCitationsFromFiles(processedFiles, baseUrl);
+      ragCitations = await extractCitationsFromFiles(processedFiles, baseUrl);
     } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
-      citations = await extractCitationsFromChunks(usedChunksForCitations, baseUrl);
+      ragCitations = await extractCitationsFromChunks(usedChunksForCitations, baseUrl);
     }
 
+    // Combine RAG citations with web search citations
+    let citations = [...ragCitations];
+    
+    // Add web search citations if available (ALWAYS include web citations when web content is used)
+    if (webSearchStreamCitations && webSearchStreamCitations.length > 0) {
+      console.log(`🌐 [CITATIONS] Adding ${webSearchStreamCitations.length} web search citations`);
+      
+      // Format web citations to match RAG citation structure
+      const formattedWebCitations = webSearchStreamCitations.map((webCite, idx) => {
+        const citation = {
+          page: null, // Web sources don't have page numbers
+          pageStart: null,
+          pageEnd: null,
+          pageLabel: webCite.type === 'pdf' ? 'PDF Document' : 'Web Source',
+          source: webCite.title || webCite.url || 'Web Source',
+          filename: webCite.title || (webCite.url ? new URL(webCite.url).hostname : 'Web Source'),
+          fileId: null,
+          text: webCite.text || webCite.content || webCite.snippet || webCite.title || '', // Include text content
+          content: webCite.content || webCite.text || webCite.snippet || '', // Full content for expanded view
+          link: webCite.url || '',
+          viewUrl: webCite.url || '',
+          isFullDocument: false,
+          isWebSource: true, // Flag to identify web sources
+          url: webCite.url || '', // Store URL for database - CRITICAL for web sources
+          type: webCite.type || 'web', // 'pdf' or 'web'
+          snippet: webCite.snippet || webCite.text?.substring(0, 200) || '', // Short snippet
+          title: webCite.title || '',
+          sourceType: webCite.sourceType || webCite.source || 'web_search' // e.g., 'indiankanoon', 'manupatra', 'web_search'
+        };
+        
+        // Add domain name for better identification
+        if (webCite.url) {
+          try {
+            const urlObj = new URL(webCite.url);
+            citation.domain = urlObj.hostname;
+            citation.sourceName = urlObj.hostname.replace('www.', '');
+          } catch (e) {
+            // Invalid URL, skip
+          }
+        }
+        
+        console.log(`🌐 [CITATIONS] Web citation ${idx + 1}: ${citation.title} - ${citation.url}`);
+        return citation;
+      });
+      
+      // ALWAYS include web citations, even if there are no RAG citations
+      citations = [...ragCitations, ...formattedWebCitations];
+      console.log(`📚 [CITATIONS] Total citations: ${ragCitations.length} RAG + ${formattedWebCitations.length} Web = ${citations.length} total`);
+      console.log(`📚 [CITATIONS] Web citation URLs: ${formattedWebCitations.map(c => c.url).filter(Boolean).join(', ')}`);
+      
+      // Validate web citations have URLs
+      const webCitationsWithoutUrls = formattedWebCitations.filter(c => !c.url);
+      if (webCitationsWithoutUrls.length > 0) {
+        console.warn(`⚠️ [CITATIONS] ${webCitationsWithoutUrls.length} web citations missing URLs!`);
+      }
+    } else if (webSearchContent && webSearchContent.trim().length > 0) {
+      // Web content was used but citations weren't captured - log warning
+      console.warn(`⚠️ [CITATIONS] Web content was used (${webSearchContent.length} chars) but no web citations found!`);
+      console.warn(`⚠️ [CITATIONS] webSearchStreamCitations length: ${webSearchStreamCitations?.length || 0}`);
+      console.log(`📑 [CITATIONS] Using RAG citations only: ${ragCitations.length} citations`);
+      citations = ragCitations;
+    } else {
+      console.log(`📑 [STREAMING] ${ragCitations.length} RAG citations extracted (${methodUsed})`);
+      citations = ragCitations;
+    }
+    
+    // Final validation: Log citation breakdown
     if (citations.length > 0) {
-      console.log(`📑 [STREAMING] ${citations.length} citations extracted (${methodUsed})`);
-    } else if (methodUsed === 'rag' && usedChunksForCitations.length > 0) {
+      const webCitationCount = citations.filter(c => c.isWebSource || c.url).length;
+      const ragCitationCount = citations.filter(c => !c.isWebSource && !c.url && c.fileId).length;
+      console.log(`✅ [CITATIONS] Final breakdown: ${ragCitationCount} RAG + ${webCitationCount} Web = ${citations.length} total`);
+      if (webCitationCount > 0) {
+        const webUrls = citations.filter(c => c.isWebSource || c.url).map(c => c.url).filter(Boolean);
+        console.log(`✅ [CITATIONS] Web source URLs to be saved: ${webUrls.join(', ')}`);
+      }
+    }
+
+    if (citations.length === 0 && methodUsed === 'rag' && usedChunksForCitations.length > 0) {
       console.warn(`⚠️ [STREAMING] ${usedChunksForCitations.length} chunks used but NO citations extracted!`);
     }
     

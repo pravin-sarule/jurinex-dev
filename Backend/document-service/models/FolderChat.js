@@ -59,7 +59,8 @@ const FolderChat = {
     const existingHistory = normalizeHistory(chatHistory);
     
     const normalizedCitations = Array.isArray(citations) ? citations : [];
-    const validCitations = normalizedCitations.filter(c => c && (c.fileId || c.page || c.filename));
+    // Accept citations with fileId/page/filename (RAG) OR url (web sources)
+    const validCitations = normalizedCitations.filter(c => c && (c.fileId || c.page || c.filename || c.url || c.isWebSource));
 
     const res = await pool.query(
       `
