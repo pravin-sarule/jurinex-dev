@@ -21,6 +21,10 @@ const {
   extractUrlsFromQuery,
   isPdfUrl
 } = require('../services/webSearchService'); // NEW: Import web search service
+const {
+  getCachedResponse,
+  setCachedResponse
+} = require('../services/promptCacheService'); // NEW: Import prompt cache service
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1471,33 +1475,76 @@ exports.intelligentFolderChat = async (req, res) => {
 
         console.log(`🔍 [RAG] Final prompt length: ${fullPrompt.length} chars`);
 
-        try {
-          const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : question;
-          answer = await askLLM(provider, fullPrompt, '', topChunks, llmQuestion, {
-            userId: userId,
-            endpoint: '/api/doc/folder-chat',
-            fileId: null,
-            sessionId: sessionId
-          });
+        // Check cache before calling LLM
+        // IMPORTANT: Use the original user question as cache key, not the secret prompt
+        // This ensures the same question with the same secret prompt gets cached correctly
+        const cacheKey = question; // Use original user question, not promptText (which might be secret prompt)
+        const cachedResult = await getCachedResponse(userId, cacheKey, {
+          methodUsed: 'rag',
+          chatType: 'folder', // Folder chat
+          contextId: folderName, // Use folder name as context
+          secretId: used_secret_prompt ? secret_id : null // Include secret_id if using secret prompt
+        });
+
+        if (cachedResult) {
+          console.log(`💾 [CACHE] Cache HIT for user ${userId}, using cached response`);
+          // Get cached answer and post-process it (same as fresh responses)
+          let cachedAnswer = cachedResult.output;
           
+          // Post-process the cached answer
           if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-            answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
+            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, secretTemplateData.outputTemplate);
           } else {
-            answer = ensurePlainText(answer);
+            cachedAnswer = ensurePlainText(cachedAnswer);
           }
           
-          console.log(`\n${'='.repeat(80)}`);
-          console.log(`🔍🔍🔍 ANSWER PROVIDED BY: RAG METHOD 🔍🔍🔍`);
-          console.log(`✅ [RAG] Answer length: ${answer.length} chars`);
-          console.log(`✅ [RAG] Chunks used: ${topChunks.length}`);
-          console.log(`✅ [RAG] Files searched: ${processedFiles.length}`);
-          console.log(`✅ [RAG] Provider: ${provider}`);
-          console.log(`${'='.repeat(80)}\n`);
-        } catch (ragError) {
-          console.error(`❌ [RAG] Error calling LLM:`, ragError.message);
-          console.error(`❌ [RAG] Error stack:`, ragError.stack);
-          throw ragError;
+          answer = cachedAnswer;
+          methodUsed = 'rag'; // Ensure method is set
+          console.log(`✅ [CACHE] Cached response processed: ${answer.length} chars`);
+        } else {
+          console.log(`💾 [CACHE] Cache MISS for user ${userId}, calling LLM`);
+          try {
+            const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : question;
+            answer = await askLLM(provider, fullPrompt, '', topChunks, llmQuestion, {
+              userId: userId,
+              endpoint: '/api/doc/folder-chat',
+              fileId: null,
+              sessionId: sessionId
+            });
+            
+            // Store in cache after successful LLM call (before post-processing)
+            const rawAnswer = answer;
+            await setCachedResponse(userId, cacheKey, rawAnswer, {
+              methodUsed: 'rag',
+              chatType: 'folder', // Folder chat
+              contextId: folderName, // Use folder name as context
+              secretId: used_secret_prompt ? secret_id : null, // Include secret_id if using secret prompt
+              sessionId: finalSessionId,
+              ttlDays: 30 // Cache for 30 days
+            }).catch(cacheError => {
+              console.warn(`⚠️ [CACHE] Failed to cache response (non-critical):`, cacheError.message);
+            });
+          } catch (ragError) {
+            console.error(`❌ [RAG] Error calling LLM:`, ragError.message);
+            console.error(`❌ [RAG] Error stack:`, ragError.stack);
+            throw ragError;
+          }
         }
+        
+        // Post-process answer (for both cached and fresh responses)
+        if (used_secret_prompt && secretTemplateData?.outputTemplate) {
+          answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
+        } else {
+          answer = ensurePlainText(answer);
+        }
+        
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`🔍🔍🔍 ANSWER PROVIDED BY: RAG METHOD 🔍🔍🔍`);
+        console.log(`✅ [RAG] Answer length: ${answer.length} chars`);
+        console.log(`✅ [RAG] Chunks used: ${topChunks.length}`);
+        console.log(`✅ [RAG] Files searched: ${processedFiles.length}`);
+        console.log(`✅ [RAG] Provider: ${provider}`);
+        console.log(`${'='.repeat(80)}\n`);
       }
     }
 
@@ -2983,24 +3030,90 @@ exports.intelligentFolderChatStream = async (req, res) => {
         })
         .join('\n\n');
 
-      let basePrompt;
-      if (used_secret_prompt && secretValue) {
-        const inputTemplate = secretTemplateData?.inputTemplate || null;
-        const outputTemplate = secretTemplateData?.outputTemplate || null;
-        basePrompt = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
-      } else {
-        basePrompt = actualQuestion;
-      }
-      
-      let promptText = basePrompt;
-      if (conversationContext) {
-        promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
-      }
+      // Check cache before streaming (for secret prompts, use original question as cache key)
+      const cacheKey = actualQuestion; // Use original user question, not the secret prompt
+      const cachedResult = await getCachedResponse(userId, cacheKey, {
+        methodUsed: 'rag',
+        chatType: 'folder',
+        contextId: folderName,
+        secretId: used_secret_prompt ? secret_id : null
+      });
 
-      // Combine RAG content with web search content if available
-      let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
-      
-      if (webSearchContent && webSearchContent.trim().length > 0) {
+      if (cachedResult) {
+        console.log(`💾 [CACHE] Cache HIT for user ${userId}, streaming cached response`);
+        // Stream the cached response with proper animation
+        let cachedAnswer = cachedResult.output;
+        
+        // Post-process the cached answer BEFORE streaming (to ensure proper formatting)
+        if (used_secret_prompt) {
+          let streamingTemplateData = null;
+          try {
+            const secretDetails = await getSecretDetailsById(secret_id);
+            if (secretDetails && (secretDetails.input_template_id || secretDetails.output_template_id)) {
+              streamingTemplateData = await fetchTemplateFilesData(secretDetails.input_template_id, secretDetails.output_template_id);
+            }
+          } catch (e) {
+            console.warn('[CACHE] Could not fetch template data for post-processing:', e);
+          }
+          
+          if (streamingTemplateData?.outputTemplate) {
+            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, streamingTemplateData.outputTemplate);
+          } else {
+            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, null);
+          }
+        } else {
+          cachedAnswer = ensurePlainText(cachedAnswer);
+        }
+        
+        const chunkSize = 30; // Smaller chunks for smoother animation
+        const delayMs = 15; // Delay between chunks to simulate real streaming
+        
+        // Send initial metadata (same format as fresh responses)
+        res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId, method: 'rag' })}\n\n`);
+        sendStatus('generating', 'Generating response...');
+        
+        // Stream cached response in chunks with delays for smooth animation
+        fullAnswer = ''; // Reset to ensure clean state
+        for (let i = 0; i < cachedAnswer.length; i += chunkSize) {
+          const chunk = cachedAnswer.substring(i, i + chunkSize);
+          fullAnswer += chunk;
+          writeChunk(chunk);
+          
+          // Add delay between chunks for smooth streaming animation
+          if (i + chunkSize < cachedAnswer.length) {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
+        }
+        
+        // Ensure buffer is flushed before continuing
+        flushChunkBuffer();
+        
+        methodUsed = 'rag';
+        console.log(`✅ [CACHE] Cached response streamed: ${fullAnswer.length} chars`);
+        
+        // Note: Citations will be extracted after this block (same as fresh responses)
+        // Post-process is already done above, so fullAnswer is ready
+      } else {
+        console.log(`💾 [CACHE] Cache MISS for user ${userId}, calling LLM for streaming`);
+        
+        let basePrompt;
+        if (used_secret_prompt && secretValue) {
+          const inputTemplate = secretTemplateData?.inputTemplate || null;
+          const outputTemplate = secretTemplateData?.outputTemplate || null;
+          basePrompt = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
+        } else {
+          basePrompt = actualQuestion;
+        }
+        
+        let promptText = basePrompt;
+        if (conversationContext) {
+          promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
+        }
+
+        // Combine RAG content with web search content if available
+        let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
+        
+        if (webSearchContent && webSearchContent.trim().length > 0) {
         console.log(`\n${'='.repeat(80)}`);
         console.log(`🌐 [COMBINING SOURCES] Adding web search content to RAG prompt`);
         console.log(`${'='.repeat(80)}`);
@@ -3019,82 +3132,94 @@ exports.intelligentFolderChatStream = async (req, res) => {
           return `${idx + 1}. ${cite.title || 'Web Source'} (${sourceName}) - ${cite.url || 'N/A'}`;
         }).join('\n');
         
-        fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS FROM YOUR UPLOADED FILES (FOLDER: "${folderName}") ===\n${chunkContext}\n\n=== WEB CONTENT (ALREADY FETCHED AND PROVIDED BELOW) ===\n**IMPORTANT**: The following content has been successfully retrieved from the web sources listed below. You HAVE access to this content and should use it to answer the user's question.\n\n**Web Sources Accessed:**\n${webSourcesList}\n\n**Content from Web Sources:**\n${webSearchContent}\n\n=== INSTRUCTIONS ===\n1. The web content above has been successfully fetched and is available for you to use.\n2. You CAN and SHOULD use this web content to answer the user's question.\n3. Do NOT say you cannot access websites - the content has already been provided above.\n4. Combine information from both:\n   - Your uploaded documents (cited with page numbers)\n   - Web sources (cited with URLs)\n5. When referencing information, clearly indicate which source you're using (e.g., "According to Indian Kanoon..." or "Based on the web source...").\n6. If the user asked to check a specific website (like Indian Kanoon), use the provided content from that website to answer.`;
-      }
+          fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS FROM YOUR UPLOADED FILES (FOLDER: "${folderName}") ===\n${chunkContext}\n\n=== WEB CONTENT (ALREADY FETCHED AND PROVIDED BELOW) ===\n**IMPORTANT**: The following content has been successfully retrieved from the web sources listed below. You HAVE access to this content and should use it to answer the user's question.\n\n**Web Sources Accessed:**\n${webSourcesList}\n\n**Content from Web Sources:**\n${webSearchContent}\n\n=== INSTRUCTIONS ===\n1. The web content above has been successfully fetched and is available for you to use.\n2. You CAN and SHOULD use this web content to answer the user's question.\n3. Do NOT say you cannot access websites - the content has already been provided above.\n4. Combine information from both:\n   - Your uploaded documents (cited with page numbers)\n   - Web sources (cited with URLs)\n5. When referencing information, clearly indicate which source you're using (e.g., "According to Indian Kanoon..." or "Based on the web source...").\n6. If the user asked to check a specific website (like Indian Kanoon), use the provided content from that website to answer.`;
+        }
 
-      if (used_secret_prompt && secretValue) {
-        console.log(`🔐 [Streaming RAG] Using secret prompt with JSON formatting as base: "${secretName}" (${promptText.length} chars)`);
-      }
+        if (used_secret_prompt && secretValue) {
+          console.log(`🔐 [Streaming RAG] Using secret prompt with JSON formatting as base: "${secretName}" (${promptText.length} chars)`);
+        }
 
-      const provider = finalProvider || 'gemini';
-      console.log(`🔍 [STREAMING RAG] Using provider: ${provider}`);
-      const { streamLLM: streamLLMFunc, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
+        const provider = finalProvider || 'gemini';
+        console.log(`🔍 [STREAMING RAG] Using provider: ${provider}`);
+        const { streamLLM: streamLLMFunc, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
 
-      const modelConfig = ALL_LLM_CONFIGS[provider];
-      const modelName = modelConfig?.model || 'unknown';
-      let maxTokens = null;
-      try {
-        maxTokens = await getModelMaxTokens(provider, modelName);
-      } catch (tokenError) {
-      }
+        const modelConfig = ALL_LLM_CONFIGS[provider];
+        const modelName = modelConfig?.model || 'unknown';
+        let maxTokens = null;
+        try {
+          maxTokens = await getModelMaxTokens(provider, modelName);
+        } catch (tokenError) {
+        }
 
-      
-      try {
-        const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : actualQuestion;
-        for await (const chunk of streamLLMFunc(provider, fullPrompt, '', topChunks, llmQuestion)) {
-          if (typeof chunk === 'string' && chunk.trim()) {
-            fullAnswer += chunk;
-            writeChunk(chunk); // Use buffered write instead of immediate
-          } else if (typeof chunk === 'object' && chunk.type) {
-            if (chunk.type === 'thinking' && chunk.text) {
-              flushChunkBuffer(); // Flush any pending content chunks first
-              res.write(`data: ${JSON.stringify({ type: 'thinking', text: chunk.text })}\n\n`);
-              if (res.flush) res.flush();
-            } else if (chunk.type === 'content' && chunk.text) {
-              fullAnswer += chunk.text;
-              writeChunk(chunk.text); // Use buffered write instead of immediate
+        try {
+          const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : actualQuestion;
+          for await (const chunk of streamLLMFunc(provider, fullPrompt, '', topChunks, llmQuestion)) {
+            if (typeof chunk === 'string' && chunk.trim()) {
+              fullAnswer += chunk;
+              writeChunk(chunk); // Use buffered write instead of immediate
+            } else if (typeof chunk === 'object' && chunk.type) {
+              if (chunk.type === 'thinking' && chunk.text) {
+                flushChunkBuffer(); // Flush any pending content chunks first
+                res.write(`data: ${JSON.stringify({ type: 'thinking', text: chunk.text })}\n\n`);
+                if (res.flush) res.flush();
+              } else if (chunk.type === 'content' && chunk.text) {
+                fullAnswer += chunk.text;
+                writeChunk(chunk.text); // Use buffered write instead of immediate
+              }
             }
           }
-        }
-        flushChunkBuffer();
-      } catch (streamError) {
-        console.error(`\n${'='.repeat(80)}`);
-        console.error(`❌ [STREAMING RAG] Error during streaming:`);
-        console.error(`   Error Type: ${streamError.name || 'Unknown'}`);
-        console.error(`   Error Message: ${streamError.message || 'No message'}`);
-        console.error(`   Provider: ${provider}`);
-        console.error(`   Prompt Length: ${fullPrompt.length} chars`);
-        console.error(`   Stack: ${streamError.stack}`);
-        console.error(`${'='.repeat(80)}\n`);
-        
-        if (streamError.message && streamError.message.includes('fetch failed')) {
-          sendError('Network error: Failed to connect to LLM service. Please check your internet connection and API credentials.', streamError.message);
-          return;
-        }
-        
-        throw streamError;
-      }
-
-      console.log(`✅ [STREAMING RAG] Complete: ${fullAnswer.length} chars, ${topChunks.length} chunks, ${processedFiles.length} files, ${provider}`);
-
-      if (used_secret_prompt) {
-        let streamingTemplateData = null;
-        try {
-          const secretDetails = await getSecretDetailsById(secret_id);
-          if (secretDetails && (secretDetails.input_template_id || secretDetails.output_template_id)) {
-            streamingTemplateData = await fetchTemplateFilesData(secretDetails.input_template_id, secretDetails.output_template_id);
+          flushChunkBuffer();
+          
+          // Store in cache after successful streaming (before post-processing)
+          await setCachedResponse(userId, cacheKey, fullAnswer, {
+            methodUsed: 'rag',
+            chatType: 'folder',
+            contextId: folderName,
+            secretId: used_secret_prompt ? secret_id : null,
+            sessionId: finalSessionId,
+            ttlDays: 30
+          }).catch(cacheError => {
+            console.warn(`⚠️ [CACHE] Failed to cache streaming response (non-critical):`, cacheError.message);
+          });
+        } catch (streamError) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`❌ [STREAMING RAG] Error during streaming:`);
+          console.error(`   Error Type: ${streamError.name || 'Unknown'}`);
+          console.error(`   Error Message: ${streamError.message || 'No message'}`);
+          console.error(`   Provider: ${provider}`);
+          console.error(`   Prompt Length: ${fullPrompt.length} chars`);
+          console.error(`   Stack: ${streamError.stack}`);
+          console.error(`${'='.repeat(80)}\n`);
+          
+          if (streamError.message && streamError.message.includes('fetch failed')) {
+            sendError('Network error: Failed to connect to LLM service. Please check your internet connection and API credentials.', streamError.message);
+            return;
           }
-        } catch (e) {
-          console.warn('[STREAMING RAG] Could not fetch template data for post-processing:', e);
+          
+          throw streamError;
         }
-        
-        if (streamingTemplateData?.outputTemplate) {
-          fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
+
+        console.log(`✅ [STREAMING RAG] Complete: ${fullAnswer.length} chars, ${topChunks.length} chunks, ${processedFiles.length} files, ${provider}`);
+
+        if (used_secret_prompt) {
+          let streamingTemplateData = null;
+          try {
+            const secretDetails = await getSecretDetailsById(secret_id);
+            if (secretDetails && (secretDetails.input_template_id || secretDetails.output_template_id)) {
+              streamingTemplateData = await fetchTemplateFilesData(secretDetails.input_template_id, secretDetails.output_template_id);
+            }
+          } catch (e) {
+            console.warn('[STREAMING RAG] Could not fetch template data for post-processing:', e);
+          }
+          
+          if (streamingTemplateData?.outputTemplate) {
+            fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
+          } else {
+            fullAnswer = postProcessSecretPromptResponse(fullAnswer, null);
+          }
         } else {
-          fullAnswer = postProcessSecretPromptResponse(fullAnswer, null);
+          fullAnswer = ensurePlainText(fullAnswer);
         }
-      } else {
-        fullAnswer = ensurePlainText(fullAnswer);
       }
     }
 
@@ -3302,6 +3427,25 @@ exports.intelligentFolderChatStream = async (req, res) => {
     if (chunkBufferTimer) {
       clearTimeout(chunkBufferTimer);
       chunkBufferTimer = null;
+    }
+
+    // Cache the streaming response after completion
+    // Note: For streaming, we can't use cache before streaming, but we can cache for future non-streaming requests
+    try {
+      const cacheKey = actualQuestion?.trim() || '';
+      if (cacheKey && methodUsed) {
+        await setCachedResponse(userId, cacheKey, fullAnswer, {
+          methodUsed: methodUsed,
+          chatType: 'folder', // Folder chat
+          contextId: folderName, // Use folder name as context
+          sessionId: finalSessionId,
+          ttlDays: 30
+        }).catch(cacheError => {
+          console.warn(`⚠️ [CACHE] Failed to cache streaming response (non-critical):`, cacheError.message);
+        });
+      }
+    } catch (cacheError) {
+      console.warn(`⚠️ [CACHE] Error caching streaming response (non-critical):`, cacheError.message);
     }
 
     res.write(`data: ${JSON.stringify({

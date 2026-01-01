@@ -53,14 +53,44 @@ const DocumentModel = {
   },
 
   async updateFileProcessedAt(fileId) {
-    await pool.query(`
-      UPDATE user_files
-      SET processed_at = NOW(), 
-          status = 'processed', 
-          processing_progress = 100.00,
-          current_operation = 'Completed'
-      WHERE id = $1::uuid
+    // First, get the user_id before updating
+    const userResult = await pool.query(`
+      SELECT user_id FROM user_files WHERE id = $1::uuid
     `, [fileId]);
+    
+    if (userResult.rows.length > 0) {
+      const userId = userResult.rows[0].user_id;
+      
+      // Update file status
+      await pool.query(`
+        UPDATE user_files
+        SET processed_at = NOW(), 
+            status = 'processed', 
+            processing_progress = 100.00,
+            current_operation = 'Completed'
+        WHERE id = $1::uuid
+      `, [fileId]);
+      
+      // Invalidate cache for this user (new document uploaded)
+      try {
+        const { updateLastDocUpload } = require('../services/promptCacheService');
+        await updateLastDocUpload(userId);
+        console.log(`✅ [Cache] Invalidated cache for user ${userId} after document processing`);
+      } catch (cacheError) {
+        console.warn(`⚠️ [Cache] Failed to invalidate cache (non-critical):`, cacheError.message);
+        // Don't throw - cache invalidation failure shouldn't break file processing
+      }
+    } else {
+      // File not found, just update status
+      await pool.query(`
+        UPDATE user_files
+        SET processed_at = NOW(), 
+            status = 'processed', 
+            processing_progress = 100.00,
+            current_operation = 'Completed'
+        WHERE id = $1::uuid
+      `, [fileId]);
+    }
   },
 
   async updateFileOutputPath(fileId, outputPath) {

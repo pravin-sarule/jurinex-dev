@@ -3753,13 +3753,39 @@ exports.chatWithDocument = async (req, res) => {
         console.warn(`⚠️ Failed to fetch profile context:`, profileError.message);
       }
 
-      answer = await askLLM(provider, finalPrompt, '', '', storedQuestion, {
-        userId: userId,
-        endpoint: '/api/doc/chat',
-        fileId: file_id,
-        sessionId: finalSessionId
+      // Check cache before calling LLM
+      const { getCachedResponse, setCachedResponse } = require('../services/promptCacheService');
+      const cacheKey = storedQuestion; // Use the stored question as cache key
+      const cachedResult = await getCachedResponse(userId, cacheKey, {
+        methodUsed: 'rag',
+        chatType: 'file', // File chat (single document)
+        contextId: file_id.toString() // Use file_id as context
       });
-      answer = ensurePlainTextAnswer(answer);
+
+      if (cachedResult) {
+        console.log(`💾 [CACHE] Cache HIT for user ${userId}, file ${file_id}, using cached response`);
+        answer = cachedResult.output;
+      } else {
+        console.log(`💾 [CACHE] Cache MISS for user ${userId}, file ${file_id}, calling LLM`);
+        answer = await askLLM(provider, finalPrompt, '', '', storedQuestion, {
+          userId: userId,
+          endpoint: '/api/doc/chat',
+          fileId: file_id,
+          sessionId: finalSessionId
+        });
+        answer = ensurePlainTextAnswer(answer);
+        
+        // Store in cache after successful LLM call
+        await setCachedResponse(userId, cacheKey, answer, {
+          methodUsed: 'rag',
+          chatType: 'file', // File chat (single document)
+          contextId: file_id.toString(), // Use file_id as context
+          sessionId: finalSessionId,
+          ttlDays: 30
+        }).catch(cacheError => {
+          console.warn(`⚠️ [CACHE] Failed to cache response (non-critical):`, cacheError.message);
+        });
+      }
     }
 
     if (!answer?.trim()) {
