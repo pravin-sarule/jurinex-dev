@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { Upload, Loader2, CheckCircle, AlertCircle, HardDrive, Cloud } from 'lucide-react';
 import documentApi from '../../../services/documentApi';
+import googleDriveApi from '../../../services/googleDriveApi';
 import { toast } from 'react-toastify';
+import GoogleDrivePicker from '../../../components/GoogleDrivePicker';
 import {
   matchCaseType,
   matchCourtName,
@@ -18,6 +20,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   const [uploadStatus, setUploadStatus] = useState(null); // 'uploading', 'processing', 'extracting', 'success', 'error'
   const [uploadMessage, setUploadMessage] = useState('');
   const [processingProgress, setProcessingProgress] = useState(0); // 0-100
+  const [pendingGoogleDriveFiles, setPendingGoogleDriveFiles] = useState([]); // Pending Google Drive files (not uploaded yet)
   const fileInputRef = useRef(null);
   
   // Dropdown options for matching
@@ -130,28 +133,99 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
       return;
     }
 
+    // Separate local files from Google Drive files
+    const localFiles = selectedFiles.filter(f => !f.fromGoogleDrive);
+    const googleDriveFileIds = pendingGoogleDriveFiles.map(f => ({ id: f.id, name: f.name, mimeType: f.mimeType }));
+
+    if (localFiles.length === 0 && googleDriveFileIds.length === 0) {
+      toast.error('Please select at least one file to upload');
+      return;
+    }
+
     setIsUploading(true);
     setProcessingProgress(0);
     setUploadStatus('uploading');
     setUploadMessage('Uploading files...');
 
     try {
-      // Step 1: Upload files (10% progress)
-      setUploadStatus('uploading');
-      setUploadMessage('Uploading files to server...');
-      setProcessingProgress(10);
-      console.log('[UploadStep] Initial progress set to 10%');
-      
-      const uploadResult = await documentApi.uploadDocumentsForProcessing(selectedFiles);
-      
-      if (!uploadResult.success || !uploadResult.folderName) {
-        throw new Error(uploadResult.message || 'Failed to upload documents');
+      let folderName = null;
+      let uploadedFiles = [];
+
+      // Step 1: Upload local files first (if any) - 5% progress
+      if (localFiles.length > 0) {
+        setUploadStatus('uploading');
+        setUploadMessage(`Uploading ${localFiles.length} local file(s)...`);
+        setProcessingProgress(5);
+        console.log('[UploadStep] Uploading local files...');
+        
+        const uploadResult = await documentApi.uploadDocumentsForProcessing(localFiles);
+        
+        if (!uploadResult.success || !uploadResult.folderName) {
+          throw new Error(uploadResult.message || 'Failed to upload local documents');
+        }
+
+        folderName = uploadResult.folderName;
+        uploadedFiles = uploadResult.uploadedFiles || [];
+        console.log('[UploadStep] Local files uploaded to folder:', folderName);
+      }
+
+      // Step 2: Download Google Drive files (if any) - 10% progress
+      if (googleDriveFileIds.length > 0) {
+        setUploadStatus('uploading');
+        setUploadMessage(`Downloading ${googleDriveFileIds.length} file(s) from Google Drive...`);
+        setProcessingProgress(10);
+        console.log('[UploadStep] Downloading Google Drive files...');
+        
+        try {
+          // Get fresh access token
+          const tokenData = await googleDriveApi.getAccessToken();
+          if (!tokenData || !tokenData.accessToken) {
+            throw new Error('Failed to get Google Drive access token. Please reconnect your Google Drive.');
+          }
+
+          // Download Google Drive files to the folder (or create new folder if no local files)
+          const gdResult = await googleDriveApi.downloadMultipleFiles(
+            googleDriveFileIds, 
+            tokenData.accessToken, 
+            folderName // Pass folder name if local files were uploaded, otherwise it will create new
+          );
+
+          if (gdResult.success) {
+            // If no local files, use the folder from Google Drive upload
+            if (!folderName && gdResult.documents && gdResult.documents.length > 0) {
+              folderName = gdResult.documents[0].folderName || gdResult.folderName;
+            }
+            
+            // Add successfully downloaded files to uploadedFiles
+            const successfulGdFiles = gdResult.documents.filter(d => d.status !== 'failed');
+            uploadedFiles = [...uploadedFiles, ...successfulGdFiles];
+            
+            console.log('[UploadStep] Google Drive files downloaded:', successfulGdFiles.length);
+            
+            if (gdResult.summary?.failed > 0) {
+              toast.warning(`${gdResult.summary.failed} Google Drive file(s) failed to download`);
+            }
+          } else {
+            throw new Error(gdResult.message || 'Failed to download Google Drive files');
+          }
+        } catch (gdError) {
+          console.error('[UploadStep] Google Drive download error:', gdError);
+          if (localFiles.length === 0) {
+            // If no local files, this is a critical error
+            throw new Error(`Google Drive error: ${gdError.message}`);
+          } else {
+            // If we have local files, continue with warning
+            toast.warning(`Google Drive files couldn't be downloaded: ${gdError.message}`);
+          }
+        }
+      }
+
+      if (!folderName) {
+        throw new Error('No folder created. Please try again.');
       }
 
       setProcessingProgress(20);
-      console.log('[UploadStep] Upload complete, progress set to 20%');
-      const folderName = uploadResult.folderName;
-      const uploadedFiles = uploadResult.uploadedFiles || [];
+      console.log('[UploadStep] All uploads complete, progress set to 20%');
 
       // Step 2: Wait for processing to complete (20-90% progress)
       setUploadStatus('processing');
@@ -563,12 +637,87 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
     });
   };
 
+  // Handle Google Drive file selection (NOT upload yet - just add to pending list)
+  const handleGoogleDriveFilesSelected = (files) => {
+    console.log('[UploadStep] Google Drive files selected:', files);
+    
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    // Store Google Drive file metadata for later upload
+    const newPendingFiles = files.map(file => ({
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.sizeBytes || 0,
+      fromGoogleDrive: true
+    }));
+
+    setPendingGoogleDriveFiles(prev => [...prev, ...newPendingFiles]);
+    
+    // Add to selected files for display
+    const displayFiles = files.map(file => ({
+      name: file.name,
+      size: file.sizeBytes || 0,
+      fromGoogleDrive: true,
+      googleDriveId: file.id
+    }));
+    
+    const newFiles = [...selectedFiles, ...displayFiles];
+    setSelectedFiles(newFiles);
+    setCaseData({
+      ...caseData,
+      uploadedFiles: newFiles,
+    });
+
+    toast.success(`${files.length} file(s) selected from Google Drive`);
+  };
+
+  // Remove Google Drive file from pending list
+  const removeGoogleDriveFile = (googleDriveId) => {
+    setPendingGoogleDriveFiles(prev => prev.filter(f => f.id !== googleDriveId));
+    
+    // Also update selected files display
+    const newSelectedFiles = selectedFiles.filter(f => 
+      !(f.fromGoogleDrive && f.googleDriveId === googleDriveId)
+    );
+    setSelectedFiles(newSelectedFiles);
+    
+    setCaseData({
+      ...caseData,
+      uploadedFiles: newSelectedFiles,
+    });
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="mb-8">
         <h2 className="text-2xl font-semibold text-gray-900 mb-2">Upload Documents</h2>
         <p className="text-sm text-gray-600">Upload your case documents to automatically extract and fill case information</p>
+      </div>
+
+      {/* Upload Source Options */}
+      <div className="flex items-center justify-center gap-4 mb-6">
+        <button
+          type="button"
+          onClick={handleBrowseClick}
+          disabled={isUploading}
+          className="flex items-center gap-2 px-6 py-3 bg-gradient-to-br from-[#E6F8F7] to-[#F0FDFC] border-2 border-[#21C1B6] text-[#21C1B6] rounded-xl hover:bg-[#21C1B6] hover:text-white transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+        >
+          <HardDrive className="w-5 h-5" />
+          Local Files
+        </button>
+        <span className="text-gray-400 font-medium">or</span>
+        <GoogleDrivePicker
+          onFilesSelected={handleGoogleDriveFilesSelected}
+          buttonText="Google Drive"
+          buttonClassName="flex items-center gap-2 px-6 py-3 bg-white border-2 border-gray-300 text-gray-700 rounded-xl hover:border-[#4285F4] hover:text-[#4285F4] transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+          iconClassName="w-5 h-5"
+          multiselect={true}
+          disabled={isUploading}
+        />
       </div>
 
       {/* Upload Area */}
@@ -629,18 +778,33 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
               {selectedFiles.map((file, index) => (
                 <div
                   key={index}
-                  className="flex items-center justify-between bg-white p-4 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200"
+                  className={`flex items-center justify-between bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all duration-200 ${
+                    file.fromGoogleDrive ? 'border-blue-200' : 'border-gray-200'
+                  }`}
                 >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {(file.size / 1024).toFixed(2)} KB
-                    </p>
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    {file.fromGoogleDrive && (
+                      <Cloud className="w-5 h-5 text-[#4285F4] flex-shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {file.fromGoogleDrive ? (
+                          <span className="text-[#4285F4]">From Google Drive</span>
+                        ) : (
+                          `${(file.size / 1024).toFixed(2)} KB`
+                        )}
+                      </p>
+                    </div>
                   </div>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      removeFile(index);
+                      if (file.fromGoogleDrive && file.googleDriveId) {
+                        removeGoogleDriveFile(file.googleDriveId);
+                      } else {
+                        removeFile(index);
+                      }
                     }}
                     disabled={isUploading}
                     className="ml-4 text-red-500 hover:text-red-700 hover:bg-red-50 text-sm px-3 py-1.5 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed font-medium"

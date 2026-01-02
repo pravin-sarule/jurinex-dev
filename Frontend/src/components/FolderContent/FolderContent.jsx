@@ -4,6 +4,7 @@ import { FileManagerContext } from "../../context/FileManagerContext";
 import DocumentCard from "./DocumentCard";
 import { toast } from 'react-toastify';
 import { API_BASE_URL } from "../../config/apiConfig";
+import GoogleDrivePicker from "../GoogleDrivePicker";
 
 const FolderContent = ({ onDocumentClick }) => {
  const {
@@ -337,11 +338,36 @@ const FolderContent = ({ onDocumentClick }) => {
  console.error("❌ Upload failed:", e);
  setError(`Upload failed: ${e.message}`);
  } finally {
- setUploading(false);
- }
- };
+  setUploading(false);
+    }
+  };
 
- const handleDocumentClick = (doc) => {
+  // Handle Google Drive upload completion
+  const handleGoogleDriveUpload = (uploadedDocs) => {
+    // Google Drive files have been downloaded to server
+    const newDocs = uploadedDocs
+      .filter(doc => doc.status !== 'failed')
+      .map((doc) => ({
+        id: doc.id || doc._id,
+        name: doc.originalname || doc.name || doc.filename || "Unnamed",
+        originalname: doc.originalname || doc.name,
+        size: doc.file_size || doc.size || 0,
+        status: doc.status || "uploaded",
+        created_at: new Date().toISOString(),
+        processing_progress: 0,
+        current_operation: "",
+        source: "google_drive",
+      }));
+
+    if (newDocs.length > 0) {
+      setDocuments((prev) => [...prev, ...newDocs]);
+      const info = newDocs.map((d) => ({ id: d.id, name: d.name }));
+      setTimeout(() => startStatusPolling(info), 800);
+      toast.success(`${newDocs.length} file(s) uploaded from Google Drive`);
+    }
+  };
+
+  const handleDocumentClick = (doc) => {
  const processing = ["processing", "queued", "pending", "batch_processing", "batch_queued"].includes(
  doc.status?.toLowerCase()
  );
@@ -387,32 +413,46 @@ const FolderContent = ({ onDocumentClick }) => {
  `,
  }}
  />
- <div className="flex justify-between items-start mb-3 flex-shrink-0 gap-3">
- <h2 className="text-lg font-semibold min-w-0 flex-1 break-words pr-2">
- Folder: {selectedFolder}
- </h2>
- <div className="flex-shrink-0">
- <label
- htmlFor="document-upload"
- className={`cursor-pointer ${
- uploading ? "bg-gray-400 cursor-not-allowed" : "bg-[#21C1B6] hover:bg-[#1AA49B]"
- } text-white px-3 py-1.5 rounded-md text-sm transition-colors duration-200 flex items-center justify-center`}
- >
- <span className="text-xl font-bold">{uploading ? "..." : "+"}</span>
- <input
- id="document-upload"
- type="file"
- multiple
- disabled={uploading}
- className="hidden"
- onChange={(e) => {
- handleUploadDocuments(Array.from(e.target.files));
- e.target.value = "";
- }}
- />
- </label>
- </div>
- </div>
+<div className="flex justify-between items-start mb-3 flex-shrink-0 gap-3">
+<h2 className="text-lg font-semibold min-w-0 flex-1 break-words pr-2">
+Folder: {selectedFolder}
+</h2>
+<div className="flex-shrink-0 flex gap-2 items-center">
+{/* Local file upload button */}
+<label
+htmlFor="document-upload"
+className={`cursor-pointer ${
+uploading ? "bg-gray-400 cursor-not-allowed" : "bg-[#21C1B6] hover:bg-[#1AA49B]"
+} text-white px-3 py-1.5 rounded-md text-sm transition-colors duration-200 flex items-center justify-center gap-1`}
+title="Upload local files"
+>
+<svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+</svg>
+<span className="hidden sm:inline">{uploading ? "..." : "Local"}</span>
+<input
+id="document-upload"
+type="file"
+multiple
+disabled={uploading}
+className="hidden"
+onChange={(e) => {
+handleUploadDocuments(Array.from(e.target.files));
+e.target.value = "";
+}}
+/>
+</label>
+{/* Google Drive upload button */}
+<GoogleDrivePicker
+folderName={selectedFolder}
+onUploadComplete={handleGoogleDriveUpload}
+buttonText="Drive"
+buttonClassName="px-3 py-1.5 text-white rounded-md text-sm transition-colors duration-200 flex items-center gap-1 bg-[#4285F4] hover:bg-[#3367D6]"
+multiselect={true}
+disabled={uploading}
+/>
+</div>
+</div>
 
  {(error || contextError) && (
  <div className="text-red-500 mb-3 p-2 bg-red-50 rounded border border-red-200 text-sm flex-shrink-0">

@@ -27,6 +27,7 @@ import BillingAndUsagePage from './pages/BillingAndUsagePage';
 import SettingsPage from './pages/SettingsPage';
 import GetHelpPage from './pages/GetHelpPage';
 import CaseDetailView from './components/DashboardComponents/CaseDetailView';
+import GoogleDriveCallback from './pages/GoogleDriveCallback';
 import { SidebarProvider } from './context/SidebarContext';
 import { FileManagerProvider } from './context/FileManagerContext';
 import AuthChecker from './components/AuthChecker';
@@ -41,6 +42,7 @@ function App() {
             <Route path="/" element={<PublicLayout hideHeaderAndFooter={true}><LandingPage /></PublicLayout>} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/auth/google/drive/callback" element={<GoogleDriveCallback />} />
 
                    <Route path="/services" element={<PublicLayout hideContactBar={true} hideFooter={true}><ServicesPage /></PublicLayout>} />
             <Route path="/aboutus" element={<PublicLayout hideContactBar={true} hideFooter={true}><AboutUsPage /></PublicLayout>} />

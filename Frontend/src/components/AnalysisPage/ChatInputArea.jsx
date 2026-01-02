@@ -1,10 +1,12 @@
 import React, { useRef } from 'react';
-import { Paperclip, Send, Loader2, BookOpen, ChevronDown, Bot, X, Wrench } from 'lucide-react';
+import { Send, Loader2, BookOpen, ChevronDown, Bot, X, Wrench } from 'lucide-react';
+import UploadOptionsMenu from '../UploadOptionsMenu';
 
 const ChatInputArea = ({
   fileInputRef,
   isUploading,
   handleFileUpload,
+  handleGoogleDriveUpload,
   showDropdown,
   setShowDropdown,
   fileId,
@@ -32,6 +34,7 @@ const ChatInputArea = ({
   showToolsDropdown,
   setShowToolsDropdown,
   handleMindmapClick,
+  folderName = null,
 }) => {
   const dropdownRef = useRef(null);
   const toolsDropdownRef = useRef(null);
@@ -50,19 +53,14 @@ const ChatInputArea = ({
       <div className={isSplitView ? '' : 'w-full max-w-4xl px-6'}>
         <form onSubmit={handleSend} className="mx-auto">
           <div className={`flex items-center space-x-3 bg-gray-50 rounded-xl border ${isSplitView ? 'border-gray-200 px-2.5 py-2' : 'border-gray-500 px-5 py-6'} focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container`}>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading}
-              className={`${isSplitView ? 'p-1' : 'p-2'} text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0`}
-              title="Upload Document"
-            >
-              {isUploading ? (
-                <Loader2 className={`${isSplitView ? 'h-3 w-3' : 'h-5 w-5'} animate-spin`} />
-              ) : (
-                <Paperclip className={isSplitView ? 'h-3 w-3' : 'h-5 w-5'} />
-              )}
-            </button>
+            <UploadOptionsMenu
+              fileInputRef={fileInputRef}
+              isUploading={isUploading}
+              onLocalFileClick={() => fileInputRef.current?.click()}
+              onGoogleDriveUpload={handleGoogleDriveUpload}
+              folderName={folderName}
+              isSplitView={isSplitView}
+            />
             <input
               ref={fileInputRef}
               type="file"

@@ -13,6 +13,8 @@ import MessagesList from '../components/AnalysisPage/MessageList';
 import DocumentList from '../components/AnalysisPage/DocumentList';
 import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
+import UploadOptionsMenu from '../components/UploadOptionsMenu';
+import googleDriveApi from '../services/googleDriveApi';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { isUserFreeTier, FREE_TIER_MAX_FILE_SIZE_BYTES, FREE_TIER_MAX_FILE_SIZE_MB, formatFileSize } from '../utils/planUtils';
@@ -1570,6 +1572,84 @@ const AnalysisPage = () => {
     event.target.value = '';
   };
 
+  // Handle Google Drive file upload
+  const handleGoogleDriveUpload = async (documents) => {
+    console.log('[handleGoogleDriveUpload] Received documents from Google Drive:', documents);
+    
+    if (!documents || documents.length === 0) {
+      console.log('[handleGoogleDriveUpload] No documents received');
+      return;
+    }
+
+    // Filter out failed uploads
+    const successfulDocs = documents.filter(doc => doc.status !== 'failed' && !doc.error);
+    
+    if (successfulDocs.length === 0) {
+      setError('No files were successfully uploaded from Google Drive');
+      return;
+    }
+
+    setIsUploading(true);
+    setShowSplitView(true);
+
+    // Create batch uploads for the uploaded documents
+    const newBatchUploads = successfulDocs.map((doc, index) => ({
+      id: `gdrive-${doc.id || Date.now()}-${index}`,
+      file: null,
+      fileName: doc.originalname || doc.name || 'Google Drive File',
+      fileSize: doc.file_size || doc.size || 0,
+      status: 'batch_processing',
+      progress: 100,
+      error: null,
+      fileId: doc.id,
+      processingProgress: 0,
+      isLargeFile: false,
+      source: 'google_drive',
+    }));
+
+    setBatchUploads(newBatchUploads);
+
+    // Add to uploaded documents
+    const newUploadedDocs = successfulDocs.map((doc) => ({
+      id: doc.id,
+      fileName: doc.originalname || doc.name || 'Google Drive File',
+      fileSize: doc.file_size || doc.size || 0,
+      uploadedAt: new Date().toISOString(),
+      status: 'batch_processing',
+      processingProgress: 0,
+      source: 'google_drive',
+    }));
+
+    setUploadedDocuments((prev) => [...prev, ...newUploadedDocs]);
+
+    // Set the first file as the active file
+    if (successfulDocs.length > 0 && successfulDocs[0].id) {
+      const firstDoc = successfulDocs[0];
+      setFileId(firstDoc.id);
+      setDocumentData({
+        id: firstDoc.id,
+        title: firstDoc.originalname || firstDoc.name || 'Google Drive File',
+        originalName: firstDoc.originalname || firstDoc.name,
+        size: firstDoc.file_size || firstDoc.size || 0,
+        type: firstDoc.mimetype || 'application/octet-stream',
+        uploadedAt: new Date().toISOString(),
+        status: 'batch_processing',
+        processingProgress: 0,
+        source: 'google_drive',
+      });
+
+      // Start polling for processing status
+      const fileIds = successfulDocs.map(doc => doc.id).filter(Boolean);
+      if (fileIds.length > 0) {
+        startBatchProcessingPolling(fileIds);
+        startProcessingStatusPolling(firstDoc.id);
+      }
+    }
+
+    setSuccess(`${successfulDocs.length} file(s) uploaded from Google Drive! Processing...`);
+    setIsUploading(false);
+  };
+
   const handleDropdownSelect = (secretName, secretId, llmName) => {
     console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
     setActiveDropdown(secretName);
@@ -2962,15 +3042,13 @@ const AnalysisPage = () => {
             )}
             <form onSubmit={handleSend} className="mx-auto mt-4">
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isUploading}
-                  className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
-                  title="Upload Document"
-                >
-                  {isUploading ? <Loader2 className="h-4 w-4 sm:h-5 sm:w-5 animate-spin" /> : <Paperclip className="h-4 w-4 sm:h-5 sm:w-5" />}
-                </button>
+                <UploadOptionsMenu
+                  fileInputRef={fileInputRef}
+                  isUploading={isUploading}
+                  onLocalFileClick={() => fileInputRef.current?.click()}
+                  onGoogleDriveUpload={handleGoogleDriveUpload}
+                  isSplitView={false}
+                />
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -3238,15 +3316,13 @@ const AnalysisPage = () => {
               )}
               <form onSubmit={handleSend}>
                 <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isUploading}
-                    className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
-                    title="Upload Document"
-                  >
-                    {isUploading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Paperclip className="h-3 w-3" />}
-                  </button>
+                  <UploadOptionsMenu
+                    fileInputRef={fileInputRef}
+                    isUploading={isUploading}
+                    onLocalFileClick={() => fileInputRef.current?.click()}
+                    onGoogleDriveUpload={handleGoogleDriveUpload}
+                    isSplitView={true}
+                  />
                   <input
                     ref={fileInputRef}
                     type="file"

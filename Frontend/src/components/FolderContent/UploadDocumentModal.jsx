@@ -1,7 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { toast } from 'react-toastify';
+import GoogleDrivePicker from '../GoogleDrivePicker';
 
-const UploadDocumentModal = ({ isOpen, onClose, onUpload }) => {
+const UploadDocumentModal = ({ isOpen, onClose, onUpload, folderName }) => {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [error, setError] = useState('');
   const fileInputRef = useRef(null);
@@ -64,12 +65,49 @@ const UploadDocumentModal = ({ isOpen, onClose, onUpload }) => {
     onClose();
   };
 
+  const handleGoogleDriveUpload = (documents) => {
+    // Google Drive files have been downloaded and uploaded to the server
+    // Trigger the same callback as local upload
+    if (onUpload) {
+      // Convert document format to match expected format
+      const uploadedFiles = documents.filter(doc => doc.status !== 'failed');
+      if (uploadedFiles.length > 0) {
+        onUpload(uploadedFiles, true); // true indicates files are already uploaded
+      }
+    }
+    onClose();
+  };
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
       <div className="bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-lg border border-gray-700">
         <h3 className="text-xl font-semibold text-white mb-4">Upload Documents</h3>
+        
+        {/* Upload Source Options */}
+        <div className="mb-4">
+          <p className="text-sm text-gray-400 mb-3">Choose upload source:</p>
+          <div className="flex gap-3 justify-center mb-4">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current.click()}
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-md flex items-center gap-2 transition-colors duration-200"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Local Files
+            </button>
+            <GoogleDrivePicker
+              folderName={folderName}
+              onUploadComplete={handleGoogleDriveUpload}
+              buttonText="Google Drive"
+              multiselect={true}
+            />
+          </div>
+        </div>
+
         <form onSubmit={handleSubmit}>
           <div
             className="border-2 border-dashed border-gray-600 rounded-lg p-6 text-center cursor-pointer hover:border-blue-500 transition-colors duration-200 mb-4"
@@ -122,10 +160,13 @@ const UploadDocumentModal = ({ isOpen, onClose, onUpload }) => {
             </button>
             <button
               type="submit"
-              className="px-4 py-2 text-white rounded-md transition-colors duration-200" 
+              disabled={selectedFiles.length === 0}
+              className={`px-4 py-2 text-white rounded-md transition-colors duration-200 ${
+                selectedFiles.length === 0 ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
               style={{ backgroundColor: '#21C1B6' }}
             >
-              Upload
+              Upload Local Files
             </button>
           </div>
         </form>
