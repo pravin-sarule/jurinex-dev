@@ -12188,3 +12188,6 @@ exports.getFolderChunks = async (req, res) => {
     });
   }
 };
+
+// Export processDocumentWithAI for use by Google Drive controller
+exports.processDocumentWithAI = processDocumentWithAI;

@@ -8,6 +8,7 @@ dotenv.config();
 console.log(`[Gateway] PAYMENT_SERVICE_URL: ${process.env.PAYMENT_SERVICE_URL}`);
 console.log(`[Gateway] Gateway Port: ${process.env.PORT || 5000}`);
 
+const { createProxyMiddleware } = require("http-proxy-middleware");
 const authProxy = require("./routes/authProxy");
 const fileProxy = require("./routes/fileProxy");
 // const paymentProxy = require("./routes/paymentProxy");
@@ -19,6 +20,9 @@ const chatProxy = require("./routes/chatProxy");
 // const userResourcesProxy = require("./routes/userResourcesProxy");
 
 const app = express();
+
+// Target URL for auth service
+const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
 
 // const allowedOrigins = ["http://localhost:5173", "http://localhost:5000"];
 
@@ -73,6 +77,26 @@ app.use((req, res, next) => {
 app.get("/health", (req, res) => {
   res.json({ status: "API Gateway is running" });
 });
+
+// Google OAuth callback - handle BEFORE other auth routes
+// This is a special route because Google redirects here directly
+app.use("/api/auth/google/callback", createProxyMiddleware({
+  target: targetAuth,
+  changeOrigin: true,
+  pathRewrite: (path, req) => {
+    // Preserve the full path including query params
+    const fullPath = `/api/auth/google/callback${path}`;
+    console.log(`[GATEWAY] Google OAuth callback: ${req.originalUrl} -> ${fullPath}`);
+    return fullPath;
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    console.log(`[GATEWAY] Google OAuth callback response: ${proxyRes.statusCode}`);
+  },
+  onError: (err, req, res) => {
+    console.error("[GATEWAY] Google OAuth callback error:", err.message);
+    res.status(502).send("Bad Gateway - auth service unreachable");
+  },
+}));
 
 // Mount proxies
 app.use(authProxy);

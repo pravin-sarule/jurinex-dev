@@ -21,6 +21,7 @@
     "firebase": "^12.5.0",
     "firebase-admin": "^13.5.0",
     "google-auth-library": "^10.4.2",
+    "googleapis": "^144.0.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^7.0.9",
     "pg": "^8.11.3",

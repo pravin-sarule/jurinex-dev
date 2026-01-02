@@ -11,6 +11,7 @@ const fileRoutes = require('./routes/fileRoutes');
 const contentRoutes = require('./routes/contentRoutes');
 const mindmapRoutes = require('./routes/mindmapRoutes');
 const multimodalRagRoutes = require('./routes/multimodalRagRoutes');
+const googleDriveRoutes = require('./routes/googleDriveRoutes');
 
 const { warmQueue } = require('./queues/embeddingQueue');
 const { startEmbeddingWorker } = require('./workers/embeddingWorker');
@@ -54,6 +55,7 @@ app.use('/api/doc', documentRoutes);
 app.use('/api/doc', chatRoutes);
 app.use('/api/doc', secretManagerRoutes);
 app.use('/api/files', fileRoutes);
+app.use('/api/files', googleDriveRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/mindmap', mindmapRoutes);
 app.use('/api/multimodal-rag', multimodalRagRoutes);

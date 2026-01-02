@@ -3,6 +3,7 @@ const router = express.Router();
 const { protect } = require('../middleware/auth');
 
 const { register, login, verifyOtpAndLogin, updateProfile, deleteAccount, logout, fetchProfile, getUserById, updateRazorpayCustomerId , firebaseGoogleSignIn, getUserInfo, getProfessionalProfile, updateProfessionalProfile, changePassword, getAllActiveUsers, getAllUsers } = require('../controllers/authController');
+const googleDriveRoutes = require('./googleDriveRoutes');
 
 router.post('/register', register);
 
@@ -35,5 +36,8 @@ router.post('/google', firebaseGoogleSignIn);
 
 
 router.put('/change-password', protect, changePassword); 
+
+// Google Drive OAuth routes
+router.use('/', googleDriveRoutes);
 
 module.exports = router;

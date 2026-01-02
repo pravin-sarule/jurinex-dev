@@ -680,8 +680,9 @@ async function retryWithBackoff(fn, retries = 3, delay = 2000) {
 }
 
 const GEMINI_MODELS = {
-  gemini: ['gemini-2.0-flash-exp', 'gemini-1.5-flash'],
-  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.0-pro-exp', 'gemini-1.5-pro'],
+  // Primary model with fallbacks for rate limiting (using valid model names)
+  gemini: ['gemini-2.0-flash-exp', 'gemini-2.5-flash-preview-04-17', 'gemini-2.0-flash'],
+  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.5-pro-preview-05-06'],
   'gemini-3-pro': ['gemini-3-pro-preview'], // Uses new SDK
 };
 
@@ -1344,10 +1345,39 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
           return geminiResponse;
         }
       } catch (err) {
-        console.warn(`❌ Gemini model ${modelName} failed: ${err.message}`);
+        const errorMessage = err.message || '';
+        console.warn(`❌ Gemini model ${modelName} failed: ${errorMessage.substring(0, 200)}`);
+        
+        const isRateLimitError = 
+          errorMessage.includes('429') ||
+          errorMessage.includes('Too Many Requests') ||
+          errorMessage.includes('quota') ||
+          errorMessage.includes('rate limit') ||
+          errorMessage.includes('exceeded') ||
+          err.status === 429;
+          
+        const isNotFoundError = 
+          errorMessage.includes('404') ||
+          errorMessage.includes('Not Found') ||
+          errorMessage.includes('is not found') ||
+          errorMessage.includes('not supported') ||
+          err.status === 404;
         
         const isGemini3ProFailure = modelName === 'gemini-3-pro-preview' && err.message?.includes('Gemini 3.0 Pro network error');
         const hasLegacyModels = models.length > 1 && models.some(m => m !== 'gemini-3-pro-preview');
+        
+        // If model not found, immediately try next fallback (no delay)
+        if (isNotFoundError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [FolderAI] Model ${modelName} not found, trying next fallback...`);
+          continue;
+        }
+        
+        // If rate limited, wait and try fallback
+        if (isRateLimitError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [FolderAI] Rate limit on ${modelName}, waiting before trying fallback model...`);
+          await new Promise(res => setTimeout(res, 2000));
+          continue;
+        }
         
         if (isGemini3ProFailure && hasLegacyModels) {
           console.log(`[Gemini 3.0 Pro] ⚠️ Falling back to legacy Gemini models due to network error...`);
@@ -1477,7 +1507,7 @@ async function getSummaryFromChunks(chunks) {
   // This avoids web search, system prompts, and other overhead
   try {
     // Try multiple models with fallback - attempt API call with each until one succeeds
-    const modelNames = ['gemini-2.0-flash-exp', 'gemini-1.5-flash-latest', 'gemini-1.5-pro', 'gemini-1.5-flash-002'];
+    const modelNames = ['gemini-2.0-flash-exp'];
     let lastError = null;
     let summaryText = null;
     let successfulModel = null;
@@ -1644,7 +1674,36 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         }
       } catch (err) {
         lastError = err;
-        console.warn(`[Stream] ❌ Gemini model ${modelName} failed:`, err.message);
+        const errorMessage = err.message || '';
+        console.warn(`[Stream] ❌ Gemini model ${modelName} failed:`, errorMessage.substring(0, 200));
+        
+        const isRateLimitError = 
+          errorMessage.includes('429') ||
+          errorMessage.includes('Too Many Requests') ||
+          errorMessage.includes('quota') ||
+          errorMessage.includes('rate limit') ||
+          errorMessage.includes('exceeded') ||
+          err.status === 429;
+          
+        const isNotFoundError = 
+          errorMessage.includes('404') ||
+          errorMessage.includes('Not Found') ||
+          errorMessage.includes('is not found') ||
+          errorMessage.includes('not supported') ||
+          err.status === 404;
+        
+        // If model not found, immediately try next fallback (no delay)
+        if (isNotFoundError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [FolderAI Stream] Model ${modelName} not found, trying next fallback...`);
+          continue;
+        }
+        
+        // If rate limited, wait and try fallback
+        if (isRateLimitError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [FolderAI Stream] Rate limit on ${modelName}, waiting before trying fallback model...`);
+          await new Promise(res => setTimeout(res, 2000));
+          continue;
+        }
         
         if (modelName === models[models.length - 1]) {
           throw err;

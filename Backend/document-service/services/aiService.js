@@ -454,30 +454,46 @@ function filterRelevantChunks(chunks, userMessage, maxChunks = 12) {
     .join('\n\n');
 }
 
-async function retryWithBackoff(fn, retries = 3, delay = 3000) {
-  for (let i = 1; i <= retries; i++) {
+// Retry with exponential backoff for rate limiting and overload errors
+async function retryWithBackoff(fn, retries = 3, delay = 2000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      console.warn(`⚠️ Attempt ${i} failed: ${err.message}`);
-      const transient =
-        err.message.includes('overloaded') ||
-        err.message.includes('temporarily unavailable') ||
-        err.message.includes('quota') ||
-        err.message.includes('rate limit') ||
-        err.message.includes('503');
-      if (transient && i < retries) {
-        await new Promise(res => setTimeout(res, delay * i));
-      } else if (i === retries) {
-        return '⚠️ The AI service is temporarily overloaded. Please try again.';
+      const errorMessage = err.message || '';
+      const isRateLimitError = 
+        errorMessage.includes('overloaded') ||
+        errorMessage.includes('503') ||
+        errorMessage.includes('429') ||
+        errorMessage.includes('Too Many Requests') ||
+        errorMessage.includes('temporarily unavailable') ||
+        errorMessage.includes('quota') ||
+        errorMessage.includes('rate limit') ||
+        errorMessage.includes('exceeded') ||
+        err.status === 429 ||
+        err.status === 503;
+        
+      console.warn(`⚠️ [retryWithBackoff] Attempt ${attempt}/${retries} failed:`, errorMessage.substring(0, 200));
+      
+      if (isRateLimitError) {
+        if (attempt < retries) {
+          const backoffDelay = delay * attempt;
+          console.log(`⏳ [retryWithBackoff] Rate limit detected, waiting ${backoffDelay}ms before retry...`);
+          await new Promise(res => setTimeout(res, backoffDelay));
+        } else {
+          throw new Error('LLM provider is temporarily unavailable due to rate limiting. Please try again later.');
+        }
+      } else {
+        throw err; // Re-throw non-rate-limit errors immediately
       }
     }
   }
 }
 
 const GEMINI_MODELS = {
-  gemini: ['gemini-2.0-flash-exp', 'gemini-1.5-flash-latest'],
-  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.0-pro-exp'],
+  // Primary model with fallbacks for rate limiting (using valid model names)
+  gemini: ['gemini-2.0-flash-exp', 'gemini-2.5-flash-preview-04-17', 'gemini-2.0-flash'],
+  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.5-pro-preview-05-06'],
   'gemini-3-pro': ['gemini-3-pro-preview'], // Uses new SDK
 };
 
@@ -631,8 +647,8 @@ async function getModelMaxTokens(provider, modelName) {
     'gemini-2.5-pro': 8192,
     'gemini-2.5-flash': 8192,
     'gemini-2.0-flash-exp': 8192,
+    'gemini-2.0-flash': 8192,
     'gemini-2.0-pro-exp': 8192,
-    'gemini-1.5-flash-latest': 8192,
     'gemini-1.5-flash': 8192,
     'gemini-1.5-pro': 8192,
   };
@@ -1182,8 +1198,38 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
           return text;
         }
       } catch (err) {
-        console.warn(`⚠️ Gemini model ${modelName} failed: ${err.message}`);
+        const errorMessage = err.message || '';
+        const isRateLimitError = 
+          errorMessage.includes('429') ||
+          errorMessage.includes('Too Many Requests') ||
+          errorMessage.includes('quota') ||
+          errorMessage.includes('rate limit') ||
+          errorMessage.includes('exceeded') ||
+          err.status === 429;
+          
+        const isNotFoundError = 
+          errorMessage.includes('404') ||
+          errorMessage.includes('Not Found') ||
+          errorMessage.includes('is not found') ||
+          errorMessage.includes('not supported') ||
+          err.status === 404;
+          
+        console.warn(`⚠️ Gemini model ${modelName} failed: ${errorMessage.substring(0, 200)}`);
         console.error('[Gemini Error Details]', err.response?.data || err);
+        
+        // If model not found, immediately try next fallback (no delay)
+        if (isNotFoundError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [callSinglePrompt] Model ${modelName} not found, trying next fallback...`);
+          continue;
+        }
+        
+        // If rate limited, wait and try fallback
+        if (isRateLimitError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [callSinglePrompt] Rate limit on ${modelName}, waiting before trying fallback model...`);
+          await new Promise(res => setTimeout(res, 2000));
+          continue;
+        }
+        
         if (modelName === models[models.length - 1]) {
           throw err;
         }
@@ -1351,10 +1397,14 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   if (isGemini) {
     const models = GEMINI_MODELS[provider] || GEMINI_MODELS['gemini'];
+    let lastError = null;
+    
     for (const modelName of models) {
       try {
         const maxOutputTokens = await getModelMaxTokens(provider, modelName);
         const isGemini3Pro = modelName === 'gemini-3-pro-preview';
+        
+        console.log(`[streamLLM] Trying Gemini model: ${modelName}`);
         
         if (isGemini3Pro) {
           const hasValidSystemPrompt = enhancedSystemPrompt && enhancedSystemPrompt.trim().length > 0;
@@ -1398,10 +1448,49 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
           return;
         }
       } catch (err) {
-        if (modelName === models[models.length - 1]) throw err;
+        lastError = err;
+        const errorMessage = err.message || '';
+        const isRateLimitError = 
+          errorMessage.includes('429') ||
+          errorMessage.includes('Too Many Requests') ||
+          errorMessage.includes('quota') ||
+          errorMessage.includes('rate limit') ||
+          errorMessage.includes('exceeded') ||
+          err.status === 429;
+        
+        const isNotFoundError = 
+          errorMessage.includes('404') ||
+          errorMessage.includes('Not Found') ||
+          errorMessage.includes('is not found') ||
+          errorMessage.includes('not supported') ||
+          err.status === 404;
+        
+        console.warn(`⚠️ [streamLLM] Gemini model ${modelName} failed:`, errorMessage.substring(0, 200));
+        
+        // If model not found, immediately try next fallback (no delay)
+        if (isNotFoundError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [streamLLM] Model ${modelName} not found, trying next fallback...`);
+          continue;
+        }
+        
+        // If rate limited, wait longer and try fallback
+        if (isRateLimitError && modelName !== models[models.length - 1]) {
+          console.log(`🔄 [streamLLM] Rate limit on ${modelName}, waiting before trying fallback model...`);
+          // Wait 2 seconds before trying the next model
+          await new Promise(res => setTimeout(res, 2000));
+          continue;
+        }
+        
+        // If this is the last model, throw the error
+        if (modelName === models[models.length - 1]) {
+          throw err;
+        }
         continue;
       }
     }
+    
+    // If we get here, all models failed
+    if (lastError) throw lastError;
   }
 
   const hasValidSystemPrompt = enhancedSystemPrompt && enhancedSystemPrompt.trim().length > 0;

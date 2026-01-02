@@ -53,10 +53,15 @@ router.use(
       if (req.user && req.user.id) {
         proxyReq.setHeader("x-user-id", req.user.id);
       }
+      // Forward Authorization header for Google Drive service-to-service calls
+      if (req.headers.authorization) {
+        proxyReq.setHeader("Authorization", req.headers.authorization);
+      }
+      console.log(`[Gateway] Proxying docs request to: /api/files${req.url}`);
     },
     logLevel: "debug", // shows proxy details
-    proxyTimeout: 60000,
-    timeout: 60000,
+    proxyTimeout: 120000, // 2 minutes for file uploads
+    timeout: 120000,
     onError: (err, req, res) => {
       console.error("File service proxy error:", err.message);
       res.status(500).json({ error: "File Service is unavailable" });
