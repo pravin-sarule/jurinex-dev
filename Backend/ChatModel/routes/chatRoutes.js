@@ -19,6 +19,12 @@ router.post(
 );
 
 router.post(
+  '/google-drive/upload',
+  protect,
+  chatController.uploadDocumentFromGoogleDrive
+);
+
+router.post(
   '/ask',
   protect,
   chatController.askQuestion

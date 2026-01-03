@@ -80,14 +80,22 @@ app.get("/health", (req, res) => {
 
 // Google OAuth callback - handle BEFORE other auth routes
 // This is a special route because Google redirects here directly
-app.use("/api/auth/google/callback", createProxyMiddleware({
+// Use app.get() to ensure exact matching and query param preservation
+app.get("/api/auth/google/callback", createProxyMiddleware({
   target: targetAuth,
   changeOrigin: true,
   pathRewrite: (path, req) => {
-    // Preserve the full path including query params
-    const fullPath = `/api/auth/google/callback${path}`;
-    console.log(`[GATEWAY] Google OAuth callback: ${req.originalUrl} -> ${fullPath}`);
-    return fullPath;
+    // Preserve query string from original request
+    const queryString = req.url.includes('?') ? req.url.split('?')[1] : '';
+    const targetPath = `/api/auth/google/callback${queryString ? '?' + queryString : ''}`;
+    console.log(`[GATEWAY] Google OAuth callback: ${req.method} ${req.originalUrl}`);
+    console.log(`[GATEWAY] Query string: ${queryString || 'none'}`);
+    console.log(`[GATEWAY] Proxying to: ${targetPath}`);
+    return targetPath;
+  },
+  onProxyReq: (proxyReq, req) => {
+    // Log the actual request being sent
+    console.log(`[GATEWAY] Proxy request path: ${proxyReq.path}`);
   },
   onProxyRes: (proxyRes, req, res) => {
     console.log(`[GATEWAY] Google OAuth callback response: ${proxyRes.statusCode}`);
@@ -95,6 +103,16 @@ app.use("/api/auth/google/callback", createProxyMiddleware({
   onError: (err, req, res) => {
     console.error("[GATEWAY] Google OAuth callback error:", err.message);
     res.status(502).send("Bad Gateway - auth service unreachable");
+  },
+}));
+
+// Also handle with trailing slash
+app.get("/api/auth/google/callback/", createProxyMiddleware({
+  target: targetAuth,
+  changeOrigin: true,
+  pathRewrite: (path, req) => {
+    const queryString = req.url.includes('?') ? req.url.split('?')[1] : '';
+    return `/api/auth/google/callback${queryString ? '?' + queryString : ''}`;
   },
 }));
 

@@ -11,10 +11,34 @@ const GoogleDriveCallback = () => {
 
   useEffect(() => {
     const handleCallback = async () => {
+      const success = searchParams.get('success');
+      const errorParam = searchParams.get('error');
       const code = searchParams.get('code');
       const state = searchParams.get('state');
-      const errorParam = searchParams.get('error');
 
+      // Check for success parameter first (backend already processed the OAuth)
+      if (success === 'true') {
+        setStatus('success');
+        toast.success('Google Drive connected successfully!');
+
+        // If opened as popup, send success message to parent window
+        if (window.opener) {
+          window.opener.postMessage({
+            type: 'GOOGLE_DRIVE_AUTH_SUCCESS'
+          }, window.location.origin);
+          
+          // Close popup after short delay
+          setTimeout(() => window.close(), 1500);
+        } else {
+          // If not a popup, redirect to dashboard or previous page
+          setTimeout(() => {
+            navigate('/dashboard', { replace: true });
+          }, 1500);
+        }
+        return;
+      }
+
+      // Check for error parameter
       if (errorParam) {
         setStatus('error');
         setError(`Authorization failed: ${errorParam}`);
@@ -30,14 +54,11 @@ const GoogleDriveCallback = () => {
         return;
       }
 
-      if (!code) {
-        setStatus('error');
-        setError('No authorization code received');
-        return;
-      }
-
+      // Legacy flow: if code and state are present, use POST API to complete OAuth
+      // This is for cases where frontend handles the callback directly
+      if (code && state) {
       try {
-        // Complete the OAuth flow
+          // Complete the OAuth flow via POST API
         const result = await googleDriveApi.handleCallback(code, state);
         
         setStatus('success');
@@ -71,6 +92,12 @@ const GoogleDriveCallback = () => {
           }, window.location.origin);
         }
       }
+        return;
+      }
+
+      // No success, no error, no code - invalid request
+      setStatus('error');
+      setError('Invalid callback request. Please try connecting again.');
     };
 
     handleCallback();

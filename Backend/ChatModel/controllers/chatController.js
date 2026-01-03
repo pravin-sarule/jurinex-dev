@@ -147,11 +147,16 @@ const { askLLMWithGCS, streamLLMWithGCS } = require('../services/llmService');
 const UserProfileService = require('../services/userProfileService');
 const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const { 
   fetchTemplateFilesData, 
   buildEnhancedSystemPromptWithTemplates 
 } = require('../services/secretPromptTemplateService');
+
+// Import Google Drive service from document-service
+const googleDriveService = require(path.join(__dirname, '../../document-service/services/googleDriveService'));
+const { downloadFile: downloadFileFromGoogleDrive } = googleDriveService;
 
 exports.uploadDocumentAndGetURI = async (req, res) => {
   try {
@@ -222,6 +227,117 @@ exports.uploadDocumentAndGetURI = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to upload document',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Upload document from Google Drive to ChatModel
+ * Downloads file from Google Drive, uploads to GCS, and saves to database
+ * Same workflow as uploadDocumentAndGetURI but for Google Drive files
+ */
+exports.uploadDocumentFromGoogleDrive = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const authorizationHeader = req.headers.authorization;
+    const { fileId, accessToken } = req.body;
+    
+    if (!fileId) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Google Drive file ID is required' 
+      });
+    }
+
+    if (!accessToken) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Google Drive access token is required' 
+      });
+    }
+
+    console.log(`📤 [ChatModel] Downloading file from Google Drive for user ${userId}: ${fileId}`);
+
+    const userProfile = await UserProfileService.getUserProfile(userId, authorizationHeader);
+    if (!userProfile) {
+      console.warn(`⚠️ Could not fetch user profile for user ${userId}`);
+    }
+
+    const bucketName = process.env.GCS_BUCKET_NAME;
+    
+    if (!bucketName) {
+      return res.status(500).json({
+        success: false,
+        message: 'GCS configuration missing. Please set GCS_BUCKET_NAME in .env'
+      });
+    }
+
+    // Step 1: Download file from Google Drive
+    let downloadedFile;
+    try {
+      downloadedFile = await downloadFileFromGoogleDrive(accessToken, fileId);
+    } catch (driveError) {
+      console.error('❌ [ChatModel] Google Drive download error:', driveError.message);
+      if (driveError.message?.includes('invalid_grant') || driveError.message?.includes('Invalid Credentials')) {
+        return res.status(401).json({
+          success: false,
+          message: 'Google Drive access token expired. Please try again.',
+          needsAuth: true
+        });
+      }
+      throw driveError;
+    }
+
+    const { buffer, filename, mimeType } = downloadedFile;
+    const fileSizeBytes = buffer.length;
+
+    console.log(`✅ [ChatModel] Downloaded file from Google Drive: ${filename}, size: ${fileSizeBytes} bytes, type: ${mimeType}`);
+
+    // Step 2: Upload to GCS (same path structure as regular upload)
+    const timestamp = Date.now();
+    const safeFilename = filename.replace(/\s+/g, '_');
+    const gcsFilePath = `chat-uploads/${userId}/${timestamp}_${safeFilename}`;
+
+    const gcsUri = await uploadFileToGCS(
+      bucketName,
+      gcsFilePath,
+      buffer,
+      mimeType
+    );
+
+    console.log(`✅ [ChatModel] File uploaded to GCS: ${gcsUri}`);
+
+    // Step 3: Save file record to database
+    const savedFile = await File.create({
+      user_id: userId,
+      originalname: filename,
+      gcs_path: gcsFilePath,
+      mimetype: mimeType,
+      size: fileSizeBytes,
+      status: 'uploaded'
+    });
+
+    console.log(`✅ [ChatModel] File metadata saved to database: ${savedFile.id}`);
+
+    // Step 4: Return success response (same format as uploadDocumentAndGetURI)
+    return res.status(200).json({
+      success: true,
+      message: 'File downloaded from Google Drive and uploaded successfully',
+      data: {
+        file_id: savedFile.id,
+        filename: filename,
+        gcs_uri: gcsUri,
+        size: fileSizeBytes,
+        mimetype: mimeType
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [ChatModel] Error uploading document from Google Drive:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to upload document from Google Drive',
       error: error.message
     });
   }

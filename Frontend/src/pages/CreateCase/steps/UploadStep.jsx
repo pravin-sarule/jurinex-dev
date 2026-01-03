@@ -15,7 +15,6 @@ import {
 
 const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange }) => {
   const [selectedFiles, setSelectedFiles] = useState(caseData.uploadedFiles || []);
-  const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null); // 'uploading', 'processing', 'extracting', 'success', 'error'
   const [uploadMessage, setUploadMessage] = useState('');
@@ -92,33 +91,6 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   // Handle file selection
   const handleFileChange = (e) => {
     const files = Array.from(e.target.files);
-    const newFiles = [...selectedFiles, ...files];
-    setSelectedFiles(newFiles);
-    setCaseData({
-      ...caseData,
-      uploadedFiles: newFiles,
-    });
-  };
-
-  // Handle drag and drop
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-
-    const files = Array.from(e.dataTransfer.files);
     const newFiles = [...selectedFiles, ...files];
     setSelectedFiles(newFiles);
     setCaseData({
@@ -699,78 +671,45 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
       </div>
 
       {/* Upload Source Options */}
-      <div className="flex items-center justify-center gap-4 mb-6">
-        <button
-          type="button"
-          onClick={handleBrowseClick}
-          disabled={isUploading}
-          className="flex items-center gap-2 px-6 py-3 bg-gradient-to-br from-[#E6F8F7] to-[#F0FDFC] border-2 border-[#21C1B6] text-[#21C1B6] rounded-xl hover:bg-[#21C1B6] hover:text-white transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
-        >
-          <HardDrive className="w-5 h-5" />
-          Local Files
-        </button>
-        <span className="text-gray-400 font-medium">or</span>
-        <GoogleDrivePicker
-          onFilesSelected={handleGoogleDriveFilesSelected}
-          buttonText="Google Drive"
-          buttonClassName="flex items-center gap-2 px-6 py-3 bg-white border-2 border-gray-300 text-gray-700 rounded-xl hover:border-[#4285F4] hover:text-[#4285F4] transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
-          iconClassName="w-5 h-5"
-          multiselect={true}
-          disabled={isUploading}
-        />
-      </div>
-
-      {/* Upload Area */}
-      <div
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        onClick={handleBrowseClick}
-        className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-300 ease-in-out ${
-          isDragging
-            ? 'border-[#21C1B6] bg-gradient-to-br from-[#E6F8F7] to-[#F0FDFC] shadow-lg scale-[1.01]'
-            : 'border-gray-300 hover:border-[#21C1B6] hover:bg-gradient-to-br hover:from-gray-50 hover:to-[#F9FAFB] hover:shadow-md'
-        }`}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            handleBrowseClick();
-          }
-        }}
-        aria-label="Upload Documents"
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          onChange={handleFileChange}
-          className="hidden"
-          accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
-          aria-label="File Input"
-        />
-        {/* Upload Icon */}
-        <div className="flex justify-center mb-6">
-          <div className={`w-20 h-20 rounded-2xl flex items-center justify-center transition-all duration-300 ${
-            isDragging
-              ? 'bg-[#21C1B6] shadow-lg'
-              : 'bg-gradient-to-br from-[#E6F8F7] to-[#F0FDFC] border-2 border-[#21C1B6] border-opacity-20'
-          }`}>
-            <Upload className={`h-10 w-10 transition-colors duration-300 ${
-              isDragging ? 'text-white' : 'text-[#21C1B6]'
-            }`} />
+      <div className="mt-8 mb-6">
+        <div className="bg-white border-2 border-gray-200 rounded-xl p-8 shadow-sm">
+          <div className="flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onClick={handleBrowseClick}
+              disabled={isUploading}
+              className="flex items-center gap-2 px-6 py-3 bg-white border-2 border-gray-300 text-gray-700 rounded-xl hover:border-gray-400 hover:text-gray-900 transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+            >
+              <HardDrive className="w-5 h-5" />
+              Local Files
+            </button>
+            <span className="text-gray-400 font-medium">or</span>
+            <GoogleDrivePicker
+              onFilesSelected={handleGoogleDriveFilesSelected}
+              buttonText="Google Drive"
+              buttonClassName="flex items-center gap-2 px-6 py-3 bg-white border-2 border-gray-300 text-gray-700 rounded-xl hover:border-[#4285F4] hover:text-[#4285F4] transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+              iconClassName="w-5 h-5"
+              multiselect={true}
+              disabled={isUploading}
+            />
           </div>
         </div>
-        <p className="text-base text-gray-700 mb-2 font-medium">
-          Drag and drop files here, or{' '}
-          <span className="text-[#21C1B6] font-semibold cursor-pointer hover:underline transition-all">click to browse</span>
-        </p>
-        <p className="text-sm text-gray-500 mt-3">
-          Supported formats: PDF, DOC, DOCX, TXT, PNG, JPG, JPEG, TIFF
-        </p>
-        {selectedFiles.length > 0 && (
-          <div className="mt-8 text-left">
+      </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        onChange={handleFileChange}
+        className="hidden"
+        accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
+        aria-label="File Input"
+      />
+
+      {/* Selected Files List */}
+      {selectedFiles.length > 0 && (
+        <div className="mt-6">
+          <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
             <p className="text-sm font-semibold text-gray-800 mb-4">
               Selected files ({selectedFiles.length})
             </p>
@@ -778,7 +717,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
               {selectedFiles.map((file, index) => (
                 <div
                   key={index}
-                  className={`flex items-center justify-between bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all duration-200 ${
+                  className={`flex items-center justify-between bg-gray-50 p-4 rounded-xl border shadow-sm hover:shadow-md transition-all duration-200 ${
                     file.fromGoogleDrive ? 'border-blue-200' : 'border-gray-200'
                   }`}
                 >
@@ -816,8 +755,8 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
               ))}
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Upload Button */}
       {selectedFiles.length > 0 && !isUploading && (

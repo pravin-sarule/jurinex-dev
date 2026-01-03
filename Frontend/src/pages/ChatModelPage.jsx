@@ -14,6 +14,8 @@ import MessagesList from '../components/AnalysisPage/MessageList';
 import DocumentList from '../components/AnalysisPage/DocumentList';
 import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
+import UploadOptionsMenu from '../components/UploadOptionsMenu';
+import googleDriveApi from '../services/googleDriveApi';
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
@@ -1534,6 +1536,132 @@ const ChatModelPage = () => {
     event.target.value = '';
   };
 
+  // Handle Google Drive file upload for ChatModel
+  const handleGoogleDriveUpload = async (files) => {
+    console.log('[handleGoogleDriveUpload] Files selected from Google Drive:', files);
+    
+    if (!files || files.length === 0) {
+      console.log('[handleGoogleDriveUpload] No files received');
+      return;
+    }
+
+    // For ChatModel, we'll process the first file (single file upload workflow)
+    const file = files[0];
+    
+    try {
+      setIsChatUploading(true);
+      setUploadProgress(0);
+      setError(null);
+
+      // Get access token
+      let tokenData;
+      try {
+        tokenData = await googleDriveApi.getAccessToken();
+      } catch (error) {
+        if (error.response?.data?.needsAuth) {
+          setError('Google Drive authorization expired. Please reconnect your Google Drive.');
+          setIsChatUploading(false);
+          return;
+        }
+        throw error;
+      }
+
+      const accessToken = tokenData.accessToken;
+      const fileId = file.id || file.fileId;
+
+      if (!fileId) {
+        setError('File ID is missing from selected file');
+        setIsChatUploading(false);
+        return;
+      }
+
+      console.log('[handleGoogleDriveUpload] Uploading file to ChatModel:', fileId);
+
+      setUploadProgress(20);
+
+      // Call ChatModel Google Drive upload endpoint
+      const token = getAuthToken();
+      const headers = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      setUploadProgress(40);
+
+      const response = await fetch(`${API_BASE_URL}/chat/google-drive/upload`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          fileId,
+          accessToken,
+        }),
+      });
+
+      setUploadProgress(70);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.message || errorData.error || `Upload failed with status ${response.status}`;
+        
+        if (errorData.needsAuth) {
+          setError('Google Drive authorization expired. Please reconnect your Google Drive.');
+        } else {
+          setError(`Failed to upload from Google Drive: ${errorMessage}`);
+        }
+        setIsChatUploading(false);
+        return;
+      }
+
+      const result = await response.json();
+      console.log('[handleGoogleDriveUpload] Upload response:', result);
+
+      setUploadProgress(90);
+
+      const uploadedFileId = result.data?.file_id || result.file_id;
+
+      if (!uploadedFileId) {
+        setError('No file_id returned from upload');
+        setIsChatUploading(false);
+        return;
+      }
+
+      console.log('[handleGoogleDriveUpload] Extracted file_id:', uploadedFileId);
+
+      setUploadedFileId(uploadedFileId);
+      setFileId(uploadedFileId);
+      setUploadProgress(100);
+
+      // Set document data
+      setDocumentData({
+        name: result.data?.filename || file.name,
+        originalName: result.data?.filename || file.name,
+        size: result.data?.size || file.sizeBytes || 0,
+        type: result.data?.mimetype || file.mimeType,
+        uploadedAt: new Date().toISOString(),
+      });
+
+      setTimeout(() => {
+        setIsChatUploading(false);
+        setSuccess('Document uploaded from Google Drive successfully! You can now ask questions about it.');
+        
+        setShowSplitView(true);
+        setHasResponse(true);
+        
+        setStreamingStatus('ready');
+        setStreamingMessage('Document ready. You can now ask questions about it.');
+
+        fetchChatModelFiles();
+      }, 500);
+
+    } catch (error) {
+      console.error('[handleGoogleDriveUpload] Error:', error);
+      setError(`Failed to upload from Google Drive: ${error.message}`);
+      setIsChatUploading(false);
+    }
+  };
+
   const handleDropdownSelect = (secretName, secretId, llmName) => {
     console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
    
@@ -2101,6 +2229,27 @@ const ChatModelPage = () => {
     fetchSecrets();
   }, []);
 
+  // Format structured JSON responses (similar to AnalysisPage)
+  useEffect(() => {
+    if (selectedMessageId && messages.length > 0 && currentResponse) {
+      const selectedMessage = messages.find(msg => msg.id === selectedMessageId);
+      if (selectedMessage) {
+        const rawAnswer = selectedMessage.answer || selectedMessage.response || '';
+        const isSecretPrompt = selectedMessage.used_secret_prompt || false;
+        const isCurrentResponseRawJson = isStructuredJsonResponse(currentResponse);
+        const isRawAnswerStructured = isStructuredJsonResponse(rawAnswer);
+        
+        if (isSecretPrompt && isRawAnswerStructured && (isCurrentResponseRawJson || currentResponse === rawAnswer)) {
+          const formattedResponse = renderSecretPromptResponse(rawAnswer);
+          if (formattedResponse !== currentResponse) {
+            setCurrentResponse(formattedResponse);
+            setAnimatedResponseContent(formattedResponse);
+          }
+        }
+      }
+    }
+  }, [selectedMessageId, messages, currentResponse]);
+
 
 
   useEffect(() => {
@@ -2637,15 +2786,14 @@ const ChatModelPage = () => {
             )}
             <form onSubmit={handleSend} className="mx-auto mt-4">
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
+                <UploadOptionsMenu
+                  fileInputRef={fileInputRef}
+                  isUploading={isUploading || isChatUploading}
+                  onLocalFileClick={() => fileInputRef.current?.click()}
+                  onGoogleDriveFilesSelected={handleGoogleDriveUpload}
+                  isSplitView={false}
                   disabled={isUploading || isChatUploading}
-                  className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
-                  title="Upload Document"
-                >
-                  {(isUploading || isChatUploading) ? <Loader2 className="h-4 w-4 sm:h-5 sm:w-5 animate-spin" /> : <Paperclip className="h-4 w-4 sm:h-5 sm:w-5" />}
-                </button>
+                />
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -2908,15 +3056,14 @@ const ChatModelPage = () => {
               )}
               <form onSubmit={handleSend}>
                 <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
+                  <UploadOptionsMenu
+                    fileInputRef={fileInputRef}
+                    isUploading={isUploading || isChatUploading}
+                    onLocalFileClick={() => fileInputRef.current?.click()}
+                    onGoogleDriveFilesSelected={handleGoogleDriveUpload}
+                    isSplitView={true}
                     disabled={isUploading || isChatUploading}
-                    className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
-                    title="Upload Document"
-                  >
-                    {(isUploading || isChatUploading) ? <Loader2 className="h-3 w-3 animate-spin" /> : <Paperclip className="h-3 w-3" />}
-                  </button>
+                  />
                   <input
                     ref={fileInputRef}
                     type="file"
