@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import googleDriveApi from '../services/googleDriveApi';
@@ -8,16 +8,26 @@ const GoogleDriveCallback = () => {
   const navigate = useNavigate();
   const [status, setStatus] = useState('processing');
   const [error, setError] = useState(null);
+  const isProcessingRef = useRef(false); // Guard to prevent duplicate processing
 
   useEffect(() => {
+    
     const handleCallback = async () => {
+      // Prevent duplicate processing
+      if (isProcessingRef.current) {
+        console.log('[GoogleDriveCallback] Already processing, skipping duplicate call');
+        return;
+      }
+      
       const success = searchParams.get('success');
       const errorParam = searchParams.get('error');
       const code = searchParams.get('code');
       const state = searchParams.get('state');
 
       // Check for success parameter first (backend already processed the OAuth)
+      // IMPORTANT: If success=true, backend already handled it - DO NOT POST again
       if (success === 'true') {
+        isProcessingRef.current = true;
         setStatus('success');
         toast.success('Google Drive connected successfully!');
 
@@ -40,6 +50,7 @@ const GoogleDriveCallback = () => {
 
       // Check for error parameter
       if (errorParam) {
+        isProcessingRef.current = true;
         setStatus('error');
         setError(`Authorization failed: ${errorParam}`);
         
@@ -54,50 +65,56 @@ const GoogleDriveCallback = () => {
         return;
       }
 
-      // Legacy flow: if code and state are present, use POST API to complete OAuth
-      // This is for cases where frontend handles the callback directly
-      if (code && state) {
-      try {
+      // Legacy flow: if code and state are present AND no success/error, use POST API to complete OAuth
+      // This is ONLY for cases where Google redirects directly to frontend (shouldn't happen in normal flow)
+      // NOTE: This should rarely execute since backend handles the callback first
+      if (code && state && !success && !errorParam) {
+        isProcessingRef.current = true;
+        try {
+          console.log('[GoogleDriveCallback] Processing legacy callback with code/state');
           // Complete the OAuth flow via POST API
-        const result = await googleDriveApi.handleCallback(code, state);
-        
-        setStatus('success');
-        toast.success('Google Drive connected successfully!');
-
-        // If opened as popup, send success message to parent window
-        if (window.opener) {
-          window.opener.postMessage({
-            type: 'GOOGLE_DRIVE_AUTH_SUCCESS',
-            code,
-            state
-          }, window.location.origin);
+          const result = await googleDriveApi.handleCallback(code, state);
           
-          // Close popup after short delay
-          setTimeout(() => window.close(), 1500);
-        } else {
-          // If not a popup, redirect to dashboard or previous page
-          setTimeout(() => {
-            navigate('/dashboard', { replace: true });
-          }, 1500);
+          setStatus('success');
+          toast.success('Google Drive connected successfully!');
+
+          // If opened as popup, send success message to parent window
+          if (window.opener) {
+            window.opener.postMessage({
+              type: 'GOOGLE_DRIVE_AUTH_SUCCESS',
+              code,
+              state
+            }, window.location.origin);
+            
+            // Close popup after short delay
+            setTimeout(() => window.close(), 1500);
+          } else {
+            // If not a popup, redirect to dashboard or previous page
+            setTimeout(() => {
+              navigate('/dashboard', { replace: true });
+            }, 1500);
+          }
+        } catch (err) {
+          console.error('[GoogleDriveCallback] Error:', err);
+          setStatus('error');
+          setError(err.response?.data?.error || err.message || 'Failed to connect Google Drive');
+          
+          if (window.opener) {
+            window.opener.postMessage({
+              type: 'GOOGLE_DRIVE_AUTH_ERROR',
+              error: err.message
+            }, window.location.origin);
+          }
         }
-      } catch (err) {
-        console.error('[GoogleDriveCallback] Error:', err);
-        setStatus('error');
-        setError(err.response?.data?.error || err.message || 'Failed to connect Google Drive');
-        
-        if (window.opener) {
-          window.opener.postMessage({
-            type: 'GOOGLE_DRIVE_AUTH_ERROR',
-            error: err.message
-          }, window.location.origin);
-        }
-      }
         return;
       }
 
       // No success, no error, no code - invalid request
-      setStatus('error');
-      setError('Invalid callback request. Please try connecting again.');
+      if (!isProcessingRef.current) {
+        isProcessingRef.current = true;
+        setStatus('error');
+        setError('Invalid callback request. Please try connecting again.');
+      }
     };
 
     handleCallback();

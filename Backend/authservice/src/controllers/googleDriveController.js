@@ -218,10 +218,27 @@ const handleCallbackPost = async (req, res) => {
     });
   } catch (error) {
     console.error('[GoogleDrive] Error handling callback (POST):', error);
+    console.error('[GoogleDrive] Error details:', {
+      message: error.message,
+      code: error.code,
+      response: error.response?.data
+    });
     
-    if (error.message.includes('invalid_grant')) {
+    // Handle invalid_grant (code already used or expired)
+    if (error.message.includes('invalid_grant') || error.code === 'invalid_grant') {
+      // Check if user already has a refresh token (might be duplicate callback)
+      const user = await User.findById(userId);
+      if (user?.google_drive_refresh_token) {
+        console.log('[GoogleDrive] Code already used, but user already has refresh token - likely duplicate callback');
+        // Return success since connection already exists
+        return res.json({ 
+          message: 'Google Drive is already connected',
+          connected: true 
+        });
+      }
+      
       return res.status(400).json({ 
-        message: 'Invalid authorization code. Please try connecting again.' 
+        message: 'Authorization code has already been used or expired. Please try connecting again.' 
       });
     }
     

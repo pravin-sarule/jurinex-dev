@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'react-toastify';
 import googleDriveApi, { openGooglePicker, loadGooglePickerApi } from '../services/googleDriveApi';
 import driveLogo from '../assets/drive logo.avif';
@@ -22,6 +22,7 @@ const GoogleDrivePicker = ({
   const [isUploading, setIsUploading] = useState(false);
   const [checkingConnection, setCheckingConnection] = useState(true);
   const [currentAccessToken, setCurrentAccessToken] = useState(null);
+  const isProcessingRef = useRef(false); // Guard to prevent duplicate processing
 
   // Check connection status on mount
   useEffect(() => {
@@ -44,16 +45,65 @@ const GoogleDrivePicker = ({
   // Handle OAuth callback from popup/redirect
   useEffect(() => {
     const handleMessage = async (event) => {
+      // Only process messages from same origin
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+      
+      // Prevent duplicate processing
+      if (isProcessingRef.current) {
+        console.log('[GoogleDrive] Already processing callback, skipping duplicate message');
+        return;
+      }
+      
       if (event.data?.type === 'GOOGLE_DRIVE_AUTH_SUCCESS') {
         const { code, state } = event.data;
+        
+        // If backend already processed (no code/state in message), just update status
+        if (!code || !state) {
+          console.log('[GoogleDrive] Backend already processed callback, updating connection status');
+          isProcessingRef.current = true;
+          setIsConnected(true);
+          // Re-check connection status to ensure it's updated
+          checkConnectionStatus();
+          // Reset after a delay to allow future callbacks
+          setTimeout(() => {
+            isProcessingRef.current = false;
+          }, 2000);
+          // Don't call handleCallback again - backend already did it
+          return;
+        }
+        
+        // Legacy flow: if code/state are present, POST to backend
+        // This should rarely happen since backend handles it first
+        isProcessingRef.current = true;
         try {
+          console.log('[GoogleDrive] Processing callback with code/state from message');
           await googleDriveApi.handleCallback(code, state);
           setIsConnected(true);
           toast.success('Google Drive connected successfully!');
         } catch (error) {
           console.error('[GoogleDrive] Callback error:', error);
-          toast.error('Failed to connect Google Drive');
+          // Only show error if it's not a "code already used" error
+          if (!error.response?.data?.message?.includes('already') && 
+              !error.response?.data?.message?.includes('Invalid authorization code')) {
+            toast.error('Failed to connect Google Drive');
+          }
+        } finally {
+          // Reset after a delay to allow future callbacks
+          setTimeout(() => {
+            isProcessingRef.current = false;
+          }, 2000);
         }
+      } else if (event.data?.type === 'GOOGLE_DRIVE_AUTH_ERROR') {
+        isProcessingRef.current = true;
+        console.error('[GoogleDrive] Auth error from popup:', event.data.error);
+        setIsConnected(false);
+        toast.error(`Google Drive connection failed: ${event.data.error || 'Unknown error'}`);
+        // Reset after a delay
+        setTimeout(() => {
+          isProcessingRef.current = false;
+        }, 2000);
       }
     };
 
@@ -62,11 +112,26 @@ const GoogleDrivePicker = ({
   }, []);
 
   // Handle URL params for OAuth callback (if using redirect flow)
+  // NOTE: This should rarely execute since the callback page handles redirects
   useEffect(() => {
+    // Only process if we're on the callback route and not already processed
+    if (!window.location.pathname.includes('/auth/google/drive/callback')) {
+      return;
+    }
+    
     const urlParams = new URLSearchParams(window.location.search);
     const code = urlParams.get('code');
     const state = urlParams.get('state');
+    const success = urlParams.get('success');
+    const error = urlParams.get('error');
     
+    // Don't process if backend already handled it (success/error present)
+    // The callback page will handle these cases
+    if (success || error) {
+      return;
+    }
+    
+    // Only process if code and state are present and state contains userId
     if (code && state?.includes('userId')) {
       handleOAuthCallback(code, state);
     }
