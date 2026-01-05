@@ -154,9 +154,8 @@ const {
   buildEnhancedSystemPromptWithTemplates 
 } = require('../services/secretPromptTemplateService');
 
-// Import Google Drive service from document-service
-const googleDriveService = require(path.join(__dirname, '../../document-service/services/googleDriveService'));
-const { downloadFile: downloadFileFromGoogleDrive } = googleDriveService;
+// Import Google Drive service from ChatModel services
+const { downloadFile: downloadFileFromGoogleDrive } = require('../services/googleDriveService');
 
 exports.uploadDocumentAndGetURI = async (req, res) => {
   try {
