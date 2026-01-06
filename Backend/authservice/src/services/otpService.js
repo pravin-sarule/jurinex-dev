@@ -251,7 +251,7 @@ const getPasswordSetEmailTemplate = () => {
 
           <!-- Action Button -->
           <div style="text-align: center; margin-bottom: 25px;">
-            <a href="http://localhost:5173/login" class="btn-primary" style="display: block; background: linear-gradient(135deg, #21C1B6 0%, #1AA49B 100%); color: white; padding: 18px 32px; border-radius: 10px; text-decoration: none; font-size: 16px; font-weight: 700; box-shadow: 0 4px 14px rgba(33, 193, 182, 0.3); transition: all 0.3s ease;">
+            <a href="https://jurinex-dev.netlify.app/login" class="btn-primary" style="display: block; background: linear-gradient(135deg, #21C1B6 0%, #1AA49B 100%); color: white; padding: 18px 32px; border-radius: 10px; text-decoration: none; font-size: 16px; font-weight: 700; box-shadow: 0 4px 14px rgba(33, 193, 182, 0.3); transition: all 0.3s ease;">
               Go to Login Page
             </a>
           </div>
