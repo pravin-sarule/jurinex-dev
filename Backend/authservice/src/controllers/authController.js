@@ -69,12 +69,237 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Session = require('../models/Session');
 const UserProfessionalProfile = require('../models/UserProfessionalProfile');
+const Firm = require('../models/Firm');
+const FirmUser = require('../models/FirmUser');
 const { generateToken } = require('../utils/jwt');
-const { createAndSendOTP, verifyOTP } = require('../services/otpService');
+const { createAndSendOTP, verifyOTP, sendPasswordSetEmail } = require('../services/otpService');
 const admin = require('../config/firebase'); // Import Firebase Admin SDK
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+// Solo Lawyer Registration
+const registerSoloLawyer = async (req, res) => {
+  const {
+    full_name,
+    bar_enrollment_number,
+    state_bar_council,
+    email,
+    mobile,
+    office_address,
+    city,
+    state,
+    pin_code,
+    pan_number,
+    gst_number,
+    password
+  } = req.body;
+
+  try {
+    // Validate required fields
+    if (!full_name || !bar_enrollment_number || !state_bar_council || !email || !mobile || 
+        !office_address || !city || !state || !pin_code || !pan_number || !password) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'All mandatory fields are required' 
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findByEmail(email);
+    if (existingUser) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'User with this email already exists' 
+      });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const user = await User.create({
+      username: full_name,
+      email,
+      password: hashedPassword,
+      auth_type: 'manual',
+      account_type: 'SOLO',
+      approval_status: 'APPROVED',
+      first_login: false,
+      is_active: true,
+      phone: mobile,
+      location: `${city}, ${state}`
+    });
+
+    // Create professional profile with solo lawyer data
+    const profile = await UserProfessionalProfile.findOrCreate(user.id);
+    await UserProfessionalProfile.update(user.id, {
+      full_name,
+      state_bar_council,
+      email,
+      mobile,
+      office_address,
+      city,
+      state,
+      pin_code,
+      pan_number,
+      gst_number: gst_number || null,
+      bar_enrollment_number,
+      is_profile_completed: true
+    });
+
+    // Generate token and create session
+    const token = generateToken(user);
+    await Session.create({ user_id: user.id, token });
+
+    res.status(201).json({
+      success: true,
+      message: 'Solo lawyer registered successfully',
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        account_type: user.account_type,
+        approval_status: user.approval_status,
+      },
+    });
+  } catch (error) {
+    console.error('Error during solo lawyer registration:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Internal server error' 
+    });
+  }
+};
+
+// Firm Registration
+const registerFirm = async (req, res) => {
+  const {
+    firm_name,
+    registering_advocate_name,
+    bar_enrollment_number,
+    enrollment_date,
+    state_bar_council,
+    firm_type,
+    establishment_date,
+    email,
+    mobile,
+    landline,
+    office_address,
+    city,
+    district,
+    state,
+    pin_code,
+    pan_number,
+    gst_number
+  } = req.body;
+
+  try {
+    // Validate required fields (bar_enrollment_number, enrollment_date, state_bar_council, establishment_date are optional)
+    if (!firm_name || !registering_advocate_name || !firm_type ||
+        !email || !mobile || !office_address || !city || !state || !pin_code || !pan_number) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'All mandatory fields are required' 
+      });
+    }
+
+    // Check if firm email already exists
+    const existingFirm = await Firm.findByEmail(email);
+    if (existingFirm) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Firm with this email already exists' 
+      });
+    }
+
+    // Check if user with this email exists
+    const existingUser = await User.findByEmail(email);
+    if (existingUser) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'User with this email already exists' 
+      });
+    }
+
+    // Generate temporary password for firm admin
+    const tempPassword = Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12).toUpperCase() + '!@#';
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+    // Create firm admin user
+    const adminUser = await User.create({
+      username: registering_advocate_name,
+      email,
+      password: hashedPassword,
+      auth_type: 'manual',
+      account_type: 'FIRM_ADMIN',
+      approval_status: 'PENDING',
+      first_login: true,
+      is_active: false,
+      phone: mobile,
+      location: `${city}, ${state}`
+    });
+
+    // Create firm record
+    const firm = await Firm.create({
+      firm_name,
+      firm_type,
+      establishment_date,
+      registering_advocate_name,
+      bar_enrollment_number,
+      enrollment_date,
+      state_bar_council,
+      email,
+      mobile,
+      landline: landline || null,
+      office_address,
+      city,
+      district: district || null,
+      state,
+      pin_code,
+      pan_number,
+      gst_number: gst_number || null,
+      approval_status: 'PENDING',
+      admin_user_id: adminUser.id
+    });
+
+    // Create firm_user relationship
+    await FirmUser.create({
+      firm_id: firm.id,
+      user_id: adminUser.id,
+      role: 'ADMIN'
+    });
+
+    // TODO: Send email to admin with credentials (tempPassword)
+    // For now, we'll return it in response (remove in production)
+    console.log(`[Firm Registration] Admin credentials for ${email}: Password: ${tempPassword}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Firm registration submitted successfully. Your application is under review. You will receive access within 24 hours after verification.',
+      firm: {
+        id: firm.id,
+        firm_name: firm.firm_name,
+        email: firm.email,
+        approval_status: firm.approval_status
+      },
+      // Remove admin_credentials in production - send via email instead
+      admin_credentials: {
+        email: adminUser.email,
+        temporary_password: tempPassword,
+        note: 'Please change your password on first login'
+      }
+    });
+  } catch (error) {
+    console.error('Error during firm registration:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Internal server error' 
+    });
+  }
+};
+
+// Legacy register endpoint (keeping for backward compatibility)
 const register = async (req, res) => {
   const { username, email, password } = req.body;
 
@@ -128,6 +353,53 @@ const login = async (req, res) => {
       return res.status(403).json({ message: 'You are blocked for policy violations.' });
     }
 
+    // Check approval status for FIRM_ADMIN and FIRM_USER
+    if ((user.account_type === 'FIRM_ADMIN' || user.account_type === 'FIRM_USER')) {
+      // For FIRM_ADMIN, check firm's approval status first
+      if (user.account_type === 'FIRM_ADMIN') {
+        const firm = await Firm.findByAdminUserId(user.id);
+        if (firm) {
+          // If firm is APPROVED, allow login regardless of user approval_status
+          if (firm.approval_status === 'APPROVED') {
+            console.log(`[AuthController] Firm is APPROVED, allowing login for FIRM_ADMIN: ${user.email}`);
+            // Allow login - firm is approved
+          } else if (firm.approval_status === 'PENDING') {
+            return res.status(403).json({ 
+              message: 'Your account is pending approval. Please wait for admin verification.' 
+            });
+          } else if (firm.approval_status === 'REJECTED') {
+            return res.status(403).json({ 
+              message: 'Your account has been rejected. Please contact support.' 
+            });
+          }
+        } else {
+          // Firm not found - check user approval_status
+          if (user.approval_status === 'PENDING') {
+            return res.status(403).json({ 
+              message: 'Your account is pending approval. Please wait for admin verification.' 
+            });
+          }
+          if (user.approval_status === 'REJECTED') {
+            return res.status(403).json({ 
+              message: 'Your account has been rejected. Please contact support.' 
+            });
+          }
+        }
+      } else {
+        // For FIRM_USER, check user approval_status
+        if (user.approval_status === 'PENDING') {
+          return res.status(403).json({ 
+            message: 'Your account is pending approval. Please wait for admin verification.' 
+          });
+        }
+        if (user.approval_status === 'REJECTED') {
+          return res.status(403).json({ 
+            message: 'Your account has been rejected. Please contact support.' 
+          });
+        }
+      }
+    }
+
     if (!user.password || typeof user.password !== 'string' || user.password.trim() === '') {
       console.log(`[AuthController] User ${user.email} has no password (likely Google sign-in user).`);
       return res.status(400).json({ 
@@ -143,6 +415,22 @@ const login = async (req, res) => {
     }
     console.log(`[AuthController] ✅ Password matched for user: ${user.email}`);
 
+    // Handle first-time login for FIRM_ADMIN and FIRM_USER
+    if ((user.account_type === 'FIRM_ADMIN' || user.account_type === 'FIRM_USER') && user.first_login === true) {
+      // Send OTP for first-time login to change password
+      await createAndSendOTP(user.email);
+      console.log(`[AuthController] ✅ First-time login - OTP sent to: ${user.email}`);
+      
+      return res.status(200).json({
+        requiresOtp: true,
+        firstLogin: true,
+        success: true,
+        message: 'First-time login detected. OTP sent to your email. Please verify to change your password.',
+        email: user.email,
+      });
+    }
+
+    // Regular login flow - send OTP for verification
     await createAndSendOTP(user.email);
     console.log(`[AuthController] ✅ OTP sent to: ${user.email}`);
 
@@ -159,7 +447,7 @@ const login = async (req, res) => {
 };
 
 const verifyOtpAndLogin = async (req, res) => {
-  const { email, otp } = req.body;
+  const { email, otp, newPassword } = req.body;
   console.log(`[AuthController] Attempting OTP verification for email: ${email}`);
 
   try {
@@ -182,14 +470,36 @@ const verifyOtpAndLogin = async (req, res) => {
       });
     }
 
-    const token = generateToken(user);
+    // Handle first-time login password change
+    let isFirstLogin = false;
+    if ((user.account_type === 'FIRM_ADMIN' || user.account_type === 'FIRM_USER') && user.first_login === true) {
+      if (!newPassword || newPassword.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password is required and must be at least 6 characters long.'
+        });
+      }
 
-    await Session.create({ user_id: user.id, token });
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await User.update(user.id, { 
+        password: hashedPassword, 
+        first_login: false 
+      });
+      isFirstLogin = true;
+      console.log(`[AuthController] ✅ Password changed for first-time login: ${email}`);
+    }
+
+    // Refresh user data after update
+    const updatedUser = await User.findByEmail(email);
+
+    const token = generateToken(updatedUser);
+
+    await Session.create({ user_id: updatedUser.id, token });
     console.log(`[AuthController] ✅ Session created for user: ${email}`);
 
     let professionalProfile;
     try {
-      professionalProfile = await UserProfessionalProfile.findOrCreate(user.id);
+      professionalProfile = await UserProfessionalProfile.findOrCreate(updatedUser.id);
       console.log(`[AuthController] ✅ Professional profile checked/created for user: ${email}`);
     } catch (profileError) {
       console.error('[AuthController] ⚠️ Error checking/creating professional profile:', profileError);
@@ -197,14 +507,17 @@ const verifyOtpAndLogin = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: 'Login successful',
+      message: isFirstLogin ? 'Password changed successfully. Login successful.' : 'Login successful',
       token,
       user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        is_blocked: user.is_blocked,
+        id: updatedUser.id,
+        username: updatedUser.username,
+        email: updatedUser.email,
+        role: updatedUser.role,
+        is_blocked: updatedUser.is_blocked,
+        account_type: updatedUser.account_type,
+        approval_status: updatedUser.approval_status,
+        first_login: updatedUser.first_login,
       },
       professionalProfile: professionalProfile ? {
         is_profile_completed: professionalProfile.is_profile_completed
@@ -779,6 +1092,103 @@ const changePassword = async (req, res) => {
   }
 };
 
+// Set Password for First-Time Login (Firm Users)
+const setPassword = async (req, res) => {
+  const { email, newPassword, confirmPassword, token } = req.body;
+
+  console.log(`[AuthController] Attempting to set password for email: ${email}`);
+
+  try {
+    if (!email || !newPassword || !confirmPassword) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Email, new password, and confirmation are required' 
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'New password and confirmation do not match' 
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'New password must be at least 6 characters long' 
+      });
+    }
+
+    const user = await User.findByEmail(email);
+    if (!user) {
+      console.log(`[AuthController] User not found for email: ${email}`);
+      return res.status(404).json({ 
+        success: false,
+        message: 'User not found' 
+      });
+    }
+
+    // Verify this is a firm user (FIRM_ADMIN or FIRM_USER) with first_login = true
+    if (user.account_type !== 'FIRM_ADMIN' && user.account_type !== 'FIRM_USER') {
+      return res.status(403).json({ 
+        success: false,
+        message: 'This endpoint is only for firm users setting their initial password' 
+      });
+    }
+
+    if (!user.first_login) {
+      return res.status(403).json({ 
+        success: false,
+        message: 'Password has already been set. Please use change password instead.' 
+      });
+    }
+
+    // Optional: Verify token if provided (for email link security)
+    // For now, we'll allow setting password if user exists and first_login is true
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    
+    // Update password and set first_login to false
+    await User.update(user.id, { 
+      password: hashedPassword, 
+      first_login: false 
+    });
+
+    console.log(`[AuthController] ✅ Password set successfully for user: ${email}`);
+
+    // Send password set confirmation email to firm email
+    try {
+      // Get firm email if user is FIRM_ADMIN
+      if (user.account_type === 'FIRM_ADMIN') {
+        const Firm = require('../models/Firm');
+        const firm = await Firm.findByAdminUserId(user.id);
+        if (firm && firm.email) {
+          await sendPasswordSetEmail(firm.email);
+          console.log(`[AuthController] ✅ Password set email sent to firm: ${firm.email}`);
+        }
+      }
+      // Also send to user's email
+      await sendPasswordSetEmail(email);
+      console.log(`[AuthController] ✅ Password set email sent to user: ${email}`);
+    } catch (emailError) {
+      console.error('[AuthController] ⚠️ Error sending password set email:', emailError);
+      // Don't fail the request if email fails
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Password set successfully. You can now login with your new password.'
+    });
+  } catch (error) {
+    console.error('[AuthController] ❌ Error during password setup:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+
 const getAllActiveUsers = async (req, res) => {
   try {
     const users = await User.findAllActive();
@@ -838,8 +1248,162 @@ const getAllUsers = async (req, res) => {
   }
 };
 
+// Firm Admin: Create Staff User
+const createFirmStaff = async (req, res) => {
+  const { email, password, username, phone } = req.body;
+  const adminUserId = req.user.id;
+
+  try {
+    // Verify admin is a firm admin
+    if (req.user.account_type !== 'FIRM_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only firm admins can create staff users'
+      });
+    }
+
+    // Get firm info
+    const firm = await Firm.findByAdminUserId(adminUserId);
+    if (!firm) {
+      return res.status(404).json({
+        success: false,
+        message: 'Firm not found'
+      });
+    }
+
+    if (firm.approval_status !== 'APPROVED') {
+      return res.status(403).json({
+        success: false,
+        message: 'Firm is not approved yet'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findByEmail(email);
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create staff user
+    const staffUser = await User.create({
+      username: username || email.split('@')[0],
+      email,
+      password: hashedPassword,
+      auth_type: 'manual',
+      account_type: 'FIRM_USER',
+      approval_status: 'APPROVED',
+      first_login: true,
+      is_active: true,
+      phone: phone || null
+    });
+
+    // Create firm_user relationship
+    await FirmUser.create({
+      firm_id: firm.id,
+      user_id: staffUser.id,
+      role: 'STAFF'
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Staff user created successfully',
+      user: {
+        id: staffUser.id,
+        username: staffUser.username,
+        email: staffUser.email,
+        account_type: staffUser.account_type,
+        first_login: staffUser.first_login
+      }
+    });
+  } catch (error) {
+    console.error('Error creating firm staff:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+
+// Get firm staff list (for firm admin)
+const getFirmStaff = async (req, res) => {
+  const adminUserId = req.user.id;
+
+  try {
+    if (req.user.account_type !== 'FIRM_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only firm admins can view staff list'
+      });
+    }
+
+    const firm = await Firm.findByAdminUserId(adminUserId);
+    if (!firm) {
+      return res.status(404).json({
+        success: false,
+        message: 'Firm not found'
+      });
+    }
+
+    const staffList = await FirmUser.findByFirmId(firm.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Staff list fetched successfully',
+      staff: staffList
+    });
+  } catch (error) {
+    console.error('Error fetching firm staff:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+
+// Get firm information (for firm admin)
+const getFirmInfo = async (req, res) => {
+  const adminUserId = req.user.id;
+
+  try {
+    if (req.user.account_type !== 'FIRM_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only firm admins can view firm information'
+      });
+    }
+
+    const firm = await Firm.findByAdminUserId(adminUserId);
+    if (!firm) {
+      return res.status(404).json({
+        success: false,
+        message: 'Firm not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Firm information fetched successfully',
+      firm
+    });
+  } catch (error) {
+    console.error('Error fetching firm info:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+
 module.exports = { 
-  register, 
+  register,
+  registerSoloLawyer,
+  registerFirm,
   login, 
   firebaseGoogleSignIn, 
   verifyOtpAndLogin, 
@@ -853,6 +1417,10 @@ module.exports = {
   getProfessionalProfile,
   updateProfessionalProfile,
   changePassword,
+  setPassword,
   getAllActiveUsers,
-  getAllUsers
+  getAllUsers,
+  createFirmStaff,
+  getFirmStaff,
+  getFirmInfo
 };

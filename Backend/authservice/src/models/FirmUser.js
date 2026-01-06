@@ -1,0 +1,75 @@
+const pool = require('../config/db');
+
+class FirmUser {
+  static async create({
+    firm_id,
+    user_id,
+    role = 'STAFF'
+  }) {
+    const result = await pool.query(
+      `INSERT INTO firm_users (
+        firm_id, user_id, role, created_at
+      ) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      RETURNING *`,
+      [firm_id, user_id, role]
+    );
+    return result.rows[0];
+  }
+
+  static async findByUserId(userId) {
+    const result = await pool.query(
+      `SELECT fu.*, f.firm_name, f.firm_type 
+       FROM firm_users fu
+       JOIN firms f ON fu.firm_id = f.id
+       WHERE fu.user_id = $1`,
+      [userId]
+    );
+    return result.rows[0];
+  }
+
+  static async findByFirmId(firmId) {
+    const result = await pool.query(
+      `SELECT fu.*, u.username, u.email, u.phone, u.is_active
+       FROM firm_users fu
+       JOIN users u ON fu.user_id = u.id
+       WHERE fu.firm_id = $1
+       ORDER BY fu.created_at DESC`,
+      [firmId]
+    );
+    return result.rows;
+  }
+
+  static async findAdminByFirmId(firmId) {
+    const result = await pool.query(
+      `SELECT fu.*, u.username, u.email, u.phone
+       FROM firm_users fu
+       JOIN users u ON fu.user_id = u.id
+       WHERE fu.firm_id = $1 AND fu.role = 'ADMIN'
+       LIMIT 1`,
+      [firmId]
+    );
+    return result.rows[0];
+  }
+
+  static async updateRole(userId, firmId, newRole) {
+    const result = await pool.query(
+      `UPDATE firm_users 
+       SET role = $1 
+       WHERE user_id = $2 AND firm_id = $3
+       RETURNING *`,
+      [newRole, userId, firmId]
+    );
+    return result.rows[0];
+  }
+
+  static async delete(userId, firmId) {
+    const result = await pool.query(
+      'DELETE FROM firm_users WHERE user_id = $1 AND firm_id = $2 RETURNING *',
+      [userId, firmId]
+    );
+    return result.rows[0];
+  }
+}
+
+module.exports = FirmUser;
+

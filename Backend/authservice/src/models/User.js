@@ -19,18 +19,26 @@ class User {
     firebase_uid = null,
     role = 'user',
     is_blocked = false,
-    razorpay_customer_id = null
+    razorpay_customer_id = null,
+    account_type = 'SOLO',
+    approval_status = 'APPROVED',
+    first_login = true,
+    is_active = true,
+    phone = null,
+    location = null
   }) {
     const result = await pool.query(
       `INSERT INTO users (
         username, email, password, google_uid,
         auth_type, profile_image, firebase_uid,
         role, is_blocked, razorpay_customer_id,
+        account_type, approval_status, first_login, is_active,
+        phone, location,
         created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       RETURNING *`,
-      [username, email, password, google_uid, auth_type, profile_image, firebase_uid, role, is_blocked, razorpay_customer_id]
+      [username, email, password, google_uid, auth_type, profile_image, firebase_uid, role, is_blocked, razorpay_customer_id, account_type, approval_status, first_login, is_active, phone, location]
     );
     return result.rows[0];
   }

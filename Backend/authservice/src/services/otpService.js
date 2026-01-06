@@ -175,9 +175,136 @@ const verifyOTP = async (email, otp) => {
     return false;
 };
 
+const getPasswordSetEmailTemplate = () => {
+    return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Password Generated Successfully</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      @keyframes float {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-8px); }
+      }
+      
+      @keyframes slideIn {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      
+      .icon-3d {
+        animation: float 3s ease-in-out infinite;
+      }
+      
+      .btn-primary:hover {
+        opacity: 0.95;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 15px rgba(33, 193, 182, 0.4);
+      }
+
+      @keyframes gradient-shift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      
+      body { margin: 0; padding: 0; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      table, td { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    </style>
+  </head>
+  <body style="margin: 0; padding: 0; font-family: 'Inter', sans-serif; background: #f5f7fa;">
+    <div style="padding: 25px 15px;">
+      <div style="max-width: 520px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 15px 50px rgba(33, 193, 182, 0.12), 0 5px 15px rgba(0, 0, 0, 0.08);">
+        
+        <div style="background: linear-gradient(90deg, #21C1B6 0%, #1AA49B 50%, #21C1B6 100%); background-size: 200% 100%; height: 6px; animation: gradient-shift 3s ease infinite;"></div>
+
+        <!-- Header -->
+        <div style="padding: 30px 35px 20px; text-align: center; background: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);">
+          <div class="icon-3d" style="display: inline-block; background: linear-gradient(135deg, #21C1B6 0%, #1AA49B 100%); width: 50px; height: 50px; border-radius: 14px; margin-bottom: 15px; box-shadow: 0 8px 20px rgba(33, 193, 182, 0.35), inset 0 -3px 8px rgba(0, 0, 0, 0.15); position: relative;">
+            <svg width="50" height="50" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="position: relative; z-index: 1; transform: scale(0.6); top: 1px;">
+               <path d="M12 15V17M8 21H16C17.1046 21 18 20.1046 18 19V11C18 9.89543 17.1046 9 16 9H8C6.89543 9 6 9.89543 6 11V19C6 20.1046 6.89543 21 8 21ZM12 5C10.3431 5 9 6.34315 9 8V9H15V8C15 6.34315 13.6569 5 12 5Z" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(145deg, rgba(255,255,255,0.3) 0%, transparent 100%); border-radius: 14px;"></div>
+          </div>
+          <h1 style="margin: 0 0 6px; font-size: 22px; font-weight: 700; color: #1a1a1a; letter-spacing: -0.5px;">Password Set Successfully</h1>
+          <p style="margin: 0; font-size: 13px; color: #6b7280; font-weight: 500;">Your Jurinex account is now active</p>
+        </div>
+
+        <!-- Main Content -->
+        <div style="padding: 15px 35px 25px;">
+          <p style="margin: 0 0 25px; font-size: 14px; color: #4b5563; line-height: 1.6; text-align: center;">
+            Your account password has been successfully generated and updated. You can now use your credentials to access the Jurinex Legal AI Dashboard.
+          </p>
+
+          <!-- Success Animation/Indicator -->
+          <div style="text-align: center; margin-bottom: 30px;">
+             <div style="display: inline-block; padding: 10px 20px; background: #f0fdf9; border: 1px solid #21C1B6; border-radius: 30px;">
+                <span style="font-size: 13px; font-weight: 700; color: #0f766e;">Status: Secure & Active</span>
+             </div>
+          </div>
+
+          <!-- Action Button -->
+          <div style="text-align: center; margin-bottom: 25px;">
+            <a href="http://localhost:5173/login" class="btn-primary" style="display: block; background: linear-gradient(135deg, #21C1B6 0%, #1AA49B 100%); color: white; padding: 18px 32px; border-radius: 10px; text-decoration: none; font-size: 16px; font-weight: 700; box-shadow: 0 4px 14px rgba(33, 193, 182, 0.3); transition: all 0.3s ease;">
+              Go to Login Page
+            </a>
+          </div>
+
+          <p style="margin: 0 0 20px; font-size: 13px; color: #9ca3af; text-align: center;">
+            If you did not perform this action, please contact our security team immediately at <a href="mailto:security@jurinex.ai" style="color: #1AA49B; text-decoration: none;">security@jurinex.ai</a>.
+          </p>
+
+          <!-- Security Tips -->
+          <div style="background: #f9fafb; border-radius: 12px; padding: 16px; border: 1px solid #e5e7eb;">
+            <p style="margin: 0 0 8px; font-size: 11px; font-weight: 700; color: #4b5563; text-transform: uppercase;">Security Tips:</p>
+            <ul style="margin: 0; padding: 0 0 0 18px; font-size: 12px; color: #6b7280; line-height: 1.6;">
+              <li>Enable Multi-Factor Authentication (MFA) in settings.</li>
+              <li>Never share your login credentials with anyone.</li>
+              <li>Jurinex staff will never ask for your password via email.</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="background: #f9fafb; padding: 20px 35px; text-align: center; border-top: 1px solid #e5e7eb;">
+          <p style="margin: 0 0 8px; font-size: 12px; color: #6b7280;">
+            Questions? Visit our <a href="#" style="color: #21C1B6; text-decoration: none; font-weight: 600;">Help Center</a>
+          </p>
+          <p style="margin: 0; font-size: 11px; color: #9ca3af;">© 2026 Jurinex AI Assistant · All rights reserved</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>`;
+};
+
+const sendPasswordSetEmail = async (email) => {
+    try {
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: 'Password Set Successfully - Jurinex AI',
+            html: getPasswordSetEmailTemplate(),
+        };
+
+        await transporter.sendMail(mailOptions);
+        console.log(`[EmailService] Password set email sent to: ${email}`);
+    } catch (error) {
+        console.error(`[EmailService] Error sending password set email to ${email}:`, error);
+        // Don't throw error - email sending failure shouldn't block password setup
+    }
+};
+
 module.exports = {
     generateOTP,
     sendOTPEmail,
     createAndSendOTP,
     verifyOTP,
+    sendPasswordSetEmail,
 };

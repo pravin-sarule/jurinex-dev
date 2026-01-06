@@ -2,10 +2,13 @@ const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/auth');
 
-const { register, login, verifyOtpAndLogin, updateProfile, deleteAccount, logout, fetchProfile, getUserById, updateRazorpayCustomerId , firebaseGoogleSignIn, getUserInfo, getProfessionalProfile, updateProfessionalProfile, changePassword, getAllActiveUsers, getAllUsers } = require('../controllers/authController');
+const { register, registerSoloLawyer, registerFirm, login, verifyOtpAndLogin, updateProfile, deleteAccount, logout, fetchProfile, getUserById, updateRazorpayCustomerId , firebaseGoogleSignIn, getUserInfo, getProfessionalProfile, updateProfessionalProfile, changePassword, setPassword, getAllActiveUsers, getAllUsers, createFirmStaff, getFirmStaff, getFirmInfo } = require('../controllers/authController');
 const googleDriveRoutes = require('./googleDriveRoutes');
 
-router.post('/register', register);
+// Registration routes
+router.post('/register', register); // Legacy endpoint
+router.post('/register/solo', registerSoloLawyer);
+router.post('/register/firm', registerFirm);
 
 router.post('/login', login);
 
@@ -35,7 +38,13 @@ router.put('/users/:id/razorpay-customer-id', protect, updateRazorpayCustomerId)
 router.post('/google', firebaseGoogleSignIn);
 
 
-router.put('/change-password', protect, changePassword); 
+router.put('/change-password', protect, changePassword);
+router.post('/set-password', setPassword); // Public endpoint for first-time password setup
+
+// Firm admin routes
+router.post('/firm/staff', protect, createFirmStaff);
+router.get('/firm/staff', protect, getFirmStaff);
+router.get('/firm/info', protect, getFirmInfo);
 
 // Google Drive OAuth routes
 router.use('/', googleDriveRoutes);
