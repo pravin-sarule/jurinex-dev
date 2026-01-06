@@ -19,6 +19,11 @@ const LoginPage = () => {
  const [serverMessage, setServerMessage] = useState("");
  const [otpEmail, setOtpEmail] = useState('');
  const [logoError, setLogoError] = useState(false);
+ const [isFirstLogin, setIsFirstLogin] = useState(false);
+ const [newPassword, setNewPassword] = useState("");
+ const [confirmNewPassword, setConfirmNewPassword] = useState("");
+ const [showNewPassword, setShowNewPassword] = useState(false);
+ const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
 
  const [isGoogleSignInProgress, setIsGoogleSignInProgress] = useState(false);
 
@@ -173,12 +178,13 @@ const LoginPage = () => {
  try {
  const result = await login(formData.email, formData.password);
 
- if (result.requiresOtp) {
- setIsOTPStage(true);
- setOtpEmail(result.email || formData.email);
- setServerMessage('');
- setSuccessMessage(result.message || 'OTP sent to your email. Please check and enter the code.');
- } else if (result.success) {
+    if (result.requiresOtp) {
+      setIsOTPStage(true);
+      setIsFirstLogin(result.firstLogin || false);
+      setOtpEmail(result.email || formData.email);
+      setServerMessage('');
+      setSuccessMessage(result.message || 'OTP sent to your email. Please check and enter the code.');
+    } else if (result.success) {
  setSuccessMessage('Login successful! Redirecting...');
  setTimeout(() => {
  navigate('/dashboard', { replace: true });
@@ -194,49 +200,70 @@ const LoginPage = () => {
  }
  };
 
- const handleVerifyOTP = async (e) => {
- if (e) e.preventDefault();
- 
- if (otp.length !== 6) {
- setSuccessMessage("");
- setServerMessage("Please enter a 6-digit OTP.");
- return;
- }
+const handleVerifyOTP = async (e) => {
+  if (e) e.preventDefault();
+  
+  if (otp.length !== 6) {
+    setSuccessMessage("");
+    setServerMessage("Please enter a 6-digit OTP.");
+    return;
+  }
 
- setIsVerifying(true);
- setServerMessage('');
- setSuccessMessage('');
- 
- try {
- const result = await verifyOtp(otpEmail || formData.email, otp);
+  // If first login, validate new password
+  if (isFirstLogin) {
+    if (!newPassword || newPassword.length < 6) {
+      setServerMessage("New password is required and must be at least 6 characters long.");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setServerMessage("Passwords do not match.");
+      return;
+    }
+  }
 
- if (result.success) {
- setSuccessMessage('OTP verification successful! Logging in...');
- setServerMessage('');
- 
- setTimeout(() => {
- navigate('/dashboard', { replace: true });
- }, 1500);
- } else {
- setServerMessage(result.message || "Invalid OTP. Please try again.");
- setSuccessMessage('');
- }
- } catch (error) {
- setServerMessage(error.message || "Invalid OTP. Please try again.");
- setSuccessMessage('');
- console.error('OTP verification error:', error);
- } finally {
- setIsVerifying(false);
- }
- };
+  setIsVerifying(true);
+  setServerMessage('');
+  setSuccessMessage('');
 
- const handleBackToLogin = () => {
+  try {
+    const result = await verifyOtp(
+      otpEmail || formData.email, 
+      otp, 
+      isFirstLogin ? newPassword : null
+    );
+
+    if (result.success) {
+      setSuccessMessage(isFirstLogin 
+        ? 'Password changed successfully! Logging in...' 
+        : 'OTP verification successful! Logging in...');
+      setServerMessage('');
+      
+      setTimeout(() => {
+        navigate('/dashboard', { replace: true });
+      }, 1500);
+    } else {
+      setServerMessage(result.message || "Invalid OTP. Please try again.");
+      setSuccessMessage('');
+    }
+  } catch (error) {
+    setServerMessage(error.message || "Invalid OTP. Please try again.");
+    setSuccessMessage('');
+    console.error('OTP verification error:', error);
+  } finally {
+    setIsVerifying(false);
+  }
+};
+
+const handleBackToLogin = () => {
  setIsOTPStage(false);
+ setIsFirstLogin(false);
  setOtp('');
+ setNewPassword('');
+ setConfirmNewPassword('');
  setServerMessage('');
  setSuccessMessage('');
  setErrors({});
- };
+};
 
  return (
  <div className="min-h-screen flex font-sans transition-all duration-700 ease-in-out">
@@ -413,15 +440,75 @@ const LoginPage = () => {
  }}
  />
 
+ {isFirstLogin && (
+ <div className="space-y-4 mt-4">
+ <div className="bg-blue-50 border-l-4 border-blue-400 p-3 rounded">
+ <p className="text-sm text-blue-800">
+ <strong>First-time login:</strong> Please set a new password for your account.
+ </p>
+ </div>
+ 
+ <div>
+ <label className="block text-sm font-medium text-gray-700 mb-1">
+ New Password *
+ </label>
+ <div className="relative">
+ <input
+ type={showNewPassword ? "text" : "password"}
+ placeholder="Enter new password (min 6 characters)"
+ className="w-full px-4 py-2.5 border border-gray-300 rounded-lg pr-10 focus:ring-2 focus:ring-[#21C1B6] text-black"
+ value={newPassword}
+ onChange={(e) => {
+ setNewPassword(e.target.value);
+ setServerMessage('');
+ }}
+ />
+ <button
+ type="button"
+ onClick={() => setShowNewPassword(!showNewPassword)}
+ className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"
+ >
+ {showNewPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+ </button>
+ </div>
+ </div>
+
+ <div>
+ <label className="block text-sm font-medium text-gray-700 mb-1">
+ Confirm New Password *
+ </label>
+ <div className="relative">
+ <input
+ type={showConfirmNewPassword ? "text" : "password"}
+ placeholder="Confirm new password"
+ className="w-full px-4 py-2.5 border border-gray-300 rounded-lg pr-10 focus:ring-2 focus:ring-[#21C1B6] text-black"
+ value={confirmNewPassword}
+ onChange={(e) => {
+ setConfirmNewPassword(e.target.value);
+ setServerMessage('');
+ }}
+ />
+ <button
+ type="button"
+ onClick={() => setShowConfirmNewPassword(!showConfirmNewPassword)}
+ className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"
+ >
+ {showConfirmNewPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+ </button>
+ </div>
+ </div>
+ </div>
+ )}
+
  <button
  type="submit"
- disabled={isVerifying || otp.length !== 6}
+ disabled={isVerifying || otp.length !== 6 || (isFirstLogin && (!newPassword || newPassword.length < 6 || newPassword !== confirmNewPassword))}
  className="w-full mt-6 py-3 px-5 text-white font-semibold rounded-lg transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
  style={{
  background: "linear-gradient(90deg, #21C1B6 0%, #1AA49B 100%)",
  }}
  >
- {isVerifying ? "Verifying..." : "Verify OTP"}
+ {isVerifying ? "Verifying..." : isFirstLogin ? "Verify OTP & Change Password" : "Verify OTP"}
  </button>
  </form>
 

@@ -15,8 +15,9 @@ import ToolsPage from './pages/ToolsPage';
 import DraftingPage from './pages/DraftingPage';
 import ChatHistoryPage from './pages/ChatHistoryPage';
 import LandingPage from './pages/LandingPage';
-import RegisterPage from './pages/auth/RegisterPage';
+import LawFirmRegistrationPage from './pages/auth/LawFirmRegistrationPage';
 import LoginPage from './pages/auth/LoginPage';
+import SetPasswordPage from './pages/auth/SetPasswordPage';
 import PublicLayout from './layouts/PublicLayout';
 import ServicesPage from './pages/ServicesPage';
 import AboutUsPage from './pages/AboutUsPage';
@@ -40,8 +41,9 @@ function App() {
         <FileManagerProvider>
           <Routes>
             <Route path="/" element={<PublicLayout hideHeaderAndFooter={true}><LandingPage /></PublicLayout>} />
-            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/register" element={<LawFirmRegistrationPage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/set-password" element={<SetPasswordPage />} />
             <Route path="/auth/google/drive/callback" element={<GoogleDriveCallback />} />
 
                    <Route path="/services" element={<PublicLayout hideContactBar={true} hideFooter={true}><ServicesPage /></PublicLayout>} />

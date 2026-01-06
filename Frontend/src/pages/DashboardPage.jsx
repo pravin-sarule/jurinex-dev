@@ -1,12 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Calendar, Lightbulb, FileEdit, FolderOpen, Brain } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import DashboardHeader from '../components/DashboardComponents/DashboardHeader';
 import DashboardInsights from '../components/DashboardComponents/DashboardInsights';
 import DashboardCasesTable from '../components/DashboardComponents/DashboardCasesTable';
+import { useSidebar } from '../context/SidebarContext';
 
 const DashboardPage = () => {
   const navigate = useNavigate();
+  const { setIsSidebarHidden } = useSidebar();
+
+  // Ensure sidebar is visible on dashboard
+  useEffect(() => {
+    setIsSidebarHidden(false);
+  }, [setIsSidebarHidden]);
 
   const insights = [
     {

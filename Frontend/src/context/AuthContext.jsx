@@ -125,6 +125,7 @@ export const AuthProvider = ({ children }) => {
         return { 
           success: false, 
           requiresOtp: true, 
+          firstLogin: response.firstLogin || false,
           email: email, 
           message: response.message || 'OTP required. Please check your email.' 
         };
@@ -153,9 +154,9 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const verifyOtp = async (email, otp) => {
+  const verifyOtp = async (email, otp, newPassword = null) => {
     try {
-      const response = await api.verifyOtp(email, otp);
+      const response = await api.verifyOtp(email, otp, newPassword);
       
       if (response.success && response.token) {
         setToken(response.token);

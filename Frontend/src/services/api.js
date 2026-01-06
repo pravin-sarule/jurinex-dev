@@ -81,12 +81,26 @@ class ApiService {
  return response;
  }
 
- async register(userData) {
- return this.request("/auth/api/auth/register", {
- method: "POST",
- body: JSON.stringify(userData),
- });
- }
+  async register(userData) {
+    return this.request("/auth/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify(userData),
+    });
+  }
+
+  async registerSoloLawyer(userData) {
+    return this.request("/auth/api/auth/register/solo", {
+      method: "POST",
+      body: JSON.stringify(userData),
+    });
+  }
+
+  async registerFirm(firmData) {
+    return this.request("/auth/api/auth/register/firm", {
+      method: "POST",
+      body: JSON.stringify(firmData),
+    });
+  }
 
  async logout() {
  localStorage.removeItem("token");
@@ -102,12 +116,19 @@ class ApiService {
  });
  }
 
- async updatePassword(passwordData) {
- return this.request("/auth/api/auth/change-password", {
- method: "PUT",
- body: JSON.stringify(passwordData),
- });
- }
+  async updatePassword(passwordData) {
+    return this.request("/auth/api/auth/change-password", {
+      method: "PUT",
+      body: JSON.stringify(passwordData),
+    });
+  }
+
+  async setPassword(passwordData) {
+    return this.request("/auth/api/auth/set-password", {
+      method: "POST",
+      body: JSON.stringify(passwordData),
+    });
+  }
 
  async getProfessionalProfile() {
  return this.request("/auth/api/auth/professional-profile", {
@@ -138,16 +159,20 @@ class ApiService {
  return this.request("/auth/api/auth/profile");
  }
 
- async verifyOtp(email, otp) {
- const response = await this.request(`${API_BASE_URL}/auth/api/auth/verify-otp`, {
- method: "POST",
- body: JSON.stringify({ email, otp }),
- });
- if (response.token) {
- localStorage.setItem("token", response.token);
- }
- return response;
- }
+  async verifyOtp(email, otp, newPassword = null) {
+    const body = { email, otp };
+    if (newPassword) {
+      body.newPassword = newPassword;
+    }
+    const response = await this.request(`${API_BASE_URL}/auth/api/auth/verify-otp`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (response.token) {
+      localStorage.setItem("token", response.token);
+    }
+    return response;
+  }
 
  async getTemplates() {
  return this.request("/drafting");

@@ -152,6 +152,11 @@ const Sidebar = () => {
  const displayName = getDisplayName(user);
  const userInitials = getInitials(user);
 
+ // Debug logging - after all state declarations
+ useEffect(() => {
+   console.log('Sidebar render:', { isSidebarHidden, isSidebarCollapsed, isMobile });
+ }, [isSidebarHidden, isSidebarCollapsed, isMobile]);
+
  useEffect(() => {
  const checkDevice = () => {
  setIsMobile(window.innerWidth < 1024);
@@ -439,14 +444,17 @@ const Sidebar = () => {
  return (
  <>
  <MobileHeader />
+ {!isSidebarHidden && (
  <div
- className={`hidden lg:flex bg-[#0d1117] border-r border-gray-900 flex-col transition-all duration-300 ease-in-out shadow-2xl ${
+ className={`flex bg-[#0d1117] border-r border-gray-900 flex-col transition-all duration-300 ease-in-out shadow-2xl ${
  isSidebarCollapsed ? 'w-20' : 'w-72'
  } relative h-screen`}
  data-sidebar-root
+ style={{ display: 'flex' }}
  >
  <SidebarContent toggleProfileMenu={toggleProfileMenu} isProfileMenuOpen={isProfileMenuOpen} />
  </div>
+ )}
  {isMobileMenuOpen && (
  <div className="lg:hidden fixed inset-0 z-50 flex">
  <div
