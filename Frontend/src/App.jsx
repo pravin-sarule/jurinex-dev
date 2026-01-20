@@ -13,7 +13,13 @@ import AnalysisPage from './pages/AnalysisPage';
 import ChatModelPage from './pages/ChatModelPage';
 import ToolsPage from './pages/ToolsPage';
 import DraftingPage from './pages/DraftingPage';
+import DraftsPage from './pages/DraftsPage';
+import DraftEditorPage from './pages/DraftEditorPage';
+import DraftSelectionPage from './pages/DraftSelectionPage';
+import GoogleDocsPage from './pages/GoogleDocsPage';
+import MicrosoftWordPage from './pages/MicrosoftWordPage';
 import ChatHistoryPage from './pages/ChatHistoryPage';
+import { DraftingOiPage } from './components/drafting-frontend';
 import LandingPage from './pages/LandingPage';
 import LawFirmRegistrationPage from './pages/auth/LawFirmRegistrationPage';
 import LoginPage from './pages/auth/LoginPage';
@@ -212,6 +218,84 @@ function App() {
                   <MainLayout>
                     <DraftingPage />
                   </MainLayout>
+                </AuthChecker>
+              }
+            />
+            
+            {/* Draft Selection Page */}
+            <Route
+              path="/draft-selection"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <DraftSelectionPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            
+            {/* Google Docs Drafting Routes */}
+            <Route
+              path="/draft/google-docs"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <GoogleDocsPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            
+            {/* Microsoft Word Drafting Routes */}
+            <Route
+              path="/draft/microsoft-word"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <MicrosoftWordPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            
+            {/* Zoho Office Drafting Routes */}
+            <Route
+              path="/draft/zoho-office"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <DraftingOiPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            
+            {/* New Google Docs Drafting Service Routes */}
+            <Route
+              path="/drafts"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <DraftsPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            
+            <Route
+              path="/draft/:draftId"
+              element={
+                <AuthChecker>
+                  <DraftEditorPage />
+                </AuthChecker>
+              }
+            />
+            
+            <Route
+              path="/draft/new"
+              element={
+                <AuthChecker>
+                  <DraftEditorPage />
                 </AuthChecker>
               }
             />

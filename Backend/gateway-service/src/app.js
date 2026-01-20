@@ -15,8 +15,10 @@ const fileProxy = require("./routes/fileProxy");
 const paymentProxy = require("./routes/paymentProxy");
 const supportProxy = require("./routes/supportProxy");
 const draftProxy = require("./routes/draftProxy");
+const msdraftProxy = require("./routes/msdraftProxy");
 const visualProxy = require("./routes/visualProxy");
 const chatProxy = require("./routes/chatProxy");
+const zohodraftingproxy = require("./routes/zohodraftingproxy");
 // const userResourcesProxy = require("./routes/userResourcesProxy");
 
 const app = express();
@@ -62,14 +64,17 @@ app.use(cors({
     return callback(new Error("Not allowed by CORS"));
   },
   credentials: true, // if sending cookies
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-user-id"]
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-user-id", "X-Google-Access-Token"]
 }));
 
 
 // Simple logger to see incoming requests
 app.use((req, res, next) => {
   console.log(`[Gateway] Incoming Request: ${req.method} ${req.originalUrl}`);
+  console.log(`[Gateway] Request Path: ${req.path}`);
+  console.log(`[Gateway] Request Base URL: ${req.baseUrl}`);
+  console.log(`[Gateway] Has Auth Header: ${!!req.headers.authorization}`);
   next();
 });
 
@@ -122,9 +127,15 @@ app.use(fileProxy);
 // app.use(paymentProxy);
 app.use(paymentProxy);
 app.use("/support", supportProxy);
+// Mount msdraftProxy FIRST to handle Microsoft Word auth routes (token in query)
+// This must come before draftProxy to catch auth routes
+app.use("/drafting", msdraftProxy);
+// Mount draftProxy for Google Docs routes (different service/port)
 app.use("/drafting", draftProxy);
 app.use(visualProxy); // Visual Service proxy for flowchart generation
 app.use(chatProxy); // ChatModel Service proxy for document Q&A
+app.use("/api/drafting", zohodraftingproxy); // Zoho Drafting Service proxy
+
 // app.use(userResourcesProxy);
 
 // Catch-all for 404 errors

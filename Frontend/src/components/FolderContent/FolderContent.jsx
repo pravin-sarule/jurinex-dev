@@ -415,7 +415,7 @@ const FolderContent = ({ onDocumentClick }) => {
  />
 <div className="flex justify-between items-start mb-3 flex-shrink-0 gap-3">
 <h2 className="text-lg font-semibold min-w-0 flex-1 break-words pr-2">
-Folder: {selectedFolder}
+Case: {selectedFolder}
 </h2>
 <div className="flex-shrink-0 flex gap-2 items-center">
 {/* Local file upload button */}
@@ -446,10 +446,12 @@ e.target.value = "";
 <GoogleDrivePicker
 folderName={selectedFolder}
 onUploadComplete={handleGoogleDriveUpload}
-buttonText="Drive"
-buttonClassName="px-3 py-1.5 text-white rounded-md text-sm transition-colors duration-200 flex items-center gap-1 bg-[#4285F4] hover:bg-[#3367D6]"
+buttonText=""
+buttonClassName="p-2 hover:bg-gray-100 rounded-md transition-colors duration-200 flex items-center justify-center"
+iconClassName="h-6 w-6"
 multiselect={true}
 disabled={uploading}
+showIconOnly={true}
 />
 </div>
 </div>

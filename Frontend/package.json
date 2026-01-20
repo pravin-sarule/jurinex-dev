@@ -17,6 +17,7 @@
     "@ckeditor/ckeditor5-react": "^11.0.0",
     "@google/generative-ai": "^0.24.1",
     "@heroicons/react": "^2.2.0",
+    "@mui/material": "^7.3.7",
     "@tailwindcss/vite": "^4.1.11",
     "@tinymce/tinymce-react": "^6.3.0",
     "@tiptap/extension-color": "^3.4.1",

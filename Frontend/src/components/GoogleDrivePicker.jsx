@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'react-toastify';
 import googleDriveApi, { openGooglePicker, loadGooglePickerApi } from '../services/googleDriveApi';
-import driveLogo from '../assets/drive logo.avif';
+import driveLogo from '../assets/3128271.png';
 
 // Get API key from environment
 const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
@@ -15,7 +15,8 @@ const GoogleDrivePicker = ({
   buttonText = 'Google Drive',
   multiselect = true,
   disabled = false,
-  showDriveIcon = false
+  showDriveIcon = false,
+  showIconOnly = false
 }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -312,6 +313,7 @@ const GoogleDrivePicker = ({
           ? 'bg-gray-600 cursor-not-allowed opacity-50' 
           : 'bg-[#4285F4] hover:bg-[#3367D6]'
       }`}
+      title={showIconOnly ? (isConnected ? 'Upload from Google Drive' : 'Connect Google Drive') : undefined}
     >
       {isLoading || isUploading ? (
         <svg className={iconClassName || "animate-spin h-5 w-5"} viewBox="0 0 24 24">
@@ -321,15 +323,17 @@ const GoogleDrivePicker = ({
       ) : (
         <img src={driveLogo} alt="Google Drive" className={iconClassName || iconSize} />
       )}
-      <span className="font-medium">
-        {isUploading 
-          ? 'Uploading...' 
-          : isLoading 
-            ? 'Loading...' 
-            : isConnected 
-              ? buttonText 
-              : 'Connect Drive'}
-      </span>
+      {!showIconOnly && (
+        <span className="font-medium">
+          {isUploading 
+            ? 'Uploading...' 
+            : isLoading 
+              ? 'Loading...' 
+              : isConnected 
+                ? buttonText 
+                : 'Connect Drive'}
+        </span>
+      )}
     </button>
   );
 };

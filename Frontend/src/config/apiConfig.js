@@ -8,7 +8,7 @@
 // Get base gateway URL from environment or use default
 const GATEWAY_URL = import.meta.env.VITE_APP_GATEWAY_URL || 
                     import.meta.env.VITE_APP_API_URL || 
-                    'https://gateway-service-120280829617.asia-south1.run.app';
+                    'http://localhost:5000';
 
 // API Base URLs for different services
 export const API_BASE_URL = GATEWAY_URL;
@@ -31,7 +31,7 @@ export const DOCS_BASE_URL = `${GATEWAY_URL}/docs`;
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 // For direct service access (if needed, but prefer gateway)
-export const DOCUMENT_SERVICE_DIRECT = import.meta.env.VITE_DOCUMENT_SERVICE_URL || 'https://document-service-120280829617.asia-south1.run.app';
+export const DOCUMENT_SERVICE_DIRECT = import.meta.env.VITE_DOCUMENT_SERVICE_URL || 'http://localhost:5002';
 export const CONTENT_SERVICE_DIRECT = `${DOCUMENT_SERVICE_DIRECT}/api/content`;
 
 // Export default object for convenience

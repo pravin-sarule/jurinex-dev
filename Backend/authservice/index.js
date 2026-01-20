@@ -7,6 +7,7 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 const authRoutes = require("./src/routes/authRoutes");
+const internalRoutes = require("./src/routes/internalRoutes");
 const pool = require("./src/config/db.js");
 
 const app = express();
@@ -36,6 +37,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/auth/internal", internalRoutes); // Internal service-to-service routes
 
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && "body" in err) {

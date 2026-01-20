@@ -249,16 +249,16 @@ const Sidebar = () => {
  else navigate('/chats');
  };
 
- const navigationItems = [
-   { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
-   { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
-   { name: 'ICOM', path: '/analysis', icon: MagnifyingGlassCircleIcon },
-   { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
-   { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
-   { name: 'Tools', path: '/tools', icon: Cog6ToothIcon },
-   { name: 'Document Drafting', icon: PencilSquareIcon },
-   { name: 'Billing & Usage', path: '/billing-usage', icon: CreditCardIcon },
- ];
+  const navigationItems = [
+    { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
+    { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
+    { name: 'ICOM', path: '/analysis', icon: MagnifyingGlassCircleIcon },
+    { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
+    { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
+    { name: 'Tools', path: '/tools', icon: Cog6ToothIcon },
+    { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
+    { name: 'Billing & Usage', path: '/billing-usage', icon: CreditCardIcon },
+  ];
 
  const JuriNexLogo = ({ collapsed = false }) => (
  <div className="flex items-center space-x-3">
@@ -287,26 +287,30 @@ const Sidebar = () => {
 
  const SidebarContent = ({ isMobileView = false, toggleProfileMenu, isProfileMenuOpen }) => (
  <div className="flex flex-col h-full bg-[#0d1117]">
- <div className={`px-6 py-5 border-b border-gray-900 relative ${isMobileView ? '' : 'hidden lg:block'}`}>
- {!isMobileView && (
- <button
- onClick={toggleSidebar}
- className="absolute top-1/2 -right-3 transform -translate-y-1/2 bg-[#0d1117] border border-gray-800 rounded-full p-1.5 shadow-lg hover:bg-gray-900 transition-all duration-200 z-10"
- >
- {isSidebarCollapsed ? <ChevronRightIcon className="h-4 w-4 text-gray-500" /> : <ChevronLeftIcon className="h-4 w-4 text-gray-500" />}
- </button>
- )}
- {isMobileView && (
+ <div className={`py-5 border-b border-gray-900 relative ${isSidebarCollapsed && !isMobileView ? 'px-2' : 'px-6'} transition-all duration-300`}>
+ {isMobileView ? (
  <div className="flex items-center justify-between">
  <JuriNexLogo />
  <button onClick={() => setIsMobileMenuOpen(false)} className="p-2 rounded-lg hover:bg-gray-900 transition-colors duration-200">
  <XMarkIcon className="h-6 w-6 text-gray-400" />
  </button>
  </div>
- )}
- {!isMobileView && (
- <div className={`flex ${isSidebarCollapsed ? 'justify-center' : ''}`}>
+ ) : (
+ <div className="relative flex items-center">
+ <div className={`flex ${isSidebarCollapsed ? 'justify-center flex-1' : 'flex-1'}`}>
  <JuriNexLogo collapsed={isSidebarCollapsed} />
+ </div>
+ <button
+ onClick={toggleSidebar}
+ className="absolute top-1/2 -translate-y-1/2 -right-4 bg-[#1a1d23] hover:bg-gray-700 rounded-full p-1.5 transition-all duration-200 group border border-gray-700 shadow-lg z-50"
+ title={isSidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+ >
+ {isSidebarCollapsed ? (
+ <ChevronRightIcon className="h-4 w-4 text-gray-400 group-hover:text-white transition-colors" />
+ ) : (
+ <ChevronLeftIcon className="h-4 w-4 text-gray-400 group-hover:text-white transition-colors" />
+ )}
+ </button>
  </div>
  )}
  </div>
@@ -314,12 +318,15 @@ const Sidebar = () => {
  <div className="px-4 pt-6 pb-4">
  <button
  onClick={() => navigate('/analysis', { state: { newChat: true } })}
- className="w-full text-white rounded-xl py-3 text-sm font-bold flex items-center justify-center transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+ className={`w-full text-white rounded-xl py-3 text-sm font-bold flex items-center justify-center transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 ${
+ isSidebarCollapsed && !isMobileView ? 'px-2' : ''
+ }`}
  style={{ backgroundColor: '#21C1B6' }}
  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1AA49B')}
  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
+ title={isSidebarCollapsed && !isMobileView ? 'New Case Analysis' : undefined}
  >
- <PlusIcon className="h-5 w-5" />
+ <PlusIcon className={`h-5 w-5 ${isSidebarCollapsed && !isMobileView ? '' : ''}`} />
  <span className={`${isSidebarCollapsed && !isMobileView ? 'hidden' : 'inline ml-2'}`}>New Case Analysis</span>
  </button>
  </div>
@@ -331,37 +338,38 @@ const Sidebar = () => {
  const Icon = item.icon;
  const active = isActive(item.path);
  const isChats = item.name === 'Chats';
+ const isCollapsed = isSidebarCollapsed && !isMobileView;
  return (
  <div key={item.name}>
  {isChats ? (
  <Link
  to={currentFileId ? `/chats/${currentFileId}` : '/chats'}
- className={`group flex items-center w-full ${isSidebarCollapsed && !isMobileView ? 'justify-center px-3' : 'px-4'} py-3 text-sm rounded-xl transition-all duration-200 ${
+ className={`group flex items-center w-full ${isCollapsed ? 'justify-center px-3' : 'px-4'} py-3 text-sm rounded-xl transition-all duration-200 relative ${
  active ? 'bg-[#1c2128] text-white font-bold' : 'text-gray-400 hover:bg-[#1c2128]/60 hover:text-gray-200 font-medium'
  }`}
- title={isSidebarCollapsed && !isMobileView ? item.name : undefined}
+ title={isCollapsed ? item.name : undefined}
  >
  <Icon
- className={`h-5 w-5 ${isSidebarCollapsed && !isMobileView ? '' : 'mr-3'} transition-colors duration-200 ${
+ className={`h-5 w-5 ${isCollapsed ? '' : 'mr-3'} transition-colors duration-200 flex-shrink-0 ${
  active ? 'text-white' : 'text-gray-500 group-hover:text-gray-300'
  }`}
  />
- <span className={`${isSidebarCollapsed && !isMobileView ? 'hidden' : 'inline'} transition-all duration-200`}>{item.name}</span>
+ <span className={`${isCollapsed ? 'hidden' : 'inline'} transition-all duration-200 truncate`}>{item.name}</span>
  </Link>
  ) : (
  <Link
  to={item.path}
- className={`group flex items-center w-full ${isSidebarCollapsed && !isMobileView ? 'justify-center px-3' : 'px-4'} py-3 text-sm rounded-xl transition-all duration-200 ${
+ className={`group flex items-center w-full ${isCollapsed ? 'justify-center px-3' : 'px-4'} py-3 text-sm rounded-xl transition-all duration-200 relative ${
  active ? 'bg-[#1c2128] text-white font-bold' : 'text-gray-400 hover:bg-[#1c2128]/60 hover:text-gray-200 font-medium'
  }`}
- title={isSidebarCollapsed && !isMobileView ? item.name : undefined}
+ title={isCollapsed ? item.name : undefined}
  >
  <Icon
- className={`h-5 w-5 ${isSidebarCollapsed && !isMobileView ? '' : 'mr-3'} transition-colors duration-200 ${
+ className={`h-5 w-5 ${isCollapsed ? '' : 'mr-3'} transition-colors duration-200 flex-shrink-0 ${
  active ? 'text-white' : 'text-gray-500 group-hover:text-gray-300'
  }`}
  />
- <span className={`${isSidebarCollapsed && !isMobileView ? 'hidden' : 'inline'} transition-all duration-200`}>{item.name}</span>
+ <span className={`${isCollapsed ? 'hidden' : 'inline'} transition-all duration-200 truncate`}>{item.name}</span>
  </Link>
  )}
  </div>
@@ -375,11 +383,12 @@ const Sidebar = () => {
  <button
  ref={profileButtonRef}
  onClick={toggleProfileMenu}
- className={`w-full flex items-center space-x-3 text-gray-400 hover:bg-[#1c2128]/60 rounded-xl py-3 px-4 text-sm font-medium transition-all duration-200 ${
- isSidebarCollapsed && !isMobileView ? 'justify-center px-2' : 'justify-between'
+ className={`w-full flex items-center text-gray-400 hover:bg-[#1c2128]/60 rounded-xl py-3 text-sm font-medium transition-all duration-200 ${
+ isSidebarCollapsed && !isMobileView ? 'justify-center px-2' : 'justify-between px-4 space-x-3'
  }`}
+ title={isSidebarCollapsed && !isMobileView ? displayName : undefined}
  >
- <div className="flex items-center space-x-3 min-w-0 flex-1">
+ <div className={`flex items-center min-w-0 flex-1 ${isSidebarCollapsed && !isMobileView ? 'justify-center' : 'space-x-3'}`}>
  <div className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0 shadow-lg" style={{ backgroundColor: '#21C1B6' }}>
  {userInitials}
  </div>
@@ -446,9 +455,9 @@ const Sidebar = () => {
  <MobileHeader />
  {!isSidebarHidden && (
  <div
- className={`flex bg-[#0d1117] border-r border-gray-900 flex-col transition-all duration-300 ease-in-out shadow-2xl ${
+ className={`hidden lg:flex bg-[#0d1117] border-r border-gray-900 flex-col transition-all duration-300 ease-in-out shadow-2xl ${
  isSidebarCollapsed ? 'w-20' : 'w-72'
- } relative h-screen`}
+ } relative h-screen overflow-visible`}
  data-sidebar-root
  style={{ display: 'flex' }}
  >

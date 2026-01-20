@@ -1207,10 +1207,28 @@ async function processDocument(
        if (status.done) {
          batchCompleted = true;
          
-         if (status.error) {
-           console.error(`[processDocument] Batch processing error:`, status.error);
-           throw new Error(`Batch processing failed: ${JSON.stringify(status.error)}`);
-         }
+        if (status.error) {
+          // Log full error details for debugging
+          console.error(`[processDocument] ❌ Batch processing error:`, {
+            error: status.error,
+            code: status.error.code,
+            message: status.error.message,
+            details: status.error.details,
+            fullError: JSON.stringify(status.error, null, 2)
+          });
+
+          // Extract detailed error message
+          let errorMessage = status.error.message || "Batch processing failed";
+          if (status.error.code) {
+            errorMessage = `[${status.error.code}] ${errorMessage}`;
+          }
+          if (status.error.details && Array.isArray(status.error.details) && status.error.details.length > 0) {
+            const detailMessages = status.error.details.map(d => d.message || JSON.stringify(d)).join('; ');
+            errorMessage = `${errorMessage}. Details: ${detailMessages}`;
+          }
+
+          throw new Error(`Batch processing failed: ${errorMessage}`);
+        }
          
          await updateProcessingProgress(
            fileId,
@@ -5327,16 +5345,35 @@ exports.getDocumentProcessingStatus = async (req, res) => {
       }
 
       if (operationStatus.error) {
+        // Log full error details for debugging
+        console.error(`[getDocumentProcessingStatus] ❌ Batch processing error for file ${file_id}:`, {
+          error: operationStatus.error,
+          code: operationStatus.error.code,
+          message: operationStatus.error.message,
+          details: operationStatus.error.details,
+          fullError: JSON.stringify(operationStatus.error, null, 2)
+        });
+
+        // Extract detailed error message
+        let errorMessage = operationStatus.error.message || "Batch processing failed";
+        if (operationStatus.error.code) {
+          errorMessage = `[${operationStatus.error.code}] ${errorMessage}`;
+        }
+        if (operationStatus.error.details && Array.isArray(operationStatus.error.details) && operationStatus.error.details.length > 0) {
+          const detailMessages = operationStatus.error.details.map(d => d.message || JSON.stringify(d)).join('; ');
+          errorMessage = `${errorMessage}. Details: ${detailMessages}`;
+        }
+
         await updateProcessingProgress(
           file_id,
           "error",
           0.0,
-          "Batch processing failed"
+          `Batch processing failed: ${errorMessage}`
         );
         await ProcessingJobModel.updateJobStatus(
           job.job_id,
           "failed",
-          operationStatus.error.message
+          errorMessage
         );
         return res.json({
           ...baseResponse,
@@ -5344,7 +5381,7 @@ exports.getDocumentProcessingStatus = async (req, res) => {
           processing_progress: 0,
           current_operation: "Batch processing failed",
           job_status: "failed",
-          job_error: operationStatus.error.message,
+          job_error: errorMessage,
         });
       }
 

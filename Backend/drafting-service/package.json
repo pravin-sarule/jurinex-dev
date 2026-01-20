@@ -1,0 +1,31 @@
+{
+  "name": "drafting-service",
+  "version": "1.0.0",
+  "description": "Drafting microservice for Google Docs template management and document drafting",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "ngrok": "ngrok http 5005",
+    "ngrok:auth": "ngrok config add-authtoken"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.17.1",
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "google-auth-library": "^10.5.0",
+    "googleapis": "^144.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "pg": "^8.16.3",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "ngrok": "^5.0.0-beta.2",
+    "nodemon": "^3.0.0"
+  }
+}
