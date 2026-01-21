@@ -8,17 +8,24 @@ dotenv.config();
 console.log(`[Gateway] PAYMENT_SERVICE_URL: ${process.env.PAYMENT_SERVICE_URL}`);
 console.log(`[Gateway] Gateway Port: ${process.env.PORT || 5000}`);
 
-const { createProxyMiddleware } = require("http-proxy-middleware");
-const authProxy = require("./routes/authProxy");
-const fileProxy = require("./routes/fileProxy");
-// const paymentProxy = require("./routes/paymentProxy");
-const paymentProxy = require("./routes/paymentProxy");
-const supportProxy = require("./routes/supportProxy");
-const draftProxy = require("./routes/draftProxy");
-const visualProxy = require("./routes/visualProxy");
-const chatProxy = require("./routes/chatProxy");
-const aiAgentProxy = require("./routes/aiAgentProxy");
-// const userResourcesProxy = require("./routes/userResourcesProxy");
+// Load route modules with error handling
+let authProxy, fileProxy, paymentProxy, supportProxy, draftProxy, visualProxy, chatProxy, aiAgentProxy;
+
+try {
+  const { createProxyMiddleware } = require("http-proxy-middleware");
+  authProxy = require("./routes/authProxy");
+  fileProxy = require("./routes/fileProxy");
+  paymentProxy = require("./routes/paymentProxy");
+  supportProxy = require("./routes/supportProxy");
+  draftProxy = require("./routes/draftProxy");
+  visualProxy = require("./routes/visualProxy");
+  chatProxy = require("./routes/chatProxy");
+  aiAgentProxy = require("./routes/aiAgentProxy");
+  console.log("[Gateway] All route modules loaded successfully");
+} catch (error) {
+  console.error("[Gateway] Error loading route modules:", error);
+  throw error; // Re-throw to prevent silent failures
+}
 
 const app = express();
 
@@ -34,49 +41,54 @@ const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
 //   allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-user-id"]
 // }));
 
-// ✅ Update allowed origins for frontend + local dev
 const allowedOrigins = [
-  "http://localhost:5173", // Vite dev server
-  "http://localhost:5000", // local testing
-  "http://localhost:8000", // HTTP server for test pages
-  "http://localhost:3000", // Alternative test server
-  "http://127.0.0.1:8000", // HTTP server (alternative)
-  "http://127.0.0.1:3000", // Alternative test server
-  "https://nexintel.netlify.app", // production frontend (old)
-  "https://jurinex-dev.netlify.app", // production frontend (current)
-  "https://gateway-service-120280829617.asia-south1.run.app" // Gateway service URL (for inter-service calls)
+  "http://localhost:5173",
+  "http://localhost:5000",
+  "http://localhost:8000",
+  "http://localhost:3000",
+  "http://127.0.0.1:8000",
+  "http://127.0.0.1:3000",
+  "https://nexintel.netlify.app",
+  "https://jurinex-dev.netlify.app",
+  "https://gateway-service-120280829617.asia-south1.run.app"
 ];
 
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like Postman, curl, or file:// protocol)
+  origin: (origin, callback) => {
+    // Allow internal service calls, curl, Postman
     if (!origin) return callback(null, true);
-    
-    // Allow requests from allowed origins
+
+    // Allow localhost on any port
+    if (origin.startsWith("http://localhost") || origin.startsWith("http://127.0.0.1")) {
+      return callback(null, true);
+    }
+
+    // Allow production frontends & gateway
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    
-    // For development: allow localhost with any port
-    if (origin && (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:"))) {
-      return callback(null, true);
-    }
-    
-    return callback(new Error("Not allowed by CORS"));
+
+    console.warn("❌ CORS blocked:", origin);
+
+    // ❗ IMPORTANT: never throw error
+    return callback(null, false);
   },
-  credentials: true, // if sending cookies
+  credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: [
-    "Origin", 
-    "X-Requested-With", 
-    "Content-Type", 
-    "Accept", 
-    "Authorization", 
+    "Origin",
+    "X-Requested-With",
+    "Content-Type",
+    "Accept",
+    "Authorization",
     "x-user-id",
-    "X-Service-Name",
-    "x-service-name"
-  ]
+    "x-service-name",
+    "X-Service-Name"
+  ],
+  optionsSuccessStatus: 200
 }));
+
+
 
 
 // Simple logger to see incoming requests
