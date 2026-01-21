@@ -613,6 +613,7 @@ import law01 from '../assets/law01.png';
 import { motion, useScroll, useTransform, useInView } from 'framer-motion';
 import Footer from '../components/Footer';
 import PublicHeader from '../components/PublicHeader';
+import ChatbotWidget from '../components/ChatbotWidget';
 
 const LandingPage = () => {
  const navigate = useNavigate();
@@ -1204,6 +1205,7 @@ const LandingPage = () => {
  </section>
 
  <Footer/>
+ <ChatbotWidget />
  </div>
  </div>
  );
