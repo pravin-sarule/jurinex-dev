@@ -8,11 +8,13 @@ dotenv.config();
 console.log(`[Gateway] PAYMENT_SERVICE_URL: ${process.env.PAYMENT_SERVICE_URL}`);
 console.log(`[Gateway] Gateway Port: ${process.env.PORT || 5000}`);
 
+// Load http-proxy-middleware (used throughout the file)
+const { createProxyMiddleware } = require("http-proxy-middleware");
+
 // Load route modules with error handling
 let authProxy, fileProxy, paymentProxy, supportProxy, draftProxy, visualProxy, chatProxy, aiAgentProxy;
 
 try {
-  const { createProxyMiddleware } = require("http-proxy-middleware");
   authProxy = require("./routes/authProxy");
   fileProxy = require("./routes/fileProxy");
   paymentProxy = require("./routes/paymentProxy");
