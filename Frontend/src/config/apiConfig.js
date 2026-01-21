@@ -8,7 +8,7 @@
 // Get base gateway URL from environment or use default
 const GATEWAY_URL = import.meta.env.VITE_APP_GATEWAY_URL || 
                     import.meta.env.VITE_APP_API_URL || 
-                    'http://localhost:5000';
+                    'https://gateway-service-120280829617.asia-south1.run.app';
 
 // API Base URLs for different services
 export const API_BASE_URL = GATEWAY_URL;
