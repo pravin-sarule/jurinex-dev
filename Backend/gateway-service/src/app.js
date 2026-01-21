@@ -17,6 +17,7 @@ const supportProxy = require("./routes/supportProxy");
 const draftProxy = require("./routes/draftProxy");
 const visualProxy = require("./routes/visualProxy");
 const chatProxy = require("./routes/chatProxy");
+const aiAgentProxy = require("./routes/aiAgentProxy");
 // const userResourcesProxy = require("./routes/userResourcesProxy");
 
 const app = express();
@@ -41,7 +42,9 @@ const allowedOrigins = [
   "http://localhost:3000", // Alternative test server
   "http://127.0.0.1:8000", // HTTP server (alternative)
   "http://127.0.0.1:3000", // Alternative test server
-  "https://nexintel.netlify.app" // your production frontend
+  "https://nexintel.netlify.app", // production frontend (old)
+  "https://jurinex-dev.netlify.app", // production frontend (current)
+  "https://gateway-service-120280829617.asia-south1.run.app" // Gateway service URL (for inter-service calls)
 ];
 
 app.use(cors({
@@ -63,7 +66,16 @@ app.use(cors({
   },
   credentials: true, // if sending cookies
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-user-id"]
+  allowedHeaders: [
+    "Origin", 
+    "X-Requested-With", 
+    "Content-Type", 
+    "Accept", 
+    "Authorization", 
+    "x-user-id",
+    "X-Service-Name",
+    "x-service-name"
+  ]
 }));
 
 
@@ -125,6 +137,7 @@ app.use("/support", supportProxy);
 app.use("/drafting", draftProxy);
 app.use(visualProxy); // Visual Service proxy for flowchart generation
 app.use(chatProxy); // ChatModel Service proxy for document Q&A
+app.use(aiAgentProxy); // AI-Agent Service proxy for document processing and multi-file chat
 // app.use(userResourcesProxy);
 
 // Catch-all for 404 errors
