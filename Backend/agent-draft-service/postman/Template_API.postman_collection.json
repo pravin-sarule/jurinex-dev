@@ -1,0 +1,62 @@
+{
+  "info": {
+    "name": "Agent Draft - Template API",
+    "description": "Template gallery: list templates, get template by id, preview image (signed URL). No JWT required.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "template_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "List templates",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/templates?category=&is_active=true&limit=50&offset=0&include_preview_url=true",
+          "host": ["{{base_url}}"],
+          "path": ["api", "templates"],
+          "query": [
+            { "key": "category", "value": "", "description": "Filter by category (optional)" },
+            { "key": "is_active", "value": "true", "description": "Only active templates" },
+            { "key": "limit", "value": "50", "description": "Page size (1-100)" },
+            { "key": "offset", "value": "0", "description": "Pagination offset" },
+            { "key": "include_preview_url", "value": "true", "description": "Include signed preview image URL per template" }
+          ]
+        },
+        "description": "GET /api/templates — List templates for the gallery. Response includes preview_image_url (signed) when available."
+      }
+    },
+    {
+      "name": "Get template by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/templates/{{template_id}}?include_asset_urls=false",
+          "host": ["{{base_url}}"],
+          "path": ["api", "templates", "{{template_id}}"],
+          "query": [
+            { "key": "include_asset_urls", "value": "false", "description": "Set true to add signed URLs for assets and images" }
+          ]
+        },
+        "description": "GET /api/templates/{template_id} — Full template with CSS, HTML, assets, images. Set template_id in collection variables or path."
+      }
+    },
+    {
+      "name": "Get template preview image URL",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/templates/{{template_id}}/preview-image",
+          "host": ["{{base_url}}"],
+          "path": ["api", "templates", "{{template_id}}", "preview-image"]
+        },
+        "description": "GET /api/templates/{template_id}/preview-image — Returns JSON with preview_image_url (signed GCS URL) for gallery <img src=\"...\">."
+      }
+    }
+  ]
+}

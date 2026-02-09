@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body::-webkit-scrollbar {}
+
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+select {
+  color: black;
+}
+
+select option {
+  color: black;
+  background-color: white;
+}
+
+/* Custom Scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  /* slate-300 */
+  border-radius: 20px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #94a3b8;
+  /* slate-400 */
+}
+
+
+/* Google Drive Picker - No blur background, smooth overlay */
+.picker-dialog-bg,
+.picker.picker-dialog-bg {
+  background: rgba(0, 0, 0, 0.4) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  transition: opacity 0.2s ease-in-out !important;
+}
+
+.picker-dialog {
+  box-shadow: 0 24px 38px 3px rgba(0, 0, 0, 0.14),
+    0 9px 46px 8px rgba(0, 0, 0, 0.12),
+    0 11px 15px -7px rgba(0, 0, 0, 0.2) !important;
+  border-radius: 8px !important;
+  animation: pickerSlideIn 0.2s ease-out !important;
+}
+
+@keyframes pickerSlideIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Ensure no blur on body when picker is open */
+body.picker-active {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Override any global blur effects when Google picker opens */
+div[id^="picker"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}

@@ -475,11 +475,11 @@
 //       console.log(`[PDF DETECTION] File: ${originalFilename}`);
 //       console.log(`[PDF DETECTION] File ID: ${fileId}`);
 //       console.log(`${"🔍".repeat(40)}\n`);
-      
+
 //       await updateProgress(fileId, "batch_queued", 6, "Analyzing PDF format (checking if digital-native)");
-      
+
 //       const pdfDetection = await detectDigitalNativePDF(fileBuffer);
-      
+
 //       console.log(`\n${"=".repeat(80)}`);
 //       console.log(`[PDF DETECTION] Analysis Results for File ID: ${fileId}`);
 //       console.log(`${"=".repeat(80)}`);
@@ -504,48 +504,48 @@
 //       }
 //       console.log(`  ✅ Is Digital Native: ${pdfDetection.isDigitalNative ? 'YES' : 'NO'}`);
 //       console.log(`${"=".repeat(80)}\n`);
-      
+
 //       if (pdfDetection.isDigitalNative) {
 //         isDigitalNative = true;
-        
+
 //         console.log(`\n${"🟢".repeat(40)}`);
 //         console.log(`[TEXT EXTRACTION METHOD] ✅ DIGITAL-NATIVE PDF DETECTED`);
 //         console.log(`[TEXT EXTRACTION METHOD] 📦 Using: pdf-parse (FREE - No Document AI cost)`);
 //         console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: $0.00 (Cost savings enabled)`);
 //         console.log(`[TEXT EXTRACTION METHOD] ⚡ Speed: Fast (local parsing)`);
 //         console.log(`${"🟢".repeat(40)}\n`);
-        
+
 //         await updateProgress(fileId, "processing", 20, "Extracting text from digital-native PDF (using pdf-parse)");
-        
+
 //         extractedTexts = await extractTextFromPDFWithPages(fileBuffer);
-        
+
 //         console.log(`[TEXT EXTRACTION] ✅ Successfully extracted ${extractedTexts.length} text segment(s) with page numbers`);
 //         if (extractedTexts.length > 0 && extractedTexts[0].page_start) {
 //           console.log(`[TEXT EXTRACTION] 📄 Page range: ${extractedTexts[0].page_start} - ${extractedTexts[0].page_end}`);
 //         }
-        
+
 //         const totalExtractedText = extractedTexts.map(t => t.text || '').join(' ').trim();
 //         const extractedWordCount = totalExtractedText.split(/\s+/).filter(w => w.length > 0).length;
 //         const extractedCharCount = totalExtractedText.length;
 //         const minWordsRequired = 10 * pdfDetection.pageCount; // At least 10 words per page
 //         const minCharsRequired = 100 * pdfDetection.pageCount; // At least 100 chars per page
-        
+
 //         console.log(`[TEXT EXTRACTION] Validation:`);
 //         console.log(`  - Extracted words: ${extractedWordCount} (minimum: ${minWordsRequired})`);
 //         console.log(`  - Extracted characters: ${extractedCharCount} (minimum: ${minCharsRequired})`);
-        
+
 //         if (extractedWordCount < minWordsRequired || extractedCharCount < minCharsRequired) {
 //           console.log(`\n${"⚠️".repeat(40)}`);
 //           console.log(`[TEXT EXTRACTION] ⚠️ WARNING: Extracted text is too sparse`);
 //           console.log(`[TEXT EXTRACTION] Digital-native detection may have been incorrect`);
 //           console.log(`[TEXT EXTRACTION] Falling back to Document AI for better extraction`);
 //           console.log(`${"⚠️".repeat(40)}\n`);
-          
+
 //           isDigitalNative = false;
 //           extractedTexts = [];
 //         } else {
 //           await updateProgress(fileId, "processing", 42, "Text extraction completed (digital-native PDF - pdf-parse)");
-          
+
 //           await processDigitalNativePDF(fileId, extractedTexts, userId, secretId, jobId);
 //           return; // Exit early, processing continues in background
 //         }
@@ -623,81 +623,81 @@
 //   }
 // }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
 
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // //     if (savedChunks.length !== chunksToSave.length) {
-    
-    
-    
-    
-    
-    
-    
-    
-    
-      
+
+
+
+
+
+
+
+
+
+
 // //       if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
-      
-    
+
+
 // //     if (validVectors.length !== vectorsToSave.length) {
-    
-    
+
+
 // //     if (savedVectors.length !== validVectors.length) {
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-      
-        
+
+
+
+
+
+
+
+
+
+
+
+
 // //           console.error(`   ❌ WARNING: Chunks exist but NO embeddings found!`);
 // //           console.log(`   ✅ All chunks have embeddings!`);
-    
-    
-    
+
+
+
 
 // async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId, jobId) {
 //   try {
 //     console.log(`\n${'='.repeat(80)}`);
 //     console.log(`[processDigitalNativePDF] Starting processing for File ID: ${fileId}`);
 //     console.log(`${'='.repeat(80)}\n`);
-    
+
 //     await updateProgress(fileId, "processing", 45, "Loading chunking configuration");
-    
+
 //     let chunkingMethod = "recursive";
 //     if (secretId) {
 //       try {
@@ -715,26 +715,26 @@
 //         console.warn(`[processDigitalNativePDF] Error fetching chunking method: ${err.message}`);
 //       }
 //     }
-    
+
 //     console.log(`[processDigitalNativePDF] Chunking method: ${chunkingMethod}`);
 //     await updateProgress(fileId, "processing", 48, `Configuration loaded: ${chunkingMethod}`);
-    
+
 //     await updateProgress(fileId, "processing", 50, "Starting chunking");
-    
+
 //     const chunks = await chunkDocument(extractedTexts, fileId, chunkingMethod);
 //     console.log(`[processDigitalNativePDF] ✅ Generated ${chunks.length} chunks`);
-    
+
 //     if (chunks.length === 0) {
 //       console.warn(`[processDigitalNativePDF] ⚠️ No chunks generated`);
 //       await updateProgress(fileId, "processed", 100, "Completed (no content)");
 //       await ProcessingJob.updateJobStatus(jobId, "completed");
 //       return;
 //     }
-    
+
 //     await updateProgress(fileId, "processing", 58, `Created ${chunks.length} chunks`);
-    
+
 //     await updateProgress(fileId, "processing", 60, "Saving chunks to database");
-    
+
 //     const chunksToSave = chunks.map((chunk, i) => {
 //       const page_start = chunk.metadata?.page_start !== null && chunk.metadata?.page_start !== undefined
 //         ? chunk.metadata.page_start
@@ -742,11 +742,11 @@
 //       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
 //         ? chunk.metadata.page_end
 //         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-      
+
 //       if (i < 3) {
 //         console.log(`[Save Chunks] Chunk ${i}: page_start=${page_start}, page_end=${page_end}, has metadata=${!!chunk.metadata}`);
 //       }
-      
+
 //       return {
 //         file_id: fileId,
 //         chunk_index: i,
@@ -757,96 +757,96 @@
 //         heading: chunk.metadata?.heading || chunk.heading || null,
 //       };
 //     });
-    
+
 //     console.log(`[processDigitalNativePDF] 💾 Saving ${chunksToSave.length} chunks to database...`);
 //     const savedChunks = await FileChunk.saveMultipleChunks(chunksToSave);
 //     console.log(`[processDigitalNativePDF] ✅ Saved ${savedChunks.length} chunks to database`);
-    
+
 //     if (savedChunks.length !== chunksToSave.length) {
 //       console.error(`[processDigitalNativePDF] ❌ Chunk count mismatch: expected ${chunksToSave.length}, saved ${savedChunks.length}`);
 //       throw new Error(`Chunk save failed: expected ${chunksToSave.length}, got ${savedChunks.length}`);
 //     }
-    
+
 //     const chunkIds = savedChunks.map(c => c.id);
 //     console.log(`[processDigitalNativePDF] 📋 Saved chunk IDs: ${chunkIds.slice(0, 5).join(', ')}${chunkIds.length > 5 ? `... (${chunkIds.length} total)` : ''}`);
-    
+
 //     await updateProgress(fileId, "processing", 68, `${savedChunks.length} chunks saved`);
-    
+
 //     await updateProgress(fileId, "processing", 70, "Generating embeddings");
-    
+
 //     const chunkContents = chunks.map(c => c.content);
 //     console.log(`[processDigitalNativePDF] 🔄 Generating embeddings for ${chunkContents.length} chunks`);
-    
+
 //     let embeddings;
 //     try {
 //       embeddings = await generateEmbeddings(chunkContents);
 //       console.log(`[processDigitalNativePDF] ✅ Generated ${embeddings.length} embeddings`);
-      
+
 //       if (embeddings.length !== chunkContents.length) {
 //         console.error(`[processDigitalNativePDF] ❌ Embedding count mismatch: expected ${chunkContents.length}, got ${embeddings.length}`);
 //         throw new Error(`Embedding generation failed: expected ${chunkContents.length}, got ${embeddings.length}`);
 //       }
-      
+
 //       for (let i = 0; i < embeddings.length; i++) {
 //         if (!embeddings[i] || !Array.isArray(embeddings[i]) || embeddings[i].length === 0) {
 //           console.error(`[processDigitalNativePDF] ❌ Invalid embedding at index ${i}`);
 //           throw new Error(`Invalid embedding at index ${i}: ${JSON.stringify(embeddings[i])}`);
 //         }
 //       }
-      
+
 //     } catch (embeddingError) {
 //       console.error(`[processDigitalNativePDF] ❌ Embedding generation failed:`, embeddingError.message);
 //       throw embeddingError;
 //     }
-    
+
 //     await updateProgress(fileId, "processing", 75, "Embeddings generated");
-    
+
 //     await updateProgress(fileId, "processing", 76, "Saving vector embeddings");
-    
+
 //     console.log(`[processDigitalNativePDF] 🔗 Mapping chunks to embeddings...`);
 //     const vectorsToSave = savedChunks.map((savedChunk, index) => {
 //       const originalChunkIndex = savedChunk.chunk_index;
 //       const embedding = embeddings[originalChunkIndex];
-      
+
 //       if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
 //         console.error(`[processDigitalNativePDF] ❌ Missing/invalid embedding for chunk ${savedChunk.id} at index ${originalChunkIndex}`);
 //         throw new Error(`Invalid embedding for chunk ${savedChunk.id}`);
 //       }
-      
+
 //       return {
 //         chunk_id: savedChunk.id,
 //         embedding: embedding,
 //         file_id: fileId,
 //       };
 //     });
-    
+
 //     console.log(`[processDigitalNativePDF] 💾 Saving ${vectorsToSave.length} vector embeddings to database...`);
-    
+
 //     let savedVectors;
 //     try {
 //       savedVectors = await ChunkVector.saveMultipleChunkVectors(vectorsToSave);
 //       console.log(`[processDigitalNativePDF] ✅ Saved ${savedVectors.length} vector embeddings to database`);
-      
+
 //       if (savedVectors.length !== vectorsToSave.length) {
 //         console.error(`[processDigitalNativePDF] ❌ Vector count mismatch: expected ${vectorsToSave.length}, saved ${savedVectors.length}`);
 //         throw new Error(`Vector save failed: expected ${vectorsToSave.length}, got ${savedVectors.length}`);
 //       }
-      
+
 //     } catch (vectorSaveError) {
 //       console.error(`[processDigitalNativePDF] ❌ Failed to save vectors:`, vectorSaveError.message);
 //       throw vectorSaveError;
 //     }
-    
+
 //     const vectorIds = savedVectors.map(v => v.chunk_id);
 //     console.log(`[processDigitalNativePDF] 📋 Saved vector chunk IDs: ${vectorIds.slice(0, 5).join(', ')}${vectorIds.length > 5 ? `... (${vectorIds.length} total)` : ''}`);
-    
+
 //     await updateProgress(fileId, "processing", 85, "Vector embeddings saved");
-    
+
 //     console.log(`\n[processDigitalNativePDF] 🔍 IMMEDIATE VERIFICATION CHECK`);
 //     try {
 //       const verifyVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
 //       console.log(`   ✅ Verification: Found ${verifyVectors.length} embeddings in database for ${chunkIds.length} chunks`);
-      
+
 //       if (verifyVectors.length === 0) {
 //         console.error(`   ❌ CRITICAL: Vectors were saved but CANNOT be retrieved!`);
 //         throw new Error('Vectors saved but retrieval failed - database issue');
@@ -859,9 +859,9 @@
 //       console.error(`   ❌ Verification failed:`, verifyError.message);
 //       throw new Error(`Embedding verification failed: ${verifyError.message}`);
 //     }
-    
+
 //     await updateProgress(fileId, "processing", 86, "Generating document summary");
-    
+
 //     let summary = null;
 //     try {
 //       if (chunks.length > 0) {
@@ -875,27 +875,27 @@
 //     } catch (summaryError) {
 //       console.warn(`[processDigitalNativePDF] ⚠️ Summary generation failed: ${summaryError.message}`);
 //     }
-    
+
 //     await updateProgress(fileId, "processing", 95, "Summary completed");
-    
+
 //     await updateProgress(fileId, "processing", 98, "Finalizing processing");
-    
+
 //     await File.updateProcessingStatus(fileId, "processed", 100, "Completed");
 //     await ProcessingJob.updateJobStatus(jobId, "completed");
-    
+
 //     console.log(`\n${'='.repeat(80)}`);
 //     console.log(`[processDigitalNativePDF] 🔍 FINAL VERIFICATION`);
 //     console.log(`${'='.repeat(80)}`);
-    
+
 //     try {
 //       const verifyChunks = await FileChunk.getChunksByFileId(fileId);
 //       console.log(`   ✅ Chunks in database: ${verifyChunks.length} (expected: ${savedChunks.length})`);
-      
+
 //       if (verifyChunks.length > 0) {
 //         const verifyChunkIds = verifyChunks.map(c => c.id);
 //         const verifyVectors = await ChunkVector.getVectorsByChunkIds(verifyChunkIds);
 //         console.log(`   ✅ Embeddings in database: ${verifyVectors.length} (expected: ${savedVectors.length})`);
-        
+
 //         if (verifyVectors.length === 0) {
 //           console.error(`   ❌ CRITICAL ERROR: Chunks exist but NO embeddings found!`);
 //           throw new Error('No embeddings found after save - critical database issue');
@@ -912,7 +912,7 @@
 //       await ProcessingJob.updateJobStatus(jobId, "failed", verifyError.message);
 //       throw verifyError;
 //     }
-    
+
 //     console.log(`\n${'='.repeat(80)}`);
 //     console.log(`[processDigitalNativePDF] ✅ COMPLETED SUCCESSFULLY`);
 //     console.log(`${'='.repeat(80)}`);
@@ -925,7 +925,7 @@
 //     console.log(`   ✅ Status: processed`);
 //     console.log(`   ✅ All verifications passed`);
 //     console.log(`${'='.repeat(80)}\n`);
-    
+
 //   } catch (err) {
 //     console.error(`\n${'='.repeat(80)}`);
 //     console.error(`[processDigitalNativePDF] ❌ ERROR`);
@@ -933,7 +933,7 @@
 //     console.error(`   - Error: ${err.message}`);
 //     console.error(`   - Stack: ${err.stack}`);
 //     console.error(`${'='.repeat(80)}\n`);
-    
+
 //     await updateProgress(fileId, "error", 0, `Processing failed: ${err.message}`);
 //     await ProcessingJob.updateJobStatus(jobId, "failed", err.message);
 //   }
@@ -968,13 +968,13 @@
 //         .map(segment => segment.text || '')
 //         .filter(text => text.trim())
 //         .join('\n\n');
-      
+
 //       if (plainText && plainText.trim()) {
 //         console.log(`[Save Extracted Text] Saving plain text (${plainText.length} chars) to output bucket`);
-        
+
 //         const outputTextPath = `extracted-text/${file_id}.txt`;
 //         const outputTextFile = fileOutputBucket.file(outputTextPath);
-        
+
 //         await outputTextFile.save(plainText, {
 //           resumable: false,
 //           metadata: {
@@ -982,10 +982,10 @@
 //             cacheControl: 'public, max-age=31536000',
 //           },
 //         });
-        
+
 //         const outputTextUri = `gs://${fileOutputBucket.name}/${outputTextPath}`;
 //         console.log(`[Save Extracted Text] ✅ Saved to: ${outputTextUri}`);
-        
+
 //         try {
 //           await File.updateFileOutputPath(file_id, outputTextUri);
 //           console.log(`[Save Extracted Text] ✅ Updated database with output path`);
@@ -1073,11 +1073,11 @@
 //       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
 //         ? chunk.metadata.page_end
 //         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-      
+
 //       if (i < 3) {
 //         console.log(`[Save Chunks] Chunk ${i}: page_start=${page_start}, page_end=${page_end}, has metadata=${!!chunk.metadata}`);
 //       }
-      
+
 //       return {
 //         file_id: file_id,
 //         chunk_index: i,
@@ -1494,7 +1494,7 @@
 // //     RETURNING *;
 // //   `;
 
-  
+
 // //   const values = [
 // //     userIdInt,
 // //     case_title,
@@ -1857,15 +1857,15 @@
 
 //     const authorizationHeader = req.headers.authorization;
 //     const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-    
+
 //     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
-    
+
 //     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
 //       return res.status(400).json({ 
 //         error: "Invalid file size. Please provide a valid file size in bytes." 
 //       });
 //     }
-    
+
 //     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
 //     if (!fileSizeCheck.allowed) {
 //       console.log(`\n${'🆓'.repeat(40)}`);
@@ -1875,7 +1875,7 @@
 //       console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
 //       console.log(`[FREE TIER] ❌ Signed URL NOT generated - upload prevented`);
 //       console.log(`${'🆓'.repeat(40)}\n`);
-      
+
 //       return res.status(403).json({ 
 //         error: fileSizeCheck.message,
 //         shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
@@ -1887,7 +1887,7 @@
 //         limit: `${fileSizeCheck.maxSizeMB} MB`
 //       });
 //     }
-    
+
 //     console.log(`✅ [generateUploadUrl] File size check passed: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
 
 //     const folderQuery = `
@@ -1971,19 +1971,19 @@
 
 //     const authorizationHeader = req.headers.authorization;
 //     const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-    
+
 //     const [metadata] = await fileRef.getMetadata();
 //     const actualFileSize = parseInt(metadata.size) || parseInt(size);
-    
+
 //     const fileSizeBytes = typeof actualFileSize === 'string' ? parseInt(actualFileSize, 10) : Number(actualFileSize);
-    
+
 //     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
 //       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
 //       return res.status(400).json({ 
 //         error: "Invalid file size. Unable to determine file size." 
 //       });
 //     }
-    
+
 //     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
 //     if (!fileSizeCheck.allowed) {
 //       console.log(`\n${'🆓'.repeat(40)}`);
@@ -1993,11 +1993,11 @@
 //       console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
 //       console.log(`[FREE TIER] 🗑️ Deleting file from GCS...`);
 //       console.log(`${'🆓'.repeat(40)}\n`);
-      
+
 //       await fileRef.delete().catch(err => {
 //         console.error(`❌ Failed to delete oversized file from GCS:`, err.message);
 //       });
-      
+
 //       return res.status(403).json({ 
 //         error: fileSizeCheck.message,
 //         shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
@@ -2010,7 +2010,7 @@
 //         actualFileSizeMB: (fileSizeBytes / (1024 * 1024)).toFixed(2)
 //       });
 //     }
-    
+
 //     const storageLimitCheck = await checkStorageLimit(userId, fileSizeBytes, userPlan);
 //     if (!storageLimitCheck.allowed) {
 //       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
@@ -2153,7 +2153,7 @@
 //     const uploadedFiles = [];
 //     for (const file of req.files) {
 //       const fileSizeBytes = typeof file.size === 'string' ? parseInt(file.size, 10) : Number(file.size);
-      
+
 //       const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
 //       if (!fileSizeCheck.allowed) {
 //         console.log(`\n${'🆓'.repeat(40)}`);
@@ -2162,7 +2162,7 @@
 //         console.log(`[FREE TIER] File size: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
 //         console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
 //         console.log(`${'🆓'.repeat(40)}\n`);
-        
+
 //         uploadedFiles.push({
 //           originalname: file.originalname,
 //           error: fileSizeCheck.message,
@@ -2791,7 +2791,7 @@
 //       console.log(`[FREE TIER] - Subsequent chats: Must use RAG retrieval`);
 //       console.log(`[FREE TIER] - Daily token limit: 100,000 tokens (in + out)`);
 //       console.log(`${'🆓'.repeat(40)}\n`);
-      
+
 //       const controllerAccessCheck = await TokenUsageService.checkFreeTierControllerAccessLimit(userId, plan, 'FileController');
 //       if (!controllerAccessCheck.allowed) {
 //         return res.status(403).json({
@@ -3012,9 +3012,9 @@
 //         console.log(`\n📄 FETCHING TEMPLATE FILES:`);
 //         console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
 //         console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
-        
+
 //         templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
-        
+
 //         if (templateData.hasTemplates) {
 //           console.log(`✅ Template files fetched successfully`);
 //           if (templateData.inputTemplate) {
@@ -3033,7 +3033,7 @@
 //         secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
 //         console.log(`✅ Enhanced prompt built with template examples`);
 //         console.log(`   Enhanced prompt length: ${secretValue.length} characters\n`);
-        
+
 //         // Add JSON formatting instructions if output template exists
 //         const inputTemplate = templateData?.inputTemplate || null;
 //         const outputTemplate = templateData?.outputTemplate || null;
@@ -3081,28 +3081,28 @@
 //       console.log(`\n🔍 [RAG] Starting vector search for secret prompt...`);
 //       console.log(`   - Files to search: ${files.length}`);
 //       console.log(`   - Max results per file: ${maxResults}`);
-      
+
 //       const questionEmbedding = await generateEmbedding(secretValue);
 //       console.log(`   - Question embedding generated: ${questionEmbedding.length} dimensions`);
-      
+
 //       const allRelevantChunks = [];
 //       for (const file of files) {
 //         console.log(`\n   🔍 Searching chunks in file: ${file.originalname}`);
 //         console.log(`      File ID: ${file.id} (type: ${typeof file.id})`);
 //         console.log(`      File Status: ${file.status}`);
-        
+
 //         const debugChunks = await FileChunk.getChunksByFileId(file.id);
 //         console.log(`      📋 Chunks in database: ${debugChunks.length}`);
-        
+
 //         if (debugChunks.length === 0) {
 //           console.log(`      ⚠️ No chunks found in database for this file - skipping vector search`);
 //           continue;
 //         }
-        
+
 //         const chunkIds = debugChunks.map(c => c.id);
 //         const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
 //         console.log(`      🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
-        
+
 //         if (debugVectors.length === 0) {
 //           console.log(`      ⚠️ WARNING: Chunks exist but no embeddings found!`);
 //           console.log(`      💡 This means embeddings were not generated. Using chunks directly as fallback.`);
@@ -3119,7 +3119,7 @@
 //           console.log(`      ✅ Added ${fallbackChunks.length} chunks as fallback (no embeddings available)`);
 //           continue;
 //         }
-        
+
 //         console.log(`      🔎 Performing vector search with embedding...`);
 //         const relevant = await ChunkVector.findNearestChunksAcrossFiles(
 //           questionEmbedding,
@@ -3127,7 +3127,7 @@
 //           [file.id]
 //         );
 //         console.log(`      📊 Vector search found: ${relevant.length} relevant chunks`);
-        
+
 //         if (relevant.length) {
 //           const chunksWithSimilarity = relevant.map((r) => {
 //             const distance = parseFloat(r.distance) || 2.0;
@@ -3165,7 +3165,7 @@
 //       if (allRelevantChunks.length === 0) {
 //         console.warn(`\n⚠️ [RAG] No chunks found via vector search - trying fallback...`);
 //         console.warn(`   - Files searched: ${files.length}`);
-        
+
 //         const processingFiles = files.filter(f => f.status !== 'processed');
 //         if (processingFiles.length > 0) {
 //           console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
@@ -3174,7 +3174,7 @@
 //             processingFiles: processingFiles.map(f => ({ id: f.id, name: f.originalname, status: f.status }))
 //           });
 //         }
-        
+
 //         console.log(`   - Attempting fallback: Using all chunks from processed files...`);
 //         const fallbackChunks = [];
 //         for (const file of files) {
@@ -3194,7 +3194,7 @@
 //             }
 //           }
 //         }
-        
+
 //         if (fallbackChunks.length > 0) {
 //           console.log(`   ✅ Fallback successful: Using ${fallbackChunks.length} chunks from ${files.length} file(s)`);
 //           allRelevantChunks.push(...fallbackChunks);
@@ -3218,7 +3218,7 @@
 //       const topChunks = allRelevantChunks
 //         .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
 //         .slice(0, 10);
-      
+
 //       console.log(`   - Top chunks selected: ${topChunks.length}`);
 //       console.log(`   - Similarity range: ${Math.min(...topChunks.map(c => c.similarity)).toFixed(3)} - ${Math.max(...topChunks.map(c => c.similarity)).toFixed(3)}`);
 //       usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
@@ -3317,7 +3317,7 @@
 //             console.log(`[FREE TIER] Gemini Eyeball limit reached - forcing RAG`);
 //             console.log(`[FREE TIER] ${eyeballLimitCheck.message}`);
 //             console.log(`${'🆓'.repeat(40)}\n`);
-            
+
 //             queryAnalysis.needsFullDocument = false;
 //             queryAnalysis.strategy = 'TARGETED_RAG';
 //             queryAnalysis.reason = 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead';
@@ -3337,7 +3337,7 @@
 //         const inputTokens = Math.ceil((question?.length || 0) / 4);
 //         const estimatedOutputTokens = Math.ceil(inputTokens * 1.5); // Estimate output tokens
 //         const estimatedTokens = inputTokens + estimatedOutputTokens;
-        
+
 //         const tokenLimitCheck = await TokenUsageService.checkFreeTierDailyTokenLimit(userId, plan, estimatedTokens);
 //         if (!tokenLimitCheck.allowed) {
 //           return res.status(403).json({
@@ -3410,25 +3410,25 @@
 //         console.log(`   - Question: "${question.substring(0, 100)}${question.length > 100 ? '...' : ''}"`);
 //         console.log(`   - Files to search: ${files.length}`);
 //         console.log(`   - Max results per file: ${maxResults}`);
-        
+
 //         const allRelevantChunks = [];
 //         for (const file of files) {
 //           console.log(`\n   🔍 Searching chunks in file: ${file.originalname}`);
 //           console.log(`      File ID: ${file.id} (type: ${typeof file.id})`);
 //           console.log(`      File Status: ${file.status}`);
-          
+
 //           const debugChunks = await FileChunk.getChunksByFileId(file.id);
 //           console.log(`      📋 Chunks in database: ${debugChunks.length}`);
-          
+
 //           if (debugChunks.length === 0) {
 //             console.log(`      ⚠️ No chunks found in database for this file - skipping vector search`);
 //             continue;
 //           }
-          
+
 //           const chunkIds = debugChunks.map(c => c.id);
 //           const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
 //           console.log(`      🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
-          
+
 //           if (debugVectors.length === 0) {
 //             console.log(`      ⚠️ WARNING: Chunks exist but no embeddings found!`);
 //             console.log(`      💡 This means embeddings were not generated. Using chunks directly as fallback.`);
@@ -3445,7 +3445,7 @@
 //             console.log(`      ✅ Added ${fallbackChunks.length} chunks as fallback (no embeddings available)`);
 //             continue;
 //           }
-          
+
 //           console.log(`      🔎 Performing vector search with embedding...`);
 //           const relevant = await ChunkVector.findNearestChunksAcrossFiles(
 //             questionEmbedding,
@@ -3453,7 +3453,7 @@
 //             [file.id]
 //           );
 //           console.log(`      📊 Vector search found: ${relevant.length} relevant chunks`);
-          
+
 //           if (relevant.length) {
 //             const chunksWithSimilarity = relevant.map((r) => {
 //               const distance = parseFloat(r.distance) || 2.0;
@@ -3491,7 +3491,7 @@
 //         if (allRelevantChunks.length === 0) {
 //           console.warn(`\n⚠️ [RAG] No chunks found via vector search - trying fallback...`);
 //           console.warn(`   - Files searched: ${files.length}`);
-          
+
 //           const processingFiles = files.filter(f => f.status !== 'processed');
 //           if (processingFiles.length > 0) {
 //             console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
@@ -3500,7 +3500,7 @@
 //               processingFiles: processingFiles.map(f => ({ id: f.id, name: f.originalname, status: f.status }))
 //             });
 //           }
-          
+
 //           console.log(`   - Attempting fallback: Using all chunks from processed files...`);
 //           const fallbackChunks = [];
 //           for (const file of files) {
@@ -3520,7 +3520,7 @@
 //               }
 //             }
 //           }
-          
+
 //           if (fallbackChunks.length > 0) {
 //             console.log(`   ✅ Fallback successful: Using ${fallbackChunks.length} chunks from ${files.length} file(s)`);
 //             allRelevantChunks.push(...fallbackChunks);
@@ -3544,7 +3544,7 @@
 //         const topChunks = allRelevantChunks
 //           .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
 //           .slice(0, 10);
-        
+
 //         console.log(`   - Top chunks selected: ${topChunks.length}`);
 //         console.log(`   - Similarity range: ${Math.min(...topChunks.map(c => c.similarity)).toFixed(3)} - ${Math.max(...topChunks.map(c => c.similarity)).toFixed(3)}`);
 //         usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
@@ -3904,10 +3904,10 @@
 //     if (!prefix.endsWith('/')) {
 //       prefix += '/';
 //     }
-    
+
 //     console.log(`[getFileProcessingStatus] Fetching results from bucket: ${bucketName}, prefix: ${prefix}`);
 //     console.log(`[getFileProcessingStatus] Full output URI: ${job.gcs_output_uri_prefix}`);
-    
+
 //     const extractedBatchTexts = await fetchBatchResults(bucketName, prefix);
 
 //     if (!extractedBatchTexts || extractedBatchTexts.length === 0) {
@@ -3919,13 +3919,13 @@
 //         message: "Could not extract any meaningful text content from batch document. This may indicate: 1) Image-only PDF with no OCR text, 2) Corrupted document, 3) Document AI processing incomplete, or 4) JSON structure mismatch."
 //       };
 //       console.error(`[getFileProcessingStatus] ❌ Text extraction failed:`, errorDetails);
-      
+
 //       await File.updateProcessingStatus(file_id, "error", 0.0, "Text extraction failed: No text content found in Document AI results");
 //       await ProcessingJob.updateJobStatus(job.job_id, "failed", errorDetails.message);
-      
+
 //       throw new Error(`Could not extract any meaningful text content from batch document. Check logs for details. Output URI: ${job.gcs_output_uri_prefix}`);
 //     }
-    
+
 //     const nonEmptyTexts = extractedBatchTexts.filter(item => item.text && item.text.trim());
 //     if (nonEmptyTexts.length === 0) {
 //       console.error(`[getFileProcessingStatus] ❌ All extracted text segments are empty`);
@@ -3938,7 +3938,7 @@
 //       await ProcessingJob.updateJobStatus(job.job_id, "failed", errorDetails.message);
 //       throw new Error(`All extracted text segments are empty. Total segments: ${extractedBatchTexts.length}`);
 //     }
-    
+
 //     console.log(`[getFileProcessingStatus] ✅ Successfully extracted ${nonEmptyTexts.length} non-empty text segments from ${extractedBatchTexts.length} total segments`);
 
 //     let batchChunkingMethod = "recursive"; // Default fallback
@@ -3989,7 +3989,7 @@
 //       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
 //         ? chunk.metadata.page_end
 //         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-      
+
 //       return {
 //         file_id: file_id,
 //         chunk_index: i,
@@ -4136,11 +4136,11 @@
 //     const chatHistoryWithCitations = await Promise.all(
 //       chatHistory.map(async (chat) => {
 //         let citations = chat.citations || [];
-        
+
 //         if ((!citations || citations.length === 0) && chat.used_chunk_ids && chat.used_chunk_ids.length > 0) {
 //           try {
 //             const { extractCitationsFromChunks } = require('./intelligentFolderChatController');
-            
+
 //             const chunkIds = chat.used_chunk_ids;
 //             const chunksQuery = `
 //               SELECT 
@@ -4157,7 +4157,7 @@
 //               ORDER BY uf.originalname ASC, fc.page_start ASC;
 //             `;
 //             const { rows: chunks } = await pool.query(chunksQuery, [chunkIds, userId]);
-            
+
 //             if (chunks.length > 0) {
 //               const formattedChunks = chunks.map(c => ({
 //                 chunk_id: c.id,
@@ -4167,9 +4167,9 @@
 //                 file_id: c.file_id,
 //                 filename: c.filename,
 //               }));
-              
+
 //               citations = await extractCitationsFromChunks(formattedChunks, baseUrl);
-              
+
 //               if (citations.length > 0) {
 //                 await pool.query(
 //                   `UPDATE folder_chats SET citations = $1::jsonb WHERE id = $2::uuid`,
@@ -4329,12 +4329,12 @@
 //     }
 
 //     const chat = chatRows[0];
-    
+
 //     let citations = chat.citations || [];
-    
+
 //     if ((!citations || citations.length === 0) && chat.used_chunk_ids && chat.used_chunk_ids.length > 0) {
 //       console.log(`🔄 [getChatCitations] No citations in DB, generating from chunk IDs for chat ${chatId}`);
-      
+
 //       const protocol = req.protocol || 'http';
 //       const host = req.get('host') || '';
 //       const baseUrl = `${protocol}://${host}`;
@@ -4385,7 +4385,7 @@
 //         console.warn(`⚠️ [getChatCitations] No chunks found for IDs: ${chunkIds.join(', ')}`);
 //       }
 //     }
-    
+
 //     if (!chat.used_chunk_ids || chat.used_chunk_ids.length === 0) {
 //       return res.status(200).json({
 //         success: true,
@@ -4734,7 +4734,7 @@
 
 //     const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 //     const isValidUUID = UUID_REGEX.test(sessionId);
-    
+
 //     if (!isValidUUID) {
 //       return res.status(400).json({
 //         error: "Invalid session ID format",
@@ -4751,10 +4751,10 @@
 //       ORDER BY created_at DESC
 //       LIMIT 10
 //     `;
-    
+
 //     const checkResult = await pool.query(checkQuery, [userId, sessionId]);
 //     console.log(`🗑️ [deleteFolderChatSession] Found ${checkResult.rows.length} chat(s) with session_id: ${sessionId}`);
-    
+
 //     if (checkResult.rows.length === 0) {
 //       return res.status(404).json({
 //         error: "Chat session not found",
@@ -4763,17 +4763,17 @@
 //         message: "No chats found with this session ID for your user account."
 //       });
 //     }
-    
+
 //     const normalizedFolderName = folderName.trim();
 //     const matchingFolder = checkResult.rows.filter(row => 
 //       row.folder_name && row.folder_name.trim().toLowerCase() === normalizedFolderName.toLowerCase()
 //     );
-    
+
 //     console.log(`🗑️ [deleteFolderChatSession] Checking folder match:`);
 //     console.log(`   - Requested folder: "${normalizedFolderName}"`);
 //     console.log(`   - Found folders: ${[...new Set(checkResult.rows.map(r => r.folder_name))].join(', ')}`);
 //     console.log(`   - Matching chats: ${matchingFolder.length}`);
-    
+
 //     if (matchingFolder.length === 0) {
 //       const actualFolders = [...new Set(checkResult.rows.map(r => r.folder_name).filter(Boolean))];
 //       return res.status(404).json({
@@ -4788,7 +4788,7 @@
 //         }
 //       });
 //     }
-    
+
 //     const deleteQuery = `
 //       DELETE FROM folder_chats
 //       WHERE user_id = $1
@@ -4843,7 +4843,7 @@
 
 //     const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 //     const isValidUUID = UUID_REGEX.test(chatId);
-    
+
 //     if (!isValidUUID) {
 //       return res.status(400).json({
 //         error: "Invalid chat ID format",
@@ -4858,9 +4858,9 @@
 //       WHERE id = $1::uuid
 //         AND user_id = $2
 //     `;
-    
+
 //     const checkResult = await pool.query(checkQuery, [chatId, userId]);
-    
+
 //     if (checkResult.rows.length === 0) {
 //       return res.status(404).json({
 //         error: "Chat not found",
@@ -5189,9 +5189,9 @@
 // exports.getFilesForMindmap = async (req, res) => {
 //   try {
 //     const userId = req.user.id;
-    
+
 //     console.log(`[getFilesForMindmap] Fetching processed files for user: ${userId}`);
-    
+
 //     const query = `
 //       SELECT 
 //         id,
@@ -5208,9 +5208,9 @@
 //         AND status = 'processed'
 //       ORDER BY created_at DESC
 //     `;
-    
+
 //     const result = await pool.query(query, [userId]);
-    
+
 //     const files = result.rows.map(file => ({
 //       id: file.id,
 //       name: file.originalname,
@@ -5221,9 +5221,9 @@
 //       createdAt: file.created_at,
 //       processedAt: file.processed_at
 //     }));
-    
+
 //     console.log(`[getFilesForMindmap] Found ${files.length} processed files for user ${userId}`);
-    
+
 //     return res.status(200).json({
 //       success: true,
 //       files: files,
@@ -5294,7 +5294,7 @@
 //     console.log(`✅ Generated view URL for file: ${file.originalname}${pageNumber ? ` (page ${pageNumber})` : ''}`);
 
 //     const finalViewUrl = viewUrl;
-    
+
 //     const viewUrlWithPage = pageNumber && file.mimetype === 'application/pdf' 
 //       ? `${finalViewUrl}#page=${pageNumber}` 
 //       : finalViewUrl;
@@ -5560,7 +5560,7 @@
 
 //     for (const file of filesToProcess) {
 //       const chunks = await FileChunk.getChunksByFileId(file.id);
-      
+
 //       for (const chunk of chunks) {
 //         if (page) {
 //           const pageNum = parseInt(page, 10);
@@ -6134,11 +6134,11 @@ async function processDocumentWithAI(
       console.log(`[PDF DETECTION] File: ${originalFilename}`);
       console.log(`[PDF DETECTION] File ID: ${fileId}`);
       console.log(`${"🔍".repeat(40)}\n`);
-     
+
       await updateProgress(fileId, "batch_queued", 6, "Analyzing PDF format (checking if digital-native)");
-     
+
       const pdfDetection = await detectDigitalNativePDF(fileBuffer);
-     
+
       console.log(`\n${"=".repeat(80)}`);
       console.log(`[PDF DETECTION] Analysis Results for File ID: ${fileId}`);
       console.log(`${"=".repeat(80)}`);
@@ -6163,48 +6163,48 @@ async function processDocumentWithAI(
       }
       console.log(`  ✅ Is Digital Native: ${pdfDetection.isDigitalNative ? 'YES' : 'NO'}`);
       console.log(`${"=".repeat(80)}\n`);
-     
+
       if (pdfDetection.isDigitalNative) {
         isDigitalNative = true;
-       
+
         console.log(`\n${"🟢".repeat(40)}`);
         console.log(`[TEXT EXTRACTION METHOD] ✅ DIGITAL-NATIVE PDF DETECTED`);
         console.log(`[TEXT EXTRACTION METHOD] 📦 Using: pdf-parse (FREE - No Document AI cost)`);
         console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: $0.00 (Cost savings enabled)`);
         console.log(`[TEXT EXTRACTION METHOD] ⚡ Speed: Fast (local parsing)`);
         console.log(`${"🟢".repeat(40)}\n`);
-       
+
         await updateProgress(fileId, "processing", 20, "Extracting text from digital-native PDF (using pdf-parse)");
-       
+
         extractedTexts = await extractTextFromPDFWithPages(fileBuffer);
-       
+
         console.log(`[TEXT EXTRACTION] ✅ Successfully extracted ${extractedTexts.length} text segment(s) with page numbers`);
         if (extractedTexts.length > 0 && extractedTexts[0].page_start) {
           console.log(`[TEXT EXTRACTION] 📄 Page range: ${extractedTexts[0].page_start} - ${extractedTexts[0].page_end}`);
         }
-       
+
         const totalExtractedText = extractedTexts.map(t => t.text || '').join(' ').trim();
         const extractedWordCount = totalExtractedText.split(/\s+/).filter(w => w.length > 0).length;
         const extractedCharCount = totalExtractedText.length;
         const minWordsRequired = 10 * pdfDetection.pageCount; // At least 10 words per page
         const minCharsRequired = 100 * pdfDetection.pageCount; // At least 100 chars per page
-       
+
         console.log(`[TEXT EXTRACTION] Validation:`);
         console.log(`  - Extracted words: ${extractedWordCount} (minimum: ${minWordsRequired})`);
         console.log(`  - Extracted characters: ${extractedCharCount} (minimum: ${minCharsRequired})`);
-       
+
         if (extractedWordCount < minWordsRequired || extractedCharCount < minCharsRequired) {
           console.log(`\n${"⚠️".repeat(40)}`);
           console.log(`[TEXT EXTRACTION] ⚠️ WARNING: Extracted text is too sparse`);
           console.log(`[TEXT EXTRACTION] Digital-native detection may have been incorrect`);
           console.log(`[TEXT EXTRACTION] Falling back to Document AI for better extraction`);
           console.log(`${"⚠️".repeat(40)}\n`);
-         
+
           isDigitalNative = false;
           extractedTexts = [];
         } else {
           await updateProgress(fileId, "processing", 42, "Text extraction completed (digital-native PDF - pdf-parse)");
-         
+
           await processDigitalNativePDF(fileId, extractedTexts, userId, secretId, jobId);
           return; // Exit early, processing continues in background
         }
@@ -6282,81 +6282,81 @@ async function processDocumentWithAI(
   }
 }
 
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
 
 
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 //     if (savedChunks.length !== chunksToSave.length) {
-   
-   
-   
-   
-   
-   
-   
-   
-   
-     
+
+
+
+
+
+
+
+
+
+
 //       if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
-     
-   
+
+
 //     if (validVectors.length !== vectorsToSave.length) {
-   
-   
+
+
 //     if (savedVectors.length !== validVectors.length) {
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-     
-       
+
+
+
+
+
+
+
+
+
+
+
+
 //           console.error(`   ❌ WARNING: Chunks exist but NO embeddings found!`);
 //           console.log(`   ✅ All chunks have embeddings!`);
-   
-   
-   
+
+
+
 
 async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId, jobId) {
   try {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`[processDigitalNativePDF] Starting processing for File ID: ${fileId}`);
     console.log(`${'='.repeat(80)}\n`);
-   
+
     await updateProgress(fileId, "processing", 45, "Loading chunking configuration");
-   
+
     let chunkingMethod = "recursive";
     if (secretId) {
       try {
@@ -6374,26 +6374,26 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
         console.warn(`[processDigitalNativePDF] Error fetching chunking method: ${err.message}`);
       }
     }
-   
+
     console.log(`[processDigitalNativePDF] Chunking method: ${chunkingMethod}`);
     await updateProgress(fileId, "processing", 48, `Configuration loaded: ${chunkingMethod}`);
-   
+
     await updateProgress(fileId, "processing", 50, "Starting chunking");
-   
+
     const chunks = await chunkDocument(extractedTexts, fileId, chunkingMethod);
     console.log(`[processDigitalNativePDF] ✅ Generated ${chunks.length} chunks`);
-   
+
     if (chunks.length === 0) {
       console.warn(`[processDigitalNativePDF] ⚠️ No chunks generated`);
       await updateProgress(fileId, "processed", 100, "Completed (no content)");
       await ProcessingJob.updateJobStatus(jobId, "completed");
       return;
     }
-   
+
     await updateProgress(fileId, "processing", 58, `Created ${chunks.length} chunks`);
-   
+
     await updateProgress(fileId, "processing", 60, "Saving chunks to database");
-   
+
     const chunksToSave = chunks.map((chunk, i) => {
       const page_start = chunk.metadata?.page_start !== null && chunk.metadata?.page_start !== undefined
         ? chunk.metadata.page_start
@@ -6401,11 +6401,11 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
         ? chunk.metadata.page_end
         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-     
+
       if (i < 3) {
         console.log(`[Save Chunks] Chunk ${i}: page_start=${page_start}, page_end=${page_end}, has metadata=${!!chunk.metadata}`);
       }
-     
+
       return {
         file_id: fileId,
         chunk_index: i,
@@ -6416,96 +6416,96 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
         heading: chunk.metadata?.heading || chunk.heading || null,
       };
     });
-   
+
     console.log(`[processDigitalNativePDF] 💾 Saving ${chunksToSave.length} chunks to database...`);
     const savedChunks = await FileChunk.saveMultipleChunks(chunksToSave);
     console.log(`[processDigitalNativePDF] ✅ Saved ${savedChunks.length} chunks to database`);
-   
+
     if (savedChunks.length !== chunksToSave.length) {
       console.error(`[processDigitalNativePDF] ❌ Chunk count mismatch: expected ${chunksToSave.length}, saved ${savedChunks.length}`);
       throw new Error(`Chunk save failed: expected ${chunksToSave.length}, got ${savedChunks.length}`);
     }
-   
+
     const chunkIds = savedChunks.map(c => c.id);
     console.log(`[processDigitalNativePDF] 📋 Saved chunk IDs: ${chunkIds.slice(0, 5).join(', ')}${chunkIds.length > 5 ? `... (${chunkIds.length} total)` : ''}`);
-   
+
     await updateProgress(fileId, "processing", 68, `${savedChunks.length} chunks saved`);
-   
+
     await updateProgress(fileId, "processing", 70, "Generating embeddings");
-   
+
     const chunkContents = chunks.map(c => c.content);
     console.log(`[processDigitalNativePDF] 🔄 Generating embeddings for ${chunkContents.length} chunks`);
-   
+
     let embeddings;
     try {
       embeddings = await generateEmbeddings(chunkContents);
       console.log(`[processDigitalNativePDF] ✅ Generated ${embeddings.length} embeddings`);
-     
+
       if (embeddings.length !== chunkContents.length) {
         console.error(`[processDigitalNativePDF] ❌ Embedding count mismatch: expected ${chunkContents.length}, got ${embeddings.length}`);
         throw new Error(`Embedding generation failed: expected ${chunkContents.length}, got ${embeddings.length}`);
       }
-     
+
       for (let i = 0; i < embeddings.length; i++) {
         if (!embeddings[i] || !Array.isArray(embeddings[i]) || embeddings[i].length === 0) {
           console.error(`[processDigitalNativePDF] ❌ Invalid embedding at index ${i}`);
           throw new Error(`Invalid embedding at index ${i}: ${JSON.stringify(embeddings[i])}`);
         }
       }
-     
+
     } catch (embeddingError) {
       console.error(`[processDigitalNativePDF] ❌ Embedding generation failed:`, embeddingError.message);
       throw embeddingError;
     }
-   
+
     await updateProgress(fileId, "processing", 75, "Embeddings generated");
-   
+
     await updateProgress(fileId, "processing", 76, "Saving vector embeddings");
-   
+
     console.log(`[processDigitalNativePDF] 🔗 Mapping chunks to embeddings...`);
     const vectorsToSave = savedChunks.map((savedChunk, index) => {
       const originalChunkIndex = savedChunk.chunk_index;
       const embedding = embeddings[originalChunkIndex];
-     
+
       if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
         console.error(`[processDigitalNativePDF] ❌ Missing/invalid embedding for chunk ${savedChunk.id} at index ${originalChunkIndex}`);
         throw new Error(`Invalid embedding for chunk ${savedChunk.id}`);
       }
-     
+
       return {
         chunk_id: savedChunk.id,
         embedding: embedding,
         file_id: fileId,
       };
     });
-   
+
     console.log(`[processDigitalNativePDF] 💾 Saving ${vectorsToSave.length} vector embeddings to database...`);
-   
+
     let savedVectors;
     try {
       savedVectors = await ChunkVector.saveMultipleChunkVectors(vectorsToSave);
       console.log(`[processDigitalNativePDF] ✅ Saved ${savedVectors.length} vector embeddings to database`);
-     
+
       if (savedVectors.length !== vectorsToSave.length) {
         console.error(`[processDigitalNativePDF] ❌ Vector count mismatch: expected ${vectorsToSave.length}, saved ${savedVectors.length}`);
         throw new Error(`Vector save failed: expected ${vectorsToSave.length}, got ${savedVectors.length}`);
       }
-     
+
     } catch (vectorSaveError) {
       console.error(`[processDigitalNativePDF] ❌ Failed to save vectors:`, vectorSaveError.message);
       throw vectorSaveError;
     }
-   
+
     const vectorIds = savedVectors.map(v => v.chunk_id);
     console.log(`[processDigitalNativePDF] 📋 Saved vector chunk IDs: ${vectorIds.slice(0, 5).join(', ')}${vectorIds.length > 5 ? `... (${vectorIds.length} total)` : ''}`);
-   
+
     await updateProgress(fileId, "processing", 85, "Vector embeddings saved");
-   
+
     console.log(`\n[processDigitalNativePDF] 🔍 IMMEDIATE VERIFICATION CHECK`);
     try {
       const verifyVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
       console.log(`   ✅ Verification: Found ${verifyVectors.length} embeddings in database for ${chunkIds.length} chunks`);
-     
+
       if (verifyVectors.length === 0) {
         console.error(`   ❌ CRITICAL: Vectors were saved but CANNOT be retrieved!`);
         throw new Error('Vectors saved but retrieval failed - database issue');
@@ -6518,9 +6518,9 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
       console.error(`   ❌ Verification failed:`, verifyError.message);
       throw new Error(`Embedding verification failed: ${verifyError.message}`);
     }
-   
+
     await updateProgress(fileId, "processing", 86, "Generating document summary");
-   
+
     let summary = null;
     try {
       if (chunks.length > 0) {
@@ -6539,27 +6539,27 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
     } catch (summaryError) {
       console.warn(`[processDigitalNativePDF] ⚠️ Summary generation failed: ${summaryError.message}`);
     }
-   
+
     await updateProgress(fileId, "processing", 95, "Summary completed");
-   
+
     await updateProgress(fileId, "processing", 98, "Finalizing processing");
-   
+
     await File.updateProcessingStatus(fileId, "processed", 100, "Completed");
     await ProcessingJob.updateJobStatus(jobId, "completed");
-   
+
     console.log(`\n${'='.repeat(80)}`);
     console.log(`[processDigitalNativePDF] 🔍 FINAL VERIFICATION`);
     console.log(`${'='.repeat(80)}`);
-   
+
     try {
       const verifyChunks = await FileChunk.getChunksByFileId(fileId);
       console.log(`   ✅ Chunks in database: ${verifyChunks.length} (expected: ${savedChunks.length})`);
-     
+
       if (verifyChunks.length > 0) {
         const verifyChunkIds = verifyChunks.map(c => c.id);
         const verifyVectors = await ChunkVector.getVectorsByChunkIds(verifyChunkIds);
         console.log(`   ✅ Embeddings in database: ${verifyVectors.length} (expected: ${savedVectors.length})`);
-       
+
         if (verifyVectors.length === 0) {
           console.error(`   ❌ CRITICAL ERROR: Chunks exist but NO embeddings found!`);
           throw new Error('No embeddings found after save - critical database issue');
@@ -6576,7 +6576,7 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
       await ProcessingJob.updateJobStatus(jobId, "failed", verifyError.message);
       throw verifyError;
     }
-   
+
     console.log(`\n${'='.repeat(80)}`);
     console.log(`[processDigitalNativePDF] ✅ COMPLETED SUCCESSFULLY`);
     console.log(`${'='.repeat(80)}`);
@@ -6589,7 +6589,7 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
     console.log(`   ✅ Status: processed`);
     console.log(`   ✅ All verifications passed`);
     console.log(`${'='.repeat(80)}\n`);
-   
+
   } catch (err) {
     console.error(`\n${'='.repeat(80)}`);
     console.error(`[processDigitalNativePDF] ❌ ERROR`);
@@ -6597,7 +6597,7 @@ async function processDigitalNativePDF(fileId, extractedTexts, userId, secretId,
     console.error(`   - Error: ${err.message}`);
     console.error(`   - Stack: ${err.stack}`);
     console.error(`${'='.repeat(80)}\n`);
-   
+
     await updateProgress(fileId, "error", 0, `Processing failed: ${err.message}`);
     await ProcessingJob.updateJobStatus(jobId, "failed", err.message);
   }
@@ -6632,13 +6632,13 @@ async function processBatchResults(file_id, job) {
         .map(segment => segment.text || '')
         .filter(text => text.trim())
         .join('\n\n');
-     
+
       if (plainText && plainText.trim()) {
         console.log(`[Save Extracted Text] Saving plain text (${plainText.length} chars) to output bucket`);
-       
+
         const outputTextPath = `extracted-text/${file_id}.txt`;
         const outputTextFile = fileOutputBucket.file(outputTextPath);
-       
+
         await outputTextFile.save(plainText, {
           resumable: false,
           metadata: {
@@ -6646,10 +6646,10 @@ async function processBatchResults(file_id, job) {
             cacheControl: 'public, max-age=31536000',
           },
         });
-       
+
         const outputTextUri = `gs://${fileOutputBucket.name}/${outputTextPath}`;
         console.log(`[Save Extracted Text] ✅ Saved to: ${outputTextUri}`);
-       
+
         try {
           await File.updateFileOutputPath(file_id, outputTextUri);
           console.log(`[Save Extracted Text] ✅ Updated database with output path`);
@@ -6737,11 +6737,11 @@ async function processBatchResults(file_id, job) {
       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
         ? chunk.metadata.page_end
         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-     
+
       if (i < 3) {
         console.log(`[Save Chunks] Chunk ${i}: page_start=${page_start}, page_end=${page_end}, has metadata=${!!chunk.metadata}`);
       }
-     
+
       return {
         file_id: file_id,
         chunk_index: i,
@@ -6820,10 +6820,10 @@ async function processBatchResults(file_id, job) {
       if (cached && cached.embedding) {
         const embedding = parseCachedEmbedding(cached.embedding);
         if (embedding && Array.isArray(embedding) && embedding.length > 0) {
-          vectors.push({ 
-            chunk_id: savedChunk.id, 
-            embedding, 
-            file_id: file_id 
+          vectors.push({
+            chunk_id: savedChunk.id,
+            embedding,
+            file_id: file_id
           });
           cacheHits.push(savedChunk.chunk_index);
           continue;
@@ -6845,37 +6845,82 @@ async function processBatchResults(file_id, job) {
     // Process embeddings in batches
     if (toEmbed.length > 0) {
       const { BATCH_SIZE, PARALLEL_BATCHES } = require("../services/embeddingService");
+      console.log(`[Embeddings] Configuration - BATCH_SIZE: ${BATCH_SIZE}, PARALLEL_BATCHES: ${PARALLEL_BATCHES}`);
+
       const totalBatches = Math.ceil(toEmbed.length / BATCH_SIZE);
-      
+      console.log(`[Embeddings] Will process ${toEmbed.length} chunks in ${totalBatches} batches`);
+
       for (let batchStart = 0; batchStart < toEmbed.length; batchStart += BATCH_SIZE * PARALLEL_BATCHES) {
         const parallelPromises = [];
-        
+
         // Create parallel batch processing promises
         for (let i = 0; i < PARALLEL_BATCHES && (batchStart + i * BATCH_SIZE) < toEmbed.length; i++) {
           const batchIndex = batchStart + i * BATCH_SIZE;
           const batch = toEmbed.slice(batchIndex, batchIndex + BATCH_SIZE);
           if (batch.length > 0) {
+            console.log(`[Embeddings] Creating promise for batch at index ${batchIndex}, size: ${batch.length}`);
             const texts = batch.map((item) => item.content);
             parallelPromises.push(
-              generateEmbeddingsWithMeta(texts).then(({ embeddings, model }) => ({
-                embeddings,
-                model,
-                batch,
-              }))
+              generateEmbeddingsWithMeta(texts)
+                .then(({ embeddings, model }) => {
+                  console.log(`[Embeddings] Promise resolved - Model: ${model}, Embeddings: ${embeddings?.length}`);
+                  return {
+                    embeddings,
+                    model,
+                    batch,
+                  };
+                })
+                .catch((error) => {
+                  console.error(`❌ [Embeddings] Promise rejected:`, error.message);
+                  console.error(error.stack);
+                  throw error;
+                })
             );
           }
         }
 
+        console.log(`[Embeddings] Waiting for ${parallelPromises.length} parallel promises...`);
+
         // Wait for all parallel batches to complete
         const batchResults = await Promise.all(parallelPromises);
-        
+
         // Process results
         for (const { embeddings, model, batch } of batchResults) {
-          if (!embeddings || embeddings.length !== batch.length) {
+          console.log(`[Embeddings] Batch result - Model: ${model}, Embeddings: ${embeddings?.length}, Batch size: ${batch.length}`);
+
+          if (!embeddings) {
+            console.error(`❌ [Embeddings] ERROR: embeddings is null/undefined!`);
+            throw new Error(`Embedding generation returned null/undefined`);
+          }
+
+          if (!Array.isArray(embeddings)) {
+            console.error(`❌ [Embeddings] ERROR: embeddings is not an array! Type: ${typeof embeddings}`);
+            throw new Error(`Embedding generation returned non-array: ${typeof embeddings}`);
+          }
+
+          if (embeddings.length === 0) {
+            console.error(`❌ [Embeddings] ERROR: embeddings array is empty!`);
+            console.error(`   - Batch size: ${batch.length}`);
+            console.error(`   - Model: ${model}`);
+            throw new Error(`Embedding generation returned empty array for ${batch.length} chunks`);
+          }
+
+          if (embeddings.length !== batch.length) {
+            console.error(`❌ [Embeddings] ERROR: Embedding count mismatch!`);
+            console.error(`   - Expected: ${batch.length}`);
+            console.error(`   - Got: ${embeddings.length}`);
             throw new Error(`Embedding count mismatch (expected ${batch.length}, got ${embeddings?.length || 0})`);
           }
 
           embeddings.forEach((embedding, idx) => {
+            if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+              console.error(`❌ [Embeddings] ERROR: Invalid embedding at index ${idx}`);
+              console.error(`   - Type: ${typeof embedding}`);
+              console.error(`   - Is Array: ${Array.isArray(embedding)}`);
+              console.error(`   - Length: ${embedding?.length}`);
+              throw new Error(`Invalid embedding at index ${idx}`);
+            }
+
             const chunk = batch[idx];
             vectors.push({
               chunk_id: chunk.chunkId,
@@ -6889,23 +6934,38 @@ async function processBatchResults(file_id, job) {
               embedding,
               model,
               tokenCount: chunk.tokenCount,
-            }).catch(() => {});
+            }).catch(() => { });
           });
 
           const currentBatch = Math.floor(batchStart / BATCH_SIZE) + 1;
           const progress = 89 + Math.min(8, Math.round((currentBatch / totalBatches) * 10));
           await updateProgress(file_id, "processing", progress, `Generating embeddings (${currentBatch}/${totalBatches} batches)`);
-          console.log(`[Embeddings] ✅ Processed batch ${currentBatch}/${totalBatches} (${batch.length} chunks)`);
+          console.log(`[Embeddings] ✅ Processed batch ${currentBatch}/${totalBatches} (${batch.length} chunks, ${embeddings.length} embeddings generated)`);
         }
       }
     }
 
+    console.log(`[Embeddings] 📊 Summary:`);
+    console.log(`   - Total chunks: ${savedChunks.length}`);
+    console.log(`   - Cache hits: ${cacheHits.length}`);
+    console.log(`   - To embed: ${toEmbed.length}`);
+    console.log(`   - Vectors collected: ${vectors.length}`);
+
     // Save all vectors to database
     await updateProgress(file_id, "processing", 97, "Saving embeddings to database");
     console.log(`[Embeddings] Saving ${vectors.length} vectors to database`);
-    
+
+    if (vectors.length === 0) {
+      console.error(`❌ [Embeddings] ERROR: No vectors to save!`);
+      console.error(`   - Saved chunks: ${savedChunks.length}`);
+      console.error(`   - Cache hits: ${cacheHits.length}`);
+      console.error(`   - To embed: ${toEmbed.length}`);
+      console.error(`   - This means embedding generation failed silently!`);
+      throw new Error(`No embeddings generated for ${savedChunks.length} chunks`);
+    }
+
     await ChunkVector.saveMultipleChunkVectors(vectors);
-    
+
     console.log(`[Embeddings] ✅ Saved ${vectors.length} vectors for file ${file_id}`);
     await updateProgress(file_id, "processed", 100, "Processing complete");
     await ProcessingJob.updateJobStatus(job.job_id, "completed");
@@ -6967,7 +7027,7 @@ exports.createFolder = async (req, res) => {
       user_id: userId,
       originalname: safeFolderName,
       gcs_path: gcsPath,
-      folder_path: cleanParentPath || null,
+      folder_path: cleanParentPath || null, // ✅ FIX: Store parent path, not folder's own path
       mimetype: 'folder/x-directory',
       is_folder: true,
       status: "processed",
@@ -7004,7 +7064,7 @@ async function createFolderInternal(userId, folderName, parentPath = "") {
       user_id: userId,
       originalname: safeFolderName,
       gcs_path: gcsPath,
-      folder_path: folderPath, // This is what files will reference
+      folder_path: parentPath || null, // ✅ FIX: Store parent path, not the folder's own path
       mimetype: "folder/x-directory",
       is_folder: true,
       status: "processed",
@@ -7269,7 +7329,7 @@ exports.createCase = async (req, res) => {
     // Step 4: Move files from temp folder to case folder if temp_folder_name is provided
     if (temp_folder_name) {
       console.log(`📁 Moving files from temp folder "${temp_folder_name}" to case folder "${folder.folder_path}"`);
-      
+
       try {
         // Find files by temp folder_path (no folder record exists, just find files by folder_path string)
         const tempFiles = await File.findByUserIdAndFolderPath(userId, temp_folder_name);
@@ -7288,7 +7348,7 @@ exports.createCase = async (req, res) => {
               // Check if file exists in GCS
               const oldFile = bucket.file(oldGcsPath);
               const [exists] = await oldFile.exists();
-              
+
               if (exists) {
                 // Copy file to new location
                 const newFile = bucket.file(newGcsPath);
@@ -7584,13 +7644,23 @@ exports.getCase = async (req, res) => {
 exports.getFolders = async (req, res) => {
   try {
     const userId = req.user.id;
-    const files = await File.findByUserId(userId);
+
+    // JOIN with cases to get the case_title if available
+    const query = `
+      SELECT uf.*, c.case_title 
+      FROM user_files uf 
+      LEFT JOIN cases c ON uf.id = c.folder_id 
+      WHERE uf.user_id = $1 
+      ORDER BY uf.is_folder DESC, uf.created_at DESC
+    `;
+    const { rows: files } = await pool.query(query, [userId]);
 
     const folders = files
       .filter(file => file.is_folder)
       .map(folder => ({
         id: folder.id,
         name: folder.originalname,
+        case_title: folder.case_title,
         folder_path: folder.folder_path,
         created_at: folder.created_at,
       }));
@@ -7620,13 +7690,38 @@ exports.getFolders = async (req, res) => {
     const folderMap = {};
     folders.forEach(folder => {
       folder.children = [];
-      folderMap[folder.folder_path ? folder.folder_path + '/' + folder.name : folder.name] = folder;
+      // Use gcs_path as the primary key for grouping if available
+      if (folder.gcs_path) {
+        folderMap[folder.gcs_path] = folder;
+      }
+      // Fallback to the constructed path key for backward compatibility
+      const legacyKey = folder.folder_path ? folder.folder_path + '/' + folder.name : folder.name;
+      if (!folderMap[legacyKey]) {
+        folderMap[legacyKey] = folder;
+      }
     });
 
     signedFiles.forEach(file => {
-      const parentFolderKey = file.folder_path || '';
-      if (folderMap[parentFolderKey]) {
-        folderMap[parentFolderKey].children.push(file);
+      let matched = false;
+
+      // 1. Try matching via GCS path hierarchy
+      if (file.gcs_path) {
+        const lastSlashIndex = file.gcs_path.lastIndexOf('/');
+        if (lastSlashIndex !== -1) {
+          const parentGcsPath = file.gcs_path.substring(0, lastSlashIndex + 1);
+          if (folderMap[parentGcsPath]) {
+            folderMap[parentGcsPath].children.push(file);
+            matched = true;
+          }
+        }
+      }
+
+      // 2. Fallback to matching via folder_path column
+      if (!matched) {
+        const parentFolderKey = file.folder_path || '';
+        if (folderMap[parentFolderKey]) {
+          folderMap[parentFolderKey].children.push(file);
+        }
       }
     });
 
@@ -7657,15 +7752,15 @@ exports.generateUploadUrl = async (req, res) => {
 
     const authorizationHeader = req.headers.authorization;
     const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-   
+
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
-   
+
     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
       return res.status(400).json({
         error: "Invalid file size. Please provide a valid file size in bytes."
       });
     }
-   
+
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -7675,7 +7770,7 @@ exports.generateUploadUrl = async (req, res) => {
       console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
       console.log(`[FREE TIER] ❌ Signed URL NOT generated - upload prevented`);
       console.log(`${'🆓'.repeat(40)}\n`);
-     
+
       return res.status(403).json({
         error: fileSizeCheck.message,
         shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
@@ -7687,7 +7782,7 @@ exports.generateUploadUrl = async (req, res) => {
         limit: `${fileSizeCheck.maxSizeMB} MB`
       });
     }
-   
+
     console.log(`✅ [generateUploadUrl] File size check passed: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
 
     const folderQuery = `
@@ -7771,19 +7866,19 @@ exports.completeSignedUpload = async (req, res) => {
 
     const authorizationHeader = req.headers.authorization;
     const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-   
+
     const [metadata] = await fileRef.getMetadata();
     const actualFileSize = parseInt(metadata.size) || parseInt(size);
-   
+
     const fileSizeBytes = typeof actualFileSize === 'string' ? parseInt(actualFileSize, 10) : Number(actualFileSize);
-   
+
     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
       return res.status(400).json({
         error: "Invalid file size. Unable to determine file size."
       });
     }
-   
+
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -7793,11 +7888,11 @@ exports.completeSignedUpload = async (req, res) => {
       console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
       console.log(`[FREE TIER] 🗑️ Deleting file from GCS...`);
       console.log(`${'🆓'.repeat(40)}\n`);
-     
+
       await fileRef.delete().catch(err => {
         console.error(`❌ Failed to delete oversized file from GCS:`, err.message);
       });
-     
+
       return res.status(403).json({
         error: fileSizeCheck.message,
         shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
@@ -7810,7 +7905,7 @@ exports.completeSignedUpload = async (req, res) => {
         actualFileSizeMB: (fileSizeBytes / (1024 * 1024)).toFixed(2)
       });
     }
-   
+
     const storageLimitCheck = await checkStorageLimit(userId, fileSizeBytes, userPlan);
     if (!storageLimitCheck.allowed) {
       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
@@ -7844,12 +7939,17 @@ exports.completeSignedUpload = async (req, res) => {
 
     let savedFile;
     try {
-      console.log(`💾 [completeSignedUpload] Saving file metadata to database...`);
+      // ✅ FIX: Construct the full folder path for files correctly
+      let fileFolderPath = folderRow.folder_path || '';
+      if (folderRow.originalname && !fileFolderPath.endsWith(folderRow.originalname)) {
+        fileFolderPath = fileFolderPath ? `${fileFolderPath}/${folderRow.originalname}` : folderRow.originalname;
+      }
+
       savedFile = await File.create({
         user_id: userId,
         originalname: filename,
         gcs_path: gcsPath,
-        folder_path: folderRow.folder_path,
+        folder_path: fileFolderPath,
         mimetype: mimetype || 'application/octet-stream',
         size: fileSizeBytes, // Use actual size from GCS metadata
         is_folder: false,
@@ -7942,9 +8042,19 @@ exports.uploadDocumentsToCaseByFolderName = async (req, res) => {
 
     const folderRow = folderRows[0];
 
-    let folderPathForFiles = folderRow.folder_path;
+    // ✅ FIX: Construct the full folder path for files correctly
+    // If the folderRow.folder_path already ends with the folderRow.originalname, 
+    // it means it's already the full path. Otherwise we append it.
+    let folderPathForFiles = folderRow.folder_path || '';
+    if (folderRow.originalname && !folderPathForFiles.endsWith(folderRow.originalname)) {
+      folderPathForFiles = folderPathForFiles
+        ? `${folderPathForFiles}/${folderRow.originalname}`
+        : folderRow.originalname;
+    }
 
-    console.log(`📁 Found folder. Database folder_path: ${folderPathForFiles}`);
+    console.log(`📁 Found folder: ${folderRow.originalname}`);
+    console.log(`📁 Database folder_path (stored): ${folderRow.folder_path}`);
+    console.log(`📁 Calculated folder path for files: ${folderPathForFiles}`);
     console.log(`📁 GCS path: ${folderRow.gcs_path}`);
 
     const authorizationHeader = req.headers.authorization;
@@ -7953,7 +8063,7 @@ exports.uploadDocumentsToCaseByFolderName = async (req, res) => {
     const uploadedFiles = [];
     for (const file of req.files) {
       const fileSizeBytes = typeof file.size === 'string' ? parseInt(file.size, 10) : Number(file.size);
-     
+
       const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
       if (!fileSizeCheck.allowed) {
         console.log(`\n${'🆓'.repeat(40)}`);
@@ -7962,7 +8072,7 @@ exports.uploadDocumentsToCaseByFolderName = async (req, res) => {
         console.log(`[FREE TIER] File size: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
         console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
         console.log(`${'🆓'.repeat(40)}\n`);
-       
+
         uploadedFiles.push({
           originalname: file.originalname,
           error: fileSizeCheck.message,
@@ -8591,7 +8701,7 @@ exports.queryFolderDocuments = async (req, res) => {
       console.log(`[FREE TIER] - Subsequent chats: Must use RAG retrieval`);
       console.log(`[FREE TIER] - Daily token limit: 100,000 tokens (in + out)`);
       console.log(`${'🆓'.repeat(40)}\n`);
-     
+
       const controllerAccessCheck = await TokenUsageService.checkFreeTierControllerAccessLimit(userId, plan, 'FileController');
       if (!controllerAccessCheck.allowed) {
         return res.status(403).json({
@@ -8603,17 +8713,65 @@ exports.queryFolderDocuments = async (req, res) => {
       }
     }
 
-    const folderPattern = `%${folderName}%`;
+    let folder;
+    let fullFolderPath;
+    let storedFolderPath = '';
+
+    const folderQuery = `
+      SELECT id, originalname, folder_path, gcs_path
+      FROM user_files
+      WHERE user_id = $1
+        AND is_folder = true
+        AND originalname = $2
+      ORDER BY created_at DESC
+      LIMIT 1;
+    `;
+    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
+
+    if (folderRows.length === 0) {
+      console.warn(`⚠️ Folder record "${folderName}" not found in queryFolderDocuments. Trying as direct path...`);
+      fullFolderPath = folderName;
+      folder = {
+        id: null,
+        name: folderName,
+        folder_path: folderName
+      };
+    } else {
+      folder = folderRows[0];
+      storedFolderPath = folder.folder_path || '';
+
+      // ✅ FIX: Calculate full path for robust matching
+      fullFolderPath = storedFolderPath;
+      if (folder.originalname && !fullFolderPath.endsWith(folder.originalname)) {
+        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folder.originalname}` : folder.originalname;
+      }
+    }
+
+    console.log(`📂 [queryFolderDocuments] Folder matched: ${folderName}`);
+    console.log(`📂 [queryFolderDocuments] Paths: stored="${storedFolderPath}", full="${fullFolderPath}"`);
+
     const filesQuery = `
       SELECT id, originalname, folder_path, status, gcs_path, mimetype
       FROM user_files
       WHERE user_id = $1
         AND is_folder = false
         AND status = 'processed'
-        AND folder_path LIKE $2
+        AND (
+          folder_path = $2 
+          OR folder_path LIKE $3
+          OR gcs_path LIKE $4
+        )
       ORDER BY created_at DESC;
     `;
-    const { rows: files } = await pool.query(filesQuery, [userId, folderPattern]);
+
+    const queryParams = [
+      userId,
+      fullFolderPath,
+      `${fullFolderPath}/%`,
+      folder.gcs_path ? `${folder.gcs_path}%` : `impossible_path_fallback`
+    ];
+
+    const { rows: files } = await pool.query(filesQuery, queryParams);
 
     if (files.length === 0) {
       return res.status(404).json({ error: "No processed files found in this folder." });
@@ -8812,9 +8970,9 @@ exports.queryFolderDocuments = async (req, res) => {
         console.log(`\n📄 FETCHING TEMPLATE FILES:`);
         console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
         console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
-       
+
         templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
-       
+
         if (templateData.hasTemplates) {
           console.log(`✅ Template files fetched successfully`);
           if (templateData.inputTemplate) {
@@ -8833,7 +8991,7 @@ exports.queryFolderDocuments = async (req, res) => {
         secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
         console.log(`✅ Enhanced prompt built with template examples`);
         console.log(`   Enhanced prompt length: ${secretValue.length} characters\n`);
-       
+
         // Add JSON formatting instructions if output template exists
         const inputTemplate = templateData?.inputTemplate || null;
         const outputTemplate = templateData?.outputTemplate || null;
@@ -8881,28 +9039,28 @@ exports.queryFolderDocuments = async (req, res) => {
       console.log(`\n🔍 [RAG] Starting vector search for secret prompt...`);
       console.log(`   - Files to search: ${files.length}`);
       console.log(`   - Max results per file: ${maxResults}`);
-     
+
       const questionEmbedding = await generateEmbedding(secretValue);
       console.log(`   - Question embedding generated: ${questionEmbedding.length} dimensions`);
-     
+
       const allRelevantChunks = [];
       for (const file of files) {
         console.log(`\n   🔍 Searching chunks in file: ${file.originalname}`);
         console.log(`      File ID: ${file.id} (type: ${typeof file.id})`);
         console.log(`      File Status: ${file.status}`);
-       
+
         const debugChunks = await FileChunk.getChunksByFileId(file.id);
         console.log(`      📋 Chunks in database: ${debugChunks.length}`);
-       
+
         if (debugChunks.length === 0) {
           console.log(`      ⚠️ No chunks found in database for this file - skipping vector search`);
           continue;
         }
-       
+
         const chunkIds = debugChunks.map(c => c.id);
         const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
         console.log(`      🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
-       
+
         if (debugVectors.length === 0) {
           console.log(`      ⚠️ WARNING: Chunks exist but no embeddings found!`);
           console.log(`      💡 This means embeddings were not generated. Using chunks directly as fallback.`);
@@ -8919,7 +9077,7 @@ exports.queryFolderDocuments = async (req, res) => {
           console.log(`      ✅ Added ${fallbackChunks.length} chunks as fallback (no embeddings available)`);
           continue;
         }
-       
+
         console.log(`      🔎 Performing vector search with embedding...`);
         const relevant = await ChunkVector.findNearestChunksAcrossFiles(
           questionEmbedding,
@@ -8927,7 +9085,7 @@ exports.queryFolderDocuments = async (req, res) => {
           [file.id]
         );
         console.log(`      📊 Vector search found: ${relevant.length} relevant chunks`);
-       
+
         if (relevant.length) {
           const chunksWithSimilarity = relevant.map((r) => {
             const distance = parseFloat(r.distance) || 2.0;
@@ -8965,7 +9123,7 @@ exports.queryFolderDocuments = async (req, res) => {
       if (allRelevantChunks.length === 0) {
         console.warn(`\n⚠️ [RAG] No chunks found via vector search - trying fallback...`);
         console.warn(`   - Files searched: ${files.length}`);
-       
+
         const processingFiles = files.filter(f => f.status !== 'processed');
         if (processingFiles.length > 0) {
           console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
@@ -8974,7 +9132,7 @@ exports.queryFolderDocuments = async (req, res) => {
             processingFiles: processingFiles.map(f => ({ id: f.id, name: f.originalname, status: f.status }))
           });
         }
-       
+
         console.log(`   - Attempting fallback: Using all chunks from processed files...`);
         const fallbackChunks = [];
         for (const file of files) {
@@ -8994,7 +9152,7 @@ exports.queryFolderDocuments = async (req, res) => {
             }
           }
         }
-       
+
         if (fallbackChunks.length > 0) {
           console.log(`   ✅ Fallback successful: Using ${fallbackChunks.length} chunks from ${files.length} file(s)`);
           allRelevantChunks.push(...fallbackChunks);
@@ -9017,8 +9175,8 @@ exports.queryFolderDocuments = async (req, res) => {
 
       const topChunks = allRelevantChunks
         .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-        .slice(0, 10);
-     
+        .slice(0, 30); // Increased from 10 to 30 for comprehensive context
+
       console.log(`   - Top chunks selected: ${topChunks.length}`);
       console.log(`   - Similarity range: ${Math.min(...topChunks.map(c => c.similarity)).toFixed(3)} - ${Math.max(...topChunks.map(c => c.similarity)).toFixed(3)}`);
       usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
@@ -9117,7 +9275,7 @@ exports.queryFolderDocuments = async (req, res) => {
             console.log(`[FREE TIER] Gemini Eyeball limit reached - forcing RAG`);
             console.log(`[FREE TIER] ${eyeballLimitCheck.message}`);
             console.log(`${'🆓'.repeat(40)}\n`);
-           
+
             queryAnalysis.needsFullDocument = false;
             queryAnalysis.strategy = 'TARGETED_RAG';
             queryAnalysis.reason = 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead';
@@ -9137,7 +9295,7 @@ exports.queryFolderDocuments = async (req, res) => {
         const inputTokens = Math.ceil((question?.length || 0) / 4);
         const estimatedOutputTokens = Math.ceil(inputTokens * 1.5); // Estimate output tokens
         const estimatedTokens = inputTokens + estimatedOutputTokens;
-       
+
         const tokenLimitCheck = await TokenUsageService.checkFreeTierDailyTokenLimit(userId, plan, estimatedTokens);
         if (!tokenLimitCheck.allowed) {
           return res.status(403).json({
@@ -9210,25 +9368,25 @@ exports.queryFolderDocuments = async (req, res) => {
         console.log(`   - Question: "${question.substring(0, 100)}${question.length > 100 ? '...' : ''}"`);
         console.log(`   - Files to search: ${files.length}`);
         console.log(`   - Max results per file: ${maxResults}`);
-       
+
         const allRelevantChunks = [];
         for (const file of files) {
           console.log(`\n   🔍 Searching chunks in file: ${file.originalname}`);
           console.log(`      File ID: ${file.id} (type: ${typeof file.id})`);
           console.log(`      File Status: ${file.status}`);
-         
+
           const debugChunks = await FileChunk.getChunksByFileId(file.id);
           console.log(`      📋 Chunks in database: ${debugChunks.length}`);
-         
+
           if (debugChunks.length === 0) {
             console.log(`      ⚠️ No chunks found in database for this file - skipping vector search`);
             continue;
           }
-         
+
           const chunkIds = debugChunks.map(c => c.id);
           const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
           console.log(`      🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
-         
+
           if (debugVectors.length === 0) {
             console.log(`      ⚠️ WARNING: Chunks exist but no embeddings found!`);
             console.log(`      💡 This means embeddings were not generated. Using chunks directly as fallback.`);
@@ -9245,7 +9403,7 @@ exports.queryFolderDocuments = async (req, res) => {
             console.log(`      ✅ Added ${fallbackChunks.length} chunks as fallback (no embeddings available)`);
             continue;
           }
-         
+
           console.log(`      🔎 Performing vector search with embedding...`);
           const relevant = await ChunkVector.findNearestChunksAcrossFiles(
             questionEmbedding,
@@ -9253,7 +9411,7 @@ exports.queryFolderDocuments = async (req, res) => {
             [file.id]
           );
           console.log(`      📊 Vector search found: ${relevant.length} relevant chunks`);
-         
+
           if (relevant.length) {
             const chunksWithSimilarity = relevant.map((r) => {
               const distance = parseFloat(r.distance) || 2.0;
@@ -9291,7 +9449,7 @@ exports.queryFolderDocuments = async (req, res) => {
         if (allRelevantChunks.length === 0) {
           console.warn(`\n⚠️ [RAG] No chunks found via vector search - trying fallback...`);
           console.warn(`   - Files searched: ${files.length}`);
-         
+
           const processingFiles = files.filter(f => f.status !== 'processed');
           if (processingFiles.length > 0) {
             console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
@@ -9300,7 +9458,7 @@ exports.queryFolderDocuments = async (req, res) => {
               processingFiles: processingFiles.map(f => ({ id: f.id, name: f.originalname, status: f.status }))
             });
           }
-         
+
           console.log(`   - Attempting fallback: Using all chunks from processed files...`);
           const fallbackChunks = [];
           for (const file of files) {
@@ -9320,7 +9478,7 @@ exports.queryFolderDocuments = async (req, res) => {
               }
             }
           }
-         
+
           if (fallbackChunks.length > 0) {
             console.log(`   ✅ Fallback successful: Using ${fallbackChunks.length} chunks from ${files.length} file(s)`);
             allRelevantChunks.push(...fallbackChunks);
@@ -9344,7 +9502,7 @@ exports.queryFolderDocuments = async (req, res) => {
         const topChunks = allRelevantChunks
           .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
           .slice(0, 10);
-       
+
         console.log(`   - Top chunks selected: ${topChunks.length}`);
         console.log(`   - Similarity range: ${Math.min(...topChunks.map(c => c.similarity)).toFixed(3)} - ${Math.max(...topChunks.map(c => c.similarity)).toFixed(3)}`);
         usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
@@ -9566,7 +9724,7 @@ exports.getFolderProcessingStatus = async (req, res) => {
     // folderName could be either folder_path or originalname
     // Try to find by folder_path first (which is what we return from uploadForProcessing)
     let files = await File.findByUserIdAndFolderPath(userId, folderName);
-    
+
     // If not found, try to find by originalname (for backward compatibility)
     if (files.length === 0) {
       console.log(`[getFolderProcessingStatus] No files found with folder_path, trying to find by originalname...`);
@@ -9631,16 +9789,16 @@ exports.uploadAndExtractCaseFields = async (req, res) => {
   try {
     const userId = req.user.id;
     const username = req.user.username;
-    
+
     console.log(`\n${'='.repeat(80)}`);
     console.log(`📤 UPLOAD AND EXTRACT CASE FIELDS - START`);
     console.log(`User ID: ${userId}, Username: ${username}`);
     console.log(`Files count: ${req.files ? req.files.length : 0}`);
     console.log(`${'='.repeat(80)}\n`);
-    
+
     if (!req.files || req.files.length === 0) {
       console.error('❌ No files provided in request');
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: "No files uploaded",
         message: "Please select at least one file to upload."
@@ -9650,14 +9808,14 @@ exports.uploadAndExtractCaseFields = async (req, res) => {
     // Step 1: Create temporary folder
     const tempFolderName = `case-creation-${Date.now()}`;
     console.log(`📁 Step 1/4: Creating temporary folder: ${tempFolderName}`);
-    
+
     const tempFolder = await createFolderInternal(userId, tempFolderName, '');
     console.log(`✅ Folder created: ${tempFolder.originalname}`);
 
     // Step 2: Upload files (reuse existing upload logic)
     console.log(`📤 Step 2/4: Uploading ${req.files.length} file(s)...`);
     const uploadedFiles = [];
-    
+
     for (const file of req.files) {
       try {
         const ext = path.extname(file.originalname);
@@ -9678,7 +9836,7 @@ exports.uploadAndExtractCaseFields = async (req, res) => {
           user_id: userId,
           originalname: safeName,
           gcs_path: uniqueKey,
-          folder_path: tempFolder.folder_path,
+          folder_path: tempFolder.originalname, // Fixed: Use folder's originalname as the path since it's at root
           mimetype: file.mimetype,
           size: file.size,
           is_folder: false,
@@ -9706,7 +9864,7 @@ exports.uploadAndExtractCaseFields = async (req, res) => {
 
     if (uploadedFiles.length === 0) {
       console.error('❌ No files were successfully uploaded');
-      return res.status(500).json({ 
+      return res.status(500).json({
         success: false,
         error: "Failed to upload any files",
         message: "All file uploads failed. Please check file formats and try again."
@@ -9722,11 +9880,11 @@ exports.uploadAndExtractCaseFields = async (req, res) => {
 
     while (!allProcessed && attempts < maxAttempts) {
       await new Promise(resolve => setTimeout(resolve, pollInterval));
-      
+
       // Use folder_path (not originalname) to find files
       const files = await File.findByUserIdAndFolderPath(userId, tempFolder.folder_path);
       const documents = files.filter(f => !f.is_folder);
-      
+
       if (documents.length === 0) {
         attempts++;
         continue;
@@ -9753,7 +9911,7 @@ exports.uploadAndExtractCaseFields = async (req, res) => {
 
     // Step 4: Extract case fields using query
     console.log(`🔍 Step 4/4: Extracting case fields from documents...`);
-    
+
     const extractionPrompt = `Extract all case information from the uploaded documents. Return a JSON object with the following fields:
 - caseTitle (case title or name)
 - caseNumber (case number if available)
@@ -9795,10 +9953,14 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
         WHERE user_id = $1
           AND is_folder = false
           AND status = 'processed'
-          AND folder_path = $2
+          AND (folder_path = $2 OR folder_path LIKE $3)
         ORDER BY created_at DESC;
       `;
-      const { rows: processedFiles } = await pool.query(filesQuery, [userId, tempFolder.folder_path]);
+      const { rows: processedFiles } = await pool.query(filesQuery, [
+        userId,
+        tempFolder.originalname,
+        `${tempFolder.originalname}/%`
+      ]);
 
       if (processedFiles.length === 0) {
         console.warn('⚠️ No processed files found for extraction');
@@ -9834,13 +9996,13 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
           // Use AI to extract case fields from chunks
           const documentContext = allChunks.join('\n\n');
           const provider = 'gemini';
-          
+
           console.log(`  🤖 Querying AI to extract case fields (${allChunks.length} chunks, ${documentContext.length} chars)...`);
-          
+
           // Limit context to avoid token limits
           const limitedContext = documentContext.substring(0, 50000);
           const fullPrompt = extractionPrompt + '\n\nDocument Content:\n' + limitedContext;
-          
+
           let answer;
           try {
             // Wrap AI call in Promise.race with timeout to prevent hanging
@@ -9851,13 +10013,13 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
               '',
               'Extract case fields'
             );
-            
+
             const timeoutPromise = new Promise((_, reject) => {
               setTimeout(() => reject(new Error('AI extraction timed out after 120 seconds')), 120000);
             });
-            
+
             answer = await Promise.race([aiCallPromise, timeoutPromise]);
-            
+
             if (!answer || typeof answer !== 'string') {
               console.warn(`  ⚠️ Invalid AI response:`, typeof answer);
               answer = null;
@@ -9920,7 +10082,7 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
     // IMPORTANT: This endpoint ONLY extracts and returns data - it does NOT create a case
     // The case is only created when user submits the final form in ReviewStep (handleCreateCase)
     // This ensures users can review and edit all fields before case creation
-    
+
     const responseData = {
       success: true,
       folderName: tempFolderName,
@@ -9941,7 +10103,7 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
     console.error('❌ Error name:', error.name);
     console.error('❌ Error message:', error.message);
     console.error('❌ Error stack:', error.stack);
-    
+
     // Ensure we always send a response even if something goes wrong
     if (!res.headersSent) {
       return res.status(500).json({
@@ -9961,16 +10123,16 @@ exports.uploadForProcessing = async (req, res) => {
   try {
     const userId = req.user.id;
     const username = req.user.username;
-    
+
     console.log(`\n${'='.repeat(80)}`);
     console.log(`📤 UPLOAD FOR PROCESSING - START`);
     console.log(`User ID: ${userId}, Username: ${username}`);
     console.log(`Files count: ${req.files ? req.files.length : 0}`);
     console.log(`${'='.repeat(80)}\n`);
-    
+
     if (!req.files || req.files.length === 0) {
       console.error('❌ No files provided in request');
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: "No files uploaded",
         message: "Please select at least one file to upload."
@@ -10024,7 +10186,7 @@ exports.uploadForProcessing = async (req, res) => {
         ).catch(err => console.error(`❌ Processing failed for ${savedFile.id}:`, err.message));
 
         console.log(`  ✅ Uploaded: ${safeName} (ID: ${savedFile.id})`);
-        
+
         return {
           id: savedFile.id,
           name: savedFile.originalname,
@@ -10042,7 +10204,7 @@ exports.uploadForProcessing = async (req, res) => {
 
     if (uploadedFiles.length === 0) {
       console.error('❌ No files were successfully uploaded');
-      return res.status(500).json({ 
+      return res.status(500).json({
         success: false,
         error: "Failed to upload any files",
         message: "All file uploads failed. Please check file formats and try again."
@@ -10064,7 +10226,7 @@ exports.uploadForProcessing = async (req, res) => {
   } catch (error) {
     console.error('❌ uploadForProcessing error:', error);
     console.error('❌ Error stack:', error.stack);
-    
+
     if (!res.headersSent) {
       return res.status(500).json({
         success: false,
@@ -10081,7 +10243,7 @@ exports.extractCaseFieldsFromFolder = async (req, res) => {
   try {
     const userId = req.user.id;
     let { folderName } = req.params;
-    
+
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🔍 EXTRACT CASE FIELDS FROM FOLDER - START`);
     console.log(`User ID: ${userId}`);
@@ -10098,7 +10260,7 @@ exports.extractCaseFieldsFromFolder = async (req, res) => {
     // Find files by folder_path (folderName is a folder_path identifier, not a folder record)
     // Since we no longer create folder records for temp uploads, just find files directly by folder_path
     let files = await File.findByUserIdAndFolderPath(userId, folderName);
-    
+
     // If not found, try to find by originalname (backward compatibility for old folder records)
     if (files.length === 0) {
       console.log(`[extractCaseFieldsFromFolder] No files found with folder_path "${folderName}", trying to find by originalname...`);
@@ -10170,7 +10332,7 @@ exports.extractCaseFieldsFromFolder = async (req, res) => {
     }
 
     let extractedData = {};
-    
+
     if (allChunks.length === 0) {
       console.warn('⚠️ No chunks found in processed files');
       extractedData = {};
@@ -10180,11 +10342,11 @@ exports.extractCaseFieldsFromFolder = async (req, res) => {
         const documentContext = chunkMetadata.map((meta, idx) => {
           return `[Document: ${meta.fileName} - Section ${idx + 1}]\n${meta.content}`;
         }).join('\n\n---\n\n');
-        
-        const provider = 'gemini';
-        
+
+        const provider = 'gemini-pro-2.5';
+
         console.log(`  🤖 Querying AI to extract case fields (${allChunks.length} chunks from ${processedFiles.length} files, ${documentContext.length} chars)...`);
-        
+
         const extractionPrompt = `You are an expert legal document analyst. Extract ALL case information from the documents using semantic understanding and intelligent field matching.
 
 INSTRUCTIONS:
@@ -10253,7 +10415,7 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
         // Use more context for better extraction (increased from 50k to 100k chars)
         const limitedContext = documentContext.substring(0, 100000);
         const fullPrompt = extractionPrompt + '\n\n=== DOCUMENT CONTENT ===\n' + limitedContext + '\n\n=== EXTRACTION INSTRUCTIONS ===\nExtract ALL fields comprehensively. Use semantic understanding to find fields even with different names. Be thorough and leave no field empty if the information exists in the document.';
-        
+
         let answer;
         try {
           const aiCallPromise = askFolderLLMService(
@@ -10263,13 +10425,13 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
             '',
             'Extract case fields'
           );
-          
+
           const timeoutPromise = new Promise((_, reject) => {
             setTimeout(() => reject(new Error('AI extraction timed out after 120 seconds')), 120000);
           });
-          
+
           answer = await Promise.race([aiCallPromise, timeoutPromise]);
-          
+
           if (!answer || typeof answer !== 'string') {
             console.warn(`  ⚠️ Invalid AI response:`, typeof answer);
             answer = null;
@@ -10322,7 +10484,7 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
   } catch (error) {
     console.error('❌ extractCaseFieldsFromFolder error:', error);
     console.error('❌ Error stack:', error.stack);
-    
+
     if (!res.headersSent) {
       return res.status(500).json({
         success: false,
@@ -10434,10 +10596,10 @@ exports.getFileProcessingStatus = async (req, res) => {
     if (!prefix.endsWith('/')) {
       prefix += '/';
     }
-   
+
     console.log(`[getFileProcessingStatus] Fetching results from bucket: ${bucketName}, prefix: ${prefix}`);
     console.log(`[getFileProcessingStatus] Full output URI: ${job.gcs_output_uri_prefix}`);
-   
+
     const extractedBatchTexts = await fetchBatchResults(bucketName, prefix);
 
     if (!extractedBatchTexts || extractedBatchTexts.length === 0) {
@@ -10449,13 +10611,13 @@ exports.getFileProcessingStatus = async (req, res) => {
         message: "Could not extract any meaningful text content from batch document. This may indicate: 1) Image-only PDF with no OCR text, 2) Corrupted document, 3) Document AI processing incomplete, or 4) JSON structure mismatch."
       };
       console.error(`[getFileProcessingStatus] ❌ Text extraction failed:`, errorDetails);
-     
+
       await File.updateProcessingStatus(file_id, "error", 0.0, "Text extraction failed: No text content found in Document AI results");
       await ProcessingJob.updateJobStatus(job.job_id, "failed", errorDetails.message);
-     
+
       throw new Error(`Could not extract any meaningful text content from batch document. Check logs for details. Output URI: ${job.gcs_output_uri_prefix}`);
     }
-   
+
     const nonEmptyTexts = extractedBatchTexts.filter(item => item.text && item.text.trim());
     if (nonEmptyTexts.length === 0) {
       console.error(`[getFileProcessingStatus] ❌ All extracted text segments are empty`);
@@ -10468,7 +10630,7 @@ exports.getFileProcessingStatus = async (req, res) => {
       await ProcessingJob.updateJobStatus(job.job_id, "failed", errorDetails.message);
       throw new Error(`All extracted text segments are empty. Total segments: ${extractedBatchTexts.length}`);
     }
-   
+
     console.log(`[getFileProcessingStatus] ✅ Successfully extracted ${nonEmptyTexts.length} non-empty text segments from ${extractedBatchTexts.length} total segments`);
 
     let batchChunkingMethod = "recursive"; // Default fallback
@@ -10519,7 +10681,7 @@ exports.getFileProcessingStatus = async (req, res) => {
       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
         ? chunk.metadata.page_end
         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-     
+
       return {
         file_id: file_id,
         chunk_index: i,
@@ -10671,11 +10833,11 @@ exports.getFolderChatSessionById = async (req, res) => {
     const chatHistoryWithCitations = await Promise.all(
       chatHistory.map(async (chat) => {
         let citations = chat.citations || [];
-       
+
         if ((!citations || citations.length === 0) && chat.used_chunk_ids && chat.used_chunk_ids.length > 0) {
           try {
             const { extractCitationsFromChunks } = require('./intelligentFolderChatController');
-           
+
             const chunkIds = chat.used_chunk_ids;
             const chunksQuery = `
               SELECT
@@ -10692,7 +10854,7 @@ exports.getFolderChatSessionById = async (req, res) => {
               ORDER BY uf.originalname ASC, fc.page_start ASC;
             `;
             const { rows: chunks } = await pool.query(chunksQuery, [chunkIds, userId]);
-           
+
             if (chunks.length > 0) {
               const formattedChunks = chunks.map(c => ({
                 chunk_id: c.id,
@@ -10702,9 +10864,9 @@ exports.getFolderChatSessionById = async (req, res) => {
                 file_id: c.file_id,
                 filename: c.filename,
               }));
-             
+
               citations = await extractCitationsFromChunks(formattedChunks, baseUrl);
-             
+
               if (citations.length > 0) {
                 await pool.query(
                   `UPDATE folder_chats SET citations = $1::jsonb WHERE id = $2::uuid`,
@@ -10864,12 +11026,12 @@ exports.getChatCitations = async (req, res) => {
     }
 
     const chat = chatRows[0];
-   
+
     let citations = chat.citations || [];
-   
+
     if ((!citations || citations.length === 0) && chat.used_chunk_ids && chat.used_chunk_ids.length > 0) {
       console.log(`🔄 [getChatCitations] No citations in DB, generating from chunk IDs for chat ${chatId}`);
-     
+
       const protocol = req.protocol || 'http';
       const host = req.get('host') || '';
       const baseUrl = `${protocol}://${host}`;
@@ -10920,7 +11082,7 @@ exports.getChatCitations = async (req, res) => {
         console.warn(`⚠️ [getChatCitations] No chunks found for IDs: ${chunkIds.join(', ')}`);
       }
     }
-   
+
     if (!chat.used_chunk_ids || chat.used_chunk_ids.length === 0) {
       return res.status(200).json({
         success: true,
@@ -11269,7 +11431,7 @@ exports.deleteFolderChatSession = async (req, res) => {
 
     const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const isValidUUID = UUID_REGEX.test(sessionId);
-   
+
     if (!isValidUUID) {
       return res.status(400).json({
         error: "Invalid session ID format",
@@ -11286,10 +11448,10 @@ exports.deleteFolderChatSession = async (req, res) => {
       ORDER BY created_at DESC
       LIMIT 10
     `;
-   
+
     const checkResult = await pool.query(checkQuery, [userId, sessionId]);
     console.log(`🗑️ [deleteFolderChatSession] Found ${checkResult.rows.length} chat(s) with session_id: ${sessionId}`);
-   
+
     if (checkResult.rows.length === 0) {
       return res.status(404).json({
         error: "Chat session not found",
@@ -11298,17 +11460,17 @@ exports.deleteFolderChatSession = async (req, res) => {
         message: "No chats found with this session ID for your user account."
       });
     }
-   
+
     const normalizedFolderName = folderName.trim();
     const matchingFolder = checkResult.rows.filter(row =>
       row.folder_name && row.folder_name.trim().toLowerCase() === normalizedFolderName.toLowerCase()
     );
-   
+
     console.log(`🗑️ [deleteFolderChatSession] Checking folder match:`);
     console.log(`   - Requested folder: "${normalizedFolderName}"`);
     console.log(`   - Found folders: ${[...new Set(checkResult.rows.map(r => r.folder_name))].join(', ')}`);
     console.log(`   - Matching chats: ${matchingFolder.length}`);
-   
+
     if (matchingFolder.length === 0) {
       const actualFolders = [...new Set(checkResult.rows.map(r => r.folder_name).filter(Boolean))];
       return res.status(404).json({
@@ -11323,7 +11485,7 @@ exports.deleteFolderChatSession = async (req, res) => {
         }
       });
     }
-   
+
     const deleteQuery = `
       DELETE FROM folder_chats
       WHERE user_id = $1
@@ -11378,7 +11540,7 @@ exports.deleteSingleFolderChat = async (req, res) => {
 
     const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const isValidUUID = UUID_REGEX.test(chatId);
-   
+
     if (!isValidUUID) {
       return res.status(400).json({
         error: "Invalid chat ID format",
@@ -11393,9 +11555,9 @@ exports.deleteSingleFolderChat = async (req, res) => {
       WHERE id = $1::uuid
         AND user_id = $2
     `;
-   
+
     const checkResult = await pool.query(checkQuery, [chatId, userId]);
-   
+
     if (checkResult.rows.length === 0) {
       return res.status(404).json({
         error: "Chat not found",
@@ -11455,6 +11617,44 @@ exports.deleteSingleFolderChat = async (req, res) => {
       error: "Failed to delete chat",
       details: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+};
+
+exports.deleteAllFolderChats = async (req, res) => {
+  try {
+    const { folderName } = req.params;
+    const userId = req.user.id;
+
+    console.log(`🗑️ [deleteAllFolderChats] Deleting all chats from folder: ${folderName}, user: ${userId}`);
+
+    const normalizedFolderName = folderName.trim();
+
+    const deleteQuery = `
+      DELETE FROM folder_chats
+      WHERE user_id = $1
+        AND LOWER(TRIM(folder_name)) = LOWER(TRIM($2))
+      RETURNING id, folder_name, question
+    `;
+
+    const result = await pool.query(deleteQuery, [userId, normalizedFolderName]);
+    const deletedCount = result.rowCount || 0;
+
+    console.log(`🗑️ [deleteAllFolderChats] Deleted ${deletedCount} chat(s) from folder: ${normalizedFolderName}`);
+
+    return res.json({
+      success: true,
+      message: `Successfully deleted ${deletedCount} chat(s) from folder`,
+      folderName: normalizedFolderName,
+      deletedCount
+    });
+
+  } catch (error) {
+    console.error("❌ deleteAllFolderChats error:", error);
+    console.error("❌ deleteAllFolderChats error stack:", error.stack);
+    res.status(500).json({
+      error: "Failed to delete all folder chats",
+      details: error.message
     });
   }
 };
@@ -11626,6 +11826,10 @@ exports.getCaseFilesByFolderName = async (req, res) => {
 
     console.log(`📂 [getCaseFilesByFolderName] User: ${username}, Folder: ${folderName}`);
 
+    let folder;
+    let fullFolderPath;
+    let storedFolderPath = '';
+
     const folderQuery = `
       SELECT * FROM user_files
       WHERE user_id = $1
@@ -11637,15 +11841,30 @@ exports.getCaseFilesByFolderName = async (req, res) => {
     const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
 
     if (folderRows.length === 0) {
-      console.warn(`⚠️ Folder "${folderName}" not found for user ${userId}`);
-      return res.status(404).json({
-        error: `Folder "${folderName}" not found for this user.`,
-      });
+      console.warn(`⚠️ Folder record "${folderName}" not found for user ${userId}. Trying as direct path...`);
+      // Fallback: If no folder record exists, treat folderName as the fullFolderPath itself
+      // (This covers temporary uploads like temp-case-X)
+      fullFolderPath = folderName;
+      folder = {
+        id: null,
+        name: folderName,
+        folder_path: folderName,
+        gcs_path: null
+      };
+    } else {
+      folder = folderRows[0];
+      storedFolderPath = folder.folder_path || '';
+
+      // ✅ FIX: Construct the full folder path for files correctly
+      fullFolderPath = storedFolderPath;
+      if (folder.originalname && !fullFolderPath.endsWith(folder.originalname)) {
+        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folder.originalname}` : folder.originalname;
+      }
     }
 
-    const folder = folderRows[0];
-    const folderPath = folder.folder_path; // ✅ Use the same folder_path stored during upload
-    console.log(`✅ Folder found. Using folder_path: ${folderPath}`);
+    console.log(`✅ Folder found: ${folderName}`);
+    console.log(`✅ Stored path: ${storedFolderPath}`);
+    console.log(`✅ Full path: ${fullFolderPath}`);
 
     const filesQuery = `
       SELECT
@@ -11669,19 +11888,31 @@ exports.getCaseFilesByFolderName = async (req, res) => {
       FROM user_files
       WHERE user_id = $1
         AND is_folder = false
-        AND folder_path = $2
+        AND (
+          folder_path = $2 
+          OR folder_path LIKE $3
+          OR gcs_path LIKE $4
+        )
       ORDER BY created_at DESC;
     `;
-    const { rows: files } = await pool.query(filesQuery, [userId, folderPath]);
+
+    const queryParams = [
+      userId,
+      fullFolderPath,
+      `${fullFolderPath}/%`,
+      folder.gcs_path ? `${folder.gcs_path}%` : `impossible_path_fallback`
+    ];
+
+    const { rows: files } = await pool.query(filesQuery, queryParams);
 
     if (files.length === 0) {
-      console.warn(`⚠️ No files found under folder_path: ${folderPath}`);
+      console.warn(`⚠️ No files found under folder_path: ${storedFolderPath} or ${fullFolderPath}`);
       return res.status(200).json({
         message: "Folder files fetched successfully, but no documents found.",
         folder,
         files: [],
         debug: {
-          searched_folder_path: folderPath,
+          searched_folder_path: fullFolderPath,
           hint: "Check that uploaded files used the same folder_path value",
         },
       });
@@ -11724,9 +11955,9 @@ exports.getCaseFilesByFolderName = async (req, res) => {
 exports.getFilesForMindmap = async (req, res) => {
   try {
     const userId = req.user.id;
-   
+
     console.log(`[getFilesForMindmap] Fetching processed files for user: ${userId}`);
-   
+
     const query = `
       SELECT
         id,
@@ -11743,9 +11974,9 @@ exports.getFilesForMindmap = async (req, res) => {
         AND status = 'processed'
       ORDER BY created_at DESC
     `;
-   
+
     const result = await pool.query(query, [userId]);
-   
+
     const files = result.rows.map(file => ({
       id: file.id,
       name: file.originalname,
@@ -11756,9 +11987,9 @@ exports.getFilesForMindmap = async (req, res) => {
       createdAt: file.created_at,
       processedAt: file.processed_at
     }));
-   
+
     console.log(`[getFilesForMindmap] Found ${files.length} processed files for user ${userId}`);
-   
+
     return res.status(200).json({
       success: true,
       files: files,
@@ -11829,7 +12060,7 @@ exports.viewDocument = async (req, res) => {
     console.log(`✅ Generated view URL for file: ${file.originalname}${pageNumber ? ` (page ${pageNumber})` : ''}`);
 
     const finalViewUrl = viewUrl;
-   
+
     const viewUrlWithPage = pageNumber && file.mimetype === 'application/pdf'
       ? `${finalViewUrl}#page=${pageNumber}`
       : finalViewUrl;
@@ -12095,7 +12326,7 @@ exports.getFolderChunks = async (req, res) => {
 
     for (const file of filesToProcess) {
       const chunks = await FileChunk.getChunksByFileId(file.id);
-     
+
       for (const chunk of chunks) {
         if (page) {
           const pageNum = parseInt(page, 10);
@@ -12116,8 +12347,8 @@ exports.getFolderChunks = async (req, res) => {
           page_end: chunk.page_end || null,
           page_range: chunk.page_start && chunk.page_end
             ? (chunk.page_start === chunk.page_end
-                ? `Page ${chunk.page_start}`
-                : `Pages ${chunk.page_start}-${chunk.page_end}`)
+              ? `Page ${chunk.page_start}`
+              : `Pages ${chunk.page_start}-${chunk.page_end}`)
             : null,
           heading: chunk.heading || null,
           file_id: file.id,
@@ -12173,9 +12404,9 @@ exports.getFolderChunks = async (req, res) => {
         chunks_without_pages: allChunks.filter(c => c.page_start === null).length,
         page_range: allChunks.length > 0 && allChunks.some(c => c.page_start !== null)
           ? {
-              min: Math.min(...allChunks.filter(c => c.page_start !== null).map(c => c.page_start)),
-              max: Math.max(...allChunks.filter(c => c.page_start !== null).map(c => c.page_end || c.page_start))
-            }
+            min: Math.min(...allChunks.filter(c => c.page_start !== null).map(c => c.page_start)),
+            max: Math.max(...allChunks.filter(c => c.page_start !== null).map(c => c.page_end || c.page_start))
+          }
           : null
       }
     });

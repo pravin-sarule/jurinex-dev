@@ -1,210 +1,3 @@
-//     if (!process.env.SERPER_API_KEY) {
-
-
-
-
-
-
-    
-
-    
-//         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-//         .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-      
-
-
-
-//   if (!userMessage) return false;
-
-  
-//   // PRIORITY 1: EXPLICIT WEB SEARCH REQUESTS (CHECK FIRST!)
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-//   if (isGeneralKnowledgeQuestion && !hasDocumentContext) {
-  
-  
-//   if (!hasDocumentContext && isGeneralKnowledgeQuestion) {
-  
-
-
-//   if (!context) return '';
-  
-
-//   if (!chunks) return '';
-  
-  
-  
-  
-  
-
-
-
-
-
-
-
-
-
-//   if (!modelName) {
-
-
-//   if (normalized && normalized !== provider) providerCandidates.push(normalized);
-
-
-//     if (value != null) {
-
-
-
-
-
-//         { available: !!key, model: cfg.model, reason: key ? 'Available' : 'Missing API key' },
-
-
-
-    
-
-    
-    
-
-  
-
-
-  
-
-//   if (!config) throw new Error(`❌ Unsupported LLM provider: ${provider}`);
-
-
-  
-//   if (!originalQuestion && userMessage) {
-//       if (!userQuestionForSearch || userQuestionForSearch.length > 500) {
-
-  
-
-
-  
-  
-//   if (!isExplicitWebRequest) {
-  
-  
-  
-    
-  
-  
-    
-    
-    
-    
-    
-    
-    
-    
-
-
-//     hasDocumentContext && !isExplicitWebRequest, // Don't treat as document context if explicit web request
-
-//     callSinglePrompt(provider, prompt, enhancedSystemPrompt, webSearchData !== null || urlContents.length > 0)
-
-
-
-
-
-        
-        
-          
-            
-            
-            
-
-            
-            
-            
-            
-//             if (!text) {
-            
-            
-            
-        
-//         const hasLegacyModels = models.length > 1 && models.some(m => m !== 'gemini-3-pro-preview');
-        
-        
-
-
-
-
-
-
-
-
-
-
-//   if (!config) throw new Error(`❌ Unsupported LLM provider: ${provider}`);
-
-  
-//   if (!originalQuestion && userMessage) {
-
-  
-
-
-//   if (trimmedFilteredChunks && !isExplicitWebRequest) {
-
-//     Boolean(trimmedContext || trimmedFilteredChunks) && !isExplicitWebRequest,
-
-
-        
-          
-          
-          
-          
-          
-              
-              
-              
-              
-              
-          
-//           if (!response) {
-          
-//               hasStream: !!response?.stream,
-//               hasResponse: !!response,
-          
-            
-            
-                
-                
-                
-                
-                
-              
-              
-          
-            
-            
-
-
-
-
-
-    
-//       if (!line.trim() || !line.startsWith('data: ')) continue;
-
 
 
 require('dotenv').config();
@@ -270,7 +63,7 @@ async function performWebSearch(query, numResults = 5) {
 async function fetchUrlContent(url) {
   try {
     console.log(`[URL Fetch] 📄 Fetching content from: ${url}`);
-    
+
     const response = await axios.get(url, {
       timeout: 15000,
       headers: {
@@ -280,7 +73,7 @@ async function fetchUrlContent(url) {
     });
 
     let content = response.data;
-    
+
     if (typeof content === 'string') {
       content = content
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
@@ -288,7 +81,7 @@ async function fetchUrlContent(url) {
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-      
+
       if (content.length > 10000) {
         content = content.substring(0, 10000) + '...';
       }
@@ -321,7 +114,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
   const message = userMessage.toLowerCase();
   const contextLower = (context || '').toLowerCase();
   const chunksLower = (relevantChunks || '').toLowerCase();
-  
+
   // PRIORITY 1: EXPLICIT WEB SEARCH REQUESTS (CHECK FIRST!)
   const explicitWebSearchTriggers = [
     'search for',
@@ -378,13 +171,13 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'web se answer',
     'web pe answer',
   ];
-  
+
   const hasExplicitTrigger = explicitWebSearchTriggers.some(trigger => message.includes(trigger));
   if (hasExplicitTrigger) {
     console.log('[Web Search] ✅ EXPLICIT web search request detected - triggering web search (FolderAI)');
     return true;
   }
-  
+
   const documentRejectionKeywords = [
     "don't want from document",
     "don't want from the document",
@@ -435,7 +228,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     "document nahi",
     "document mat use karo",
   ];
-  
+
   const hasDocumentRejection = documentRejectionKeywords.some(keyword => {
     const lowerKeyword = keyword.toLowerCase();
     if (lowerKeyword.length <= 5) {
@@ -447,15 +240,15 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     }
     return message.includes(lowerKeyword);
   });
-  
-  const hasDontWant = (message.includes("don't want") || message.includes("dont want") || message.includes("don't want") || message.includes("do not want")) && 
-                      (message.includes("document") || message.includes("from document"));
-  
+
+  const hasDontWant = (message.includes("don't want") || message.includes("dont want") || message.includes("don't want") || message.includes("do not want")) &&
+    (message.includes("document") || message.includes("from document"));
+
   if (hasDocumentRejection || hasDontWant) {
     console.log('[Web Search] ✅ User explicitly rejected documents - ALWAYS triggering web search (FolderAI)');
     return true;
   }
-  
+
   const personalPronouns = [
     'my',
     'my own',
@@ -465,7 +258,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'my information',
     'my data',
   ];
-  
+
   const personalDataKeywords = [
     'my case',
     'my organization',
@@ -488,21 +281,21 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'my type',
     'my category',
   ];
-  
+
   const hasPersonalPronoun = personalPronouns.some(pronoun => {
     const regex = new RegExp(`\\b${pronoun}\\b`, 'i');
     return regex.test(userMessage);
   });
-  
+
   const isPersonalDataQuestion = personalDataKeywords.some(keyword => message.includes(keyword));
-  
+
   if (hasPersonalPronoun || isPersonalDataQuestion) {
     console.log('[Web Search] Personal data/profile question detected - skipping web search (FolderAI)');
     return false;
   }
-  
+
   const hasDocumentContext = (contextLower.length > 500) || (chunksLower.length > 500);
-  
+
   const currentInfoTriggers = [
     'latest news',
     'current events',
@@ -529,14 +322,14 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'recently',
     'latest',
   ];
-  
+
   const hasCurrentInfoTrigger = currentInfoTriggers.some(trigger => message.includes(trigger));
-  
+
   if (hasCurrentInfoTrigger) {
     console.log('[Web Search] ✅ Current/real-time information request detected (FolderAI)');
     return true;
   }
-  
+
   const generalKnowledgePatterns = [
     /^what is (.+)\?/i,
     /^who is (.+)\?/i,
@@ -548,9 +341,9 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     /explain (.+)/i,
     /what are (.+)/i,
   ];
-  
+
   const isGeneralKnowledgeQuestion = generalKnowledgePatterns.some(pattern => pattern.test(userMessage));
-  
+
   const documentRelatedKeywords = [
     'document',
     'this document',
@@ -569,29 +362,29 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'find in',
     'show me from',
   ];
-  
+
   const isDocumentQuestion = documentRelatedKeywords.some(keyword => message.includes(keyword));
-  
+
   if (isDocumentQuestion && hasDocumentContext) {
     console.log('[Web Search] Question is about documents and context is available - skipping web search (FolderAI)');
     return false;
   }
-  
+
   if (isGeneralKnowledgeQuestion && !hasDocumentContext) {
     console.log('[Web Search] ✅ General knowledge question without document context (FolderAI)');
     return true;
   }
-  
+
   if (hasDocumentContext) {
     console.log('[Web Search] Document context available - assuming answer is in documents (FolderAI)');
     return false;
   }
-  
+
   if (!hasDocumentContext && isGeneralKnowledgeQuestion) {
     console.log('[Web Search] ✅ No document context - triggering for general knowledge question (FolderAI)');
     return true;
   }
-  
+
   console.log('[Web Search] No web search triggers detected - using available context (FolderAI)');
   return false;
 }
@@ -604,7 +397,7 @@ function trimContext(context, maxTokens = 500) {
   if (!context) return '';
   const tokens = estimateTokenCount(context);
   if (tokens <= maxTokens) return context;
-  
+
   const ratio = maxTokens / tokens;
   const trimmedLength = Math.floor(context.length * ratio);
   return context.substring(0, trimmedLength) + '...';
@@ -612,7 +405,7 @@ function trimContext(context, maxTokens = 500) {
 
 function filterRelevantChunks(chunks, userMessage, maxChunks = 5) {
   if (!chunks) return '';
-  
+
   let chunkString;
   if (Array.isArray(chunks)) {
     chunkString = chunks
@@ -630,15 +423,15 @@ function filterRelevantChunks(chunks, userMessage, maxChunks = 5) {
   } else {
     return '';
   }
-  
+
   const chunkArray = chunkString.split('\n\n').filter(Boolean);
   if (chunkArray.length <= maxChunks) return chunkString;
-  
+
   const keywords = userMessage.toLowerCase()
     .split(/\s+/)
     .filter(w => w.length > 3)
     .slice(0, 5); // Top 5 keywords only
-  
+
   const scored = chunkArray.map(chunk => {
     const chunkLower = chunk.toLowerCase();
     const score = keywords.reduce((sum, kw) => {
@@ -646,7 +439,7 @@ function filterRelevantChunks(chunks, userMessage, maxChunks = 5) {
     }, 0);
     return { chunk, score };
   });
-  
+
   return scored
     .sort((a, b) => b.score - a.score)
     .slice(0, maxChunks)
@@ -681,8 +474,8 @@ async function retryWithBackoff(fn, retries = 3, delay = 2000) {
 
 const GEMINI_MODELS = {
   // Primary model with fallbacks for rate limiting (using valid model names)
-  gemini: ['gemini-2.0-flash-exp', 'gemini-2.5-flash-preview-04-17', 'gemini-2.0-flash'],
-  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.5-pro-preview-05-06'],
+  gemini: ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'],
+  'gemini-pro-2.5': ['gemini-1.5-pro', 'gemini-2.0-flash'],
   'gemini-3-pro': ['gemini-3-pro-preview'], // Uses new SDK
 };
 
@@ -760,8 +553,8 @@ const LLM_CONFIGS = {
 
 const ALL_LLM_CONFIGS = {
   ...LLM_CONFIGS,
-  gemini: { model: 'gemini-2.0-flash-exp', headers: {} },
-  'gemini-pro-2.5': { model: 'gemini-2.5-pro', headers: {} },
+  gemini: { model: 'gemini-1.5-pro', headers: {} },
+  'gemini-pro-2.5': { model: 'gemini-1.5-pro', headers: {} },
   'gemini-3-pro': { model: 'gemini-3-pro-preview' }, // Uses new SDK
 };
 
@@ -840,11 +633,17 @@ async function getModelMaxTokens(provider, modelName) {
   const defaultMaxTokens = {
     'gemini-3-pro-preview': 8192,
     'gemini-2.5-pro': 8192,
+    'gemini-2.5-pro-preview': 8192,
     'gemini-2.5-flash': 8192,
     'gemini-2.0-pro-exp': 8192,
     'gemini-1.5-pro': 8192,
     'gemini-1.5-flash': 8192,
     'gemini-2.0-flash-exp': 8192,
+    'gemini-2.0-flash': 8192,
+    'gemini-1.5-flash-8b': 8192,
+    'gemini-2.5-flash-preview-04-17': 8192,
+    'gemini-pro': 8192,
+    'gemini-pro-vision': 8192,
   };
 
   const modelLower = modelName.toLowerCase();
@@ -913,7 +712,7 @@ function resolveProviderName(name = '') {
 async function getSystemPrompt(baseContext = '') {
   try {
     const dbSystemPrompt = await SystemPrompt.getLatestSystemPrompt();
-    
+
     if (dbSystemPrompt && baseContext) {
       const combinedPrompt = `${dbSystemPrompt}
 
@@ -922,13 +721,13 @@ ${baseContext}`;
       console.log(`[SystemPrompt] Database prompt length: ${dbSystemPrompt.length} chars | Adaptive context: ${baseContext.length} chars (FolderAI)`);
       return combinedPrompt;
     }
-    
+
     if (dbSystemPrompt) {
       console.log('[SystemPrompt] ✅ Using system prompt from database (STRICT COMPLIANCE MODE) (FolderAI)');
       console.log(`[SystemPrompt] Database prompt length: ${dbSystemPrompt.length} chars (FolderAI)`);
       return dbSystemPrompt;
     }
-    
+
     console.log('[SystemPrompt] ⚠️ No database prompt found, using fallback system instruction (FolderAI)');
     return baseContext || 'You are a helpful assistant.';
   } catch (err) {
@@ -939,7 +738,7 @@ ${baseContext}`;
 
 function buildEnhancedSystemPrompt(baseSystemPrompt, hasDocuments, hasWebSearch, hasUrlContent, isExplicitWebRequest = false) {
   let sourceInfo = '';
-  
+
   if (isExplicitWebRequest && (hasWebSearch || hasUrlContent)) {
     sourceInfo = `\n\n⚠️ CRITICAL: The user EXPLICITLY requested information from the INTERNET/WEB.
 You MUST prioritize and use WEB SEARCH RESULTS${hasUrlContent ? ' or FETCHED WEBSITE CONTENT' : ''} as your PRIMARY source.
@@ -973,7 +772,7 @@ When answering:
 - When answering based on documents, mention "Based on your documents..." or "According to the provided information..."
 - Focus on information from the user's documents and context`;
   }
-  
+
   return baseSystemPrompt + sourceInfo;
 }
 
@@ -987,7 +786,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   const safeContext = typeof context === 'string' ? context : '';
 
   let userQuestionForSearch = originalQuestion || userMessage;
-  
+
   if (!originalQuestion && userMessage) {
     const userQuestionMatch = userMessage.match(/USER QUESTION:\s*(.+?)(?:\n\n===|$)/s);
     if (userQuestionMatch) {
@@ -1017,7 +816,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     'web se dhoondo', 'web pe dhoondo', 'internet se', 'online dhoondo', 'web se batao'
   ];
   const isExplicitWebRequest = explicitWebKeywords.some(keyword => messageLower.includes(keyword));
-  
+
   let trimmedContext, filteredChunks, trimmedFilteredChunks;
   if (isExplicitWebRequest) {
     console.log('[Web Search] 🎯 Explicit web request detected - minimizing document context (FolderAI)');
@@ -1036,9 +835,9 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   let citations = [];
   let sourceInfo = [];
   let urlContents = [];
-  
+
   const urls = extractUrls(userQuestionForSearch);
-  
+
   if (!isExplicitWebRequest) {
     if (trimmedFilteredChunks) {
       sourceInfo.push('📄 Uploaded Documents');
@@ -1047,7 +846,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       sourceInfo.push('📋 User Profile/Context');
     }
   }
-  
+
   if (urls.length > 0) {
     console.log(`[URL Fetch] 🔗 Found ${urls.length} URL(s) in message, fetching content... (FolderAI)`);
     for (const url of urls) {
@@ -1058,14 +857,14 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       }
     }
   }
-  
+
   const needsWebSearch = isExplicitWebRequest || shouldTriggerWebSearch(userQuestionForSearch, trimmedContext, trimmedFilteredChunks);
-  
+
   if (needsWebSearch) {
     console.log(`[Web Search] 🔍 ${isExplicitWebRequest ? 'EXPLICIT' : 'Auto'}-triggering web search for user question (FolderAI):`, userQuestionForSearch.substring(0, 100));
     console.log(`[Web Search] 📋 Provider: ${provider} - Web search will be available for this model (FolderAI)`);
     webSearchData = await performWebSearch(userQuestionForSearch, 5);
-    
+
     if (webSearchData && webSearchData.results) {
       citations = webSearchData.citations;
       sourceInfo.push('🌐 Web Search');
@@ -1077,12 +876,12 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   } else {
     console.log(`[Web Search] ⏭️ Web search not needed for provider ${provider} (FolderAI)`);
   }
-  
+
   let prompt = userMessage.trim();
-  
+
   if (isExplicitWebRequest && (webSearchData || urlContents.length > 0)) {
     console.log('[Web Search] 🎯 EXPLICIT web search request - prioritizing web sources over documents (FolderAI)');
-    
+
     if (urlContents.length > 0) {
       prompt += `\n\n=== PRIMARY SOURCE: FETCHED WEBSITE CONTENT ===`;
       urlContents.forEach(urlData => {
@@ -1090,17 +889,17 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       });
       prompt += `\n\n⚠️ CRITICAL: This website content is the PRIMARY source for your answer.`;
     }
-    
+
     if (webSearchData && webSearchData.results) {
       prompt += `\n\n=== PRIMARY SOURCE: WEB SEARCH RESULTS ===\n${webSearchData.results}`;
       prompt += `\n\n⚠️ CRITICAL: These web search results are the PRIMARY source for your answer. Use them as the main source.`;
     }
-    
+
     if (trimmedFilteredChunks) {
       prompt += `\n\n=== SECONDARY REFERENCE: UPLOADED DOCUMENTS (OPTIONAL) ===\n${trimmedFilteredChunks}`;
       prompt += `\n\n⚠️ NOTE: The user explicitly requested web/internet information. Use documents ONLY for additional context if needed, but PRIMARY source must be web search results.`;
     }
-    
+
     prompt += `\n\n🎯 CRITICAL INSTRUCTIONS:
 - The user EXPLICITLY requested information from the INTERNET/WEB
 - You MUST prioritize and use WEB SEARCH RESULTS or FETCHED WEBSITE CONTENT as your PRIMARY source
@@ -1109,12 +908,12 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
 - If using web search, cite sources as [Source 1], [Source 2], etc.
 - If using fetched website content, mention the URL explicitly
 - DO NOT rely primarily on documents when the user asked for web/internet information`;
-    
+
   } else {
     if (trimmedFilteredChunks) {
       prompt += `\n\n=== UPLOADED DOCUMENTS CONTEXT ===\n${trimmedFilteredChunks}`;
     }
-    
+
     if (urlContents.length > 0) {
       prompt += `\n\n=== FETCHED WEBSITE CONTENT ===`;
       urlContents.forEach(urlData => {
@@ -1122,11 +921,11 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       });
       prompt += `\n\n⚠️ IMPORTANT: When using information from fetched websites above, cite the URL and mention "According to ${urlContents[0].url}..."`;
     }
-    
+
     if (webSearchData && webSearchData.results) {
       prompt += `\n\n=== WEB SEARCH RESULTS ===\n${webSearchData.results}\n\n⚠️ IMPORTANT: When using information from web sources above, cite them as [Source 1], [Source 2], etc.`;
     }
-    
+
     if (sourceInfo.length > 0) {
       prompt += `\n\n📌 Available Information Sources: ${sourceInfo.join(', ')}`;
       prompt += `\n\n🎯 Instructions: 
@@ -1151,7 +950,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   );
 
   console.log(`[askLLM] 📤 Sending request to ${provider} with ${webSearchData ? 'WEB SEARCH RESULTS' : 'NO web search'} (FolderAI)`);
-  const response = await retryWithBackoff(() => 
+  const response = await retryWithBackoff(() =>
     callSinglePrompt(provider, prompt, enhancedSystemPrompt, webSearchData !== null || urlContents.length > 0, metadata)
   );
 
@@ -1179,19 +978,19 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
       try {
         const maxOutputTokens = await getModelMaxTokens(provider, modelName);
         console.log(`[FolderLLM Max Tokens] Gemini model ${modelName} using maxOutputTokens=${maxOutputTokens}`);
-        
+
         const isGemini3Pro = modelName === 'gemini-3-pro-preview';
-        
+
         if (isGemini3Pro) {
           console.log(`[SystemPrompt] 🎯 Gemini 3.0 Pro ${modelName} using new SDK with system instruction (FolderAI)`);
-          
+
           try {
             const totalRequestSize = prompt.length + (systemPrompt?.length || 0);
             const maxSafeRequestSize = 3000000;
-            
+
             let finalPrompt = prompt;
             let finalSystemPrompt = systemPrompt;
-            
+
             if (totalRequestSize > maxSafeRequestSize) {
               console.warn(`[Gemini 3.0 Pro] ⚠️ Request size (${totalRequestSize} chars) exceeds safe limit (${maxSafeRequestSize} chars). Truncating...`);
               const maxPromptSize = Math.floor(maxSafeRequestSize * 0.9);
@@ -1199,7 +998,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               finalPrompt = truncatedPrompt + '\n\n[...content truncated due to size limits...]';
               console.log(`[Gemini 3.0 Pro] 📉 Truncated prompt from ${prompt.length} to ${finalPrompt.length} chars`);
             }
-            
+
             const request = {
               model: modelName,
               contents: [
@@ -1218,14 +1017,14 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
             };
 
             console.log(`[Gemini 3.0 Pro] 🚀 Sending request with ${finalPrompt.length} chars prompt and ${(finalSystemPrompt?.length || 0)} chars system instruction`);
-            
+
             const requestPromise = genAI3.models.generateContent(request);
-            const timeoutPromise = new Promise((_, reject) => 
+            const timeoutPromise = new Promise((_, reject) =>
               setTimeout(() => reject(new Error('Request timeout: Gemini 3.0 Pro API request took too long')), 180000)
             );
-            
+
             const response = await Promise.race([requestPromise, timeoutPromise]);
-            
+
             let text = '';
             if (response.text) {
               text = response.text;
@@ -1235,16 +1034,16 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
                 text = candidate.content.parts.map(part => part.text || '').join('');
               }
             }
-            
+
             if (!text) {
               console.error('[Gemini 3.0 Pro] ❌ No text in response:', JSON.stringify(response, null, 2));
               throw new Error('No text content in Gemini 3.0 Pro response');
             }
-            
+
             const usage = response.usageMetadata || {};
             let inputTokens = usage.promptTokenCount || 0;
             let outputTokens = usage.candidatesTokenCount || 0;
-            
+
             // Calculate tokens from text if API didn't return them
             if (inputTokens === 0 && finalPrompt) {
               inputTokens = estimateTokenCount(finalPrompt + (finalSystemPrompt || ''));
@@ -1254,11 +1053,11 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               outputTokens = estimateTokenCount(text);
               console.log(`⚠️ [Gemini 3.0 Pro FolderAI] API didn't return output tokens, calculated from text: ${outputTokens}`);
             }
-            
+
             console.log(
               `✅ Gemini 3.0 Pro (${modelName}) - Tokens used: ${inputTokens} + ${outputTokens} = ${inputTokens + outputTokens} | max=${maxOutputTokens} (FolderAI)`
             );
-            
+
             // Log LLM usage to payment service
             console.log(`🔍 [DEBUG FolderAI] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${modelName}, metadata:`, JSON.stringify(metadata));
             if (metadata && metadata.userId && modelName) {
@@ -1276,15 +1075,15 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
                 console.error('⚠️ Failed to log LLM usage (FolderAI):', err.message);
               });
             }
-            
+
             return text;
           } catch (gemini3Error) {
-            const isNetworkError = gemini3Error.message?.includes('fetch failed') || 
-                                  gemini3Error.message?.includes('network') ||
-                                  gemini3Error.message?.includes('timeout') ||
-                                  gemini3Error.message?.includes('ECONNREFUSED') ||
-                                  gemini3Error.message?.includes('ETIMEDOUT');
-            
+            const isNetworkError = gemini3Error.message?.includes('fetch failed') ||
+              gemini3Error.message?.includes('network') ||
+              gemini3Error.message?.includes('timeout') ||
+              gemini3Error.message?.includes('ECONNREFUSED') ||
+              gemini3Error.message?.includes('ETIMEDOUT');
+
             if (isNetworkError) {
               console.error(`[Gemini 3.0 Pro] ❌ Network/Request error: ${gemini3Error.message}`);
               console.log(`[Gemini 3.0 Pro] ⚠️ Attempting fallback to legacy Gemini models...`);
@@ -1311,7 +1110,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
           const geminiResponse = await result.response.text();
           let inputTokens = result.response.usageMetadata?.promptTokenCount || 0;
           let outputTokens = result.response.usageMetadata?.candidatesTokenCount || 0;
-          
+
           // Calculate tokens from text if API didn't return them
           if (inputTokens === 0 && prompt) {
             inputTokens = estimateTokenCount(prompt + (systemPrompt || ''));
@@ -1321,9 +1120,9 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
             outputTokens = estimateTokenCount(geminiResponse);
             console.log(`⚠️ [Gemini Legacy FolderAI] API didn't return output tokens, calculated from text: ${outputTokens}`);
           }
-          
+
           console.log(`✅ Gemini (${modelName}) - Input: ${inputTokens}, Output: ${outputTokens}, Total: ${inputTokens + outputTokens} | max=${maxOutputTokens} (FolderAI)`);
-          
+
           // Log LLM usage to payment service
           console.log(`🔍 [DEBUG FolderAI] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${modelName}, metadata:`, JSON.stringify(metadata));
           if (metadata && metadata.userId && modelName) {
@@ -1341,49 +1140,49 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               console.error('⚠️ Failed to log LLM usage (FolderAI):', err.message);
             });
           }
-          
+
           return geminiResponse;
         }
       } catch (err) {
         const errorMessage = err.message || '';
         console.warn(`❌ Gemini model ${modelName} failed: ${errorMessage.substring(0, 200)}`);
-        
-        const isRateLimitError = 
+
+        const isRateLimitError =
           errorMessage.includes('429') ||
           errorMessage.includes('Too Many Requests') ||
           errorMessage.includes('quota') ||
           errorMessage.includes('rate limit') ||
           errorMessage.includes('exceeded') ||
           err.status === 429;
-          
-        const isNotFoundError = 
+
+        const isNotFoundError =
           errorMessage.includes('404') ||
           errorMessage.includes('Not Found') ||
           errorMessage.includes('is not found') ||
           errorMessage.includes('not supported') ||
           err.status === 404;
-        
+
         const isGemini3ProFailure = modelName === 'gemini-3-pro-preview' && err.message?.includes('Gemini 3.0 Pro network error');
         const hasLegacyModels = models.length > 1 && models.some(m => m !== 'gemini-3-pro-preview');
-        
+
         // If model not found, immediately try next fallback (no delay)
         if (isNotFoundError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [FolderAI] Model ${modelName} not found, trying next fallback...`);
           continue;
         }
-        
+
         // If rate limited, wait and try fallback
         if (isRateLimitError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [FolderAI] Rate limit on ${modelName}, waiting before trying fallback model...`);
           await new Promise(res => setTimeout(res, 2000));
           continue;
         }
-        
+
         if (isGemini3ProFailure && hasLegacyModels) {
           console.log(`[Gemini 3.0 Pro] ⚠️ Falling back to legacy Gemini models due to network error...`);
           continue;
         }
-        
+
         if (modelName === models[models.length - 1]) {
           throw err;
         }
@@ -1396,9 +1195,9 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
   const messages = isClaude
     ? [{ role: 'user', content: prompt }]
     : [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
-      ];
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt },
+    ];
 
   const resolvedModel = config.model;
   const maxTokens = await getModelMaxTokens(provider, resolvedModel);
@@ -1411,17 +1210,17 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
 
   const payload = isClaude
     ? {
-        model: config.model,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages,
-      }
+      model: config.model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages,
+    }
     : {
-        model: config.model,
-        messages,
-        max_tokens: maxTokens,
-        temperature: 0.7,
-      };
+      model: config.model,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.7,
+    };
   console.log(`[FolderLLM Max Tokens] ${provider} model ${resolvedModel} using max_tokens=${maxTokens}`);
 
   // Reduced timeout for Claude to fail faster if there's an issue
@@ -1435,7 +1234,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
   let inputTokens = 0;
   let outputTokens = 0;
   let resolvedModelName = resolvedModel;
-  
+
   if (isClaude) {
     inputTokens = response.data?.usage?.input_tokens || 0;
     outputTokens = response.data?.usage?.output_tokens || 0;
@@ -1443,12 +1242,12 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
     inputTokens = response.data?.usage?.prompt_tokens || 0;
     outputTokens = response.data?.usage?.completion_tokens || 0;
   }
-  
+
   // Get response text for token calculation if needed
   const responseText = response.data?.choices?.[0]?.message?.content ||
     response.data?.content?.[0]?.text ||
     '';
-  
+
   // Calculate tokens from text if API didn't return them
   if (inputTokens === 0 && prompt) {
     inputTokens = estimateTokenCount(prompt + (systemPrompt || ''));
@@ -1460,7 +1259,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
   }
 
   console.log(`✅ ${provider} - Input: ${inputTokens}, Output: ${outputTokens}, Total: ${inputTokens + outputTokens} | max=${maxTokens} (FolderAI)`);
-  
+
   // Log LLM usage to payment service
   console.log(`🔍 [DEBUG FolderAI] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${resolvedModel}, metadata:`, JSON.stringify(metadata));
   if (metadata && metadata.userId && resolvedModel) {
@@ -1488,35 +1287,35 @@ async function getSummaryFromChunks(chunks) {
   if (!chunks || chunks.length === 0) {
     return null;
   }
-  
+
   // Optimize: Limit input size to prevent huge prompts and speed up processing
   const MAX_INPUT_CHARS = 50000; // Limit to 50k chars for faster processing
   const MAX_OUTPUT_TOKENS = 1000; // Limit summary length
-  
+
   let combinedText = chunks.join('\n\n');
-  
+
   // Truncate if too long
   if (combinedText.length > MAX_INPUT_CHARS) {
     console.log(`[getSummaryFromChunks] ⚡ Truncating text from ${combinedText.length} to ${MAX_INPUT_CHARS} chars for faster processing`);
     combinedText = combinedText.substring(0, MAX_INPUT_CHARS) + '\n\n[...content truncated for summary...]';
   }
-  
+
   const prompt = `Provide a concise summary (2-3 paragraphs) of the following text:\n\n${combinedText}`;
-  
+
   // Optimize: Use direct Gemini API call instead of full askLLM for speed
   // This avoids web search, system prompts, and other overhead
   try {
     // Try multiple models with fallback - attempt API call with each until one succeeds
-    const modelNames = ['gemini-2.0-flash-exp'];
+    const modelNames = ['gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'];
     let lastError = null;
     let summaryText = null;
     let successfulModel = null;
-    
+
     for (const modelName of modelNames) {
       try {
         console.log(`[getSummaryFromChunks] ⚡ Trying model: ${modelName}`);
         const model = genAI.getGenerativeModel({ model: modelName });
-        
+
         // Create timeout promise (60 seconds max for summaries)
         const requestPromise = model.generateContent(prompt, {
           generationConfig: {
@@ -1524,11 +1323,11 @@ async function getSummaryFromChunks(chunks) {
             temperature: 0.3, // Lower temperature for more consistent summaries
           },
         });
-        
-        const timeoutPromise = new Promise((_, reject) => 
+
+        const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Summary generation timeout')), 60000)
         );
-        
+
         const result = await Promise.race([requestPromise, timeoutPromise]);
         summaryText = await result.response.text();
         successfulModel = modelName;
@@ -1540,13 +1339,13 @@ async function getSummaryFromChunks(chunks) {
         continue; // Try next model
       }
     }
-    
+
     if (!summaryText || !successfulModel) {
       throw new Error(`All Gemini models failed. Last error: ${lastError?.message || 'Unknown'}`);
     }
-    
+
     const summary = summaryText;
-    
+
     return summary;
   } catch (error) {
     console.error('[getSummaryFromChunks] ❌ Error generating summary:', error.message);
@@ -1562,7 +1361,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   const safeContext = typeof context === 'string' ? context : '';
   let userQuestionForSearch = originalQuestion || userMessage;
-  
+
   if (!originalQuestion && userMessage) {
     const userQuestionMatch = userMessage.match(/USER QUESTION:\s*(.+?)(?:\n\n===|$)/s);
     if (userQuestionMatch) {
@@ -1572,11 +1371,11 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   const messageLower = userQuestionForSearch.toLowerCase();
   const explicitWebKeywords = [
-    'search web', 'search online', 'from web', 'web se', 'web pe', 
+    'search web', 'search online', 'from web', 'web se', 'web pe',
     'don\'t want from document', 'not from document', 'ignore document'
   ];
   const isExplicitWebRequest = explicitWebKeywords.some(keyword => messageLower.includes(keyword));
-  
+
   let trimmedContext, filteredChunks, trimmedFilteredChunks;
   if (isExplicitWebRequest) {
     trimmedContext = '';
@@ -1619,14 +1418,14 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   if (isGemini) {
     const models = GEMINI_MODELS[provider] || GEMINI_MODELS['gemini'];
     let lastError = null;
-    
+
     for (const modelName of models) {
       try {
         const maxOutputTokens = await getModelMaxTokens(provider, modelName);
         const isGemini3Pro = modelName === 'gemini-3-pro-preview';
-        
+
         console.log(`[Stream] Attempting Gemini model: ${modelName}`);
-        
+
         if (isGemini3Pro) {
           const request = {
             model: modelName,
@@ -1634,11 +1433,11 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             systemInstruction: enhancedSystemPrompt ? { parts: [{ text: enhancedSystemPrompt }] } : undefined,
             generationConfig: { maxOutputTokens, temperature: 0.7 },
           };
-          
+
           console.log(`[Gemini 3.0 Pro Stream] 🚀 Starting stream (prompt: ${prompt.length} chars)`);
-          
+
           const response = await genAI3.models.generateContentStream(request);
-          
+
           let chunkCount = 0;
           for await (const chunk of response) {
             chunkCount++;
@@ -1647,19 +1446,19 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
               yield text; // Yield text directly as string
             }
           }
-          
+
           console.log(`[Gemini 3.0 Pro Stream] ✅ Stream completed (${chunkCount} chunks)`);
           return; // Successfully streamed
-          
+
         } else {
           const model = genAI.getGenerativeModel(
             enhancedSystemPrompt ? { model: modelName, systemInstruction: enhancedSystemPrompt } : { model: modelName }
           );
-          
+
           const result = await model.generateContentStream(prompt, {
             generationConfig: { maxOutputTokens },
           });
-          
+
           let chunkCount = 0;
           for await (const chunk of result.stream) {
             chunkCount++;
@@ -1668,7 +1467,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
               yield text; // Yield text directly as string
             }
           }
-          
+
           console.log(`[Gemini Stream] ✅ Stream completed (${chunkCount} chunks)`);
           return; // Successfully streamed
         }
@@ -1676,42 +1475,42 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         lastError = err;
         const errorMessage = err.message || '';
         console.warn(`[Stream] ❌ Gemini model ${modelName} failed:`, errorMessage.substring(0, 200));
-        
-        const isRateLimitError = 
+
+        const isRateLimitError =
           errorMessage.includes('429') ||
           errorMessage.includes('Too Many Requests') ||
           errorMessage.includes('quota') ||
           errorMessage.includes('rate limit') ||
           errorMessage.includes('exceeded') ||
           err.status === 429;
-          
-        const isNotFoundError = 
+
+        const isNotFoundError =
           errorMessage.includes('404') ||
           errorMessage.includes('Not Found') ||
           errorMessage.includes('is not found') ||
           errorMessage.includes('not supported') ||
           err.status === 404;
-        
+
         // If model not found, immediately try next fallback (no delay)
         if (isNotFoundError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [FolderAI Stream] Model ${modelName} not found, trying next fallback...`);
           continue;
         }
-        
+
         // If rate limited, wait and try fallback
         if (isRateLimitError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [FolderAI Stream] Rate limit on ${modelName}, waiting before trying fallback model...`);
           await new Promise(res => setTimeout(res, 2000));
           continue;
         }
-        
+
         if (modelName === models[models.length - 1]) {
           throw err;
         }
         continue;
       }
     }
-    
+
     throw lastError || new Error('❌ All Gemini models failed for streaming');
   }
 
@@ -1739,25 +1538,25 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   let lastChunkTime = Date.now();
   const CHUNK_TIMEOUT = 30000; // 30 seconds timeout between chunks
   let hasReceivedData = false;
-  
+
   try {
     for await (const chunk of response.data) {
       const now = Date.now();
       const timeSinceLastChunk = now - lastChunkTime;
-      
+
       // If we've received data before and it's been too long, break
       if (hasReceivedData && timeSinceLastChunk > CHUNK_TIMEOUT) {
         console.warn(`[Stream] Timeout: No data received for ${timeSinceLastChunk}ms, ending stream`);
         break;
       }
-      
+
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || ''; // Keep incomplete line in buffer
-      
+
       for (const line of lines) {
         if (!line.trim()) continue;
-        
+
         // Handle Claude SSE format: "data: {...}" or "event: ..."
         if (line.startsWith('data: ')) {
           const data = line.replace(/^data: /, '').trim();
@@ -1765,10 +1564,10 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             console.log(`[Stream] ✅ ${provider} stream completed (${chunkCount} chunks)`);
             return;
           }
-          
+
           try {
             const json = JSON.parse(data);
-            
+
             // Claude streaming format: content_block_delta or delta
             let text = '';
             if (isClaude) {
@@ -1786,7 +1585,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             } else {
               text = json.choices?.[0]?.delta?.content || '';
             }
-            
+
             if (text) {
               hasReceivedData = true;
               lastChunkTime = now;
@@ -1808,7 +1607,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         }
       }
     }
-    
+
     // Process any remaining buffer
     if (buffer.trim()) {
       const lines = buffer.split('\n');
@@ -1831,7 +1630,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         }
       }
     }
-    
+
     console.log(`[Stream] ✅ ${provider} stream completed (${chunkCount} chunks)`);
   } catch (error) {
     console.error(`[Stream] Error during streaming:`, error.message);

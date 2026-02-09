@@ -28,20 +28,20 @@ router.get("/file/:fileId/view", authMiddleware.protect, async (req, res) => {
 router.get("/:fileId/view", authMiddleware.protect, async (req, res, next) => {
   try {
     const fileId = req.params.fileId;
-    
+
     const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    
+
     console.log(`🔍 [Route /:fileId/view] Checking fileId: ${fileId}`);
     console.log(`🔍 [Route /:fileId/view] Full URL: ${req.originalUrl || req.url}`);
-    
+
     if (!uuidPattern.test(fileId)) {
       console.log(`⏭️ [Route /:fileId/view] Not a UUID (${fileId}), calling next('route')`);
       return next('route'); // Skip to next matching route
     }
-    
+
     console.log(`✅ [Route /:fileId/view] UUID validated! fileId: ${fileId}`);
     console.log(`✅ [Route /:fileId/view] Calling viewDocument controller`);
-    
+
     await fileController.viewDocument(req, res);
   } catch (error) {
     console.error(`❌ [Route /:fileId/view] Error:`, error);
@@ -119,6 +119,7 @@ router.delete("/:folderName/sessions/:sessionId", authMiddleware.protect, fileCo
 
 router.get("/:folderName/chats", authMiddleware.protect, fileController.getFolderChatsByFolder);
 router.get("/:folderName/chats/:sessionId", authMiddleware.protect, fileController.getFolderChatSessionById);
+router.delete("/:folderName/chats", authMiddleware.protect, fileController.deleteAllFolderChats);
 router.delete("/:folderName/chat/:chatId", authMiddleware.protect, fileController.deleteSingleFolderChat);
 router.delete("/:folderName/chats/:sessionId", authMiddleware.protect, fileController.deleteFolderChatSession);
 

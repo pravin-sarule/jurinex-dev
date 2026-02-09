@@ -11,8 +11,8 @@ const { getSecretDetailsById } = require('../controllers/secretManagerController
 const { validate: isUuid } = require("uuid");
 const { uploadToGCS, getSignedUrl, getSignedUploadUrl } = require("../services/gcsService");
 const {
- convertHtmlToDocx,
- convertHtmlToPdf,
+  convertHtmlToDocx,
+  convertHtmlToPdf,
 } = require("../services/conversionService");
 const {
   askGemini,
@@ -32,8 +32,8 @@ const {
 } = require("../services/documentAiService");
 const { chunkDocument } = require("../services/chunkingService");
 const {
- generateEmbedding,
- generateEmbeddings,
+  generateEmbedding,
+  generateEmbeddings,
 } = require("../services/embeddingService");
 const { normalizeGcsKey } = require("../utils/gcsKey");
 const TokenUsageService = require("../services/tokenUsageService");
@@ -41,17 +41,17 @@ const UserProfileService = require("../services/userProfileService");
 const { fileInputBucket, fileOutputBucket } = require("../config/gcs");
 const { checkStorageLimit } = require("../utils/storage"); // Import checkStorageLimit
 const { DOCUMENT_UPLOAD_COST_TOKENS } = require("../middleware/checkTokenLimits");
-const { 
-  fetchTemplateFilesData, 
+const {
+  fetchTemplateFilesData,
   buildEnhancedSystemPromptWithTemplates,
-  fetchSecretManagerWithTemplates 
+  fetchSecretManagerWithTemplates
 } = require("../services/secretPromptTemplateService"); // NEW: Import template service
 const { processSecretPromptWithTemplates } = require("../services/secretTemplateExtractionService"); // NEW: Import secret template extraction service
 
 const { v4: uuidv4 } = require("uuid");
-const { 
-  extractUrlsFromQuery, 
-  isPdfUrl, 
+const {
+  extractUrlsFromQuery,
+  isPdfUrl,
   isWebPageUrl,
   fetchWebPageContent,
   processWebPageFromUrl,
@@ -64,7 +64,7 @@ const CONVERSATION_HISTORY_TURNS = 5;
 
 function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outputTemplate = null) {
   let jsonFormattingInstructions = '';
-  
+
   if (inputTemplate && inputTemplate.extracted_text && outputTemplate && outputTemplate.extracted_text) {
     jsonFormattingInstructions += `\n\n`;
     jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n`;
@@ -83,7 +83,7 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
   if (outputTemplate && outputTemplate.extracted_text) {
     const templateText = outputTemplate.extracted_text;
     const sectionKeys = [];
-    
+
     const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
     let match;
     while ((match = sectionPattern.exec(templateText)) !== null) {
@@ -91,11 +91,11 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
         sectionKeys.push(match[1]);
       }
     }
-    
+
     if (outputTemplate.structured_schema) {
       try {
-        const schema = typeof outputTemplate.structured_schema === 'string' 
-          ? JSON.parse(outputTemplate.structured_schema) 
+        const schema = typeof outputTemplate.structured_schema === 'string'
+          ? JSON.parse(outputTemplate.structured_schema)
           : outputTemplate.structured_schema;
         if (schema.properties && schema.properties.generated_sections && schema.properties.generated_sections.properties) {
           Object.keys(schema.properties.generated_sections.properties).forEach(key => {
@@ -108,8 +108,8 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
         console.warn('Could not parse structured_schema:', e);
       }
     }
-    
-    const sectionsList = sectionKeys.length > 0 
+
+    const sectionsList = sectionKeys.length > 0
       ? `\n\n📋 REQUIRED SECTIONS (MUST INCLUDE ALL):\n${sectionKeys.map((key, idx) => `   ${idx + 1}. ${key}`).join('\n')}\n`
       : '';
 
@@ -249,23 +249,23 @@ Your response should ONLY contain the JSON wrapped in markdown code blocks. Do n
 
 function fixJsonSyntax(jsonString) {
   if (!jsonString || typeof jsonString !== 'string') return jsonString;
-  
+
   let fixed = jsonString.trim();
-  
+
   // Remove trailing commas before } or ]
   fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
-  
+
   // Fix unescaped newlines in strings (replace actual newlines with \n)
   // But be careful not to break legitimate JSON structure
   fixed = fixed.replace(/("(?:[^"\\]|\\.)*")/g, (match) => {
     // Already properly escaped strings, leave them alone
     return match;
   });
-  
+
   // Try to fix unclosed strings or escaped quotes issues
   // Remove control characters except \n, \r, \t
   fixed = fixed.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-  
+
   return fixed;
 }
 
@@ -275,19 +275,19 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   }
 
   let cleanedResponse = rawResponse.trim();
-  
+
   // Try to extract JSON from markdown code blocks first
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
     let jsonText = jsonMatch[1].trim();
-    
+
     // Try parsing as-is first
     try {
       const jsonData = JSON.parse(jsonText);
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block, attempting to fix...', e.message);
-      
+
       // Try fixing common JSON issues
       try {
         const fixedJson = fixJsonSyntax(jsonText);
@@ -301,7 +301,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       }
     }
   }
-  
+
   // Try parsing as raw JSON (without markdown)
   const trimmed = cleanedResponse.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
@@ -313,7 +313,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       return cleanedResponse;
     } catch (e) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse raw JSON, attempting to fix...', e.message);
-      
+
       // Try fixing common JSON issues
       try {
         const fixedJson = fixJsonSyntax(trimmed);
@@ -328,7 +328,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       }
     }
   }
-  
+
   // Try to find JSON pattern in the response
   const jsonPattern = /\{[\s\S]*\}/;
   const jsonMatch2 = cleanedResponse.match(jsonPattern);
@@ -348,14 +348,14 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       }
     }
   }
-  
+
   // Return the original response if we couldn't parse it
   return cleanedResponse;
 }
 
 function ensurePlainTextAnswer(answer) {
   if (!answer) return '';
-  
+
   if (typeof answer === 'string') {
     try {
       const parsed = JSON.parse(answer);
@@ -378,7 +378,7 @@ function ensurePlainTextAnswer(answer) {
       return answer.trim();
     }
   }
-  
+
   if (typeof answer === 'object' && answer !== null) {
     if (answer.text) {
       return String(answer.text).trim();
@@ -391,7 +391,7 @@ function ensurePlainTextAnswer(answer) {
     }
     return JSON.stringify(answer);
   }
-  
+
   return String(answer || '').trim();
 }
 
@@ -424,115 +424,115 @@ function appendConversationToPrompt(prompt, conversationText) {
 }
 
 exports.uploadDocument = async (req, res) => {
- const userId = req.user.id;
- const authorizationHeader = req.headers.authorization;
+  const userId = req.user.id;
+  const authorizationHeader = req.headers.authorization;
 
- try {
- if (!userId) return res.status(401).json({ error: "Unauthorized" });
- if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+  try {
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    if (!req.file) return res.status(400).json({ error: "No file uploaded." });
 
- const { originalname, mimetype, buffer, size } = req.file;
- const { secret_id } = req.body; // NEW: Get secret_id from request body
+    const { originalname, mimetype, buffer, size } = req.file;
+    const { secret_id } = req.body; // NEW: Get secret_id from request body
 
- const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
 
- const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
- 
- if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
-   return res.status(400).json({ 
-     error: "Invalid file size. Please provide a valid file size." 
-   });
- }
+    const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
 
- const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
- if (!fileSizeCheck.allowed) {
-   console.log(`\n${'🆓'.repeat(40)}`);
-   console.log(`[FREE TIER] File upload REJECTED - size limit exceeded`);
-   console.log(`[FREE TIER] File: ${originalname}`);
-   console.log(`[FREE TIER] File size: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
-   console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
-   console.log(`[FREE TIER] ❌ Upload prevented - file not saved`);
-   console.log(`${'🆓'.repeat(40)}\n`);
-   
-   return res.status(403).json({ 
-     error: fileSizeCheck.message,
-     shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
-     fileSizeMB: fileSizeCheck.fileSizeMB,
-     fileSizeGB: fileSizeCheck.fileSizeGB,
-     maxSizeMB: fileSizeCheck.maxSizeMB,
-     upgradeRequired: true,
-     planType: 'free',
-     limit: `${fileSizeCheck.maxSizeMB} MB`
-   });
- }
+    if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
+      return res.status(400).json({
+        error: "Invalid file size. Please provide a valid file size."
+      });
+    }
 
- const isFreeUser = TokenUsageService.isFreePlan(userPlan);
- if (isFreeUser) {
-   const controllerAccessCheck = await TokenUsageService.checkFreeTierControllerAccessLimit(userId, userPlan, 'documentController');
-   if (!controllerAccessCheck.allowed) {
-     return res.status(403).json({
-       error: controllerAccessCheck.message,
-       upgradeRequired: true,
-       used: controllerAccessCheck.used,
-       limit: controllerAccessCheck.limit
-     });
-   }
- }
+    const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
+    if (!fileSizeCheck.allowed) {
+      console.log(`\n${'🆓'.repeat(40)}`);
+      console.log(`[FREE TIER] File upload REJECTED - size limit exceeded`);
+      console.log(`[FREE TIER] File: ${originalname}`);
+      console.log(`[FREE TIER] File size: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
+      console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
+      console.log(`[FREE TIER] ❌ Upload prevented - file not saved`);
+      console.log(`${'🆓'.repeat(40)}\n`);
 
- const storageLimitCheck = await checkStorageLimit(userId, size, userPlan);
- if (!storageLimitCheck.allowed) {
- return res.status(403).json({ error: storageLimitCheck.message });
- }
+      return res.status(403).json({
+        error: fileSizeCheck.message,
+        shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
+        fileSizeMB: fileSizeCheck.fileSizeMB,
+        fileSizeGB: fileSizeCheck.fileSizeGB,
+        maxSizeMB: fileSizeCheck.maxSizeMB,
+        upgradeRequired: true,
+        planType: 'free',
+        limit: `${fileSizeCheck.maxSizeMB} MB`
+      });
+    }
 
- const requestedResources = {
- tokens: DOCUMENT_UPLOAD_COST_TOKENS,
- documents: 1,
- ai_analysis: 1,
- storage_gb: size / (1024 ** 3), // convert bytes to GB
- };
+    const isFreeUser = TokenUsageService.isFreePlan(userPlan);
+    if (isFreeUser) {
+      const controllerAccessCheck = await TokenUsageService.checkFreeTierControllerAccessLimit(userId, userPlan, 'documentController');
+      if (!controllerAccessCheck.allowed) {
+        return res.status(403).json({
+          error: controllerAccessCheck.message,
+          upgradeRequired: true,
+          used: controllerAccessCheck.used,
+          limit: controllerAccessCheck.limit
+        });
+      }
+    }
 
- const limitCheck = await TokenUsageService.enforceLimits(
- userId,
- userUsage,
- userPlan,
- requestedResources
- );
+    const storageLimitCheck = await checkStorageLimit(userId, size, userPlan);
+    if (!storageLimitCheck.allowed) {
+      return res.status(403).json({ error: storageLimitCheck.message });
+    }
 
- if (!limitCheck.allowed) {
- return res.status(403).json({
- success: false,
- message: limitCheck.message,
- nextRenewalTime: limitCheck.nextRenewalTime,
- remainingTime: limitCheck.remainingTime,
- });
- }
+    const requestedResources = {
+      tokens: DOCUMENT_UPLOAD_COST_TOKENS,
+      documents: 1,
+      ai_analysis: 1,
+      storage_gb: size / (1024 ** 3), // convert bytes to GB
+    };
 
- const folderPath = `uploads/${userId}`;
- const { gsUri } = await uploadToGCS(originalname, buffer, folderPath, true, mimetype);
+    const limitCheck = await TokenUsageService.enforceLimits(
+      userId,
+      userUsage,
+      userPlan,
+      requestedResources
+    );
 
- const fileId = await DocumentModel.saveFileMetadata(
- userId,
- originalname,
- gsUri,
- folderPath,
- mimetype,
- size,
- "uploaded"
- );
+    if (!limitCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        message: limitCheck.message,
+        nextRenewalTime: limitCheck.nextRenewalTime,
+        remainingTime: limitCheck.remainingTime,
+      });
+    }
 
- await TokenUsageService.incrementUsage(userId, requestedResources, userPlan);
+    const folderPath = `uploads/${userId}`;
+    const { gsUri } = await uploadToGCS(originalname, buffer, folderPath, true, mimetype);
 
- processDocument(fileId, buffer, mimetype, userId, secret_id); // NEW: Pass secret_id to processDocument
+    const fileId = await DocumentModel.saveFileMetadata(
+      userId,
+      originalname,
+      gsUri,
+      folderPath,
+      mimetype,
+      size,
+      "uploaded"
+    );
 
-  res.status(202).json({
-    message: "Document uploaded and processing initiated.",
-    file_id: fileId,
-    gs_uri: gsUri,
-  });
-} catch (error) {
-  console.error("❌ uploadDocument error:", error);
-  res.status(500).json({ error: "Failed to upload document." });
-}
+    await TokenUsageService.incrementUsage(userId, requestedResources, userPlan);
+
+    processDocument(fileId, buffer, mimetype, userId, secret_id); // NEW: Pass secret_id to processDocument
+
+    res.status(202).json({
+      message: "Document uploaded and processing initiated.",
+      file_id: fileId,
+      gs_uri: gsUri,
+    });
+  } catch (error) {
+    console.error("❌ uploadDocument error:", error);
+    res.status(500).json({ error: "Failed to upload document." });
+  }
 };
 
 exports.generateUploadUrl = async (req, res) => {
@@ -548,21 +548,21 @@ exports.generateUploadUrl = async (req, res) => {
     }
 
     if (!size) {
-      return res.status(400).json({ 
-        error: "File size is required. Please provide the file size in bytes." 
+      return res.status(400).json({
+        error: "File size is required. Please provide the file size in bytes."
       });
     }
 
     const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-    
+
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
-    
+
     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
-      return res.status(400).json({ 
-        error: "Invalid file size. Please provide a valid file size in bytes." 
+      return res.status(400).json({
+        error: "Invalid file size. Please provide a valid file size in bytes."
       });
     }
-    
+
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -572,8 +572,8 @@ exports.generateUploadUrl = async (req, res) => {
       console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
       console.log(`[FREE TIER] ❌ Signed URL NOT generated - upload prevented`);
       console.log(`${'🆓'.repeat(40)}\n`);
-      
-      return res.status(403).json({ 
+
+      return res.status(403).json({
         error: fileSizeCheck.message,
         shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
         fileSizeMB: fileSizeCheck.fileSizeMB,
@@ -584,7 +584,7 @@ exports.generateUploadUrl = async (req, res) => {
         limit: `${fileSizeCheck.maxSizeMB} MB`
       });
     }
-    
+
     console.log(`✅ [generateUploadUrl] File size check passed: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
 
     const folderPath = `uploads/${userId}`;
@@ -634,7 +634,7 @@ exports.completeSignedUpload = async (req, res) => {
       console.error(`❌ [completeSignedUpload] File not found in GCS: ${gcsPath}`);
       return res.status(404).json({ error: "File not found in storage. Upload may have failed." });
     }
-    
+
     const [metadata] = await fileRef.getMetadata();
     console.log(`✅ [completeSignedUpload] File found in GCS: ${gcsPath}`);
     console.log(`📋 [completeSignedUpload] File metadata:`, {
@@ -643,20 +643,20 @@ exports.completeSignedUpload = async (req, res) => {
       timeCreated: metadata.timeCreated,
       bucket: fileInputBucket.name
     });
-    
+
     const actualFileSize = parseInt(metadata.size) || parseInt(size);
-    
+
     if (metadata.size && parseInt(metadata.size) !== parseInt(size)) {
       console.warn(`⚠️ [completeSignedUpload] Size mismatch: expected ${size}, got ${metadata.size}. Using actual size from GCS.`);
     }
-    
+
     if (mimetype && metadata.contentType && metadata.contentType !== mimetype) {
       console.warn(`⚠️ [completeSignedUpload] MIME type mismatch: expected ${mimetype}, got ${metadata.contentType}`);
       mimetype = metadata.contentType;
     }
 
     const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-    
+
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(actualFileSize, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`\n${'🆓'.repeat(40)}`);
@@ -666,12 +666,12 @@ exports.completeSignedUpload = async (req, res) => {
       console.log(`[FREE TIER] Max allowed: ${fileSizeCheck.maxSizeMB || 10} MB`);
       console.log(`[FREE TIER] 🗑️ Deleting file from GCS...`);
       console.log(`${'🆓'.repeat(40)}\n`);
-      
+
       await fileRef.delete().catch(err => {
         console.error(`❌ Failed to delete oversized file from GCS:`, err.message);
       });
-      
-      return res.status(403).json({ 
+
+      return res.status(403).json({
         error: fileSizeCheck.message,
         shortMessage: fileSizeCheck.shortMessage || fileSizeCheck.message,
         fileSizeMB: fileSizeCheck.fileSizeMB,
@@ -683,7 +683,7 @@ exports.completeSignedUpload = async (req, res) => {
         actualFileSizeMB: (actualFileSize / (1024 * 1024)).toFixed(2)
       });
     }
-    
+
     const storageLimitCheck = await checkStorageLimit(userId, actualFileSize, userPlan);
     if (!storageLimitCheck.allowed) {
       await fileRef.delete().catch(err => console.error("Failed to delete file:", err));
@@ -733,9 +733,9 @@ exports.completeSignedUpload = async (req, res) => {
     } catch (dbError) {
       console.error(`❌ [completeSignedUpload] Failed to save file to database:`, dbError);
       await fileRef.delete().catch(err => console.error("Failed to delete file after DB error:", err));
-      return res.status(500).json({ 
+      return res.status(500).json({
         error: "Failed to save file metadata to database",
-        details: dbError.message 
+        details: dbError.message
       });
     }
 
@@ -748,7 +748,7 @@ exports.completeSignedUpload = async (req, res) => {
 
     console.log(`📥 [completeSignedUpload] Downloading file buffer for processing...`);
     const [fileBuffer] = await fileRef.download();
-    
+
     if (!fileBuffer || fileBuffer.length === 0) {
       console.error(`❌ [completeSignedUpload] Downloaded file buffer is empty!`);
       try {
@@ -757,15 +757,15 @@ exports.completeSignedUpload = async (req, res) => {
       } catch (updateError) {
         console.error(`⚠️ Failed to update file status:`, updateError.message);
       }
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Uploaded file appears to be empty or corrupted.",
         file_id: fileId // Return file_id so frontend knows the file was created
       });
     }
-    
+
     console.log(`✅ [completeSignedUpload] File buffer downloaded: ${fileBuffer.length} bytes`);
     console.log(`🚀 [completeSignedUpload] Starting document processing with mime type: ${mimetype || 'application/octet-stream'}`);
-    
+
     processDocument(fileId, fileBuffer, mimetype || metadata.contentType || 'application/octet-stream', userId, secret_id)
       .catch(err => {
         console.error(`❌ [completeSignedUpload] Error in processDocument:`, err);
@@ -790,978 +790,1027 @@ exports.completeSignedUpload = async (req, res) => {
 
 
 const updateProcessingProgress = async (
- fileId,
- status,
- progress,
- currentOperation
+  fileId,
+  status,
+  progress,
+  currentOperation
 ) => {
- await DocumentModel.updateFileStatus(fileId, status, progress);
- await DocumentModel.updateCurrentOperation(fileId, currentOperation);
- console.log(`[Progress] File ${fileId}: ${currentOperation} - ${progress}%`);
+  await DocumentModel.updateFileStatus(fileId, status, progress);
+  await DocumentModel.updateCurrentOperation(fileId, currentOperation);
+  console.log(`[Progress] File ${fileId}: ${currentOperation} - ${progress}%`);
 };
 
 async function processDocument(
- fileId,
- fileBuffer,
- mimetype,
- userId,
- secretId = null
+  fileId,
+  fileBuffer,
+  mimetype,
+  userId,
+  secretId = null
 ) {
- const jobId = uuidv4();
+  const jobId = uuidv4();
 
- try {
- await updateProcessingProgress(
- fileId,
- "processing",
- 0.0,
- "Starting document processing"
- );
+  try {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`[processDocument] 🚀 Starting document processing`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`  📄 File ID: ${fileId}`);
+    console.log(`  👤 User ID: ${userId}`);
+    console.log(`  📦 MIME Type: ${mimetype}`);
+    console.log(`  💾 Buffer Size: ${(fileBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`  🔐 Secret ID: ${secretId || 'none'}`);
+    console.log(`  🆔 Job ID: ${jobId}`);
+    console.log(`${'='.repeat(80)}\n`);
 
- await ProcessingJobModel.createJob({
- job_id: jobId,
- file_id: fileId,
- type: "synchronous",
- document_ai_operation_name: null,
- status: "queued",
- secret_id: secretId,
- });
+    // Get file metadata for logging
+    const fileMetadata = await DocumentModel.getFileById(fileId);
+    if (fileMetadata) {
+      console.log(`✅ [processDocument] File metadata retrieved:`);
+      console.log(`   - Original name: ${fileMetadata.originalname}`);
+      console.log(`   - GCS path: ${fileMetadata.gcs_path}`);
+      console.log(`   - Status: ${fileMetadata.status}`);
+    }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 2.0,
- "Processing job created"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      0.0,
+      "Starting document processing"
+    );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 3.0,
- "Initializing document processor"
- );
+    await ProcessingJobModel.createJob({
+      job_id: jobId,
+      file_id: fileId,
+      type: "synchronous",
+      document_ai_operation_name: null,
+      status: "queued",
+      secret_id: secretId,
+    });
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 5.0,
- "Initialization complete"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      2.0,
+      "Processing job created"
+    );
 
- let chunkingMethod = "recursive";
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      3.0,
+      "Initializing document processor"
+    );
 
- if (secretId) {
- await updateProcessingProgress(
- fileId,
- "processing",
- 7.0,
- "Fetching processing configuration from database"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      5.0,
+      "Initialization complete"
+    );
 
- console.log(
- `[processDocument] Fetching chunking method for secret ID: ${secretId}`
- );
+    let chunkingMethod = "recursive";
 
- const secretQuery = `
+    if (secretId) {
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        7.0,
+        "Fetching processing configuration from database"
+      );
+
+      console.log(
+        `[processDocument] Fetching chunking method for secret ID: ${secretId}`
+      );
+
+      const secretQuery = `
  SELECT chunking_method
  FROM secret_manager
  WHERE id = $1
  `;
- const result = await db.query(secretQuery, [secretId]);
+      const result = await db.query(secretQuery, [secretId]);
 
- if (result.rows.length > 0 && result.rows[0].chunking_method) {
- chunkingMethod = result.rows[0].chunking_method;
- console.log(
- `[processDocument] Using chunking method from DB: ${chunkingMethod}`
- );
- await updateProcessingProgress(
- fileId,
- "processing",
- 10.0,
- `Configuration loaded: ${chunkingMethod} chunking`
- );
- }
- } else {
- await updateProcessingProgress(
- fileId,
- "processing",
- 10.0,
- "Using default configuration (recursive chunking)"
- );
- }
+      if (result.rows.length > 0 && result.rows[0].chunking_method) {
+        chunkingMethod = result.rows[0].chunking_method;
+        console.log(
+          `[processDocument] Using chunking method from DB: ${chunkingMethod}`
+        );
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          10.0,
+          `Configuration loaded: ${chunkingMethod} chunking`
+        );
+      }
+    } else {
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        10.0,
+        "Using default configuration (recursive chunking)"
+      );
+    }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 12.0,
- "Configuration ready"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      12.0,
+      "Configuration ready"
+    );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 13.0,
- "Checking document processing status"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      13.0,
+      "Checking document processing status"
+    );
 
- const file = await DocumentModel.getFileById(fileId);
+    const file = await DocumentModel.getFileById(fileId);
 
- if (file.status === "processed") {
- console.log(
- `[processDocument] File ${fileId} already processed. Skipping.`
- );
- await ProcessingJobModel.updateJobStatus(jobId, "completed");
- await updateProcessingProgress(
- fileId,
- "processed",
- 100.0,
- "Already processed"
- );
- return;
- }
+    if (file.status === "processed") {
+      console.log(
+        `[processDocument] File ${fileId} already processed. Skipping.`
+      );
+      await ProcessingJobModel.updateJobStatus(jobId, "completed");
+      await updateProcessingProgress(
+        fileId,
+        "processed",
+        100.0,
+        "Already processed"
+      );
+      return;
+    }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 15.0,
- "Document ready for processing"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      15.0,
+      "Document ready for processing"
+    );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 16.0,
- "Analyzing document format"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      16.0,
+      "Analyzing document format"
+    );
 
- let extractedTexts = [];
- const isPDF = String(mimetype).toLowerCase() === 'application/pdf';
- const ocrMimeTypes = [
- "image/png",
- "image/jpeg",
- "image/tiff",
- "application/msword",
- "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
- "application/vnd.ms-powerpoint",
- "application/vnd.openxmlformats-officedocument.presentationml.presentation",
- "application/vnd.ms-excel",
- "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
- "text/plain",
- "text/csv",
- ];
+    let extractedTexts = [];
+    const isPDF = String(mimetype).toLowerCase() === 'application/pdf';
+    const ocrMimeTypes = [
+      "image/png",
+      "image/jpeg",
+      "image/tiff",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "text/plain",
+      "text/csv",
+    ];
 
- if (isPDF) {
-   console.log(`[processDocument] PDF detected - checking if digital-native...`);
-   
-   await updateProcessingProgress(
-     fileId,
-     "processing",
-     18.0,
-     "Analyzing PDF format (checking if digital-native)"
-   );
-   
-   const pdfDetection = await detectDigitalNativePDF(fileBuffer);
-   
-   console.log(`\n${"=".repeat(80)}`);
-   console.log(`[PDF DETECTION] Analysis Results for File ID: ${fileId}`);
-   console.log(`${"=".repeat(80)}`);
-   console.log(`  📄 Page Count: ${pdfDetection.pageCount}`);
-   console.log(`  📊 Non-whitespace Characters: ${pdfDetection.nonWhitespaceChars}`);
-   console.log(`  📏 Threshold: ${pdfDetection.threshold}`);
-   console.log(`  🎯 Confidence Score: ${pdfDetection.confidence || 0}%`);
-   if (pdfDetection.metrics) {
-     console.log(`  📈 Metrics:`);
-     console.log(`     - Characters per page: ${pdfDetection.metrics.charsPerPage}`);
-     console.log(`     - Words per page: ${pdfDetection.metrics.wordsPerPage}`);
-     console.log(`     - Non-whitespace chars/page: ${pdfDetection.metrics.nonWhitespaceCharsPerPage}`);
-     console.log(`     - Total words: ${pdfDetection.metrics.totalWords}`);
-     console.log(`     - Has sentences: ${pdfDetection.metrics.hasSentences ? 'Yes' : 'No'}`);
-     console.log(`     - OCR artifacts detected: ${pdfDetection.metrics.hasOCRArtifacts ? 'Yes' : 'No'}`);
-   }
-   if (pdfDetection.reasons && pdfDetection.reasons.length > 0) {
-     console.log(`  🔍 Detection Reasons:`);
-     pdfDetection.reasons.forEach((reason, idx) => {
-       console.log(`     ${idx + 1}. ${reason}`);
-     });
-   }
-   console.log(`  ✅ Is Digital Native: ${pdfDetection.isDigitalNative ? 'YES' : 'NO'}`);
-   console.log(`${"=".repeat(80)}\n`);
-   
-   if (pdfDetection.isDigitalNative) {
-     console.log(`\n${"🟢".repeat(40)}`);
-     console.log(`[TEXT EXTRACTION METHOD] ✅ DIGITAL-NATIVE PDF DETECTED`);
-     console.log(`[TEXT EXTRACTION METHOD] 📦 Using: pdf-parse (FREE - No Document AI cost)`);
-     console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: $0.00 (Cost savings enabled)`);
-     console.log(`[TEXT EXTRACTION METHOD] ⚡ Speed: Fast (local parsing)`);
-     console.log(`${"🟢".repeat(40)}\n`);
-     
-     await updateProcessingProgress(
-       fileId,
-       "processing",
-       20.0,
-       "Extracting text from digital-native PDF (using pdf-parse)"
-     );
-     
-     extractedTexts = await extractTextFromPDFWithPages(fileBuffer);
-     
-     console.log(`[TEXT EXTRACTION] ✅ Successfully extracted ${extractedTexts.length} text segment(s) with page numbers`);
-     if (extractedTexts.length > 0 && extractedTexts[0].page_start) {
-       console.log(`[TEXT EXTRACTION] 📄 Page range: ${extractedTexts[0].page_start} - ${extractedTexts[0].page_end}`);
-     }
-     
-     const totalExtractedText = extractedTexts.map(t => t.text || '').join(' ').trim();
-     const extractedWordCount = totalExtractedText.split(/\s+/).filter(w => w.length > 0).length;
-     const extractedCharCount = totalExtractedText.length;
-     const minWordsRequired = 10 * pdfDetection.pageCount; // At least 10 words per page
-     const minCharsRequired = 100 * pdfDetection.pageCount; // At least 100 chars per page
-     
-     console.log(`[TEXT EXTRACTION] Validation:`);
-     console.log(`  - Extracted words: ${extractedWordCount} (minimum: ${minWordsRequired})`);
-     console.log(`  - Extracted characters: ${extractedCharCount} (minimum: ${minCharsRequired})`);
-     
-     if (extractedWordCount < minWordsRequired || extractedCharCount < minCharsRequired) {
-       console.log(`\n${"⚠️".repeat(40)}`);
-       console.log(`[TEXT EXTRACTION] ⚠️ WARNING: Extracted text is too sparse`);
-       console.log(`[TEXT EXTRACTION] Digital-native detection may have been incorrect`);
-       console.log(`[TEXT EXTRACTION] Falling back to Document AI for better extraction`);
-       console.log(`${"⚠️".repeat(40)}\n`);
-       
-       extractedTexts = [];
-       
-       await updateProcessingProgress(
-         fileId,
-         "processing",
-         20.0,
-         "Text extraction insufficient - falling back to Document AI OCR"
-       );
-     } else {
-       await updateProcessingProgress(
-         fileId,
-         "processing",
-         38.0,
-         "Text extraction completed (digital-native PDF - pdf-parse)"
-       );
-       
-       await updateProcessingProgress(
-         fileId,
-         "processing",
-         42.0,
-         "Text extraction successful (Method: pdf-parse)"
-       );
-     }
-   } else {
-     console.log(`\n${"🟡".repeat(40)}`);
-     console.log(`[TEXT EXTRACTION METHOD] ⚠️ SCANNED PDF DETECTED`);
-     console.log(`[TEXT EXTRACTION METHOD] 📦 Using: Document AI OCR (Google Cloud)`);
-     console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: Document AI pricing applies`);
-     console.log(`[TEXT EXTRACTION METHOD] ⏱️ Speed: Slower (cloud OCR processing)`);
-     if (pdfDetection.error) {
-       console.log(`[TEXT EXTRACTION METHOD] ⚠️ Detection error: ${pdfDetection.error}`);
-     }
-     console.log(`${"🟡".repeat(40)}\n`);
-     
-     await updateProcessingProgress(
-       fileId,
-       "processing",
-       20.0,
-       "Scanned PDF detected - preparing for Document AI OCR"
-     );
-     
-   }
- }
- 
- const useOCR = (isPDF && !extractedTexts.length) || ocrMimeTypes.includes(String(mimetype).toLowerCase());
+    if (isPDF) {
+      console.log(`[processDocument] PDF detected - checking if digital-native...`);
 
- if (useOCR) {
- console.log(
- `[processDocument] Using Document AI OCR for ${isPDF ? 'scanned PDF' : 'file'} (file ID: ${fileId})`
- );
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        18.0,
+        "Analyzing PDF format (checking if digital-native)"
+      );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 20.0,
- "Preparing document for OCR"
- );
+      const pdfDetection = await detectDigitalNativePDF(fileBuffer);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 22.0,
- "Sending document to OCR engine"
- );
+      console.log(`\n${"=".repeat(80)}`);
+      console.log(`[PDF DETECTION] Analysis Results for File ID: ${fileId}`);
+      console.log(`${"=".repeat(80)}`);
+      console.log(`  📄 Page Count: ${pdfDetection.pageCount}`);
+      console.log(`  📊 Non-whitespace Characters: ${pdfDetection.nonWhitespaceChars}`);
+      console.log(`  📏 Threshold: ${pdfDetection.threshold}`);
+      console.log(`  🎯 Confidence Score: ${pdfDetection.confidence || 0}%`);
+      if (pdfDetection.metrics) {
+        console.log(`  📈 Metrics:`);
+        console.log(`     - Characters per page: ${pdfDetection.metrics.charsPerPage}`);
+        console.log(`     - Words per page: ${pdfDetection.metrics.wordsPerPage}`);
+        console.log(`     - Non-whitespace chars/page: ${pdfDetection.metrics.nonWhitespaceCharsPerPage}`);
+        console.log(`     - Total words: ${pdfDetection.metrics.totalWords}`);
+        console.log(`     - Has sentences: ${pdfDetection.metrics.hasSentences ? 'Yes' : 'No'}`);
+        console.log(`     - OCR artifacts detected: ${pdfDetection.metrics.hasOCRArtifacts ? 'Yes' : 'No'}`);
+      }
+      if (pdfDetection.reasons && pdfDetection.reasons.length > 0) {
+        console.log(`  🔍 Detection Reasons:`);
+        pdfDetection.reasons.forEach((reason, idx) => {
+          console.log(`     ${idx + 1}. ${reason}`);
+        });
+      }
+      console.log(`  ✅ Is Digital Native: ${pdfDetection.isDigitalNative ? 'YES' : 'NO'}`);
+      console.log(`${"=".repeat(80)}\n`);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 25.0,
- "OCR processing started (this may take a moment)"
- );
+      if (pdfDetection.isDigitalNative) {
+        console.log(`\n${"🟢".repeat(40)}`);
+        console.log(`[TEXT EXTRACTION METHOD] ✅ DIGITAL-NATIVE PDF DETECTED`);
+        console.log(`[TEXT EXTRACTION METHOD] 📦 Using: pdf-parse (FREE - No Document AI cost)`);
+        console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: $0.00 (Cost savings enabled)`);
+        console.log(`[TEXT EXTRACTION METHOD] ⚡ Speed: Fast (local parsing)`);
+        console.log(`${"🟢".repeat(40)}\n`);
 
- const FILE_SIZE_LIMIT_INLINE = 20 * 1024 * 1024; // 20MB - Document AI inline limit
- const fileSizeMB = (fileBuffer.length / 1024 / 1024).toFixed(2);
- const isLargeFile = fileBuffer.length > FILE_SIZE_LIMIT_INLINE;
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          20.0,
+          "Extracting text from digital-native PDF (using pdf-parse)"
+        );
 
- console.log(`[processDocument] Processing file with Document AI (${fileSizeMB}MB, mimeType: ${mimetype})`);
+        extractedTexts = await extractTextFromPDFWithPages(fileBuffer);
 
- let useBatchProcessing = isLargeFile;
- 
- if (!useBatchProcessing) {
-   try {
-     extractedTexts = await extractTextFromDocument(fileBuffer, mimetype);
-     
-     if (!extractedTexts || extractedTexts.length === 0) {
-       console.warn(`[processDocument] No text extracted from inline processing, trying batch processing`);
-       useBatchProcessing = true;
-     } else {
-       console.log(`[processDocument] Successfully extracted ${extractedTexts.length} text segment(s) using inline processing`);
-       
-       await updateProcessingProgress(
-         fileId,
-         "processing",
-         38.0,
-         "OCR processing completed"
-       );
-
-       await updateProcessingProgress(
-         fileId,
-         "processing",
-         42.0,
-         "Text extraction successful"
-       );
-     }
-   } catch (ocrError) {
-     console.warn(`[processDocument] Inline OCR failed (${ocrError.message}), falling back to batch processing`);
-     useBatchProcessing = true;
-   }
- }
-
- if (useBatchProcessing) {
-   console.log(`[processDocument] Using batch processing (file: ${fileSizeMB}MB)`);
-   
-   await updateProcessingProgress(
-     fileId,
-     "processing",
-     26.0,
-     "Uploading to GCS for batch processing"
-   );
-   
-   const fileRecord = await DocumentModel.getFileById(fileId);
-   const originalFilename = fileRecord?.originalname || `file_${fileId}`;
-   
-   const batchUploadFolder = `batch-uploads/${userId}/${uuidv4()}`;
-   const { gsUri: gcsInputUri } = await uploadToGCS(
-     originalFilename,
-     fileBuffer,
-     batchUploadFolder,
-     true, // Use input bucket
-     mimetype
-   );
-   
-   await updateProcessingProgress(
-     fileId,
-     "batch_processing",
-     30.0,
-     "Starting batch OCR processing"
-   );
-   
-   const outputPrefix = `document-ai-results/${userId}/${uuidv4()}/`;
-   const gcsOutputUriPrefix = `gs://${fileOutputBucket.name}/${outputPrefix}`;
-   
-   const operationName = await batchProcessDocument(
-     [gcsInputUri],
-     gcsOutputUriPrefix,
-     mimetype
-   );
-   
-   console.log(`[processDocument] Batch operation started: ${operationName}`);
-   
-   const job = await ProcessingJobModel.getJobByFileId(fileId);
-   if (job && job.job_id) {
-     await ProcessingJobModel.updateJob(job.job_id, {
-       gcs_input_uri: gcsInputUri,
-       gcs_output_uri_prefix: gcsOutputUriPrefix,
-       document_ai_operation_name: operationName,
-       type: "batch",
-       status: "running",
-     });
-   }
-   
-   try {
-     await DocumentModel.updateFileOutputPath(fileId, gcsOutputUriPrefix);
-     console.log(`[processDocument] ✅ Stored output path in user_files: ${gcsOutputUriPrefix}`);
-   } catch (outputPathError) {
-     console.error(`[processDocument] ⚠️ Failed to store output path (non-critical):`, outputPathError.message);
-   }
-   
-   let batchCompleted = false;
-   let attempts = 0;
-   const maxAttempts = 240; // 20 minutes max
-   
-   while (!batchCompleted && attempts < maxAttempts) {
-     await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-     attempts++;
-     
-     try {
-       const status = await getOperationStatus(operationName);
-       
-       if (status.done) {
-         batchCompleted = true;
-         
-        if (status.error) {
-          // Log full error details for debugging
-          console.error(`[processDocument] ❌ Batch processing error:`, {
-            error: status.error,
-            code: status.error.code,
-            message: status.error.message,
-            details: status.error.details,
-            fullError: JSON.stringify(status.error, null, 2)
-          });
-
-          // Extract detailed error message
-          let errorMessage = status.error.message || "Batch processing failed";
-          if (status.error.code) {
-            errorMessage = `[${status.error.code}] ${errorMessage}`;
-          }
-          if (status.error.details && Array.isArray(status.error.details) && status.error.details.length > 0) {
-            const detailMessages = status.error.details.map(d => d.message || JSON.stringify(d)).join('; ');
-            errorMessage = `${errorMessage}. Details: ${detailMessages}`;
-          }
-
-          throw new Error(`Batch processing failed: ${errorMessage}`);
+        console.log(`[TEXT EXTRACTION] ✅ Successfully extracted ${extractedTexts.length} text segment(s) with page numbers`);
+        if (extractedTexts.length > 0 && extractedTexts[0].page_start) {
+          console.log(`[TEXT EXTRACTION] 📄 Page range: ${extractedTexts[0].page_start} - ${extractedTexts[0].page_end}`);
         }
-         
-         await updateProcessingProgress(
-           fileId,
-           "processing",
-           40.0,
-           "Fetching batch processing results"
-         );
-         
-         const bucketName = fileOutputBucket.name;
-         const prefix = outputPrefix;
-         extractedTexts = await fetchBatchResults(bucketName, prefix);
-         
-         if (!extractedTexts || extractedTexts.length === 0) {
-           throw new Error("No text extracted from batch processing results");
-         }
-         
-         console.log(`\n${"✅".repeat(40)}`);
-         console.log(`[TEXT EXTRACTION] ✅ SUCCESS - Batch Document AI Processing`);
-         console.log(`[TEXT EXTRACTION] 📦 Method: Document AI (Batch)`);
-         console.log(`[TEXT EXTRACTION] 📊 Extracted: ${extractedTexts.length} text segment(s)`);
-         console.log(`${"✅".repeat(40)}\n`);
-         
-         await updateProcessingProgress(
-           fileId,
-           "processing",
-           42.0,
-           "Batch OCR processing completed"
-         );
-       } else {
-         const progress = Math.min(30 + (attempts * 0.15), 39);
-         await updateProcessingProgress(
-           fileId,
-           "batch_processing",
-           progress,
-           "Batch OCR processing in progress"
-         );
-       }
-     } catch (pollError) {
-       console.error(`[processDocument] Batch polling error:`, pollError);
-       throw pollError;
-     }
-   }
-   
-   if (!batchCompleted) {
-     throw new Error("Batch processing timeout after 20 minutes");
-   }
- }
- } else {
-   console.log(`\n${"🟢".repeat(40)}`);
-   console.log(`[TEXT EXTRACTION METHOD] ✅ STANDARD TEXT EXTRACTION`);
-   console.log(`[TEXT EXTRACTION METHOD] 📦 Using: Native text extractor (pdf-parse/mammoth)`);
-   console.log(`[TEXT EXTRACTION METHOD] 📄 File Type: ${mimetype}`);
-   console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: $0.00 (Free)`);
-   console.log(`[TEXT EXTRACTION METHOD] ⚡ Speed: Fast (local parsing)`);
-   console.log(`${"🟢".repeat(40)}\n`);
-   
-   console.log(`[processDocument] Using standard text extraction for file ID ${fileId}`);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 22.0,
- "Starting text extraction"
- );
+        const totalExtractedText = extractedTexts.map(t => t.text || '').join(' ').trim();
+        const extractedWordCount = totalExtractedText.split(/\s+/).filter(w => w.length > 0).length;
+        const extractedCharCount = totalExtractedText.length;
+        const minWordsRequired = 10 * pdfDetection.pageCount; // At least 10 words per page
+        const minCharsRequired = 100 * pdfDetection.pageCount; // At least 100 chars per page
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 28.0,
- "Extracting text content from document"
- );
+        console.log(`[TEXT EXTRACTION] Validation:`);
+        console.log(`  - Extracted words: ${extractedWordCount} (minimum: ${minWordsRequired})`);
+        console.log(`  - Extracted characters: ${extractedCharCount} (minimum: ${minCharsRequired})`);
 
- const text = await extractText(fileBuffer, mimetype);
- extractedTexts.push({ text });
+        if (extractedWordCount < minWordsRequired || extractedCharCount < minCharsRequired) {
+          console.log(`\n${"⚠️".repeat(40)}`);
+          console.log(`[TEXT EXTRACTION] ⚠️ WARNING: Extracted text is too sparse`);
+          console.log(`[TEXT EXTRACTION] Digital-native detection may have been incorrect`);
+          console.log(`[TEXT EXTRACTION] Falling back to Document AI for better extraction`);
+          console.log(`${"⚠️".repeat(40)}\n`);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 38.0,
- "Text extracted successfully"
- );
+          extractedTexts = [];
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 42.0,
- "Text extraction completed"
- );
- }
+          await updateProcessingProgress(
+            fileId,
+            "processing",
+            20.0,
+            "Text extraction insufficient - falling back to Document AI OCR"
+          );
+        } else {
+          await updateProcessingProgress(
+            fileId,
+            "processing",
+            38.0,
+            "Text extraction completed (digital-native PDF - pdf-parse)"
+          );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 43.0,
- "Validating extracted text"
- );
+          await updateProcessingProgress(
+            fileId,
+            "processing",
+            42.0,
+            "Text extraction successful (Method: pdf-parse)"
+          );
+        }
+      } else {
+        console.log(`\n${"🟡".repeat(40)}`);
+        console.log(`[TEXT EXTRACTION METHOD] ⚠️ SCANNED PDF DETECTED`);
+        console.log(`[TEXT EXTRACTION METHOD] 📦 Using: Document AI OCR (Google Cloud)`);
+        console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: Document AI pricing applies`);
+        console.log(`[TEXT EXTRACTION METHOD] ⏱️ Speed: Slower (cloud OCR processing)`);
+        if (pdfDetection.error) {
+          console.log(`[TEXT EXTRACTION METHOD] ⚠️ Detection error: ${pdfDetection.error}`);
+        }
+        console.log(`${"🟡".repeat(40)}\n`);
 
- if (
- !extractedTexts.length ||
- extractedTexts.every((item) => !item.text || item.text.trim() === "")
- ) {
- throw new Error("No meaningful text extracted from document.");
- }
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          20.0,
+          "Scanned PDF detected - preparing for Document AI OCR"
+        );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 45.0,
- "Text validation completed"
- );
+      }
+    }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 46.0,
- `Preparing to chunk document using ${chunkingMethod} method`
- );
+    const useOCR = (isPDF && !extractedTexts.length) || ocrMimeTypes.includes(String(mimetype).toLowerCase());
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 48.0,
- "Analyzing document structure for optimal chunking"
- );
+    if (useOCR) {
+      console.log(
+        `[processDocument] Using Document AI OCR for ${isPDF ? 'scanned PDF' : 'file'} (file ID: ${fileId})`
+      );
 
- console.log(
- `[processDocument] Chunking file ID ${fileId} using method: ${chunkingMethod}`
- );
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        20.0,
+        "Preparing document for OCR"
+      );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 50.0,
- `Chunking document with ${chunkingMethod} strategy`
- );
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        22.0,
+        "Sending document to OCR engine"
+      );
 
- const chunks = await chunkDocument(extractedTexts, fileId, chunkingMethod);
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        25.0,
+        "OCR processing started (this may take a moment)"
+      );
 
- console.log(
- `[processDocument] Generated ${chunks.length} chunks using ${chunkingMethod} method.`
- );
+      const FILE_SIZE_LIMIT_INLINE = 20 * 1024 * 1024; // 20MB - Document AI inline limit
+      const fileSizeMB = (fileBuffer.length / 1024 / 1024).toFixed(2);
+      const isLargeFile = fileBuffer.length > FILE_SIZE_LIMIT_INLINE;
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 56.0,
- `Generated ${chunks.length} chunks`
- );
+      console.log(`[processDocument] Processing file with Document AI (${fileSizeMB}MB, mimeType: ${mimetype})`);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 58.0,
- `Chunking completed with ${chunks.length} segments`
- );
+      let useBatchProcessing = isLargeFile;
 
- if (!chunks.length) {
- console.warn(
- `[processDocument] No chunks generated. Marking as processed.`
- );
- await DocumentModel.updateFileProcessedAt(fileId);
- await updateProcessingProgress(
- fileId,
- "processed",
- 100.0,
- "Processing completed (no content to chunk)"
- );
- await ProcessingJobModel.updateJobStatus(jobId, "completed");
- return;
- }
+      if (!useBatchProcessing) {
+        try {
+          extractedTexts = await extractTextFromDocument(fileBuffer, mimetype);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 59.0,
- "Preparing chunks for embedding generation"
- );
+          if (!extractedTexts || extractedTexts.length === 0) {
+            console.warn(`[processDocument] No text extracted from inline processing, trying batch processing`);
+            useBatchProcessing = true;
+          } else {
+            console.log(`[processDocument] Successfully extracted ${extractedTexts.length} text segment(s) using inline processing`);
 
- const chunkContents = chunks.map((c) => c.content);
+            await updateProcessingProgress(
+              fileId,
+              "processing",
+              38.0,
+              "OCR processing completed"
+            );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 62.0,
- `Ready to generate embeddings for ${chunks.length} chunks`
- );
+            await updateProcessingProgress(
+              fileId,
+              "processing",
+              42.0,
+              "Text extraction successful"
+            );
+          }
+        } catch (ocrError) {
+          console.warn(`[processDocument] Inline OCR failed (${ocrError.message}), falling back to batch processing`);
+          useBatchProcessing = true;
+        }
+      }
 
- console.log(
- `[processDocument] Generating embeddings for ${chunks.length} chunks...`
- );
+      if (useBatchProcessing) {
+        console.log(`[processDocument] Using batch processing (file: ${fileSizeMB}MB)`);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 64.0,
- "Connecting to embedding service"
- );
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          26.0,
+          "Uploading to GCS for batch processing"
+        );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 66.0,
- `Processing embeddings for ${chunks.length} chunks`
- );
+        const fileRecord = await DocumentModel.getFileById(fileId);
+        const originalFilename = fileRecord?.originalname || `file_${fileId}`;
 
- const embeddings = await generateEmbeddings(chunkContents);
+        const batchUploadFolder = `batch-uploads/${userId}/${uuidv4()}`;
+        const { gsUri: gcsInputUri } = await uploadToGCS(
+          originalFilename,
+          fileBuffer,
+          batchUploadFolder,
+          true, // Use input bucket
+          mimetype
+        );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 74.0,
- "All embeddings generated successfully"
- );
+        await updateProcessingProgress(
+          fileId,
+          "batch_processing",
+          30.0,
+          "Starting batch OCR processing"
+        );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 76.0,
- "Validating embeddings"
- );
+        const outputPrefix = `document-ai-results/${userId}/${uuidv4()}/`;
+        const gcsOutputUriPrefix = `gs://${fileOutputBucket.name}/${outputPrefix}`;
 
- if (chunks.length !== embeddings.length) {
- throw new Error(
- "Mismatch between number of chunks and embeddings generated."
- );
- }
+        const operationName = await batchProcessDocument(
+          [gcsInputUri],
+          gcsOutputUriPrefix,
+          mimetype
+        );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 77.0,
- "Preparing data for database storage"
- );
+        console.log(`[processDocument] Batch operation started: ${operationName}`);
 
-const chunksToSave = chunks.map((chunk, i) => {
-  const page_start = chunk.metadata?.page_start !== null && chunk.metadata?.page_start !== undefined
-    ? chunk.metadata.page_start
-    : (chunk.page_start !== null && chunk.page_start !== undefined ? chunk.page_start : null);
-  const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
-    ? chunk.metadata.page_end
-    : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-  
-  return {
-    file_id: fileId,
-    chunk_index: i,
-    content: chunk.content,
-    token_count: chunk.token_count,
-    page_start: page_start,
-    page_end: page_end || page_start, // Use page_start if page_end is null
-    heading: chunk.metadata?.heading || chunk.heading || null,
-  };
-});
+        const job = await ProcessingJobModel.getJobByFileId(fileId);
+        if (job && job.job_id) {
+          await ProcessingJobModel.updateJob(job.job_id, {
+            gcs_input_uri: gcsInputUri,
+            gcs_output_uri_prefix: gcsOutputUriPrefix,
+            document_ai_operation_name: operationName,
+            type: "batch",
+            status: "running",
+          });
+        }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 78.0,
- "Data prepared for storage"
- );
+        try {
+          await DocumentModel.updateFileOutputPath(fileId, gcsOutputUriPrefix);
+          console.log(`[processDocument] ✅ Stored output path in user_files: ${gcsOutputUriPrefix}`);
+        } catch (outputPathError) {
+          console.error(`[processDocument] ⚠️ Failed to store output path (non-critical):`, outputPathError.message);
+        }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 79.0,
- "Saving chunks to database"
- );
+        let batchCompleted = false;
+        let attempts = 0;
+        const maxAttempts = 240; // 20 minutes max
 
- const savedChunks = await FileChunkModel.saveMultipleChunks(chunksToSave);
+        while (!batchCompleted && attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+          attempts++;
 
- console.log(
- `[processDocument] Saved ${savedChunks.length} chunks to database.`
- );
+          try {
+            const status = await getOperationStatus(operationName);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 82.0,
- `${savedChunks.length} chunks saved successfully`
- );
+            if (status.done) {
+              batchCompleted = true;
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 83.0,
- "Preparing vector embeddings for storage"
- );
+              if (status.error) {
+                // Log full error details for debugging
+                console.error(`[processDocument] ❌ Batch processing error:`, {
+                  error: status.error,
+                  code: status.error.code,
+                  message: status.error.message,
+                  details: status.error.details,
+                  fullError: JSON.stringify(status.error, null, 2)
+                });
 
- const vectorsToSave = savedChunks.map((savedChunk, i) => ({
- chunk_id: savedChunk.id,
- embedding: embeddings[i],
- file_id: fileId,
- }));
+                // Extract detailed error message
+                let errorMessage = status.error.message || "Batch processing failed";
+                if (status.error.code) {
+                  errorMessage = `[${status.error.code}] ${errorMessage}`;
+                }
+                if (status.error.details && Array.isArray(status.error.details) && status.error.details.length > 0) {
+                  const detailMessages = status.error.details.map(d => d.message || JSON.stringify(d)).join('; ');
+                  errorMessage = `${errorMessage}. Details: ${detailMessages}`;
+                }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 84.0,
- "Vector data prepared"
- );
+                throw new Error(`Batch processing failed: ${errorMessage}`);
+              }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 85.0,
- "Storing vector embeddings in database"
- );
+              await updateProcessingProgress(
+                fileId,
+                "processing",
+                40.0,
+                "Fetching batch processing results"
+              );
 
- await ChunkVectorModel.saveMultipleChunkVectors(vectorsToSave);
+              const bucketName = fileOutputBucket.name;
+              const prefix = outputPrefix;
+              extractedTexts = await fetchBatchResults(bucketName, prefix);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 88.0,
- "Vector embeddings stored successfully"
- );
+              if (!extractedTexts || extractedTexts.length === 0) {
+                throw new Error("No text extracted from batch processing results");
+              }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 89.0,
- "Preparing document content for summarization"
- );
+              console.log(`\n${"✅".repeat(40)}`);
+              console.log(`[TEXT EXTRACTION] ✅ SUCCESS - Batch Document AI Processing`);
+              console.log(`[TEXT EXTRACTION] 📦 Method: Document AI (Batch)`);
+              console.log(`[TEXT EXTRACTION] 📊 Extracted: ${extractedTexts.length} text segment(s)`);
+              console.log(`${"✅".repeat(40)}\n`);
 
- const fullText = chunks.map((c) => c.content).join("\n\n");
+              await updateProcessingProgress(
+                fileId,
+                "processing",
+                42.0,
+                "Batch OCR processing completed"
+              );
+            } else {
+              const progress = Math.min(30 + (attempts * 0.15), 39);
+              await updateProcessingProgress(
+                fileId,
+                "batch_processing",
+                progress,
+                "Batch OCR processing in progress"
+              );
+            }
+          } catch (pollError) {
+            console.error(`[processDocument] Batch polling error:`, pollError);
+            throw pollError;
+          }
+        }
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 90.0,
- "Ready to generate summary"
- );
+        if (!batchCompleted) {
+          throw new Error("Batch processing timeout after 20 minutes");
+        }
+      }
+    } else {
+      console.log(`\n${"🟢".repeat(40)}`);
+      console.log(`[TEXT EXTRACTION METHOD] ✅ STANDARD TEXT EXTRACTION`);
+      console.log(`[TEXT EXTRACTION METHOD] 📦 Using: Native text extractor (pdf-parse/mammoth)`);
+      console.log(`[TEXT EXTRACTION METHOD] 📄 File Type: ${mimetype}`);
+      console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: $0.00 (Free)`);
+      console.log(`[TEXT EXTRACTION METHOD] ⚡ Speed: Fast (local parsing)`);
+      console.log(`${"🟢".repeat(40)}\n`);
 
- try {
- if (fullText.trim()) {
- await updateProcessingProgress(
- fileId,
- "processing",
- 91.0,
- "Connecting to AI summarization service"
- );
+      console.log(`[processDocument] Using standard text extraction for file ID ${fileId}`);
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 92.0,
- "Generating AI-powered document summary"
- );
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        22.0,
+        "Starting text extraction"
+      );
 
- const summary = await getSummaryFromChunks(fullText);
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        28.0,
+        "Extracting text content from document"
+      );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 94.0,
- "Saving document summary"
- );
+      const text = await extractText(fileBuffer, mimetype);
+      extractedTexts.push({ text });
 
- await DocumentModel.updateFileSummary(fileId, summary);
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        38.0,
+        "Text extracted successfully"
+      );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 95.0,
- "Summary generated and saved successfully"
- );
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        42.0,
+        "Text extraction completed"
+      );
+    }
 
- console.log(
- `[processDocument] Summary generated for file ID ${fileId}`
- );
- }
- } catch (summaryError) {
- console.warn(
- `[processDocument] Summary generation failed: ${summaryError.message}`
- );
- await updateProcessingProgress(
- fileId,
- "processing",
- 95.0,
- "Summary generation skipped (non-critical error)"
- );
- }
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      43.0,
+      "Validating extracted text"
+    );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 96.0,
- "Updating document metadata"
- );
+    if (
+      !extractedTexts.length ||
+      extractedTexts.every((item) => !item.text || item.text.trim() === "")
+    ) {
+      throw new Error("No meaningful text extracted from document.");
+    }
 
- await DocumentModel.updateFileProcessedAt(fileId);
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      45.0,
+      "Text validation completed"
+    );
 
- await updateProcessingProgress(
- fileId,
- "processing",
- 98.0,
- "Finalizing document processing"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      46.0,
+      `Preparing to chunk document using ${chunkingMethod} method`
+    );
 
- await updateProcessingProgress(
- fileId,
- "processed",
- 100.0,
- "Document processing completed successfully"
- );
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      48.0,
+      "Analyzing document structure for optimal chunking"
+    );
 
- await ProcessingJobModel.updateJobStatus(jobId, "completed");
+    console.log(
+      `[processDocument] Chunking file ID ${fileId} using method: ${chunkingMethod}`
+    );
 
- console.log(
- `✅ Document ID ${fileId} fully processed using '${chunkingMethod}' method.`
- );
- } catch (error) {
- console.error(`❌ processDocument failed for file ID ${fileId}:`, error);
- await updateProcessingProgress(
- fileId,
- "error",
- 0.0,
- `Processing failed: ${error.message}`
- );
- await ProcessingJobModel.updateJobStatus(jobId, "failed", error.message);
- }
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      50.0,
+      `Chunking document with ${chunkingMethod} strategy`
+    );
+
+    const chunks = await chunkDocument(extractedTexts, fileId, chunkingMethod);
+
+    console.log(
+      `[processDocument] Generated ${chunks.length} chunks using ${chunkingMethod} method.`
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      56.0,
+      `Generated ${chunks.length} chunks`
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      58.0,
+      `Chunking completed with ${chunks.length} segments`
+    );
+
+    if (!chunks.length) {
+      console.warn(
+        `[processDocument] No chunks generated. Marking as processed.`
+      );
+      await DocumentModel.updateFileProcessedAt(fileId);
+      await updateProcessingProgress(
+        fileId,
+        "processed",
+        100.0,
+        "Processing completed (no content to chunk)"
+      );
+      await ProcessingJobModel.updateJobStatus(jobId, "completed");
+      return;
+    }
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      59.0,
+      "Preparing chunks for embedding generation"
+    );
+
+    const chunkContents = chunks.map((c) => c.content);
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      62.0,
+      `Ready to generate embeddings for ${chunks.length} chunks`
+    );
+
+    console.log(
+      `[processDocument] Generating embeddings for ${chunks.length} chunks...`
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      64.0,
+      "Connecting to embedding service"
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      66.0,
+      `Processing embeddings for ${chunks.length} chunks`
+    );
+
+    const embeddings = await generateEmbeddings(chunkContents);
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      74.0,
+      "All embeddings generated successfully"
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      76.0,
+      "Validating embeddings"
+    );
+
+    if (chunks.length !== embeddings.length) {
+      throw new Error(
+        "Mismatch between number of chunks and embeddings generated."
+      );
+    }
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      77.0,
+      "Preparing data for database storage"
+    );
+
+    const chunksToSave = chunks.map((chunk, i) => {
+      const page_start = chunk.metadata?.page_start !== null && chunk.metadata?.page_start !== undefined
+        ? chunk.metadata.page_start
+        : (chunk.page_start !== null && chunk.page_start !== undefined ? chunk.page_start : null);
+      const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
+        ? chunk.metadata.page_end
+        : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
+
+      return {
+        file_id: fileId,
+        chunk_index: i,
+        content: chunk.content,
+        token_count: chunk.token_count,
+        page_start: page_start,
+        page_end: page_end || page_start, // Use page_start if page_end is null
+        heading: chunk.metadata?.heading || chunk.heading || null,
+      };
+    });
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      78.0,
+      "Data prepared for storage"
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      79.0,
+      "Saving chunks to database"
+    );
+
+    const savedChunks = await FileChunkModel.saveMultipleChunks(chunksToSave);
+
+    console.log(
+      `[processDocument] Saved ${savedChunks.length} chunks to database.`
+    );
+
+    // Verify chunks were saved
+    if (savedChunks.length !== chunksToSave.length) {
+      console.error(`❌ [processDocument] Chunk count mismatch: expected ${chunksToSave.length}, saved ${savedChunks.length}`);
+      throw new Error(`Failed to save all chunks: expected ${chunksToSave.length}, got ${savedChunks.length}`);
+    }
+
+    // Log chunk IDs for verification
+    const chunkIds = savedChunks.map(c => c.id);
+    console.log(`✅ [processDocument] Chunk IDs saved: ${chunkIds.slice(0, 3).join(', ')}${chunkIds.length > 3 ? `... (${chunkIds.length} total)` : ''}`);
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      82.0,
+      `${savedChunks.length} chunks saved successfully`
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      83.0,
+      "Preparing vector embeddings for storage"
+    );
+
+    const vectorsToSave = savedChunks.map((savedChunk, i) => ({
+      chunk_id: savedChunk.id,
+      embedding: embeddings[i],
+      file_id: fileId,
+    }));
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      84.0,
+      "Vector data prepared"
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      85.0,
+      "Storing vector embeddings in database"
+    );
+
+    await ChunkVectorModel.saveMultipleChunkVectors(vectorsToSave);
+
+    console.log(`✅ [processDocument] Saved ${vectorsToSave.length} embeddings to database`);
+
+    // Verify embeddings were saved
+    const savedEmbeddings = await ChunkVectorModel.getVectorsByChunkIds(chunkIds);
+    console.log(`✅ [processDocument] Verified ${savedEmbeddings.length} embeddings in database`);
+
+    if (savedEmbeddings.length !== vectorsToSave.length) {
+      console.error(`❌ [processDocument] Embedding count mismatch: expected ${vectorsToSave.length}, found ${savedEmbeddings.length}`);
+      throw new Error(`Failed to save all embeddings: expected ${vectorsToSave.length}, got ${savedEmbeddings.length}`);
+    }
+
+    // Final verification: Check embedding coverage for this file
+    const embeddingCoverage = await ChunkVectorModel.verifyEmbeddingsForFile(fileId);
+    console.log(`✅ [processDocument] Final verification - Chunks: ${embeddingCoverage.totalChunks}, Embeddings: ${embeddingCoverage.totalEmbeddings}, Coverage: ${embeddingCoverage.coveragePercentage.toFixed(2)}%`);
+
+    if (!embeddingCoverage.isComplete) {
+      console.warn(`⚠️ [processDocument] Incomplete embedding coverage: ${embeddingCoverage.coveragePercentage.toFixed(2)}%`);
+    }
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      88.0,
+      "Vector embeddings stored successfully"
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      89.0,
+      "Preparing document content for summarization"
+    );
+
+    const fullText = chunks.map((c) => c.content).join("\n\n");
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      90.0,
+      "Ready to generate summary"
+    );
+
+    try {
+      if (fullText.trim()) {
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          91.0,
+          "Connecting to AI summarization service"
+        );
+
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          92.0,
+          "Generating AI-powered document summary"
+        );
+
+        const summary = await getSummaryFromChunks(fullText);
+
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          94.0,
+          "Saving document summary"
+        );
+
+        await DocumentModel.updateFileSummary(fileId, summary);
+
+        await updateProcessingProgress(
+          fileId,
+          "processing",
+          95.0,
+          "Summary generated and saved successfully"
+        );
+
+        console.log(
+          `[processDocument] Summary generated for file ID ${fileId}`
+        );
+      }
+    } catch (summaryError) {
+      console.warn(
+        `[processDocument] Summary generation failed: ${summaryError.message}`
+      );
+      await updateProcessingProgress(
+        fileId,
+        "processing",
+        95.0,
+        "Summary generation skipped (non-critical error)"
+      );
+    }
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      96.0,
+      "Updating document metadata"
+    );
+
+    await DocumentModel.updateFileProcessedAt(fileId);
+
+    await updateProcessingProgress(
+      fileId,
+      "processing",
+      98.0,
+      "Finalizing document processing"
+    );
+
+    await updateProcessingProgress(
+      fileId,
+      "processed",
+      100.0,
+      "Document processing completed successfully"
+    );
+
+    await ProcessingJobModel.updateJobStatus(jobId, "completed");
+
+    console.log(
+      `✅ Document ID ${fileId} fully processed using '${chunkingMethod}' method.`
+    );
+  } catch (error) {
+    console.error(`❌ processDocument failed for file ID ${fileId}:`, error);
+    await updateProcessingProgress(
+      fileId,
+      "error",
+      0.0,
+      `Processing failed: ${error.message}`
+    );
+    await ProcessingJobModel.updateJobStatus(jobId, "failed", error.message);
+  }
 }
 
 exports.analyzeDocument = async (req, res) => {
- const userId = req.user.id;
- const authorizationHeader = req.headers.authorization;
+  const userId = req.user.id;
+  const authorizationHeader = req.headers.authorization;
 
- try {
- const { file_id } = req.body;
- if (!file_id)
- return res.status(400).json({ error: "file_id is required." });
+  try {
+    const { file_id } = req.body;
+    if (!file_id)
+      return res.status(400).json({ error: "file_id is required." });
 
- const file = await DocumentModel.getFileById(file_id);
- if (!file) return res.status(404).json({ error: "File not found." });
- if (file.user_id !== userId)
- return res.status(403).json({ error: "Access denied." });
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file) return res.status(404).json({ error: "File not found." });
+    if (file.user_id !== userId)
+      return res.status(403).json({ error: "Access denied." });
 
- if (file.status !== "processed") {
- return res.status(400).json({
- error: "Document is still processing or failed.",
- status: file.status,
- progress: file.processing_progress,
- });
- }
+    if (file.status !== "processed") {
+      return res.status(400).json({
+        error: "Document is still processing or failed.",
+        status: file.status,
+        progress: file.processing_progress,
+      });
+    }
 
- const chunks = await FileChunkModel.getChunksByFileId(file_id);
- const fullText = chunks.map((c) => c.content).join("\n\n");
+    const chunks = await FileChunkModel.getChunksByFileId(file_id);
+    const fullText = chunks.map((c) => c.content).join("\n\n");
 
- const analysisCost = Math.ceil(fullText.length / 500);
+    const analysisCost = Math.ceil(fullText.length / 500);
 
- const { userUsage, userPlan, requestedResources } = req;
+    const { userUsage, userPlan, requestedResources } = req;
 
 
- let insights;
- try {
- insights = await analyzeWithGemini(fullText);
- await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
- } catch (aiError) {
- console.error("❌ Gemini analysis error:", aiError);
- return res.status(500).json({
- error: "Failed to get AI analysis.",
- details: aiError.message,
- });
- }
+    let insights;
+    try {
+      insights = await analyzeWithGemini(fullText);
+      await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
+    } catch (aiError) {
+      console.error("❌ Gemini analysis error:", aiError);
+      return res.status(500).json({
+        error: "Failed to get AI analysis.",
+        details: aiError.message,
+      });
+    }
 
- return res.json(insights);
- } catch (error) {
- console.error("❌ analyzeDocument error:", error);
- return res.status(500).json({ error: "Failed to analyze document." });
- }
+    return res.json(insights);
+  } catch (error) {
+    console.error("❌ analyzeDocument error:", error);
+    return res.status(500).json({ error: "Failed to analyze document." });
+  }
 };
 exports.getSummary = async (req, res) => {
- const userId = req.user.id;
- const authorizationHeader = req.headers.authorization;
+  const userId = req.user.id;
+  const authorizationHeader = req.headers.authorization;
 
- try {
- const { file_id, selected_chunk_ids } = req.body;
+  try {
+    const { file_id, selected_chunk_ids } = req.body;
 
- if (!file_id)
- return res.status(400).json({ error: "file_id is required." });
- if (!Array.isArray(selected_chunk_ids) || selected_chunk_ids.length === 0) {
- return res.status(400).json({ error: "No chunks selected for summary." });
- }
+    if (!file_id)
+      return res.status(400).json({ error: "file_id is required." });
+    if (!Array.isArray(selected_chunk_ids) || selected_chunk_ids.length === 0) {
+      return res.status(400).json({ error: "No chunks selected for summary." });
+    }
 
- const file = await DocumentModel.getFileById(file_id);
- if (!file || file.user_id !== userId) {
- return res.status(403).json({ error: "Access denied or file not found." });
- }
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file || file.user_id !== userId) {
+      return res.status(403).json({ error: "Access denied or file not found." });
+    }
 
- if (file.status !== "processed") {
- return res.status(400).json({
- error: "Document is still processing or failed.",
- status: file.status,
- progress: file.processing_progress,
- });
- }
+    if (file.status !== "processed") {
+      return res.status(400).json({
+        error: "Document is still processing or failed.",
+        status: file.status,
+        progress: file.processing_progress,
+      });
+    }
 
- const fileChunks = await FileChunkModel.getChunksByFileId(file_id);
- const allowedIds = new Set(fileChunks.map((c) => c.id));
- const safeChunkIds = selected_chunk_ids.filter((id) => allowedIds.has(id));
+    const fileChunks = await FileChunkModel.getChunksByFileId(file_id);
+    const allowedIds = new Set(fileChunks.map((c) => c.id));
+    const safeChunkIds = selected_chunk_ids.filter((id) => allowedIds.has(id));
 
- if (safeChunkIds.length === 0) {
- return res.status(400).json({ error: "Selected chunks are invalid for this file." });
- }
+    if (safeChunkIds.length === 0) {
+      return res.status(400).json({ error: "Selected chunks are invalid for this file." });
+    }
 
- const selectedChunks = await FileChunkModel.getChunkContentByIds(safeChunkIds);
- const combinedText = selectedChunks.map((chunk) => chunk.content).join("\n\n");
+    const selectedChunks = await FileChunkModel.getChunkContentByIds(safeChunkIds);
+    const combinedText = selectedChunks.map((chunk) => chunk.content).join("\n\n");
 
- if (!combinedText.trim()) {
- return res.status(400).json({ error: "Selected chunks contain no readable content." });
- }
+    if (!combinedText.trim()) {
+      return res.status(400).json({ error: "Selected chunks contain no readable content." });
+    }
 
- const summaryCost = Math.ceil(combinedText.length / 200);
+    const summaryCost = Math.ceil(combinedText.length / 200);
 
- const { userUsage, userPlan, requestedResources } = req;
+    const { userUsage, userPlan, requestedResources } = req;
 
 
- let summary;
- try {
- summary = await getSummaryFromChunks(combinedText);
- await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
- } catch (aiError) {
- console.error("❌ Gemini summary error:", aiError);
- return res.status(500).json({
- error: "Failed to generate summary.",
- details: aiError.message,
- });
- }
+    let summary;
+    try {
+      summary = await getSummaryFromChunks(combinedText);
+      await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
+    } catch (aiError) {
+      console.error("❌ Gemini summary error:", aiError);
+      return res.status(500).json({
+        error: "Failed to generate summary.",
+        details: aiError.message,
+      });
+    }
 
- return res.json({ summary, used_chunk_ids: safeChunkIds });
- } catch (error) {
- console.error("❌ Error generating summary:", error);
- return res.status(500).json({ error: "Failed to generate summary." });
- }
+    return res.json({ summary, used_chunk_ids: safeChunkIds });
+  } catch (error) {
+    console.error("❌ Error generating summary:", error);
+    return res.status(500).json({ error: "Failed to generate summary." });
+  }
 };
 
 
@@ -1786,7 +1835,7 @@ exports.getSummary = async (req, res) => {
 
 
 
-      
+
 //       if (!allChunks || allChunks.length === 0) {
 
 
@@ -1794,30 +1843,30 @@ exports.getSummary = async (req, res) => {
 
 
 
-        
 
 
 
 
 
-      
+
+
 
 //       if (!question?.trim())
 
 
 
-      
+
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
 
 
 //       if (!rankedChunks || rankedChunks.length === 0) {
-        
-        
 
 
 
 
-          
+
+
+
 
 
 
@@ -1838,7 +1887,7 @@ exports.getSummary = async (req, res) => {
 
 
 
-    
+
 //     if (hasFileId && !uuidRegex.test(file_id)) {
 
 
@@ -1849,11 +1898,11 @@ exports.getSummary = async (req, res) => {
 //       if (!question?.trim()) {
 
 
-      
+
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
 
 
-      
+
 
 //       if (!answer?.trim()) {
 
@@ -1862,7 +1911,7 @@ exports.getSummary = async (req, res) => {
 
 
 
-    
+
 
 //     if (!file) return res.status(404).json({ error: 'File not found.' });
 //     if (String(file.user_id) !== String(userId)) {
@@ -1871,7 +1920,7 @@ exports.getSummary = async (req, res) => {
 //       const hasUnassignedChats = sessionHistory.some((chat) => !chat.file_id);
 
 
-    
+
 
 
 
@@ -1881,7 +1930,7 @@ exports.getSummary = async (req, res) => {
 
 
 
-      
+
 //       if (!allChunks || allChunks.length === 0) {
 
 
@@ -1889,30 +1938,30 @@ exports.getSummary = async (req, res) => {
 
 
 
-        
 
 
 
 
 
-      
+
+
 
 //       if (!question?.trim()) {
 
 
 
-      
+
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
 
 
 //       if (!rankedChunks || rankedChunks.length === 0) {
-        
-        
 
 
 
 
-          
+
+
+
 
 
 
@@ -1940,7 +1989,7 @@ function analyzeQueryIntent(question) {
   }
 
   const queryLower = question.toLowerCase();
-  
+
   const fullDocumentKeywords = [
     'summary', 'summarize', 'overview', 'complete', 'entire', 'all',
     'comprehensive', 'detailed analysis', 'full details', 'everything',
@@ -1951,26 +2000,26 @@ function analyzeQueryIntent(question) {
     'case details', 'petition details', 'contract terms',
     'parties involved', 'background', 'history'
   ];
-  
+
   const targetedKeywords = [
     'specific section', 'find where', 'locate', 'search for',
     'what does it say about', 'mention of', 'reference to',
     'clause', 'paragraph', 'page', 'section'
   ];
-  
-  const needsFullDoc = fullDocumentKeywords.some(keyword => 
+
+  const needsFullDoc = fullDocumentKeywords.some(keyword =>
     queryLower.includes(keyword)
   );
-  
-  const isTargeted = targetedKeywords.some(keyword => 
+
+  const isTargeted = targetedKeywords.some(keyword =>
     queryLower.includes(keyword)
   );
-  
+
   const isShortQuestion = question.trim().split(' ').length <= 5;
-  
-  const isBroadQuestion = /^(what|who|when|where|why|how)\s/i.test(queryLower) && 
-                          !isTargeted;
-  
+
+  const isBroadQuestion = /^(what|who|when|where|why|how)\s/i.test(queryLower) &&
+    !isTargeted;
+
   return {
     needsFullDocument: needsFullDoc || (isBroadQuestion && !isTargeted) || isShortQuestion,
     threshold: needsFullDoc ? 0.0 : (isTargeted ? 0.80 : 0.75),
@@ -2000,7 +2049,7 @@ function analyzeQueryIntent(question) {
 
 //     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 //     const hasFileId = Boolean(file_id);
-    
+
 //     if (hasFileId && !uuidRegex.test(file_id)) {
 //       return res.status(400).json({ error: 'Invalid file ID format.' });
 //     }
@@ -2026,7 +2075,7 @@ function analyzeQueryIntent(question) {
 //       console.log(`[chatWithDocument] Pre-upload mode - chatting without document`);
 
 //       let dbLlmName = llm_name; // Use the one from request first
-      
+
 //       if (!dbLlmName) {
 //         const customQueryLlm = `
 //           SELECT cq.llm_name, cq.llm_model_id
@@ -2046,7 +2095,7 @@ function analyzeQueryIntent(question) {
 
 //       let provider = resolveProviderName(dbLlmName || 'gemini');
 //       console.log(`[chatWithDocument] Resolved provider for pre-upload: ${provider}`);
-      
+
 //       const availableProviders = getAvailableProviders();
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
 //         console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini for pre-upload chat`);
@@ -2059,9 +2108,9 @@ function analyzeQueryIntent(question) {
 
 //       try {
 //         const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
-        
+
 //         console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion} for question: "${userPrompt}"`);
-        
+
 //         let profileContext;
 //         if (isProfileQuestion) {
 //           console.log(`[chatWithDocument] Fetching detailed profile context for user ${userId}...`);
@@ -2073,7 +2122,7 @@ function analyzeQueryIntent(question) {
 //         } else {
 //           profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
 //         }
-        
+
 //         if (profileContext) {
 //           finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
 //           console.log(`[chatWithDocument] ✅ Added user professional profile context to pre-upload prompt (detailed: ${isProfileQuestion}, length: ${profileContext.length} chars)`);
@@ -2087,7 +2136,7 @@ function analyzeQueryIntent(question) {
 
 //       console.log(`[chatWithDocument] Pre-upload conversation | Provider: ${provider} | Session: ${finalSessionId}`);
 //       console.log(`[chatWithDocument] Prompt length: ${finalPrompt.length} chars | History turns: ${sessionHistory.length}`);
-      
+
 //       let answer = await askLLM(provider, finalPrompt, '', '', userPrompt); // Pass original question for web search
 //       answer = ensurePlainTextAnswer(answer);
 
@@ -2152,7 +2201,7 @@ function analyzeQueryIntent(question) {
 //       });
 //     }
 
-    
+
 //     console.log(`[chatWithDocument] Post-upload mode - chatting with document ${file_id}`);
 
 //     const file = await DocumentModel.getFileById(file_id);
@@ -2183,7 +2232,7 @@ function analyzeQueryIntent(question) {
 
 //     const conversationContext = formatConversationHistory(previousChats);
 //     const historyForStorage = simplifyHistory(previousChats);
-    
+
 //     if (historyForStorage.length > 0) {
 //       const lastTurn = historyForStorage[historyForStorage.length - 1];
 //       console.log(
@@ -2270,19 +2319,19 @@ function analyzeQueryIntent(question) {
 //       // NEW: Process secret prompt with input/output templates from document_ai_extractions
 //       let templateProcessingResult = null;
 //       let useTemplateExtraction = false;
-      
+
 //       if (input_template_id || output_template_id) {
 //         useTemplateExtraction = true;
 //         console.log(`\n📄 [Secret Prompt] Processing with templates from document_ai_extractions:`);
 //         console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
 //         console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
-        
+
 //         // Get all chunks for document context (will be used in extraction)
 //         const allChunksForExtraction = await FileChunkModel.getChunksByFileId(file_id);
 //         if (!allChunksForExtraction || allChunksForExtraction.length === 0) {
 //           return res.status(400).json({ error: 'No content found in document.' });
 //         }
-        
+
 //         const documentContextForExtraction = allChunksForExtraction
 //           .sort((a, b) => {
 //             if ((a.page_start || 0) !== (b.page_start || 0)) {
@@ -2306,7 +2355,7 @@ function analyzeQueryIntent(question) {
 //             return chunkHeader + (c.content || '');
 //           })
 //           .join('\n\n');
-        
+
 //         // Process secret prompt with templates
 //         templateProcessingResult = await processSecretPromptWithTemplates({
 //           secretPrompt: secretValue,
@@ -2318,7 +2367,7 @@ function analyzeQueryIntent(question) {
 //           documentContext: documentContextForExtraction,
 //           provider: provider
 //         });
-        
+
 //         console.log(`✅ [Secret Prompt] Template processing completed`);
 //         if (templateProcessingResult.storedInputTemplateId) {
 //           console.log(`   Stored input template ID: ${templateProcessingResult.storedInputTemplateId}`);
@@ -2363,7 +2412,7 @@ function analyzeQueryIntent(question) {
 //             chunk_id: chunk.id, 
 //             distance: 0 
 //           }));
-        
+
 //         console.log(`✅ Using all ${rankedChunks.length} chunks for secret prompt`);
 //       } else {
 //         console.log(`🔍 Performing semantic search for secret prompt...`);
@@ -2415,7 +2464,7 @@ function analyzeQueryIntent(question) {
 
 //         for (const chunk of chunksToConsider) {
 //           if (selectedChunks.length >= MAX_CHUNKS) break;
-          
+
 //           const chunkLength = chunk.content?.length || 0;
 //           if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
 //             selectedChunks.push(chunk);
@@ -2457,7 +2506,7 @@ function analyzeQueryIntent(question) {
 //       const documentContext = selectedChunks
 //         .map((c, idx) => {
 //           let chunkHeader = `\n${'='.repeat(80)}\n`;
-          
+
 //           if (useFullDocumentForSecret) {
 //             chunkHeader += `SECTION ${idx + 1} of ${selectedChunks.length}`;
 //             if (c.page_start) {
@@ -2477,16 +2526,16 @@ function analyzeQueryIntent(question) {
 //               chunkHeader += ` | Page ${c.page_start}`;
 //             }
 //           }
-          
+
 //           chunkHeader += `\n${'='.repeat(80)}\n\n`;
-          
+
 //           return chunkHeader + (c.content || '');
 //         })
 //         .join('\n\n');
 
 //       const inputTemplate = templateData?.inputTemplate || null;
 //       const outputTemplate = templateData?.outputTemplate || null;
-      
+
 //       // secretValue already contains enhanced prompt from buildEnhancedSystemPromptWithTemplates
 //       // Add JSON formatting instructions if output template exists
 //       let finalSecretPrompt = secretValue;
@@ -2496,7 +2545,7 @@ function analyzeQueryIntent(question) {
 //           finalSecretPrompt += jsonFormatting;
 //         }
 //       }
-      
+
 //       adaptiveSystemContext = `
 // ═══════════════════════════════════════════════════════════════════════
 // SECRET PROMPT ANALYSIS MODE: ${useFullDocumentForSecret ? 'COMPREHENSIVE (Full Document)' : 'TARGETED (Relevant Sections)'}
@@ -2562,7 +2611,7 @@ function analyzeQueryIntent(question) {
 
 //       provider = resolveProviderName(dbLlmName || "gemini");
 //       console.log(`🤖 Resolved LLM provider for custom query: ${provider}`);
-      
+
 //       const availableProviders = getAvailableProviders();
 //       if (!availableProviders[provider] || !availableProviders[provider].available) {
 //         console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini`);
@@ -2574,11 +2623,11 @@ function analyzeQueryIntent(question) {
 //       if (useFullDocument) {
 //         console.log(`📚 Fetching ALL chunks for comprehensive analysis...`);
 //         const allChunks = await FileChunkModel.getChunksByFileId(file_id);
-        
+
 //         if (!allChunks || allChunks.length === 0) {
 //           return res.status(400).json({ error: 'No content found in document.' });
 //         }
-        
+
 //         rankedChunks = allChunks
 //           .sort((a, b) => {
 //             if (a.page_start !== b.page_start) {
@@ -2592,7 +2641,7 @@ function analyzeQueryIntent(question) {
 //             chunk_id: chunk.id,
 //             distance: 0
 //           }));
-        
+
 //         console.log(`✅ Retrieved ${rankedChunks.length} chunks for full document analysis`);
 //       } else {
 //         console.log(`🔍 Performing semantic search for targeted query...`);
@@ -2639,7 +2688,7 @@ function analyzeQueryIntent(question) {
 
 //         for (const chunk of chunksToConsider) {
 //           if (selectedChunks.length >= MAX_CHUNKS) break;
-          
+
 //           const chunkLength = chunk.content.length;
 //           if (currentContextLength + chunkLength <= MAX_CONTEXT_CHARS) {
 //             selectedChunks.push(chunk);
@@ -2681,7 +2730,7 @@ function analyzeQueryIntent(question) {
 //       const documentContext = selectedChunks
 //         .map((c, idx) => {
 //           let chunkHeader = `\n${'='.repeat(80)}\n`;
-          
+
 //           if (useFullDocument) {
 //             chunkHeader += `SECTION ${idx + 1} of ${selectedChunks.length}`;
 //             if (c.page_start) {
@@ -2701,9 +2750,9 @@ function analyzeQueryIntent(question) {
 //               chunkHeader += ` | Page ${c.page_start}`;
 //             }
 //           }
-          
+
 //           chunkHeader += `\n${'='.repeat(80)}\n\n`;
-          
+
 //           return chunkHeader + (c.content || '');
 //         })
 //         .join('\n\n');
@@ -2770,7 +2819,7 @@ function analyzeQueryIntent(question) {
 
 // ${useFullDocument ? 'COMPLETE DOCUMENT CONTENT:' : 'RELEVANT DOCUMENT SECTIONS:'}
 // ${documentContext}`;
-      
+
 //       const adaptiveSystemContext = adaptiveInstructions;
 //     }
 
@@ -2778,9 +2827,9 @@ function analyzeQueryIntent(question) {
 
 //     try {
 //       const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(storedQuestion);
-      
+
 //       console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion} for question: "${storedQuestion}"`);
-      
+
 //       let profileContext;
 //       if (isProfileQuestion) {
 //         console.log(`[chatWithDocument] Fetching detailed profile context for user ${userId}...`);
@@ -2792,7 +2841,7 @@ function analyzeQueryIntent(question) {
 //       } else {
 //         profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
 //       }
-      
+
 //       if (profileContext) {
 //         finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
 //         console.log(`[chatWithDocument] ✅ Added user professional profile context to prompt (detailed: ${isProfileQuestion}, length: ${profileContext.length} chars)`);
@@ -2825,21 +2874,21 @@ function analyzeQueryIntent(question) {
 
 //     if (estimatedPromptTokens > safeLimit) {
 //       console.warn(`⚠️ Prompt is ${estimatedPromptTokens} tokens, which exceeds safe limit ${safeLimit} for ${provider}`);
-      
+
 //       if (useFullDocument && !used_secret_prompt) {
 //         console.log(`⚠️ Falling back to targeted mode due to context size`);
 //         useFullDocument = false;
-        
+
 //         const questionEmbedding = await generateEmbedding(storedQuestion);
 //         const fallbackRankedChunks = await ChunkVectorModel.findNearestChunks(
 //           questionEmbedding,
 //           10,
 //           file_id
 //         );
-        
+
 //         const fallbackSelectedChunks = fallbackRankedChunks.slice(0, 10);
 //         usedChunkIds = fallbackSelectedChunks.map(c => c.chunk_id || c.id);
-        
+
 //         const fallbackDocumentContext = fallbackSelectedChunks
 //           .map((c, idx) => {
 //             const similarity = c.similarity || c.distance || 0;
@@ -2847,11 +2896,11 @@ function analyzeQueryIntent(question) {
 //             return `--- Chunk ${idx + 1} | Relevance: ${(score * 100).toFixed(1)}% ---\n${c.content || ''}`;
 //           })
 //           .join('\n\n');
-        
+
 //         finalPrompt = `${storedQuestion}\n\n=== RELEVANT CONTEXT ===\n${fallbackDocumentContext}`;
-        
+
 //         finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
-        
+
 //         try {
 //           const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(storedQuestion);
 //           let profileContext;
@@ -2863,14 +2912,14 @@ function analyzeQueryIntent(question) {
 //           } else {
 //             profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
 //           }
-          
+
 //           if (profileContext) {
 //             finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
 //           }
 //         } catch (profileError) {
 //           console.warn(`⚠️ Failed to re-add profile context in fallback mode`);
 //         }
-        
+
 //         const newEstimatedTokens = Math.ceil(finalPrompt.length / CHARS_PER_TOKEN);
 //         console.log(`✅ Fallback prompt: ${newEstimatedTokens} tokens (${((newEstimatedTokens/modelLimit)*100).toFixed(1)}% of model limit)`);
 //       } else {
@@ -2897,7 +2946,7 @@ function analyzeQueryIntent(question) {
 //         console.log(`[chatWithDocument] ✅ Passing adaptive system context (${adaptiveSystemContext.length} chars) to be combined with database system prompt`);
 //       }
 //       answer = await askLLM(provider, finalPrompt, adaptiveSystemContext || '', '', storedQuestion);
-      
+
 //       if (used_secret_prompt && templateData?.outputTemplate) {
 //         answer = postProcessSecretPromptResponse(answer, templateData.outputTemplate);
 //       } else {
@@ -3000,7 +3049,7 @@ exports.chatWithDocument = async (req, res) => {
 
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const hasFileId = Boolean(file_id);
-    
+
     if (hasFileId && !uuidRegex.test(file_id)) {
       return res.status(400).json({ error: 'Invalid file ID format.' });
     }
@@ -3029,7 +3078,7 @@ exports.chatWithDocument = async (req, res) => {
       console.log(`[chatWithDocument] Pre-upload mode - chatting without document`);
 
       let dbLlmName = llm_name;
-      
+
       if (!dbLlmName) {
         const customQueryLlm = `
           SELECT cq.llm_name, cq.llm_model_id
@@ -3049,7 +3098,7 @@ exports.chatWithDocument = async (req, res) => {
 
       let provider = resolveProviderName(dbLlmName || 'gemini');
       console.log(`[chatWithDocument] Resolved provider for pre-upload: ${provider}`);
-      
+
       const availableProviders = getAvailableProviders();
       if (!availableProviders[provider] || !availableProviders[provider].available) {
         console.warn(`⚠️ Provider '${provider}' unavailable — falling back to gemini for pre-upload chat`);
@@ -3062,9 +3111,9 @@ exports.chatWithDocument = async (req, res) => {
 
       try {
         const isProfileQuestion = /(my|my own|my personal|my professional|give me|show me|tell me about|what is|what are).*(profile|professional|legal|credentials|bar|jurisdiction|practice|role|experience|details)/i.test(userPrompt);
-        
+
         console.log(`[chatWithDocument] Profile question detected: ${isProfileQuestion}`);
-        
+
         let profileContext;
         if (isProfileQuestion) {
           profileContext = await UserProfileService.getDetailedProfileContext(userId, req.headers.authorization);
@@ -3074,7 +3123,7 @@ exports.chatWithDocument = async (req, res) => {
         } else {
           profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
         }
-        
+
         if (profileContext) {
           finalPrompt = `${profileContext}\n\nUSER QUESTION:\n${finalPrompt}`;
           console.log(`[chatWithDocument] ✅ Added profile context (${profileContext.length} chars)`);
@@ -3206,15 +3255,15 @@ exports.chatWithDocument = async (req, res) => {
       // Fetch secret configuration with template IDs
       const { fetchSecretManagerWithTemplates } = require('../services/secretPromptTemplateService');
       const secretData = await fetchSecretManagerWithTemplates(secret_id);
-      
+
       if (!secretData) {
         return res.status(404).json({ error: 'Secret configuration not found.' });
       }
 
-      const { 
-        name: secretName, 
-        secret_manager_id, 
-        version, 
+      const {
+        name: secretName,
+        secret_manager_id,
+        version,
         llm_name: dbLlmName,
         input_template_id: dbInputTemplateId,
         output_template_id: dbOutputTemplateId
@@ -3244,11 +3293,11 @@ exports.chatWithDocument = async (req, res) => {
       const client = new SecretManagerServiceClient();
       const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
       const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
-      
+
       console.log(`🔐 Fetching secret from GCP...`);
       const [accessResponse] = await client.accessSecretVersion({ name: gcpSecretName });
       const secretValue = accessResponse.payload.data.toString('utf8');
-      
+
       if (!secretValue?.trim()) {
         return res.status(500).json({ error: '❌ Secret value is empty in GCP.' });
       }
@@ -3302,9 +3351,9 @@ exports.chatWithDocument = async (req, res) => {
         // CALL TEMPLATE EXTRACTION SERVICE
         // ==================================================================================
         console.log(`\n🚀 Calling processSecretPromptWithTemplates...`);
-        
+
         const { processSecretPromptWithTemplates } = require('../services/secretTemplateExtractionService');
-        
+
         const templateResult = await processSecretPromptWithTemplates({
           secretPrompt: secretValue,
           inputTemplateId: finalInputTemplateId,
@@ -3386,7 +3435,7 @@ exports.chatWithDocument = async (req, res) => {
           .join('\n\n');
 
         let finalPrompt = `${secretValue}\n\n=== DOCUMENT TO ANALYZE ===\n${documentContext}`;
-        
+
         if (additional_input?.trim()) {
           finalPrompt += `\n\n=== ADDITIONAL INSTRUCTIONS ===\n${additional_input.trim()}`;
         }
@@ -3423,38 +3472,38 @@ exports.chatWithDocument = async (req, res) => {
       }
 
       storedQuestion = question.trim();
-      
+
       // ==================================================================================
       // WEB SEARCH / URL PROCESSING (Check if query contains URLs or needs web search)
       // ==================================================================================
       console.log(`\n${'='.repeat(80)}`);
       console.log(`🌐 [chatWithDocument] Checking for web search/URL in query`);
       console.log(`${'='.repeat(80)}`);
-      
+
       const urlsInQuery = extractUrlsFromQuery(storedQuestion);
       const hasPdfUrl = urlsInQuery.some(url => isPdfUrl(url));
       const hasWebPageUrl = urlsInQuery.some(url => isWebPageUrl(url));
       const queryLower = storedQuestion.toLowerCase();
       const searchKeywords = ['find', 'search', 'locate', 'get', 'fetch', 'retrieve', 'report', 'document', 'pdf', 'whitepaper', 'paper', 'study', 'analysis', 'research', 'publication', 'website', 'webpage', 'article', 'blog'];
       const needsWebSearch = searchKeywords.some(keyword => queryLower.includes(keyword));
-      
+
       console.log(`   URLs found: ${urlsInQuery.length}`);
       console.log(`   Has PDF URL: ${hasPdfUrl}`);
       console.log(`   Has Web Page URL: ${hasWebPageUrl}`);
       console.log(`   Needs Web Search: ${needsWebSearch}`);
-      
+
       if (hasPdfUrl || hasWebPageUrl || needsWebSearch) {
         console.log(`\n🌐 [chatWithDocument] Web search/URL processing detected`);
-        
+
         try {
           let webSearchContent = '';
           let webSearchCitations = [];
-          
+
           if (hasPdfUrl) {
             const urlToProcess = urlsInQuery.find(url => isPdfUrl(url));
             console.log(`📄 [chatWithDocument] Processing PDF from URL: ${urlToProcess}`);
             console.log(`   Question: "${storedQuestion}"`);
-            
+
             try {
               const pdfResult = await processPdfFromUrl(urlToProcess, storedQuestion);
               console.log(`   PDF processing result:`, {
@@ -3462,7 +3511,7 @@ exports.chatWithDocument = async (req, res) => {
                 contentLength: pdfResult.content?.length || 0,
                 error: pdfResult.error
               });
-              
+
               if (pdfResult.success && pdfResult.content) {
                 webSearchContent = pdfResult.content;
                 webSearchCitations = [pdfResult.citation];
@@ -3481,7 +3530,7 @@ exports.chatWithDocument = async (req, res) => {
             const urlToProcess = urlsInQuery.find(url => isWebPageUrl(url));
             console.log(`🌐 [chatWithDocument] Processing web page from URL: ${urlToProcess}`);
             console.log(`   Question: "${storedQuestion}"`);
-            
+
             try {
               const webResult = await processWebPageFromUrl(urlToProcess, storedQuestion);
               console.log(`   Web page processing result:`, {
@@ -3489,7 +3538,7 @@ exports.chatWithDocument = async (req, res) => {
                 contentLength: webResult.content?.length || 0,
                 error: webResult.error
               });
-              
+
               if (webResult.success && webResult.content) {
                 webSearchContent = webResult.content;
                 webSearchCitations = [webResult.citation];
@@ -3506,11 +3555,11 @@ exports.chatWithDocument = async (req, res) => {
             }
           } else if (needsWebSearch) {
             console.log(`🔍 [chatWithDocument] Performing web search for: "${storedQuestion}"`);
-            
+
             try {
               // Use Gemini's Google Search tool
               const { searchForPdfs, analyzeAndProcessPdfQuery } = require('../services/webSearchService');
-              
+
               // Try PDF search first
               let searchResult = await analyzeAndProcessPdfQuery(storedQuestion, storedQuestion);
               console.log(`   Search result:`, {
@@ -3520,7 +3569,7 @@ exports.chatWithDocument = async (req, res) => {
                 citationsCount: searchResult.citations?.length || 0,
                 error: searchResult.error
               });
-              
+
               if (searchResult.success && searchResult.processedContent) {
                 webSearchContent = searchResult.processedContent;
                 webSearchCitations = searchResult.citations || [];
@@ -3536,15 +3585,15 @@ exports.chatWithDocument = async (req, res) => {
               // Continue with document-only processing if search throws
             }
           }
-          
+
           // If we have web search content, incorporate it into the prompt
           if (webSearchContent && webSearchContent.trim().length > 0) {
             console.log(`📝 [chatWithDocument] Incorporating web content into document context`);
-            
+
             // Get document chunks as usual
             const queryAnalysis = analyzeQueryIntent(storedQuestion);
             const useFullDocument = queryAnalysis.needsFullDocument;
-            
+
             let rankedChunks;
             if (useFullDocument) {
               const allChunks = await FileChunkModel.getChunksByFileId(file_id);
@@ -3564,14 +3613,14 @@ exports.chatWithDocument = async (req, res) => {
                 file_id
               );
             }
-            
+
             if (!rankedChunks || rankedChunks.length === 0) {
               const allChunks = await FileChunkModel.getChunksByFileId(file_id);
               rankedChunks = allChunks.map(c => ({ ...c, similarity: 0.5, chunk_id: c.id }));
             }
-            
+
             usedChunkIds = rankedChunks.map(c => c.chunk_id || c.id);
-            
+
             const documentContext = rankedChunks
               .map((c, idx) => {
                 let header = `\n${'='.repeat(80)}\nSECTION ${idx + 1}`;
@@ -3580,11 +3629,11 @@ exports.chatWithDocument = async (req, res) => {
                 return header + (c.content || '');
               })
               .join('\n\n');
-            
+
             // Combine document context with web search content
             let finalPrompt = `${storedQuestion}\n\n=== DOCUMENT ===\n${documentContext}\n\n=== ADDITIONAL WEB CONTEXT ===\n${webSearchContent}`;
             finalPrompt = appendConversationToPrompt(finalPrompt, conversationContext);
-            
+
             try {
               const profileContext = await UserProfileService.getProfileContext(userId, req.headers.authorization);
               if (profileContext) {
@@ -3593,7 +3642,7 @@ exports.chatWithDocument = async (req, res) => {
             } catch (profileError) {
               console.warn(`⚠️ Failed to fetch profile context:`, profileError.message);
             }
-            
+
             answer = await askLLM(provider, finalPrompt, '', '', storedQuestion, {
               userId: userId,
               endpoint: '/api/doc/chat',
@@ -3601,21 +3650,21 @@ exports.chatWithDocument = async (req, res) => {
               sessionId: finalSessionId
             });
             answer = ensurePlainTextAnswer(answer);
-            
+
             // Add web citations to the response
             if (webSearchCitations.length > 0) {
               // Store citations in chat metadata if needed
               console.log(`📚 [chatWithDocument] Web citations: ${webSearchCitations.length}`);
             }
-            
+
             console.log(`✅ [chatWithDocument] Response generated with web content`);
             console.log(`${'='.repeat(80)}\n`);
-            
+
             // Skip the regular document processing below
             if (!answer?.trim()) {
               return res.status(500).json({ error: 'Empty response from AI.' });
             }
-            
+
             const savedChat = await FileChat.saveChat(
               file_id,
               userId,
@@ -3628,16 +3677,16 @@ exports.chatWithDocument = async (req, res) => {
               used_secret_prompt ? secret_id : null,
               historyForStorage
             );
-            
+
             console.log(`✅ Chat saved: ID=${savedChat.id}, chunks=${usedChunkIds.length}`);
-            
+
             try {
               const { userUsage, userPlan, requestedResources } = req;
               await TokenUsageService.incrementUsage(userId, requestedResources, userUsage, userPlan);
             } catch (e) {
               console.warn('Token usage increment failed:', e.message);
             }
-            
+
             const historyRows = await FileChat.getChatHistory(file_id, savedChat.session_id);
             const history = historyRows.map((row) => ({
               id: row.id,
@@ -3656,7 +3705,7 @@ exports.chatWithDocument = async (req, res) => {
                 ? `Analysis: ${row.prompt_label || 'Secret Prompt'}`
                 : row.question,
             }));
-            
+
             return res.status(200).json({
               success: true,
               session_id: savedChat.session_id,
@@ -3681,7 +3730,7 @@ exports.chatWithDocument = async (req, res) => {
           console.error(`   Error: ${webSearchError.message}`);
           console.error(`   Stack: ${webSearchError.stack}`);
           console.error(`${'='.repeat(80)}\n`);
-          
+
           // If a URL was provided, we should fail rather than silently fall back
           if (hasPdfUrl || hasWebPageUrl) {
             return res.status(500).json({
@@ -3691,7 +3740,7 @@ exports.chatWithDocument = async (req, res) => {
               suggestion: 'Please ensure the URL is publicly accessible and try again.'
             });
           }
-          
+
           // For search queries, continue with document-only processing
           console.warn(`⚠️ [chatWithDocument] Continuing with document-only processing...`);
         }
@@ -3713,7 +3762,7 @@ exports.chatWithDocument = async (req, res) => {
       }
 
       provider = resolveProviderName(dbLlmName || "gemini");
-      
+
       const availableProviders = getAvailableProviders();
       if (!availableProviders[provider] || !availableProviders[provider].available) {
         provider = 'gemini';
@@ -3792,7 +3841,7 @@ exports.chatWithDocument = async (req, res) => {
           sessionId: finalSessionId
         });
         answer = ensurePlainTextAnswer(answer);
-        
+
         // Store in cache after successful LLM call
         await setCachedResponse(userId, cacheKey, answer, {
           methodUsed: 'rag',
@@ -3910,7 +3959,7 @@ exports.chatWithDocument = async (req, res) => {
 
 //     userId = req.user.id;
 
-    
+
 //     let capturedPrompt = null;
 //     let capturedProvider = null;
 //     let capturedStoredQuestion = null;
@@ -3923,7 +3972,7 @@ exports.chatWithDocument = async (req, res) => {
 //     let capturedSecretId = secret_id;
 //     let capturedHistoryForStorage = [];
 
-    
+
 //     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 //     const hasFileId = Boolean(file_id);
 //     const hasExistingSession = session_id && uuidRegex.test(session_id);
@@ -3931,22 +3980,22 @@ exports.chatWithDocument = async (req, res) => {
 
 //     console.log(`[chatWithDocumentStream] Streaming started: file_id=${file_id}, session_id=${finalSessionId}`);
 
-    
-    
+
+
 //     let fullAnswer = '';
 //     let streamingError = null;
 
 //     try {
-      
-      
+
+
 //       let promptBuilt = false;
-      
-      
-      
-      
-      
-      
-      
+
+
+
+
+
+
+
 //       if (!hasFileId) {
 //         if (!question?.trim()) {
 //           clearInterval(heartbeat);
@@ -4003,7 +4052,7 @@ exports.chatWithDocument = async (req, res) => {
 //         }
 
 //         res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
-        
+
 //         let fullAnswer = '';
 //         try {
 //           for await (const chunk of streamLLM(provider, finalPrompt, '', '', userPrompt)) {
@@ -4051,7 +4100,7 @@ exports.chatWithDocument = async (req, res) => {
 //         return;
 //       }
 
-      
+
 //       const file = await DocumentModel.getFileById(file_id);
 //       if (!file) {
 //         clearInterval(heartbeat);
@@ -4072,12 +4121,12 @@ exports.chatWithDocument = async (req, res) => {
 //         return;
 //       }
 
-      
+
 //       console.log('[chatWithDocumentStream] Post-upload: using streaming wrapper');
-      
+
 //       let capturedData = null;
 //       let captureError = null;
-      
+
 //       const mockRes = {
 //         status: (code) => {
 //           mockRes.statusCode = code;
@@ -4127,7 +4176,7 @@ exports.chatWithDocument = async (req, res) => {
 //       }
 
 //       res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: capturedData.session_id })}\n\n`);
-      
+
 //       let answer = capturedData.answer;
 //       const chunkSize = 10; // Stream 10 characters at a time
 //       for (let i = 0; i < answer.length; i += chunkSize) {
@@ -4138,7 +4187,7 @@ exports.chatWithDocument = async (req, res) => {
 //         }
 //         await new Promise(resolve => setTimeout(resolve, 10));
 //       }
-      
+
 //       res.write(`data: ${JSON.stringify({ 
 //         type: 'done', 
 //         session_id: capturedData.session_id, 
@@ -4151,7 +4200,7 @@ exports.chatWithDocument = async (req, res) => {
 //       res.write(`data: [DONE]\n\n`);
 //       clearInterval(heartbeat);
 //       res.end();
-      
+
 //     } catch (error) {
 //       console.error('❌ Error in chatWithDocumentStream:', error);
 //       clearInterval(heartbeat);
@@ -4272,7 +4321,7 @@ exports.chatWithDocumentStream = async (req, res) => {
       }
 
       res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
-      
+
       let fullAnswer = '';
       let streamUsageData = null;
       try {
@@ -4283,7 +4332,7 @@ exports.chatWithDocumentStream = async (req, res) => {
           fileId: null,
           sessionId: finalSessionId
         });
-        
+
         for await (const chunk of streamWithMetadata) {
           fullAnswer += chunk;
           res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
@@ -4291,7 +4340,7 @@ exports.chatWithDocumentStream = async (req, res) => {
             res.flush();
           }
         }
-        
+
         // Try to get usage metadata if available
         if (streamWithMetadata.usageMetadata) {
           streamUsageData = streamWithMetadata.usageMetadata;
@@ -4308,24 +4357,24 @@ exports.chatWithDocumentStream = async (req, res) => {
       const estimateTokenCount = (text) => Math.ceil((text || '').length / 4);
       const estimatedInputTokens = estimateTokenCount(finalPrompt);
       const estimatedOutputTokens = estimateTokenCount(fullAnswer);
-      
+
       // Log LLM usage to payment service after streaming completes
       console.log(`📊 [Streaming] Estimating usage - input: ${estimatedInputTokens}, output: ${estimatedOutputTokens}`);
       if (userId && provider) {
-      // Get the model name from the provider
-      const { resolveProviderName, getAvailableProviders } = require('../services/aiService');
-      const resolvedProvider = resolveProviderName(provider);
-      
-      // Try to get actual model name - for gemini-pro-2.5, use gemini-2.5-pro
-      let modelName = resolvedProvider;
-      if (resolvedProvider === 'gemini-pro-2.5') {
-        modelName = 'gemini-2.5-pro';
-      } else if (resolvedProvider === 'gemini-3-pro') {
-        modelName = 'gemini-3-pro-preview';
-      } else if (resolvedProvider === 'gemini') {
-        modelName = 'gemini-2.0-flash-exp'; // Default for gemini provider
-      }
-        
+        // Get the model name from the provider
+        const { resolveProviderName, getAvailableProviders } = require('../services/aiService');
+        const resolvedProvider = resolveProviderName(provider);
+
+        // Try to get actual model name - for gemini-pro-2.5, use gemini-2.5-pro
+        let modelName = resolvedProvider;
+        if (resolvedProvider === 'gemini-pro-2.5') {
+          modelName = 'gemini-2.5-pro';
+        } else if (resolvedProvider === 'gemini-3-pro') {
+          modelName = 'gemini-3-pro-preview';
+        } else if (resolvedProvider === 'gemini') {
+          modelName = 'gemini-2.0-flash'; // Default for gemini provider
+        }
+
         const LLMUsageLogService = require('../services/llmUsageLogService');
         LLMUsageLogService.logUsage({
           userId: userId,
@@ -4354,9 +4403,9 @@ exports.chatWithDocumentStream = async (req, res) => {
         simplifyHistory(sessionHistory)
       );
 
-      res.write(`data: ${JSON.stringify({ 
-        type: 'done', 
-        session_id: savedChat.session_id, 
+      res.write(`data: ${JSON.stringify({
+        type: 'done',
+        session_id: savedChat.session_id,
         message_id: savedChat.id,
         answer: fullAnswer,
         llm_provider: provider
@@ -4398,16 +4447,16 @@ exports.chatWithDocumentStream = async (req, res) => {
     // ==================================================================================
     // Template extraction requires complete response for validation and merging
     // So we must use non-streaming approach for secret prompts with templates
-    
+
     let useTemplateExtraction = false;
     if (used_secret_prompt && secret_id) {
       const { fetchSecretManagerWithTemplates } = require('../services/secretPromptTemplateService');
       const secretData = await fetchSecretManagerWithTemplates(secret_id);
-      
+
       if (secretData) {
         const finalInputTemplateId = secretData.input_template_id || input_template_id;
         const finalOutputTemplateId = secretData.output_template_id || output_template_id;
-        
+
         if (finalInputTemplateId || finalOutputTemplateId) {
           useTemplateExtraction = true;
           console.log(`[chatWithDocumentStream] Template extraction detected - using non-streaming mode`);
@@ -4420,10 +4469,10 @@ exports.chatWithDocumentStream = async (req, res) => {
     // ==================================================================================
     if (useTemplateExtraction || used_secret_prompt) {
       console.log(`[chatWithDocumentStream] Using non-streaming wrapper for secret prompt/templates`);
-      
+
       let capturedData = null;
       let captureError = null;
-      
+
       const mockRes = {
         status: (code) => {
           mockRes.statusCode = code;
@@ -4435,7 +4484,7 @@ exports.chatWithDocumentStream = async (req, res) => {
         },
         setHeader: () => mockRes,
         writeHead: () => mockRes,
-        end: () => {},
+        end: () => { },
         headersSent: false,
         statusCode: 200
       };
@@ -4477,11 +4526,11 @@ exports.chatWithDocumentStream = async (req, res) => {
       }
 
       res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: capturedData.session_id })}\n\n`);
-      
+
       // Stream the complete answer character by character for better UX
       let answer = capturedData.answer;
       const chunkSize = 50; // Stream 50 characters at a time (faster than before)
-      
+
       for (let i = 0; i < answer.length; i += chunkSize) {
         const chunk = answer.substring(i, Math.min(i + chunkSize, answer.length));
         res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
@@ -4491,10 +4540,10 @@ exports.chatWithDocumentStream = async (req, res) => {
         // Small delay to simulate streaming (adjust as needed)
         await new Promise(resolve => setTimeout(resolve, 20));
       }
-      
-      res.write(`data: ${JSON.stringify({ 
-        type: 'done', 
-        session_id: capturedData.session_id, 
+
+      res.write(`data: ${JSON.stringify({
+        type: 'done',
+        session_id: capturedData.session_id,
         message_id: capturedData.message_id,
         answer: answer,
         llm_provider: capturedData.llm_provider,
@@ -4559,7 +4608,7 @@ exports.chatWithDocumentStream = async (req, res) => {
     }
 
     let provider = resolveProviderName(dbLlmName || "gemini");
-    
+
     const availableProviders = getAvailableProviders();
     if (!availableProviders[provider] || !availableProviders[provider].available) {
       provider = 'gemini';
@@ -4650,14 +4699,14 @@ exports.chatWithDocumentStream = async (req, res) => {
     const estimateTokenCount = (text) => Math.ceil((text || '').length / 4);
     const estimatedInputTokens = estimateTokenCount(finalPrompt);
     const estimatedOutputTokens = estimateTokenCount(fullAnswer);
-    
+
     // Log LLM usage to payment service after streaming completes
     console.log(`📊 [Streaming] Estimating usage - input: ${estimatedInputTokens}, output: ${estimatedOutputTokens}`);
     if (userId && provider) {
       // Get the model name from the provider
       const { resolveProviderName } = require('../services/aiService');
       const resolvedProvider = resolveProviderName(provider);
-      
+
       // Try to get actual model name - for gemini-pro-2.5, use gemini-2.5-pro
       let modelName = resolvedProvider;
       if (resolvedProvider === 'gemini-pro-2.5') {
@@ -4665,9 +4714,9 @@ exports.chatWithDocumentStream = async (req, res) => {
       } else if (resolvedProvider === 'gemini-3-pro') {
         modelName = 'gemini-3-pro-preview';
       } else if (resolvedProvider === 'gemini') {
-        modelName = 'gemini-2.0-flash-exp'; // Default for gemini provider
+        modelName = 'gemini-2.0-flash'; // Default for gemini provider
       }
-      
+
       const LLMUsageLogService = require('../services/llmUsageLogService');
       LLMUsageLogService.logUsage({
         userId: userId,
@@ -4706,9 +4755,9 @@ exports.chatWithDocumentStream = async (req, res) => {
       console.warn('Token usage increment failed:', e.message);
     }
 
-    res.write(`data: ${JSON.stringify({ 
-      type: 'done', 
-      session_id: savedChat.session_id, 
+    res.write(`data: ${JSON.stringify({
+      type: 'done',
+      session_id: savedChat.session_id,
       message_id: savedChat.id,
       answer: fullAnswer,
       llm_provider: provider,
@@ -4731,147 +4780,147 @@ exports.chatWithDocumentStream = async (req, res) => {
 };
 
 exports.saveEditedDocument = async (req, res) => {
- try {
- const { file_id, edited_html } = req.body;
- if (!file_id || typeof edited_html !== "string") {
- return res
- .status(400)
- .json({ error: "file_id and edited_html are required." });
- }
+  try {
+    const { file_id, edited_html } = req.body;
+    if (!file_id || typeof edited_html !== "string") {
+      return res
+        .status(400)
+        .json({ error: "file_id and edited_html are required." });
+    }
 
- const file = await DocumentModel.getFileById(file_id);
- if (!file || file.user_id !== req.user.id) {
- return res
- .status(403)
- .json({ error: "Access denied or file not found." });
- }
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file || file.user_id !== req.user.id) {
+      return res
+        .status(403)
+        .json({ error: "Access denied or file not found." });
+    }
 
- const docxBuffer = await convertHtmlToDocx(edited_html);
- const pdfBuffer = await convertHtmlToPdf(edited_html);
+    const docxBuffer = await convertHtmlToDocx(edited_html);
+    const pdfBuffer = await convertHtmlToPdf(edited_html);
 
- const { gsUri: docxUrl } = await uploadToGCS(
- `edited_${file_id}.docx`,
- docxBuffer,
- "edited",
- false,
- "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
- );
- const { gsUri: pdfUrl } = await uploadToGCS(
- `edited_${file_id}.pdf`,
- pdfBuffer,
- "edited",
- false,
- "application/pdf"
- );
+    const { gsUri: docxUrl } = await uploadToGCS(
+      `edited_${file_id}.docx`,
+      docxBuffer,
+      "edited",
+      false,
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    const { gsUri: pdfUrl } = await uploadToGCS(
+      `edited_${file_id}.pdf`,
+      pdfBuffer,
+      "edited",
+      false,
+      "application/pdf"
+    );
 
- await DocumentModel.saveEditedVersions(file_id, docxUrl, pdfUrl);
+    await DocumentModel.saveEditedVersions(file_id, docxUrl, pdfUrl);
 
- return res.json({ docx_download_url: docxUrl, pdf_download_url: pdfUrl });
- } catch (error) {
- console.error("❌ saveEditedDocument error:", error);
- return res.status(500).json({ error: "Failed to save edited document." });
- }
+    return res.json({ docx_download_url: docxUrl, pdf_download_url: pdfUrl });
+  } catch (error) {
+    console.error("❌ saveEditedDocument error:", error);
+    return res.status(500).json({ error: "Failed to save edited document." });
+  }
 };
 
 exports.downloadDocument = async (req, res) => {
- try {
- const { file_id, format } = req.params;
- if (!file_id || !format)
- return res
- .status(400)
- .json({ error: "file_id and format are required." });
- if (!["docx", "pdf"].includes(format))
- return res
- .status(400)
- .json({ error: "Invalid format. Use docx or pdf." });
+  try {
+    const { file_id, format } = req.params;
+    if (!file_id || !format)
+      return res
+        .status(400)
+        .json({ error: "file_id and format are required." });
+    if (!["docx", "pdf"].includes(format))
+      return res
+        .status(400)
+        .json({ error: "Invalid format. Use docx or pdf." });
 
- const file = await DocumentModel.getFileById(file_id);
- if (!file) return res.status(404).json({ error: "File not found." });
- if (file.user_id !== req.user.id)
- return res.status(403).json({ error: "Access denied" });
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file) return res.status(404).json({ error: "File not found." });
+    if (file.user_id !== req.user.id)
+      return res.status(403).json({ error: "Access denied" });
 
- const targetUrl =
- format === "docx" ? file.edited_docx_path : file.edited_pdf_path;
- if (!targetUrl)
- return res
- .status(404)
- .json({ error: "File not found or not yet generated" });
+    const targetUrl =
+      format === "docx" ? file.edited_docx_path : file.edited_pdf_path;
+    if (!targetUrl)
+      return res
+        .status(404)
+        .json({ error: "File not found or not yet generated" });
 
- const gcsKey = normalizeGcsKey(targetUrl, process.env.GCS_BUCKET);
- if (!gcsKey)
- return res.status(500).json({ error: "Invalid GCS path for the file." });
+    const gcsKey = normalizeGcsKey(targetUrl, process.env.GCS_BUCKET);
+    if (!gcsKey)
+      return res.status(500).json({ error: "Invalid GCS path for the file." });
 
- const signedUrl = await getSignedUrl(gcsKey);
- return res.redirect(signedUrl);
- } catch (error) {
- console.error("❌ Error generating signed URL:", error);
- return res
- .status(500)
- .json({ error: "Failed to generate signed download link" });
- }
+    const signedUrl = await getSignedUrl(gcsKey);
+    return res.redirect(signedUrl);
+  } catch (error) {
+    console.error("❌ Error generating signed URL:", error);
+    return res
+      .status(500)
+      .json({ error: "Failed to generate signed download link" });
+  }
 };
 
 exports.getChatHistory = async (req, res) => {
- try {
- const userId = req.user.id;
+  try {
+    const userId = req.user.id;
 
- const chats = await FileChat.getChatHistoryByUserId(userId);
+    const chats = await FileChat.getChatHistoryByUserId(userId);
 
- if (!chats || chats.length === 0) {
- return res.status(404).json({ error: "No chat history found for this user." });
- }
+    if (!chats || chats.length === 0) {
+      return res.status(404).json({ error: "No chat history found for this user." });
+    }
 
- const sessions = chats.reduce((acc, chat) => {
- if (!acc[chat.session_id]) {
- acc[chat.session_id] = {
- session_id: chat.session_id,
- file_id: chat.file_id || null,
- filename: chat.filename || null,
- user_id: chat.user_id,
- messages: []
- };
- } else {
- if (!acc[chat.session_id].filename && chat.filename) {
- acc[chat.session_id].filename = chat.filename;
- }
- if (!acc[chat.session_id].file_id && chat.file_id) {
- acc[chat.session_id].file_id = chat.file_id;
- }
- }
+    const sessions = chats.reduce((acc, chat) => {
+      if (!acc[chat.session_id]) {
+        acc[chat.session_id] = {
+          session_id: chat.session_id,
+          file_id: chat.file_id || null,
+          filename: chat.filename || null,
+          user_id: chat.user_id,
+          messages: []
+        };
+      } else {
+        if (!acc[chat.session_id].filename && chat.filename) {
+          acc[chat.session_id].filename = chat.filename;
+        }
+        if (!acc[chat.session_id].file_id && chat.file_id) {
+          acc[chat.session_id].file_id = chat.file_id;
+        }
+      }
 
- acc[chat.session_id].messages.push({
- id: chat.id,
- question: chat.question,
- answer: chat.answer,
- used_chunk_ids: chat.used_chunk_ids,
- used_secret_prompt: chat.used_secret_prompt,
- prompt_label: chat.prompt_label,
- created_at: chat.created_at
- });
+      acc[chat.session_id].messages.push({
+        id: chat.id,
+        question: chat.question,
+        answer: chat.answer,
+        used_chunk_ids: chat.used_chunk_ids,
+        used_secret_prompt: chat.used_secret_prompt,
+        prompt_label: chat.prompt_label,
+        created_at: chat.created_at
+      });
 
- return acc;
- }, {});
+      return acc;
+    }, {});
 
- const sessionArray = Object.values(sessions);
- for (const session of sessionArray) {
- if (!session.filename || session.filename === undefined) {
- const sessionChats = chats.filter(c => c.session_id === session.session_id && c.filename);
- if (sessionChats.length > 0 && sessionChats[0].filename) {
- session.filename = sessionChats[0].filename;
- if (!session.file_id && sessionChats[0].file_id) {
- session.file_id = sessionChats[0].file_id;
- }
- } else {
- session.filename = null;
- }
- }
- }
+    const sessionArray = Object.values(sessions);
+    for (const session of sessionArray) {
+      if (!session.filename || session.filename === undefined) {
+        const sessionChats = chats.filter(c => c.session_id === session.session_id && c.filename);
+        if (sessionChats.length > 0 && sessionChats[0].filename) {
+          session.filename = sessionChats[0].filename;
+          if (!session.file_id && sessionChats[0].file_id) {
+            session.file_id = sessionChats[0].file_id;
+          }
+        } else {
+          session.filename = null;
+        }
+      }
+    }
 
- return res.json(Object.values(sessions));
- } catch (error) {
- console.error("❌ getChatHistory error:", error);
- return res.status(500).json({ error: "Failed to fetch chat history." });
- }
+    return res.json(Object.values(sessions));
+  } catch (error) {
+    console.error("❌ getChatHistory error:", error);
+    return res.status(500).json({ error: "Failed to fetch chat history." });
+  }
 };
 
 
@@ -4890,27 +4939,27 @@ async function processBatchResults(file_id, job) {
     );
 
     const bucketName = process.env.GCS_OUTPUT_BUCKET_NAME;
-    
+
     if (!bucketName) {
       throw new Error("GCS_OUTPUT_BUCKET_NAME environment variable is not set");
     }
-    
+
     if (!job.gcs_output_uri_prefix) {
       throw new Error(`No output URI prefix found in job for file ${file_id}`);
     }
-    
+
     let prefix = job.gcs_output_uri_prefix;
     if (prefix.startsWith('gs://')) {
       prefix = prefix.replace(`gs://${bucketName}/`, "");
     }
-    
+
     if (!prefix.endsWith('/')) {
       prefix += '/';
     }
-    
+
     console.log(`[processBatchResults] Fetching results from bucket: ${bucketName}, prefix: ${prefix}`);
     console.log(`[processBatchResults] Full output URI: ${job.gcs_output_uri_prefix}`);
-    
+
     const extractedBatchTexts = await fetchBatchResults(bucketName, prefix);
 
     console.log(`[processBatchResults] Extracted ${extractedBatchTexts.length} text segments`);
@@ -4927,15 +4976,15 @@ async function processBatchResults(file_id, job) {
         .map(segment => segment.text || '')
         .filter(text => text.trim())
         .join('\n\n');
-      
+
       if (plainText && plainText.trim()) {
         console.log(`[processBatchResults] Saving plain text (${plainText.length} chars) to output bucket`);
-        
+
         const { fileOutputBucket } = require('../config/gcs');
-        
+
         const outputTextPath = `extracted-text/${file_id}.txt`;
         const outputTextFile = fileOutputBucket.file(outputTextPath);
-        
+
         await outputTextFile.save(plainText, {
           resumable: false,
           metadata: {
@@ -4943,10 +4992,10 @@ async function processBatchResults(file_id, job) {
             cacheControl: 'public, max-age=31536000',
           },
         });
-        
+
         const outputTextUri = `gs://${fileOutputBucket.name}/${outputTextPath}`;
         console.log(`[processBatchResults] ✅ Saved extracted text to: ${outputTextUri}`);
-        
+
         try {
           await DocumentModel.updateFileOutputPath(file_id, outputTextUri);
           console.log(`[processBatchResults] ✅ Updated database with output path`);
@@ -5094,7 +5143,7 @@ async function processBatchResults(file_id, job) {
       const page_end = chunk.metadata?.page_end !== null && chunk.metadata?.page_end !== undefined
         ? chunk.metadata.page_end
         : (chunk.page_end !== null && chunk.page_end !== undefined ? chunk.page_end : null);
-      
+
       return {
         file_id,
         chunk_index: i,
@@ -5309,7 +5358,7 @@ exports.getDocumentProcessingStatus = async (req, res) => {
       }
 
       const currentProgress = parseFloat(file.processing_progress) || 0;
-     
+
       if (currentProgress < 5) {
         await updateProcessingProgress(
           file_id,
@@ -5452,196 +5501,196 @@ exports.getDocumentProcessingStatus = async (req, res) => {
 };
 
 exports.batchUploadDocuments = async (req, res) => {
- const userId = req.user.id;
- const authorizationHeader = req.headers.authorization;
+  const userId = req.user.id;
+  const authorizationHeader = req.headers.authorization;
 
- try {
- console.log(`[batchUploadDocuments] Received batch upload request.`);
- const { secret_id, llm_name, trigger_initial_analysis_with_secret } = req.body; // Destructure trigger_initial_analysis_with_secret
- console.log(`[batchUploadDocuments] Received secret_id: ${secret_id}, llm_name: ${llm_name}, trigger_initial_analysis_with_secret: ${trigger_initial_analysis_with_secret}`);
+  try {
+    console.log(`[batchUploadDocuments] Received batch upload request.`);
+    const { secret_id, llm_name, trigger_initial_analysis_with_secret } = req.body; // Destructure trigger_initial_analysis_with_secret
+    console.log(`[batchUploadDocuments] Received secret_id: ${secret_id}, llm_name: ${llm_name}, trigger_initial_analysis_with_secret: ${trigger_initial_analysis_with_secret}`);
 
- if (!userId) return res.status(401).json({ error: "Unauthorized" });
- if (!req.files || req.files.length === 0)
- return res.status(400).json({ error: "No files uploaded." });
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    if (!req.files || req.files.length === 0)
+      return res.status(400).json({ error: "No files uploaded." });
 
- let usageAndPlan;
- try {
- usageAndPlan = await TokenUsageService.getUserUsageAndPlan(
- userId,
- authorizationHeader
- );
- } catch (planError) {
- console.error(`❌ Failed to retrieve user plan for user ${userId}:`, planError.message);
- return res.status(500).json({
- success: false,
- message: "Failed to retrieve user plan. Please ensure the user plan service is accessible.",
- details: planError.message,
- });
- }
+    let usageAndPlan;
+    try {
+      usageAndPlan = await TokenUsageService.getUserUsageAndPlan(
+        userId,
+        authorizationHeader
+      );
+    } catch (planError) {
+      console.error(`❌ Failed to retrieve user plan for user ${userId}:`, planError.message);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to retrieve user plan. Please ensure the user plan service is accessible.",
+        details: planError.message,
+      });
+    }
 
- const { usage: userUsage, plan: userPlan } = usageAndPlan;
+    const { usage: userUsage, plan: userPlan } = usageAndPlan;
 
- const requestedResources = {
- tokens: req.files.length * 100, // Example: each file consumes 100 tokens
- documents: req.files.length,
- ai_analysis: req.files.length,
- storage_gb: req.files.reduce((acc, f) => acc + f.size / (1024 ** 3), 0), // convert bytes to GB
- };
+    const requestedResources = {
+      tokens: req.files.length * 100, // Example: each file consumes 100 tokens
+      documents: req.files.length,
+      ai_analysis: req.files.length,
+      storage_gb: req.files.reduce((acc, f) => acc + f.size / (1024 ** 3), 0), // convert bytes to GB
+    };
 
- const limitCheck = await TokenUsageService.enforceLimits(
- userId,
- userUsage,
- userPlan,
- requestedResources
- );
+    const limitCheck = await TokenUsageService.enforceLimits(
+      userId,
+      userUsage,
+      userPlan,
+      requestedResources
+    );
 
- if (!limitCheck.allowed) {
- return res.status(403).json({
- success: false,
- message: limitCheck.message,
- nextRenewalTime: limitCheck.nextRenewalTime,
- remainingTime: limitCheck.remainingTime,
- });
- }
+    if (!limitCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        message: limitCheck.message,
+        nextRenewalTime: limitCheck.nextRenewalTime,
+        remainingTime: limitCheck.remainingTime,
+      });
+    }
 
- const uploadedFiles = [];
- for (const file of req.files) {
- try {
- const originalFilename = file.originalname;
- const mimeType = file.mimetype;
+    const uploadedFiles = [];
+    for (const file of req.files) {
+      try {
+        const originalFilename = file.originalname;
+        const mimeType = file.mimetype;
 
- const batchUploadFolder = `batch-uploads/${userId}/${uuidv4()}`;
- const { gsUri: gcsInputUri, gcsPath: folderPath } = await uploadToGCS(
- originalFilename,
- file.buffer,
- batchUploadFolder,
- true,
- mimeType
- );
+        const batchUploadFolder = `batch-uploads/${userId}/${uuidv4()}`;
+        const { gsUri: gcsInputUri, gcsPath: folderPath } = await uploadToGCS(
+          originalFilename,
+          file.buffer,
+          batchUploadFolder,
+          true,
+          mimeType
+        );
 
- const outputPrefix = `document-ai-results/${userId}/${uuidv4()}/`;
- const gcsOutputUriPrefix = `gs://${fileOutputBucket.name}/${outputPrefix}`;
+        const outputPrefix = `document-ai-results/${userId}/${uuidv4()}/`;
+        const gcsOutputUriPrefix = `gs://${fileOutputBucket.name}/${outputPrefix}`;
 
- console.log(`[batchUploadDocuments] Starting Document AI batch processing for ${originalFilename}`);
- const operationName = await batchProcessDocument(
-   [gcsInputUri],
-   gcsOutputUriPrefix,
-   mimeType
- );
+        console.log(`[batchUploadDocuments] Starting Document AI batch processing for ${originalFilename}`);
+        const operationName = await batchProcessDocument(
+          [gcsInputUri],
+          gcsOutputUriPrefix,
+          mimeType
+        );
 
- const fileId = await DocumentModel.saveFileMetadata(
- userId,
- originalFilename,
- gcsInputUri,
- folderPath,
- mimeType,
- file.size,
- "batch_queued"
- );
+        const fileId = await DocumentModel.saveFileMetadata(
+          userId,
+          originalFilename,
+          gcsInputUri,
+          folderPath,
+          mimeType,
+          file.size,
+          "batch_queued"
+        );
 
- const jobId = uuidv4();
- await ProcessingJobModel.createJob({
- job_id: jobId,
- file_id: fileId,
- type: "batch",
- gcs_input_uri: gcsInputUri,
- gcs_output_uri_prefix: gcsOutputUriPrefix,
- document_ai_operation_name: operationName,
- status: "queued",
- secret_id: secret_id || null, // Pass secret_id from request body
- });
+        const jobId = uuidv4();
+        await ProcessingJobModel.createJob({
+          job_id: jobId,
+          file_id: fileId,
+          type: "batch",
+          gcs_input_uri: gcsInputUri,
+          gcs_output_uri_prefix: gcsOutputUriPrefix,
+          document_ai_operation_name: operationName,
+          status: "queued",
+          secret_id: secret_id || null, // Pass secret_id from request body
+        });
 
- await DocumentModel.updateFileStatus(fileId, "batch_processing", 0.0);
+        await DocumentModel.updateFileStatus(fileId, "batch_processing", 0.0);
 
- uploadedFiles.push({
- file_id: fileId,
- job_id: jobId,
- filename: originalFilename,
- operation_name: operationName,
- gcs_input_uri: gcsInputUri,
- gcs_output_uri_prefix: gcsOutputUriPrefix,
- });
- } catch (innerError) {
- console.error(`❌ Error processing ${file.originalname}:`, innerError);
- uploadedFiles.push({
- filename: file.originalname,
- error: innerError.message,
- });
- }
- }
+        uploadedFiles.push({
+          file_id: fileId,
+          job_id: jobId,
+          filename: originalFilename,
+          operation_name: operationName,
+          gcs_input_uri: gcsInputUri,
+          gcs_output_uri_prefix: gcsOutputUriPrefix,
+        });
+      } catch (innerError) {
+        console.error(`❌ Error processing ${file.originalname}:`, innerError);
+        uploadedFiles.push({
+          filename: file.originalname,
+          error: innerError.message,
+        });
+      }
+    }
 
- try {
- await TokenUsageService.incrementUsage(
- userId,
- requestedResources,
- userPlan
- );
- } catch (usageError) {
- console.error(`❌ Error incrementing token usage for user ${userId}:`, usageError);
- }
+    try {
+      await TokenUsageService.incrementUsage(
+        userId,
+        requestedResources,
+        userPlan
+      );
+    } catch (usageError) {
+      console.error(`❌ Error incrementing token usage for user ${userId}:`, usageError);
+    }
 
- return res.status(202).json({
- success: true,
- message: "Batch document upload successful; processing initiated.",
- uploaded_files: uploadedFiles,
- });
- } catch (error) {
- console.error("❌ Batch Upload Error:", error);
- return res.status(500).json({
- success: false,
- message: "Failed to initiate batch processing",
- details: error.message,
- });
- }
+    return res.status(202).json({
+      success: true,
+      message: "Batch document upload successful; processing initiated.",
+      uploaded_files: uploadedFiles,
+    });
+  } catch (error) {
+    console.error("❌ Batch Upload Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to initiate batch processing",
+      details: error.message,
+    });
+  }
 };
 
 exports.getUserStorageUtilization = async (req, res) => {
- try {
- const userId = req.user.id;
- if (!userId) {
- return res.status(401).json({ message: 'Unauthorized' });
- }
+  try {
+    const userId = req.user.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
 
- const totalStorageUsedBytes = await File.getTotalStorageUsed(userId);
- const totalStorageUsedGB = (totalStorageUsedBytes / (1024 * 1024 * 1024)).toFixed(2);
+    const totalStorageUsedBytes = await File.getTotalStorageUsed(userId);
+    const totalStorageUsedGB = (totalStorageUsedBytes / (1024 * 1024 * 1024)).toFixed(2);
 
- res.status(200).json({
- storage: {
- used_bytes: totalStorageUsedBytes,
- used_gb: totalStorageUsedGB,
- }
- });
+    res.status(200).json({
+      storage: {
+        used_bytes: totalStorageUsedBytes,
+        used_gb: totalStorageUsedGB,
+      }
+    });
 
- } catch (error) {
- console.error('❌ Error fetching user storage utilization:', error);
- res.status(500).json({ message: 'Internal server error', error: error.message });
- }
+  } catch (error) {
+    console.error('❌ Error fetching user storage utilization:', error);
+    res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 };
 
 exports.getUserUsageAndPlan = async (req, res) => {
- try {
- const { userId } = req.params;
- const authorizationHeader = req.headers.authorization; // Pass through auth header
+  try {
+    const { userId } = req.params;
+    const authorizationHeader = req.headers.authorization; // Pass through auth header
 
- if (!userId) {
- return res.status(400).json({ error: "User ID is required." });
- }
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is required." });
+    }
 
- const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
 
- return res.status(200).json({
- success: true,
- data: {
- usage,
- plan,
- timeLeft
- }
- });
+    return res.status(200).json({
+      success: true,
+      data: {
+        usage,
+        plan,
+        timeLeft
+      }
+    });
 
- } catch (error) {
- console.error('❌ Error fetching user usage and plan:', error);
- res.status(500).json({ message: 'Internal server error', error: error.message });
- }
+  } catch (error) {
+    console.error('❌ Error fetching user usage and plan:', error);
+    res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
 };
 
 
@@ -5707,9 +5756,9 @@ exports.deleteAllChats = async (req, res) => {
     const userId = req.user.id;
 
     const stats = await FileChat.getChatStatistics(userId);
-    
+
     if (stats && stats.totalChats === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: true,
         message: "No chats found to delete.",
         deleted_count: 0
@@ -5743,7 +5792,7 @@ exports.deleteChatsBySession = async (req, res) => {
     const result = await FileChat.deleteChatsBySession(session_id, userId);
 
     if (result.deletedCount === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "No chats found in this session or access denied.",
         session_id: session_id
       });
@@ -5780,7 +5829,7 @@ exports.deleteChatsByFile = async (req, res) => {
     const result = await FileChat.deleteChatsByFileId(file_id, userId);
 
     if (result.deletedCount === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: true,
         message: "No chats found for this file.",
         deleted_count: 0,
@@ -5917,5 +5966,191 @@ exports.getDocumentComplete = async (req, res) => {
 };
 
 exports.processDocument = processDocument;
+
+// Diagnostic endpoint to verify chunks and embeddings
+exports.verifyFileProcessing = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const { file_id } = req.params;
+
+    if (!file_id) {
+      return res.status(400).json({ error: "file_id is required" });
+    }
+
+    // Get file metadata
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    if (String(file.user_id) !== String(userId)) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    // Get chunks
+    const chunks = await FileChunkModel.getChunksByFileId(file_id);
+    console.log(`[verifyFileProcessing] Found ${chunks.length} chunks for file ${file_id}`);
+
+    // Get embeddings coverage
+    const embeddingCoverage = await ChunkVectorModel.verifyEmbeddingsForFile(file_id);
+    console.log(`[verifyFileProcessing] Embedding coverage: ${embeddingCoverage.coveragePercentage.toFixed(2)}%`);
+
+    // Get sample embeddings
+    let sampleEmbeddings = [];
+    if (chunks.length > 0) {
+      const chunkIds = chunks.slice(0, 3).map(c => c.id);
+      sampleEmbeddings = await ChunkVectorModel.getVectorsByChunkIds(chunkIds);
+    }
+
+    return res.status(200).json({
+      success: true,
+      file: {
+        id: file.id,
+        originalname: file.originalname,
+        status: file.status,
+        processing_progress: file.processing_progress,
+        current_operation: file.current_operation,
+        gcs_path: file.gcs_path
+      },
+      chunks: {
+        total: chunks.length,
+        sample: chunks.slice(0, 3).map(c => ({
+          id: c.id,
+          chunk_index: c.chunk_index,
+          page_start: c.page_start,
+          page_end: c.page_end,
+          content_length: c.content ? c.content.length : 0,
+          token_count: c.token_count
+        }))
+      },
+      embeddings: {
+        total: embeddingCoverage.totalEmbeddings,
+        coverage_percentage: embeddingCoverage.coveragePercentage,
+        is_complete: embeddingCoverage.isComplete,
+        sample: sampleEmbeddings.map(e => ({
+          chunk_id: e.chunk_id,
+          file_id: e.file_id,
+          has_embedding: !!e.embedding,
+          embedding_dimension: e.embedding ? (Array.isArray(e.embedding) ? e.embedding.length : 'unknown') : 0
+        }))
+      },
+      verification: {
+        chunks_saved: chunks.length > 0,
+        embeddings_saved: embeddingCoverage.totalEmbeddings > 0,
+        processing_complete: file.status === 'processed',
+        all_checks_passed: chunks.length > 0 && embeddingCoverage.isComplete && file.status === 'processed'
+      }
+    });
+  } catch (error) {
+    console.error("❌ verifyFileProcessing error:", error);
+    return res.status(500).json({
+      error: "Failed to verify file processing",
+      details: error.message
+    });
+  }
+};
+
+// Reprocess embeddings for files that were uploaded before the embedding API fix
+exports.reprocessFileEmbeddings = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const { file_id } = req.params;
+
+    if (!file_id) {
+      return res.status(400).json({ error: "file_id is required" });
+    }
+
+    // Get file metadata
+    const file = await DocumentModel.getFileById(file_id);
+    if (!file) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    if (String(file.user_id) !== String(userId)) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    console.log(`[reprocessFileEmbeddings] Starting reprocessing for file ${file_id}`);
+
+    // Get existing chunks
+    const chunks = await FileChunkModel.getChunksByFileId(file_id);
+
+    if (chunks.length === 0) {
+      return res.status(400).json({
+        error: "No chunks found for this file. File needs to be fully reprocessed."
+      });
+    }
+
+    console.log(`[reprocessFileEmbeddings] Found ${chunks.length} chunks`);
+
+    // Check if embeddings already exist
+    const embeddingCoverage = await ChunkVectorModel.verifyEmbeddingsForFile(file_id);
+
+    if (embeddingCoverage.isComplete) {
+      return res.status(200).json({
+        message: "File already has complete embeddings",
+        chunks: embeddingCoverage.totalChunks,
+        embeddings: embeddingCoverage.totalEmbeddings,
+        coverage: embeddingCoverage.coveragePercentage
+      });
+    }
+
+    console.log(`[reprocessFileEmbeddings] Current coverage: ${embeddingCoverage.coveragePercentage.toFixed(2)}%`);
+    console.log(`[reprocessFileEmbeddings] Generating embeddings for ${chunks.length} chunks...`);
+
+    // Generate embeddings for all chunks
+    const chunkContents = chunks.map(c => c.content);
+    const embeddings = await generateEmbeddings(chunkContents);
+
+    console.log(`[reprocessFileEmbeddings] Generated ${embeddings.length} embeddings`);
+
+    // Prepare vectors to save
+    const vectorsToSave = chunks.map((chunk, i) => ({
+      chunk_id: chunk.id,
+      embedding: embeddings[i],
+      file_id: file_id,
+    }));
+
+    console.log(`[reprocessFileEmbeddings] Saving ${vectorsToSave.length} embeddings...`);
+
+    // Save embeddings
+    await ChunkVectorModel.saveMultipleChunkVectors(vectorsToSave);
+
+    // Verify the save
+    const newCoverage = await ChunkVectorModel.verifyEmbeddingsForFile(file_id);
+
+    console.log(`[reprocessFileEmbeddings] ✅ Reprocessing complete. New coverage: ${newCoverage.coveragePercentage.toFixed(2)}%`);
+
+    return res.status(200).json({
+      success: true,
+      message: "Embeddings regenerated successfully",
+      file: {
+        id: file.id,
+        originalname: file.originalname
+      },
+      before: {
+        chunks: embeddingCoverage.totalChunks,
+        embeddings: embeddingCoverage.totalEmbeddings,
+        coverage: embeddingCoverage.coveragePercentage
+      },
+      after: {
+        chunks: newCoverage.totalChunks,
+        embeddings: newCoverage.totalEmbeddings,
+        coverage: newCoverage.coveragePercentage
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ reprocessFileEmbeddings error:", error);
+    return res.status(500).json({
+      error: "Failed to reprocess embeddings",
+      details: error.message
+    });
+  }
+};
+
+
 
 

@@ -22,7 +22,8 @@ const {
   syncDriveToGCSController,
   openDocumentForEditing,
   checkWebhookConfig,
-  viewDocumentFromGCS
+  viewDocumentFromGCS,
+  saveAssembledDraft
 } = require('../controllers/draftController');
 
 const {
@@ -59,6 +60,11 @@ router.get('/webhook-config', authMiddleware.protect, checkWebhookConfig);
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage() });
 router.post('/upload', authMiddleware.protect, upload.single('file'), uploadFileInitial);
+
+// Finish Assembled Draft Flow: Agent -> This Service -> GCS -> Drive -> Database
+// POST /api/drafts/finish-assembled
+// Accepts multipart/form-data with file field
+router.post('/finish-assembled', upload.single('file'), saveAssembledDraft);
 
 // Sync Google Drive to GCS (overwrite existing file)
 // POST /api/drafts/sync-drive-to-gcs

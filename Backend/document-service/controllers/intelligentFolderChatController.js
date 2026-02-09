@@ -11,8 +11,8 @@ const { v4: uuidv4 } = require('uuid');
 const { streamLLM } = require('../services/folderAiService');
 const { getSecretDetailsById } = require('./secretManagerController');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
-const { 
-  fetchTemplateFilesData, 
+const {
+  fetchTemplateFilesData,
   buildEnhancedSystemPromptWithTemplates
 } = require('../services/secretPromptTemplateService'); // NEW: Import template service
 const {
@@ -34,7 +34,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   }
 
   let cleanedResponse = rawResponse.trim();
-  
+
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
     try {
@@ -44,7 +44,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block:', e);
     }
   }
-  
+
   const trimmed = cleanedResponse.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
@@ -57,7 +57,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse raw JSON:', e);
     }
   }
-  
+
   const jsonPattern = /\{[\s\S]*\}/;
   const jsonMatch2 = cleanedResponse.match(jsonPattern);
   if (jsonMatch2) {
@@ -67,13 +67,13 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
     } catch (e) {
     }
   }
-  
+
   return cleanedResponse;
 }
 
 function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outputTemplate = null) {
   let jsonFormattingInstructions = '';
-  
+
   if (inputTemplate && inputTemplate.extracted_text && outputTemplate && outputTemplate.extracted_text) {
     jsonFormattingInstructions += `\n\n`;
     jsonFormattingInstructions += `═══════════════════════════════════════════════════════════════════════\n`;
@@ -92,7 +92,7 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
   if (outputTemplate && outputTemplate.extracted_text) {
     const templateText = outputTemplate.extracted_text;
     const sectionKeys = [];
-    
+
     const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
     let match;
     while ((match = sectionPattern.exec(templateText)) !== null) {
@@ -100,11 +100,11 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
         sectionKeys.push(match[1]);
       }
     }
-    
+
     if (outputTemplate.structured_schema) {
       try {
-        const schema = typeof outputTemplate.structured_schema === 'string' 
-          ? JSON.parse(outputTemplate.structured_schema) 
+        const schema = typeof outputTemplate.structured_schema === 'string'
+          ? JSON.parse(outputTemplate.structured_schema)
           : outputTemplate.structured_schema;
         if (schema.properties && schema.properties.generated_sections && schema.properties.generated_sections.properties) {
           Object.keys(schema.properties.generated_sections.properties).forEach(key => {
@@ -117,8 +117,8 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
         console.warn('Could not parse structured_schema:', e);
       }
     }
-    
-    const sectionsList = sectionKeys.length > 0 
+
+    const sectionsList = sectionKeys.length > 0
       ? `\n\n📋 REQUIRED SECTIONS (MUST INCLUDE ALL):\n${sectionKeys.map((key, idx) => `   ${idx + 1}. ${key}`).join('\n')}\n`
       : '';
 
@@ -258,7 +258,7 @@ Your response should ONLY contain the JSON wrapped in markdown code blocks. Do n
 
 function ensurePlainText(answer) {
   if (!answer) return '';
-  
+
   if (typeof answer === 'string') {
     try {
       const parsed = JSON.parse(answer);
@@ -281,7 +281,7 @@ function ensurePlainText(answer) {
       return answer.trim();
     }
   }
-  
+
   if (typeof answer === 'object' && answer !== null) {
     if (answer.text) {
       return String(answer.text).trim();
@@ -294,7 +294,7 @@ function ensurePlainText(answer) {
     }
     return JSON.stringify(answer);
   }
-  
+
   return String(answer || '').trim();
 }
 
@@ -448,12 +448,12 @@ async function extractCitationsFromFiles(files = [], baseUrl = '') {
     try {
       const chunks = await FileChunk.getChunksByFileId(fileId);
       let firstPage = 1;
-      
+
       if (chunks && chunks.length > 0) {
         const pages = chunks
           .map(c => c.page_start)
           .filter(p => p !== null && p !== undefined && p > 0);
-        
+
         if (pages.length > 0) {
           firstPage = Math.min(...pages);
         }
@@ -506,41 +506,41 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
     console.log(`[extractCitationsFromChunks] No chunks provided`);
     return [];
   }
-  
+
   console.log(`[extractCitationsFromChunks] Processing ${chunks.length} chunks for citations`);
-  
+
   const citationsMap = new Map(); // Use Map to avoid duplicates: "fileId:pageNumber"
   let chunksWithoutPages = 0;
   let chunksWithoutFileId = 0;
-  
+
   chunks.forEach((chunk, index) => {
     const filename = chunk.filename || 'document.pdf';
     const fileId = chunk.file_id || chunk.fileId || null;
-    const pageStart = chunk.page_start !== null && chunk.page_start !== undefined 
-      ? chunk.page_start 
+    const pageStart = chunk.page_start !== null && chunk.page_start !== undefined
+      ? chunk.page_start
       : (chunk.pageStart !== null && chunk.pageStart !== undefined ? chunk.pageStart : null);
     const pageEnd = chunk.page_end !== null && chunk.page_end !== undefined
       ? chunk.page_end
       : (chunk.pageEnd !== null && chunk.pageEnd !== undefined ? chunk.pageEnd : null);
-    
+
     if (index < 3) {
       console.log(`[extractCitationsFromChunks] Chunk ${index}: fileId=${fileId}, page_start=${pageStart}, page_end=${pageEnd}, filename=${filename}`);
     }
-    
+
     if (pageStart !== null && pageStart !== undefined && fileId) {
       const pageNumber = parseInt(pageStart, 10) || pageStart; // Ensure it's a number
       const citationKey = `${fileId}:${pageNumber}`; // Unique key: fileId:pageNumber
-      
+
       if (!citationsMap.has(citationKey)) {
         const contentSnippet = (chunk.content || '').substring(0, 150).trim();
-        const text = contentSnippet.length > 0 
+        const text = contentSnippet.length > 0
           ? `${contentSnippet}${contentSnippet.length >= 150 ? '...' : ''}`
           : 'Content from page';
-        
-            const viewUrl = fileId
-              ? `${baseUrl}/api/files/file/${fileId}/view?page=${pageNumber}`
-              : null;
-        
+
+        const viewUrl = fileId
+          ? `${baseUrl}/api/files/file/${fileId}/view?page=${pageNumber}`
+          : null;
+
         citationsMap.set(citationKey, {
           page: pageNumber,
           pageStart: pageStart,
@@ -548,7 +548,7 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
           filename: filename,
           fileId: fileId,
           text: text,
-          pageLabel: pageEnd && pageEnd !== pageStart 
+          pageLabel: pageEnd && pageEnd !== pageStart
             ? `Pages ${pageStart}-${pageEnd}`
             : `Page ${pageNumber}`,
           link: `${filename}#page=${pageNumber}`,
@@ -565,7 +565,7 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
       }
     }
   });
-  
+
   console.log(`[extractCitationsFromChunks] Citations extracted: ${citationsMap.size}`);
   if (chunksWithoutPages > 0) {
     console.warn(`[extractCitationsFromChunks] ⚠️ ${chunksWithoutPages} chunks skipped - missing page_start`);
@@ -573,7 +573,7 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
   if (chunksWithoutFileId > 0) {
     console.warn(`[extractCitationsFromChunks] ⚠️ ${chunksWithoutFileId} chunks skipped - missing file_id`);
   }
-  
+
   const citations = Array.from(citationsMap.values())
     .sort((a, b) => {
       if (a.filename !== b.filename) {
@@ -581,7 +581,7 @@ async function extractCitationsFromChunks(chunks = [], baseUrl = '') {
       }
       return (a.page || 0) - (b.page || 0);
     });
-  
+
   return citations;
 }
 
@@ -636,7 +636,7 @@ exports.intelligentFolderChat = async (req, res) => {
 
       try {
         const secretDetails = await getSecretDetailsById(secret_id);
-        
+
         if (!secretDetails) {
           console.warn(`🔐 [Secret Prompt] Secret not found in database`);
         } else {
@@ -705,9 +705,9 @@ exports.intelligentFolderChat = async (req, res) => {
                 console.log(`\n📄 [Secret Prompt] Fetching template files:`);
                 console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
                 console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
-                
+
                 const templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
-                
+
                 if (templateData.hasTemplates) {
                   console.log(`✅ [Secret Prompt] Template files fetched successfully`);
                   if (templateData.inputTemplate) {
@@ -716,7 +716,7 @@ exports.intelligentFolderChat = async (req, res) => {
                   if (templateData.outputTemplate) {
                     console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
                   }
-                  
+
                   secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
                   secretTemplateData = templateData; // Store for later use
                   console.log(`✅ [Secret Prompt] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
@@ -734,9 +734,9 @@ exports.intelligentFolderChat = async (req, res) => {
         }
       } catch (secretError) {
         console.error(`🔐 [Secret Prompt] Error fetching secret:`, secretError.message);
-        return res.status(500).json({ 
+        return res.status(500).json({
           error: "Failed to fetch secret configuration.",
-          details: secretError.message 
+          details: secretError.message
         });
       }
     }
@@ -758,8 +758,12 @@ exports.intelligentFolderChat = async (req, res) => {
       console.log(`${'🆓'.repeat(40)}\n`);
     }
 
+    let folderRow;
+    let fullFolderPath;
+    let storedFolderPath = '';
+
     const folderQuery = `
-      SELECT id, originalname, folder_path
+      SELECT id, originalname, folder_path, gcs_path
       FROM user_files
       WHERE user_id = $1
         AND is_folder = true
@@ -768,93 +772,80 @@ exports.intelligentFolderChat = async (req, res) => {
       LIMIT 1;
     `;
     const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
-    
+
     if (folderRows.length === 0) {
-      console.error(`❌ [FOLDER ISOLATION] Folder "${folderName}" not found for user`);
-      return res.status(404).json({
-        error: `Folder "${folderName}" not found.`,
-        folder_name: folderName
-      });
-    }
-    
-    const folderRow = folderRows[0];
-    const actualFolderPath = folderRow.folder_path; // This could be null, empty string, or a path
-    
-    let filesQuery, queryParams;
-    if (!actualFolderPath || actualFolderPath === '') {
-      filesQuery = `
-        SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
-        FROM user_files
-        WHERE user_id = $1
-          AND is_folder = false
-          AND status = 'processed'
-          AND (folder_path IS NULL OR folder_path = '')
-        ORDER BY created_at DESC;
-      `;
-      queryParams = [userId];
+      console.warn(`⚠️ Folder record "${folderName}" not found in intelligentFolderChat. Trying as direct path...`);
+      fullFolderPath = folderName;
+      folderRow = {
+        id: null,
+        originalname: folderName,
+        folder_path: folderName
+      };
     } else {
-      filesQuery = `
-        SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
-        FROM user_files
-        WHERE user_id = $1
-          AND is_folder = false
-          AND status = 'processed'
-          AND folder_path = $2
-        ORDER BY created_at DESC;
-      `;
-      queryParams = [userId, actualFolderPath];
+      folderRow = folderRows[0];
+      storedFolderPath = folderRow.folder_path || '';
+
+      // ✅ FIX: Calculate the full path of the folder to ensure we find all files
+      fullFolderPath = storedFolderPath;
+      if (folderRow.originalname && !fullFolderPath.endsWith(folderRow.originalname)) {
+        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folderRow.originalname}` : folderRow.originalname;
+      }
     }
-    
+
+    console.log(`📂 [FOLDER ISOLATION] Folder: "${folderName}"`);
+    console.log(`📂 [FOLDER ISOLATION] Stored path: "${storedFolderPath}"`);
+    console.log(`📂 [FOLDER ISOLATION] Full path: "${fullFolderPath}"`);
+
+    // ✅ FIX: Use a more robust LIKE pattern to find all files in this folder branch
+    // This strictly matches files inside the folder or its sub-segments
+    const filesQuery = `
+      SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
+      FROM user_files
+      WHERE user_id = $1
+        AND is_folder = false
+        AND (status = 'processed' OR status = 'uploaded' OR status = 'queued' OR status = 'processing')
+        AND (
+          folder_path = $2
+          OR folder_path LIKE $3
+          OR gcs_path LIKE $4
+        )
+      ORDER BY created_at DESC;
+    `;
+
+    const queryParams = [
+      userId,
+      fullFolderPath,
+      `${fullFolderPath}/%`,
+      folderRow.gcs_path ? `${folderRow.gcs_path}%` : `impossible_path_fallback`
+    ];
+
     const { rows: files } = await pool.query(filesQuery, queryParams);
-    
-    console.log(`📂 [FOLDER ISOLATION] Folder "${folderName}" has folder_path: "${actualFolderPath || '(root)'}"`);
+
 
     console.log(`📂 [FOLDER ISOLATION] Total processed files found in folder "${folderName}": ${files.length}`);
     if (files.length > 0) {
-      console.log(`📂 [FOLDER ISOLATION] Files found:`, files.map(f => ({ 
-        name: f.originalname, 
-        status: f.status, 
+      console.log(`📂 [FOLDER ISOLATION] Files found:`, files.map(f => ({
+        name: f.originalname,
+        status: f.status,
         folder_path: f.folder_path || '(null)'
       })));
-      const wrongFolderFiles = files.filter(f => (f.folder_path || '') !== (actualFolderPath || ''));
-      if (wrongFolderFiles.length > 0) {
-        console.error(`❌ [FOLDER ISOLATION] CRITICAL ERROR: Found ${wrongFolderFiles.length} files from wrong folder!`);
-        console.error(`❌ [FOLDER ISOLATION] Wrong files:`, wrongFolderFiles.map(f => ({
-          name: f.originalname,
-          expected_folder_path: actualFolderPath || '(root)',
-          actual_folder_path: f.folder_path || '(root)'
-        })));
-      }
     } else {
-      const debugQuery = `
-        SELECT DISTINCT folder_path, COUNT(*) as file_count
-        FROM user_files
-        WHERE user_id = $1 AND is_folder = false
-        GROUP BY folder_path
-        ORDER BY file_count DESC
-        LIMIT 10;
-      `;
-      const { rows: debugRows } = await pool.query(debugQuery, [userId]);
-      console.log(`🔍 [DEBUG] Available folder_path values in database:`, debugRows.map(r => ({
-        folder_path: r.folder_path || '(null/empty)',
-        file_count: r.file_count
-      })));
-      console.log(`🔍 [DEBUG] Querying for folder_path: "${actualFolderPath || '(null/empty)'}"`);
+      console.log(`🔍 [DEBUG] No files found for folder: "${folderName}"`);
     }
 
-    const processedFiles = files; // Already filtered by query
+    const processedFiles = files.filter(f => f.status === 'processed' || f.status === 'processing' || f.status === 'queued' || f.status === 'uploaded');
 
     if (processedFiles.length === 0) {
-      console.log(`⚠️ No processed documents found. Total files: ${files.length}, Processed: ${processedFiles.length}`);
+      console.log(`⚠️ No documents found. Total files: ${files.length}, Target documents: ${processedFiles.length}`);
       return res.status(404).json({
-        error: "No processed documents found in this folder.",
+        error: "No documents found in this folder.",
         total_files: files.length,
-        processed_files: processedFiles.length,
         folder_name: folderName
       });
     }
 
-    console.log(`📄 Found ${processedFiles.length} processed files in folder`);
+    console.log(`📄 Found ${processedFiles.length} documents in folder (various statuses)`);
+
 
     let routingDecision;
     let finalProvider = null; // Will be set based on secret prompt or DB fetch
@@ -890,7 +881,7 @@ exports.intelligentFolderChat = async (req, res) => {
             console.log(`[FREE TIER] Gemini Eyeball limit reached - forcing RAG`);
             console.log(`[FREE TIER] ${eyeballLimitCheck.message}`);
             console.log(`${'🆓'.repeat(40)}\n`);
-            
+
             routingDecision = {
               method: 'rag',
               reason: 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead',
@@ -964,7 +955,7 @@ exports.intelligentFolderChat = async (req, res) => {
       const inputTokens = Math.ceil((question?.length || 0) / 4);
       const estimatedOutputTokens = Math.ceil(inputTokens * 1.5); // Estimate output tokens
       const estimatedTokens = inputTokens + estimatedOutputTokens;
-      
+
       const tokenLimitCheck = await TokenUsageService.checkFreeTierDailyTokenLimit(userId, plan, estimatedTokens);
       if (!tokenLimitCheck.allowed) {
         return res.status(403).json({
@@ -1049,7 +1040,7 @@ exports.intelligentFolderChat = async (req, res) => {
         });
 
         answer = await Promise.race([geminiPromise, overallTimeout]);
-        
+
         if (used_secret_prompt && secretTemplateData?.outputTemplate) {
           answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
         } else {
@@ -1112,7 +1103,7 @@ exports.intelligentFolderChat = async (req, res) => {
       } else {
         basePrompt = question;
       }
-      
+
       let promptText = basePrompt;
       if (conversationContext) {
         console.log(`🔍 [RAG] Adding conversation context (${conversationContext.length} chars)`);
@@ -1128,31 +1119,24 @@ exports.intelligentFolderChat = async (req, res) => {
 
       for (let i = 0; i < processedFiles.length; i++) {
         const file = processedFiles[i];
-        
-        if (file.folder_path !== folderName) {
-          console.error(`❌ [FOLDER ISOLATION] SKIPPING FILE: "${file.originalname}" - Wrong folder!`);
-          console.error(`   Expected folder: "${folderName}"`);
-          console.error(`   Actual folder: "${file.folder_path}"`);
-          continue; // Skip files from wrong folder
-        }
-        
+
         console.log(`\n🔍 [RAG] Searching file ${i + 1}/${processedFiles.length}: ${file.originalname}`);
         console.log(`   File ID: ${file.id} (type: ${typeof file.id})`);
         console.log(`   File Status: ${file.status}`);
         console.log(`   ✅ Folder verified: ${file.folder_path}`);
-        
+
         const debugChunks = await FileChunk.getChunksByFileId(file.id);
         console.log(`   📋 Chunks in database: ${debugChunks.length}`);
-        
+
         if (debugChunks.length === 0) {
           console.log(`   ⚠️ No chunks found in database for this file - skipping vector search`);
           continue;
         }
-        
+
         const chunkIds = debugChunks.map(c => c.id);
         const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
         console.log(`   🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
-        
+
         if (debugVectors.length === 0) {
           console.log(`   ⚠️ WARNING: Chunks exist but no embeddings found!`);
           console.log(`   💡 Using chunks directly as fallback.`);
@@ -1169,10 +1153,10 @@ exports.intelligentFolderChat = async (req, res) => {
           console.log(`   ✅ Added ${fallbackChunks.length} chunks as fallback (no embeddings available)`);
           continue;
         }
-        
+
         const fileIdStr = String(file.id).trim();
         const isValidUUID = UUID_REGEX.test(fileIdStr);
-        
+
         if (!isValidUUID) {
           console.error(`   ❌ Invalid file ID format: ${file.id} (expected UUID)`);
           const fallbackChunks = debugChunks.map(c => ({
@@ -1188,7 +1172,7 @@ exports.intelligentFolderChat = async (req, res) => {
           console.log(`   ✅ Added ${fallbackChunks.length} chunks as fallback (invalid file ID format)`);
           continue;
         }
-        
+
         console.log(`   🔎 Performing vector search with embedding...`);
         const relevant = await ChunkVector.findNearestChunks(
           questionEmbedding,
@@ -1235,14 +1219,14 @@ exports.intelligentFolderChat = async (req, res) => {
       if (allRelevantChunks.length === 0) {
         console.warn(`\n⚠️ [RAG] No chunks found via vector search - trying fallback...`);
         console.warn(`   - Files searched: ${processedFiles.length}`);
-        
+
         const processingFiles = processedFiles.filter(f => f.status !== 'processed');
         if (processingFiles.length > 0) {
           console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
           sendError("Document is still being processed. Please wait for processing to complete before asking questions.");
           return;
         }
-        
+
         console.log(`   - Attempting fallback: Using all chunks from processed files...`);
         const fallbackChunks = [];
         for (const file of processedFiles) {
@@ -1262,7 +1246,7 @@ exports.intelligentFolderChat = async (req, res) => {
             }
           }
         }
-        
+
         if (fallbackChunks.length > 0) {
           console.log(`   ✅ Fallback successful: Using ${fallbackChunks.length} chunks from ${processedFiles.length} file(s)`);
           allRelevantChunks.push(...fallbackChunks);
@@ -1272,40 +1256,40 @@ exports.intelligentFolderChat = async (req, res) => {
           console.error(`   - Files status: ${processedFiles.map(f => `${f.originalname}: ${f.status}`).join(', ')}`);
           console.log(`⚠️ [RAG] No relevant chunks found - using conversation history + user context + case data`);
 
-        let profileContext = '';
-        try {
-          profileContext = await UserProfileService.getProfileContext(userId, authorizationHeader) || '';
+          let profileContext = '';
+          try {
+            profileContext = await UserProfileService.getProfileContext(userId, authorizationHeader) || '';
+            if (profileContext) {
+              console.log(`🔍 [RAG] Fetched user profile context (${profileContext.length} chars)`);
+            }
+          } catch (profileError) {
+            console.warn(`🔍 [RAG] Failed to fetch profile context:`, profileError.message);
+          }
+
+          let caseContext = '';
+          try {
+            const { fetchCaseDataForFolder, formatCaseDataAsContext } = require('./FileController');
+            const caseData = await fetchCaseDataForFolder(userId, folderName);
+            if (caseData) {
+              caseContext = formatCaseDataAsContext(caseData);
+              console.log(`🔍 [RAG] Fetched case data context (${caseContext.length} chars)`);
+            }
+          } catch (caseError) {
+            console.warn(`🔍 [RAG] Failed to fetch case data:`, caseError.message);
+          }
+
+          let contextParts = [];
+          if (conversationContext) {
+            contextParts.push(`=== PREVIOUS CONVERSATION ===\n${conversationContext}`);
+          }
           if (profileContext) {
-            console.log(`🔍 [RAG] Fetched user profile context (${profileContext.length} chars)`);
+            contextParts.push(`=== USER PROFILE CONTEXT ===\n${profileContext}`);
           }
-        } catch (profileError) {
-          console.warn(`🔍 [RAG] Failed to fetch profile context:`, profileError.message);
-        }
-
-        let caseContext = '';
-        try {
-          const { fetchCaseDataForFolder, formatCaseDataAsContext } = require('./FileController');
-          const caseData = await fetchCaseDataForFolder(userId, folderName);
-          if (caseData) {
-            caseContext = formatCaseDataAsContext(caseData);
-            console.log(`🔍 [RAG] Fetched case data context (${caseContext.length} chars)`);
+          if (caseContext) {
+            contextParts.push(caseContext);
           }
-        } catch (caseError) {
-          console.warn(`🔍 [RAG] Failed to fetch case data:`, caseError.message);
-        }
 
-        let contextParts = [];
-        if (conversationContext) {
-          contextParts.push(`=== PREVIOUS CONVERSATION ===\n${conversationContext}`);
-        }
-        if (profileContext) {
-          contextParts.push(`=== USER PROFILE CONTEXT ===\n${profileContext}`);
-        }
-        if (caseContext) {
-          contextParts.push(caseContext);
-        }
-
-        const combinedContext = contextParts.join('\n\n');
+          const combinedContext = contextParts.join('\n\n');
 
           if (!combinedContext) {
             console.error(`❌ [RAG] No chunks, conversation history, profile, or case data available`);
@@ -1315,111 +1299,92 @@ exports.intelligentFolderChat = async (req, res) => {
             });
           }
 
-        console.log(`🔍 [RAG] Using context-based answer (no chunks): ${combinedContext.length} chars`);
+          console.log(`🔍 [RAG] Using context-based answer (no chunks): ${combinedContext.length} chars`);
 
-        let contextPrompt = promptText;
-        if (combinedContext) {
-          if (used_secret_prompt && secretValue) {
-            const inputTemplate = secretTemplateData?.inputTemplate || null;
-            const outputTemplate = secretTemplateData?.outputTemplate || null;
-            const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
-            contextPrompt = `${combinedContext}\n\n=== SECRET PROMPT ===\n${formattedSecretValue}`;
+          let contextPrompt = promptText;
+          if (combinedContext) {
+            if (used_secret_prompt && secretValue) {
+              const inputTemplate = secretTemplateData?.inputTemplate || null;
+              const outputTemplate = secretTemplateData?.outputTemplate || null;
+              const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
+              contextPrompt = `${combinedContext}\n\n=== SECRET PROMPT ===\n${formattedSecretValue}`;
+            } else {
+              contextPrompt = `${combinedContext}\n\n=== USER QUESTION ===\n${promptText}`;
+            }
           } else {
-            contextPrompt = `${combinedContext}\n\n=== USER QUESTION ===\n${promptText}`;
+            if (used_secret_prompt && secretValue) {
+              const inputTemplate = secretTemplateData?.inputTemplate || null;
+              const outputTemplate = secretTemplateData?.outputTemplate || null;
+              const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
+              contextPrompt = formattedSecretValue;
+            }
           }
-        } else {
-          if (used_secret_prompt && secretValue) {
-            const inputTemplate = secretTemplateData?.inputTemplate || null;
-            const outputTemplate = secretTemplateData?.outputTemplate || null;
-            const formattedSecretValue = addSecretPromptJsonFormatting(secretValue, inputTemplate, outputTemplate);
-            contextPrompt = formattedSecretValue;
+
+          const provider = finalProvider || 'gemini';
+          console.log(`🔍 [RAG] Calling LLM with provider: ${provider} (context-based, no chunks)`);
+          const { askLLM, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
+
+          const modelConfig = ALL_LLM_CONFIGS[provider];
+          const modelName = modelConfig?.model || 'unknown';
+          let maxTokens = null;
+          try {
+            maxTokens = await getModelMaxTokens(provider, modelName);
+            console.log(`🔍 [RAG] Model: ${modelName}, Max tokens: ${maxTokens || 'default'}`);
+          } catch (tokenError) {
+            console.warn(`🔍 [RAG] Could not fetch token limits: ${tokenError.message}`);
           }
-        }
 
-        const provider = finalProvider || 'gemini';
-        console.log(`🔍 [RAG] Calling LLM with provider: ${provider} (context-based, no chunks)`);
-        const { askLLM, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
+          try {
+            const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : question;
+            answer = await askLLM(provider, contextPrompt, '', null, llmQuestion, {
+              userId: userId,
+              endpoint: '/api/doc/folder-chat',
+              fileId: null,
+              sessionId: sessionId
+            });
 
-        const modelConfig = ALL_LLM_CONFIGS[provider];
-        const modelName = modelConfig?.model || 'unknown';
-        let maxTokens = null;
-        try {
-          maxTokens = await getModelMaxTokens(provider, modelName);
-          console.log(`🔍 [RAG] Model: ${modelName}, Max tokens: ${maxTokens || 'default'}`);
-        } catch (tokenError) {
-          console.warn(`🔍 [RAG] Could not fetch token limits: ${tokenError.message}`);
-        }
+            if (used_secret_prompt && secretTemplateData?.outputTemplate) {
+              answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
+            } else {
+              answer = ensurePlainText(answer);
+            }
 
-        try {
-          const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : question;
-          answer = await askLLM(provider, contextPrompt, '', null, llmQuestion, {
-            userId: userId,
-            endpoint: '/api/doc/folder-chat',
-            fileId: null,
-            sessionId: sessionId
-          });
-          
-          if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-            answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
-          } else {
-            answer = ensurePlainText(answer);
-          }
-          
-          console.log(`\n${'='.repeat(80)}`);
-          console.log(`🔍🔍🔍 ANSWER PROVIDED BY: RAG METHOD (CONTEXT-BASED) 🔍🔍🔍`);
-          console.log(`✅ [RAG] Answer length: ${answer.length} chars`);
-          console.log(`✅ [RAG] Chunks used: 0 (using conversation history + user context + case data)`);
-          console.log(`✅ [RAG] Files searched: ${processedFiles.length}`);
-          console.log(`✅ [RAG] Provider: ${provider}`);
-          console.log(`${'='.repeat(80)}\n`);
+            console.log(`\n${'='.repeat(80)}`);
+            console.log(`🔍🔍🔍 ANSWER PROVIDED BY: RAG METHOD (CONTEXT-BASED) 🔍🔍🔍`);
+            console.log(`✅ [RAG] Answer length: ${answer.length} chars`);
+            console.log(`✅ [RAG] Chunks used: 0 (using conversation history + user context + case data)`);
+            console.log(`✅ [RAG] Files searched: ${processedFiles.length}`);
+            console.log(`✅ [RAG] Provider: ${provider}`);
+            console.log(`${'='.repeat(80)}\n`);
 
-          usedChunkIds = [];
+            usedChunkIds = [];
 
-          if (!answer || !answer.trim()) {
-            console.error(`❌ [RAG] Empty answer from context-based response`);
+            if (!answer || !answer.trim()) {
+              console.error(`❌ [RAG] Empty answer from context-based response`);
+              return res.status(500).json({
+                error: "Failed to generate response from available context.",
+                details: "LLM returned empty response"
+              });
+            }
+
+          } catch (contextError) {
+            console.error(`❌ [RAG] Error in context-based LLM call:`, contextError.message);
             return res.status(500).json({
-              error: "Failed to generate response from available context.",
-              details: "LLM returned empty response"
+              error: "Failed to process query with available context.",
+              details: contextError.message
             });
           }
-
-        } catch (contextError) {
-          console.error(`❌ [RAG] Error in context-based LLM call:`, contextError.message);
-          return res.status(500).json({
-            error: "Failed to process query with available context.",
-            details: contextError.message
-          });
-        }
         }
       } else {
-        const validFolderChunks = allRelevantChunks.filter(chunk => {
-          const chunkFile = processedFiles.find(f => f.id === (chunk.file_id || chunk.fileId));
-          if (!chunkFile) {
-            console.warn(`⚠️ [FOLDER ISOLATION] Chunk ${chunk.chunk_id || chunk.id} has unknown file_id, skipping`);
-            return false;
-          }
-          if (chunkFile.folder_path !== folderName) {
-            console.error(`❌ [FOLDER ISOLATION] Chunk ${chunk.chunk_id || chunk.id} from wrong folder!`);
-            console.error(`   File: ${chunkFile.originalname}, Expected: "${folderName}", Actual: "${chunkFile.folder_path}"`);
-            return false;
-          }
-          return true;
-        });
-        
-        if (validFolderChunks.length < allRelevantChunks.length) {
-          console.warn(`⚠️ [FOLDER ISOLATION] Filtered out ${allRelevantChunks.length - validFolderChunks.length} chunks from wrong folders`);
-        }
-        
+        const validFolderChunks = allRelevantChunks;
+
         const topChunks = validFolderChunks
           .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-          .slice(0, 10); // Top 10 chunks
-
-        console.log(`🔍 [RAG] Selected top ${topChunks.length} chunks (similarity range: ${topChunks[topChunks.length - 1]?.similarity || 0} - ${topChunks[0]?.similarity || 0})`);
-        console.log(`✅ [FOLDER ISOLATION] All ${topChunks.length} chunks verified to belong to folder "${folderName}"`);
+          .slice(0, 30); // Increased to 30 for comprehensive context
 
         usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
         usedChunksForCitations = topChunks; // Store chunks for citation extraction
-        
+
         console.log(`\n${'='.repeat(80)}`);
         console.log(`📋 [RAG RESPONSE] CHUNKS WITH CITATIONS (${topChunks.length} chunks):`);
         console.log(`${'='.repeat(80)}`);
@@ -1439,7 +1404,7 @@ exports.intelligentFolderChat = async (req, res) => {
           }
         });
         console.log(`${'='.repeat(80)}\n`);
-        
+
         console.log(`🔍 [RAG] Using chunk IDs: ${usedChunkIds.slice(0, 5).join(', ')}${usedChunkIds.length > 5 ? '...' : ''}`);
 
         const chunkContext = topChunks
@@ -1490,14 +1455,14 @@ exports.intelligentFolderChat = async (req, res) => {
           console.log(`💾 [CACHE] Cache HIT for user ${userId}, using cached response`);
           // Get cached answer and post-process it (same as fresh responses)
           let cachedAnswer = cachedResult.output;
-          
+
           // Post-process the cached answer
           if (used_secret_prompt && secretTemplateData?.outputTemplate) {
             cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, secretTemplateData.outputTemplate);
           } else {
             cachedAnswer = ensurePlainText(cachedAnswer);
           }
-          
+
           answer = cachedAnswer;
           methodUsed = 'rag'; // Ensure method is set
           console.log(`✅ [CACHE] Cached response processed: ${answer.length} chars`);
@@ -1511,7 +1476,7 @@ exports.intelligentFolderChat = async (req, res) => {
               fileId: null,
               sessionId: sessionId
             });
-            
+
             // Store in cache after successful LLM call (before post-processing)
             const rawAnswer = answer;
             await setCachedResponse(userId, cacheKey, rawAnswer, {
@@ -1530,14 +1495,14 @@ exports.intelligentFolderChat = async (req, res) => {
             throw ragError;
           }
         }
-        
+
         // Post-process answer (for both cached and fresh responses)
         if (used_secret_prompt && secretTemplateData?.outputTemplate) {
           answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
         } else {
           answer = ensurePlainText(answer);
         }
-        
+
         console.log(`\n${'='.repeat(80)}`);
         console.log(`🔍🔍🔍 ANSWER PROVIDED BY: RAG METHOD 🔍🔍🔍`);
         console.log(`✅ [RAG] Answer length: ${answer.length} chars`);
@@ -1569,7 +1534,7 @@ exports.intelligentFolderChat = async (req, res) => {
     const protocol = req.protocol || 'http';
     const host = req.get('host') || '';
     const baseUrl = `${protocol}://${host}`;
-    
+
     let citations = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
       console.log(`👁️ [Gemini Eyeball] Extracting citations from ${processedFiles.length} files`);
@@ -1581,7 +1546,7 @@ exports.intelligentFolderChat = async (req, res) => {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`📑 [RESPONSE CITATIONS] Total citations: ${citations.length}`);
     console.log(`${'='.repeat(80)}`);
-    
+
     if (citations.length > 0) {
       citations.forEach((citation, idx) => {
         console.log(`\n📄 Citation ${idx + 1}:`);
@@ -1614,7 +1579,7 @@ exports.intelligentFolderChat = async (req, res) => {
         console.log(`   ⚠️  Gemini Eyeball method used - no file citations extracted`);
       }
     }
-    
+
     console.log(`${'='.repeat(80)}\n`);
 
     console.log(`💾 [intelligentFolderChat] Saving chat to folder_chat table with ${citations.length} citations...`);
@@ -1656,7 +1621,7 @@ exports.intelligentFolderChat = async (req, res) => {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`📑 [RESPONSE CITATIONS] Total citations: ${citations.length}`);
     console.log(`${'='.repeat(80)}`);
-    
+
     if (citations.length > 0) {
       citations.forEach((citation, idx) => {
         console.log(`\n📄 Citation ${idx + 1}:`);
@@ -1686,7 +1651,7 @@ exports.intelligentFolderChat = async (req, res) => {
         console.log(`   ⚠️  Gemini Eyeball method used - no file citations extracted`);
       }
     }
-    
+
     console.log(`${'='.repeat(80)}\n`);
 
     let chunkDetails = [];
@@ -1695,7 +1660,7 @@ exports.intelligentFolderChat = async (req, res) => {
       for (const file of processedFiles) {
         try {
           const chunks = await FileChunk.getChunksByFileId(file.id);
-          
+
           if (!chunks || chunks.length === 0) {
             continue;
           }
@@ -1715,14 +1680,14 @@ exports.intelligentFolderChat = async (req, res) => {
           });
 
           const allPages = Array.from(pageSet).sort((a, b) => a - b);
-          
+
           if (allPages.length > 0) {
             const minPage = Math.min(...allPages);
             const maxPage = Math.max(...allPages);
-            const pageLabel = allPages.length === 1 
-              ? `Page ${minPage}` 
+            const pageLabel = allPages.length === 1
+              ? `Page ${minPage}`
               : (minPage === maxPage ? `Page ${minPage}` : `Pages ${minPage}-${maxPage}`);
-            
+
             chunkDetails.push({
               file_id: file.id,
               filename: file.originalname,
@@ -1731,7 +1696,7 @@ exports.intelligentFolderChat = async (req, res) => {
               page_end: maxPage,
               page_label: pageLabel,
               all_pages: allPages, // Include all pages array
-              content_preview: chunks && chunks.length > 0 
+              content_preview: chunks && chunks.length > 0
                 ? (chunks[0].content || '').substring(0, 200) + ((chunks[0].content || '').length > 200 ? '...' : '')
                 : 'Full document analysis',
               is_full_document: false, // Changed to false since we now show specific pages
@@ -1745,7 +1710,7 @@ exports.intelligentFolderChat = async (req, res) => {
               page_end: null,
               page_label: 'Full Document',
               all_pages: [1],
-              content_preview: chunks && chunks.length > 0 
+              content_preview: chunks && chunks.length > 0
                 ? (chunks[0].content || '').substring(0, 200) + ((chunks[0].content || '').length > 200 ? '...' : '')
                 : 'Full document analysis',
               is_full_document: true,
@@ -1783,7 +1748,7 @@ exports.intelligentFolderChat = async (req, res) => {
     });
 
     const plainTextAnswer = ensurePlainText(answer);
-    
+
     return res.json({
       success: true,
       session_id: finalSessionId,
@@ -1794,6 +1759,8 @@ exports.intelligentFolderChat = async (req, res) => {
       used_chunk_ids: usedChunkIds,
       citations: citations, // Array of citation objects with page numbers and links
       chunk_details: chunkDetails, // ✅ Chunk/file details with page numbers for easy reference
+      id: savedChat.id,
+      message_id: savedChat.id,
       chat_id: savedChat.id,
       chat_history: updatedHistory,
       timestamp: new Date().toISOString(),
@@ -1859,14 +1826,14 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
   const writeChunk = (text) => {
     if (!text || res.destroyed) return;
-    
+
     chunkBuffer += text;
-    
+
     if (chunkBuffer.length >= MAX_CHUNK_BUFFER_SIZE) {
       flushChunkBuffer();
       return;
     }
-    
+
     if (!chunkBufferTimer) {
       chunkBufferTimer = setTimeout(() => {
         flushChunkBuffer();
@@ -1928,7 +1895,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     const actualQuestion = question || req.query.question || '';
     const hasSecretId = secret_id && (secret_id !== null && secret_id !== undefined && secret_id !== '');
-    
+
     if (!hasSecretId && (!actualQuestion || !actualQuestion.trim())) {
       sendError('question is required when secret_id is not provided');
       return;
@@ -1952,8 +1919,12 @@ exports.intelligentFolderChatStream = async (req, res) => {
       console.log(`${'🆓'.repeat(40)}\n`);
     }
 
+    let folderRow;
+    let fullFolderPath;
+    let storedFolderPath = '';
+
     const folderQuery = `
-      SELECT id, originalname, folder_path
+      SELECT id, originalname, folder_path, gcs_path
       FROM user_files
       WHERE user_id = $1
         AND is_folder = true
@@ -1962,77 +1933,63 @@ exports.intelligentFolderChatStream = async (req, res) => {
       LIMIT 1;
     `;
     const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
-    
-    if (folderRows.length === 0) {
-      console.error(`❌ [Streaming] [FOLDER ISOLATION] Folder "${folderName}" not found for user`);
-      sendError(`Folder "${folderName}" not found.`);
-      return;
-    }
-    
-    const folderRow = folderRows[0];
-    const actualFolderPath = folderRow.folder_path; // This could be null, empty string, or a path
-    
-    let filesQuery, queryParams;
-    if (!actualFolderPath || actualFolderPath === '') {
-      filesQuery = `
-        SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
-        FROM user_files
-        WHERE user_id = $1
-          AND is_folder = false
-          AND status = 'processed'
-          AND (folder_path IS NULL OR folder_path = '')
-        ORDER BY created_at DESC;
-      `;
-      queryParams = [userId];
-    } else {
-      filesQuery = `
-        SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
-        FROM user_files
-        WHERE user_id = $1
-          AND is_folder = false
-          AND status = 'processed'
-          AND folder_path = $2
-        ORDER BY created_at DESC;
-      `;
-      queryParams = [userId, actualFolderPath];
-    }
-    
-    const { rows: files } = await pool.query(filesQuery, queryParams);
-    const processedFiles = files; // Already filtered by query
 
-    console.log(`📂 [Streaming] [FOLDER ISOLATION] Folder "${folderName}" has folder_path: "${actualFolderPath || '(root)'}"`);
-    console.log(`📂 [Streaming] [FOLDER ISOLATION] Found ${processedFiles.length} processed files in folder "${folderName}"`);
-    if (processedFiles.length > 0) {
-      const wrongFolderFiles = processedFiles.filter(f => (f.folder_path || '') !== (actualFolderPath || ''));
-      if (wrongFolderFiles.length > 0) {
-        console.error(`❌ [Streaming] [FOLDER ISOLATION] CRITICAL ERROR: Found ${wrongFolderFiles.length} files from wrong folder!`);
-        console.error(`❌ [Streaming] [FOLDER ISOLATION] Wrong files:`, wrongFolderFiles.map(f => ({
-          name: f.originalname,
-          expected_folder_path: actualFolderPath || '(root)',
-          actual_folder_path: f.folder_path || '(root)'
-        })));
-      } else {
-        console.log(`✅ [Streaming] [FOLDER ISOLATION] All ${processedFiles.length} files verified to belong to folder "${folderName}" (folder_path: "${actualFolderPath || '(root)'}")`);
+    if (folderRows.length === 0) {
+      console.warn(`⚠️ Folder record "${folderName}" not found in intelligentFolderChatStream. Trying as direct path...`);
+      fullFolderPath = folderName;
+      folderRow = {
+        id: null,
+        originalname: folderName,
+        folder_path: folderName
+      };
+    } else {
+      folderRow = folderRows[0];
+      storedFolderPath = folderRow.folder_path || '';
+
+      // ✅ FIX: Calculate the full path of the folder to ensure we find all files
+      fullFolderPath = storedFolderPath;
+      if (folderRow.originalname && !fullFolderPath.endsWith(folderRow.originalname)) {
+        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folderRow.originalname}` : folderRow.originalname;
       }
     }
 
+    console.log(`📂 [Streaming] [FOLDER ISOLATION] Folder: "${folderName}"`);
+    console.log(`📂 [Streaming] [FOLDER ISOLATION] Stored path: "${storedFolderPath}"`);
+    console.log(`📂 [Streaming] [FOLDER ISOLATION] Full path: "${fullFolderPath}"`);
+
+    // ✅ FIX: Use a more robust LIKE pattern to find all files in this folder branch
+    const filesQuery = `
+      SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
+      FROM user_files
+      WHERE user_id = $1
+        AND is_folder = false
+        AND (status = 'processed' OR status = 'uploaded' OR status = 'queued' OR status = 'processing')
+        AND (
+          folder_path = $2 
+          OR folder_path LIKE $3
+          OR gcs_path LIKE $4
+        )
+      ORDER BY created_at DESC;
+    `;
+
+    const queryParams = [
+      userId,
+      fullFolderPath,
+      `${fullFolderPath}/%`,
+      folderRow.gcs_path ? `${folderRow.gcs_path}%` : `impossible_path_fallback`
+    ];
+
+    const { rows: files } = await pool.query(filesQuery, queryParams);
+    const processedFiles = files.filter(f => f.status === 'processed' || f.status === 'processing' || f.status === 'queued' || f.status === 'uploaded');
+
+    console.log(`📂 [Streaming] [FOLDER ISOLATION] Found ${processedFiles.length} candidate documents in folder "${folderName}"`);
+    if (processedFiles.length > 0) {
+      console.log(`✅ [Streaming] [FOLDER ISOLATION] All files verified for folder "${folderName}"`);
+    }
+
     if (processedFiles.length === 0) {
-      const debugQuery = `
-        SELECT DISTINCT folder_path, COUNT(*) as file_count
-        FROM user_files
-        WHERE user_id = $1 AND is_folder = false
-        GROUP BY folder_path
-        ORDER BY file_count DESC
-        LIMIT 10;
-      `;
-      const { rows: debugRows } = await pool.query(debugQuery, [userId]);
-      console.log(`🔍 [Streaming] [DEBUG] Available folder_path values in database:`, debugRows.map(r => ({
-        folder_path: r.folder_path || '(null/empty)',
-        file_count: r.file_count
-      })));
-      console.log(`🔍 [Streaming] [DEBUG] Querying for folder_path: "${actualFolderPath || '(null/empty)'}"`);
-      console.log(`⚠️ [Streaming] No processed documents found in folder: "${folderName}" (folder_path: "${actualFolderPath || '(root)'}")`);
-      sendError(`No processed documents found in folder "${folderName}". Documents may still be processing.`);
+      console.log(`⚠️ [Streaming] No documents found in folder: "${folderName}"`);
+      sendError(`No documents found in folder "${folderName}". If you just uploaded files, please wait a moment for them to be registered.`);
       return;
     }
 
@@ -2051,7 +2008,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
       try {
         const secretDetails = await getSecretDetailsById(secret_id);
-        
+
         if (!secretDetails) {
           console.warn(`🔐 [Streaming Secret Prompt] Secret not found in database`);
           sendError('Secret configuration not found');
@@ -2120,11 +2077,11 @@ exports.intelligentFolderChatStream = async (req, res) => {
               console.error(`4. Check that the secret exists in GCP Secret Manager`);
               console.error(`5. Verify the service account email has access to the secret`);
               console.error(`${'='.repeat(80)}\n`);
-              
+
               const errorMessage = gcpError.message.includes('PERMISSION_DENIED')
                 ? `Permission denied accessing GCP Secret Manager. Please ensure the service account has 'Secret Manager Secret Accessor' role (roles/secretmanager.secretAccessor). Secret: ${secret_manager_id}`
                 : `Failed to fetch secret from GCP Secret Manager: ${gcpError.message}`;
-              
+
               sendError(errorMessage, gcpError.message);
               return;
             }
@@ -2155,9 +2112,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
               console.log(`\n📄 [Streaming Secret Prompt] Fetching template files:`);
               console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
               console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
-              
+
               const templateData = await fetchTemplateFilesData(input_template_id, output_template_id);
-              
+
               if (templateData.hasTemplates) {
                 console.log(`✅ [Streaming Secret Prompt] Template files fetched successfully`);
                 if (templateData.inputTemplate) {
@@ -2166,13 +2123,13 @@ exports.intelligentFolderChatStream = async (req, res) => {
                 if (templateData.outputTemplate) {
                   console.log(`   Output: ${templateData.outputTemplate.filename} (${templateData.outputTemplate.extracted_text?.length || 0} chars)`);
                 }
-                
+
                 secretValue = buildEnhancedSystemPromptWithTemplates(secretValue, templateData);
                 console.log(`✅ [Streaming Secret Prompt] Enhanced prompt built with template examples (${secretValue.length} chars)\n`);
               } else {
                 console.log(`⚠️ [Streaming Secret Prompt] No template files found or available\n`);
               }
-              
+
               secretTemplateData = templateData; // Store for later use in streaming route
             }
           } catch (gcpError) {
@@ -2235,7 +2192,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
             console.log(`[FREE TIER STREAM] ${eyeballLimitCheck.message}`);
             console.log(`${'🆓'.repeat(40)}\n`);
             sendStatus('info', eyeballLimitCheck.message);
-            
+
             routingDecision = {
               method: 'rag',
               reason: 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead',
@@ -2306,49 +2263,49 @@ exports.intelligentFolderChatStream = async (req, res) => {
     let webSearchCitations = [];
     let webSearchContent = ''; // Initialize at function scope
     let webSearchStreamCitations = []; // Initialize at function scope
-    
+
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🔍 [URL DETECTION] Starting URL detection`);
     console.log(`   Query: "${actualQuestion}"`);
     console.log(`${'='.repeat(80)}`);
-    
+
     const urlsInQuery = extractUrlsFromQuery(actualQuestion);
     console.log(`[URL DETECTION] Extracted URLs:`, urlsInQuery);
-    
+
     // Check for any URL (PDF or web page)
     const { isPdfUrl, isWebPageUrl } = require('../services/webSearchService');
-    
+
     let hasUrl = urlsInQuery.length > 0 && urlsInQuery.some(url => {
       const isPdf = isPdfUrl(url);
       const isWeb = isWebPageUrl(url);
       const lowerUrl = url.toLowerCase();
-      const isGoogleDrive = lowerUrl.includes('googleusercontent.com') || 
-                            lowerUrl.includes('drive.google.com') ||
-                            lowerUrl.includes('viewer') ||
-                            lowerUrl.includes('/pdf/');
-      
+      const isGoogleDrive = lowerUrl.includes('googleusercontent.com') ||
+        lowerUrl.includes('drive.google.com') ||
+        lowerUrl.includes('viewer') ||
+        lowerUrl.includes('/pdf/');
+
       console.log(`[URL DETECTION] Checking URL: ${url}`);
       console.log(`   - Is PDF: ${isPdf}`);
       console.log(`   - Is Web Page: ${isWeb}`);
       console.log(`   - Is Google Drive: ${isGoogleDrive}`);
-      
+
       return isPdf || isWeb || isGoogleDrive;
     });
-    
-      const queryLower = actualQuestion.toLowerCase();
-      // ONLY trigger web search when user EXPLICITLY requests it
-      const explicitWebSearchKeywords = [
-        'search from the web', 'search on web', 'search on the web', 'search online',
-        'search the internet', 'search the web', 'search web', 'find on web',
-        'find on the web', 'find online', 'look up online', 'look up on web',
-        'google search', 'web search', 'internet search', 'use web search',
-        'check online', 'check the web', 'get from web', 'get from internet',
-        'from web', 'from the web', 'from internet', 'answer from web',
-        'answer from the web', 'tell me from web', 'web se', 'web pe',
-        'online search', 'internet se', 'web par search', 'web se dekh',
-        'web pe dekh', 'web se batao', 'web pe batao'
-      ];
-      const needsWebSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
+
+    const queryLower = actualQuestion.toLowerCase();
+    // ONLY trigger web search when user EXPLICITLY requests it
+    const explicitWebSearchKeywords = [
+      'search from the web', 'search on web', 'search on the web', 'search online',
+      'search the internet', 'search the web', 'search web', 'find on web',
+      'find on the web', 'find online', 'look up online', 'look up on web',
+      'google search', 'web search', 'internet search', 'use web search',
+      'check online', 'check the web', 'get from web', 'get from internet',
+      'from web', 'from the web', 'from internet', 'answer from web',
+      'answer from the web', 'tell me from web', 'web se', 'web pe',
+      'online search', 'internet se', 'web par search', 'web se dekh',
+      'web pe dekh', 'web se batao', 'web pe batao'
+    ];
+    const needsWebSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
 
     console.log(`[URL DETECTION] Results:`);
     console.log(`   - URLs found: ${urlsInQuery.length}`);
@@ -2377,30 +2334,30 @@ exports.intelligentFolderChatStream = async (req, res) => {
             if (isPdfUrl(url)) return true;
             if (isWebPageUrl(url)) return true;
             const lowerUrl = url.toLowerCase();
-            return lowerUrl.includes('googleusercontent.com') || 
-                   lowerUrl.includes('drive.google.com') ||
-                   lowerUrl.includes('viewer') ||
-                   lowerUrl.includes('/pdf/');
+            return lowerUrl.includes('googleusercontent.com') ||
+              lowerUrl.includes('drive.google.com') ||
+              lowerUrl.includes('viewer') ||
+              lowerUrl.includes('/pdf/');
           });
-          
-          const isPdf = isPdfUrl(url) || 
-                        url.toLowerCase().includes('googleusercontent.com') || 
-                        url.toLowerCase().includes('drive.google.com') ||
-                        url.toLowerCase().includes('viewer') ||
-                        url.toLowerCase().includes('/pdf/');
+
+          const isPdf = isPdfUrl(url) ||
+            url.toLowerCase().includes('googleusercontent.com') ||
+            url.toLowerCase().includes('drive.google.com') ||
+            url.toLowerCase().includes('viewer') ||
+            url.toLowerCase().includes('/pdf/');
           const isWeb = isWebPageUrl(url);
-          
+
           if (isPdf) {
             console.log(`📄 [WEB SEARCH] Processing PDF/Document directly from URL: ${url}`);
             console.log(`📄 [WEB SEARCH] URL type: ${url?.includes('google') ? 'Google Drive/Viewer' : 'Direct PDF'}`);
-            
+
             const { streamPdfFromUrl } = require('../services/webSearchService');
             try {
               for await (const chunk of streamPdfFromUrl(url, actualQuestion)) {
                 webSearchContent += chunk;
                 writeChunk(chunk);
               }
-              
+
               webSearchStreamCitations = [{
                 title: 'PDF Document',
                 url: url, // CRITICAL: Full URL must be included
@@ -2424,18 +2381,18 @@ exports.intelligentFolderChatStream = async (req, res) => {
               console.error(`❌ [WEB SEARCH] Error streaming PDF:`, streamError.message);
               console.error(`❌ [WEB SEARCH] Error stack:`, streamError.stack);
               sendStatus('error', `Failed to process PDF from URL. The URL may require authentication or may not be accessible. Error: ${streamError.message}`);
-              
+
               if (url && url.includes('google')) {
                 sendStatus('info', 'Note: Google Drive links may require the file to be publicly accessible. Try sharing the file with "Anyone with the link" permission.');
               }
-              
+
               webSearchContent = '';
               webSearchResult = null;
             }
           } else if (isWeb) {
             console.log(`🌐 [WEB SEARCH] Processing web page from URL: ${url}`);
             console.log(`🌐 [WEB SEARCH] Question: "${actualQuestion}"`);
-            
+
             const { streamWebPageFromUrl } = require('../services/webSearchService');
             try {
               console.log(`🌐 [WEB SEARCH] Starting to stream web page content...`);
@@ -2449,7 +2406,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
                 }
               }
               console.log(`🌐 [WEB SEARCH] ✅ Completed streaming: ${chunkCount} chunks, ${webSearchContent.length} total chars`);
-              
+
               webSearchStreamCitations = [{
                 title: 'Web Page',
                 url: url, // CRITICAL: Full URL must be included
@@ -2494,10 +2451,10 @@ exports.intelligentFolderChatStream = async (req, res) => {
             'online search', 'internet se', 'web par search', 'web se dekh',
             'web pe dekh', 'web se batao', 'web pe batao'
           ];
-          
+
           const queryLower = actualQuestion.toLowerCase();
           const explicitlyRequestedWebSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
-          
+
           if (!explicitlyRequestedWebSearch) {
             console.log(`⚠️ [WEB SEARCH] User did not explicitly request web search - skipping`);
             console.log(`   Query: "${actualQuestion}"`);
@@ -2509,43 +2466,43 @@ exports.intelligentFolderChatStream = async (req, res) => {
             // Search and process using Gemini's Google Search tool
             console.log(`🔍 [WEB SEARCH] User explicitly requested web search`);
             console.log(`   Query: "${actualQuestion}"`);
-            
+
             const { searchForPdfs, processPdfFromUrl, processWebPageFromUrl, isPdfUrl, isWebPageUrl } = require('../services/webSearchService');
-            
+
             // Use Gemini's Google Search to find relevant URLs (PDFs and web pages)
             const searchResults = await searchForPdfs(actualQuestion, 5); // Get top 5 results
-            
+
             if (searchResults.success && searchResults.results && searchResults.results.length > 0) {
               console.log(`✅ [WEB SEARCH] Found ${searchResults.results.length} results from Google Search`);
-              
+
               // Separate PDFs from HTML pages
               const pdfResults = searchResults.results.filter(result => isPdfUrl(result.link));
               const htmlResults = searchResults.results.filter(result => isWebPageUrl(result.link) && !isPdfUrl(result.link));
-              
+
               console.log(`📄 [WEB SEARCH] Found ${pdfResults.length} PDF(s) and ${htmlResults.length} HTML page(s)`);
-              
+
               // Initialize variables for processing
               const processedContents = [];
               const allWebCitations = [];
-              
+
               // If PDFs are found, process them via URL streaming flow (same as direct URL processing)
               if (pdfResults.length > 0) {
                 console.log(`📄 [WEB SEARCH] Found ${pdfResults.length} PDF(s) - processing via URL streaming flow`);
                 const { streamPdfFromUrl } = require('../services/webSearchService');
-                
+
                 // Process the first PDF (or all PDFs if multiple)
                 for (let pdfIdx = 0; pdfIdx < Math.min(pdfResults.length, 2); pdfIdx++) {
                   const pdfResult = pdfResults[pdfIdx];
                   const pdfUrl = pdfResult.link;
-                  
+
                   try {
                     console.log(`📄 [WEB SEARCH] Processing PDF ${pdfIdx + 1}/${Math.min(pdfResults.length, 2)}: ${pdfUrl}`);
-                    
+
                     for await (const chunk of streamPdfFromUrl(pdfUrl, actualQuestion)) {
                       webSearchContent += chunk;
                       writeChunk(chunk);
                     }
-                    
+
                     // Add PDF citation with full URL information
                     allWebCitations.push({
                       title: pdfResult.title || 'PDF Document',
@@ -2567,7 +2524,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
                       })() : '',
                       note: 'Processed via URL streaming'
                     });
-                    
+
                     console.log(`✅ [WEB SEARCH] Processed PDF ${pdfIdx + 1} via URL streaming`);
                   } catch (streamError) {
                     console.error(`❌ [WEB SEARCH] Error streaming PDF ${pdfUrl}:`, streamError.message);
@@ -2584,22 +2541,22 @@ exports.intelligentFolderChatStream = async (req, res) => {
                   }
                 }
               }
-              
+
               // Process HTML pages directly (only HTML pages, not PDFs)
-              
+
               // Process top 3 HTML results (if any)
               const htmlResultsToProcess = htmlResults.slice(0, 3);
-              
+
               if (htmlResultsToProcess.length > 0) {
                 console.log(`🌐 [WEB SEARCH] Processing ${htmlResultsToProcess.length} HTML page(s) directly`);
-                
+
                 for (let i = 0; i < htmlResultsToProcess.length; i++) {
                   const result = htmlResultsToProcess[i];
                   const url = result.link;
-                  
+
                   try {
                     console.log(`🌐 [WEB SEARCH] Processing HTML page ${i + 1}/${htmlResultsToProcess.length}: ${url}`);
-                    
+
                     const webResult = await processWebPageFromUrl(url, actualQuestion);
                     if (webResult.success && webResult.content) {
                       processedContents.push({
@@ -2640,7 +2597,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
                   }
                 }
               }
-              
+
               // Combine all processed content (PDFs are already streamed to webSearchContent, HTML needs to be added)
               if (processedContents.length > 0) {
                 // Add HTML content to existing webSearchContent (which may already contain PDF content)
@@ -2649,16 +2606,16 @@ exports.intelligentFolderChatStream = async (req, res) => {
                     return `=== WEB SOURCE ${idx + 1}: ${item.title} ===\nURL: ${item.url}\n${item.snippet ? `Snippet: ${item.snippet}\n` : ''}\nContent:\n${item.content}\n\n`;
                   })
                   .join('\n');
-                
+
                 // Append HTML content to PDF content (if any)
                 if (webSearchContent) {
                   webSearchContent += '\n\n' + htmlContent;
                 } else {
                   webSearchContent = htmlContent;
                 }
-                
+
                 webSearchStreamCitations = allWebCitations;
-                
+
                 console.log(`✅ [WEB SEARCH] Combined content: ${pdfResults.length > 0 ? 'PDF(s) + ' : ''}${processedContents.length} HTML source(s) = ${webSearchContent.length} chars`);
                 console.log(`📚 [WEB SEARCH] Total citations: ${allWebCitations.length} (${pdfResults.length} PDF(s) + ${htmlResultsToProcess.length} HTML page(s))`);
               } else if (pdfResults.length > 0) {
@@ -2744,7 +2701,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
       } else {
         basePrompt = actualQuestion;
       }
-      
+
       let promptText = basePrompt;
       if (conversationContext) {
         promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
@@ -2753,7 +2710,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
       if (used_secret_prompt && secretValue) {
       }
 
-      
+
       try {
         const forcedModel = isFreeUser ? TokenUsageService.getFreeTierForcedModel() : null;
         for await (const chunk of streamGeminiWithMultipleGCS(promptText, documents, '', forcedModel)) {
@@ -2781,12 +2738,12 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.error(`   Documents: ${documents.length}`);
         console.error(`   Stack: ${streamError.stack}`);
         console.error(`${'='.repeat(80)}\n`);
-        
+
         if (streamError.message && streamError.message.includes('fetch failed')) {
           sendError('Network error: Failed to connect to Gemini service. Please check your internet connection and GCP credentials.', streamError.message);
           return;
         }
-        
+
         throw streamError;
       }
 
@@ -2802,7 +2759,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         } catch (e) {
           console.warn('[STREAMING Gemini Eyeball] Could not fetch template data for post-processing:', e);
         }
-        
+
         if (streamingTemplateData?.outputTemplate) {
           fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
         } else {
@@ -2824,31 +2781,23 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
       for (let i = 0; i < processedFiles.length; i++) {
         const file = processedFiles[i];
-        
-        const fileFolderPath = file.folder_path || '';
-        if (fileFolderPath !== (actualFolderPath || '')) {
-          console.error(`❌ [STREAMING] [FOLDER ISOLATION] SKIPPING FILE: "${file.originalname}" - Wrong folder!`);
-          console.error(`   Expected folder_path: "${actualFolderPath || '(root)'}"`);
-          console.error(`   Actual folder_path: "${fileFolderPath || '(root)'}"`);
-          continue; // Skip files from wrong folder
-        }
-        
+
         if (i === 0 || i === processedFiles.length - 1) {
           console.log(`🔍 [STREAMING RAG] Searching file ${i + 1}/${processedFiles.length}: ${file.originalname}`);
         }
-        
+
         const debugChunks = await FileChunk.getChunksByFileId(file.id);
         console.log(`   📋 Chunks in database: ${debugChunks.length}`);
-        
+
         if (debugChunks.length === 0) {
           console.log(`   ⚠️ No chunks found in database for this file - skipping vector search`);
           continue;
         }
-        
+
         const chunkIds = debugChunks.map(c => c.id);
         const debugVectors = await ChunkVector.getVectorsByChunkIds(chunkIds);
         console.log(`   🔗 Embeddings in database: ${debugVectors.length} for ${chunkIds.length} chunks`);
-        
+
         if (debugVectors.length === 0) {
           console.log(`   ⚠️ WARNING: Chunks exist but no embeddings found!`);
           console.log(`   💡 Using chunks directly as fallback.`);
@@ -2865,10 +2814,10 @@ exports.intelligentFolderChatStream = async (req, res) => {
           console.log(`   ✅ Added ${fallbackChunks.length} chunks as fallback (no embeddings available)`);
           continue;
         }
-        
+
         const fileIdStr = String(file.id).trim();
         const isValidUUID = UUID_REGEX.test(fileIdStr);
-        
+
         if (!isValidUUID) {
           console.error(`   ❌ Invalid file ID format: ${file.id} (expected UUID)`);
           const fallbackChunks = debugChunks.map(c => ({
@@ -2884,7 +2833,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
           console.log(`   ✅ Added ${fallbackChunks.length} chunks as fallback (invalid file ID format)`);
           continue;
         }
-        
+
         console.log(`   🔎 Performing vector search with embedding...`);
         const relevant = await ChunkVector.findNearestChunks(
           questionEmbedding,
@@ -2931,14 +2880,14 @@ exports.intelligentFolderChatStream = async (req, res) => {
       if (allRelevantChunks.length === 0) {
         console.warn(`\n⚠️ [STREAMING RAG] No chunks found via vector search - trying fallback...`);
         console.warn(`   - Files searched: ${processedFiles.length}`);
-        
+
         const processingFiles = processedFiles.filter(f => f.status !== 'processed');
         if (processingFiles.length > 0) {
           console.warn(`   - ⚠️ ${processingFiles.length} file(s) still processing: ${processingFiles.map(f => f.originalname).join(', ')}`);
           sendError("Document is still being processed. Please wait for processing to complete before asking questions.");
           return;
         }
-        
+
         console.log(`   - Attempting fallback: Using all chunks from processed files...`);
         const fallbackChunks = [];
         for (const file of processedFiles) {
@@ -2958,7 +2907,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
             }
           }
         }
-        
+
         if (fallbackChunks.length > 0) {
           console.log(`   ✅ Fallback successful: Using ${fallbackChunks.length} chunks from ${processedFiles.length} file(s)`);
           allRelevantChunks.push(...fallbackChunks);
@@ -2971,34 +2920,17 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
       }
 
-      const validFolderChunks = allRelevantChunks.filter(chunk => {
-        const chunkFile = processedFiles.find(f => f.id === (chunk.file_id || chunk.fileId));
-        if (!chunkFile) {
-          console.warn(`⚠️ [STREAMING] [FOLDER ISOLATION] Chunk ${chunk.chunk_id || chunk.id} has unknown file_id, skipping`);
-          return false;
-        }
-        const chunkFileFolderPath = chunkFile.folder_path || '';
-        if (chunkFileFolderPath !== (actualFolderPath || '')) {
-          console.error(`❌ [STREAMING] [FOLDER ISOLATION] Chunk ${chunk.chunk_id || chunk.id} from wrong folder!`);
-          console.error(`   File: ${chunkFile.originalname}, Expected folder_path: "${actualFolderPath || '(root)'}", Actual: "${chunkFileFolderPath || '(root)'}"`);
-          return false;
-        }
-        return true;
-      });
-      
-      if (validFolderChunks.length < allRelevantChunks.length) {
-        console.warn(`⚠️ [STREAMING] [FOLDER ISOLATION] Filtered out ${allRelevantChunks.length - validFolderChunks.length} chunks from wrong folders`);
-      }
-      
+      const validFolderChunks = allRelevantChunks;
+
       const topChunks = validFolderChunks
         .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-        .slice(0, 10);
+        .slice(0, 30); // Increased to 30 for comprehensive context
 
-      console.log(`✅ [STREAMING] [FOLDER ISOLATION] All ${topChunks.length} chunks verified to belong to folder "${folderName}"`);
+      console.log(`✅ [STREAMING] [FOLDER ISOLATION] Chunks collected from folder "${folderName}"`);
 
       usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
       usedChunksForCitations = topChunks; // Store chunks for citation extraction
-      
+
       console.log(`\n${'='.repeat(80)}`);
       console.log(`📋 [STREAMING RAG RESPONSE] CHUNKS WITH CITATIONS (${topChunks.length} chunks):`);
       console.log(`${'='.repeat(80)}`);
@@ -3018,7 +2950,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
       });
       console.log(`${'='.repeat(80)}\n`);
-      
+
       console.log(`🔍 [STREAMING RAG] Selected top ${topChunks.length} chunks`);
 
       const chunkContext = topChunks
@@ -3043,7 +2975,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         console.log(`💾 [CACHE] Cache HIT for user ${userId}, streaming cached response`);
         // Stream the cached response with proper animation
         let cachedAnswer = cachedResult.output;
-        
+
         // Post-process the cached answer BEFORE streaming (to ensure proper formatting)
         if (used_secret_prompt) {
           let streamingTemplateData = null;
@@ -3055,7 +2987,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
           } catch (e) {
             console.warn('[CACHE] Could not fetch template data for post-processing:', e);
           }
-          
+
           if (streamingTemplateData?.outputTemplate) {
             cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, streamingTemplateData.outputTemplate);
           } else {
@@ -3064,38 +2996,38 @@ exports.intelligentFolderChatStream = async (req, res) => {
         } else {
           cachedAnswer = ensurePlainText(cachedAnswer);
         }
-        
+
         const chunkSize = 30; // Smaller chunks for smoother animation
         const delayMs = 15; // Delay between chunks to simulate real streaming
-        
+
         // Send initial metadata (same format as fresh responses)
         res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId, method: 'rag' })}\n\n`);
         sendStatus('generating', 'Generating response...');
-        
+
         // Stream cached response in chunks with delays for smooth animation
         fullAnswer = ''; // Reset to ensure clean state
         for (let i = 0; i < cachedAnswer.length; i += chunkSize) {
           const chunk = cachedAnswer.substring(i, i + chunkSize);
           fullAnswer += chunk;
           writeChunk(chunk);
-          
+
           // Add delay between chunks for smooth streaming animation
           if (i + chunkSize < cachedAnswer.length) {
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
         }
-        
+
         // Ensure buffer is flushed before continuing
         flushChunkBuffer();
-        
+
         methodUsed = 'rag';
         console.log(`✅ [CACHE] Cached response streamed: ${fullAnswer.length} chars`);
-        
+
         // Note: Citations will be extracted after this block (same as fresh responses)
         // Post-process is already done above, so fullAnswer is ready
       } else {
         console.log(`💾 [CACHE] Cache MISS for user ${userId}, calling LLM for streaming`);
-        
+
         let basePrompt;
         if (used_secret_prompt && secretValue) {
           const inputTemplate = secretTemplateData?.inputTemplate || null;
@@ -3104,7 +3036,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         } else {
           basePrompt = actualQuestion;
         }
-        
+
         let promptText = basePrompt;
         if (conversationContext) {
           promptText = `Previous Conversation:\n${conversationContext}\n\n---\n\n${promptText}`;
@@ -3112,26 +3044,26 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
         // Combine RAG content with web search content if available
         let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
-        
+
         if (webSearchContent && webSearchContent.trim().length > 0) {
-        console.log(`\n${'='.repeat(80)}`);
-        console.log(`🌐 [COMBINING SOURCES] Adding web search content to RAG prompt`);
-        console.log(`${'='.repeat(80)}`);
-        console.log(`   Web content length: ${webSearchContent.length} chars`);
-        console.log(`   Web citations: ${webSearchStreamCitations.length}`);
-        console.log(`   RAG chunks: ${topChunks.length}`);
-        console.log(`${'='.repeat(80)}\n`);
-        
-        // Build web sources list for clarity
-        const webSourcesList = webSearchStreamCitations.map((cite, idx) => {
-          const sourceName = cite.sourceType === 'indiankanoon' ? 'Indian Kanoon' :
-                           cite.sourceType === 'manupatra' ? 'Manupatra' :
-                           cite.sourceType === 'scconline' ? 'SCC Online' :
-                           cite.sourceType === 'legalcrystal' ? 'Legal Crystal' :
-                           cite.domain || cite.url || 'Web Source';
-          return `${idx + 1}. ${cite.title || 'Web Source'} (${sourceName}) - ${cite.url || 'N/A'}`;
-        }).join('\n');
-        
+          console.log(`\n${'='.repeat(80)}`);
+          console.log(`🌐 [COMBINING SOURCES] Adding web search content to RAG prompt`);
+          console.log(`${'='.repeat(80)}`);
+          console.log(`   Web content length: ${webSearchContent.length} chars`);
+          console.log(`   Web citations: ${webSearchStreamCitations.length}`);
+          console.log(`   RAG chunks: ${topChunks.length}`);
+          console.log(`${'='.repeat(80)}\n`);
+
+          // Build web sources list for clarity
+          const webSourcesList = webSearchStreamCitations.map((cite, idx) => {
+            const sourceName = cite.sourceType === 'indiankanoon' ? 'Indian Kanoon' :
+              cite.sourceType === 'manupatra' ? 'Manupatra' :
+                cite.sourceType === 'scconline' ? 'SCC Online' :
+                  cite.sourceType === 'legalcrystal' ? 'Legal Crystal' :
+                    cite.domain || cite.url || 'Web Source';
+            return `${idx + 1}. ${cite.title || 'Web Source'} (${sourceName}) - ${cite.url || 'N/A'}`;
+          }).join('\n');
+
           fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS FROM YOUR UPLOADED FILES (FOLDER: "${folderName}") ===\n${chunkContext}\n\n=== WEB CONTENT (ALREADY FETCHED AND PROVIDED BELOW) ===\n**IMPORTANT**: The following content has been successfully retrieved from the web sources listed below. You HAVE access to this content and should use it to answer the user's question.\n\n**Web Sources Accessed:**\n${webSourcesList}\n\n**Content from Web Sources:**\n${webSearchContent}\n\n=== INSTRUCTIONS ===\n1. The web content above has been successfully fetched and is available for you to use.\n2. You CAN and SHOULD use this web content to answer the user's question.\n3. Do NOT say you cannot access websites - the content has already been provided above.\n4. Combine information from both:\n   - Your uploaded documents (cited with page numbers)\n   - Web sources (cited with URLs)\n5. When referencing information, clearly indicate which source you're using (e.g., "According to Indian Kanoon..." or "Based on the web source...").\n6. If the user asked to check a specific website (like Indian Kanoon), use the provided content from that website to answer.`;
         }
 
@@ -3169,7 +3101,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
             }
           }
           flushChunkBuffer();
-          
+
           // Store in cache after successful streaming (before post-processing)
           await setCachedResponse(userId, cacheKey, fullAnswer, {
             methodUsed: 'rag',
@@ -3190,12 +3122,12 @@ exports.intelligentFolderChatStream = async (req, res) => {
           console.error(`   Prompt Length: ${fullPrompt.length} chars`);
           console.error(`   Stack: ${streamError.stack}`);
           console.error(`${'='.repeat(80)}\n`);
-          
+
           if (streamError.message && streamError.message.includes('fetch failed')) {
             sendError('Network error: Failed to connect to LLM service. Please check your internet connection and API credentials.', streamError.message);
             return;
           }
-          
+
           throw streamError;
         }
 
@@ -3211,7 +3143,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
           } catch (e) {
             console.warn('[STREAMING RAG] Could not fetch template data for post-processing:', e);
           }
-          
+
           if (streamingTemplateData?.outputTemplate) {
             fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
           } else {
@@ -3226,7 +3158,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
     const protocol = req.protocol || req.headers['x-forwarded-proto'] || 'http';
     const host = req.get('host') || req.headers.host || '';
     const baseUrl = `${protocol}://${host}`;
-    
+
     // Extract citations from RAG (uploaded documents)
     let ragCitations = [];
     if (methodUsed === 'gemini_eyeball' && processedFiles.length > 0) {
@@ -3238,11 +3170,11 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     // Combine RAG citations with web search citations
     let citations = [...ragCitations];
-    
+
     // Add web search citations if available (ALWAYS include web citations when web content is used)
     if (webSearchStreamCitations && webSearchStreamCitations.length > 0) {
       console.log(`🌐 [CITATIONS] Adding ${webSearchStreamCitations.length} web search citations`);
-      
+
       // Format web citations to match RAG citation structure
       const formattedWebCitations = webSearchStreamCitations.map((webCite, idx) => {
         const citation = {
@@ -3265,7 +3197,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
           title: webCite.title || '',
           sourceType: webCite.sourceType || webCite.source || 'web_search' // e.g., 'indiankanoon', 'manupatra', 'web_search'
         };
-        
+
         // Add domain name for better identification
         if (webCite.url) {
           try {
@@ -3276,16 +3208,16 @@ exports.intelligentFolderChatStream = async (req, res) => {
             // Invalid URL, skip
           }
         }
-        
+
         console.log(`🌐 [CITATIONS] Web citation ${idx + 1}: ${citation.title} - ${citation.url}`);
         return citation;
       });
-      
+
       // ALWAYS include web citations, even if there are no RAG citations
       citations = [...ragCitations, ...formattedWebCitations];
       console.log(`📚 [CITATIONS] Total citations: ${ragCitations.length} RAG + ${formattedWebCitations.length} Web = ${citations.length} total`);
       console.log(`📚 [CITATIONS] Web citation URLs: ${formattedWebCitations.map(c => c.url).filter(Boolean).join(', ')}`);
-      
+
       // Validate web citations have URLs
       const webCitationsWithoutUrls = formattedWebCitations.filter(c => !c.url);
       if (webCitationsWithoutUrls.length > 0) {
@@ -3301,7 +3233,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
       console.log(`📑 [STREAMING] ${ragCitations.length} RAG citations extracted (${methodUsed})`);
       citations = ragCitations;
     }
-    
+
     // Final validation: Log citation breakdown
     if (citations.length > 0) {
       const webCitationCount = citations.filter(c => c.isWebSource || c.url).length;
@@ -3316,7 +3248,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
     if (citations.length === 0 && methodUsed === 'rag' && usedChunksForCitations.length > 0) {
       console.warn(`⚠️ [STREAMING] ${usedChunksForCitations.length} chunks used but NO citations extracted!`);
     }
-    
+
     console.log(`${'='.repeat(80)}\n`);
 
     let storedQuestion;
@@ -3348,7 +3280,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
       for (const file of processedFiles) {
         try {
           const chunks = await FileChunk.getChunksByFileId(file.id);
-          
+
           if (!chunks || chunks.length === 0) {
             continue;
           }
@@ -3368,14 +3300,14 @@ exports.intelligentFolderChatStream = async (req, res) => {
           });
 
           const allPages = Array.from(pageSet).sort((a, b) => a - b);
-          
+
           if (allPages.length > 0) {
             const minPage = Math.min(...allPages);
             const maxPage = Math.max(...allPages);
-            const pageLabel = allPages.length === 1 
-              ? `Page ${minPage}` 
+            const pageLabel = allPages.length === 1
+              ? `Page ${minPage}`
               : (minPage === maxPage ? `Page ${minPage}` : `Pages ${minPage}-${maxPage}`);
-            
+
             chunkDetails.push({
               file_id: file.id,
               filename: file.originalname,
@@ -3384,7 +3316,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
               page_end: maxPage,
               page_label: pageLabel,
               all_pages: allPages, // Include all pages array
-              content_preview: chunks && chunks.length > 0 
+              content_preview: chunks && chunks.length > 0
                 ? (chunks[0].content || '').substring(0, 200) + ((chunks[0].content || '').length > 200 ? '...' : '')
                 : 'Full document analysis',
               is_full_document: false, // Changed to false since we now show specific pages
@@ -3398,7 +3330,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
               page_end: null,
               page_label: 'Full Document',
               all_pages: [1],
-              content_preview: chunks && chunks.length > 0 
+              content_preview: chunks && chunks.length > 0
                 ? (chunks[0].content || '').substring(0, 200) + ((chunks[0].content || '').length > 200 ? '...' : '')
                 : 'Full document analysis',
               is_full_document: true,
@@ -3451,9 +3383,13 @@ exports.intelligentFolderChatStream = async (req, res) => {
     res.write(`data: ${JSON.stringify({
       type: 'done',
       session_id: finalSessionId,
+      id: savedChat.id,
+      message_id: savedChat.id,
       chat_id: savedChat.id,
       method: methodUsed,
       answer_length: fullAnswer.length,
+      used_chunk_ids: usedChunkIds,
+      used_file_ids: usedFileIds,
       citations: citations, // Array of citation objects with page numbers and links
       chunk_details: chunkDetails // ✅ Chunk details with page numbers for easy reference
     })}\n\n`);

@@ -1,0 +1,373 @@
+/* Enhanced Draft Selection Page Styles */
+
+/* Smooth transitions for all interactive elements */
+.draft-selection-enhanced * {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Template Gallery Styles */
+.template-gallery-container {
+  position: relative;
+  overflow: hidden;
+}
+
+.template-gallery-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+.template-gallery-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.template-gallery-scroll::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.template-gallery-scroll::-webkit-scrollbar-thumb {
+  background: #21C1B6;
+  border-radius: 4px;
+}
+
+.template-gallery-scroll::-webkit-scrollbar-thumb:hover {
+  background: #1AA49B;
+}
+
+/* Template Card Hover Effects */
+.template-card {
+  transition: all 0.3s ease;
+}
+
+.template-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+}
+
+/* Two Panel Layout Transitions */
+.two-panel-layout {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Panel Slide Transitions */
+.panel-left,
+.panel-right {
+  transition: all 0.3s ease;
+}
+
+/* Template Preview Panel */
+.template-preview-panel {
+  transition: opacity 0.3s ease;
+}
+
+.template-preview-panel.loading {
+  opacity: 0.6;
+}
+
+/* Editable Field Styles */
+.editable-field {
+  transition: all 0.2s ease;
+}
+
+.editable-field:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(33, 193, 182, 0.1);
+}
+
+/* Sidebar Blocks - AI Assistant & Form Fields (separate cards) */
+.sidebar-blocks {
+  display: flex;
+  gap: 1rem;
+  min-height: 0;
+}
+
+.sidebar-block {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar-block__header {
+  flex-shrink: 0;
+}
+
+.sidebar-block--ai .sidebar-block__header {
+  border-bottom-color: rgba(139, 92, 246, 0.15);
+}
+
+.sidebar-block--form .sidebar-block__header {
+  border-bottom-color: rgba(20, 184, 166, 0.15);
+}
+
+/* Chat Panel Styles */
+.chat-message {
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.chat-input-container {
+  transition: all 0.2s ease;
+}
+
+.chat-input-container:focus-within {
+  box-shadow: 0 0 0 2px rgba(33, 193, 182, 0.2);
+}
+
+/* Form Field Styles */
+.form-field {
+  transition: all 0.2s ease;
+}
+
+.form-field:focus-within {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Responsive Breakpoints */
+@media (max-width: 1024px) {
+  .two-panel-layout {
+    flex-direction: column;
+  }
+
+  .panel-left,
+  .panel-right {
+    width: 100% !important;
+    height: 50vh;
+  }
+}
+
+@media (max-width: 768px) {
+  .template-card {
+    min-width: 200px;
+  }
+
+  .sidebar-blocks {
+    flex-direction: column;
+    padding: 0.75rem;
+    gap: 0.75rem;
+  }
+
+  .sidebar-block--ai,
+  .sidebar-block--form {
+    min-height: 280px;
+    max-height: 50vh;
+  }
+
+  .sidebar-block--form {
+    max-width: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .template-card {
+    min-width: 180px;
+  }
+}
+
+/* Loading States */
+.loading-spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Smooth Scroll Behavior */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Button Hover Effects */
+.btn-primary {
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(33, 193, 182, 0.3);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+/* Close Button Animation */
+.close-button {
+  transition: all 0.2s ease;
+}
+
+.close-button:hover {
+  transform: rotate(90deg);
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+/* Template Gallery Arrow Buttons */
+.gallery-arrow {
+  transition: all 0.2s ease;
+}
+
+.gallery-arrow:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.gallery-arrow:active {
+  transform: scale(0.95);
+}
+
+/* Scroll Indicator */
+.scroll-indicator {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    #21C1B6,
+    transparent
+  );
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.template-gallery-container:hover .scroll-indicator {
+  opacity: 1;
+}
+
+/* Smooth Panel Transitions */
+.panel-enter {
+  opacity: 0;
+  transform: translateX(20px);
+}
+
+.panel-enter-active {
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.panel-exit {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.panel-exit-active {
+  opacity: 0;
+  transform: translateX(-20px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+/* A4 Page Styling */
+.a4-page {
+  width: 210mm;
+  min-height: 297mm;
+  padding: 25.4mm;
+  page-break-after: always;
+  background: white;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+  margin: 0 auto 20px;
+  font-family: 'Times New Roman', Times, serif;
+  font-size: 12pt;
+  line-height: 1.6;
+  color: #333;
+}
+
+.a4-page * {
+  max-width: 100%;
+}
+
+.a4-page h1,
+.a4-page h2,
+.a4-page h3 {
+  font-weight: bold;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+}
+
+.a4-page p {
+  margin: 0.8em 0;
+  text-align: justify;
+}
+
+@media print {
+  .a4-page {
+    margin: 0;
+    box-shadow: none;
+  }
+}
+
+/* Filled Field Styling */
+.filled-field {
+  transition: all 0.2s ease;
+  display: inline-block;
+}
+
+.filled-field:hover {
+  background-color: rgba(33, 193, 182, 0.2);
+  border-color: #1AA49B !important;
+}
+
+/* Empty Field Styling */
+.empty-field {
+  transition: all 0.2s ease;
+  display: inline-block;
+}
+
+.empty-field:hover {
+  background-color: rgba(255, 193, 7, 0.1);
+  border-color: #ffc107 !important;
+}
+
+/* Preview Content Container */
+.preview-content {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* TipTap ProseMirror Styles */
+.ProseMirror {
+  outline: none;
+}
+
+.ProseMirror p {
+  margin: 1em 0;
+}
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3 {
+  font-weight: bold;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}

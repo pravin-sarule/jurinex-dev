@@ -64,7 +64,7 @@ async function performWebSearch(query, numResults = 5) {
 async function fetchUrlContent(url) {
   try {
     console.log(`[URL Fetch] 📄 Fetching content from: ${url}`);
-    
+
     const response = await axios.get(url, {
       timeout: 15000,
       headers: {
@@ -74,7 +74,7 @@ async function fetchUrlContent(url) {
     });
 
     let content = response.data;
-    
+
     if (typeof content === 'string') {
       content = content
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
@@ -82,7 +82,7 @@ async function fetchUrlContent(url) {
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-      
+
       if (content.length > 10000) {
         content = content.substring(0, 10000) + '...';
       }
@@ -117,7 +117,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
   const message = userMessage.toLowerCase();
   const contextLower = (context || '').toLowerCase();
   const chunksLower = (relevantChunks || '').toLowerCase();
-  
+
   // PRIORITY 1: EXPLICIT WEB SEARCH REQUESTS (CHECK FIRST!)
   const explicitWebSearchTriggers = [
     'search for',
@@ -174,13 +174,13 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'web se answer',
     'web pe answer',
   ];
-  
+
   const hasExplicitTrigger = explicitWebSearchTriggers.some(trigger => message.includes(trigger));
   if (hasExplicitTrigger) {
     console.log('[Web Search] ✅ EXPLICIT web search request detected - triggering web search');
     return true;
   }
-  
+
   const documentRejectionKeywords = [
     "don't want from document",
     "don't want from the document",
@@ -231,7 +231,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     "document nahi",
     "document mat use karo",
   ];
-  
+
   const hasDocumentRejection = documentRejectionKeywords.some(keyword => {
     const lowerKeyword = keyword.toLowerCase();
     if (lowerKeyword.length <= 5) {
@@ -243,15 +243,15 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     }
     return message.includes(lowerKeyword);
   });
-  
-  const hasDontWant = (message.includes("don't want") || message.includes("dont want") || message.includes("don't want") || message.includes("do not want")) && 
-                      (message.includes("document") || message.includes("from document"));
-  
+
+  const hasDontWant = (message.includes("don't want") || message.includes("dont want") || message.includes("don't want") || message.includes("do not want")) &&
+    (message.includes("document") || message.includes("from document"));
+
   if (hasDocumentRejection || hasDontWant) {
     console.log('[Web Search] ✅ User explicitly rejected documents - ALWAYS triggering web search');
     return true;
   }
-  
+
   const personalPronouns = [
     'my',
     'my own',
@@ -261,7 +261,7 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'my information',
     'my data',
   ];
-  
+
   const personalDataKeywords = [
     'my case',
     'my organization',
@@ -284,21 +284,21 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'my type',
     'my category',
   ];
-  
+
   const hasPersonalPronoun = personalPronouns.some(pronoun => {
     const regex = new RegExp(`\\b${pronoun}\\b`, 'i');
     return regex.test(userMessage);
   });
-  
+
   const isPersonalDataQuestion = personalDataKeywords.some(keyword => message.includes(keyword));
-  
+
   if (hasPersonalPronoun || isPersonalDataQuestion) {
     console.log('[Web Search] Personal data/profile question detected - skipping web search');
     return false;
   }
-  
+
   const hasDocumentContext = (contextLower.length > 500) || (chunksLower.length > 500);
-  
+
   const currentInfoTriggers = [
     'latest news',
     'current events',
@@ -325,14 +325,14 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'recently',
     'latest',
   ];
-  
+
   const hasCurrentInfoTrigger = currentInfoTriggers.some(trigger => message.includes(trigger));
-  
+
   if (hasCurrentInfoTrigger) {
     console.log('[Web Search] ✅ Current/real-time information request detected');
     return true;
   }
-  
+
   const generalKnowledgePatterns = [
     /^what is (.+)\?/i,
     /^who is (.+)\?/i,
@@ -344,9 +344,9 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     /explain (.+)/i,
     /what are (.+)/i,
   ];
-  
+
   const isGeneralKnowledgeQuestion = generalKnowledgePatterns.some(pattern => pattern.test(userMessage));
-  
+
   const documentRelatedKeywords = [
     'document',
     'this document',
@@ -365,29 +365,29 @@ function shouldTriggerWebSearch(userMessage, context = '', relevantChunks = '') 
     'find in',
     'show me from',
   ];
-  
+
   const isDocumentQuestion = documentRelatedKeywords.some(keyword => message.includes(keyword));
-  
+
   if (isDocumentQuestion && hasDocumentContext) {
     console.log('[Web Search] Question is about documents and context is available - skipping web search');
     return false;
   }
-  
+
   if (isGeneralKnowledgeQuestion && !hasDocumentContext) {
     console.log('[Web Search] ✅ General knowledge question without document context');
     return true;
   }
-  
+
   if (hasDocumentContext) {
     console.log('[Web Search] Document context available - assuming answer is in documents');
     return false;
   }
-  
+
   if (!hasDocumentContext && isGeneralKnowledgeQuestion) {
     console.log('[Web Search] ✅ No document context - triggering for general knowledge question');
     return true;
   }
-  
+
   console.log('[Web Search] No web search triggers detected - using available context');
   return false;
 }
@@ -396,21 +396,19 @@ function estimateTokenCount(text = '') {
   return Math.ceil(text.length / 4); // ~4 characters per token
 }
 
-function trimContext(context = '', maxTokens = 20000) {
+function trimContext(context, maxTokens = 500) {
   if (!context) return '';
   const tokens = estimateTokenCount(context);
   if (tokens <= maxTokens) return context;
+
   const ratio = maxTokens / tokens;
   const trimmedLength = Math.floor(context.length * ratio);
-  return (
-    context.substring(0, trimmedLength) +
-    '\n\n[...context truncated due to model limits...]'
-  );
+  return context.substring(0, trimmedLength) + '...';
 }
 
-function filterRelevantChunks(chunks, userMessage, maxChunks = 12) {
+function filterRelevantChunks(chunks, userMessage, maxChunks = 5) {
   if (!chunks) return '';
-  
+
   let chunkString;
   if (Array.isArray(chunks)) {
     chunkString = chunks
@@ -428,22 +426,20 @@ function filterRelevantChunks(chunks, userMessage, maxChunks = 12) {
   } else {
     return '';
   }
-  
+
   const chunkArray = chunkString.split('\n\n').filter(Boolean);
   if (chunkArray.length <= maxChunks) return chunkString;
 
-  const keywords = userMessage
-    .toLowerCase()
+  const keywords = userMessage.toLowerCase()
     .split(/\s+/)
     .filter(w => w.length > 3)
-    .slice(0, 10);
+    .slice(0, 5); // Top 5 keywords only
 
   const scored = chunkArray.map(chunk => {
-    const text = chunk.toLowerCase();
-    const score = keywords.reduce(
-      (sum, kw) => sum + (text.includes(kw) ? 1 : 0),
-      0
-    );
+    const chunkLower = chunk.toLowerCase();
+    const score = keywords.reduce((sum, kw) => {
+      return sum + (chunkLower.includes(kw) ? 1 : 0);
+    }, 0);
     return { chunk, score };
   });
 
@@ -461,7 +457,7 @@ async function retryWithBackoff(fn, retries = 3, delay = 2000) {
       return await fn();
     } catch (err) {
       const errorMessage = err.message || '';
-      const isRateLimitError = 
+      const isRateLimitError =
         errorMessage.includes('overloaded') ||
         errorMessage.includes('503') ||
         errorMessage.includes('429') ||
@@ -472,9 +468,9 @@ async function retryWithBackoff(fn, retries = 3, delay = 2000) {
         errorMessage.includes('exceeded') ||
         err.status === 429 ||
         err.status === 503;
-        
+
       console.warn(`⚠️ [retryWithBackoff] Attempt ${attempt}/${retries} failed:`, errorMessage.substring(0, 200));
-      
+
       if (isRateLimitError) {
         if (attempt < retries) {
           const backoffDelay = delay * attempt;
@@ -492,8 +488,8 @@ async function retryWithBackoff(fn, retries = 3, delay = 2000) {
 
 const GEMINI_MODELS = {
   // Primary model with fallbacks for rate limiting (using valid model names)
-  gemini: ['gemini-2.0-flash-exp', 'gemini-2.5-flash-preview-04-17', 'gemini-2.0-flash'],
-  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.5-pro-preview-05-06'],
+  gemini: ['gemini-2.0-flash', 'gemini-2.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro'],
+  'gemini-pro-2.5': ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro'],
   'gemini-3-pro': ['gemini-3-pro-preview'], // Uses new SDK
 };
 
@@ -567,8 +563,8 @@ const LLM_CONFIGS = {
       Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
     },
   },
-  gemini: { model: 'gemini-2.0-flash-exp' },
-  'gemini-pro-2.5': { model: 'gemini-2.5-pro' },
+  gemini: { model: 'gemini-1.5-pro', headers: {} },
+  'gemini-pro-2.5': { model: 'gemini-1.5-pro', headers: {} },
   'gemini-3-pro': { model: 'gemini-3-pro-preview' }, // Uses new SDK
 };
 
@@ -645,12 +641,17 @@ async function getModelMaxTokens(provider, modelName) {
   const defaultMaxTokens = {
     'gemini-3-pro-preview': 8192,
     'gemini-2.5-pro': 8192,
+    'gemini-2.5-pro-preview': 8192,
     'gemini-2.5-flash': 8192,
     'gemini-2.0-flash-exp': 8192,
     'gemini-2.0-flash': 8192,
     'gemini-2.0-pro-exp': 8192,
     'gemini-1.5-flash': 8192,
     'gemini-1.5-pro': 8192,
+    'gemini-1.5-flash-8b': 8192,
+    'gemini-2.5-flash-preview-04-17': 8192,
+    'gemini-pro': 8192,
+    'gemini-pro-vision': 8192,
   };
 
   const modelLower = modelName.toLowerCase();
@@ -725,7 +726,7 @@ function getAvailableProviders() {
 async function getSystemPrompt(baseContext = '') {
   try {
     const dbSystemPrompt = await SystemPrompt.getLatestSystemPrompt();
-    
+
     if (dbSystemPrompt && baseContext) {
       const combinedPrompt = `${dbSystemPrompt}
 
@@ -734,14 +735,14 @@ ${baseContext}`;
       console.log(`[SystemPrompt] Database prompt length: ${dbSystemPrompt.length} chars | Adaptive context: ${baseContext.length} chars`);
       return combinedPrompt;
     }
-    
+
     if (dbSystemPrompt && dbSystemPrompt.trim()) {
       console.log('[SystemPrompt] ✅ Using system prompt from database (STRICT COMPLIANCE MODE)');
       console.log(`[SystemPrompt] Database prompt length: ${dbSystemPrompt.length} chars`);
       console.log(`[SystemPrompt] Database prompt preview: ${dbSystemPrompt.substring(0, 200)}...`);
       return dbSystemPrompt.trim();
     }
-    
+
     console.log('[SystemPrompt] ⚠️ No database prompt found, using fallback system instruction');
     if (baseContext && baseContext.trim()) {
       console.log(`[SystemPrompt] Using context as fallback (${baseContext.length} chars)`);
@@ -761,7 +762,7 @@ ${baseContext}`;
 
 function buildEnhancedSystemPrompt(baseSystemPrompt, hasDocuments, hasWebSearch, hasUrlContent, isExplicitWebRequest = false) {
   let sourceInfo = '';
-  
+
   if (isExplicitWebRequest && (hasWebSearch || hasUrlContent)) {
     sourceInfo = `\n\n⚠️ CRITICAL: The user EXPLICITLY requested information from the INTERNET/WEB.
 You MUST prioritize and use WEB SEARCH RESULTS${hasUrlContent ? ' or FETCHED WEBSITE CONTENT' : ''} as your PRIMARY source.
@@ -795,7 +796,7 @@ When answering:
 - When answering based on documents, mention "Based on your documents..." or "According to the provided information..."
 - Focus on information from the user's documents and context`;
   }
-  
+
   return baseSystemPrompt + sourceInfo;
 }
 
@@ -807,7 +808,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   const safeContext = typeof context === 'string' ? context : '';
 
   let userQuestionForSearch = originalQuestion || userMessage;
-  
+
   if (!originalQuestion && userMessage) {
     const userQuestionMatch = userMessage.match(/USER QUESTION:\s*(.+?)(?:\n\n===|$)/s);
     if (userQuestionMatch) {
@@ -837,7 +838,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     'web se dhoondo', 'web pe dhoondo', 'internet se', 'online dhoondo', 'web se batao'
   ];
   const isExplicitWebRequest = explicitWebKeywords.some(keyword => messageLower.includes(keyword));
-  
+
   let trimmedContext, filteredChunks, trimmedChunks;
   if (isExplicitWebRequest) {
     console.log('[Web Search] 🎯 Explicit web request detected - minimizing document context');
@@ -854,9 +855,9 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   let citations = [];
   let sourceInfo = [];
   let urlContents = [];
-  
+
   const urls = extractUrls(userQuestionForSearch);
-  
+
   if (!isExplicitWebRequest) {
     if (trimmedChunks) {
       sourceInfo.push('📄 Uploaded Documents');
@@ -865,7 +866,7 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       sourceInfo.push('📋 User Profile/Context');
     }
   }
-  
+
   if (urls.length > 0) {
     console.log(`[URL Fetch] 🔗 Found ${urls.length} URL(s) in message, fetching content...`);
     for (const url of urls) {
@@ -876,13 +877,13 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       }
     }
   }
-  
+
   const needsWebSearch = isExplicitWebRequest || shouldTriggerWebSearch(userQuestionForSearch, trimmedContext, trimmedChunks);
   if (needsWebSearch) {
     console.log(`[Web Search] 🔍 ${isExplicitWebRequest ? 'EXPLICIT' : 'Auto'}-triggering web search for user question:`, userQuestionForSearch.substring(0, 100));
     console.log(`[Web Search] 📋 Provider: ${provider} - Web search will be available for this model`);
     webSearchData = await performWebSearch(userQuestionForSearch, 5);
-    
+
     if (webSearchData && webSearchData.results) {
       citations = webSearchData.citations;
       sourceInfo.push('🌐 Web Search');
@@ -896,10 +897,10 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
   }
 
   let prompt = userMessage.trim();
-  
+
   if (isExplicitWebRequest && (webSearchData || urlContents.length > 0)) {
     console.log('[Web Search] 🎯 EXPLICIT web search request - prioritizing web sources over documents');
-    
+
     if (urlContents.length > 0) {
       prompt += `\n\n=== PRIMARY SOURCE: FETCHED WEBSITE CONTENT ===`;
       urlContents.forEach(urlData => {
@@ -907,17 +908,17 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       });
       prompt += `\n\n⚠️ CRITICAL: This website content is the PRIMARY source for your answer.`;
     }
-    
+
     if (webSearchData && webSearchData.results) {
       prompt += `\n\n=== PRIMARY SOURCE: WEB SEARCH RESULTS ===\n${webSearchData.results}`;
       prompt += `\n\n⚠️ CRITICAL: These web search results are the PRIMARY source for your answer. Use them as the main source.`;
     }
-    
+
     if (trimmedChunks) {
       prompt += `\n\n=== SECONDARY REFERENCE: UPLOADED DOCUMENTS (OPTIONAL) ===\n${trimmedChunks}`;
       prompt += `\n\n⚠️ NOTE: The user explicitly requested web/internet information. Use documents ONLY for additional context if needed, but PRIMARY source must be web search results.`;
     }
-    
+
     prompt += `\n\n🎯 CRITICAL INSTRUCTIONS:
 - The user EXPLICITLY requested information from the INTERNET/WEB
 - You MUST prioritize and use WEB SEARCH RESULTS${urlContents.length > 0 ? ' or FETCHED WEBSITE CONTENT' : ''} as your PRIMARY source
@@ -925,12 +926,12 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
 - Start your answer with: "According to web search results..." or "Based on information from the internet..."
 - Cite sources as [Source 1], [Source 2], etc.${urlContents.length > 0 ? ' or mention the URL explicitly' : ''}
 - DO NOT rely primarily on documents when the user asked for web/internet information`;
-    
+
   } else {
     if (trimmedChunks) {
       prompt += `\n\n=== UPLOADED DOCUMENTS CONTEXT ===\n${trimmedChunks}`;
     }
-    
+
     if (urlContents.length > 0) {
       prompt += `\n\n=== FETCHED WEBSITE CONTENT ===`;
       urlContents.forEach(urlData => {
@@ -938,11 +939,11 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
       });
       prompt += `\n\n⚠️ IMPORTANT: When using information from fetched websites above, cite the URL and mention "According to ${urlContents[0].url}..."`;
     }
-    
+
     if (webSearchData && webSearchData.results) {
       prompt += `\n\n=== WEB SEARCH RESULTS ===\n${webSearchData.results}\n\n⚠️ IMPORTANT: When using information from web sources above, cite them as [Source 1], [Source 2], etc.`;
     }
-    
+
     if (sourceInfo.length > 0) {
       prompt += `\n\n📌 Available Information Sources: ${sourceInfo.join(', ')}`;
       prompt += `\n\n🎯 Instructions: 
@@ -954,9 +955,9 @@ async function askLLM(providerName, userMessage, context = '', relevant_chunks =
     }
   }
 
-  const hasComprehensiveInstructions = prompt.includes('COMPREHENSIVE (Full Document)') || 
-                                       prompt.includes('COMPLETE DOCUMENT CONTENT') ||
-                                       prompt.includes('Now provide your comprehensive analysis:');
+  const hasComprehensiveInstructions = prompt.includes('COMPREHENSIVE (Full Document)') ||
+    prompt.includes('COMPLETE DOCUMENT CONTENT') ||
+    prompt.includes('Now provide your comprehensive analysis:');
 
   if (hasComprehensiveInstructions) {
     const reinforcementInstructions = `
@@ -971,7 +972,7 @@ CRITICAL REMINDER - You MUST:
 ✓ Be comprehensive - don't skip important details
 
 Begin your analysis now:`;
-    
+
     prompt += reinforcementInstructions;
     console.log('[askLLM] ✅ Added reinforcement instructions for comprehensive analysis');
   }
@@ -994,7 +995,7 @@ Begin your analysis now:`;
   );
 
   if (citations.length > 0) {
-    const citationsText = '\n\n---\n**📚 Web Sources Referenced:**\n' + 
+    const citationsText = '\n\n---\n**📚 Web Sources Referenced:**\n' +
       citations.map(c => `[Source ${c.index}] [${c.title}](${c.link})`).join('\n');
     return response + citationsText;
   }
@@ -1024,19 +1025,19 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
       try {
         const maxOutputTokens = await getModelMaxTokens(provider, modelName);
         console.log(`[LLM Max Tokens] Gemini model ${modelName} using maxOutputTokens=${maxOutputTokens}`);
-        
+
         const isGemini3Pro = modelName === 'gemini-3-pro-preview';
-        
+
         if (isGemini3Pro) {
           console.log(`[SystemPrompt] 🎯 Gemini 3.0 Pro ${modelName} using new SDK`);
-          
+
           try {
             const totalRequestSize = prompt.length + (systemPrompt?.length || 0);
             const maxSafeRequestSize = 3000000; // ~750K tokens (75% of 1M for safety)
-            
+
             let finalPrompt = prompt;
             let finalSystemPrompt = systemPrompt;
-            
+
             if (totalRequestSize > maxSafeRequestSize) {
               console.warn(`[Gemini 3.0 Pro] ⚠️ Request size (${totalRequestSize} chars) exceeds safe limit (${maxSafeRequestSize} chars). Truncating...`);
               const maxPromptSize = Math.floor(maxSafeRequestSize * 0.9);
@@ -1044,7 +1045,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               finalPrompt = truncatedPrompt + '\n\n[...content truncated due to size limits...]';
               console.log(`[Gemini 3.0 Pro] 📉 Truncated prompt from ${prompt.length} to ${finalPrompt.length} chars`);
             }
-            
+
             const requestPayload = {
               model: modelName,
               contents: [
@@ -1061,33 +1062,33 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
                 temperature: 0.7,
               }
             };
-            
+
             console.log(`[Gemini 3.0 Pro] 🚀 Sending request with ${finalPrompt.length} chars prompt and ${(hasValidSystemPrompt ? finalSystemPrompt.trim().length : 0)} chars system instruction`);
             if (hasValidSystemPrompt) {
               console.log(`[callSinglePrompt] ✅ System prompt WILL be applied to Gemini 3.0 Pro ${modelName} (${finalSystemPrompt.trim().length} chars)`);
             } else {
               console.error(`[callSinglePrompt] ❌ System prompt NOT applied to Gemini 3.0 Pro ${modelName}`);
             }
-            
+
             const requestPromise = genAI3.models.generateContent(requestPayload);
-            const timeoutPromise = new Promise((_, reject) => 
+            const timeoutPromise = new Promise((_, reject) =>
               setTimeout(() => reject(new Error('Request timeout: Gemini 3.0 Pro API request took too long')), 180000)
             );
-            
+
             const response = await Promise.race([requestPromise, timeoutPromise]);
-            
-            const text = response.text || 
-                        response.candidates?.[0]?.content?.parts?.[0]?.text || 
-                        response.response?.text() || '';
-            
+
+            const text = response.text ||
+              response.candidates?.[0]?.content?.parts?.[0]?.text ||
+              response.response?.text() || '';
+
             if (!text) {
               throw new Error('No text returned from Gemini 3.0 Pro');
             }
-            
+
             const usage = response.usageMetadata || {};
             let inputTokens = usage.promptTokenCount || usage.promptTokenCount || 0;
             let outputTokens = usage.candidatesTokenCount || 0;
-            
+
             // Calculate tokens from text if API didn't return them
             if (inputTokens === 0 && finalPrompt) {
               inputTokens = estimateTokenCount(finalPrompt + (finalSystemPrompt || ''));
@@ -1097,11 +1098,11 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               outputTokens = estimateTokenCount(text);
               console.log(`⚠️ [Gemini 3.0 Pro] API didn't return output tokens, calculated from text: ${outputTokens}`);
             }
-            
+
             console.log(
               `✅ Gemini 3.0 Pro (${modelName}) - Tokens used: ${inputTokens} + ${outputTokens} | max=${maxOutputTokens}`
             );
-            
+
             // Log LLM usage to payment service
             console.log(`🔍 [DEBUG] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${modelName}, metadata:`, JSON.stringify(metadata));
             if (metadata && metadata.userId && modelName) {
@@ -1119,15 +1120,15 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
                 console.error('⚠️ Failed to log LLM usage:', err.message);
               });
             }
-            
+
             return text;
           } catch (gemini3Error) {
-            const isNetworkError = gemini3Error.message?.includes('fetch failed') || 
-                                  gemini3Error.message?.includes('network') ||
-                                  gemini3Error.message?.includes('timeout') ||
-                                  gemini3Error.message?.includes('ECONNREFUSED') ||
-                                  gemini3Error.message?.includes('ETIMEDOUT');
-            
+            const isNetworkError = gemini3Error.message?.includes('fetch failed') ||
+              gemini3Error.message?.includes('network') ||
+              gemini3Error.message?.includes('timeout') ||
+              gemini3Error.message?.includes('ECONNREFUSED') ||
+              gemini3Error.message?.includes('ETIMEDOUT');
+
             if (isNetworkError) {
               console.error(`[Gemini 3.0 Pro] ❌ Network/Request error: ${gemini3Error.message}`);
               console.log(`[Gemini 3.0 Pro] ⚠️ Attempting fallback to legacy Gemini models...`);
@@ -1162,7 +1163,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
           const usage = result.response.usageMetadata || {};
           let inputTokens = usage.promptTokenCount || 0;
           let outputTokens = usage.candidatesTokenCount || 0;
-          
+
           // Calculate tokens from text if API didn't return them
           if (inputTokens === 0 && prompt) {
             inputTokens = estimateTokenCount(prompt + (systemPrompt || ''));
@@ -1172,11 +1173,11 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
             outputTokens = estimateTokenCount(text);
             console.log(`⚠️ [Gemini Legacy] API didn't return output tokens, calculated from text: ${outputTokens}`);
           }
-          
+
           console.log(
             `✅ Gemini (${modelName}) - Tokens used: ${inputTokens} + ${outputTokens} | max=${maxOutputTokens}`
           );
-          
+
           // Log LLM usage to payment service
           console.log(`🔍 [DEBUG] Checking metadata for logging - userId: ${metadata?.userId}, modelName: ${modelName}, metadata:`, JSON.stringify(metadata));
           if (metadata && metadata.userId && modelName) {
@@ -1194,42 +1195,42 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
               console.error('⚠️ Failed to log LLM usage:', err.message);
             });
           }
-          
+
           return text;
         }
       } catch (err) {
         const errorMessage = err.message || '';
-        const isRateLimitError = 
+        const isRateLimitError =
           errorMessage.includes('429') ||
           errorMessage.includes('Too Many Requests') ||
           errorMessage.includes('quota') ||
           errorMessage.includes('rate limit') ||
           errorMessage.includes('exceeded') ||
           err.status === 429;
-          
-        const isNotFoundError = 
+
+        const isNotFoundError =
           errorMessage.includes('404') ||
           errorMessage.includes('Not Found') ||
           errorMessage.includes('is not found') ||
           errorMessage.includes('not supported') ||
           err.status === 404;
-          
+
         console.warn(`⚠️ Gemini model ${modelName} failed: ${errorMessage.substring(0, 200)}`);
         console.error('[Gemini Error Details]', err.response?.data || err);
-        
+
         // If model not found, immediately try next fallback (no delay)
         if (isNotFoundError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [callSinglePrompt] Model ${modelName} not found, trying next fallback...`);
           continue;
         }
-        
+
         // If rate limited, wait and try fallback
         if (isRateLimitError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [callSinglePrompt] Rate limit on ${modelName}, waiting before trying fallback model...`);
           await new Promise(res => setTimeout(res, 2000));
           continue;
         }
-        
+
         if (modelName === models[models.length - 1]) {
           throw err;
         }
@@ -1241,9 +1242,9 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
   const messages = isClaude
     ? [{ role: 'user', content: prompt }]
     : [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
-      ];
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt },
+    ];
 
   const resolvedModelName = config.model;
   const maxTokens = await getModelMaxTokens(provider, resolvedModelName);
@@ -1256,17 +1257,17 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
 
   const payload = isClaude
     ? {
-        model: config.model,
-        max_tokens: maxTokens,
-        messages,
-        system: systemPrompt,
-      }
+      model: config.model,
+      max_tokens: maxTokens,
+      messages,
+      system: systemPrompt,
+    }
     : {
-        model: config.model,
-        messages,
-        max_tokens: maxTokens,
-        temperature: 0.7,
-      };
+      model: config.model,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.7,
+    };
   console.log(`[LLM Max Tokens] ${provider} model ${resolvedModelName} using max_tokens=${maxTokens}`);
 
   const response = await axios.post(config.apiUrl, payload, {
@@ -1277,12 +1278,12 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
   const usage = response.data?.usage || {};
   let inputTokens = usage.prompt_tokens || usage.input_tokens || 0;
   let outputTokens = usage.completion_tokens || usage.output_tokens || 0;
-  
+
   // Get response text for token calculation if needed
   const responseText = response.data?.choices?.[0]?.message?.content ||
     response.data?.content?.[0]?.text ||
     '';
-  
+
   // Calculate tokens from text if API didn't return them
   if (inputTokens === 0 && prompt) {
     inputTokens = estimateTokenCount(prompt + (systemPrompt || ''));
@@ -1292,7 +1293,7 @@ async function callSinglePrompt(provider, prompt, systemPrompt, hasWebSearch = f
     outputTokens = estimateTokenCount(responseText);
     console.log(`⚠️ [${provider}] API didn't return output tokens, calculated from text: ${outputTokens}`);
   }
-  
+
   console.log(
     `✅ ${provider} - Tokens: ${inputTokens} + ${outputTokens}`
   );
@@ -1325,7 +1326,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   const safeContext = typeof context === 'string' ? context : '';
   let userQuestionForSearch = originalQuestion || userMessage;
-  
+
   if (!originalQuestion && userMessage) {
     const userQuestionMatch = userMessage.match(/USER QUESTION:\s*(.+?)(?:\n\n===|$)/s);
     if (userQuestionMatch) {
@@ -1335,11 +1336,11 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   const messageLower = userQuestionForSearch.toLowerCase();
   const explicitWebKeywords = [
-    'search web', 'search online', 'from web', 'web se', 'web pe', 
+    'search web', 'search online', 'from web', 'web se', 'web pe',
     'don\'t want from document', 'not from document', 'ignore document'
   ];
   const isExplicitWebRequest = explicitWebKeywords.some(keyword => messageLower.includes(keyword));
-  
+
   let trimmedContext, filteredChunks, trimmedChunks;
   if (isExplicitWebRequest) {
     trimmedContext = '';
@@ -1354,7 +1355,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   let webSearchData = null;
   let urlContents = [];
   const urls = extractUrls(userQuestionForSearch);
-  
+
   if (urls.length > 0) {
     for (const url of urls) {
       const urlData = await fetchUrlContent(url);
@@ -1363,7 +1364,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
       }
     }
   }
-  
+
   const needsWebSearch = isExplicitWebRequest || shouldTriggerWebSearch(userQuestionForSearch, trimmedContext, trimmedChunks);
   if (needsWebSearch) {
     webSearchData = await performWebSearch(userQuestionForSearch, 5);
@@ -1398,14 +1399,14 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   if (isGemini) {
     const models = GEMINI_MODELS[provider] || GEMINI_MODELS['gemini'];
     let lastError = null;
-    
+
     for (const modelName of models) {
       try {
         const maxOutputTokens = await getModelMaxTokens(provider, modelName);
         const isGemini3Pro = modelName === 'gemini-3-pro-preview';
-        
+
         console.log(`[streamLLM] Trying Gemini model: ${modelName}`);
-        
+
         if (isGemini3Pro) {
           const hasValidSystemPrompt = enhancedSystemPrompt && enhancedSystemPrompt.trim().length > 0;
           const request = {
@@ -1414,9 +1415,9 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             systemInstruction: hasValidSystemPrompt ? { parts: [{ text: enhancedSystemPrompt.trim() }] } : undefined,
             generationConfig: { maxOutputTokens, temperature: 0.7 },
           };
-          
+
           const response = await genAI3.models.generateContentStream(request);
-          
+
           let stream = null;
           if (response && typeof response[Symbol.asyncIterator] === 'function') {
             stream = response;
@@ -1425,7 +1426,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
           } else {
             throw new Error('Invalid streaming response from Gemini 3.0 Pro API');
           }
-          
+
           for await (const chunk of stream) {
             const text = chunk?.text || (typeof chunk?.text === 'function' ? chunk.text() : '') || '';
             if (text) yield text;
@@ -1433,14 +1434,14 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
           return;
         } else {
           const hasValidSystemPrompt = enhancedSystemPrompt && enhancedSystemPrompt.trim().length > 0;
-          const modelConfig = hasValidSystemPrompt 
-            ? { model: modelName, systemInstruction: enhancedSystemPrompt.trim() } 
+          const modelConfig = hasValidSystemPrompt
+            ? { model: modelName, systemInstruction: enhancedSystemPrompt.trim() }
             : { model: modelName };
           const model = genAI.getGenerativeModel(modelConfig);
           const result = await model.generateContentStream(prompt, {
             generationConfig: { maxOutputTokens },
           });
-          
+
           for await (const chunk of result.stream) {
             const text = chunk.text();
             if (text) yield text;
@@ -1450,29 +1451,29 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
       } catch (err) {
         lastError = err;
         const errorMessage = err.message || '';
-        const isRateLimitError = 
+        const isRateLimitError =
           errorMessage.includes('429') ||
           errorMessage.includes('Too Many Requests') ||
           errorMessage.includes('quota') ||
           errorMessage.includes('rate limit') ||
           errorMessage.includes('exceeded') ||
           err.status === 429;
-        
-        const isNotFoundError = 
+
+        const isNotFoundError =
           errorMessage.includes('404') ||
           errorMessage.includes('Not Found') ||
           errorMessage.includes('is not found') ||
           errorMessage.includes('not supported') ||
           err.status === 404;
-        
+
         console.warn(`⚠️ [streamLLM] Gemini model ${modelName} failed:`, errorMessage.substring(0, 200));
-        
+
         // If model not found, immediately try next fallback (no delay)
         if (isNotFoundError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [streamLLM] Model ${modelName} not found, trying next fallback...`);
           continue;
         }
-        
+
         // If rate limited, wait longer and try fallback
         if (isRateLimitError && modelName !== models[models.length - 1]) {
           console.log(`🔄 [streamLLM] Rate limit on ${modelName}, waiting before trying fallback model...`);
@@ -1480,7 +1481,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
           await new Promise(res => setTimeout(res, 2000));
           continue;
         }
-        
+
         // If this is the last model, throw the error
         if (modelName === models[models.length - 1]) {
           throw err;
@@ -1488,7 +1489,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         continue;
       }
     }
-    
+
     // If we get here, all models failed
     if (lastError) throw lastError;
   }
@@ -1496,31 +1497,31 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   const hasValidSystemPrompt = enhancedSystemPrompt && enhancedSystemPrompt.trim().length > 0;
   const messages = isClaude
     ? [{ role: 'user', content: prompt }]
-    : hasValidSystemPrompt 
+    : hasValidSystemPrompt
       ? [{ role: 'system', content: enhancedSystemPrompt.trim() }, { role: 'user', content: prompt }]
       : [{ role: 'user', content: prompt }];
 
   const resolvedModelName = config.model;
   const maxTokens = await getModelMaxTokens(provider, resolvedModelName);
-  
+
   const payload = isClaude
-    ? { 
-        model: config.model, 
-        max_tokens: maxTokens, 
-        messages, 
-        system: hasValidSystemPrompt ? enhancedSystemPrompt.trim() : undefined, 
-        stream: true 
-      }
-    : { 
-        model: config.model, 
-        messages, 
-        max_tokens: maxTokens, 
-        temperature: 0.7, 
-        stream: true 
-      };
+    ? {
+      model: config.model,
+      max_tokens: maxTokens,
+      messages,
+      system: hasValidSystemPrompt ? enhancedSystemPrompt.trim() : undefined,
+      stream: true
+    }
+    : {
+      model: config.model,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.7,
+      stream: true
+    };
 
   console.log(`[Claude Stream] Starting stream with max_tokens=${maxTokens}, timeout=240s`);
-  
+
   const response = await axios.post(config.apiUrl, payload, {
     headers: config.headers,
     responseType: 'stream',
@@ -1531,25 +1532,25 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   let lastChunkTime = Date.now();
   const CHUNK_TIMEOUT = 30000; // 30 seconds timeout between chunks
   let hasReceivedData = false;
-  
+
   try {
     for await (const chunk of response.data) {
       const now = Date.now();
       const timeSinceLastChunk = now - lastChunkTime;
-      
+
       // If we've received data before and it's been too long, break
       if (hasReceivedData && timeSinceLastChunk > CHUNK_TIMEOUT) {
         console.warn(`[Claude Stream] Timeout: No data received for ${timeSinceLastChunk}ms, ending stream`);
         break;
       }
-      
+
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-      
+
       for (const line of lines) {
         if (!line.trim()) continue;
-        
+
         // Handle Claude SSE format: "data: {...}" or "event: ..."
         if (line.startsWith('data: ')) {
           const data = line.replace(/^data: /, '').trim();
@@ -1557,10 +1558,10 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             console.log('[Claude Stream] Received [DONE] signal');
             return;
           }
-          
+
           try {
             const json = JSON.parse(data);
-            
+
             // Claude streaming format: content_block_delta or delta
             let text = '';
             if (json.type === 'content_block_delta' && json.delta?.text) {
@@ -1574,7 +1575,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             } else if (!isClaude && json.choices?.[0]?.delta?.content) {
               text = json.choices[0].delta.content;
             }
-            
+
             if (text) {
               hasReceivedData = true;
               lastChunkTime = now;
@@ -1595,7 +1596,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         }
       }
     }
-    
+
     // Process any remaining buffer
     if (buffer.trim()) {
       const lines = buffer.split('\n');
@@ -1628,11 +1629,77 @@ async function getSummaryFromChunks(chunks) {
   if (!chunks || chunks.length === 0) {
     return null;
   }
-  const combinedText = chunks.join('\n\n');
-  const prompt = `Provide a concise summary of the following text:\n\n${combinedText}`;
-  
-  const summary = await askLLM('gemini', prompt);
-  return summary;
+
+  const MAX_INPUT_CHARS = 15000; // Limit input to ~4k tokens for summaries
+  const MAX_OUTPUT_TOKENS = 1000; // Limit summary length
+
+  let combinedText = chunks.join('\n\n');
+
+  // Truncate if too long
+  if (combinedText.length > MAX_INPUT_CHARS) {
+    console.log(`[getSummaryFromChunks] ⚡ Truncating text from ${combinedText.length} to ${MAX_INPUT_CHARS} chars for faster processing`);
+    combinedText = combinedText.substring(0, MAX_INPUT_CHARS) + '\n\n[...content truncated for summary...]';
+  }
+
+  const prompt = `Provide a concise summary (2-3 paragraphs) of the following text:\n\n${combinedText}`;
+
+  // Optimize: Use direct Gemini API call instead of full askLLM for speed
+  // This avoids web search, system prompts, and other overhead
+  try {
+    // Try multiple models with fallback - attempt API call with each until one succeeds
+    const modelNames = ['gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'];
+    let lastError = null;
+    let summaryText = null;
+    let successfulModel = null;
+
+    for (const modelName of modelNames) {
+      try {
+        console.log(`[getSummaryFromChunks] ⚡ Trying model: ${modelName}`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+
+        // Create timeout promise (60 seconds max for summaries)
+        const requestPromise = model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            temperature: 0.3, // Lower temperature for more consistent summaries
+          },
+        });
+
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Summary generation timeout')), 60000)
+        );
+
+        const result = await Promise.race([requestPromise, timeoutPromise]);
+        summaryText = await result.response.text();
+        successfulModel = modelName;
+
+        if (summaryText) {
+          console.log(`✅ [getSummaryFromChunks] Summary generated successfully using ${successfulModel}`);
+          break; // Exit loop on success
+        }
+      } catch (err) {
+        console.warn(`⚠️ [getSummaryFromChunks] Model ${modelName} failed:`, err.message);
+        lastError = err;
+        continue; // Try next model
+      }
+    }
+
+    if (summaryText) {
+      return summaryText.trim();
+    } else {
+      throw lastError || new Error('All models failed for summary generation');
+    }
+  } catch (err) {
+    console.error('[getSummaryFromChunks] ❌ Error generating summary:', err.message);
+    // Fallback to simpler method if everything fails
+    try {
+      console.log('[getSummaryFromChunks] 🔄 Falling back to standard askLLM...');
+      return await askLLM('gemini', prompt);
+    } catch (fallbackErr) {
+      console.error('[getSummaryFromChunks] ❌ Final fallback failed:', fallbackErr.message);
+      return null;
+    }
+  }
 }
 
 module.exports = {

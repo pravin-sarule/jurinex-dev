@@ -40,62 +40,62 @@ router.post(
 
 
 router.post(
-    '/analyze',
-    protect,
-    checkDocumentUploadLimits, // Middleware checks plan limits
-    controller.analyzeDocument
+  '/analyze',
+  protect,
+  checkDocumentUploadLimits, // Middleware checks plan limits
+  controller.analyzeDocument
 );
 
 router.post(
-    '/summary',
-    protect,
-    checkDocumentUploadLimits,
-    controller.getSummary
+  '/summary',
+  protect,
+  checkDocumentUploadLimits,
+  controller.getSummary
 );
 
 router.post(
-    '/chat',
-    protect,
-    checkDocumentUploadLimits,
-    controller.chatWithDocument
+  '/chat',
+  protect,
+  checkDocumentUploadLimits,
+  controller.chatWithDocument
 );
 
 router.post(
-    '/chat/stream',
-    protect,
-    checkDocumentUploadLimits,
-    controller.chatWithDocumentStream
+  '/chat/stream',
+  protect,
+  checkDocumentUploadLimits,
+  controller.chatWithDocumentStream
 );
 
 router.post(
-    '/save',
-    protect,
-    checkDocumentUploadLimits,
-    controller.saveEditedDocument
+  '/save',
+  protect,
+  checkDocumentUploadLimits,
+  controller.saveEditedDocument
 );
 
 router.get(
-    '/download/:file_id/:format',
-    protect,
-    controller.downloadDocument
+  '/download/:file_id/:format',
+  protect,
+  controller.downloadDocument
 );
 
 router.get(
-    '/chat-history/:file_id',
-    protect,
-    controller.getChatHistory
+  '/chat-history/:file_id',
+  protect,
+  controller.getChatHistory
 );
 
 router.get(
-    '/status/:file_id',
-    protect,
-    controller.getDocumentProcessingStatus
+  '/status/:file_id',
+  protect,
+  controller.getDocumentProcessingStatus
 );
 
 router.get(
-    '/user-usage-and-plan/:userId',
-    protect,
-    controller.getUserUsageAndPlan
+  '/user-usage-and-plan/:userId',
+  protect,
+  controller.getUserUsageAndPlan
 );
 
 
@@ -146,6 +146,18 @@ router.get(
   '/document/:file_id/complete',
   protect,
   controller.getDocumentComplete
+);
+
+router.get(
+  '/verify/:file_id',
+  protect,
+  controller.verifyFileProcessing
+);
+
+router.post(
+  '/reprocess-embeddings/:file_id',
+  protect,
+  controller.reprocessFileEmbeddings
 );
 
 module.exports = router;

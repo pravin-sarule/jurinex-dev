@@ -1,0 +1,15 @@
+google-genai
+python-dotenv
+pytest
+pydantic>=2.0.0
+# Ingestion pipeline: GCS, Document AI, embeddings, DB
+google-cloud-storage
+google-cloud-documentai
+pypdf
+psycopg2-binary
+numpy
+# API
+fastapi
+uvicorn[standard]
+python-multipart
+PyJWT

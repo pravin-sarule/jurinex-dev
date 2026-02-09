@@ -31,7 +31,7 @@ function getGCSProjectId() {
         return credentials.project_id;
       }
     }
-    
+
     throw new Error('GCP_PROJECT_ID not found. Set GCP_PROJECT_ID in .env');
   } catch (error) {
     console.error('❌ Failed to get GCP Project ID:', error.message);
@@ -41,18 +41,18 @@ function getGCSProjectId() {
 
 function initializeVertexAI() {
   if (vertexAI) return vertexAI;
-  
+
   try {
     const projectId = getGCSProjectId();
     const location = process.env.GCP_LOCATION || 'us-central1';
-    
+
     console.log(`🚀 Initializing Vertex AI for web search service: ${projectId}, location: ${location}`);
-    
+
     vertexAI = new VertexAI({
       project: projectId,
       location: location,
     });
-    
+
     return vertexAI;
   } catch (error) {
     console.error('❌ Failed to initialize Vertex AI:', error.message);
@@ -70,11 +70,11 @@ function extractUrlsFromQuery(query) {
     console.log(`[URL Extraction] Query is empty or not a string`);
     return [];
   }
-  
+
   // More comprehensive URL regex that handles various URL formats
   const urlRegex = /(https?:\/\/[^\s\)\]\>\"\']+)/gi;
   const matches = query.match(urlRegex);
-  
+
   if (matches) {
     // Clean up URLs (remove trailing punctuation that might have been captured)
     const cleanedUrls = matches.map(url => {
@@ -84,7 +84,7 @@ function extractUrlsFromQuery(query) {
     console.log(`[URL Extraction] Found ${cleanedUrls.length} URL(s):`, cleanedUrls);
     return cleanedUrls;
   }
-  
+
   console.log(`[URL Extraction] No URLs found in query: "${query.substring(0, 100)}"`);
   return [];
 }
@@ -99,44 +99,44 @@ function isPdfUrl(url) {
     console.log(`[isPdfUrl] URL is empty`);
     return false;
   }
-  
+
   const lowerUrl = url.toLowerCase();
   console.log(`[isPdfUrl] Checking URL: ${url}`);
-  
+
   // Direct PDF file URLs (most common pattern)
   if (lowerUrl.endsWith('.pdf') || lowerUrl.includes('.pdf?') || lowerUrl.includes('.pdf#') || lowerUrl.includes('/.pdf')) {
     console.log(`[isPdfUrl] ✅ Detected as PDF: ends with .pdf or contains .pdf`);
     return true;
   }
-  
+
   // URLs with /fulltext/ or /pdf/ in path (common for academic/research sites)
-  if ((lowerUrl.includes('/fulltext/') || lowerUrl.includes('/pdf/') || lowerUrl.includes('/document/')) && 
-      (lowerUrl.includes('.pdf') || lowerUrl.includes('pdf') || lowerUrl.includes('application/pdf'))) {
+  if ((lowerUrl.includes('/fulltext/') || lowerUrl.includes('/pdf/') || lowerUrl.includes('/document/')) &&
+    (lowerUrl.includes('.pdf') || lowerUrl.includes('pdf') || lowerUrl.includes('application/pdf'))) {
     console.log(`[isPdfUrl] ✅ Detected as PDF: contains /fulltext/ or /pdf/ path`);
     return true;
   }
-  
+
   // Google Drive viewer URLs for PDFs
   if (lowerUrl.includes('googleusercontent.com/viewer') && lowerUrl.includes('/pdf/')) {
     console.log(`[isPdfUrl] ✅ Detected as PDF: Google Drive viewer`);
     return true;
   }
-  
+
   // Google Drive share links that might be PDFs
   if (lowerUrl.includes('drive.google.com') && (lowerUrl.includes('/file/') || lowerUrl.includes('/open'))) {
     console.log(`[isPdfUrl] ✅ Detected as potential PDF: Google Drive link`);
     return true; // Will be validated later
   }
-  
+
   // Other common PDF viewer patterns
   if (lowerUrl.includes('viewer') && (lowerUrl.includes('pdf') || lowerUrl.includes('application/pdf'))) {
     console.log(`[isPdfUrl] ✅ Detected as PDF: viewer pattern`);
     return true;
   }
-  
+
   // Check Content-Type header if available (for URLs that don't have .pdf extension)
   // This will be checked during actual download
-  
+
   console.log(`[isPdfUrl] ❌ Not detected as PDF`);
   return false;
 }
@@ -149,16 +149,16 @@ function isPdfUrl(url) {
 function isWebPageUrl(url) {
   if (!url) return false;
   const lowerUrl = url.toLowerCase();
-  
+
   // Exclude PDFs and known file types
   if (isPdfUrl(url)) return false;
   if (lowerUrl.match(/\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|tar|gz)$/)) return false;
-  
+
   // Common web page patterns
   if (lowerUrl.startsWith('http://') || lowerUrl.startsWith('https://')) {
     return true; // Any HTTP/HTTPS URL is potentially a web page
   }
-  
+
   return false;
 }
 
@@ -169,15 +169,15 @@ function isWebPageUrl(url) {
  */
 function convertGoogleDriveUrl(url) {
   if (!url) return { original: url, download: url, viewer: url };
-  
+
   // Google Drive viewer URL pattern (already a viewer URL)
   if (url.includes('googleusercontent.com/viewer') && url.includes('/pdf/')) {
     return { original: url, download: url, viewer: url };
   }
-  
+
   // Extract file ID from various Google Drive URL formats
   let fileId = null;
-  
+
   // Format: https://drive.google.com/file/d/FILE_ID/view?usp=sharing
   if (url.includes('drive.google.com/file/d/')) {
     const fileIdMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
@@ -192,7 +192,7 @@ function convertGoogleDriveUrl(url) {
       fileId = fileIdMatch[1];
     }
   }
-  
+
   if (fileId) {
     // Try multiple URL formats
     return {
@@ -203,7 +203,7 @@ function convertGoogleDriveUrl(url) {
       fileId: fileId
     };
   }
-  
+
   return { original: url, download: url, viewer: url };
 }
 
@@ -214,17 +214,17 @@ function convertGoogleDriveUrl(url) {
  */
 function getBestUrlForProcessing(url) {
   const urls = convertGoogleDriveUrl(url);
-  
+
   // For Google Drive, prefer the viewer/preview URL as it's more likely to work with Gemini
   if (urls.viewer && urls.viewer !== url) {
     return urls.viewer;
   }
-  
+
   // Fallback to download URL
   if (urls.download && urls.download !== url) {
     return urls.download;
   }
-  
+
   return url;
 }
 
@@ -245,16 +245,16 @@ async function validatePdfUrl(url) {
         isGoogleDrive: true
       };
     }
-    
+
     const response = await axios.head(url, {
       timeout: 10000,
       maxRedirects: 5,
       validateStatus: (status) => status < 500, // Accept redirects and client errors
     });
-    
+
     const contentType = response.headers['content-type'] || '';
     const isPdf = contentType.includes('application/pdf') || isPdfUrl(url);
-    
+
     return {
       isPdf,
       accessible: response.status === 200,
@@ -282,10 +282,10 @@ async function validatePdfUrl(url) {
 async function expandQuery(userQuestion) {
   try {
     console.log(`[Query Expansion] Expanding query: "${userQuestion}"`);
-    
+
     const vertex_ai = initializeVertexAI();
-    const model = vertex_ai.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-    
+    const model = vertex_ai.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
     const expansionPrompt = `You are a legal research assistant.
 
 Given the user question, do the following:
@@ -304,7 +304,7 @@ Respond ONLY in valid JSON:
 
     const result = await model.generateContent(expansionPrompt);
     const responseText = result.response.candidates[0].content.parts[0].text;
-    
+
     // Extract JSON from response
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
@@ -315,7 +315,7 @@ Respond ONLY in valid JSON:
         queries: parsed.queries || [userQuestion] // Fallback to original if parsing fails
       };
     }
-    
+
     // Fallback: return original query
     console.warn('[Query Expansion] Failed to parse JSON, using original query');
     return {
@@ -343,7 +343,7 @@ function isBlockedDomain(url) {
   try {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname.toLowerCase();
-    
+
     // Blocked patterns
     const blockedPatterns = [
       // Court portals (session-based)
@@ -352,7 +352,7 @@ function isBlockedDomain(url) {
       /judis\.nic\.in/i,
       /court.*login/i,
       /portal.*court/i,
-      
+
       // Login-required sites
       /login/i,
       /signin/i,
@@ -361,17 +361,17 @@ function isBlockedDomain(url) {
       /members/i,
       /subscription/i,
       /paywall/i,
-      
+
       // CAPTCHA-protected
       /captcha/i,
       /recaptcha/i,
-      
+
       // Private/internal
       /intranet/i,
       /internal/i,
       /private/i
     ];
-    
+
     // Check if hostname matches any blocked pattern
     for (const pattern of blockedPatterns) {
       if (pattern.test(hostname) || pattern.test(url)) {
@@ -379,7 +379,7 @@ function isBlockedDomain(url) {
         return true;
       }
     }
-    
+
     // Allowed domains (explicit allowlist for known good sources)
     const allowedPatterns = [
       /indiankanoon\.org/i,
@@ -394,14 +394,14 @@ function isBlockedDomain(url) {
       /\.com/i,   // Commercial (with caution)
       /\.in/i     // Indian domains
     ];
-    
+
     // Check if it's an allowed domain
     const isAllowed = allowedPatterns.some(pattern => pattern.test(hostname));
-    
+
     if (!isAllowed) {
       console.log(`[Source Filter] ⚠️ Unknown domain: ${hostname} - allowing but monitoring`);
     }
-    
+
     return false; // Allow by default if not explicitly blocked
   } catch (error) {
     console.error(`[Source Filter] Error checking URL ${url}:`, error.message);
@@ -420,14 +420,14 @@ function isBlockedDomain(url) {
 async function searchForPdfs(userQuestion, numResults = 5) {
   try {
     console.log(`[Web Search] Starting Perplexity-style search for: "${userQuestion}"`);
-    
+
     // STEP 1: Query Expansion
     const { intent, queries } = await expandQuery(userQuestion);
     console.log(`[Web Search] Expanded to ${queries.length} queries with intent: ${intent}`);
-    
+
     // Check for Serper API credentials
     const apiKey = process.env.SERPER_API_KEY;
-    
+
     if (!apiKey) {
       console.warn('[Web Search] Serper API key not found.');
       console.warn('[Web Search] Please set SERPER_API_KEY in .env');
@@ -438,7 +438,7 @@ async function searchForPdfs(userQuestion, numResults = 5) {
     // STEP 2: Search with all expanded queries
     const allResults = [];
     const seenUrls = new Set(); // For deduplication
-    
+
     for (const query of queries) {
       try {
         // Build Serper API request body
@@ -446,14 +446,14 @@ async function searchForPdfs(userQuestion, numResults = 5) {
           q: query,
           num: Math.min(numResults, 10) // Serper API supports up to 10 results per request
         };
-        
+
         // Add fileType filter only if user explicitly searches for PDFs
         if (query.toLowerCase().includes('pdf') || query.toLowerCase().includes('filetype:pdf')) {
           requestBody.fileType = 'pdf';
         }
-        
+
         console.log(`[Web Search] Searching with query: "${query}"`);
-        
+
         // Make POST request to Serper API
         const response = await axios.post(
           'https://google.serper.dev/search',
@@ -469,34 +469,34 @@ async function searchForPdfs(userQuestion, numResults = 5) {
 
         if (response.data && response.data.organic) {
           const searchResults = response.data.organic || [];
-          
+
           // STEP 3: Source Filtering - Remove blocked domains
           // Accept both PDFs and Web HTML pages
           const filteredResults = searchResults.filter(item => {
             if (!item.link) return false;
-            
+
             // Check if URL is blocked
             if (isBlockedDomain(item.link)) {
               return false;
             }
-            
+
             // Check if we've seen this URL before (deduplication)
             if (seenUrls.has(item.link)) {
               return false;
             }
-            
+
             // Accept both PDFs and web pages (HTML content)
             const isPdf = isPdfUrl(item.link);
             const isWeb = isWebPageUrl(item.link);
-            
+
             if (!isPdf && !isWeb) {
               return false; // Skip if neither PDF nor web page
             }
-            
+
             seenUrls.add(item.link);
             return true;
           });
-          
+
           allResults.push(...filteredResults);
           console.log(`[Web Search] Query "${query}": ${filteredResults.length} results after filtering`);
         }
@@ -506,19 +506,19 @@ async function searchForPdfs(userQuestion, numResults = 5) {
         continue;
       }
     }
-    
+
     if (allResults.length === 0) {
       console.warn('[Web Search] No results after filtering');
       console.warn('[Web Search] Falling back to Gemini Google Search tool...');
       return await searchForPdfsWithGemini(userQuestion, numResults);
     }
-    
+
     // STEP 4: Rank by relevance + recency (simple ranking: position in results)
     // Sort by position (lower is better) and limit to max results
     const rankedResults = allResults
       .sort((a, b) => (a.position || 999) - (b.position || 999))
       .slice(0, numResults * 2); // Get more results for chunking later
-    
+
     // STEP 5: Process and format results
     const pdfResults = rankedResults.map((item, index) => {
       // Determine source type dynamically from URL domain
@@ -535,7 +535,7 @@ async function searchForPdfs(userQuestion, numResults = 5) {
       } catch (e) {
         sourceType = 'web_search';
       }
-      
+
       // Extract citation data from Serper API response
       const citationData = {
         title: item.title || (isPdfUrl(item.link) ? `PDF Document ${index + 1}` : `Web Page ${index + 1}`),
@@ -548,14 +548,14 @@ async function searchForPdfs(userQuestion, numResults = 5) {
         displayLink: item.displayLink || (item.link ? new URL(item.link).hostname : ''),
         date: item.date || null // Serper may provide date
       };
-      
+
       return citationData;
     });
 
     console.log(`[Web Search] ✅ Found ${pdfResults.length} unique results after filtering and ranking`);
     console.log(`   PDFs: ${pdfResults.filter(r => r.type === 'pdf' || isPdfUrl(r.link)).length}`);
     console.log(`   Web pages: ${pdfResults.filter(r => r.type === 'web' || isWebPageUrl(r.link)).length}`);
-    
+
     return {
       success: pdfResults.length > 0,
       results: pdfResults.slice(0, numResults),
@@ -586,10 +586,10 @@ async function searchForPdfs(userQuestion, numResults = 5) {
 async function searchForPdfsWithGemini(query, numResults = 5) {
   try {
     console.log(`[Web Search] Using Gemini Google Search tool (fallback) for query: "${query}"`);
-    
+
     const vertex_ai = initializeVertexAI();
-    const model = vertex_ai.getGenerativeModel({ 
-      model: 'gemini-2.0-flash-exp',
+    const model = vertex_ai.getGenerativeModel({
+      model: 'gemini-2.0-flash',
       tools: [{
         googleSearchRetrieval: {}
       }]
@@ -633,7 +633,7 @@ Return ONLY valid JSON with the results you found. Find the most relevant result
     }
 
     const responseText = result.response.candidates[0].content.parts[0].text;
-    
+
     // Parse JSON response
     let pdfResults = [];
     try {
@@ -644,7 +644,7 @@ Return ONLY valid JSON with the results you found. Find the most relevant result
       } else if (cleanedText.startsWith('```')) {
         cleanedText = cleanedText.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
       }
-      
+
       const parsed = JSON.parse(cleanedText);
       if (parsed.results && Array.isArray(parsed.results)) {
         pdfResults = parsed.results
@@ -664,7 +664,7 @@ Return ONLY valid JSON with the results you found. Find the most relevant result
     }
 
     console.log(`[Web Search] Found ${pdfResults.length} results using Gemini Google Search (fallback)`);
-    
+
     return {
       success: pdfResults.length > 0,
       results: pdfResults.slice(0, numResults),
@@ -696,7 +696,7 @@ async function fetchWebPageContentWithPuppeteer(url) {
     }
 
     console.log(`[Web Page] Using Puppeteer for JavaScript-heavy site: ${url}`);
-    
+
     const browser = await puppeteer.launch({
       headless: true,
       args: [
@@ -711,11 +711,11 @@ async function fetchWebPageContentWithPuppeteer(url) {
 
     try {
       const page = await browser.newPage();
-      
+
       // Set realistic viewport and user agent
       await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-      
+
       // Set extra headers
       await page.setExtraHTTPHeaders({
         'Accept-Language': 'en-US,en;q=0.9',
@@ -774,7 +774,7 @@ async function fetchWebPageContentWithAPI(url) {
     // Try Serper.dev API if available
     if (process.env.SERPER_API_KEY) {
       console.log(`[Web Page] Using Serper API for: ${url}`);
-      
+
       try {
         const response = await axios.post(
           'https://google.serper.dev/url',
@@ -803,11 +803,11 @@ async function fetchWebPageContentWithAPI(url) {
     // Try Tavily API if available
     if (process.env.TAVILY_API_KEY) {
       console.log(`[Web Page] Using Tavily API for: ${url}`);
-      
+
       try {
         const response = await axios.post(
           'https://api.tavily.com/v1/content',
-          { 
+          {
             url: url,
             include_raw_content: true
           },
@@ -852,7 +852,7 @@ async function fetchWebPageContentWithAPI(url) {
 async function fetchWebPageContent(url) {
   try {
     console.log(`[Web Page] Fetching content from URL: ${url}`);
-    
+
     // Strategy 1: Try axios first (fastest)
     try {
       // Rotate User-Agent to appear more human-like
@@ -875,128 +875,128 @@ async function fetchWebPageContent(url) {
       }
 
       const response = await axios.get(url, {
-      timeout: 30000, // Increased timeout for legal sites
-      headers: {
-        'User-Agent': randomUserAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8', // Include Hindi for Indian sites
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'cross-site',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'Referer': referer,
-        'Origin': new URL(url).origin
-      },
-      maxRedirects: 10, // More redirects for legal sites
-      validateStatus: (status) => status < 400,
-      decompress: true // Handle gzip/deflate
-    });
+        timeout: 30000, // Increased timeout for legal sites
+        headers: {
+          'User-Agent': randomUserAgent,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8', // Include Hindi for Indian sites
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'cross-site',
+          'Sec-Fetch-User': '?1',
+          'Cache-Control': 'max-age=0',
+          'Referer': referer,
+          'Origin': new URL(url).origin
+        },
+        maxRedirects: 10, // More redirects for legal sites
+        validateStatus: (status) => status < 400,
+        decompress: true // Handle gzip/deflate
+      });
 
-    let content = response.data;
-    
-    if (typeof content === 'string') {
-      // Use cheerio for better HTML parsing (especially for Indian legal sites)
-      let cheerio;
-      try {
-        cheerio = require('cheerio');
-      } catch (e) {
-        console.warn('[Web Page] cheerio not available, using regex extraction');
-      }
-      
-      let extractedContent = content;
-      
-      // Generic content extraction using cheerio (no site-specific hardcoding)
-      if (cheerio) {
-        // General cheerio extraction for other sites
-        console.log('[Web Page] Using cheerio for general extraction');
-        const $ = cheerio.load(content);
-        
-        // Remove script, style, nav, header, footer
-        $('script, style, nav, header, footer, aside, .sidebar, .navigation, .menu').remove();
-        
-        // Try to find main content
-        const mainContent = $('main, article, [role="main"], .content, #content, .main-content').first();
-        if (mainContent.length > 0) {
-          extractedContent = mainContent.text();
-          console.log(`[Web Page] Extracted from main content area: ${extractedContent.length} chars`);
-        } else {
-          extractedContent = $('body').text();
+      let content = response.data;
+
+      if (typeof content === 'string') {
+        // Use cheerio for better HTML parsing (especially for Indian legal sites)
+        let cheerio;
+        try {
+          cheerio = require('cheerio');
+        } catch (e) {
+          console.warn('[Web Page] cheerio not available, using regex extraction');
         }
-      } else {
-        // Fallback to regex extraction
-        console.log('[Web Page] Using regex extraction (cheerio not available)');
-        const contentSelectors = [
-          /<div[^>]*id="judgment"[^>]*>([\s\S]*?)<\/div>/i,
-          /<div[^>]*id="doccontent"[^>]*>([\s\S]*?)<\/div>/i,
-          /<div[^>]*id="main_content"[^>]*>([\s\S]*?)<\/div>/i,
-          /<div[^>]*class="[^"]*judgment[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
-          /<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
-          /<article[^>]*>([\s\S]*?)<\/article>/i,
-          /<main[^>]*>([\s\S]*?)<\/main>/i
-        ];
-        
-        for (const selector of contentSelectors) {
-          const match = content.match(selector);
-          if (match && match[1] && match[1].length > 500) {
-            extractedContent = match[1];
-            console.log(`[Web Page] Found content area using regex, extracted ${extractedContent.length} chars`);
-            break;
+
+        let extractedContent = content;
+
+        // Generic content extraction using cheerio (no site-specific hardcoding)
+        if (cheerio) {
+          // General cheerio extraction for other sites
+          console.log('[Web Page] Using cheerio for general extraction');
+          const $ = cheerio.load(content);
+
+          // Remove script, style, nav, header, footer
+          $('script, style, nav, header, footer, aside, .sidebar, .navigation, .menu').remove();
+
+          // Try to find main content
+          const mainContent = $('main, article, [role="main"], .content, #content, .main-content').first();
+          if (mainContent.length > 0) {
+            extractedContent = mainContent.text();
+            console.log(`[Web Page] Extracted from main content area: ${extractedContent.length} chars`);
+          } else {
+            extractedContent = $('body').text();
+          }
+        } else {
+          // Fallback to regex extraction
+          console.log('[Web Page] Using regex extraction (cheerio not available)');
+          const contentSelectors = [
+            /<div[^>]*id="judgment"[^>]*>([\s\S]*?)<\/div>/i,
+            /<div[^>]*id="doccontent"[^>]*>([\s\S]*?)<\/div>/i,
+            /<div[^>]*id="main_content"[^>]*>([\s\S]*?)<\/div>/i,
+            /<div[^>]*class="[^"]*judgment[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+            /<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+            /<article[^>]*>([\s\S]*?)<\/article>/i,
+            /<main[^>]*>([\s\S]*?)<\/main>/i
+          ];
+
+          for (const selector of contentSelectors) {
+            const match = content.match(selector);
+            if (match && match[1] && match[1].length > 500) {
+              extractedContent = match[1];
+              console.log(`[Web Page] Found content area using regex, extracted ${extractedContent.length} chars`);
+              break;
+            }
           }
         }
-      }
-      
-      // Clean up the extracted content
-      extractedContent = extractedContent
-        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-        .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, '')
-        .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
-        .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
-        .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
-        .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, '')
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/p>/gi, '\n\n')
-        .replace(/<\/div>/gi, '\n')
-        .replace(/<\/h[1-6]>/gi, '\n\n')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/[ \t]+/g, ' ')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-      
-      // If content is too short after extraction, use the full page
-      if (extractedContent.length < 200) {
-        console.log(`[Web Page] Extracted content too short (${extractedContent.length} chars), using full page`);
-        extractedContent = content
+
+        // Clean up the extracted content
+        extractedContent = extractedContent
           .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
           .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+          .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, '')
+          .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+          .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
+          .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+          .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, '')
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<\/p>/gi, '\n\n')
+          .replace(/<\/div>/gi, '\n')
+          .replace(/<\/h[1-6]>/gi, '\n\n')
           .replace(/<[^>]+>/g, ' ')
-          .replace(/\s+/g, ' ')
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\n{3,}/g, '\n\n')
           .trim();
+
+        // If content is too short after extraction, use the full page
+        if (extractedContent.length < 200) {
+          console.log(`[Web Page] Extracted content too short (${extractedContent.length} chars), using full page`);
+          extractedContent = content
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+            .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        }
+
+        content = extractedContent;
+
+        // Limit content length to avoid token limits (keep more for legal documents)
+        if (content.length > 100000) {
+          content = content.substring(0, 100000) + '... [Content truncated]';
+          console.warn(`[Web Page] Content truncated to 100000 chars for URL: ${url}`);
+        }
+
+        // Ensure we have meaningful content
+        if (content.length < 50) {
+          throw new Error('Extracted content is too short or empty');
+        }
+      } else {
+        throw new Error('Response is not text/HTML');
       }
-      
-      content = extractedContent;
-      
-      // Limit content length to avoid token limits (keep more for legal documents)
-      if (content.length > 100000) {
-        content = content.substring(0, 100000) + '... [Content truncated]';
-        console.warn(`[Web Page] Content truncated to 100000 chars for URL: ${url}`);
-      }
-      
-      // Ensure we have meaningful content
-      if (content.length < 50) {
-        throw new Error('Extracted content is too short or empty');
-      }
-    } else {
-      throw new Error('Response is not text/HTML');
-    }
 
       console.log(`[Web Page] ✅ Successfully fetched and extracted ${content.length} chars from ${url} (axios)`);
       console.log(`[Web Page] Content preview (first 300 chars): ${content.substring(0, 300)}...`);
-      
+
       return {
         success: true,
         content: content,
@@ -1004,7 +1004,7 @@ async function fetchWebPageContent(url) {
       };
     } catch (axiosError) {
       console.warn(`[Web Page] ⚠️ Axios failed for ${url}: ${axiosError.message}`);
-      
+
       // Strategy 2: Try Puppeteer for JavaScript-heavy sites
       if (axiosError.response && (axiosError.response.status === 403 || axiosError.response.status === 429)) {
         console.log(`[Web Page] Detected 403/429, trying Puppeteer...`);
@@ -1046,7 +1046,7 @@ async function fetchWebPageContent(url) {
 async function processWebPageFromUrl(url, question, modelName = 'gemini-2.0-flash-exp') {
   try {
     console.log(`[Web Page Processing] Processing web page from URL: ${url}`);
-    
+
     // Fetch the web page content
     const fetchResult = await fetchWebPageContent(url);
     if (!fetchResult.success) {
@@ -1100,7 +1100,7 @@ Be specific, accurate, and cite details from the content. If the user asked for 
     }
 
     const content = result.response.candidates[0].content.parts[0].text;
-    
+
     // Extract title from content if possible
     let pageTitle = 'Web Page';
     try {
@@ -1128,7 +1128,7 @@ Be specific, accurate, and cite details from the content. If the user asked for 
     } catch (e) {
       sourceType = 'web_page';
     }
-    
+
     const citation = {
       title: pageTitle,
       url: url,
@@ -1140,7 +1140,7 @@ Be specific, accurate, and cite details from the content. If the user asked for 
 
     console.log(`[Web Page Processing] Successfully processed web page from ${url}`);
     console.log(`[Web Page Processing] Citation: ${JSON.stringify(citation)}`);
-    
+
     return {
       success: true,
       content,
@@ -1163,7 +1163,7 @@ Be specific, accurate, and cite details from the content. If the user asked for 
 async function* streamWebPageFromUrl(url, question, modelName = 'gemini-2.0-flash-exp') {
   try {
     console.log(`[Web Page Processing] Streaming web page from URL: ${url}`);
-    
+
     // Fetch the web page content
     const fetchResult = await fetchWebPageContent(url);
     if (!fetchResult.success) {
@@ -1214,7 +1214,7 @@ Be specific, accurate, and cite details from the content. If the user asked for 
 
     for await (const chunk of streamingResp.stream) {
       let chunkText = '';
-      
+
       if (chunk.text) {
         chunkText = chunk.text;
       } else if (chunk.candidates && chunk.candidates[0]) {
@@ -1227,7 +1227,7 @@ Be specific, accurate, and cite details from the content. If the user asked for 
           }
         }
       }
-      
+
       if (chunkText) {
         yield chunkText;
       }
@@ -1248,16 +1248,16 @@ Be specific, accurate, and cite details from the content. If the user asked for 
 async function processPdfFromUrl(pdfUrl, question, modelName = 'gemini-2.0-flash-exp') {
   try {
     console.log(`[PDF Processing] Processing PDF from URL: ${pdfUrl}`);
-    
+
     // Get multiple URL options for Google Drive
     const urlOptions = convertGoogleDriveUrl(pdfUrl);
     let processedUrl = getBestUrlForProcessing(pdfUrl);
-    
+
     if (processedUrl !== pdfUrl) {
       console.log(`[PDF Processing] Converted Google Drive URL: ${pdfUrl} -> ${processedUrl}`);
       console.log(`[PDF Processing] Available URL options:`, Object.keys(urlOptions).filter(k => k !== 'original'));
     }
-    
+
     // Validate URL (skip strict validation for Google Drive URLs)
     const validation = await validatePdfUrl(processedUrl);
     if (!validation.skipValidation && !validation.accessible && !validation.isPdf) {
@@ -1308,7 +1308,7 @@ Please provide a comprehensive answer based on the PDF content. Include specific
     }
 
     const content = result.response.candidates[0].content.parts[0].text;
-    
+
     const citation = {
       title: 'PDF Document',
       url: pdfUrl, // Use original URL for citation
@@ -1320,7 +1320,7 @@ Please provide a comprehensive answer based on the PDF content. Include specific
 
     console.log(`[PDF Processing] Successfully processed PDF from ${pdfUrl}`);
     console.log(`[PDF Processing] Citation: ${JSON.stringify(citation)}`);
-    
+
     return {
       success: true,
       content,
@@ -1330,7 +1330,7 @@ Please provide a comprehensive answer based on the PDF content. Include specific
     console.error(`[PDF Processing] Error processing PDF from ${pdfUrl}:`, error.message);
     console.error(`[PDF Processing] Error details:`, error);
     console.error(`[PDF Processing] Error stack:`, error.stack);
-    
+
     // For Google Drive URLs, try alternative URL formats before fallback
     if (pdfUrl.includes('drive.google.com')) {
       const urlOptions = convertGoogleDriveUrl(pdfUrl);
@@ -1339,13 +1339,13 @@ Please provide a comprehensive answer based on the PDF content. Include specific
         urlOptions.download,
         urlOptions.viewer
       ].filter(url => url && url !== processedUrl);
-      
+
       for (const altUrl of alternativeUrls) {
         try {
           console.log(`[PDF Processing] Trying alternative Google Drive URL: ${altUrl}`);
           const vertex_ai = initializeVertexAI();
           const model = vertex_ai.getGenerativeModel({ model: modelName });
-          
+
           const prompt = `You are analyzing a PDF document from Google Drive. Please extract and analyze the following:
 
 1. **Text Content**: Extract all readable text from the document
@@ -1381,7 +1381,7 @@ Please provide a comprehensive answer based on the PDF content. Include specific
           if (result.response && result.response.candidates && result.response.candidates.length) {
             const content = result.response.candidates[0].content.parts[0].text;
             console.log(`[PDF Processing] Successfully processed PDF using alternative URL: ${altUrl}`);
-            
+
             return {
               success: true,
               content,
@@ -1401,7 +1401,7 @@ Please provide a comprehensive answer based on the PDF content. Include specific
         }
       }
     }
-    
+
     // Try fallback: download and process as base64
     try {
       console.log(`[PDF Processing] Attempting fallback method (download as base64)...`);
@@ -1428,11 +1428,11 @@ Please provide a comprehensive answer based on the PDF content. Include specific
 async function processPdfFromUrlFallback(pdfUrl, question, modelName = 'gemini-2.0-flash-exp') {
   try {
     console.log(`[PDF Processing] Using fallback method: downloading PDF from ${pdfUrl}`);
-    
+
     // Get the best download URL for Google Drive
     const urlOptions = convertGoogleDriveUrl(pdfUrl);
     let downloadUrl = urlOptions.download || pdfUrl;
-    
+
     // Try multiple download URL formats for Google Drive
     const downloadUrlsToTry = [];
     if (urlOptions.fileId) {
@@ -1445,7 +1445,7 @@ async function processPdfFromUrlFallback(pdfUrl, question, modelName = 'gemini-2
     } else {
       downloadUrlsToTry.push(downloadUrl);
     }
-    
+
     // Download PDF with appropriate headers for Google Drive
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -1453,10 +1453,10 @@ async function processPdfFromUrlFallback(pdfUrl, question, modelName = 'gemini-2
       'Accept-Language': 'en-US,en;q=0.9',
       'Referer': 'https://drive.google.com/'
     };
-    
+
     let pdfBuffer = null;
     let lastError = null;
-    
+
     // Try each download URL until one works
     for (const tryUrl of downloadUrlsToTry) {
       try {
@@ -1474,13 +1474,13 @@ async function processPdfFromUrlFallback(pdfUrl, question, modelName = 'gemini-2
           maxRedirects: 10, // Increased redirects
           validateStatus: (status) => status < 400, // Accept redirects
         });
-        
+
         console.log(`[PDF Processing] Download response:`, {
           status: response.status,
           contentType: response.headers['content-type'],
           contentLength: response.data?.length || 0
         });
-        
+
         // Check if we got a PDF or HTML (Google Drive sometimes returns HTML for authentication pages)
         const contentType = response.headers['content-type'] || '';
         if (contentType.includes('application/pdf')) {
@@ -1511,11 +1511,11 @@ async function processPdfFromUrlFallback(pdfUrl, question, modelName = 'gemini-2
         continue;
       }
     }
-    
+
     if (!pdfBuffer) {
       throw lastError || new Error('Failed to download PDF from any URL format');
     }
-    
+
     const base64Data = pdfBuffer.toString('base64');
 
     const vertex_ai = initializeVertexAI();
@@ -1554,7 +1554,7 @@ Provide a comprehensive answer with specific details and data points.`;
     });
 
     const content = result.response.candidates[0].content.parts[0].text;
-    
+
     return {
       success: true,
       content,
@@ -1582,13 +1582,13 @@ Provide a comprehensive answer with specific details and data points.`;
 async function* streamPdfFromUrl(pdfUrl, question, modelName = 'gemini-2.0-flash-exp') {
   try {
     console.log(`[PDF Processing] Streaming PDF from URL: ${pdfUrl}`);
-    
+
     // Get the best URL for processing
     let processedUrl = getBestUrlForProcessing(pdfUrl);
     if (processedUrl !== pdfUrl) {
       console.log(`[PDF Processing] Converted Google Drive URL for streaming: ${pdfUrl} -> ${processedUrl}`);
     }
-    
+
     const vertex_ai = initializeVertexAI();
     const model = vertex_ai.getGenerativeModel({ model: modelName });
 
@@ -1626,7 +1626,7 @@ Provide a comprehensive answer with specific details.`;
 
     for await (const chunk of streamingResp.stream) {
       let chunkText = '';
-      
+
       if (chunk.text) {
         chunkText = chunk.text;
       } else if (chunk.candidates && chunk.candidates[0]) {
@@ -1639,7 +1639,7 @@ Provide a comprehensive answer with specific details.`;
           }
         }
       }
-      
+
       if (chunkText) {
         yield chunkText;
       }
@@ -1663,7 +1663,7 @@ async function* streamPdfFromUrlFallback(pdfUrl, question, modelName) {
     // Get the best download URL for Google Drive
     const urlOptions = convertGoogleDriveUrl(pdfUrl);
     let downloadUrl = urlOptions.download || pdfUrl;
-    
+
     // Try multiple download URL formats for Google Drive
     const downloadUrlsToTry = [];
     if (urlOptions.fileId) {
@@ -1674,13 +1674,13 @@ async function* streamPdfFromUrlFallback(pdfUrl, question, modelName) {
     } else {
       downloadUrlsToTry.push(downloadUrl);
     }
-    
+
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Accept': 'application/pdf,application/octet-stream,*/*',
       'Referer': 'https://drive.google.com/'
     };
-    
+
     let pdfBuffer = null;
     for (const tryUrl of downloadUrlsToTry) {
       try {
@@ -1690,7 +1690,7 @@ async function* streamPdfFromUrlFallback(pdfUrl, question, modelName) {
           headers,
           maxRedirects: 5,
         });
-        
+
         const contentType = response.headers['content-type'] || '';
         if (contentType.includes('application/pdf') || response.data.length > 1000) {
           pdfBuffer = Buffer.from(response.data);
@@ -1700,11 +1700,11 @@ async function* streamPdfFromUrlFallback(pdfUrl, question, modelName) {
         continue;
       }
     }
-    
+
     if (!pdfBuffer) {
       throw new Error('Failed to download PDF from Google Drive');
     }
-    
+
     const base64Data = pdfBuffer.toString('base64');
 
     const vertex_ai = initializeVertexAI();
@@ -1737,7 +1737,7 @@ User Question: ${question}`;
 
     for await (const chunk of streamingResp.stream) {
       let chunkText = '';
-      
+
       if (chunk.text) {
         chunkText = chunk.text;
       } else if (chunk.candidates && chunk.candidates[0]) {
@@ -1750,7 +1750,7 @@ User Question: ${question}`;
           }
         }
       }
-      
+
       if (chunkText) {
         yield chunkText;
       }
@@ -1768,31 +1768,31 @@ User Question: ${question}`;
  */
 async function analyzeAndProcessPdfQuery(query, question = null) {
   const userQuestion = question || query;
-  
+
   // Step 1: Check if URL is provided in query
   const urls = extractUrlsFromQuery(query);
-  
+
   if (urls.length > 0) {
     const url = urls[0];
     console.log(`[Web Search] URL detected in query: ${url}`);
-    
+
     // Check if it's a PDF URL
-    const isPdf = isPdfUrl(url) || 
-                  url.toLowerCase().includes('googleusercontent.com') || 
-                  url.toLowerCase().includes('drive.google.com') ||
-                  url.toLowerCase().includes('viewer') ||
-                  url.toLowerCase().includes('/pdf/');
-    
+    const isPdf = isPdfUrl(url) ||
+      url.toLowerCase().includes('googleusercontent.com') ||
+      url.toLowerCase().includes('drive.google.com') ||
+      url.toLowerCase().includes('viewer') ||
+      url.toLowerCase().includes('/pdf/');
+
     // Check if it's a web page URL
     const isWebPage = isWebPageUrl(url);
-    
+
     if (isPdf) {
       // Process PDF directly from provided URL
       console.log(`[Web Search] PDF/Document URL detected: ${url}`);
       console.log(`[Web Search] URL type: ${url.includes('google') ? 'Google Drive' : 'Direct PDF'}`);
-      
+
       const result = await processPdfFromUrl(url, userQuestion);
-      
+
       return {
         hasUrl: true,
         pdfUrl: url,
@@ -1805,9 +1805,9 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
     } else if (isWebPage) {
       // Process web page content
       console.log(`[Web Search] Web page URL detected: ${url}`);
-      
+
       const result = await processWebPageFromUrl(url, userQuestion);
-      
+
       return {
         hasUrl: true,
         pdfUrl: url,
@@ -1820,7 +1820,7 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
       };
     }
   }
-  
+
   // Step 2: Determine if search is needed
   // ONLY search when user EXPLICITLY requests web search
   const explicitWebSearchKeywords = [
@@ -1860,22 +1860,22 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
     'web se batao', // Hindi/English mix
     'web pe batao' // Hindi/English mix
   ];
-  
+
   const queryLower = query.toLowerCase();
   const needsSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
-  
+
   if (needsSearch) {
     console.log(`[Web Search] Search required for query: "${query}"`);
-    
+
     const searchResults = await searchForPdfs(query, 3); // Get top 3 PDFs
-    
+
     if (searchResults.success && searchResults.results.length > 0) {
       // Process the most relevant PDF
       const topPdf = searchResults.results[0];
       console.log(`[Web Search] Processing top PDF result: ${topPdf.link}`);
-      
+
       const result = await processPdfFromUrl(topPdf.link, userQuestion);
-      
+
       // Build citations for all found PDFs
       const citations = [
         {
@@ -1891,7 +1891,7 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
           type: 'pdf'
         }))
       ];
-      
+
       return {
         hasUrl: false,
         needsSearch: true,
@@ -1902,7 +1902,7 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
         error: result.error
       };
     }
-    
+
     return {
       hasUrl: false,
       needsSearch: true,
@@ -1913,7 +1913,7 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
       error: 'No PDFs found in search results'
     };
   }
-  
+
   // No URL and no search needed
   return {
     hasUrl: false,
@@ -1928,22 +1928,22 @@ async function analyzeAndProcessPdfQuery(query, question = null) {
  */
 async function* streamAnalyzeAndProcessPdfQuery(query, question = null) {
   const userQuestion = question || query;
-  
+
   const urls = extractUrlsFromQuery(query);
-  
+
   if (urls.length > 0) {
     const url = urls[0];
-    
+
     // Check if it's a PDF URL
-    const isPdf = isPdfUrl(url) || 
-                  url.toLowerCase().includes('googleusercontent.com') || 
-                  url.toLowerCase().includes('drive.google.com') ||
-                  url.toLowerCase().includes('viewer') ||
-                  url.toLowerCase().includes('/pdf/');
-    
+    const isPdf = isPdfUrl(url) ||
+      url.toLowerCase().includes('googleusercontent.com') ||
+      url.toLowerCase().includes('drive.google.com') ||
+      url.toLowerCase().includes('viewer') ||
+      url.toLowerCase().includes('/pdf/');
+
     // Check if it's a web page URL
     const isWebPage = isWebPageUrl(url);
-    
+
     if (isPdf) {
       console.log(`[Web Search] Streaming PDF/Document from URL: ${url}`);
       yield* streamPdfFromUrl(url, userQuestion);
@@ -1954,7 +1954,7 @@ async function* streamAnalyzeAndProcessPdfQuery(query, question = null) {
       return;
     }
   }
-  
+
   // ONLY search when user EXPLICITLY requests web search
   const explicitWebSearchKeywords = [
     'search from the web',
@@ -1993,20 +1993,20 @@ async function* streamAnalyzeAndProcessPdfQuery(query, question = null) {
     'web se batao',
     'web pe batao'
   ];
-  
+
   const queryLower = query.toLowerCase();
   const needsSearch = explicitWebSearchKeywords.some(keyword => queryLower.includes(keyword));
-  
+
   if (needsSearch) {
     const searchResults = await searchForPdfs(query, 3);
-    
+
     if (searchResults.success && searchResults.results.length > 0) {
       const topPdf = searchResults.results[0];
       yield* streamPdfFromUrl(topPdf.link, userQuestion);
       return;
     }
   }
-  
+
   throw new Error('No PDF URL provided and search did not find any PDFs');
 }
 
@@ -2024,17 +2024,17 @@ function chunkEvidence(content, source, url, date = null) {
   if (!content || content.trim().length === 0) {
     return [];
   }
-  
+
   // Simple chunking: split by sentences, then group into ~500 token chunks
   const sentences = content.split(/[.!?]+\s+/).filter(s => s.trim().length > 20);
   const chunks = [];
   let currentChunk = '';
   let currentTokenCount = 0;
   const maxTokens = 500; // Approximate: 1 token ≈ 4 characters
-  
+
   for (const sentence of sentences) {
     const sentenceTokens = Math.ceil(sentence.length / 4);
-    
+
     if (currentTokenCount + sentenceTokens > maxTokens && currentChunk.length > 0) {
       // Save current chunk and start new one
       chunks.push({
@@ -2050,7 +2050,7 @@ function chunkEvidence(content, source, url, date = null) {
       currentTokenCount += sentenceTokens;
     }
   }
-  
+
   // Add remaining chunk
   if (currentChunk.trim().length > 0) {
     chunks.push({
@@ -2060,7 +2060,7 @@ function chunkEvidence(content, source, url, date = null) {
       date: date || null
     });
   }
-  
+
   console.log(`[Evidence Chunking] Created ${chunks.length} chunks from ${source}`);
   return chunks;
 }
@@ -2076,7 +2076,7 @@ async function filterEvidence(rawText) {
   try {
     const vertex_ai = initializeVertexAI();
     const model = vertex_ai.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-    
+
     const filterPrompt = `You are reviewing extracted web content.
 
 Your task:
@@ -2091,7 +2091,7 @@ Return a list of clean evidence snippets. Each snippet should be a factual state
 
     const result = await model.generateContent(filterPrompt);
     const filteredText = result.response.candidates[0].content.parts[0].text;
-    
+
     return filteredText;
   } catch (error) {
     console.error('[Evidence Filtering] Error:', error.message);
@@ -2118,7 +2118,7 @@ async function synthesizeAnswerWithCitations(evidenceChunks, userQuestion) {
         confidence: 'low'
       };
     }
-    
+
     // Count unique sources
     const uniqueSources = new Set(evidenceChunks.map(c => c.url));
     if (uniqueSources.size < 2) {
@@ -2128,15 +2128,15 @@ async function synthesizeAnswerWithCitations(evidenceChunks, userQuestion) {
         confidence: 'low'
       };
     }
-    
+
     const vertex_ai = initializeVertexAI();
     const model = vertex_ai.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-    
+
     // Format evidence chunks with metadata
     const evidenceText = evidenceChunks.map((chunk, idx) => {
       return `[Source ${idx + 1}] ${chunk.source}\nURL: ${chunk.url}${chunk.date ? `\nDate: ${chunk.date}` : ''}\nContent: ${chunk.text}`;
     }).join('\n\n');
-    
+
     const synthesisPrompt = `You are a citation-driven legal AI assistant.
 
 STRICT RULES:
@@ -2166,7 +2166,7 @@ If the provided sources are insufficient, outdated, or conflicting, respond ONLY
 
     const result = await model.generateContent(synthesisPrompt);
     const answerText = result.response.candidates[0].content.parts[0].text;
-    
+
     // Extract citations from answer
     const citations = evidenceChunks.map((chunk, idx) => ({
       index: idx + 1,
@@ -2175,7 +2175,7 @@ If the provided sources are insufficient, outdated, or conflicting, respond ONLY
       snippet: chunk.text.substring(0, 200),
       date: chunk.date || null
     }));
-    
+
     // Determine confidence
     let confidence = 'medium';
     if (uniqueSources.size >= 3 && evidenceChunks.length >= 5) {
@@ -2183,7 +2183,7 @@ If the provided sources are insufficient, outdated, or conflicting, respond ONLY
     } else if (uniqueSources.size < 2 || evidenceChunks.length < 3) {
       confidence = 'low';
     }
-    
+
     return {
       answer: answerText,
       citations: citations,
@@ -2210,14 +2210,14 @@ If the provided sources are insufficient, outdated, or conflicting, respond ONLY
 async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
   try {
     console.log(`[Perplexity Search] Starting complete pipeline for: "${userQuestion}"`);
-    
+
     // STEP 1: Query Expansion
     const { intent, queries } = await expandQuery(userQuestion);
     console.log(`[Perplexity Search] Expanded to ${queries.length} queries`);
-    
+
     // STEP 2 & 3: Web Search with Source Filtering
     const searchResult = await searchForPdfs(userQuestion, maxResults);
-    
+
     if (!searchResult.success || !searchResult.results || searchResult.results.length === 0) {
       return {
         answer: "Reliable sources were insufficient to provide a confident answer to this query.",
@@ -2226,22 +2226,22 @@ async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
         sources: []
       };
     }
-    
+
     // STEP 4 & 5: Fetch and Chunk Content (Both PDFs and Web HTML)
     const evidenceChunks = [];
     const fetchedSources = [];
-    
+
     for (const result of searchResult.results.slice(0, maxResults)) {
       try {
         let content = null;
         let contentType = 'web'; // Default to web
-        
+
         // Check if it's a PDF or web page
         if (isPdfUrl(result.link)) {
           // Process PDF
           console.log(`[Perplexity Search] 📄 Processing PDF: ${result.title}`);
           contentType = 'pdf';
-          
+
           try {
             const pdfResult = await processPdfFromUrl(result.link, userQuestion);
             if (pdfResult.success && pdfResult.content) {
@@ -2254,25 +2254,25 @@ async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
             contentType = 'web';
           }
         }
-        
+
         // If not PDF or PDF processing failed, fetch as web page
         if (!content && (isWebPageUrl(result.link) || contentType === 'web')) {
           console.log(`[Perplexity Search] 🌐 Processing Web Page: ${result.title}`);
           contentType = 'web';
-          
+
           const fetchResult = await fetchWebPageContent(result.link);
-          
+
           if (fetchResult.success && fetchResult.content) {
             content = fetchResult.content;
             console.log(`[Perplexity Search] ✅ Web page fetched: ${content.length} chars`);
           }
         }
-        
+
         // Process content if we have it (from either PDF or web)
         if (content && content.trim().length > 50) {
           // Filter evidence (remove opinions, keep facts)
           const filteredContent = await filterEvidence(content);
-          
+
           // Chunk evidence (works for both PDF text and HTML content)
           const chunks = chunkEvidence(
             filteredContent,
@@ -2280,7 +2280,7 @@ async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
             result.link,
             result.date || null
           );
-          
+
           if (chunks.length > 0) {
             evidenceChunks.push(...chunks);
             fetchedSources.push({
@@ -2290,7 +2290,7 @@ async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
               type: contentType, // 'pdf' or 'web'
               contentLength: content.length
             });
-            
+
             console.log(`[Perplexity Search] ✅ Processed ${contentType.toUpperCase()}: ${result.title} (${chunks.length} chunks)`);
           } else {
             console.warn(`[Perplexity Search] ⚠️ No chunks created from ${result.title}`);
@@ -2304,7 +2304,7 @@ async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
         continue;
       }
     }
-    
+
     // STEP 6: Check if we have enough evidence
     if (evidenceChunks.length < 2) {
       return {
@@ -2314,10 +2314,10 @@ async function performPerplexityStyleSearch(userQuestion, maxResults = 5) {
         sources: fetchedSources
       };
     }
-    
+
     // STEP 7: Synthesize Answer with Citations
     const synthesisResult = await synthesizeAnswerWithCitations(evidenceChunks, userQuestion);
-    
+
     return {
       answer: synthesisResult.answer,
       citations: synthesisResult.citations,

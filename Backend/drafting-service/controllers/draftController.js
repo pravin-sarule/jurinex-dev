@@ -31,18 +31,18 @@ const findPlaceholders = async (accessToken, fileId) => {
   try {
     const docs = getDocsClientWithToken(accessToken);
     const doc = await docs.documents.get({ documentId: fileId });
-    
+
     const placeholders = new Set();
-    const text = doc.data.body?.content?.map(para => 
+    const text = doc.data.body?.content?.map(para =>
       para.paragraph?.elements?.map(elem => elem.textRun?.content || '').join('') || ''
     ).join('') || '';
-    
+
     // Find all {{placeholder}} patterns
     const matches = text.match(/\{\{([^}]+)\}\}/g);
     if (matches) {
       matches.forEach(match => placeholders.add(match));
     }
-    
+
     return Array.from(placeholders);
   } catch (error) {
     console.error(`[Draft] Error finding placeholders:`, error.message);
@@ -54,7 +54,7 @@ const findPlaceholders = async (accessToken, fileId) => {
 const replaceAllText = async (accessToken, fileId, variables) => {
   try {
     const docs = getDocsClientWithToken(accessToken);
-    
+
     const requests = Object.entries(variables).map(([placeholder, replacement]) => ({
       replaceAllText: {
         containsText: {
@@ -64,14 +64,14 @@ const replaceAllText = async (accessToken, fileId, variables) => {
         replaceText: String(replacement)
       }
     }));
-    
+
     const response = await docs.documents.batchUpdate({
       documentId: fileId,
       requestBody: {
         requests
       }
     });
-    
+
     return response.data;
   } catch (error) {
     console.error(`[Draft] Error replacing text:`, error.message);
@@ -102,7 +102,7 @@ const initiateDraft = async (req, res) => {
     let useFileDirectly = isUploadedFile;
     try {
       templateMetadata = await getFileMetadata(googleAccessToken, templateFileId);
-      
+
       // Check if it's a Google Doc
       if (templateMetadata.mimeType && templateMetadata.mimeType !== 'application/vnd.google-apps.document') {
         return res.status(400).json({ success: false, error: 'Template must be a Google Docs document' });
@@ -117,8 +117,8 @@ const initiateDraft = async (req, res) => {
 
     // Generate draft title
     const timestamp = new Date().toISOString().split('T')[0];
-    const title = draftName || (templateMetadata.name && templateMetadata.name !== 'Untitled Document' 
-      ? `Draft - ${templateMetadata.name} (${timestamp})` 
+    const title = draftName || (templateMetadata.name && templateMetadata.name !== 'Untitled Document'
+      ? `Draft - ${templateMetadata.name} (${timestamp})`
       : `Untitled Document - ${timestamp}`);
 
     // For uploaded files, use them directly instead of copying (they're already Google Docs)
@@ -165,14 +165,14 @@ const initiateDraft = async (req, res) => {
     try {
       const { syncGoogleDocToGCS } = require('../services/fileUploadService');
       const { getAuthorizedClient } = require('../utils/oauth2Client');
-      
+
       // Get User OAuth client for export (User OAuth is required for Drive operations)
       const userOAuthClient = await getAuthorizedClient(userId);
-      
+
       console.log(`[Draft] Performing initial export to GCS for draft ${draft.id}`);
       const syncResult = await syncGoogleDocToGCS(newFile.id, 'docx', userOAuthClient);
       console.log(`[Draft] ✅ Initial export completed: ${syncResult.gcsPath}`);
-      
+
       // Update draft with gcs_path if it was created
       if (syncResult.gcsPath) {
         await Draft.update(draft.id, {
@@ -191,7 +191,7 @@ const initiateDraft = async (req, res) => {
     try {
       const { setupDriveWatcher } = require('../services/driveWebhookService');
       const { getWebhookUrl, validateWebhookUrl } = require('../utils/webhookUrl');
-      
+
       // Validate webhook URL configuration
       const validation = validateWebhookUrl();
       if (!validation.isValid) {
@@ -200,13 +200,13 @@ const initiateDraft = async (req, res) => {
         console.warn(`[Draft] ⚠️  Webhook will not be set up. For local development, use ngrok.`);
         throw new Error(validation.message);
       }
-      
+
       const webhookUrl = getWebhookUrl();
-      
+
       // Get User OAuth client for webhook setup (file is user-owned, service account can't access it)
       const { getAuthorizedClient } = require('../utils/oauth2Client');
       const userOAuthClient = await getAuthorizedClient(userId);
-      
+
       console.log(`[Draft] Setting up webhook watcher for automatic GCS sync`);
       console.log(`[Draft] Webhook URL: ${webhookUrl}`);
       await setupDriveWatcher(newFile.id, draft.id, webhookUrl, userOAuthClient);
@@ -232,7 +232,7 @@ const initiateDraft = async (req, res) => {
 
   } catch (error) {
     console.error('[Draft] Initiate draft error:', error);
-    
+
     if (error.code === 404) {
       return res.status(404).json({ success: false, error: 'Template not found or not accessible' });
     }
@@ -276,7 +276,7 @@ const createDocument = async (req, res) => {
     });
   } catch (error) {
     console.error('[Draft] Error creating document:', error);
-    
+
     if (error.message?.includes('not connected')) {
       return res.status(401).json({ success: false, error: error.message });
     }
@@ -317,9 +317,9 @@ const populateDraft = async (req, res) => {
     }
     // Enforce immutability: finalized documents cannot be modified
     if (draft.status === 'FINALIZED' || draft.status === 'finalized') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Document is finalized and cannot be edited.' 
+      return res.status(400).json({
+        success: false,
+        error: 'Document is finalized and cannot be edited.'
       });
     }
 
@@ -351,7 +351,7 @@ const populateDraft = async (req, res) => {
 
   } catch (error) {
     console.error('[Draft] Populate draft error:', error);
-    
+
     if (error.code === 403) {
       return res.status(403).json({ success: false, error: 'No permission to edit this document' });
     }
@@ -393,32 +393,32 @@ const getDraft = async (req, res) => {
       try {
         const { initializeServiceAccount } = require('../services/fileUploadService');
         const { driveClient: drive } = initializeServiceAccount();
-        
+
         // Check if Google Drive file exists and is not trashed
         try {
           const fileMetadata = await drive.files.get({
             fileId: googleFileId,
             fields: 'id, name, webViewLink, trashed'
           });
-          
+
           // Check if file is trashed
           if (fileMetadata.data.trashed === true) {
             console.log(`[Draft] Google Drive file ${googleFileId} is in trash, restoring from GCS`);
             throw new Error('File is trashed');
           }
-          
+
           webViewLink = fileMetadata.data.webViewLink;
           console.log(`[Draft] ✅ Google Drive file exists: ${googleFileId}`);
         } catch (driveError) {
           // File doesn't exist (404) or is trashed - restore from GCS
           if (driveError.code === 404 || driveError.message?.includes('not found') || driveError.message?.includes('trashed')) {
             console.log(`[Draft] Google Drive file ${googleFileId} not found (404) or deleted, restoring from GCS`);
-            
+
             // Step 2: Check if gcs_path exists
             if (!draft.gcs_path) {
               console.error(`[Draft] ⚠️  Cannot restore: draft has no gcs_path`);
-              return res.status(400).json({ 
-                success: false, 
+              return res.status(400).json({
+                success: false,
                 error: 'Google Drive file is deleted and no GCS backup is available',
                 draft: {
                   id: draft.id,
@@ -428,7 +428,7 @@ const getDraft = async (req, res) => {
                 }
               });
             }
-            
+
             // Step 3: Download file from GCS and upload back to Google Drive
             try {
               const { restoreFileFromGCSToDrive } = require('../services/fileUploadService');
@@ -438,13 +438,13 @@ const getDraft = async (req, res) => {
                 draft.title || 'Restored Document',
                 draft.user_id
               );
-              
+
               googleFileId = restoreResult.google_file_id;
               webViewLink = restoreResult.webViewLink;
               restored = true;
-              
+
               console.log(`[Draft] ✅ File restored from GCS. New Google File ID: ${googleFileId}`);
-              
+
               // Refresh draft from database to get updated google_file_id
               const updatedDraft = await Draft.findById(draftId);
               if (updatedDraft) {
@@ -454,8 +454,8 @@ const getDraft = async (req, res) => {
               }
             } catch (restoreError) {
               console.error(`[Draft] ❌ Error restoring file from GCS:`, restoreError);
-              return res.status(500).json({ 
-                success: false, 
+              return res.status(500).json({
+                success: false,
                 error: 'Failed to restore file from GCS',
                 details: restoreError.message,
                 draft: {
@@ -563,9 +563,9 @@ const getEditorUrlController = async (req, res) => {
 
     // Enforce immutability: finalized documents cannot be edited
     if (draft.status === 'FINALIZED' || draft.status === 'finalized') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Document is finalized and cannot be edited.' 
+      return res.status(400).json({
+        success: false,
+        error: 'Document is finalized and cannot be edited.'
       });
     }
 
@@ -620,7 +620,7 @@ const getPlaceholders = async (req, res) => {
 
   } catch (error) {
     console.error('[Draft] Get placeholders error:', error);
-    
+
     if (error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials')) {
       return res.status(401).json({ success: false, error: 'Google access token expired or invalid', needsAuth: true });
     }
@@ -733,7 +733,7 @@ const syncToGCS = async (req, res) => {
     // Get User OAuth client for export (User OAuth is required for Drive operations)
     const { getAuthorizedClient } = require('../utils/oauth2Client');
     const userOAuthClient = await getAuthorizedClient(userId);
-    
+
     // Use syncGoogleDocToGCS with User OAuth for export
     // If gcs_path doesn't exist, it will create one automatically
     const result = await syncGoogleDocToGCS(draft.google_file_id, format, userOAuthClient);
@@ -748,12 +748,12 @@ const syncToGCS = async (req, res) => {
     });
   } catch (error) {
     console.error('[Draft] Error syncing to GCS:', error);
-    
+
     if (error.message?.includes('GCS_KEY_BASE64') || error.message?.includes('Service Account')) {
-      return res.status(500).json({ 
-        success: false, 
+      return res.status(500).json({
+        success: false,
         error: 'Service Account configuration error. Please check GCS_KEY_BASE64 environment variable.',
-        details: error.message 
+        details: error.message
       });
     }
     if (error.message?.includes('not found') || error.message?.includes('GCS path')) {
@@ -814,15 +814,15 @@ const viewDocumentFromGCS = async (req, res) => {
     }
 
     if (!draft.gcs_path) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Draft has not been synced to GCS yet' 
+      return res.status(400).json({
+        success: false,
+        error: 'Draft has not been synced to GCS yet'
       });
     }
 
     // Get signed URL and redirect to it
     const signedUrl = await getGCSSignedUrl(draftId, 1); // 1 hour expiration for viewing
-    
+
     // Redirect to the signed URL
     res.redirect(signedUrl);
   } catch (error) {
@@ -905,7 +905,7 @@ const shareDraft = async (req, res) => {
     });
   } catch (error) {
     console.error('[Draft] Error sharing draft:', error);
-    
+
     if (error.code === 403) {
       return res.status(403).json({ success: false, error: 'No permission to share this document' });
     }
@@ -956,7 +956,7 @@ const getDraftPermissions = async (req, res) => {
     });
   } catch (error) {
     console.error('[Draft] Error getting permissions:', error);
-    
+
     if (error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials')) {
       return res.status(401).json({ success: false, error: 'Google access token expired or invalid', needsAuth: true });
     }
@@ -1003,7 +1003,7 @@ const makeDraftPublic = async (req, res) => {
     });
   } catch (error) {
     console.error('[Draft] Error making draft public:', error);
-    
+
     if (error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials')) {
       return res.status(401).json({ success: false, error: 'Google access token expired or invalid', needsAuth: true });
     }
@@ -1046,7 +1046,7 @@ const removePermission = async (req, res) => {
     });
   } catch (error) {
     console.error('[Draft] Error removing permission:', error);
-    
+
     if (error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials')) {
       return res.status(401).json({ success: false, error: 'Google access token expired or invalid', needsAuth: true });
     }
@@ -1091,7 +1091,7 @@ const uploadLocalFile = async (req, res) => {
     // importMimeType must be 'application/vnd.google-apps.document' to trigger conversion
     const importMimeType = 'application/vnd.google-apps.document';
     const fileExtension = path.extname(file.originalname).toLowerCase();
-    
+
     // Map file extensions to Google Drive import MIME types (source MIME type)
     const mimeTypeMap = {
       '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -1106,9 +1106,9 @@ const uploadLocalFile = async (req, res) => {
 
     // Verify MIME type mapping
     if (!sourceMimeType) {
-      return res.status(400).json({ 
-        success: false, 
-        error: `Unsupported file type: ${fileExtension}. Supported types: .docx, .doc, .pdf, .txt, .rtf, .html` 
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported file type: ${fileExtension}. Supported types: .docx, .doc, .pdf, .txt, .rtf, .html`
       });
     }
 
@@ -1158,7 +1158,7 @@ const uploadLocalFile = async (req, res) => {
 
   } catch (error) {
     console.error('[Draft] Error uploading local file:', error);
-    
+
     if (error.message?.includes('invalid_grant') || error.message?.includes('Invalid Credentials')) {
       return res.status(401).json({ success: false, error: 'Google access token expired or invalid', needsAuth: true });
     }
@@ -1188,7 +1188,7 @@ const uploadFileInitial = async (req, res) => {
 
     const file = req.file;
     const title = req.body.title || null; // Optional title from request body
-    
+
     console.log(`[Draft] 📤 User ${userId} uploading file from local: ${file.originalname} (${file.size} bytes)`);
     console.log(`[Draft]    MIME type: ${file.mimetype}`);
 
@@ -1222,13 +1222,13 @@ const uploadFileInitial = async (req, res) => {
 
   } catch (error) {
     console.error('[Draft] ❌ Error in upload flow:', error);
-    
+
     // Handle OAuth errors (user needs to reconnect Google Drive)
-    if (error.message?.includes('not connected Google Drive') || 
-        error.message?.includes('invalid_grant') ||
-        error.message?.includes('reconnect')) {
-      return res.status(401).json({ 
-        success: false, 
+    if (error.message?.includes('not connected Google Drive') ||
+      error.message?.includes('invalid_grant') ||
+      error.message?.includes('reconnect')) {
+      return res.status(401).json({
+        success: false,
         error: 'Google Drive connection required',
         message: 'Please reconnect your Google Drive account to upload files.',
         details: error.message
@@ -1236,21 +1236,21 @@ const uploadFileInitial = async (req, res) => {
     }
 
     // Handle Google Drive quota errors specifically
-    if (error.code === 507 || error.quotaExceeded || 
-        (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'))) {
-      return res.status(507).json({ 
-        success: false, 
+    if (error.code === 507 || error.quotaExceeded ||
+      (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'))) {
+      return res.status(507).json({
+        success: false,
         error: 'Google Drive storage quota exceeded',
         message: 'Your Google Drive storage is full. Please free up space and try again.',
         details: error.message
       });
     }
 
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to upload file', 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to upload file',
       message: 'An error occurred while uploading the file. Please try again.',
-      details: error.message 
+      details: error.message
     });
   }
 };
@@ -1286,7 +1286,7 @@ const syncDriveToGCSController = async (req, res) => {
     // Get User OAuth client for export (User OAuth is required for Drive operations)
     const { getAuthorizedClient } = require('../utils/oauth2Client');
     const userOAuthClient = await getAuthorizedClient(userId);
-    
+
     const result = await syncGoogleDocToGCS(google_file_id, exportFormat, userOAuthClient);
 
     res.status(200).json({
@@ -1297,12 +1297,12 @@ const syncDriveToGCSController = async (req, res) => {
 
   } catch (error) {
     console.error('[Draft] Error syncing Drive to GCS:', error);
-    
+
     if (error.message?.includes('GCS_KEY_BASE64') || error.message?.includes('Service Account')) {
-      return res.status(500).json({ 
-        success: false, 
+      return res.status(500).json({
+        success: false,
         error: 'Service Account configuration error. Please check GCS_KEY_BASE64 environment variable.',
-        details: error.message 
+        details: error.message
       });
     }
 
@@ -1332,7 +1332,7 @@ const openDocumentForEditing = async (req, res) => {
 
     // Step 1: Fetch draft by ID
     const draft = await Draft.findById(draftId);
-    
+
     if (!draft) {
       return res.status(404).json({ success: false, error: 'Draft not found' });
     }
@@ -1344,8 +1344,8 @@ const openDocumentForEditing = async (req, res) => {
 
     // Step 2: Ensure editor_type is 'google' (required for Google Docs iframe)
     if (draft.editor_type !== 'google') {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         error: 'This endpoint only supports Google Docs editor. Please use editor_type="google"',
         editorType: draft.editor_type || null
       });
@@ -1357,7 +1357,7 @@ const openDocumentForEditing = async (req, res) => {
     let fileNeedsRecreation = false;
     let userOAuthClient = null;
     let userOAuthDrive = null;
-    
+
     if (googleFileId) {
       try {
         // Get User OAuth client for file existence check (file is user-owned)
@@ -1365,14 +1365,14 @@ const openDocumentForEditing = async (req, res) => {
         userOAuthClient = await getAuthorizedClient(userId);
         const { google } = require('googleapis');
         userOAuthDrive = google.drive({ version: 'v3', auth: userOAuthClient });
-        
+
         // Check if Google Drive file exists and is not trashed using User OAuth
         try {
           const fileMetadata = await userOAuthDrive.files.get({
             fileId: googleFileId,
             fields: 'id, trashed'
           });
-          
+
           // Check if file is trashed
           if (fileMetadata.data.trashed === true) {
             console.log(`[Draft] Google Drive file ${googleFileId} is in trash - will recreate from GCS`);
@@ -1401,8 +1401,8 @@ const openDocumentForEditing = async (req, res) => {
         console.log(`[Draft] No Google Drive file ID - will create from GCS: ${draft.gcs_path}`);
         fileNeedsRecreation = true;
       } else {
-        return res.status(400).json({ 
-          success: false, 
+        return res.status(400).json({
+          success: false,
           error: 'Draft does not have a Google file ID or GCS path',
           draft: {
             id: draft.id,
@@ -1418,8 +1418,8 @@ const openDocumentForEditing = async (req, res) => {
       // Check if gcs_path exists
       if (!draft.gcs_path) {
         console.error(`[Draft] ⚠️  Cannot recreate: draft has no gcs_path`);
-        return res.status(400).json({ 
-          success: false, 
+        return res.status(400).json({
+          success: false,
           error: 'Google Drive file is deleted and no GCS backup is available',
           draft: {
             id: draft.id,
@@ -1429,9 +1429,9 @@ const openDocumentForEditing = async (req, res) => {
           }
         });
       }
-      
+
       console.log(`[Draft] 🔄 Starting BLOCKING recreation from GCS: ${draft.gcs_path}`);
-      
+
       try {
         // Get user's OAuth client (NOT service account) - reuse if already obtained
         if (!userOAuthClient) {
@@ -1439,7 +1439,7 @@ const openDocumentForEditing = async (req, res) => {
           userOAuthClient = await getAuthorizedClient(userId);
         }
         console.log(`[Draft] ✅ User OAuth client obtained for recreation`);
-        
+
         // RECREATE FILE - This is BLOCKING and must complete before proceeding
         const { restoreFileFromGCSToDrive } = require('../services/fileUploadService');
         const recreateResult = await restoreFileFromGCSToDrive(
@@ -1449,59 +1449,59 @@ const openDocumentForEditing = async (req, res) => {
           draft.user_id,
           userOAuthClient // Pass user OAuth client, NOT service account
         );
-        
+
         // CRITICAL: Use NEW google_file_id from recreation result
         googleFileId = recreateResult.google_file_id;
         console.log(`[Draft] ✅ Recreation COMPLETE. New Google File ID: ${googleFileId}`);
         console.log(`[Draft] 📝 OLD file ID was: ${draft.google_file_id}, NEW file ID is: ${googleFileId}`);
-        
+
         // Verify the new file ID is different and valid
         if (!googleFileId || googleFileId === draft.google_file_id) {
           throw new Error(`Recreation failed: New file ID is invalid or unchanged. Expected new ID, got: ${googleFileId}`);
         }
-        
+
         // CRITICAL: Refresh draft from database to confirm update completed
         const updatedDraft = await Draft.findById(draftId);
         if (!updatedDraft || updatedDraft.google_file_id !== googleFileId) {
           throw new Error(`Database update verification failed. Expected google_file_id: ${googleFileId}, got: ${updatedDraft?.google_file_id}`);
         }
-        
+
         console.log(`[Draft] ✅ Database verified: google_file_id = ${googleFileId}`);
-        
+
         // Update local draft object with confirmed values
         draft.google_file_id = googleFileId;
         draft.drive_item_id = updatedDraft.drive_item_id;
         draft.last_synced_at = updatedDraft.last_synced_at;
         draft.is_shared = updatedDraft.is_shared || true; // Should be true since user owns the file
-        
+
       } catch (recreateError) {
         console.error(`[Draft] ❌ BLOCKING recreation FAILED:`, recreateError);
-        
+
         // Handle Drive quota errors specifically
-        if (recreateError.code === 507 || recreateError.quotaExceeded || 
-            (recreateError.code === 403 && recreateError.errors && recreateError.errors.some(e => e.reason === 'storageQuotaExceeded'))) {
-          return res.status(507).json({ 
-            success: false, 
+        if (recreateError.code === 507 || recreateError.quotaExceeded ||
+          (recreateError.code === 403 && recreateError.errors && recreateError.errors.some(e => e.reason === 'storageQuotaExceeded'))) {
+          return res.status(507).json({
+            success: false,
             error: 'Google Drive storage quota exceeded',
             message: 'Your Google Drive storage is full. Please free up space and try again.',
             details: recreateError.message
           });
         }
-        
+
         // Handle OAuth errors (user needs to reconnect Google Drive)
-        if (recreateError.message?.includes('not connected Google Drive') || 
-            recreateError.message?.includes('invalid_grant') ||
-            recreateError.message?.includes('reconnect')) {
-          return res.status(401).json({ 
-            success: false, 
+        if (recreateError.message?.includes('not connected Google Drive') ||
+          recreateError.message?.includes('invalid_grant') ||
+          recreateError.message?.includes('reconnect')) {
+          return res.status(401).json({
+            success: false,
             error: 'Google Drive connection required',
             message: 'Please reconnect your Google Drive account to recreate the file.',
             details: recreateError.message
           });
         }
-        
-        return res.status(500).json({ 
-          success: false, 
+
+        return res.status(500).json({
+          success: false,
           error: 'Failed to recreate file from GCS',
           message: 'The file could not be recreated from backup. Please try again or contact support.',
           details: recreateError.message
@@ -1513,9 +1513,9 @@ const openDocumentForEditing = async (req, res) => {
     // After recreation, googleFileId MUST be the new file ID, not the old trashed/deleted one
     if (!googleFileId) {
       console.error(`[Draft] ❌ CRITICAL: No valid google_file_id after recreation check`);
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Draft does not have a valid Google file ID' 
+      return res.status(400).json({
+        success: false,
+        error: 'Draft does not have a valid Google file ID'
       });
     }
 
@@ -1527,31 +1527,31 @@ const openDocumentForEditing = async (req, res) => {
         const { getAuthorizedClient } = require('../utils/oauth2Client');
         userOAuthClient = await getAuthorizedClient(userId);
       }
-      
+
       // Use User OAuth client for verification
       const { google } = require('googleapis');
       const userOAuthDrive = google.drive({ version: 'v3', auth: userOAuthClient });
-      
+
       const fileCheck = await userOAuthDrive.files.get({
         fileId: googleFileId,
         fields: 'id, trashed'
       });
-      
+
       if (fileCheck.data.trashed === true) {
         console.error(`[Draft] ❌ CRITICAL: File ${googleFileId} is still trashed after recreation!`);
-        return res.status(500).json({ 
-          success: false, 
+        return res.status(500).json({
+          success: false,
           error: 'File recreation failed: File is still trashed',
           message: 'The file could not be properly recreated. Please try again.'
         });
       }
-      
+
       console.log(`[Draft] ✅ Final verification: File ${googleFileId} exists and is NOT trashed`);
     } catch (verifyError) {
       if (verifyError.code === 404) {
         console.error(`[Draft] ❌ CRITICAL: File ${googleFileId} not found after recreation!`);
-        return res.status(500).json({ 
-          success: false, 
+        return res.status(500).json({
+          success: false,
           error: 'File recreation failed: File not found',
           message: 'The file could not be properly recreated. Please try again.'
         });
@@ -1567,29 +1567,29 @@ const openDocumentForEditing = async (req, res) => {
     // Note: If file was recreated, user already owns it (is_shared = true), so skip sharing
     // Check if is_shared flag exists (handle backward compatibility)
     const isShared = draft.is_shared === true || draft.is_shared === 'true' || draft.is_shared === 1;
-    
+
     if (!isShared) {
       // File exists but is not shared with user - share it
       // This should not happen if file was recreated (user owns it), but handle for existing files
       const userEmail = req.user.email;
-      
+
       if (!userEmail) {
         console.warn(`[Draft] ⚠️  User email not available in request, cannot share file`);
-        return res.status(400).json({ 
-          success: false, 
+        return res.status(400).json({
+          success: false,
           error: 'User email not available. Cannot share file with user.'
         });
       }
-      
+
       try {
         // Use user's OAuth client to share (since service account might not have permission)
         const { getAuthorizedClient } = require('../utils/oauth2Client');
         const userOAuthClient = await getAuthorizedClient(userId);
         const { google } = require('googleapis');
         const drive = google.drive({ version: 'v3', auth: userOAuthClient });
-        
+
         console.log(`[Draft] Sharing file ${googleFileId} with user: ${userEmail}`);
-        
+
         // Share file with user using USER OAuth client
         await drive.permissions.create({
           fileId: googleFileId,
@@ -1601,14 +1601,14 @@ const openDocumentForEditing = async (req, res) => {
           sendNotificationEmail: false, // Don't send notification email
           supportsAllDrives: true
         });
-        
+
         console.log(`[Draft] ✅ File shared successfully with ${userEmail}`);
-        
+
         // Update is_shared flag in database
         await Draft.update(draftId, {
           is_shared: true
         });
-        
+
         draft.is_shared = true; // Update local draft object
       } catch (shareError) {
         // If file is already shared with user, that's fine - mark as shared
@@ -1620,8 +1620,8 @@ const openDocumentForEditing = async (req, res) => {
           draft.is_shared = true;
         } else {
           console.warn(`[Draft] ⚠️  Failed to share file with user:`, shareError.message);
-          return res.status(500).json({ 
-            success: false, 
+          return res.status(500).json({
+            success: false,
             error: 'Failed to share file with user',
             details: shareError.message
           });
@@ -1636,17 +1636,17 @@ const openDocumentForEditing = async (req, res) => {
     try {
       const { setupDriveWatcher } = require('../services/driveWebhookService');
       const { getWebhookUrl, validateWebhookUrl } = require('../utils/webhookUrl');
-      
+
       const validation = validateWebhookUrl();
       if (validation.isValid) {
         const webhookUrl = getWebhookUrl();
-        
+
         // Get User OAuth client for webhook setup (file is user-owned)
         if (!userOAuthClient) {
           const { getAuthorizedClient } = require('../utils/oauth2Client');
           userOAuthClient = await getAuthorizedClient(userId);
         }
-        
+
         console.log(`[Draft] 🔔 Setting up/refreshing webhook watcher for file ${googleFileId}`);
         await setupDriveWatcher(googleFileId, draftId, webhookUrl, userOAuthClient);
         console.log(`[Draft] ✅ Webhook watcher set up/refreshed for automatic sync`);
@@ -1694,18 +1694,18 @@ const openDocumentForEditing = async (req, res) => {
 const checkWebhookConfig = async (req, res) => {
   try {
     const { validateWebhookUrl, getWebhookUrl, getWebhookBaseUrl } = require('../utils/webhookUrl');
-    
+
     const validation = validateWebhookUrl();
     const webhookUrl = getWebhookUrl();
     const baseUrl = getWebhookBaseUrl();
-    
+
     // Check environment variables
     const envVars = {
       NGROK_URL: process.env.NGROK_URL || 'not set',
       WEBHOOK_BASE_URL: process.env.WEBHOOK_BASE_URL || 'not set',
       GATEWAY_URL: process.env.GATEWAY_URL || 'not set'
     };
-    
+
     res.status(200).json({
       success: true,
       webhook: {
@@ -1718,8 +1718,8 @@ const checkWebhookConfig = async (req, res) => {
       environment: {
         variables: envVars,
         active: envVars.NGROK_URL !== 'not set' ? 'NGROK_URL' :
-                envVars.WEBHOOK_BASE_URL !== 'not set' ? 'WEBHOOK_BASE_URL' :
-                envVars.GATEWAY_URL !== 'not set' ? 'GATEWAY_URL' : 'none'
+          envVars.WEBHOOK_BASE_URL !== 'not set' ? 'WEBHOOK_BASE_URL' :
+            envVars.GATEWAY_URL !== 'not set' ? 'GATEWAY_URL' : 'none'
       },
       instructions: validation.isValid ? null : {
         local: 'For local development: 1) Start ngrok: ngrok http 5000, 2) Set NGROK_URL=https://your-ngrok-url.ngrok-free.app, 3) Restart server',
@@ -1732,6 +1732,89 @@ const checkWebhookConfig = async (req, res) => {
       error: 'Failed to check webhook configuration',
       details: error.message
     });
+  }
+};
+
+/**
+ * POST /api/drafts/finish-assembled
+ * Complete the assembly process by saving the final DOCX to GCS and Drive
+ * This is called by the Assembler agent (agent-draft-service)
+ */
+const saveAssembledDraft = async (req, res) => {
+  try {
+    const userId = parseInt(req.headers['x-user-id'] || req.user?.id);
+    const { title, draft_id: agentDraftId } = req.body;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ success: false, error: 'No DOCX file provided' });
+    }
+    if (!userId) {
+      return res.status(401).json({ success: false, error: 'User ID is required' });
+    }
+
+    console.log(`[Draft] Finalizing assembled draft for user ${userId}, agent draft: ${agentDraftId}`);
+
+    const { uploadToUserDriveAsGoogleDoc } = require('../services/fileUploadService');
+    const { getAuthorizedClient } = require('../utils/oauth2Client');
+
+    // Get authorized client for the user
+    const userOAuthClient = await getAuthorizedClient(userId);
+
+    const result = await uploadToUserDriveAsGoogleDoc(
+      file.buffer,
+      userId,
+      `${title || 'Assembled_Draft'}.docx`,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      title,
+      userOAuthClient
+    );
+
+    // Step 4: Save to generated_documents table for versioning (if agentDraftId is provided)
+    if (agentDraftId) {
+      try {
+        const pool = require('../config/db');
+
+        // Get next version number
+        const versionQuery = 'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM generated_documents WHERE draft_id = $1';
+        const versionRes = await pool.query(versionQuery, [agentDraftId]);
+        const nextVersion = versionRes.rows[0].next_version;
+
+        const genDocQuery = `
+          INSERT INTO generated_documents (document_id, draft_id, version, is_final, generated_at, file_size, file_name, file_path, file_type)
+          VALUES (gen_random_uuid(), $1, $2, $3, NOW(), $4, $5, $6, $7)
+          RETURNING *
+        `;
+        const genDocValues = [
+          agentDraftId,
+          nextVersion,
+          true, // mark as final for now
+          file.size,
+          `${title || 'Assembled_Draft'}.docx`,
+          result.draft.gcs_path,
+          'docx'
+        ];
+
+        await pool.query(genDocQuery, genDocValues);
+        console.log(`[Draft] ✅ Saved to generated_documents. Version: ${nextVersion}`);
+      } catch (dbError) {
+        console.warn(`[Draft] ⚠️  Failed to save to generated_documents (non-critical):`, dbError.message);
+      }
+    }
+
+    console.log(`[Draft] ✅ Assembled draft finished. Google File ID: ${result.draft.google_file_id}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Draft assembled and saved successfully',
+      googleFileId: result.draft.google_file_id,
+      iframeUrl: `https://docs.google.com/document/d/${result.draft.google_file_id}/edit?embedded=true`,
+      draft: result.draft
+    });
+
+  } catch (error) {
+    console.error('[Draft] Error saving assembled draft:', error);
+    res.status(500).json({ success: false, error: 'Failed to save assembled draft', details: error.message });
   }
 };
 
@@ -1757,5 +1840,6 @@ module.exports = {
   syncDriveToGCSController,
   openDocumentForEditing,
   checkWebhookConfig,
-  viewDocumentFromGCS
+  viewDocumentFromGCS,
+  saveAssembledDraft
 };

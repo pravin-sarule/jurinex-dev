@@ -14,31 +14,60 @@ class File {
 
   static async findByUserId(user_id) {
     const result = await pool.query(
-      'SELECT * FROM user_files WHERE user_id = $1 ORDER BY is_folder DESC, created_at DESC', 
+      'SELECT * FROM user_files WHERE user_id = $1 ORDER BY is_folder DESC, created_at DESC',
       [user_id]
     );
     return result.rows;
   }
 
-  static async findByUserIdAndFolderPath(user_id, folder_path) {
-    let query, params;
-    
-    if (!folder_path || folder_path === '') {
-      query = `
-        SELECT * FROM user_files 
-        WHERE user_id = $1 AND (folder_path IS NULL OR folder_path = '')
-        ORDER BY is_folder DESC, originalname ASC
-      `;
-      params = [user_id];
-    } else {
-      query = `
-        SELECT * FROM user_files 
-        WHERE user_id = $1 AND folder_path = $2
-        ORDER BY is_folder DESC, originalname ASC
-      `;
-      params = [user_id, folder_path];
+  static async findByUserIdAndFolderPath(user_id, folder_path_or_name) {
+    if (!folder_path_or_name || folder_path_or_name === '') {
+      const result = await pool.query(
+        'SELECT * FROM user_files WHERE user_id = $1 AND (folder_path IS NULL OR folder_path = "") ORDER BY is_folder DESC, originalname ASC',
+        [user_id]
+      );
+      return result.rows;
     }
-    
+
+    // First, find the folder record to get the "stored" folder_path
+    const folderResult = await pool.query(
+      'SELECT folder_path, originalname FROM user_files WHERE user_id = $1 AND originalname = $2 AND is_folder = true LIMIT 1',
+      [user_id, folder_path_or_name]
+    );
+
+    if (folderResult.rows.length === 0) {
+      // Fallback: try finding files directly by the folder_path_or_name string
+      const result = await pool.query(
+        'SELECT * FROM user_files WHERE user_id = $1 AND folder_path = $2 ORDER BY is_folder DESC, originalname ASC',
+        [user_id, folder_path_or_name]
+      );
+      return result.rows;
+    }
+
+    const folder = folderResult.rows[0];
+    const storedPath = folder.folder_path || '';
+    let robustPath = storedPath;
+    if (folder.originalname && !robustPath.endsWith(folder.originalname)) {
+      robustPath = robustPath ? `${robustPath}/${folder.originalname}` : folder.originalname;
+    }
+
+    // Now search for files that match ONLY this folder and its subfolders
+    const query = `
+      SELECT * FROM user_files 
+      WHERE user_id = $1 
+      AND (
+        folder_path = $2 
+        OR folder_path LIKE $3
+      )
+      ORDER BY is_folder DESC, originalname ASC
+    `;
+
+    const params = [
+      user_id,
+      robustPath,
+      `${robustPath}/%`
+    ];
+
     const result = await pool.query(query, params);
     return result.rows;
   }
@@ -58,7 +87,7 @@ class File {
 
   static async findFolderByPath(user_id, folder_name, parent_path = '') {
     const folder_path = parent_path ? `${parent_path}/${folder_name}` : folder_name;
-    
+
     const result = await pool.query(
       'SELECT * FROM user_files WHERE user_id = $1 AND originalname = $2 AND folder_path = $3 AND is_folder = true',
       [user_id, folder_name, parent_path]
@@ -117,7 +146,7 @@ class File {
     const fields = Object.keys(updates);
     const values = Object.values(updates);
     const setClause = fields.map((field, index) => `${field} = $${index + 2}`).join(', ');
-    
+
     const result = await pool.query(
       `UPDATE user_files SET ${setClause}, updated_at = NOW() WHERE id = $1::uuid RETURNING *`,
       [id, ...values]
@@ -202,7 +231,7 @@ class File {
 
   static async findDuplicates(user_id, originalname, folder_path) {
     let query, params;
-    
+
     if (!folder_path || folder_path === '') {
       query = `
         SELECT * FROM user_files 
@@ -216,7 +245,7 @@ class File {
       `;
       params = [user_id, originalname, folder_path];
     }
-    
+
     const result = await pool.query(query, params);
     return result.rows;
   }
@@ -278,7 +307,7 @@ class File {
             updated_at = NOW()
         WHERE id = $1::uuid
       `, [fileId, outputPath]);
-      
+
       console.log(`[File.updateFileOutputPath] ✅ Updated output path for file ${fileId}: ${outputPath}`);
     } catch (error) {
       if (error.message.includes('column') && error.message.includes('does not exist')) {

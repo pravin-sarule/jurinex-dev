@@ -31,9 +31,9 @@ function initializeServiceAccount() {
     const jsonString = Buffer.from(process.env.GCS_KEY_BASE64, 'base64').toString('utf-8');
     serviceAccountCredentials = JSON.parse(jsonString);
 
-    if (!serviceAccountCredentials.project_id || 
-        !serviceAccountCredentials.private_key || 
-        !serviceAccountCredentials.client_email) {
+    if (!serviceAccountCredentials.project_id ||
+      !serviceAccountCredentials.private_key ||
+      !serviceAccountCredentials.client_email) {
       throw new Error('Invalid service account key format. Missing required fields.');
     }
 
@@ -84,28 +84,28 @@ const BUCKET_NAME = process.env.GCS_BUCKET || process.env.GCS_BUCKET_NAME || 'dr
  */
 const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title = null) => {
   let gcsPath = null; // Declare outside try block for cleanup
-  
+
   try {
     // Ensure clients are initialized
     const { storage: storageClient, driveClient: drive } = initializeServiceAccount();
-    
+
     console.log(`[FileUpload] Starting upload for user ${userId}: ${filename}`);
 
     // Determine title (use provided title or derive from filename)
     const baseName = title || filename.replace(/\.[^/.]+$/, '');
     const timestamp = Date.now();
     const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-    
+
     // Step 1: Upload to GCS at path uploads/{userId}/{timestamp}_{title}.docx
     // Use .docx extension for consistency (will be converted to Google Docs)
     const fileExtension = filename.match(/\.[^/.]+$/) ? filename.match(/\.[^/.]+$/)[0] : '.docx';
     gcsPath = `uploads/${userId}/${timestamp}_${baseName.replace(/[^a-zA-Z0-9._-]/g, '_')}${fileExtension}`;
-    
+
     console.log(`[FileUpload] Step 1: Uploading to GCS: ${gcsPath}`);
-    
+
     const bucket = storageClient.bucket(BUCKET_NAME);
     const gcsFile = bucket.file(gcsPath);
-    
+
     await gcsFile.save(fileBuffer, {
       metadata: {
         contentType: mimetype,
@@ -118,7 +118,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
       },
       resumable: false
     });
-    
+
     console.log(`[FileUpload] ✅ File uploaded to GCS: ${gcsPath}`);
 
     // Step 2: Download file from GCS and convert to stream
@@ -128,7 +128,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
 
     // Step 3: Upload to Google Drive using mimeType: 'application/vnd.google-apps.document'
     console.log(`[FileUpload] Step 3: Uploading to Google Drive and converting to Google Docs`);
-    
+
     // Check if file needs conversion to Google Docs
     const supportedFormats = [
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
@@ -141,11 +141,11 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
 
     let googleFileId;
     let drivePath = `/${baseName}`;
-    
+
     // If file can be converted to Google Docs, use import feature
     if (supportedFormats.includes(mimetype) || mimetype === 'application/vnd.google-apps.document') {
       console.log(`[FileUpload] Step 4: Converting file to Google Docs format`);
-      
+
       try {
         // Import as Google Docs (this automatically converts the file)
         const importFile = await drive.files.create({
@@ -159,7 +159,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
           },
           fields: 'id, name, mimeType, webViewLink'
         });
-        
+
         googleFileId = importFile.data.id;
         console.log(`[FileUpload] ✅ File converted to Google Docs: ${googleFileId}`);
       } catch (driveError) {
@@ -167,7 +167,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
         if (driveError.code === 403 && driveError.errors && driveError.errors.length > 0) {
           const errorReason = driveError.errors[0].reason;
           const errorMessage = driveError.errors[0].message;
-          
+
           if (errorReason === 'storageQuotaExceeded') {
             throw new Error(
               'Google Drive storage quota exceeded. ' +
@@ -189,7 +189,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
     } else {
       // Upload as-is (may not be editable in Google Docs)
       console.warn(`[FileUpload] ⚠️  File format ${mimetype} may not be editable in Google Docs`);
-      
+
       try {
         const driveFile = await drive.files.create({
           requestBody: {
@@ -209,7 +209,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
         if (driveError.code === 403 && driveError.errors && driveError.errors.length > 0) {
           const errorReason = driveError.errors[0].reason;
           const errorMessage = driveError.errors[0].message;
-          
+
           if (errorReason === 'storageQuotaExceeded') {
             throw new Error(
               'Google Drive storage quota exceeded. ' +
@@ -236,7 +236,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
         fileId: googleFileId,
         fields: 'name, parents'
       });
-      
+
       drivePath = `/${fileMetadata.data.name}`;
     } catch (error) {
       console.warn(`[FileUpload] ⚠️  Could not get file metadata for path:`, error.message);
@@ -244,7 +244,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
 
     // Step 5: Store the result in the PostgreSQL database
     console.log(`[FileUpload] Step 5: Saving to database`);
-    
+
     const draft = await Draft.create({
       user_id: userId,
       title: baseName,
@@ -264,7 +264,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
     try {
       const { setupDriveWatcher } = require('./driveWebhookService');
       const { getWebhookUrl, validateWebhookUrl } = require('../utils/webhookUrl');
-      
+
       // Validate webhook URL configuration
       const validation = validateWebhookUrl();
       if (!validation.isValid) {
@@ -273,7 +273,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
         console.warn(`[FileUpload] ⚠️  Webhook will not be set up. For local development, use ngrok.`);
         throw new Error(validation.message);
       }
-      
+
       const webhookUrl = getWebhookUrl();
       console.log(`[FileUpload] Step 6: Setting up webhook watcher for automatic sync`);
       console.log(`[FileUpload] Webhook URL: ${webhookUrl}`);
@@ -302,13 +302,13 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
     };
   } catch (error) {
     console.error(`[FileUpload] Error uploading file:`, error);
-    
+
     // Only clean up GCS file if it's not a Drive quota error
     // If Drive quota is exceeded, the file is still useful in GCS
-    const isQuotaError = error.message?.includes('storage quota exceeded') || 
-                         error.message?.includes('storageQuotaExceeded') ||
-                         (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'));
-    
+    const isQuotaError = error.message?.includes('storage quota exceeded') ||
+      error.message?.includes('storageQuotaExceeded') ||
+      (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'));
+
     if (gcsPath && !isQuotaError) {
       try {
         const { storage: storageClient } = initializeServiceAccount();
@@ -322,7 +322,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
     } else if (isQuotaError && gcsPath) {
       console.log(`[FileUpload] Keeping GCS file ${gcsPath} despite Drive quota error - file is still accessible in GCS`);
     }
-    
+
     // Handle specific errors
     if (error.message?.includes('invalid_grant') || error.message?.includes('invalid_rapt')) {
       throw new Error('Service Account authentication failed. Please check GCS_KEY_BASE64 configuration.');
@@ -351,30 +351,30 @@ const syncGoogleDocToGCS = async (googleFileId, exportFormat = 'docx', userOAuth
   try {
     // Use service account ONLY for GCS storage operations
     const { storage: storageClient } = initializeServiceAccount();
-    
+
     // Use User OAuth for Drive API operations (export)
     if (!userOAuthClient) {
       throw new Error('User OAuth client is required for exporting Google Docs');
     }
-    
+
     const { google } = require('googleapis');
     const drive = google.drive({ version: 'v3', auth: userOAuthClient });
-    
+
     console.log(`[FileUpload] Starting sync for Google file ${googleFileId} as ${exportFormat}`);
 
     // Step 1: Fetch the draft from the database
     const draft = await Draft.findByGoogleFileId(googleFileId);
-    
+
     if (!draft) {
       throw new Error(`Draft with google_file_id ${googleFileId} not found`);
     }
 
     let gcsPath = draft.gcs_path;
-    
+
     // If no gcs_path exists, create one (for drafts created from templates)
     if (!gcsPath) {
       console.log(`[FileUpload] Draft ${draft.id} doesn't have a GCS path. Creating initial GCS path...`);
-      
+
       // Get file metadata from Google Drive to get the title
       let fileName = draft.title || 'document';
       try {
@@ -393,17 +393,17 @@ const syncGoogleDocToGCS = async (googleFileId, exportFormat = 'docx', userOAuth
       const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
       const timestamp = Date.now();
       const fileExtension = exportFormat === 'pdf' ? 'pdf' : 'docx';
-      
+
       // Create GCS path similar to handleInitialUpload
       gcsPath = `uploads/${draft.user_id}/${timestamp}_${safeFileName}.${fileExtension}`;
-      
+
       console.log(`[FileUpload] Created new GCS path: ${gcsPath}`);
-      
+
       // Update draft with the new gcs_path
       await Draft.update(draft.id, {
         gcs_path: gcsPath
       });
-      
+
       console.log(`[FileUpload] Updated draft ${draft.id} with GCS path: ${gcsPath}`);
     } else {
       console.log(`[FileUpload] Using existing GCS path: ${gcsPath}`);
@@ -441,7 +441,7 @@ const syncGoogleDocToGCS = async (googleFileId, exportFormat = 'docx', userOAuth
 
     // Step 3: Use bucket.file(gcs_path).save() to overwrite the file in GCS
     console.log(`[FileUpload] Overwriting file in GCS: ${gcsPath}`);
-    
+
     const bucket = storageClient.bucket(BUCKET_NAME);
     const gcsFile = bucket.file(gcsPath);
 
@@ -499,7 +499,7 @@ const syncGoogleDocToGCS = async (googleFileId, exportFormat = 'docx', userOAuth
     };
   } catch (error) {
     console.error(`[FileUpload] Error syncing Google Doc to GCS:`, error);
-    
+
     // Handle specific errors
     if (error.message?.includes('invalid_grant') || error.message?.includes('invalid_rapt')) {
       throw new Error('Service Account authentication failed. Please check GCS_KEY_BASE64 configuration.');
@@ -528,17 +528,17 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
   try {
     // Use Service Account ONLY for GCS operations
     const { storage: storageClient } = initializeServiceAccount();
-    
+
     // Use USER OAuth client for Google Drive operations (user will own the file)
     const { google } = require('googleapis');
     const drive = google.drive({ version: 'v3', auth: userOAuthClient });
-    
+
     console.log(`[FileUpload] Restoring file from GCS: ${gcsPath} for draft ${draftId}`);
 
     // Step 1: Download file from GCS
     const bucket = storageClient.bucket(BUCKET_NAME);
     const gcsFile = bucket.file(gcsPath);
-    
+
     const [exists] = await gcsFile.exists();
     if (!exists) {
       throw new Error(`File not found in GCS: ${gcsPath}`);
@@ -556,13 +556,13 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
     // Step 3: Upload to Google Drive (convert to Google Doc if .docx)
     let googleFileId;
     let webViewLink;
-    
+
     const fileStream = Readable.from(fileBuffer);
-    
+
     if (contentType.includes('wordprocessingml') || fileName.endsWith('.docx')) {
       // Upload as Google Doc (Drive will auto-convert)
       console.log(`[FileUpload] Uploading to Google Drive as Google Doc`);
-      
+
       const driveFile = await drive.files.create({
         requestBody: {
           name: fileName.replace(/\.docx?$/i, ''),
@@ -574,14 +574,14 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
         },
         fields: 'id, name, webViewLink, webContentLink'
       });
-      
+
       googleFileId = driveFile.data.id;
       webViewLink = driveFile.data.webViewLink;
       console.log(`[FileUpload] ✅ File uploaded to Drive as Google Doc: ${googleFileId}`);
     } else if (contentType.includes('pdf')) {
       // For PDFs, we can import as Google Doc too
       console.log(`[FileUpload] Uploading PDF to Google Drive as Google Doc`);
-      
+
       const driveFile = await drive.files.create({
         requestBody: {
           name: fileName.replace(/\.pdf$/i, ''),
@@ -593,14 +593,14 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
         },
         fields: 'id, name, webViewLink, webContentLink'
       });
-      
+
       googleFileId = driveFile.data.id;
       webViewLink = driveFile.data.webViewLink;
       console.log(`[FileUpload] ✅ PDF uploaded to Drive as Google Doc: ${googleFileId}`);
     } else {
       // Upload as original file type (may not be editable in Google Docs)
       console.log(`[FileUpload] Uploading to Google Drive as ${contentType}`);
-      
+
       const driveFile = await drive.files.create({
         requestBody: {
           name: fileName,
@@ -612,7 +612,7 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
         },
         fields: 'id, name, webViewLink, webContentLink'
       });
-      
+
       googleFileId = driveFile.data.id;
       webViewLink = driveFile.data.webViewLink;
       console.log(`[FileUpload] ✅ File uploaded to Drive: ${googleFileId}`);
@@ -645,7 +645,7 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
     try {
       const { setupDriveWatcher } = require('./driveWebhookService');
       const { getWebhookUrl, validateWebhookUrl } = require('../utils/webhookUrl');
-      
+
       const validation = validateWebhookUrl();
       if (validation.isValid) {
         const webhookUrl = getWebhookUrl();
@@ -668,7 +668,7 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
     };
   } catch (error) {
     console.error(`[FileUpload] Error restoring file from GCS to Drive:`, error);
-    
+
     // Handle Drive quota errors specifically
     if (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded')) {
       const quotaError = new Error("Google Drive storage quota exceeded. Please free up space in your Google Drive account.");
@@ -676,7 +676,7 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
       quotaError.quotaExceeded = true;
       throw quotaError;
     }
-    
+
     throw error;
   }
 };
@@ -695,31 +695,31 @@ const restoreFileFromGCSToDrive = async (draftId, gcsPath, title, userId, userOA
  */
 const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimetype, title = null, userOAuthClient) => {
   let gcsPath = null; // Declare outside try block for cleanup
-  
+
   try {
     // Use Service Account ONLY for GCS operations
     const { storage: storageClient } = initializeServiceAccount();
-    
+
     // Use USER OAuth client for Google Drive operations (user will own the file)
     const { google } = require('googleapis');
     const drive = google.drive({ version: 'v3', auth: userOAuthClient });
-    
+
     console.log(`[FileUpload] 📤 Starting upload for user ${userId}: ${filename} (${fileBuffer.length} bytes)`);
 
     // Determine title (use provided title or derive from filename)
     const baseName = title || filename.replace(/\.[^/.]+$/, '');
     const timestamp = Date.now();
     const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-    
+
     // Step 1: Upload to GCS at path uploads/{userId}/{timestamp}_{title}.docx
     const fileExtension = filename.match(/\.[^/.]+$/) ? filename.match(/\.[^/.]+$/)[0] : '.docx';
     gcsPath = `uploads/${userId}/${timestamp}_${baseName.replace(/[^a-zA-Z0-9._-]/g, '_')}${fileExtension}`;
-    
+
     console.log(`[FileUpload] 📦 Step 1: Uploading to GCS: ${gcsPath}`);
-    
+
     const bucket = storageClient.bucket(BUCKET_NAME);
     const gcsFile = bucket.file(gcsPath);
-    
+
     await gcsFile.save(fileBuffer, {
       metadata: {
         contentType: mimetype,
@@ -732,7 +732,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
       },
       resumable: false
     });
-    
+
     console.log(`[FileUpload] ✅ File saved to GCS: ${gcsPath}`);
 
     // Step 2: Prepare file stream for Drive upload
@@ -742,7 +742,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     // Step 3: Upload to Google Drive using USER OAuth (convert to Google Doc)
     console.log(`[FileUpload] ☁️  Step 3: Uploading to Google Drive using USER OAuth`);
     console.log(`[FileUpload]    Converting to Google Docs format`);
-    
+
     // Supported formats that can be converted to Google Docs
     const supportedFormats = [
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
@@ -755,7 +755,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
 
     let googleFileId;
     let webViewLink;
-    
+
     // Determine source MIME type for conversion
     let sourceMimeType = mimetype;
     if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
@@ -771,7 +771,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     } else if (mimetype === 'application/rtf') {
       sourceMimeType = 'application/rtf';
     }
-    
+
     // Upload and convert to Google Docs
     if (supportedFormats.includes(mimetype)) {
       try {
@@ -786,14 +786,30 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
           },
           fields: 'id, name, mimeType, webViewLink'
         });
-        
+
         googleFileId = driveFile.data.id;
         webViewLink = driveFile.data.webViewLink;
         console.log(`[FileUpload] ✅ File uploaded to Drive as Google Doc: ${googleFileId}`);
         console.log(`[FileUpload]    File is owned by user (not service account)`);
+
+        // Step 3b: Set permissions so the iframe doesn't show "You need access"
+        // This makes the file "Anyone with the link can edit"
+        try {
+          console.log(`[FileUpload] 🔑 Setting permissions for iframe access...`);
+          await drive.permissions.create({
+            fileId: googleFileId,
+            requestBody: {
+              role: 'writer',
+              type: 'anyone'
+            }
+          });
+          console.log(`[FileUpload] ✅ Permissions updated to 'anyone with link can edit'`);
+        } catch (permError) {
+          console.warn(`[FileUpload] ⚠️ Failed to set permissions (might work anyway if user is owner):`, permError.message);
+        }
       } catch (driveError) {
         console.error(`[FileUpload] ❌ Drive upload failed:`, driveError.message);
-        
+
         // Handle Drive quota errors specifically
         if (driveError.code === 403 && driveError.errors && driveError.errors.some(e => e.reason === 'storageQuotaExceeded')) {
           const quotaError = new Error("Google Drive storage quota exceeded. Please free up space in your Google Drive account.");
@@ -801,13 +817,13 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
           quotaError.quotaExceeded = true;
           throw quotaError;
         }
-        
+
         throw driveError;
       }
     } else {
       // Upload as-is (may not be editable in Google Docs)
       console.warn(`[FileUpload] ⚠️  File format ${mimetype} may not be editable in Google Docs`);
-      
+
       const driveFile = await drive.files.create({
         requestBody: {
           name: baseName,
@@ -819,7 +835,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
         },
         fields: 'id, name, mimeType, webViewLink'
       });
-      
+
       googleFileId = driveFile.data.id;
       webViewLink = driveFile.data.webViewLink;
       console.log(`[FileUpload] ✅ File uploaded to Drive: ${googleFileId}`);
@@ -828,7 +844,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     // Step 4: Save draft record in database (BLOCKING)
     // NOTE: Service account is NOT added to user files - we use User OAuth for all operations
     console.log(`[FileUpload] 💾 Step 4: Saving draft to database`);
-    
+
     const draft = await Draft.create({
       user_id: userId,
       title: baseName,
@@ -849,7 +865,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     try {
       const { setupDriveWatcher } = require('./driveWebhookService');
       const { getWebhookUrl, validateWebhookUrl } = require('../utils/webhookUrl');
-      
+
       const validation = validateWebhookUrl();
       if (validation.isValid) {
         const webhookUrl = getWebhookUrl();
@@ -881,12 +897,12 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     };
   } catch (error) {
     console.error(`[FileUpload] ❌ Error uploading file to user Drive:`, error);
-    
+
     // Only clean up GCS file if it's not a Drive quota error
     // If Drive quota is exceeded, the file is still useful in GCS
-    const isQuotaError = error.code === 507 || error.quotaExceeded || 
-                         (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'));
-    
+    const isQuotaError = error.code === 507 || error.quotaExceeded ||
+      (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'));
+
     if (gcsPath && !isQuotaError) {
       try {
         const { storage: storageClient } = initializeServiceAccount();
@@ -900,16 +916,16 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     } else if (isQuotaError && gcsPath) {
       console.log(`[FileUpload] 📦 Keeping GCS file ${gcsPath} despite Drive quota error - file is still accessible in GCS`);
     }
-    
+
     // Handle Drive quota errors specifically
-    if (error.code === 507 || error.quotaExceeded || 
-        (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'))) {
+    if (error.code === 507 || error.quotaExceeded ||
+      (error.code === 403 && error.errors && error.errors.some(e => e.reason === 'storageQuotaExceeded'))) {
       const quotaError = new Error("Google Drive storage quota exceeded. Please free up space in your Google Drive account.");
       quotaError.code = 507;
       quotaError.quotaExceeded = true;
       throw quotaError;
     }
-    
+
     throw error;
   }
 };
