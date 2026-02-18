@@ -57,6 +57,9 @@ export * from './services';
 // Types
 export * from './types';
 
+// User Custom Template (create your own templates)
+export * from './user_custom_template';
+
 // Utilities
 export * from './utils';
 

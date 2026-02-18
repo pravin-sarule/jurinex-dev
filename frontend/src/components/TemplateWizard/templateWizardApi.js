@@ -1,21 +1,35 @@
 /**
- * Fetches templates from agent-draft-service template gallery API.
- * GET /api/templates?category=&is_active=true&limit=50&offset=0&include_preview_url=true
+ * Agent-draft-service API (API_POSTMAN.md).
+ * GET /api/templates — list admin templates with optional preview_image_url.
  */
 
 import { AGENT_DRAFT_TEMPLATE_API } from '../../config/apiConfig';
 
 const TEMPLATES_URL = `${AGENT_DRAFT_TEMPLATE_API}/api/templates`;
 
+const getAuthHeaders = () => {
+  const token =
+    localStorage.getItem('token') ||
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('access_token') ||
+    localStorage.getItem('auth_token');
+  const headers = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const userStr = localStorage.getItem('user') || localStorage.getItem('userInfo');
+    if (userStr) {
+      const parsed = JSON.parse(userStr);
+      const id = parsed?.id ?? parsed?.userId ?? parsed?.user_id;
+      if (id != null) headers['X-User-Id'] = String(id);
+    }
+  } catch (_) {}
+  return headers;
+};
+
 /**
- * Fetch template list with preview image URLs for the gallery.
- * @param {Object} options
- * @param {string} [options.category] - Filter by category
- * @param {boolean} [options.is_active=true] - Only active templates
- * @param {number} [options.limit=50] - Page size
- * @param {number} [options.offset=0] - Pagination offset
- * @param {boolean} [options.include_preview_url=true] - Include signed preview_image_url per template
- * @returns {Promise<{ success: boolean, templates: Array, count: number }>}
+ * Fetch admin template list (agent-draft-service GET /api/templates).
+ * Include preview_image_url for gallery. Optional category filter.
+ * Use finalized_only=true for draft section (only templates finalized in template section).
  */
 export const fetchTemplates = async ({
   category = '',
@@ -23,6 +37,7 @@ export const fetchTemplates = async ({
   limit = 50,
   offset = 0,
   include_preview_url = true,
+  finalized_only = false,
 } = {}) => {
   const params = new URLSearchParams({
     category: String(category),
@@ -30,12 +45,12 @@ export const fetchTemplates = async ({
     limit: String(limit),
     offset: String(offset),
     include_preview_url: String(include_preview_url),
+    finalized_only: String(finalized_only),
   });
   const url = `${TEMPLATES_URL}?${params.toString()}`;
-  console.log('[API]', 'GET', url, '— fetchTemplates');
   const response = await fetch(url, {
     method: 'GET',
-    headers: { Accept: 'application/json' },
+    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));

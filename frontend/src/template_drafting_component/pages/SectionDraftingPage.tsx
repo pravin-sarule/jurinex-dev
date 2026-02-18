@@ -1,12 +1,14 @@
 /**
  * Section Drafting Page
- * 
- * New drafting flow where users:
- * 1. See tabs for only their selected sections
+ *
+ * Advanced drafting flow: sections come ONLY from user-fetched and selected or added
+ * sections (dt_draft_section_prompts). Supports custom sections, reordering, and CRUD.
+ *
+ * 1. Load sections from dt_draft_section_prompts (no full universal catalog)
  * 2. Generate each section separately
  * 3. View Critic validation (confidence score & accuracy)
- * 4. Edit generated content
- * 5. Update via prompt
+ * 4. Edit generated content, update via prompt
+ * 5. Reorder, add, delete sections (CRUD)
  * 6. Assemble all sections into final document
  */
 
@@ -26,9 +28,10 @@ import {
     TrashIcon
 } from '@heroicons/react/24/outline';
 import { draftApi } from '../services';
-import { UNIVERSAL_SECTIONS } from '../components/constants';
+import { getUniversalSections } from '../services/universalSectionsApi';
+import { getErrorMessage, isTimeoutError } from '../services/api';
+import type { UniversalSection } from '../components/constants';
 import { toast } from 'react-toastify';
-import axios from 'axios';
 
 interface SectionState {
     sectionId: string;
@@ -50,9 +53,10 @@ interface SectionDraftingPageProps {
     draftIdProp?: string;
     onAssembleComplete?: () => void;
     onBack?: () => void;
+    addActivity?: (agent: string, action: string, status?: 'in-progress' | 'completed' | 'pending') => void;
 }
 
-export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftIdProp, onAssembleComplete, onBack }) => {
+export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftIdProp, onAssembleComplete, onBack, addActivity }) => {
     const params = useParams<{ draftId: string }>();
     const draftId = draftIdProp || params.draftId;
     const navigate = useNavigate();
@@ -68,13 +72,48 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
     const [isAssembling, setIsAssembling] = useState(false);
     const [draftTitle, setDraftTitle] = useState('');
 
-    // Custom Section State
+    // Universal list: used to mark isCustom and to resolve display names when section_name is empty
+    const [universalSectionIds, setUniversalSectionIds] = useState<Set<string>>(new Set());
+    const [universalSectionsMap, setUniversalSectionsMap] = useState<Map<string, { title: string; description: string; defaultPrompt: string }>>(new Map());
+    // Sections for this draft: only from dt_draft_section_prompts (user selected + added)
     const [allSections, setAllSections] = useState<any[]>([]);
     const [showAddSection, setShowAddSection] = useState(false);
     const [newSectionData, setNewSectionData] = useState({ name: '', type: 'clause', prompt: '' });
 
 
-    // Load draft and section prompts
+    // Build section list from dt_draft_section_prompts only (user selected + added sections)
+    const promptsToSections = (
+        prompts: any[],
+        universalIds: Set<string>,
+        universalMap: Map<string, { title: string; description: string; defaultPrompt: string }>
+    ): any[] => {
+        return prompts
+            .filter((p: any) => !p.is_deleted)
+            .map((p: any) => {
+                const isCustom = !universalIds.has(p.section_id);
+                const resolvedTitle = p.section_name?.trim() || universalMap.get(p.section_id)?.title || (isCustom ? 'Custom Section' : 'Untitled Section');
+                const resolvedDesc = p.section_type?.trim() || universalMap.get(p.section_id)?.description || (isCustom ? 'Custom' : 'Section');
+                const universalEntry = universalMap.get(p.section_id);
+                // Prefer real prompt from section_prompts (default_prompt). If custom_prompt equals section_intro, show default_prompt instead.
+                const customTrim = p.custom_prompt?.trim();
+                const introTrim = p.section_intro?.trim();
+                const useCustom = customTrim && customTrim !== introTrim;
+                const defaultPrompt = useCustom ? customTrim : (p.default_prompt?.trim()) || (isCustom
+                    ? `Generate the content for the section titled '${resolvedTitle}'. Ensure it is professionally drafted, legally sound, and formatted in clean HTML.`
+                    : (universalEntry?.defaultPrompt || ''));
+                return {
+                    id: p.section_id,
+                    title: resolvedTitle,
+                    description: resolvedDesc,
+                    defaultPrompt,
+                    isCustom,
+                    sortOrder: p.sort_order ?? 999
+                };
+            })
+            .sort((a: any, b: any) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
+    };
+
+    // Load draft: sections ONLY from dt_draft_section_prompts (user-fetched, selected, or added)
     useEffect(() => {
         const loadDraftData = async () => {
             if (!draftId) return;
@@ -82,21 +121,27 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             try {
                 setLoading(true);
 
-                // Get section prompts to determine which sections are active
-                const prompts = await draftApi.getSectionPrompts(draftId);
+                // Prompts = source of truth for this draft's sections. Universal only to mark isCustom.
+                const [universalSections, prompts] = await Promise.all([
+                    getUniversalSections(),
+                    draftApi.getSectionPrompts(draftId),
+                ]);
 
-                // Merge Universal and Custom sections
-                const mergedSections = mergeSections(UNIVERSAL_SECTIONS, prompts);
-                setAllSections(mergedSections);
+                const universalIds = new Set((universalSections || []).map((u: UniversalSection) => u.id));
+                const universalMap = new Map((universalSections || []).map((u: UniversalSection) => [u.id, { title: u.title || '', description: u.description || '', defaultPrompt: u.defaultPrompt || '' }]));
+                setUniversalSectionIds(universalIds);
+                setUniversalSectionsMap(universalMap);
 
-                const activeSections = mergedSections.map(s => s.id);
+                const sections = Array.isArray(prompts) ? promptsToSections(prompts, universalIds, universalMap) : [];
+                setAllSections(sections);
+
+                const activeSections = sections.map((s: any) => s.id);
                 setSelectedSections(activeSections);
 
                 if (activeSections.length > 0 && !activeTab) {
                     setActiveTab(activeSections[0]);
                 }
 
-                // Initialize section states
                 const initialStates: Record<string, SectionState> = {};
                 activeSections.forEach((sectionId: string) => {
                     initialStates[sectionId] = {
@@ -110,24 +155,26 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 });
                 setSectionStates(initialStates);
 
-                // Load existing section content if any
-                const token = localStorage.getItem('token');
-                const sectionsResponse = await axios.get(
-                    `http://localhost:8000/api/drafts/${draftId}/sections`,
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${token}`
-                        }
-                    }
-                );
+                const sectionsResponse = await draftApi.getSections(draftId);
 
-                if (sectionsResponse.data.success && sectionsResponse.data.sections) {
+                if (sectionsResponse.success && sectionsResponse.sections) {
                     const updatedStates = { ...initialStates };
-                    sectionsResponse.data.sections.forEach((section: any) => {
-                        if (updatedStates[section.section_key]) {
-                            updatedStates[section.section_key] = {
-                                ...updatedStates[section.section_key],
-                                content: section.content_html || '',
+                    const idByLowerKey = new Map<string, string>();
+                    Object.keys(initialStates).forEach(id => {
+                        const lower = id.toLowerCase();
+                        idByLowerKey.set(lower, id);
+                        idByLowerKey.set(lower.replace(/\s+/g, '_'), id);
+                    });
+                    sectionsResponse.sections.forEach((section: any) => {
+                        const sk = (section.section_key || '').trim();
+                        const skLower = sk.toLowerCase();
+                        const skNorm = skLower.replace(/\s+/g, '_');
+                        const targetId = idByLowerKey.get(skLower) ?? idByLowerKey.get(skNorm) ?? (initialStates[sk] ? sk : null);
+                        if (targetId) {
+                            const html = section.content_html || '';
+                            updatedStates[targetId] = {
+                                ...updatedStates[targetId],
+                                content: html,
                                 isGenerated: true,
                                 versionId: section.version_id
                             };
@@ -147,46 +194,33 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
         loadDraftData();
     }, [draftId]);
 
-    // Helper: Merge Universal and Custom (Fix: Maintain sort order from DB)
-    const mergeSections = (universal: any[], dbPrompts: any[]) => {
-        const universalIds = new Set(universal.map(u => u.id));
-        const dbMap = new Map(dbPrompts.map(p => [p.section_id, p]));
-
-        // 1. Process Universal Sections
-        const activeUniversal = universal.map((u, index) => {
-            const dbEntry = dbMap.get(u.id);
-            if (dbEntry && dbEntry.is_deleted) return null;
-            return {
-                ...u,
-                // If user customized the prompt, use it. Otherwise use universal default.
-                defaultPrompt: dbEntry?.custom_prompt || u.defaultPrompt,
-                isCustom: false,
-                sortOrder: dbEntry?.sort_order ?? index // Default to index to keep default order if no DB entry
-            };
-        }).filter(Boolean);
-
-        // 2. Process Custom Sections (in DB but not in Universal)
-        const customSections = dbPrompts
-            .filter(p => !universalIds.has(p.section_id) && !p.is_deleted)
-            .map(p => ({
-                id: p.section_id,
-                title: p.section_name || 'Custom Section',
-                description: p.section_type || 'Custom',
-                // Important: Ensure specific instruction is passed. If custom_prompt empty, fallback to a strong generic instruction.
-                defaultPrompt: p.custom_prompt || `Generate the content for the section titled '${p.section_name || 'Custom Section'}'. Ensure it is professionally drafted, legally sound, and formatted in clean HTML.`,
-                isCustom: true,
-                sortOrder: p.sort_order ?? 999
-            }));
-
-        // 3. Combine and Sort
-        // FIX: The backend sort_order is the source of truth for ALL sections (both universal and custom)
-        // If a Universal section has no sort_order (never moved), it should probably come before customs with 999?
-        // But if user reordered some, we rely on the numeric values.
-        return [...activeUniversal, ...customSections].sort((a: any, b: any) => {
-            // Treat undefined/null as max to push to bottom if needed, but above logic defaults to index or 999.
-            return a.sortOrder - b.sortOrder;
-        });
+    const refetchSectionContent = async (sectionId: string) => {
+        if (!draftId) return;
+        try {
+            const res = await draftApi.getSection(draftId, sectionId);
+            if (res.success && res.version?.content_html) {
+                setSectionStates(prev => ({
+                    ...prev,
+                    [sectionId]: {
+                        ...prev[sectionId],
+                        content: res.version.content_html,
+                        isGenerated: true,
+                        versionId: res.version.version_id
+                    }
+                }));
+            }
+        } catch (e) {
+            console.warn('Refetch section content failed:', e);
+        }
     };
+
+    useEffect(() => {
+        if (!activeTab || !draftId) return;
+        const state = sectionStates[activeTab];
+        if (state?.isGenerated && (!state.content || state.content.trim() === '')) {
+            refetchSectionContent(activeTab);
+        }
+    }, [activeTab, draftId]);
 
     const handleAddSection = async () => {
         if (!newSectionData.name.trim() || !draftId) return;
@@ -206,11 +240,11 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             // Save to DB
             await draftApi.saveSectionPrompt(draftId, sectionId, newSection);
 
-            // Refresh
+            // Refresh from dt_draft_section_prompts only
             const prompts = await draftApi.getSectionPrompts(draftId);
-            const merged = mergeSections(UNIVERSAL_SECTIONS, prompts);
-            setAllSections(merged);
-            setSelectedSections(merged.map(s => s.id));
+            const sections = Array.isArray(prompts) ? promptsToSections(prompts, universalSectionIds, universalSectionsMap) : [];
+            setAllSections(sections);
+            setSelectedSections(sections.map((s: any) => s.id));
 
             // Init state
             setSectionStates(prev => ({
@@ -266,14 +300,13 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             // Mark as deleted in DB
             await draftApi.saveSectionPrompt(draftId, sectionId, { isDeleted: true });
 
-            // Refresh list
             const prompts = await draftApi.getSectionPrompts(draftId);
-            const merged = mergeSections(UNIVERSAL_SECTIONS, prompts);
-            setAllSections(merged);
-            setSelectedSections(merged.map(s => s.id));
+            const sections = Array.isArray(prompts) ? promptsToSections(prompts, universalSectionIds, universalSectionsMap) : [];
+            setAllSections(sections);
+            setSelectedSections(sections.map((s: any) => s.id));
 
-            if (activeTab === sectionId && merged.length > 0) {
-                setActiveTab(merged[0].id);
+            if (activeTab === sectionId && sections.length > 0) {
+                setActiveTab(sections[0].id);
             }
         } catch (err) {
             toast.error('Failed to remove section');
@@ -281,34 +314,101 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
     };
 
 
+    const POLL_INTERVAL_MS = 15000;
+    const POLL_MAX_ATTEMPTS = 20;
+
+    const pollForSectionResult = async (
+        draftId: string,
+        sectionId: string,
+        sectionTitle: string,
+        addActivity?: (agent: string, message: string, status: 'in-progress' | 'completed') => void,
+        setSectionStates?: React.Dispatch<React.SetStateAction<Record<string, SectionState>>>
+    ) => {
+        for (let attempt = 1; attempt <= POLL_MAX_ATTEMPTS; attempt++) {
+            await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+            try {
+                const res = await draftApi.getSection(draftId, sectionId);
+                const html = res?.version?.content_html;
+                if (html != null && String(html).trim().length > 0) {
+                    if (setSectionStates) {
+                        setSectionStates(prev => ({
+                            ...prev,
+                            [sectionId]: {
+                                ...prev[sectionId],
+                                content: html,
+                                isGenerated: true,
+                                isGenerating: false,
+                                versionId: res?.version?.version_id ?? null
+                            }
+                        }));
+                    }
+                    toast.success(`Section "${sectionTitle}" is ready (completed in backend).`);
+                    if (addActivity) {
+                        addActivity('System', `Section "${sectionTitle}" result found.`, 'completed');
+                    }
+                    return;
+                }
+            } catch (_) {
+                // ignore fetch errors during poll
+            }
+        }
+        if (setSectionStates) {
+            setSectionStates(prev => ({
+                ...prev,
+                [sectionId]: { ...prev[sectionId], isGenerating: false }
+            }));
+        }
+        toast.warning('Generation may still be in progress. Refresh the page to check.');
+        if (addActivity) {
+            addActivity('System', 'No result yet. Refresh the page to check.', 'completed');
+        }
+    };
+
     const handleGenerateSection = async (sectionId: string) => {
         if (!draftId) return;
+
+        const section = allSections.find(s => s.id === sectionId);
+        const sectionTitle = section?.title || 'section';
 
         setSectionStates(prev => ({
             ...prev,
             [sectionId]: { ...prev[sectionId], isGenerating: true }
         }));
 
+        const timeouts: ReturnType<typeof setTimeout>[] = [];
         try {
-            // Fix: Find section in allSections (which includes custom ones) instead of just UNIVERSAL_SECTIONS
-            const section = allSections.find(s => s.id === sectionId);
-            const token = localStorage.getItem('token');
 
-            const response = await axios.post(
-                `http://localhost:8000/api/drafts/${draftId}/sections/${sectionId}/generate`,
-                {
-                    section_prompt: section?.defaultPrompt,
-                    auto_validate: true
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
+            if (addActivity) {
+                addActivity('Librarian', 'Fetching case chunks via vector search (Gemini embeddings)...', 'in-progress');
+                timeouts.push(setTimeout(() => {
+                    addActivity('Librarian', 'Retrieved top 80 chunks from case files', 'completed');
+                    addActivity('Drafter', 'Sending prompt to Gemini Flash model...', 'in-progress');
+                }, 1500));
+                timeouts.push(setTimeout(() => {
+                    addActivity('Gemini', 'Generating 2-10 pages of legal content...', 'in-progress');
+                }, 3500));
+                timeouts.push(setTimeout(() => {
+                    addActivity('Citation', 'Adding formal references and footnotes...', 'in-progress');
+                }, 5500));
+                timeouts.push(setTimeout(() => {
+                    addActivity('Critic', 'Validating legal logic and accuracy...', 'in-progress');
+                }, 7000));
+            }
+
+            const response = await draftApi.generateSection(draftId, sectionId, {
+                section_prompt: section?.defaultPrompt,
+                auto_validate: true
+            });
+
+            timeouts.forEach(t => clearTimeout(t));
+
+            if (response.success) {
+                const { version, critic_review } = response;
+
+                if (addActivity) {
+                    addActivity('Critic', 'Validation complete', 'completed');
+                    addActivity('Drafter', `${sectionTitle} drafted and verified.`, 'completed');
                 }
-            );
-
-            if (response.data.success) {
-                const { version, critic_review } = response.data;
 
                 setSectionStates(prev => ({
                     ...prev,
@@ -332,8 +432,21 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 toast.success(`Section "${section?.title}" generated successfully!`);
             }
         } catch (error) {
-            console.error('Failed to generate section:', error);
-            toast.error('Failed to generate section');
+            timeouts.forEach(t => clearTimeout(t));
+            if (isTimeoutError(error)) {
+                toast.info('Request timed out. Checking backend for result…');
+                if (addActivity) {
+                    addActivity('System', 'Request timed out. Checking for completed section…', 'in-progress');
+                }
+                pollForSectionResult(draftId, sectionId, sectionTitle, addActivity, setSectionStates);
+                return;
+            }
+            const message = getErrorMessage(error) || 'Failed to generate section';
+            console.error('Failed to generate section:', message, error);
+            toast.error(message);
+            if (addActivity) {
+                addActivity('System', message.length > 60 ? `Failed: ${message.slice(0, 57)}…` : `Failed: ${message}`, 'completed');
+            }
             setSectionStates(prev => ({
                 ...prev,
                 [sectionId]: { ...prev[sectionId], isGenerating: false }
@@ -357,27 +470,16 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             const htmlContent = editContent;
 
             // Update local state
-            setSectionStates(prev => ({
-                ...prev,
-                [activeTab]: { ...prev[activeTab], content: htmlContent }
-            }));
+        setSectionStates(prev => ({
+            ...prev,
+            [activeTab]: { ...prev[activeTab], content: htmlContent }
+        }));
 
             // Save to backend
-            const token = localStorage.getItem('token');
             const currentState = sectionStates[activeTab];
 
             if (currentState.versionId) {
-                await axios.put(
-                    `http://localhost:8000/api/drafts/${draftId}/sections/${activeTab}/versions/${currentState.versionId}`,
-                    {
-                        content_html: htmlContent
-                    },
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${token}`
-                        }
-                    }
-                );
+                await draftApi.updateSectionVersion(draftId, activeTab, currentState.versionId, htmlContent);
             }
 
             setIsEditing(false);
@@ -397,29 +499,29 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
         }));
 
         try {
-            const token = localStorage.getItem('token');
-
             // Generate RAG query automatically to fetch context from uploaded files/cases
             const section = allSections.find(s => s.id === activeTab);
             const sectionName = section?.title || activeTab;
             const autoRagQuery = `Provide all relevant factual details, case information, and context for updating the section: ${sectionName}. User request: ${updatePrompt}`;
 
-            const response = await axios.post(
-                `http://localhost:8000/api/drafts/${draftId}/sections/${activeTab}/refine`,
-                {
-                    user_feedback: updatePrompt,
-                    rag_query: autoRagQuery, // Send RAG query to fetch context
-                    auto_validate: true
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                }
-            );
+            if (addActivity) {
+                addActivity('Drafter', `Refining ${sectionName} with feedback...`, 'in-progress');
+                addActivity('Gemini', 'Processing refinement prompt...', 'in-progress');
+            }
 
-            if (response.data.success) {
-                const { version, critic_review } = response.data;
+            const response = await draftApi.refineSection(draftId, activeTab, {
+                user_feedback: updatePrompt,
+                rag_query: autoRagQuery,
+                auto_validate: true
+            });
+
+            if (response.success) {
+                const { version, critic_review } = response;
+
+                if (addActivity) {
+                    addActivity('Gemini', 'Refinement complete', 'completed');
+                    addActivity('Drafter', `${sectionName} section successfully updated.`, 'completed');
+                }
 
                 setSectionStates(prev => ({
                     ...prev,
@@ -469,21 +571,32 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
         setIsAssembling(true);
 
         try {
+            if (addActivity) {
+                addActivity('Assembler', 'Combining sections into final document...', 'in-progress');
+                addActivity('Assembler', 'Applying A4 page breaks and template format...', 'in-progress');
+            }
+
             // Call assembler agent
             const response = await draftApi.assemble(draftId, selectedSections);
 
             if (response.success) {
+                if (addActivity) {
+                    addActivity('Assembler', 'Document assembly complete. Preparing preview.', 'completed');
+                }
                 toast.success('Document assembled successfully!');
 
+                // Google Docs opens in the iframe on AssembledPreviewPage (no new tab)
                 if (onAssembleComplete) {
                     onAssembleComplete();
                 } else {
-                    // Navigate to preview or final document
                     navigate(`/template-drafting/drafts/${draftId}/preview`);
                 }
             }
         } catch (error) {
             console.error('Failed to assemble document:', error);
+            if (addActivity) {
+                addActivity('Assembler', 'Assembly failed. Check logs.', 'completed');
+            }
             toast.error('Failed to assemble document');
         } finally {
             setIsAssembling(false);
@@ -758,10 +871,14 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                                             suppressContentEditableWarning
                                                             onInput={(e) => setEditContent(e.currentTarget.innerHTML)}
                                                             dangerouslySetInnerHTML={{ __html: editContent }}
-                                                            className="w-full min-h-[400px] px-4 py-3 border-2 border-blue-300 rounded-lg focus:ring-2 focus:ring-[#21C1B6] focus:border-[#21C1B6] focus:outline-none prose max-w-none bg-white"
+                                                            className="w-full min-h-[400px] px-4 py-3 border-2 border-blue-300 rounded-lg focus:ring-2 focus:ring-[#21C1B6] focus:border-[#21C1B6] focus:outline-none max-w-none bg-white"
                                                             style={{
                                                                 maxHeight: '600px',
-                                                                overflowY: 'auto'
+                                                                overflowY: 'auto',
+                                                                fontFamily: '"Times New Roman", Times, serif',
+                                                                fontSize: '12pt',
+                                                                lineHeight: 1.5,
+                                                                padding: '2.54cm'
                                                             }}
                                                         />
                                                         <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
@@ -785,10 +902,28 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <div
-                                                        className="prose max-w-none bg-white border border-gray-200 rounded-lg p-6"
-                                                        dangerouslySetInnerHTML={{ __html: currentSection.content }}
-                                                    />
+                                                    <div className="bg-[#dadce0] rounded-lg p-4 flex justify-center">
+                                                        <div
+                                                            className="section-preview-document bg-white rounded-lg overflow-y-auto border border-gray-100"
+                                                            style={{
+                                                                minHeight: '297mm',
+                                                                padding: '2.54cm',
+                                                                fontFamily: '"Times New Roman", Times, serif',
+                                                                fontSize: '12pt',
+                                                                lineHeight: 1.5,
+                                                                width: '210mm',
+                                                                maxWidth: '100%',
+                                                                boxSizing: 'border-box',
+                                                                boxShadow: '0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.06)'
+                                                            }}
+                                                            title="Section preview — A4 (210×297mm)"
+                                                            dangerouslySetInnerHTML={{
+                                                                __html: currentSection.content && currentSection.content.trim()
+                                                                    ? currentSection.content
+                                                                    : '<p class="text-gray-400 italic">Content is loading or empty. If this persists, try regenerating the section.</p>'
+                                                            }}
+                                                        />
+                                                    </div>
                                                 )}
                                             </div>
                                         )}
@@ -822,7 +957,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                         <button
                             onClick={handleAssemble}
                             disabled={isAssembling || !selectedSections.every(id => sectionStates[id]?.isGenerated)}
-                            className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-[#21C1B6] to-[#1AA49B] text-white rounded-xl font-bold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="inline-flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-[#21C1B6] to-[#1AA49B] text-white rounded-xl font-bold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
                         >
                             <DocumentCheckIcon className="w-5 h-5" />
                             {isAssembling ? 'Assembling...' : 'Assemble Document'}

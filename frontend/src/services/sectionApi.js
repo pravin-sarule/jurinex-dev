@@ -1,17 +1,21 @@
 /**
- * Section API Service
- * 
- * Handles section generation, refinement, and retrieval
+ * Section API Service (agent-draft-service, API_POSTMAN.md).
+ * Section generate/refine, get sections, section prompts.
  */
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { AGENT_DRAFT_TEMPLATE_API } from '../config/apiConfig';
+
+const API_URL = AGENT_DRAFT_TEMPLATE_API;
 
 const getAuthHeaders = () => {
-  const token = localStorage.getItem('token');
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
-  };
+  const token =
+    localStorage.getItem('token') ||
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('access_token') ||
+    localStorage.getItem('auth_token');
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
 };
 
 /**

@@ -25,6 +25,8 @@ export interface TemplateListItem {
     category: string;
     isActive: boolean;
     createdAt: string;
+    /** Optional cover image URL (used by user custom templates) */
+    imageUrl?: string;
 }
 
 export interface TemplatePage {

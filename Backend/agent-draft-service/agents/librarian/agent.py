@@ -18,7 +18,7 @@ from services.embedding_service import generate_embeddings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TOP_K = int(__import__("os").environ.get("LIBRARIAN_TOP_K", "10"))
+DEFAULT_TOP_K = int(__import__("os").environ.get("LIBRARIAN_TOP_K", "80"))
 
 
 def run_librarian_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,11 +54,14 @@ def run_librarian_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not query:
         return {"chunks": [], "context": "", "raw_text": "", "embeddings": []}
 
-    file_ids = payload.get("file_ids") or payload.get("file_ids_list")
+    file_ids = payload.get("file_ids")
+    if file_ids is None:
+        file_ids = payload.get("file_ids_list")
+    
     if isinstance(file_ids, str):
         file_ids = [f.strip() for f in file_ids.split(",") if f.strip()]
     top_k = int(payload.get("top_k") or payload.get("limit") or DEFAULT_TOP_K)
-    top_k = max(1, min(top_k, 50))
+    top_k = max(1, min(top_k, 80))
 
     # Use the tool (ADK-style: agent uses tool to perform the task); user-specific only
     result = fetch_relevant_chunks(query=query, user_id=user_id, file_ids=file_ids, top_k=top_k)

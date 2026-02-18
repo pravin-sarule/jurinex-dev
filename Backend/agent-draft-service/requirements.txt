@@ -1,4 +1,5 @@
 google-genai
+anthropic
 python-dotenv
 pytest
 pydantic>=2.0.0
@@ -13,3 +14,6 @@ fastapi
 uvicorn[standard]
 python-multipart
 PyJWT
+# DOCX export (assemble + download)
+python-docx
+htmldocx

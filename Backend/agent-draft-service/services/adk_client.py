@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+import logging
 
+# Initialize the logger for this module
+logger = logging.getLogger(__name__)
 
 class ADKClientError(RuntimeError):
     """Raised when ADK client operations fail."""
@@ -41,17 +44,19 @@ class ADKClient:
         api_key: Optional[str] = None,
         use_local_ingestion: bool = True,
         use_local_librarian: bool = True,
+        use_local_citation: bool = True,
         use_local_drafter: bool = False,
         use_local_critic: bool = False,
         use_local_assembler: bool = False,
     ) -> None:
         """
         Initialize ADK client.
-        
+
         Args:
             api_key: Google API key for Gemini. If None, uses default from environment.
             use_local_ingestion: If True, use local pipeline instead of LLM (recommended: True)
             use_local_librarian: If True, use local retrieval instead of LLM (recommended: True)
+            use_local_citation: If True, use local citation agent instead of LLM (recommended: True)
             use_local_drafter: If True, use local mock instead of Gemini (for testing only)
             use_local_critic: If True, use local mock instead of Gemini (for testing only)
             use_local_assembler: If True, use local mock instead of Gemini (for testing only)
@@ -60,6 +65,7 @@ class ADKClient:
         self._agents: Dict[str, Any] = {}
         self._use_local_ingestion = use_local_ingestion
         self._use_local_librarian = use_local_librarian
+        self._use_local_citation = use_local_citation
         self._use_local_drafter = use_local_drafter
         self._use_local_critic = use_local_critic
         self._use_local_assembler = use_local_assembler
@@ -83,6 +89,9 @@ class ADKClient:
             return
         if config.name == "librarian" and self._use_local_librarian:
             self._agents[config.name] = None  # placeholder; run_agent uses local retrieval
+            return
+        if config.name == "citation" and self._use_local_citation:
+            self._agents[config.name] = None  # placeholder; run_agent uses local citation agent
             return
         if config.name == "drafter" and self._use_local_drafter:
             self._agents[config.name] = None  # placeholder for testing
@@ -163,6 +172,19 @@ class ADKClient:
                 raise
             except Exception as exc:
                 raise ADKClientError(f"Librarian retrieval failed: {exc}") from exc
+
+        # Citation: Local Python citation agent (Gemini-powered tools)
+        if name == "citation" and self._use_local_citation:
+            try:
+                from agents.citation.agent import run_citation_agent
+                result = run_citation_agent(payload)
+                if result.get("error"):
+                    raise ADKClientError(result["error"])
+                return result
+            except ADKClientError:
+                raise
+            except Exception as exc:
+                raise ADKClientError(f"Citation agent failed: {exc}") from exc
 
         # Drafter: Local mock (for testing only)
         if name == "drafter" and self._use_local_drafter:

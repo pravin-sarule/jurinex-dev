@@ -5,6 +5,7 @@ import { DocumentTextIcon } from '@heroicons/react/24/solid';
 import { fetchTemplates } from '../../components/TemplateWizard/templateWizardApi';
 import TemplateWizardCard from '../../components/TemplateWizard/TemplateWizardCard';
 import TemplatePreviewPopup from '../../components/TemplateWizard/TemplatePreviewPopup';
+import { customTemplateApi, CustomTemplateUploadModal } from '../../template_drafting_component';
 import '../../components/TemplateWizard/TemplateWizardGallery.css';
 import { createDraft } from '../../services/draftFormApi';
 import { toast } from 'react-toastify';
@@ -18,12 +19,32 @@ const ALL_CATEGORIES_VALUE = '';
 const AllTemplatesPage = () => {
   const navigate = useNavigate();
   const [templates, setTemplates] = useState([]);
+  const [customTemplates, setCustomTemplates] = useState([]);
+  const [customLoading, setCustomLoading] = useState(true);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [categories, setCategories] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState(ALL_CATEGORIES_VALUE);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreatingDraft, setIsCreatingDraft] = useState(false);
   const [previewTemplate, setPreviewTemplate] = useState(null);
   const [error, setError] = useState(null);
+
+  const loadCustomTemplates = useCallback(async () => {
+    setCustomLoading(true);
+    try {
+      const list = await customTemplateApi.getUserTemplates();
+      setCustomTemplates(Array.isArray(list) ? list : []);
+    } catch (err) {
+      console.warn('Failed to load custom templates:', err);
+      setCustomTemplates([]);
+    } finally {
+      setCustomLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCustomTemplates();
+  }, [loadCustomTemplates]);
 
   const loadTemplates = useCallback(async (category) => {
     setError(null);
@@ -83,6 +104,15 @@ const AllTemplatesPage = () => {
     handleTemplateClick(normalized);
   };
 
+  const toGalleryItem = (t) => ({
+    ...t,
+    id: t.id,
+    template_id: t.id,
+    name: t.name,
+    title: t.name,
+    preview_image_url: t.imageUrl,
+  });
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100/80">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-10">
@@ -94,6 +124,43 @@ const AllTemplatesPage = () => {
           <ArrowLeftIcon className="w-4 h-4 mr-1.5" />
           Back to Document Drafting
         </button>
+
+        {/* My templates (custom) */}
+        <div className="mb-10 p-6 rounded-2xl bg-white border border-gray-200/80 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+            <div>
+              <h2 className="text-xl font-bold text-gray-900">My templates</h2>
+              <p className="text-sm text-gray-600 mt-0.5">Templates you created. Upload a document to create a new one.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setUploadModalOpen(true)}
+              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-[#21C1B6]"
+            >
+              Upload custom template
+            </button>
+          </div>
+          {customLoading ? (
+            <div className="flex gap-4">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="flex-shrink-0 w-64 h-48 bg-gray-100 animate-pulse rounded-lg" />
+              ))}
+            </div>
+          ) : customTemplates.length === 0 ? (
+            <p className="text-sm text-gray-500 py-4">No custom templates yet. Click &quot;Upload custom template&quot; to add one.</p>
+          ) : (
+            <div className="template-wizard-gallery__uniform-grid">
+              {customTemplates.map((t) => (
+                <TemplateWizardCard
+                  key={`custom-${t.id}`}
+                  template={toGalleryItem(t)}
+                  onClick={handleCardClick}
+                  onPreviewClick={(tmpl) => setPreviewTemplate(tmpl)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="mb-8">
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">All templates</h1>
@@ -154,6 +221,15 @@ const AllTemplatesPage = () => {
         <TemplatePreviewPopup
           template={previewTemplate}
           onClose={() => setPreviewTemplate(null)}
+        />
+
+        <CustomTemplateUploadModal
+          isOpen={uploadModalOpen}
+          onClose={() => setUploadModalOpen(false)}
+          onUploadSuccess={() => {
+            toast.success('Custom template created.');
+            loadCustomTemplates();
+          }}
         />
 
         {isCreatingDraft && (

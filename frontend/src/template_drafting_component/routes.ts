@@ -1,5 +1,14 @@
 /**
  * Template Drafting Component - Routes Configuration
+ *
+ * API usage (see API_POSTMAN.md + API_DOCUMENTATION.md):
+ * - Admin templates: agent-draft-service GET /api/templates (templateWizardApi.fetchTemplates)
+ * - User templates: Template Analyzer GET /api/template-analysis/templates (customTemplateApi.getUserTemplates)
+ * - Template fields/sections: agent-draft-service GET /api/templates/:id (draftFormApi.getTemplate) for both admin and user
+ * - Create draft: agent-draft-service POST /api/drafts (draftFormApi.createDraft)
+ * - Get draft + merged field values (autopopulation): agent-draft-service GET /api/drafts/:id (draftFormApi.getDraft)
+ * - Section prompts: agent-draft-service GET/POST /api/drafts/:id/sections/prompts (draftApi.getSectionPrompts, saveSectionPrompt)
+ * - Section generate/refine: agent-draft-service POST /api/drafts/:id/sections/:key/generate|refine (sectionApi)
  */
 
 // Direct exports of page components (not lazy loaded)

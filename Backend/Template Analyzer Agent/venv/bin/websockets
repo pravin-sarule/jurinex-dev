@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' "/media/dell-2/d3aa004a-6211-442e-bc45-3e38dae3762b/home/admin3620/Desktop/JuriProduct_dev/jurinex-dev/Backend/Template Analyzer Agent/venv/bin/python" "$0" "$@"
+' '''
+import sys
+from websockets.cli import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

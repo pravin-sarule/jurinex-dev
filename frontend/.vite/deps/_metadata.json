@@ -2,7 +2,204 @@
   "hash": "a90c4201",
   "configHash": "b9e0c377",
   "lockfileHash": "ac280779",
-  "browserHash": "ee2f5e59",
-  "optimized": {},
-  "chunks": {}
+  "browserHash": "f66e6021",
+  "optimized": {
+    "react": {
+      "src": "../../node_modules/react/index.js",
+      "file": "react.js",
+      "fileHash": "37b0e68c",
+      "needsInterop": true
+    },
+    "react-dom/client": {
+      "src": "../../node_modules/react-dom/client.js",
+      "file": "react-dom_client.js",
+      "fileHash": "0662cd6e",
+      "needsInterop": true
+    },
+    "react-router-dom": {
+      "src": "../../node_modules/react-router-dom/dist/index.mjs",
+      "file": "react-router-dom.js",
+      "fileHash": "b7159ca4",
+      "needsInterop": false
+    },
+    "react-toastify": {
+      "src": "../../node_modules/react-toastify/dist/index.mjs",
+      "file": "react-toastify.js",
+      "fileHash": "d8234885",
+      "needsInterop": false
+    },
+    "lucide-react": {
+      "src": "../../node_modules/lucide-react/dist/esm/lucide-react.js",
+      "file": "lucide-react.js",
+      "fileHash": "737926ce",
+      "needsInterop": false
+    },
+    "@ckeditor/ckeditor5-react": {
+      "src": "../../node_modules/@ckeditor/ckeditor5-react/dist/index.js",
+      "file": "@ckeditor_ckeditor5-react.js",
+      "fileHash": "28208d02",
+      "needsInterop": false
+    },
+    "@ckeditor/ckeditor5-build-classic": {
+      "src": "../../node_modules/@ckeditor/ckeditor5-build-classic/build/ckeditor.js",
+      "file": "@ckeditor_ckeditor5-build-classic.js",
+      "fileHash": "a48c504f",
+      "needsInterop": true
+    },
+    "react-markdown": {
+      "src": "../../node_modules/react-markdown/index.js",
+      "file": "react-markdown.js",
+      "fileHash": "2862be6b",
+      "needsInterop": false
+    },
+    "remark-gfm": {
+      "src": "../../node_modules/remark-gfm/index.js",
+      "file": "remark-gfm.js",
+      "fileHash": "8b8de225",
+      "needsInterop": false
+    },
+    "rehype-raw": {
+      "src": "../../node_modules/rehype-raw/index.js",
+      "file": "rehype-raw.js",
+      "fileHash": "1f594328",
+      "needsInterop": false
+    },
+    "rehype-sanitize": {
+      "src": "../../node_modules/rehype-sanitize/index.js",
+      "file": "rehype-sanitize.js",
+      "fileHash": "ea98e848",
+      "needsInterop": false
+    },
+    "axios": {
+      "src": "../../node_modules/axios/index.js",
+      "file": "axios.js",
+      "fileHash": "b8112524",
+      "needsInterop": false
+    },
+    "framer-motion": {
+      "src": "../../node_modules/framer-motion/dist/es/index.mjs",
+      "file": "framer-motion.js",
+      "fileHash": "d5edd1c3",
+      "needsInterop": false
+    },
+    "sweetalert2": {
+      "src": "../../node_modules/sweetalert2/dist/sweetalert2.esm.all.js",
+      "file": "sweetalert2.js",
+      "fileHash": "f1354626",
+      "needsInterop": false
+    },
+    "@heroicons/react/24/outline": {
+      "src": "../../node_modules/@heroicons/react/24/outline/esm/index.js",
+      "file": "@heroicons_react_24_outline.js",
+      "fileHash": "3bb0c595",
+      "needsInterop": false
+    },
+    "@heroicons/react/24/solid": {
+      "src": "../../node_modules/@heroicons/react/24/solid/esm/index.js",
+      "file": "@heroicons_react_24_solid.js",
+      "fileHash": "762c2446",
+      "needsInterop": false
+    },
+    "@heroicons/react/20/solid": {
+      "src": "../../node_modules/@heroicons/react/20/solid/esm/index.js",
+      "file": "@heroicons_react_20_solid.js",
+      "fileHash": "b906e30d",
+      "needsInterop": false
+    },
+    "firebase/auth": {
+      "src": "../../node_modules/firebase/auth/dist/esm/index.esm.js",
+      "file": "firebase_auth.js",
+      "fileHash": "d8908f69",
+      "needsInterop": false
+    },
+    "html2pdf.js": {
+      "src": "../../node_modules/html2pdf.js/dist/html2pdf.js",
+      "file": "html2pdf__js.js",
+      "fileHash": "c9617d57",
+      "needsInterop": true
+    },
+    "react-dom": {
+      "src": "../../node_modules/react-dom/index.js",
+      "file": "react-dom.js",
+      "fileHash": "2046e36e",
+      "needsInterop": true
+    },
+    "firebase/app": {
+      "src": "../../node_modules/firebase/app/dist/esm/index.esm.js",
+      "file": "firebase_app.js",
+      "fileHash": "2b0d0fa9",
+      "needsInterop": false
+    },
+    "jspdf": {
+      "src": "../../node_modules/jspdf/dist/jspdf.es.min.js",
+      "file": "jspdf.js",
+      "fileHash": "d53860fe",
+      "needsInterop": false
+    },
+    "prop-types": {
+      "src": "../../node_modules/prop-types/index.js",
+      "file": "prop-types.js",
+      "fileHash": "f206163a",
+      "needsInterop": true
+    },
+    "zustand": {
+      "src": "../../node_modules/zustand/esm/index.mjs",
+      "file": "zustand.js",
+      "fileHash": "1a798f6b",
+      "needsInterop": false
+    },
+    "react-virtuoso": {
+      "src": "../../node_modules/react-virtuoso/dist/index.mjs",
+      "file": "react-virtuoso.js",
+      "fileHash": "38775d8b",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "html2canvas.esm-RRFMSHGV": {
+      "file": "html2canvas__esm-RRFMSHGV.js"
+    },
+    "purify.es-WT3KUPSO": {
+      "file": "purify__es-WT3KUPSO.js"
+    },
+    "index.es-T5S6Y6VV": {
+      "file": "index__es-T5S6Y6VV.js"
+    },
+    "chunk-GOXEZC53": {
+      "file": "chunk-GOXEZC53.js"
+    },
+    "chunk-HWAFLLFH": {
+      "file": "chunk-HWAFLLFH.js"
+    },
+    "chunk-Z54NHHXK": {
+      "file": "chunk-Z54NHHXK.js"
+    },
+    "chunk-KHEGHKHT": {
+      "file": "chunk-KHEGHKHT.js"
+    },
+    "chunk-FBRNANPA": {
+      "file": "chunk-FBRNANPA.js"
+    },
+    "chunk-DWWCZH4Z": {
+      "file": "chunk-DWWCZH4Z.js"
+    },
+    "chunk-MO5GZTYO": {
+      "file": "chunk-MO5GZTYO.js"
+    },
+    "chunk-VFIKZW3I": {
+      "file": "chunk-VFIKZW3I.js"
+    },
+    "chunk-P3VMZLMX": {
+      "file": "chunk-P3VMZLMX.js"
+    },
+    "chunk-U6Z4ZFZJ": {
+      "file": "chunk-U6Z4ZFZJ.js"
+    },
+    "chunk-LTZIYYLR": {
+      "file": "chunk-LTZIYYLR.js"
+    },
+    "chunk-V4OQ3NZ2": {
+      "file": "chunk-V4OQ3NZ2.js"
+    }
+  }
 }

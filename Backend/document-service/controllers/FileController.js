@@ -7355,12 +7355,19 @@ exports.createCase = async (req, res) => {
                 await oldFile.copy(newFile);
                 console.log(`  ✅ Copied ${fileName} from ${oldGcsPath} to ${newGcsPath}`);
 
+                // Calculate correct folder_path for the file (folder's parent path + folder name)
+                const fileInsideFolderPath = folder.folder_path
+                  ? `${folder.folder_path}/${folder.originalname}`
+                  : folder.originalname;
+
+                console.log(`  🔄 Updating DB for ${doc.originalname}: folder_path=${fileInsideFolderPath}`);
+
                 // Update file record in database
                 await client.query(
                   `UPDATE user_files SET gcs_path = $1, folder_path = $2 WHERE id = $3::uuid AND user_id = $4`,
-                  [newGcsPath, folder.folder_path, doc.id, userId]
+                  [newGcsPath, fileInsideFolderPath, doc.id, userId]
                 );
-                console.log(`  ✅ Updated file record ${doc.id} with new folder_path`);
+                console.log(`  ✅ Updated file record ${doc.id} with new folder_path: ${fileInsideFolderPath}`);
 
                 // Delete old file from temp location (optional - keep for now, can be cleaned up later)
                 // await oldFile.delete().catch(err => console.warn(`⚠️ Failed to delete old file: ${err.message}`));
@@ -10140,8 +10147,9 @@ exports.uploadForProcessing = async (req, res) => {
     }
 
     // Step 1: Create temporary folder_path identifier (NO folder record in database)
-    const tempFolderPath = `temp-case-${Date.now()}`;
-    const tempGcsPrefix = `${userId}/temp-uploads/${Date.now()}/`;
+    const now = Date.now();
+    const tempFolderPath = `temp-case-${now}`;
+    const tempGcsPrefix = `${userId}/temp-uploads/${now}/`;
     console.log(`📁 Using temporary path: ${tempFolderPath} (NO folder record will be created)`);
 
     // Step 2: Upload files and initiate processing in parallel

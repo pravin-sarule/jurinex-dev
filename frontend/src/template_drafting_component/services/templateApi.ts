@@ -25,10 +25,14 @@ export const templateApi = {
     },
 
     /**
-     * Get template by ID with full content and schema
+     * Get template by ID with full content and schema.
+     * Uses unified agent-draft-service endpoint (system + custom templates).
+     * include_sections and include_preview_url ensure sections and preview are returned when available.
      */
     getById: async (templateId: string): Promise<TemplateResponse> => {
-        const response = await api.get<TemplateResponse>(`/templates/${templateId}`);
+        const response = await api.get<TemplateResponse>(`/templates/${templateId}`, {
+            params: { include_sections: true, include_preview_url: true }
+        });
         return response.data;
     },
 

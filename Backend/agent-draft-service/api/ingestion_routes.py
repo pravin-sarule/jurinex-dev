@@ -1,14 +1,17 @@
 """
-Ingestion agent API: direct ingest and orchestrate/upload.
+Ingestion agent API: direct ingest, orchestrate/upload, and field extraction.
 POST /api/ingest — Direct ingestion (no orchestrator).
 POST /api/orchestrate/upload — Orchestrator → Ingestion agent (GCS, Document AI, chunk, embed, DB).
+POST /api/extract-fields — InjectionAgent: extract template fields from document text.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
@@ -72,6 +75,61 @@ async def ingest_document(
     }
 
 
+# ---- Field Extraction (InjectionAgent) ------------------------------------
+
+class ExtractFieldsRequest(BaseModel):
+    """Request body for POST /api/extract-fields."""
+    template_id: str
+    draft_session_id: Optional[str] = None
+    source_document_id: Optional[str] = None
+    raw_text: Optional[str] = None
+
+
+@router.post("/extract-fields")
+async def extract_fields(
+    body: ExtractFieldsRequest,
+    user_id: int = Depends(require_user_id),
+) -> Dict[str, Any]:
+    """
+    Trigger the InjectionAgent to extract template field values from a document.
+
+    The agent reads the document text (from raw_text or source_document_id),
+    extracts ONLY the fields allowed by the template schema, and upserts
+    the values into template_user_field_values — never overwriting user-edited
+    fields.
+
+    **Returns** the standardized result contract:
+    { status, reason, extracted_fields, skipped_fields, errors }
+    """
+    logger.info(
+        "[API] POST /api/extract-fields: template_id=%s, user_id=%s, "
+        "draft_session_id=%s, source_document_id=%s, raw_text_len=%s",
+        body.template_id, user_id, body.draft_session_id,
+        body.source_document_id, len(body.raw_text) if body.raw_text else 0,
+    )
+
+    try:
+        from agents.ingestion.injection_agent import run_injection_agent
+
+        payload = {
+            "template_id": body.template_id,
+            "user_id": user_id,
+            "draft_session_id": body.draft_session_id,
+            "source_document_id": body.source_document_id,
+            "raw_text": body.raw_text,
+        }
+        result = run_injection_agent(payload)
+
+    except Exception as e:
+        logger.exception("[API] extract-fields failed unexpectedly")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    # Agent never raises on domain errors — it returns a terminated contract
+    return result
+
+
+# ---- Orchestrate Upload ---------------------------------------------------
+
 @router.post("/orchestrate/upload")
 async def orchestrate_upload(
     user_id: int = Depends(require_user_id),
@@ -79,6 +137,7 @@ async def orchestrate_upload(
     folder_path: str = Form(""),
     draft_id: str = Form(""),
     case_id: str = Form(""),
+    template_id: str = Form(""),
 ) -> Dict[str, Any]:
     """
     Upload a document; the orchestrator runs and triggers the Ingestion agent.
@@ -138,6 +197,30 @@ async def orchestrate_upload(
             logger.info("Linked file_id=%s to draft_id=%s for draft-scoped retrieve", file_id, draft_id_from_upload)
         except Exception as e:
             logger.warning("Could not link file to draft: %s", e)
+
+    # --- Best-effort InjectionAgent: auto-extract fields if template_id given ---
+    template_id_val = upload_payload.get("template_id") or (template_id.strip() if template_id else "")
+    if template_id_val and file_id:
+        try:
+            from agents.ingestion.injection_agent import run_injection_agent
+
+            raw_text = (state.get("raw_text") or "").strip()
+            injection_payload = {
+                "template_id": template_id_val,
+                "user_id": user_id,
+                "draft_session_id": draft_id_from_upload,
+                "source_document_id": file_id,
+                "raw_text": raw_text if raw_text else None,
+            }
+            injection_result = run_injection_agent(injection_payload)
+            logger.info(
+                "InjectionAgent completed: status=%s, extracted=%d fields",
+                injection_result.get("status"),
+                len(injection_result.get("extracted_fields") or {}),
+            )
+        except Exception as e:
+            # Best-effort: failure must NOT block the upload
+            logger.warning("InjectionAgent failed (non-blocking): %s", e)
 
     if not final_document and state.get("chunks_count", 0) > 0:
         out: Dict[str, Any] = {

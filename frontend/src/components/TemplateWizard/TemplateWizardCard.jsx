@@ -17,9 +17,10 @@ const isImageUrl = (url) => {
  * Clicking the card uses the template.
  */
 const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
-  const { name, preview_image_url } = template;
+  const { name, preview_image_url, image_url } = template;
+  const imageUrl = preview_image_url || image_url;
   const [imageError, setImageError] = useState(false);
-  const showImage = preview_image_url && isImageUrl(preview_image_url) && !imageError;
+  const showImage = imageUrl && isImageUrl(imageUrl) && !imageError;
 
   const handleCardClick = () => onClick(template);
   const handlePreviewClick = (e) => {
@@ -32,13 +33,13 @@ const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
     <button
       type="button"
       onClick={handleCardClick}
-      className="template-wizard-card group flex-shrink-0 w-full h-full min-h-0 bg-white rounded-lg border border-gray-200 shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:shadow-[0_6px_20px_rgba(0,0,0,0.1)] hover:border-gray-300 transition-all duration-300 cursor-pointer overflow-hidden flex flex-col text-left focus:outline-none focus:ring-2 focus:ring-[#21C1B6] focus:ring-offset-2"
+      className="template-wizard-card group flex-shrink-0 w-full h-full min-h-0 bg-white rounded-lg border border-gray-200 shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:shadow-[0_6px_20px_rgba(0,0,0,0.1)] hover:border-gray-300 transition-all duration-300 cursor-pointer overflow-hidden flex flex-col text-left focus:outline-none"
     >
       {/* Preview area with preview icon on the right */}
       <div className="relative flex-1 min-h-0 w-full overflow-hidden bg-white">
         {showImage ? (
           <img
-            src={preview_image_url}
+            src={imageUrl}
             alt={name || 'Template preview'}
             className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300"
             onError={() => setImageError(true)}

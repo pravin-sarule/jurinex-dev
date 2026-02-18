@@ -60,6 +60,7 @@ async def log_requests(request, call_next):
 
 # --- Routers (each agent/domain in separate file) ---
 from api import (
+    agent_routes,
     draft_routes,
     ingestion_routes,
     librarian_routes,
@@ -69,6 +70,7 @@ from api import (
     assemble_routes,
 )
 
+app.include_router(agent_routes.router)
 app.include_router(template_routes.router)
 app.include_router(draft_routes.router)
 app.include_router(section_routes.router)

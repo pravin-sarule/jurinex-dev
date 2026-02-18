@@ -384,8 +384,15 @@
 }
 
 @keyframes template-wizard-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.6;
+  }
 }
 
 .template-wizard-gallery__empty {
@@ -403,4 +410,13 @@
   color: #d1d5db;
   margin: 0 auto 1rem;
   display: block;
+}
+
+/* Explicitly remove teal hover/focus border from cards */
+.template-wizard-card:hover,
+.template-wizard-card:focus {
+  border-color: #e5e7eb !important;
+  /* gray-200 equivalent */
+  outline: none !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1) !important;
 }

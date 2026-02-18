@@ -38,11 +38,14 @@ def list_templates(
     is_active: bool = True,
     limit: int = 50,
     offset: int = 0,
+    finalized_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     List templates with optional category filter. Schema: template_id, template_name, category,
     sub_category, language, status, description, created_by, created_at, updated_at.
     Preview from first template_images row. Filter by status = 'active' when is_active True.
+    When finalized_only=True, return only templates with status IN ('finalized', 'active') so
+    draft section shows only templates that are finalized (or active for backward compatibility).
     """
     query = """
         SELECT t.template_id,
@@ -56,6 +59,7 @@ def list_templates(
                t.created_by,
                t.created_at,
                t.updated_at,
+               t.image_url AS template_image_url,
                ti.image_id, ti.gcs_bucket AS preview_gcs_bucket, ti.gcs_path AS preview_gcs_path,
                ti.page_number AS preview_page_number
         FROM templates t
@@ -69,7 +73,10 @@ def list_templates(
         WHERE 1=1
     """
     params: List[Any] = []
-    if is_active:
+    if finalized_only:
+        query += " AND (t.status = %s OR t.status = %s)"
+        params.extend(["finalized", "active"])
+    elif is_active:
         query += " AND t.status = %s"
         params.append("active")
     if category:
@@ -187,9 +194,50 @@ def get_preview_image_for_template(template_id: str) -> Optional[Dict[str, Any]]
                 (template_id,),
             )
             row = cur.fetchone()
-    if not row:
-        return None
-    return dict(row)
+    if row:
+        return dict(row)
+    return None
+
+
+def get_template_image_url(template_id: str) -> Optional[str]:
+    """Fetch image_url from templates table (gs://...). Returns None if column missing or empty."""
+    try:
+        with get_draft_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT image_url FROM templates WHERE template_id = %s",
+                    (template_id,),
+                )
+                row = cur.fetchone()
+        if row and row.get("image_url"):
+            return str(row["image_url"]).strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_preview_from_assets(template_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fallback: first image asset from template_assets when template_images has no rows.
+    Returns dict with gcs_bucket, gcs_path for assets where mime_type starts with 'image/'.
+    """
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT gcs_bucket, gcs_path
+                FROM template_assets
+                WHERE template_id = %s
+                  AND mime_type LIKE 'image/%%'
+                ORDER BY uploaded_at DESC
+                LIMIT 1
+                """,
+                (template_id,),
+            )
+            row = cur.fetchone()
+    if row:
+        return dict(row)
+    return None
 
 
 def get_template_primary_asset(template_id: str) -> Optional[Dict[str, Any]]:
@@ -220,23 +268,103 @@ from services.template_field_definitions import (
     normalize_category,
 )
 
+def _parse_template_fields_json(raw: Any, template_id: str) -> List[Dict[str, Any]]:
+    """Helper to parse template_fields JSON into frontend field dicts."""
+    if not raw:
+        return []
+
+    # Parse JSON — could be dict with "fields" key or direct list
+    import json as _json
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            return []
+
+    fields_list = []
+    
+    # Logic to extract fields from various JSON structures (list, dict with "fields", dict with "sections")
+    if isinstance(raw, list):
+        # Case 1: Raw list of fields
+        fields_list = raw
+    elif isinstance(raw, dict):
+        if "fields" in raw and isinstance(raw["fields"], list):
+            # Case 2: Dict with "fields" key
+            fields_list = raw["fields"]
+        elif "sections" in raw:
+            # Case 3: Dict with "sections" key
+            sections = raw["sections"]
+            if isinstance(sections, list):
+                # Sections is a list of section objects
+                for section in sections:
+                    if isinstance(section, dict) and "fields" in section and isinstance(section["fields"], list):
+                        fields_list.extend(section["fields"])
+            elif isinstance(sections, dict) and "fields" in sections and isinstance(sections["fields"], list):
+                 # Edge case: "sections": {"fields": [...]} (user screenshot looked possibly like this?)
+                 fields_list.extend(sections["fields"])
+
+    result = []
+    for idx, f in enumerate(fields_list):
+        result.append({
+            "field_id": f.get("field_id") or f.get("id") or None,
+            "template_id": template_id,
+            "field_name": f.get("key") or f.get("field_name") or f"field_{idx}",
+            "field_label": f.get("label") or f.get("field_label") or f.get("key") or f"Field {idx}",
+            "field_type": f.get("type") or f.get("field_type") or "text",
+            "is_required": f.get("required", False) if "required" in f else f.get("is_required", False),
+            "placeholder": f.get("placeholder") or f.get("description") or "",
+            "default_value": f.get("default_value") or f.get("default") or None,
+            "validation_rules": f.get("validation_rules") or None,
+            "options": f.get("options") or None,
+            "help_text": f.get("help_text") or f.get("description") or "",
+            "field_group": f.get("group") or f.get("field_group") or "Details",
+            "sort_order": f.get("sort_order") if f.get("sort_order") is not None else idx,
+        })
+    return result
+
+
 def get_template_fields(template_id: str) -> List[Dict[str, Any]]:
-    """Return active form fields for a template, ordered by sort_order."""
+    """Return active form fields for a SYSTEM template."""
     with get_draft_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT field_id, template_id, field_name, field_label, field_type,
-                       is_required, placeholder, default_value, validation_rules,
-                       options, help_text, field_group, sort_order
+                SELECT id, template_id, template_fields
                 FROM template_fields
                 WHERE template_id = %s AND is_active = true
-                ORDER BY sort_order ASC NULLS LAST, field_name
+                LIMIT 1
                 """,
                 (template_id,),
             )
-            rows = cur.fetchall()
-    return [dict(r) for r in rows]
+            row = cur.fetchone()
+    if not row:
+        return []
+
+    return _parse_template_fields_json(row.get("template_fields"), template_id)
+
+
+def get_user_template_fields(template_id: str) -> List[Dict[str, Any]]:
+    """Return active form fields for a USER CUSTOM template."""
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, template_id, template_fields
+                FROM user_template_fields
+                WHERE template_id = %s AND is_active = true
+                LIMIT 1
+                """,
+                (template_id,),
+            )
+            row = cur.fetchone()
+    
+    # If no fields found in user_template_fields, we might want to return empty 
+    # OR fallback to 'user_template_analysis_sections' via get_template_fields_custom
+    # BUT the user specifically asked to use `user_template_fields`.
+    if not row:
+        return []
+
+    return _parse_template_fields_json(row.get("template_fields"), template_id)
 
 
 def _resolve_template_fields(template_name: str, category: str) -> List[Dict[str, Any]]:
@@ -254,28 +382,136 @@ def _resolve_template_fields(template_name: str, category: str) -> List[Dict[str
     return []
 
 
+
+def get_template_fields_custom(template_id: str) -> List[Dict[str, Any]]:
+    """
+    Fetch fields for a CUSTOM template from user_template_analysis_sections.
+    Converts section prompts into form fields.
+    Each section becomes a required field.
+    """
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, section_name, section_purpose, section_prompts, order_index
+                FROM user_template_analysis_sections
+                WHERE template_id = %s AND is_active = true
+                ORDER BY order_index ASC
+                """,
+                (template_id,),
+            )
+            rows = cur.fetchall()
+    
+    if not rows:
+        return []
+
+    fields = []
+    for idx, row in enumerate(rows):
+        # Use master_instruction as default value if desired, or just placeholder
+        prompts = row.get("section_prompts", [])
+        default_prompt = ""
+        # Parse prompts JSONB (could be string or list/dict)
+        import json as _json
+        if isinstance(prompts, str):
+            try:
+                prompts = _json.loads(prompts)
+            except:
+                prompts = []
+                
+        if isinstance(prompts, list) and len(prompts) > 0:
+            default_prompt = prompts[0].get("prompt", "")
+        elif isinstance(prompts, dict):
+            default_prompt = prompts.get("prompt", "")
+
+        section_name = row["section_name"]
+        field_key = section_name.lower().replace(" ", "_")
+        
+        fields.append({
+            "field_id": str(row["id"]),
+            "template_id": template_id,
+            "field_name": field_key,
+            "field_label": section_name,
+            "field_type": "textarea", # Sections are typically large text blocks
+            "is_required": True,
+            "placeholder": row.get("section_purpose") or f"Enter {section_name}",
+            "default_value": default_prompt, # Pre-fill with the AI prompt/instruction? Or blank? Usually blank for user to fill.
+                                             # Actually, for *drafting*, these are usually inputs *to* the AI.
+                                             # Let's keep default_value as null/empty for now unless it's a "prompt editor".
+                                             # Wait, the prompt editor uses "section_prompts". 
+                                             # The *form* fields are variables used IN the prompt. 
+                                             # But for custom templates, we might not have variable extraction yet.
+                                             # For Phase 1 of custom templates, let's treat the entire section as a field 
+                                             # OR return empty if no variables are defined.
+                                             # "Fields" usually means "Client Name", "Address", etc.
+                                             # Custom templates created via analyzer might not have explicit variables extracted yet.
+                                             # If the analyzer extracted variables, they would be in a different table?
+                                             # Checking schema... user_templates doesn't have a "fields" column.
+                                             # user_template_analysis_sections has prompts.
+                                             # If no explicit fields are defined, we might return an empty list 
+                                             # and rely on the "Section Prompts" editor instead? 
+                                             # BUT `get_template_fields` is for the "Step 1: Fill Form" UI.
+                                             # If there are no variables, Step 1 is empty. That's fine.
+            "default_value": None,
+            "validation_rules": None,
+            "options": None,
+            "help_text": row.get("section_purpose") or "",
+            "field_group": "Sections",
+            "sort_order": row.get("order_index", idx),
+        })
+    return fields
+
+
 def get_template_fields_with_fallback(template_id: str) -> List[Dict[str, Any]]:
-    """Return form fields for the opened template only (DB or category-wise fallback)."""
+    """
+    Return form fields for the opened template only (DB or category-wise fallback).
+    Supports both System Templates and Custom Templates.
+    """
+    # 1. Try System Template Fields
     try:
         fields = get_template_fields(template_id)
         if fields:
             return fields
     except psycopg2.Error:
-        # template_fields table may not exist or other DB error -> use static fallback
         pass
+
+    # 2. Try Custom Template Sections (as fields?) or Check if it is a Custom Template
     with get_draft_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Check if it's a custom template
+            cur.execute(
+                "SELECT template_name, category FROM user_templates WHERE template_id = %s",
+                (template_id,),
+            )
+            custom_row = cur.fetchone()
+            
+            if custom_row:
+                # It is a custom template!
+                # Try to fetch fields from user_template_fields (Explicit fields extracted by Analyzer)
+                fields = get_user_template_fields(template_id)
+                if fields:
+                    return fields
+                
+                # If no explicit fields, try fallback to sections as fields?
+                # User asked for "user_template_fields" specifically, but if empty, extraction fails.
+                # Fallback to sections ensures we have SOMETHING to extract.
+                
+                # Double check if we should fallback to sections
+                return get_template_fields_custom(template_id) # Enabled fallback 
+
+            # Check if it's a system template (fallback for name/category resolution)
             cur.execute(
                 "SELECT template_name, category FROM templates WHERE template_id = %s",
                 (template_id,),
             )
-            row = cur.fetchone()
-    if not row:
-        return []
-    return _resolve_template_fields(
-        row.get("template_name") or "",
-        row.get("category") or "",
-    )
+            sys_row = cur.fetchone()
+
+    if sys_row:
+        return _resolve_template_fields(
+            sys_row.get("template_name") or "",
+            sys_row.get("category") or "",
+        )
+        
+    return []
 
 
 def create_user_draft(
@@ -285,15 +521,7 @@ def create_user_draft(
 ) -> Dict[str, Any]:
     """
     Create a new user draft (fresh clone) from a template.
-    
-    Inserts:
-      - user_drafts: new row with user_id, template_id, draft_title
-      - draft_field_data: empty field_values ({}), filled_fields ([]), metadata ({is_fresh: true})
-    
-    Returns: draft dict with draft_id, template_id, etc.
-    
-    This ALWAYS creates a brand new draft. Use this when user clicks a template from the gallery.
-    For continuing an existing draft, use get_latest_draft_for_template or list_user_drafts.
+    Supports both System and Custom templates (foreign key removed).
     """
     uid = int(user_id)
     with get_draft_conn() as conn:
@@ -328,14 +556,20 @@ def list_user_drafts(
     limit: int = 50,
     offset: int = 0,
 ) -> List[Dict[str, Any]]:
-    """List drafts for a user, optionally filtered by status and template_id. user_id is integer (JWT)."""
+    """
+    List drafts for a user, fetching template details from either 
+    'templates' OR 'user_templates'.
+    """
     uid = int(user_id)
+    # COALESCE pulls from whichever table has the data (system or custom)
     query = """
         SELECT d.draft_id, d.user_id, d.template_id, d.draft_title, d.status,
                d.completion_percentage, d.created_at, d.updated_at,
-               t.template_name, t.category
+               COALESCE(t.template_name, ut.template_name) as template_name,
+               COALESCE(t.category, ut.category) as category
         FROM user_drafts d
-        JOIN templates t ON t.template_id = d.template_id
+        LEFT JOIN templates t ON t.template_id = d.template_id
+        LEFT JOIN user_templates ut ON ut.template_id = d.template_id
         WHERE d.user_id = %s
     """
     params: List[Any] = [uid]
@@ -366,7 +600,10 @@ def get_latest_draft_for_template(user_id: int, template_id: str) -> Optional[Di
 
 
 def get_user_draft(draft_id: str, user_id: int) -> Optional[Dict[str, Any]]:
-    """Get a single draft with template info, template fields, and current field_data. Returns None if not found or not owned. user_id is integer (JWT)."""
+    """
+    Get a single draft with template info.
+    Supports fetching metadata from 'templates' OR 'user_templates'.
+    """
     uid = int(user_id)
     with get_draft_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -374,9 +611,12 @@ def get_user_draft(draft_id: str, user_id: int) -> Optional[Dict[str, Any]]:
                 """
                 SELECT d.draft_id, d.user_id, d.template_id, d.draft_title, d.status,
                        d.completion_percentage, d.notes, d.created_at, d.updated_at,
-                       t.template_name, t.description, t.category
+                       COALESCE(t.template_name, ut.template_name) as template_name,
+                       COALESCE(t.description, ut.description) as description,
+                       COALESCE(t.category, ut.category) as category
                 FROM user_drafts d
-                JOIN templates t ON t.template_id = d.template_id
+                LEFT JOIN templates t ON t.template_id = d.template_id
+                LEFT JOIN user_templates ut ON ut.template_id = d.template_id
                 WHERE d.draft_id = %s AND d.user_id = %s
                 """,
                 (draft_id, uid),
@@ -728,25 +968,99 @@ def delete_draft(draft_id: str, user_id: int) -> bool:
 # SECTION VERSIONS: Section-wise generation with versioning and refinement
 # ============================================================================
 
+# Table: template_analysis_sections
+# Columns: id, template_id, section_name, section_purpose, section_intro,
+#          section_prompts (JSONB array of {prompt, field_id}), order_index,
+#          is_active, created_at, updated_at
+
+
+def get_template_analysis_sections(template_id: str) -> List[Dict[str, Any]]:
+    """
+    Fetch all section prompts from template_analysis_sections for a template.
+    Returns rows with exact table columns: id, template_id, section_name,
+    section_purpose, section_intro, section_prompts, order_index, is_active,
+    created_at, updated_at. Also adds section_key = lower(replace(section_name, ' ', '_')).
+    """
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, template_id, section_name, section_purpose, section_intro,
+                       section_prompts, order_index, is_active, created_at, updated_at
+                FROM template_analysis_sections
+                WHERE template_id = %s AND is_active = true
+                ORDER BY order_index ASC
+                """,
+                (template_id,),
+            )
+            rows = cur.fetchall()
+    results = []
+    for r in rows:
+        row = dict(r)
+        # Add section_key for convenience (matches get_template_sections)
+        name = row.get("section_name") or ""
+        row["section_key"] = name.lower().replace(" ", "_") if name else ""
+        results.append(row)
+    return results
+
+
 def get_template_sections(template_id: str) -> List[Dict[str, Any]]:
     """
-    Get all active sections for a template (admin-configured prompts).
+    Get all active sections for a template from template_analysis_sections.
+    Extracts the master_instruction prompt from the JSONB section_prompts array.
     Returns: [{ section_id, section_key, section_name, default_prompt, sort_order, ... }]
     """
     with get_draft_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT section_id, template_id, section_key, section_name, default_prompt,
-                       sort_order, is_required, is_active, created_at, updated_at
-                FROM template_sections
+                SELECT id as section_id, template_id,
+                       lower(replace(section_name, ' ', '_')) as section_key,
+                       section_name, section_purpose, section_intro,
+                       section_prompts, order_index as sort_order,
+                       is_active, created_at, updated_at
+                FROM template_analysis_sections
                 WHERE template_id = %s AND is_active = true
-                ORDER BY sort_order ASC, section_key ASC
+                ORDER BY order_index ASC
                 """,
                 (template_id,),
             )
             rows = cur.fetchall()
-    return [dict(r) for r in rows]
+            
+            # If no system sections found, check for custom template sections
+            if not rows:
+                cur.execute(
+                    """
+                    SELECT id as section_id, template_id,
+                           lower(replace(section_name, ' ', '_')) as section_key,
+                           section_name, section_purpose, 
+                           NULL as section_intro, -- user_template_analysis_sections might not have intro
+                           section_prompts, order_index as sort_order,
+                           is_active, created_at, updated_at
+                    FROM user_template_analysis_sections
+                    WHERE template_id = %s AND is_active = true
+                    ORDER BY order_index ASC
+                    """,
+                    (template_id,),
+                )
+                rows = cur.fetchall()
+
+    results = []
+    for r in rows:
+        row = dict(r)
+        # Extract default_prompt from section_prompts JSONB array
+        # Each element has {"prompt": "...", "field_id": "master_instruction"}
+        prompts = row.get("section_prompts", [])
+        default_prompt = ""
+        if isinstance(prompts, list) and len(prompts) > 0:
+            # Use the first prompt (master_instruction) as the default
+            default_prompt = prompts[0].get("prompt", "")
+        elif isinstance(prompts, dict):
+            default_prompt = prompts.get("prompt", "")
+        row["default_prompt"] = default_prompt
+        row["is_required"] = True  # All template_analysis_sections are required
+        results.append(row)
+    return results
 
 
 def get_section_latest_version(draft_id: str, section_key: str, user_id: int) -> Optional[Dict[str, Any]]:
@@ -764,14 +1078,14 @@ def get_section_latest_version(draft_id: str, section_key: str, user_id: int) ->
             )
             if not cur.fetchone():
                 return None
-            # Get latest active version
+            # Get latest active version (case-insensitive section_key match for frontend compatibility)
             cur.execute(
                 """
                 SELECT version_id, draft_id, section_key, version_number, content_html,
                        user_prompt_override, rag_context_used, generation_metadata,
                        is_active, created_by_agent, created_at
                 FROM section_versions
-                WHERE draft_id = %s AND section_key = %s AND is_active = true
+                WHERE draft_id = %s AND LOWER(TRIM(section_key)) = LOWER(TRIM(%s)) AND is_active = true
                 ORDER BY version_number DESC
                 LIMIT 1
                 """,
@@ -1012,8 +1326,10 @@ def update_draft_section_orders(draft_id: str, section_orders: List[Dict[str, An
             # Keeping existing values for other columns if they exist, or defaults
             from psycopg2.extras import execute_values
             
-            # Format: (draft_id, section_id, sort_order)
-            values = [(draft_id, item["section_id"], item["sort_order"]) for item in section_orders]
+            # Format: (draft_id, section_id, sort_order, updated_at)
+            from datetime import datetime
+            now = datetime.utcnow()
+            values = [(draft_id, item["section_id"], item["sort_order"], now) for item in section_orders]
             
             execute_values(cur,
                 """
@@ -1026,4 +1342,179 @@ def update_draft_section_orders(draft_id: str, section_orders: List[Dict[str, An
                 """,
                 values
             )
+    return True
+
+
+# ============================================================================
+# INJECTION AGENT: Auto-extract template fields from uploaded documents
+# ============================================================================
+
+import logging as _logging
+_injection_logger = _logging.getLogger(__name__)
+
+
+def get_existing_user_field_values(
+    template_id: str,
+    user_id: int,
+    draft_session_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch existing field_values and user_edited_fields for the given
+    (template_id, user_id, draft_session_id) from template_user_field_values.
+
+    WHY: The InjectionAgent needs to know which fields the user has manually
+    edited so it can skip those during field-level merge.
+
+    Returns:
+        Dict with field_values, user_edited_fields, filled_by, extraction_status
+        or None if no row exists yet.
+    """
+    uid = int(user_id)
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if draft_session_id:
+                cur.execute(
+                    """
+                    SELECT field_values, user_edited_fields, filled_by,
+                           extraction_status, extraction_error
+                    FROM template_user_field_values
+                    WHERE template_id = %s AND user_id = %s AND draft_session_id = %s
+                    """,
+                    (template_id, uid, draft_session_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT field_values, user_edited_fields, filled_by,
+                           extraction_status, extraction_error
+                    FROM template_user_field_values
+                    WHERE template_id = %s AND user_id = %s AND draft_session_id IS NULL
+                    """,
+                    (template_id, uid),
+                )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "field_values": dict(row["field_values"]) if row.get("field_values") else {},
+        "user_edited_fields": list(row["user_edited_fields"]) if row.get("user_edited_fields") else [],
+        "filled_by": row.get("filled_by"),
+        "extraction_status": row.get("extraction_status"),
+        "extraction_error": row.get("extraction_error"),
+    }
+
+
+def upsert_extracted_field_values(
+    template_id: str,
+    user_id: int,
+    field_values: Dict[str, Any],
+    filled_by: str = "agent",
+    extraction_status: str = "completed",
+    draft_session_id: Optional[str] = None,
+    source_document_id: Optional[str] = None,
+) -> bool:
+    """
+    UPSERT extracted field values into template_user_field_values.
+
+    WHY: Uses ON CONFLICT (template_id, user_id, draft_session_id) so that
+    re-extraction for the same draft overwrites previous agent extractions
+    while the field-level merge (done in the agent layer) protects user-edited
+    fields.
+
+    The caller (InjectionAgent) is responsible for performing the field-level
+    merge BEFORE calling this function. This function writes the pre-merged
+    values as-is.
+
+    Args:
+        template_id: Template being filled
+        user_id: User who owns the values
+        field_values: Pre-merged dict of field values
+        filled_by: 'agent' or 'user' — who performed this write
+        extraction_status: 'completed', 'partial', or 'failed'
+        draft_session_id: Optional draft session link
+        source_document_id: Optional source document reference
+    """
+    import json as _json
+    uid = int(user_id)
+
+    _injection_logger.info(
+        "[InjectionAgent][DB] Upserting %d fields for template_id=%s, user_id=%s, "
+        "draft_session_id=%s, filled_by=%s, status=%s",
+        len(field_values), template_id, uid, draft_session_id, filled_by, extraction_status,
+    )
+
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO template_user_field_values
+                    (template_id, user_id, draft_session_id, source_document_id,
+                     field_values, filled_by, extraction_status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, now(), now())
+                ON CONFLICT (template_id, user_id, draft_session_id)
+                DO UPDATE SET
+                    field_values = EXCLUDED.field_values,
+                    source_document_id = EXCLUDED.source_document_id,
+                    filled_by = EXCLUDED.filled_by,
+                    extraction_status = EXCLUDED.extraction_status,
+                    extraction_error = NULL,
+                    updated_at = now()
+                """,
+                (
+                    template_id, uid, draft_session_id, source_document_id,
+                    _json.dumps(field_values), filled_by, extraction_status,
+                ),
+            )
+
+    _injection_logger.info("[InjectionAgent][DB] Upsert successful")
+    return True
+
+
+def update_extraction_status(
+    template_id: str,
+    user_id: int,
+    extraction_status: str,
+    extraction_error: Optional[str] = None,
+    draft_session_id: Optional[str] = None,
+) -> bool:
+    """
+    Update only the extraction_status and extraction_error columns.
+
+    WHY: For partial or failed extractions, we want to record the error
+    in the DB without touching the field_values. If no row exists yet,
+    we INSERT a minimal row so the status is always trackable.
+    """
+    import json as _json
+    uid = int(user_id)
+
+    # Truncate error message to prevent DB overflow
+    error_truncated = extraction_error[:2000] if extraction_error else None
+
+    _injection_logger.info(
+        "[InjectionAgent][DB] Updating extraction status: template_id=%s, user_id=%s, "
+        "draft_session_id=%s → status=%s, error=%s",
+        template_id, uid, draft_session_id, extraction_status,
+        (error_truncated[:100] + "...") if error_truncated and len(error_truncated) > 100 else error_truncated,
+    )
+
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO template_user_field_values
+                    (template_id, user_id, draft_session_id,
+                     field_values, extraction_status, extraction_error, filled_by,
+                     created_at, updated_at)
+                VALUES (%s, %s, %s, '{}'::jsonb, %s, %s, 'agent', now(), now())
+                ON CONFLICT (template_id, user_id, draft_session_id)
+                DO UPDATE SET
+                    extraction_status = EXCLUDED.extraction_status,
+                    extraction_error = EXCLUDED.extraction_error,
+                    updated_at = now()
+                """,
+                (template_id, uid, draft_session_id, extraction_status, error_truncated),
+            )
+
     return True

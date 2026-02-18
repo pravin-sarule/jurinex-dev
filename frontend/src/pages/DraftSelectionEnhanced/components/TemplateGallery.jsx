@@ -2,6 +2,16 @@ import React, { useRef, useState, useEffect } from 'react';
 import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { DocumentTextIcon } from '@heroicons/react/24/solid';
 
+/** True if URL is suitable for <img> (not HTML content or data:text/html). */
+const isImageUrl = (url) => {
+  if (!url || typeof url !== 'string') return false;
+  const u = url.trim();
+  if (u.startsWith('data:text/html')) return false;
+  if (u.startsWith('data:') && !u.startsWith('data:image/')) return false;
+  if (u.startsWith('<') || u.includes('</')) return false;
+  return u.startsWith('http://') || u.startsWith('https://') || u.startsWith('data:image/');
+};
+
 const TemplateGallery = ({ templates, onTemplateClick, isLoading }) => {
   const scrollContainerRef = useRef(null);
   const [showLeftArrow, setShowLeftArrow] = useState(false);
@@ -86,7 +96,7 @@ const TemplateGallery = ({ templates, onTemplateClick, isLoading }) => {
       >
         {templates.map((template) => (
           <TemplateCard
-            key={template.id}
+            key={template.template_id || template.id}
             template={template}
             onClick={() => onTemplateClick(template)}
           />
@@ -114,15 +124,28 @@ const TemplateGallery = ({ templates, onTemplateClick, isLoading }) => {
 };
 
 const TemplateCard = ({ template, onClick }) => {
+  const imageUrl = template.preview_image_url || template.image_url;
+  const [imageError, setImageError] = useState(false);
+  const showImage = imageUrl && isImageUrl(imageUrl) && !imageError;
+
   return (
     <div
       onClick={onClick}
       className="template-card flex-shrink-0 w-64 bg-white rounded-lg border border-gray-200 shadow-sm hover:shadow-xl transition-all duration-300 cursor-pointer transform hover:-translate-y-1 group"
     >
       <div className="p-4 h-full flex flex-col">
-        {/* Icon/Thumbnail */}
-        <div className="w-full h-32 bg-gradient-to-br from-[#21C1B6] to-[#1AA49B] rounded-lg flex items-center justify-center mb-3 group-hover:scale-105 transition-transform duration-300">
-          <DocumentTextIcon className="w-12 h-12 text-white" />
+        {/* Thumbnail: template image or fallback icon */}
+        <div className="w-full h-32 rounded-lg flex items-center justify-center mb-3 overflow-hidden bg-gradient-to-br from-[#21C1B6] to-[#1AA49B] group-hover:scale-[1.02] transition-transform duration-300">
+          {showImage ? (
+            <img
+              src={imageUrl}
+              alt={template.name || template.title || 'Template preview'}
+              className="w-full h-full object-cover"
+              onError={() => setImageError(true)}
+            />
+          ) : (
+            <DocumentTextIcon className="w-12 h-12 text-white" />
+          )}
         </div>
 
         {/* Title */}

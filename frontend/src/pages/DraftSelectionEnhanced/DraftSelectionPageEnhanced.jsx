@@ -1,6 +1,25 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeftIcon, ChevronRightIcon, DocumentTextIcon, PencilSquareIcon, TrashIcon } from '@heroicons/react/24/outline';
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DocumentTextIcon,
+  PencilSquareIcon,
+  TrashIcon,
+  Squares2X2Icon,
+  Bars3Icon,
+  ArrowsUpDownIcon,
+  ArrowPathIcon,
+  FolderIcon,
+  EllipsisVerticalIcon,
+  UserIcon,
+  ClockIcon,
+  TagIcon,
+  GlobeAltIcon,
+  CalendarIcon,
+  EyeIcon,
+  StarIcon
+} from '@heroicons/react/24/outline';
 import DraftSelectionCard from '../../components/DraftComponents/DraftSelectionCard';
 import WordLogo from '../../assets/Wordlogo.svg.png';
 import ZohoLogo from '../../assets/zoho-logo-web.png';
@@ -11,34 +30,43 @@ import { createDraft, listDrafts, deleteDraft } from '../../services/draftFormAp
 import './styles/enhanced-draft-selection.css';
 
 const DRAFTS_PER_PAGE = 5;
+const LIST_DRAFTS_TIMEOUT_MS = 8000; // Stop waiting so user isn't stuck when backend is busy (e.g. section generation)
 
 const DraftSelectionPageEnhanced = () => {
   const navigate = useNavigate();
   const [isConnecting, setIsConnecting] = useState(false);
   const [isCreatingDraft, setIsCreatingDraft] = useState(false);
   const [recentDrafts, setRecentDrafts] = useState([]);
-  const [loadingDrafts, setLoadingDrafts] = useState(true);
+  const [loadingDrafts, setLoadingDrafts] = useState(false);
   const [deletingDraftId, setDeletingDraftId] = useState(null);
   const [draftsPage, setDraftsPage] = useState(1);
+  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'list'
+
+  const loadDrafts = React.useCallback(async (showRefreshSpinner = false) => {
+    if (showRefreshSpinner) setLoadingDrafts(true);
+    try {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('timeout')), LIST_DRAFTS_TIMEOUT_MS)
+      );
+      const res = await Promise.race([listDrafts(null, 20, 0), timeoutPromise]);
+      if (res?.success && Array.isArray(res.drafts)) {
+        setRecentDrafts(res.drafts);
+      } else {
+        setRecentDrafts([]);
+      }
+    } catch (err) {
+      setRecentDrafts([]);
+      if (err?.message === 'timeout') {
+        toast.info('Documents are loading in the background. Click refresh to try again.');
+      }
+    } finally {
+      setLoadingDrafts(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        setLoadingDrafts(true);
-        const res = await listDrafts(null, 20, 0);
-        if (!cancelled && res?.success && Array.isArray(res.drafts)) {
-          setRecentDrafts(res.drafts);
-        }
-      } catch {
-        if (!cancelled) setRecentDrafts([]);
-      } finally {
-        if (!cancelled) setLoadingDrafts(false);
-      }
-    };
-    load();
-    return () => { cancelled = true; };
-  }, []);
+    loadDrafts(false);
+  }, [loadDrafts]);
 
   const draftOptions = [
     {
@@ -76,9 +104,9 @@ const DraftSelectionPageEnhanced = () => {
   const handleMicrosoftWordClick = async () => {
     try {
       setIsConnecting(true);
-      
+
       const connectionStatus = await draftApi.getMicrosoftStatus();
-      
+
       if (connectionStatus.isConnected) {
         navigate('/draft/microsoft-word');
       } else {
@@ -205,92 +233,231 @@ const DraftSelectionPageEnhanced = () => {
           <TemplateWizardGallery onTemplateClick={handleTemplateClick} />
         </div>
 
-        {/* Recent drafts – latest drafts (reuse instead of creating new every time) */}
-        <div className="mb-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
-            Recent drafts
-          </h2>
-          <p className="text-gray-600 text-sm mb-4">
-            Your recent drafts. Open any to continue editing. Choosing a template above starts a new, clean draft.
-          </p>
-          {loadingDrafts ? (
-            <div className="flex items-center gap-2 text-gray-500 py-4">
-              <div className="animate-spin rounded-full h-5 w-5 border-2 border-[#21C1B6] border-t-transparent" />
-              <span>Loading recent drafts…</span>
+        {/* Recent drafts – latest drafts */}
+        <div className="mb-12">
+          {/* Recent Documents Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pt-6 border-t border-gray-100">
+            <h2 className="text-xl font-medium text-gray-800">
+              Recent documents
+            </h2>
+
+            <div className="flex items-center gap-4 sm:gap-8">
+              <div className="flex items-center gap-1 sm:gap-3">
+                {/* View switcher */}
+                <button
+                  onClick={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
+                  className="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition-colors"
+                  title={viewMode === 'grid' ? 'List view' : 'Grid view'}
+                >
+                  {viewMode === 'grid' ? (
+                    <Bars3Icon className="w-5 h-5" />
+                  ) : (
+                    <Squares2X2Icon className="w-5 h-5" />
+                  )}
+                </button>
+
+                {/* Refresh list (e.g. after returning while section generation was running) */}
+                <button
+                  onClick={() => loadDrafts(true)}
+                  disabled={loadingDrafts}
+                  className="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition-colors disabled:opacity-50"
+                  title="Refresh documents"
+                >
+                  <ArrowPathIcon className={`w-5 h-5 ${loadingDrafts ? 'animate-spin' : ''}`} />
+                </button>
+                {/* Sort */}
+                <button className="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition-colors" title="Sort options">
+                  <ArrowsUpDownIcon className="w-5 h-5" />
+                </button>
+              </div>
             </div>
-          ) : recentDrafts.length === 0 ? (
-            <p className="text-gray-500 py-4">No drafts yet. Select a template above to start; edits are stored automatically.</p>
+          </div>
+
+          {recentDrafts.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 bg-white rounded-xl border border-gray-200 shadow-sm text-center px-6">
+              <div className="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mb-4">
+                <DocumentTextIcon className="w-10 h-10 text-gray-300" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-1">No documents yet</h3>
+              <p className="text-gray-500 max-w-sm">
+                Choose a template above or click "Custom Template" to start your first legal draft.
+              </p>
+            </div>
           ) : (
             <>
-              <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200 bg-white overflow-hidden">
-                {draftsPagination.paginatedDrafts.map((d) => (
-                  <li key={d.draft_id} className="flex items-center gap-2">
-                    <button
-                      type="button"
+              {viewMode === 'grid' ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
+                  {draftsPagination.paginatedDrafts.map((d) => (
+                    <div
+                      key={d.draft_id}
+                      className="group flex flex-col bg-white rounded-2xl border border-gray-200 overflow-hidden hover:shadow-xl transition-all duration-300 cursor-pointer"
                       onClick={() => navigate(`/draft-form/${d.draft_id}`)}
-                      className="flex items-center gap-3 flex-1 min-w-0 p-4 text-left hover:bg-gray-50 transition-colors"
                     >
-                      <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-[#21C1B6]/10 flex items-center justify-center">
-                        <DocumentTextIcon className="w-5 h-5 text-[#21C1B6]" />
+                      {/* Card Preview Area */}
+                      <div className="relative aspect-[3.5/4] bg-gray-50/50 p-4 flex flex-col items-center justify-center">
+                        {/* Top Tags */}
+                        <div className="absolute top-3 left-3 right-3 flex justify-between items-center z-10">
+                          <div className="flex items-center gap-1.5 bg-white px-2 py-0.5 rounded-full border border-gray-100 shadow-sm">
+                            <TagIcon className="w-3 h-3 text-blue-500" />
+                            <span className="text-[10px] font-bold text-gray-700 uppercase tracking-tight">
+                              {d.template_category || d.category || (d.template_name || 'Legal').split(' ')[0]}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1 bg-green-50 px-2 py-0.5 rounded-full border border-green-100">
+                            <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                            <span className="text-[10px] font-bold text-green-700 uppercase tracking-tight">Active</span>
+                          </div>
+                        </div>
+
+                        {/* Document Graphic */}
+                        <div className="w-4/5 h-4/5 bg-white rounded-lg shadow-sm border border-gray-100 p-4 flex flex-col gap-2 relative mt-4 overflow-hidden">
+                          <div className="h-1.5 w-1/2 bg-gray-100 rounded" />
+                          <div className="space-y-1.5 mt-2">
+                            <div className="h-0.5 w-full bg-gray-50 rounded" />
+                            <div className="h-0.5 w-full bg-gray-50 rounded" />
+                            <div className="h-0.5 w-3/4 bg-gray-50 rounded" />
+                            <div className="h-0.5 w-full bg-gray-50 rounded" />
+                          </div>
+
+                          {/* Big Word/Doc Icon in center */}
+                          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            <div className="w-12 h-12 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg transform group-hover:scale-110 transition-transform duration-300">
+                              <span className="text-white text-2xl font-bold font-serif">W</span>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="font-medium text-gray-900 truncate">
-                          {d.draft_title || d.template_name || 'Untitled draft'}
-                        </p>
-                        <p className="text-sm text-gray-500 truncate">{d.template_name}</p>
+
+                      {/* Card Info Area */}
+                      <div className="p-5 flex flex-col gap-2">
+                        <div className="space-y-1">
+                          <h3 className="text-lg font-bold text-gray-900 leading-tight truncate">
+                            {d.draft_title || d.template_name || 'Untitled draft'}
+                          </h3>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 text-gray-400">
+                              <CalendarIcon className="w-4 h-4" />
+                              <span className="text-[13px] font-medium text-gray-500">
+                                {d.updated_at ? new Date(d.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Jan 30, 2026'}
+                              </span>
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteDraft(e, d.draft_id);
+                              }}
+                              className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                              title="Delete"
+                            >
+                              <TrashIcon className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="border-t border-gray-50 mt-1" />
                       </div>
-                      {d.updated_at && (
-                        <p className="text-sm text-gray-400 flex-shrink-0">
-                          Updated {new Date(d.updated_at).toLocaleDateString()}
-                        </p>
-                      )}
-                      <PencilSquareIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => handleDeleteDraft(e, d.draft_id)}
-                      disabled={deletingDraftId === d.draft_id}
-                      className="flex-shrink-0 p-2 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
-                      title="Delete draft"
-                      aria-label="Delete draft"
-                    >
-                      {deletingDraftId === d.draft_id ? (
-                        <span className="inline-block w-5 h-5 border-2 border-[#21C1B6] border-t-transparent rounded-full animate-spin" />
-                      ) : (
-                        <TrashIcon className="w-5 h-5" />
-                      )}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-gray-50 border-bottom border-gray-200">
+                        <th className="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Name</th>
+                        <th className="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Last modified</th>
+                        <th className="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider w-20"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {draftsPagination.paginatedDrafts.map((d) => (
+                        <tr
+                          key={d.draft_id}
+                          className="hover:bg-blue-50/30 transition-colors cursor-pointer group text-sm"
+                          onClick={() => navigate(`/draft-form/${d.draft_id}`)}
+                        >
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded bg-blue-50 dark:bg-blue-900/10 flex items-center justify-center flex-shrink-0">
+                                <DocumentTextIcon className="w-4 h-4 text-blue-600" />
+                              </div>
+                              <span className="font-medium text-gray-900 truncate max-w-xs sm:max-w-md">
+                                {d.draft_title || d.template_name || 'Untitled draft'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col">
+                              <span className="text-gray-900">
+                                {d.updated_at ? new Date(d.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown date'}
+                              </span>
+                              <span className="text-[11px] text-gray-500">
+                                Last opened {d.updated_at ? new Date(d.updated_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : ''}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteDraft(e, d.draft_id);
+                                }}
+                                className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                                title="Delete"
+                              >
+                                <TrashIcon className="w-4 h-4" />
+                              </button>
+                              <button
+                                className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <EllipsisVerticalIcon className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Pagination (kept similar but styled) */}
               {draftsPagination.totalPages > 1 && (
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-sm text-gray-500">
-                    Showing {((draftsPagination.page - 1) * DRAFTS_PER_PAGE) + 1}–{Math.min(draftsPagination.page * DRAFTS_PER_PAGE, draftsPagination.total)} of {draftsPagination.total} drafts
+                <div className="mt-8 flex flex-wrap items-center justify-between gap-4 py-4 border-t border-gray-100">
+                  <p className="text-sm text-gray-500 font-medium">
+                    Showing {((draftsPagination.page - 1) * DRAFTS_PER_PAGE) + 1}–{Math.min(draftsPagination.page * DRAFTS_PER_PAGE, draftsPagination.total)} of {draftsPagination.total} documents
                   </p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => setDraftsPage((p) => Math.max(1, p - 1))}
                       disabled={draftsPagination.page <= 1}
-                      className="inline-flex items-center gap-1.5 py-2 px-3 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-[#21C1B6]"
+                      className="p-2 rounded-lg text-gray-600 hover:bg-gray-100 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
                       aria-label="Previous page"
                     >
-                      <ChevronLeftIcon className="w-4 h-4" />
-                      Previous
+                      <ChevronLeftIcon className="w-5 h-5" />
                     </button>
-                    <span className="text-sm text-gray-600 font-medium px-2">
-                      Page {draftsPagination.page} of {draftsPagination.totalPages}
-                    </span>
+                    <div className="flex items-center gap-1 mx-2">
+                      {Array.from({ length: draftsPagination.totalPages }, (_, i) => i + 1).map(p => (
+                        <button
+                          key={p}
+                          onClick={() => setDraftsPage(p)}
+                          className={`w-8 h-8 rounded-lg text-sm font-medium transition-colors ${draftsPage === p ? 'bg-[#21C1B6] text-white shadow-sm' : 'text-gray-600 hover:bg-gray-100'}`}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
                     <button
                       type="button"
                       onClick={() => setDraftsPage((p) => Math.min(draftsPagination.totalPages, p + 1))}
                       disabled={draftsPagination.page >= draftsPagination.totalPages}
-                      className="inline-flex items-center gap-1.5 py-2 px-3 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-[#21C1B6]"
+                      className="p-2 rounded-lg text-gray-600 hover:bg-gray-100 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
                       aria-label="Next page"
                     >
-                      Next
-                      <ChevronRightIcon className="w-4 h-4" />
+                      <ChevronRightIcon className="w-5 h-5" />
                     </button>
                   </div>
                 </div>
@@ -298,7 +465,7 @@ const DraftSelectionPageEnhanced = () => {
             </>
           )}
         </div>
-        
+
         {(isConnecting || isCreatingDraft) && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-white rounded-xl shadow-xl p-8 text-center max-w-md">

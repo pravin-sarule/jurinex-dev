@@ -345,57 +345,157 @@ def get_file_ids_for_case(case_id: str, user_id: int | str) -> List[str]:
         folder_id = str(row[0])
         logger.info(f"[get_file_ids_for_case] Found folder_id={folder_id} for case_id={case_id}")
         
-        if not _is_uuid(folder_id):
-            logger.warning(f"[get_file_ids_for_case] folder_id is not a valid UUID: {folder_id}")
-            return []
+        # ISOLATION FIX: Use gcs_path for strict isolation.
+        # folder_path is ambiguous ('3/cases' shared by 7 folders).
+        # gcs_path is unique per folder ('.../Vishal_Bainade.../').
+        
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT uf.folder_path FROM user_files uf
+                    SELECT uf.gcs_path, uf.folder_path FROM user_files uf
                     WHERE uf.id = %s::uuid AND uf.user_id = %s AND uf.is_folder = true
                     LIMIT 1
                     """,
                     (folder_id, uid_str),
                 )
                 row = cur.fetchone()
-        if not row or not row[0]:
+        
+        if not row:
             logger.warning(f"[get_file_ids_for_case] No folder found with id={folder_id}")
             return []
-        folder_path = (row[0] or "").strip()
-        logger.info(f"[get_file_ids_for_case] Found folder_path={folder_path}")
+            
+        folder_gcs_path = (row[0] or "").strip()
+        folder_path = (row[1] or "").strip()
         
+        logger.info(f"[get_file_ids_for_case] Found folder_gcs_path='{folder_gcs_path}' for folder_id={folder_id}")
+        
+        # Determine query strategy
+        query = ""
+        params = []
+        
+        if folder_gcs_path and len(folder_gcs_path) > 5:
+            # Use strict GCS path filtering (PRIMARY STRATEGY)
+            logger.info(f"[get_file_ids_for_case] Using GCS Path Filtering: {folder_gcs_path}%")
+            query = """
+                SELECT id FROM user_files
+                WHERE user_id = %s AND is_folder = false
+                  AND gcs_path ILIKE %s
+                ORDER BY created_at ASC
+            """
+            params = (uid_str, folder_gcs_path + '%')
+        elif folder_path:
+            # Fallback to folder_path (Legacy/Backup)
+            logger.warning(f"[get_file_ids_for_case] folder_gcs_path invalid/empty. Fallback to folder_path='{folder_path}'")
+            query = """
+                SELECT id FROM user_files
+                WHERE user_id = %s AND is_folder = false
+                  AND folder_path = %s
+                ORDER BY created_at ASC
+            """
+            params = (uid_str, folder_path)
+        else:
+            logger.error("[get_file_ids_for_case] Both gcs_path and folder_path are empty for folder.")
+            return []
+
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id FROM user_files
-                    WHERE user_id = %s AND is_folder = false
-                      AND (folder_path = %s OR folder_path LIKE %s)
-                    ORDER BY created_at ASC
-                    """,
-                    (uid_str, folder_path, folder_path + "/%"),
-                )
+                cur.execute(query, params)
                 rows = cur.fetchall()
+        
         file_ids = [str(r[0]) for r in rows if r and r[0]]
-        logger.info(f"[get_file_ids_for_case] Found {len(file_ids)} files in case folder: {file_ids[:5] if len(file_ids) > 5 else file_ids}")
+        logger.info(f"[get_file_ids_for_case] Found {len(file_ids)} files using isolation strategy.")
         return file_ids
     except Exception as e:
         logger.exception(f"[get_file_ids_for_case] Error: {e}")
         return []
-def get_filenames_by_ids(file_ids: List[str]) -> Dict[str, str]:
-    """Map file_id -> originalname for the given file IDs."""
+        
+    return []  # Should be unreachable but safe
+
+
+def get_best_source_document(case_id: str, user_id: int | str) -> Optional[str]:
+    """
+    Find the best source document for a case.
+    Prioritizes RECENCY (Newest valid file) to handle shared folder issues.
+    Returns file_id or None.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Get file IDs (Sorted by created_at ASC usually, but we will re-query/sort)
+    # The get_file_ids_for_case returns IDs sorted by created_at ASC.
+    file_ids = get_file_ids_for_case(case_id, user_id)
     if not file_ids:
-        return {}
-    valid = [f for f in file_ids if _is_uuid(f)]
-    if not valid:
-        return {}
+        return None
+    
+    # Filter for valid file IDs
+    valid_ids = [f for f in file_ids if _is_uuid(f)]
+    if not valid_ids:
+        return None
+        
+    # We need to pick the NEWEST file that has chunks.
+    # The file_ids list is ASC (Oldest first). So reverse it for Descending (Newest first).
+    valid_ids_desc = list(reversed(valid_ids))
     
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Check chunks for these files.
+            # We want to pick the FIRST one in valid_ids_desc that has > 0 chunks.
+            
             cur.execute(
-                "SELECT id, originalname FROM user_files WHERE id = ANY(%s::uuid[])",
-                (valid,),
+                """
+                SELECT file_id, COUNT(*) as cnt 
+                FROM file_chunks 
+                WHERE file_id = ANY(%s::uuid[])
+                GROUP BY file_id
+                """,
+                (valid_ids_desc,)
             )
             rows = cur.fetchall()
-    return {str(r[0]): r[1] for r in rows}
+            
+    # Map file_id -> count
+    counts = {str(r[0]): r[1] for r in rows}
+    
+    logger.info(f"[get_best_source_document] File counts for case {case_id}: {counts}")
+
+    # Iterate newest to oldest
+    for fid in valid_ids_desc:
+        c = counts.get(fid, 0)
+        if c > 0:
+            logger.info(f"[get_best_source_document] Selected NEWEST valid file: {fid} ({c} chunks)")
+            return fid
+            
+    logger.warning("[get_best_source_document] No file with chunks found.")
+    return None
+
+
+def get_filenames_by_ids(file_ids: List[str]) -> Dict[str, str]:
+    """
+    Given a list of file UUIDs, return a mapping of {file_id: originalname}.
+    Used by the Librarian agent to add source attribution to retrieved chunks.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not file_ids:
+        return {}
+
+    valid_ids = [f for f in file_ids if f and _is_uuid(str(f))]
+    if not valid_ids:
+        return {}
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, originalname FROM user_files WHERE id = ANY(%s::uuid[])",
+                    (valid_ids,),
+                )
+                rows = cur.fetchall()
+        result = {str(r[0]): (r[1] or "Unknown") for r in rows}
+        logger.info(f"[get_filenames_by_ids] Resolved {len(result)} filenames for {len(valid_ids)} file_ids")
+        return result
+    except Exception as e:
+        logger.warning(f"[get_filenames_by_ids] Error: {e}")
+        return {fid: "Unknown" for fid in valid_ids}
+

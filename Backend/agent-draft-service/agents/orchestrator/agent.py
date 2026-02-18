@@ -137,6 +137,10 @@ class OrchestratorAgent:
                 self._agent_tasks.append({"from": "orchestrator", "to": AgentName.DRAFTER.value, "task": "draft document from chunks"})
                 logger.info("Orchestrator → %s: draft document from chunks", AgentName.DRAFTER.value)
                 self._run_drafter()
+            elif decision.next_agent == AgentName.CITATION:
+                self._agent_tasks.append({"from": "orchestrator", "to": AgentName.CITATION.value, "task": "add formal citations to draft"})
+                logger.info("Orchestrator → %s: add formal citations to draft", AgentName.CITATION.value)
+                self._run_citation()
             elif decision.next_agent == AgentName.CRITIC:
                 self._agent_tasks.append({"from": "orchestrator", "to": AgentName.CRITIC.value, "task": "validate draft"})
                 logger.info("Orchestrator → %s: validate draft", AgentName.CRITIC.value)
@@ -224,6 +228,29 @@ class OrchestratorAgent:
         if not draft:
             raise RuntimeError("Drafter agent returned empty draft.")
         self._state.set_draft(draft=draft)
+
+    def _run_citation(self) -> None:
+        """Run Citation agent: add formal citations to drafted content."""
+        try:
+            response = self._adk_client.run_agent(
+                AgentName.CITATION.value,
+                {
+                    "draft": self._state.state.draft or "",
+                    "chunks": self._state.state.chunks,
+                    "embeddings": self._state.state.embeddings,
+                },
+            )
+        except ADKClientError as exc:
+            raise RuntimeError("Citation agent failed.") from exc
+
+        content_with_citations = response.get("content_html")
+        citations = response.get("citations", [])
+
+        if not content_with_citations:
+            logger.warning("Citation agent returned no content; using original draft")
+            self._state.set_citations(self._state.state.draft or "", [])
+        else:
+            self._state.set_citations(content_with_citations, citations)
 
     def _run_critic(self) -> None:
         try:

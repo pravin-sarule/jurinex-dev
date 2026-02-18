@@ -14,6 +14,7 @@ class AgentName(str, Enum):
     INGESTION = "ingestion"
     LIBRARIAN = "librarian"
     DRAFTER = "drafter"
+    CITATION = "citation"
     CRITIC = "critic"
     ASSEMBLER = "assembler"
 
@@ -40,6 +41,8 @@ class FlowController:
             return FlowDecision(AgentName.LIBRARIAN, "chunks or embeddings missing")
         if not state.drafted:
             return FlowDecision(AgentName.DRAFTER, "draft not created")
+        if not state.cited:
+            return FlowDecision(AgentName.CITATION, "citations not added")
         if not state.validated:
             return FlowDecision(AgentName.CRITIC, "draft not validated")
         if not state.completed:

@@ -49,3 +49,21 @@ def generate_signed_url(
         return url
     except Exception:
         return None
+
+
+def generate_signed_url_from_gs(gs_url: str, expiration_minutes: int = 60) -> Optional[str]:
+    """
+    Parse gs://bucket/path and return a signed URL.
+    Use when templates.image_url or similar stores full gs:// URIs.
+    """
+    if not gs_url or not isinstance(gs_url, str) or not gs_url.strip().startswith("gs://"):
+        return None
+    gs = gs_url.strip()
+    prefix = "gs://"
+    rest = gs[len(prefix):]
+    if "/" not in rest:
+        return None
+    bucket_name, _, blob_path = rest.partition("/")
+    if not bucket_name or not blob_path:
+        return None
+    return generate_signed_url(bucket_name, blob_path, expiration_minutes)

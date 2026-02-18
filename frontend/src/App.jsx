@@ -250,7 +250,7 @@ function App() {
               path="/draft-form/:draftId"
               element={
                 <AuthChecker>
-                  <MainLayout>
+                  <MainLayout useNoPadding={true}>
                     <DraftFormPage />
                   </MainLayout>
                 </AuthChecker>

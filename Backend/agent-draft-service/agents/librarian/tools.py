@@ -31,7 +31,7 @@ def fetch_relevant_chunks(
         query: User question or evidence request. Used to embed and search for similar chunks.
         user_id: Numeric user id from JWT. Only this user's document chunks are returned.
         file_ids: Optional list of file UUIDs to restrict the search to (must belong to user_id).
-        top_k: Number of chunks to return (1–50). Default 10.
+        top_k: Number of chunks to return (1–80). Default 80.
 
     Returns:
         On success: { status: 'success', chunks: [...], context: str, count: int }
@@ -48,7 +48,7 @@ def fetch_relevant_chunks(
     except (TypeError, ValueError):
         return {"status": "error", "error_message": "user_id is required (numeric, from JWT) for user-specific retrieval."}
 
-    top_k = max(1, min(int(top_k), 50))
+    top_k = max(1, min(int(top_k), 80))
     if isinstance(file_ids, str):
         file_ids = [f.strip() for f in file_ids.split(",") if f.strip()]
 

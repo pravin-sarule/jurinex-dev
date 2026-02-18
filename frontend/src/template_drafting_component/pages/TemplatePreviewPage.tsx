@@ -9,14 +9,20 @@ import { LoadingSpinner, ErrorBoundary } from '../components/common';
 import { A4PageRenderer } from '../components/preview';
 import { useTemplateStore } from '../store/templateStore';
 import { draftApi } from '../services';
+import { getUniversalSections } from '../services/universalSectionsApi';
+import type { UniversalSection } from '../components/constants';
 import { Logger } from '../utils/logger';
-import { UNIVERSAL_SECTIONS } from '../components/constants';
 
 export const TemplatePreviewPage: React.FC = () => {
     const navigate = useNavigate();
     const { templateId } = useParams<{ templateId: string }>();
 
     const [isCreatingDraft, setIsCreatingDraft] = useState(false);
+    const [sections, setSections] = useState<UniversalSection[]>([]);
+
+    useEffect(() => {
+        getUniversalSections().then(setSections);
+    }, []);
 
     const selectedTemplate = useTemplateStore(state => state.selectedTemplate);
     const isLoadingDetails = useTemplateStore(state => state.isLoadingDetails);
@@ -194,7 +200,7 @@ export const TemplatePreviewPage: React.FC = () => {
                     }}>
                         <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '16px' }}>Document Structure</h3>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            {UNIVERSAL_SECTIONS.map((section) => (
+                            {sections.map((section) => (
                                 <div key={section.id} style={{
                                     padding: '8px 12px',
                                     border: '1px solid var(--jx-border)',

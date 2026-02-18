@@ -138,12 +138,95 @@ export const draftApi = {
     },
 
     /**
-     * Assemble final document
+     * Get all section versions for a draft
+     */
+    getSections: async (draftId: string): Promise<{ success: boolean; sections: any[]; count: number }> => {
+        const response = await api.get<{ success: boolean; sections: any[]; count: number }>(`/drafts/${draftId}/sections`);
+        return response.data;
+    },
+
+    /**
+     * Get single section content by section_key
+     */
+    getSection: async (draftId: string, sectionKey: string): Promise<{ success: boolean; version: any; reviews?: any[] }> => {
+        const response = await api.get<{ success: boolean; version: any; reviews?: any[] }>(
+            `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}`
+        );
+        return response.data;
+    },
+
+    /**
+     * Generate section content (RAG + LLM + optional critic can take several minutes)
+     */
+    generateSection: async (
+        draftId: string,
+        sectionKey: string,
+        body: { section_prompt?: string; auto_validate?: boolean }
+    ): Promise<{ success: boolean; version: any; critic_review?: any }> => {
+        const response = await api.post(
+            `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/generate`,
+            body,
+            { timeout: 600000 }
+        ); // 10 min for RAG + generation + critic
+        return response.data;
+    },
+
+    /**
+     * Refine section with user feedback
+     */
+    refineSection: async (
+        draftId: string,
+        sectionKey: string,
+        body: { user_feedback: string; rag_query?: string; auto_validate?: boolean }
+    ): Promise<{ success: boolean; version: any; critic_review?: any }> => {
+        const response = await api.post(
+            `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/refine`,
+            body,
+            { timeout: 300000 }
+        ); // 5 min
+        return response.data;
+    },
+
+    /**
+     * Update section version content
+     */
+    updateSectionVersion: async (
+        draftId: string,
+        sectionKey: string,
+        versionId: string,
+        contentHtml: string
+    ): Promise<any> => {
+        const response = await api.put(
+            `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/versions/${versionId}`,
+            { content_html: contentHtml }
+        );
+        return response.data;
+    },
+
+    /**
+     * Export assembled HTML to DOCX (download)
+     */
+    exportDocx: async (
+        draftId: string,
+        htmlContent: string,
+        cssContent?: string
+    ): Promise<Blob> => {
+        const response = await api.post(
+            `/drafts/${draftId}/export/docx`,
+            { html_content: htmlContent, css_content: cssContent || '' },
+            { responseType: 'blob', timeout: 300000 }
+        );
+        return response.data as Blob;
+    },
+
+    /**
+     * Assemble final document (supports up to 500+ pages)
      */
     assemble: async (draftId: string, sectionIds: string[]): Promise<{ success: boolean; final_document: string; template_css?: string }> => {
         const response = await api.post<{ success: boolean; final_document: string; template_css?: string }>(
             `/drafts/${draftId}/assemble`,
-            { section_ids: sectionIds }
+            { section_ids: sectionIds },
+            { timeout: 600000 }  // 10 min for large documents (500+ pages)
         );
         return response.data;
     }

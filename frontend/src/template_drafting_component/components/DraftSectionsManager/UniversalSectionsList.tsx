@@ -1,13 +1,8 @@
 
-import React, { useState } from 'react';
-import { UNIVERSAL_SECTIONS, UniversalSection, SectionCustomization } from '../constants'; // Adjust import path
-import { Edit2, Trash2, RotateCcw, Save, X } from 'lucide-react'; // Assuming lucide-react or similar icon lib is available. If not, will use text buttons or check package.json
-
-// If lucide-react is not installed, we can fall back to standard HTML/CSS or another icon set.
-// I will check package.json later, for now I'll write defensive code or use simple button text if unsure.
-// Actually, looking at previous files, I haven't seen package.json.
-// Safest is to use simple text/emoji or standard icons if I'm not sure. But modern react apps usually have icons.
-// I'll stick to text buttons with classNames for now if I can't verify, but wait, checking package.json is smart.
+import React, { useState, useEffect } from 'react';
+import { UniversalSection, SectionCustomization } from '../constants';
+import { getUniversalSections } from '../../services/universalSectionsApi';
+import { Edit2, Trash2, RotateCcw, Save, X } from 'lucide-react';
 
 interface UniversalSectionsListProps {
     customizations: Record<string, SectionCustomization>;
@@ -15,8 +10,13 @@ interface UniversalSectionsListProps {
 }
 
 export const UniversalSectionsList: React.FC<UniversalSectionsListProps> = ({ customizations, onUpdateCustomization }) => {
+    const [sections, setSections] = useState<UniversalSection[]>([]);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editPrompt, setEditPrompt] = useState('');
+
+    useEffect(() => {
+        getUniversalSections().then(setSections);
+    }, []);
 
     const handleEditStart = (section: UniversalSection) => {
         const currentCustom = customizations[section.id];
@@ -50,7 +50,7 @@ export const UniversalSectionsList: React.FC<UniversalSectionsListProps> = ({ cu
         <div className="space-y-4 p-4 bg-white rounded-lg shadow-sm border border-gray-200">
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Universal Legal Sections</h3>
             <div className="space-y-3">
-                {UNIVERSAL_SECTIONS.map((section) => {
+                {sections.map((section) => {
                     const custom = customizations[section.id];
                     const isDeleted = custom?.isDeleted;
                     const displayPrompt = custom?.customPrompt || section.defaultPrompt;

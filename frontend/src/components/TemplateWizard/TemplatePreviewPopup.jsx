@@ -19,7 +19,7 @@ const TemplatePreviewPopup = ({ template, onClose }) => {
   if (!template) return null;
 
   const name = template.name || template.title || 'Template preview';
-  const previewUrl = template.preview_image_url;
+  const previewUrl = template.preview_image_url || template.image_url;
   const showImage = previewUrl && isImageUrl(previewUrl) && !imageError;
 
   return (

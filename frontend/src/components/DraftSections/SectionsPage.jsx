@@ -1,37 +1,88 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { UNIVERSAL_SECTIONS, SECTION_CATEGORIES } from '../../config/universalSections';
 import SectionCard from './SectionCard';
 import { generateSection, refineSection, getAllSections } from '../../services/sectionApi';
+import { draftApi } from '../../template_drafting_component/services';
 
 /**
  * SectionsPage Component
- * 
- * Step 3 of the draft form: Template Sections
- * Displays all 23 universal sections with generation and refinement capabilities
+ *
+ * Loads sections from dt_draft_section_prompts only (configured by users in Configure Sections).
+ * No universal catalog: display and generation use only what the user selected/configured.
  */
 const SectionsPage = () => {
   const { draftId } = useParams();
+  const [draftSections, setDraftSections] = useState([]);
   const [generatedSections, setGeneratedSections] = useState({});
   const [criticReviews, setCriticReviews] = useState({});
   const [generatingSection, setGeneratingSection] = useState(null);
   const [refiningSection, setRefiningSection] = useState(null);
-  const [selectedCategory, setSelectedCategory] = useState('ALL');
+  const [loading, setLoading] = useState(true);
 
-  // Load existing sections for this draft
+  // Load ONLY the sections that user configured in Configure Sections step
+  useEffect(() => {
+    const loadConfiguredSections = async () => {
+      if (!draftId) return;
+
+      try {
+        setLoading(true);
+        console.log('[SectionsPage] Loading configured sections for draft:', draftId);
+
+        // Fetch sections from dt_draft_section_prompts table
+        // This contains ONLY the sections user configured in Configure Sections step
+        const sectionPrompts = await draftApi.getSectionPrompts(draftId);
+
+        console.log('[SectionsPage] Raw section prompts from API:', sectionPrompts);
+
+        if (!Array.isArray(sectionPrompts)) {
+          console.warn('[SectionsPage] Section prompts is not an array:', sectionPrompts);
+          setDraftSections([]);
+          return;
+        }
+
+        // Filter out deleted sections and map to our section structure
+        const configuredSections = sectionPrompts
+          .filter(prompt => !prompt.is_deleted) // Only active sections
+          .map((prompt, index) => ({
+            section_key: prompt.section_id,
+            section_name: prompt.section_name || 'Untitled Section',
+            default_prompt: prompt.custom_prompt || '',
+            section_purpose: prompt.section_type || '',
+            detail_level: prompt.detail_level || 'concise',
+            language: prompt.language || 'en',
+            sort_order: prompt.sort_order ?? index,
+            is_required: true
+          }))
+          .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+        console.log('[SectionsPage] Configured sections:', configuredSections.length, configuredSections);
+        setDraftSections(configuredSections);
+
+      } catch (error) {
+        console.error('[SectionsPage] Failed to load configured sections:', error);
+        setDraftSections([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadConfiguredSections();
+  }, [draftId]);
+
+  // Load existing generated sections for this draft
   useEffect(() => {
     if (draftId) {
-      loadSections();
+      loadGeneratedSections();
     }
   }, [draftId]);
 
-  const loadSections = async () => {
+  const loadGeneratedSections = async () => {
     try {
       const data = await getAllSections(draftId);
       if (data.success) {
         const sectionsMap = {};
         const reviewsMap = {};
-        
+
         data.sections.forEach((section) => {
           sectionsMap[section.section_key] = section;
           // Get latest review from generation metadata
@@ -39,12 +90,12 @@ const SectionsPage = () => {
             reviewsMap[section.section_key] = section.generation_metadata.critic;
           }
         });
-        
+
         setGeneratedSections(sectionsMap);
         setCriticReviews(reviewsMap);
       }
     } catch (error) {
-      console.error('Failed to load sections:', error);
+      console.error('[SectionsPage] Failed to load generated sections:', error);
     }
   };
 
@@ -53,20 +104,20 @@ const SectionsPage = () => {
     try {
       console.log(`[SectionsPage] Generating section: ${sectionKey}`);
       const data = await generateSection(draftId, sectionKey, prompt, ragQuery);
-      
+
       if (data.success) {
         setGeneratedSections((prev) => ({
           ...prev,
           [sectionKey]: data.version,
         }));
-        
+
         if (data.critic_review) {
           setCriticReviews((prev) => ({
             ...prev,
             [sectionKey]: data.critic_review,
           }));
         }
-        
+
         console.log(`[SectionsPage] Section generated: ${sectionKey}, status: ${data.critic_review?.status}`);
       }
     } catch (error) {
@@ -82,20 +133,20 @@ const SectionsPage = () => {
     try {
       console.log(`[SectionsPage] Refining section: ${sectionKey}`);
       const data = await refineSection(draftId, sectionKey, feedback, ragQuery);
-      
+
       if (data.success) {
         setGeneratedSections((prev) => ({
           ...prev,
           [sectionKey]: data.version,
         }));
-        
+
         if (data.critic_review) {
           setCriticReviews((prev) => ({
             ...prev,
             [sectionKey]: data.critic_review,
           }));
         }
-        
+
         console.log(`[SectionsPage] Section refined: ${sectionKey}, version: v${data.version.version_number}`);
       }
     } catch (error) {
@@ -106,34 +157,47 @@ const SectionsPage = () => {
     }
   };
 
-  const getFilteredSections = () => {
-    if (selectedCategory === 'ALL') {
-      return UNIVERSAL_SECTIONS;
-    }
-    
-    const category = Object.values(SECTION_CATEGORIES).find((c) => c.name === selectedCategory);
-    if (!category) return UNIVERSAL_SECTIONS;
-    
-    return UNIVERSAL_SECTIONS.filter((s) => category.sections.includes(s.section_key));
-  };
-
   const getProgressStats = () => {
-    const total = UNIVERSAL_SECTIONS.length;
+    const total = draftSections.length;
     const generated = Object.keys(generatedSections).length;
     const passed = Object.values(criticReviews).filter((r) => r.critic_status === 'PASS').length;
-    
+
     return { total, generated, passed };
   };
 
   const { total, generated, passed } = getProgressStats();
 
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading your configured sections...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (draftSections.length === 0) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="text-center">
+          <p className="text-gray-600 mb-4">No sections configured for this draft.</p>
+          <p className="text-sm text-gray-500">
+            Please go back to the "Configure Sections" step to select which sections you want to generate.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">Template Sections</h1>
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Draft Sections</h1>
         <p className="text-gray-600">
-          Generate each section of your legal document. Edit prompts to customize the content.
+          Generate each section of your legal document. These are the sections you configured in the previous step.
         </p>
       </div>
 
@@ -148,43 +212,14 @@ const SectionsPage = () => {
         <div className="w-full bg-gray-200 rounded-full h-3">
           <div
             className="bg-gradient-to-r from-blue-600 to-purple-600 h-3 rounded-full transition-all duration-300"
-            style={{ width: `${(generated / total) * 100}%` }}
+            style={{ width: `${total > 0 ? (generated / total) * 100 : 0}%` }}
           />
-        </div>
-      </div>
-
-      {/* Category Filter */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
-        <div className="flex items-center space-x-2 overflow-x-auto">
-          <button
-            onClick={() => setSelectedCategory('ALL')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap ${
-              selectedCategory === 'ALL'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-            }`}
-          >
-            All Sections ({total})
-          </button>
-          {Object.entries(SECTION_CATEGORIES).map(([key, category]) => (
-            <button
-              key={key}
-              onClick={() => setSelectedCategory(category.name)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap ${
-                selectedCategory === category.name
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              {category.name} ({category.sections.length})
-            </button>
-          ))}
         </div>
       </div>
 
       {/* Sections List */}
       <div className="space-y-4">
-        {getFilteredSections().map((section) => (
+        {draftSections.map((section, index) => (
           <SectionCard
             key={section.section_key}
             section={section}
@@ -199,14 +234,13 @@ const SectionsPage = () => {
       </div>
 
       {/* Next Steps */}
-      {generated === total && (
+      {generated === total && total > 0 && (
         <div className="mt-8 bg-green-50 rounded-lg border border-green-200 p-6">
           <h3 className="text-lg font-semibold text-green-900 mb-2">
             🎉 All Sections Generated!
           </h3>
           <p className="text-green-700 mb-4">
-            You've generated all {total} sections. Review them and click "Assemble Document" to
-            create your final legal document.
+            You've generated all {total} sections. Review them and proceed to assemble your final document.
           </p>
           <button className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium">
             Assemble Final Document

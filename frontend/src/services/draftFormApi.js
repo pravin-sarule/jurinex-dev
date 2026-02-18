@@ -1,9 +1,10 @@
 /**
  * Draft form API: create draft from template, get draft (with fields + values), update field values.
- * Uses agent-draft-service (Draft_DB). Requires JWT.
+ * Uses agent-draft-service (Draft_DB). Supports both System and Custom (user-uploaded) templates.
+ * Custom Template Isolation: send Authorization and X-User-Id so backend can fetch user templates from Template Analyzer.
  */
 
-import { AGENT_DRAFT_TEMPLATE_API } from '../config/apiConfig';
+import { AGENT_DRAFT_TEMPLATE_API, getUserIdForDrafting } from '../config/apiConfig';
 
 const BASE = `${AGENT_DRAFT_TEMPLATE_API}/api`;
 
@@ -23,7 +24,30 @@ const headers = () => {
   const token = getAuthToken();
   const h = { 'Content-Type': 'application/json', Accept: 'application/json' };
   if (token) h.Authorization = `Bearer ${token}`;
+  const userId = getUserIdForDrafting();
+  if (userId) h['X-User-Id'] = userId;
   return h;
+};
+
+/**
+ * Get full template: metadata, fields, sections, and preview image URL.
+ * Single call for both admin and user custom templates (agent-draft-service).
+ * Use this when you need template + fields + sections + preview_image_url in one request.
+ */
+export const getTemplate = async (templateId, options = {}) => {
+  const { includeSections = true, includePreviewUrl = true } = options;
+  const params = new URLSearchParams();
+  if (includeSections !== undefined) params.set('include_sections', String(includeSections));
+  if (includePreviewUrl !== undefined) params.set('include_preview_url', String(includePreviewUrl));
+  const qs = params.toString();
+  const url = `${BASE}/templates/${templateId}${qs ? `?${qs}` : ''}`;
+  logApi('GET', url, 'getTemplate');
+  const res = await fetch(url, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
 };
 
 /**
@@ -32,6 +56,62 @@ const headers = () => {
 export const getTemplateFields = async (templateId) => {
   logApi('GET', `${BASE}/templates/${templateId}/fields`, 'getTemplateFields');
   const res = await fetch(`${BASE}/templates/${templateId}/fields`, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get configured sections for a template from the database.
+ * Returns the template-specific sections stored in user_template_analysis_sections or template_sections.
+ */
+export const getTemplateSections = async (templateId) => {
+  logApi('GET', `${BASE}/templates/${templateId}/sections`, 'getTemplateSections');
+  const res = await fetch(`${BASE}/templates/${templateId}/sections`, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get universal sections that apply to all legal templates.
+ * Returns 23 standard sections with default prompts that users can customize.
+ * Use this instead of hardcoded UNIVERSAL_SECTIONS constant.
+ */
+export const getUniversalSections = async () => {
+  logApi('GET', `${BASE}/universal-sections`, 'getUniversalSections');
+  const res = await fetch(`${BASE}/universal-sections`, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get template preview image URL only (signed GCS or user template image_url).
+ */
+export const getTemplatePreviewImage = async (templateId) => {
+  logApi('GET', `${BASE}/templates/${templateId}/preview-image`, 'getTemplatePreviewImage');
+  const res = await fetch(`${BASE}/templates/${templateId}/preview-image`, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get signed GCS URL for template HTML content (agent-draft-service).
+ * Used by Drafter agent for visual reference. GET /api/templates/{template_id}/url
+ */
+export const getTemplateUrl = async (templateId) => {
+  logApi('GET', `${BASE}/templates/${templateId}/url`, 'getTemplateUrl');
+  const res = await fetch(`${BASE}/templates/${templateId}/url`, { headers: headers() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || err.message || `HTTP ${res.status}`);
@@ -94,6 +174,51 @@ export const getLatestDraftForTemplate = async (templateId) => {
 export const getDraft = async (draftId) => {
   logApi('GET', `${BASE}/drafts/${draftId}`, 'getDraft');
   const res = await fetch(`${BASE}/drafts/${draftId}`, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get autopopulated field values from InjectionAgent (template_user_field_values).
+ * Use with template_id and draft_session_id (= draftId) to show agent-filled form values.
+ */
+export const getTemplateUserFieldValues = async (templateId, draftSessionId = '') => {
+  const params = new URLSearchParams({ template_id: templateId });
+  if (draftSessionId) params.set('draft_session_id', draftSessionId);
+  const url = `${BASE}/template-user-field-values?${params}`;
+  logApi('GET', url, 'getTemplateUserFieldValues');
+  const res = await fetch(url, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Save form field values and user-edited tracking (for InjectionAgent merge).
+ * Call when user saves the form so agent does not overwrite user-edited fields.
+ */
+export const saveTemplateUserFieldValues = async (
+  templateId,
+  fieldValues,
+  userEditedFields = [],
+  draftSessionId = ''
+) => {
+  logApi('POST', `${BASE}/template-user-field-values`, 'saveTemplateUserFieldValues');
+  const res = await fetch(`${BASE}/template-user-field-values`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      template_id: templateId,
+      draft_session_id: draftSessionId || undefined,
+      field_values: fieldValues,
+      user_edited_fields: userEditedFields,
+    }),
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || err.message || `HTTP ${res.status}`);
@@ -212,20 +337,22 @@ export const attachCaseToDraft = async (draftId, caseId, caseTitle = null) => {
 
 /**
  * Upload a document for the draft. Orchestrator sends task to ingestion agent (GCS → Document AI → chunk → embed → DB).
- * Optional draftId/caseId link the uploaded file to the draft or case for downstream agents.
+ * When templateId is provided, backend runs InjectionAgent to autofill form fields from the document.
  * @param {File} file - The file to upload
- * @param {{ draftId?: string, caseId?: string }} options - Optional draft and case linkage
+ * @param {{ draftId?: string, caseId?: string, templateId?: string }} options - Optional draft, case, and template (for autofill)
  */
 export const uploadDocumentForDraft = async (file, options = {}) => {
   logApi('POST', `${AGENT_DRAFT_TEMPLATE_API}/api/orchestrate/upload`, 'uploadDocumentForDraft (Orchestrator → Ingestion)');
-  const token = getAuthToken();
+  const h = headers();
+  const { 'Content-Type': _drop, ...authHeaders } = h; // FormData needs browser-set Content-Type with boundary
   const form = new FormData();
   form.append('file', file);
   if (options.draftId) form.append('draft_id', options.draftId);
   if (options.caseId) form.append('case_id', options.caseId);
+  if (options.templateId) form.append('template_id', options.templateId);
   const res = await fetch(`${AGENT_DRAFT_TEMPLATE_API}/api/orchestrate/upload`, {
     method: 'POST',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: authHeaders,
     body: form,
   });
   if (!res.ok) {

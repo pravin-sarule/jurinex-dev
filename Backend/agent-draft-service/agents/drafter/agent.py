@@ -1,5 +1,6 @@
 """
 Drafter Agent (ADK-style): Generate legal document section content.
+Model is taken from payload['model'], or from DB agent config for agent_type 'drafting', or default.
 """
 
 from __future__ import annotations
@@ -13,6 +14,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-flash-lite-latest"
 
+
+def _resolve_drafter_model(payload: Dict[str, Any], agent: Optional[Dict[str, Any]] = None) -> str:
+    """Model: payload['model'] > DB agent config (drafting) > DEFAULT_MODEL."""
+    from config.gemini_models import is_valid_model
+    from services.agent_config_service import get_resolved_model_for_agent
+
+    override = payload.get("model")
+    if override and is_valid_model(override):
+        return override
+    if agent:
+        return agent.get("resolved_model") or get_resolved_model_for_agent("drafting", override_model=override)
+    return get_resolved_model_for_agent("drafting", override_model=override)
+
+
 def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run the Drafter agent: use drafting tools and report results.
@@ -25,11 +40,21 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     template_url = payload.get("template_url")
     previous_content = payload.get("previous_content")
     user_feedback = payload.get("user_feedback")
+    detail_level = payload.get("detail_level") or "concise"  # detailed | concise | short
 
     if not section_prompt and mode != "refine":
         return {"error": "section_prompt is required for generation"}
 
+    # Fetch agent from DB once: used for model resolution and prompt
+    from services.agent_config_service import get_agent_by_type
+    agent = get_agent_by_type("drafting")
+    model = _resolve_drafter_model(payload, agent=agent)
+    print(f"[Drafter] Using model: {model!r} (from DB agent config or payload)")
+    db_prompt = (agent.get("prompt") or "").strip() if agent else ""
+
     # Use the tool
+    mode = payload.get("mode", "generate")
+    batch_info = payload.get("batch_info")
     result = draft_section(
         section_key=section_key,
         section_prompt=section_prompt,
@@ -38,6 +63,11 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         template_url=template_url,
         previous_content=previous_content,
         user_feedback=user_feedback,
+        mode=mode,
+        batch_info=batch_info,
+        model=model,
+        system_prompt_override=db_prompt or None,
+        detail_level=detail_level,
     )
 
     if result.get("status") == "error":
@@ -50,7 +80,7 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "content_html": result.get("content_html", ""),
         "metadata": {
-            "model": DEFAULT_MODEL,
+            "model": model,
             "section_key": section_key,
             "mode": mode,
         },

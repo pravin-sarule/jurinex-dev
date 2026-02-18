@@ -277,6 +277,10 @@ TEMPLATE_NAME_ALIASES: Dict[str, str] = {
     "petition": "Civil Petition",
     "test pet": "Civil Petition",
     "civil petition": "Civil Petition",
+    "rent deed": "Lease Deed",
+    "rent deed test": "Lease Deed",
+    "rent agreement": "Rent Agreement",
+    "project": "Rent Agreement",
     "affidavit": "Affidavit",
     "vakalatnama": "Vakalatnama",
     # FAMILY LAW
@@ -300,13 +304,18 @@ TEMPLATE_NAME_ALIASES: Dict[str, str] = {
 # Normalized category -> default template name when template_name not in TEMPLATE_FIELDS
 CATEGORY_DEFAULT_TEMPLATE: Dict[str, str] = {
     "REAL_ESTATE": "Rent Agreement",
+    "RENT_AGREEMENT": "Rent Agreement",
     "CORPORATE_&_BUSINESS": "NDA",
+    "NDA": "NDA",
     "CORPORATE": "NDA",
     "LITIGATION": "Civil Petition",
     "FAMILY_LAW": "Divorce Petition",
     "CRIMINAL_LAW": "Bail Application",
     "EMPLOYMENT_&_HR": "Employment Contract",
     "EMPLOYMENT": "Employment Contract",
+    "HR": "Employment Contract",
+    "LEGAL": "Civil Petition",
+    "PETITION": "Civil Petition",
     "INTELLECTUAL_PROPERTY": "Trademark Application",
     "GENERAL_LEGAL": "Power of Attorney",
 }

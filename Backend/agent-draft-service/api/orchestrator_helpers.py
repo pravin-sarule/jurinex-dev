@@ -28,9 +28,10 @@ def get_orchestrator(ingestion_only: bool = True, retrieve_only: bool = False):
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY or GEMINI_API_KEY not set")
 
     client = ADKClient(
-        api_key=api_key, 
-        use_local_ingestion=True, 
-        use_local_librarian=True, 
+        api_key=api_key,
+        use_local_ingestion=True,
+        use_local_librarian=True,
+        use_local_citation=True,
         use_local_assembler=True,
         use_local_drafter=True,
         use_local_critic=True
@@ -47,6 +48,7 @@ def get_orchestrator(ingestion_only: bool = True, retrieve_only: bool = False):
             AgentName.INGESTION.value,
             AgentName.LIBRARIAN.value,
             AgentName.DRAFTER.value,
+            AgentName.CITATION.value,
             AgentName.CRITIC.value,
             AgentName.ASSEMBLER.value,
         ]

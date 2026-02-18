@@ -13,6 +13,7 @@ class DocumentState:
     ingested: bool = False
     embedded: bool = False
     drafted: bool = False
+    cited: bool = False
     validated: bool = False
     completed: bool = False
 
@@ -21,6 +22,7 @@ class DocumentState:
     chunks: List[str] = field(default_factory=list)
     embeddings: List[List[float]] = field(default_factory=list)
     draft: Optional[str] = None
+    citations: List[Dict[str, Any]] = field(default_factory=list)
     validation_issues: List[str] = field(default_factory=list)
     final_document: Optional[str] = None
 
@@ -31,6 +33,7 @@ class DocumentState:
                 "ingested": self.ingested,
                 "embedded": self.embedded,
                 "drafted": self.drafted,
+                "cited": self.cited,
                 "validated": self.validated,
                 "completed": self.completed,
             },
@@ -39,6 +42,7 @@ class DocumentState:
             "chunks_count": len(self.chunks),
             "embeddings_count": len(self.embeddings),
             "draft_present": self.draft is not None,
+            "citations_count": len(self.citations),
             "validation_issues": list(self.validation_issues),
             "final_document_present": self.final_document is not None,
         }
@@ -76,6 +80,12 @@ class StateManager:
     def set_final_document(self, document: str) -> None:
         self._state.final_document = document
         self._state.completed = True
+
+    def set_citations(self, content_with_citations: str, citations: List[Dict[str, Any]]) -> None:
+        """Update draft with citations and mark as cited."""
+        self._state.draft = content_with_citations
+        self._state.citations = citations
+        self._state.cited = True
 
     def reset_validation(self) -> None:
         """Clear validation state before re-drafting."""

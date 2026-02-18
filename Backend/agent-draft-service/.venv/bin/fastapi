@@ -1,0 +1,10 @@
+#!/bin/sh
+'''exec' /media/dell-2/d3aa004a-6211-442e-bc45-3e38dae3762b/home/admin3620/Desktop/JuriProduct_dev/jurinex-dev/Backend/agent-draft-service/.venv/bin/python3 "$0" "$@"
+' '''
+# -*- coding: utf-8 -*-
+import re
+import sys
+from fastapi.cli import main
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+    sys.exit(main())

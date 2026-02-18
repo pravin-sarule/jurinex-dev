@@ -22,3 +22,12 @@ def require_user_id(authorization: Optional[str] = Header(None, alias="Authoriza
             detail="Authorization required. Send Authorization: Bearer <JWT> (same token as authservice).",
         )
     return user_id
+
+
+def optional_user_id(authorization: Optional[str] = Header(None, alias="Authorization")) -> Optional[int]:
+    """
+    Decode JWT and return user id if present; otherwise None.
+    Use for endpoints that work with or without auth (e.g. template sections from Analyzer).
+    """
+    from services.jwt_auth import get_user_id_from_authorization
+    return get_user_id_from_authorization(authorization)

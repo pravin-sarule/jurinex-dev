@@ -59,7 +59,7 @@ def review_section(
         if system_prompt:
             prompt += f"System Instructions:\n{system_prompt}\n\n"
         
-        prompt += f"""You are a legal document auditor. Review this content for "{section_key}".
+        prompt += f"""You are a legal document auditor. Review this content for "{section_key}". Target confidence 90+ when the draft follows the template, uses sources, and has no critical errors.
 
 **Generated Content:**
 {section_content}
@@ -73,10 +73,8 @@ def review_section(
 {field_values}
 
 **Instructions:**
-- Be concise (bulleted points).
-- Total feedback < 150 words.
-- Identify all sources (filenames/cases) used.
-- Output ONLY JSON.
+- If the draft matches template structure, uses RAG/field data correctly, and has no factual/legal errors, assign score 92-98 (high confidence).
+- Be concise. Output ONLY JSON.
 
 **Format:**
 {{

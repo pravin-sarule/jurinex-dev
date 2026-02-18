@@ -13,6 +13,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.deps import require_user_id
 from services import draft_db
+from services.assembled_doc_clean import strip_citations_for_assembled
 from api.orchestrator_helpers import get_orchestrator
 from services.gcs_signed_url import generate_signed_url
 
@@ -45,12 +46,16 @@ async def assemble_document(
         
         # 2. Get all active sections for this draft
         all_sections = draft_db.get_all_active_sections(draft_id, user_id)
-        sections_map = {s["section_key"]: s for s in all_sections}
+        # Case-insensitive lookup for frontend section_id (e.g. "Prayer") vs stored section_key (e.g. "prayer")
+        def _norm(s: str) -> str:
+            return (s or "").strip().lower().replace(" ", "_")
+        sections_map = {_norm(s["section_key"]): s for s in all_sections}
         ordered_sections = []
         
         for section_id in section_ids:
-            if section_id in sections_map:
-                ordered_sections.append(sections_map[section_id])
+            n = _norm(section_id)
+            if n in sections_map:
+                ordered_sections.append(sections_map[n])
             else:
                 logger.warning(f"Section {section_id} not found or not generated")
         
@@ -94,9 +99,11 @@ async def assemble_document(
 
         if cached_hash == current_hash and cached_document and is_google_doc_valid:
             logger.info(f"[CACHE HIT] Returning cached assembled document for draft {draft_id}")
+            # Ensure citations are never shown in preview/export (strip from cached doc too)
+            final_document_clean = strip_citations_for_assembled(cached_document)
             return {
                 "success": True,
-                "final_document": cached_document,
+                "final_document": final_document_clean,
                 "template_css": cached_css,
                 "sections_assembled": len(ordered_sections),
                 "cached": True,
@@ -147,8 +154,13 @@ async def assemble_document(
         
         final_doc = result.get("final_document", "")
         if not final_doc:
-            # Fallback to combined content if orchestrator/assembler fails to return a doc
-            final_doc = "\n<!-- SECTION_BREAK -->\n".join([s.get("content_html", "") for s in ordered_sections])
+            # Fallback to combined content if orchestrator/assembler fails to return a doc (no citations in output)
+            final_doc = "\n<!-- SECTION_BREAK -->\n".join([
+                strip_citations_for_assembled(s.get("content_html", "") or "")
+                for s in ordered_sections
+            ])
+        # Ensure assembled document never contains citations (preview, Google Docs, DOCX)
+        final_doc = strip_citations_for_assembled(final_doc) if final_doc else final_doc
 
         # 8. Get template CSS
         template_css = draft_db.get_template_css(template_id)
@@ -212,12 +224,13 @@ async def export_to_docx(
 ):
     """
     Convert assembled HTML to a downloadable DOCX file.
+    Uses same format as Google Docs upload (A4, Times New Roman, 2.54cm margins).
     """
     import io
     from fastapi.responses import StreamingResponse
+
     try:
-        from htmldocx import HtmlToDocx
-        from docx import Document
+        from services.docx_export import assembled_html_to_docx_bytes
     except ImportError:
         raise HTTPException(status_code=500, detail="html2docx or python-docx not installed on server.")
 
@@ -226,56 +239,8 @@ async def export_to_docx(
         raise HTTPException(status_code=400, detail="No html_content provided for export")
 
     try:
-        document = Document()
-        
-        # Set Global Font to Times New Roman
-        from docx.shared import Pt, Cm
-        style = document.styles['Normal']
-        font = style.font
-        font.name = 'Times New Roman'
-        font.size = Pt(12)
-        
-        # Set default font for all other styles too
-        for s in document.styles:
-            if hasattr(s, 'font'):
-                s.font.name = 'Times New Roman'
-
-        # Set A4 size (approx 21cm x 29.7cm)
-        section = document.sections[0]
-        section.page_height = Cm(29.7)
-        section.page_width = Cm(21)
-        section.left_margin = Cm(2.54)
-        section.right_margin = Cm(2.54)
-        section.top_margin = Cm(2.54)
-        section.bottom_margin = Cm(2.54)
-        
-        parser = HtmlToDocx()
-        
-        # Split by section break marker
-        # We don't want to show section names anymore as per user request
-        content_parts = html_content.split('<!-- SECTION_BREAK -->')
-        
-        for i, part in enumerate(content_parts):
-            clean_part = part.strip()
-            if not clean_part:
-                continue
-            
-            # Remove any residual internal UI wrappers if they exist
-            # (The Assembler already removed the headers, but we double check for clean content)
-            parser.add_html_to_document(clean_part, document)
-            
-            # Add page break if not the last part and not empty
-            if i < len(content_parts) - 1:
-                document.add_page_break()
-
-        # Final pass on all paragraphs to force Times New Roman (Double Protection)
-        for paragraph in document.paragraphs:
-            for run in paragraph.runs:
-                run.font.name = 'Times New Roman'
-                
-        # Save to stream
-        file_stream = io.BytesIO()
-        document.save(file_stream)
+        docx_bytes = assembled_html_to_docx_bytes(html_content)
+        file_stream = io.BytesIO(docx_bytes)
         file_stream.seek(0)
 
         filename = f"Draft_{draft_id}.docx"
