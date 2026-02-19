@@ -691,6 +691,32 @@ def get_draft_field_data_for_retrieve(draft_id: str, user_id: int) -> Optional[D
     }
 
 
+def get_merged_field_values_for_draft(draft_id: str, user_id: int) -> Dict[str, Any]:
+    """
+    Return field_values for a draft merged from:
+    1. Autopopulated values (template_user_field_values from InjectionAgent)
+    2. Draft-saved values (draft_field_data) overlay so user edits take precedence.
+    Use this whenever the Drafter or Librarian needs complete field data so all
+    sections get petitioner name, court name, etc. and no [] or blank placeholders.
+    """
+    uid = int(user_id)
+    draft = get_user_draft(draft_id, uid)
+    if not draft:
+        return {}
+    template_id = draft.get("template_id")
+    draft_fv = draft.get("field_values") or {}
+    merged = dict(draft_fv)
+    if template_id:
+        agent_row = get_existing_user_field_values(str(template_id), uid, draft_session_id=draft_id)
+        if agent_row and agent_row.get("field_values"):
+            agent_fv = agent_row["field_values"]
+            merged = dict(agent_fv)
+            for k, v in draft_fv.items():
+                if v is not None and str(v).strip() != "":
+                    merged[k] = v
+    return merged
+
+
 def update_draft_field_data(
     draft_id: str,
     user_id: int,
@@ -1078,20 +1104,37 @@ def get_section_latest_version(draft_id: str, section_key: str, user_id: int) ->
             )
             if not cur.fetchone():
                 return None
-            # Get latest active version (case-insensitive section_key match for frontend compatibility)
+            # Match section_key: try normalized (spaces -> underscores) first, then exact LOWER(TRIM) for compatibility
+            norm = (section_key or "").strip().lower().replace(" ", "_")
             cur.execute(
                 """
                 SELECT version_id, draft_id, section_key, version_number, content_html,
                        user_prompt_override, rag_context_used, generation_metadata,
                        is_active, created_by_agent, created_at
                 FROM section_versions
-                WHERE draft_id = %s AND LOWER(TRIM(section_key)) = LOWER(TRIM(%s)) AND is_active = true
+                WHERE draft_id = %s AND is_active = true
+                  AND LOWER(TRIM(REPLACE(section_key, ' ', '_'))) = %s
                 ORDER BY version_number DESC
                 LIMIT 1
                 """,
-                (draft_id, section_key),
+                (draft_id, norm),
             )
             row = cur.fetchone()
+            if not row:
+                cur.execute(
+                    """
+                    SELECT version_id, draft_id, section_key, version_number, content_html,
+                           user_prompt_override, rag_context_used, generation_metadata,
+                           is_active, created_by_agent, created_at
+                    FROM section_versions
+                    WHERE draft_id = %s AND is_active = true
+                      AND LOWER(TRIM(section_key)) = LOWER(TRIM(%s))
+                    ORDER BY version_number DESC
+                    LIMIT 1
+                    """,
+                    (draft_id, section_key),
+                )
+                row = cur.fetchone()
     return dict(row) if row else None
 
 
@@ -1168,8 +1211,8 @@ def save_section_version(
 
 def get_all_active_sections(draft_id: str, user_id: int) -> List[Dict[str, Any]]:
     """
-    Get all active section versions for a draft.
-    Returns: [{ version_id, section_key, version_number, content_html, ... }]
+    Get the latest active section version per section for a draft (used for assembly).
+    Returns one row per section_key with the highest version_number (includes manual edits).
     """
     uid = int(user_id)
     with get_draft_conn() as conn:
@@ -1182,7 +1225,8 @@ def get_all_active_sections(draft_id: str, user_id: int) -> List[Dict[str, Any]]
                 return []
             cur.execute(
                 """
-                SELECT version_id, draft_id, section_key, version_number, content_html,
+                SELECT DISTINCT ON (section_key)
+                       version_id, draft_id, section_key, version_number, content_html,
                        user_prompt_override, rag_context_used, generation_metadata,
                        is_active, created_by_agent, created_at
                 FROM section_versions

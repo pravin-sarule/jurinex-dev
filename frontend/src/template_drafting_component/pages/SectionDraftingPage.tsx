@@ -12,7 +12,7 @@
  * 6. Assemble all sections into final document
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     ArrowLeftIcon,
@@ -25,7 +25,13 @@ import {
     PlusIcon,
     ArrowUpIcon,
     ArrowDownIcon,
-    TrashIcon
+    TrashIcon,
+    ChevronLeftIcon,
+    ChevronRightIcon,
+    Squares2X2Icon,
+    ArrowsPointingOutIcon,
+    ArrowUturnLeftIcon,
+    ArrowUturnRightIcon
 } from '@heroicons/react/24/outline';
 import { draftApi } from '../services';
 import { getUniversalSections } from '../services/universalSectionsApi';
@@ -51,7 +57,8 @@ interface SectionState {
 
 interface SectionDraftingPageProps {
     draftIdProp?: string;
-    onAssembleComplete?: () => void;
+    /** Called after successful assemble; receives the same response shown in preview (so preview can use it without re-calling assemble). */
+    onAssembleComplete?: (response: { success: boolean; final_document: string; template_css?: string; google_docs?: any; metadata?: any }) => void;
     onBack?: () => void;
     addActivity?: (agent: string, action: string, status?: 'in-progress' | 'completed' | 'pending') => void;
 }
@@ -78,7 +85,16 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
     // Sections for this draft: only from dt_draft_section_prompts (user selected + added)
     const [allSections, setAllSections] = useState<any[]>([]);
     const [showAddSection, setShowAddSection] = useState(false);
-    const [newSectionData, setNewSectionData] = useState({ name: '', type: 'clause', prompt: '' });
+    const [newSectionData, setNewSectionData] = useState({ name: '', type: 'clause' });
+    const [templateCss, setTemplateCss] = useState<string>('');
+    const [showSectionPopup, setShowSectionPopup] = useState(false);
+    const [showEnlargePopup, setShowEnlargePopup] = useState(false);
+    /** Section IDs for which the user has dismissed the validation box (so generated content is shown without it). */
+    const [dismissedCriticSectionIds, setDismissedCriticSectionIds] = useState<Record<string, boolean>>({});
+    /** Ref for the contentEditable area in Edit Content mode (used for undo/redo). */
+    const editContentRef = useRef<HTMLDivElement>(null);
+    /** When we enter Edit Content we store versionId here so Save always uses the correct version (avoids stale state). */
+    const editSessionVersionIdRef = useRef<string | null>(null);
 
 
     // Build section list from dt_draft_section_prompts only (user selected + added sections)
@@ -156,6 +172,12 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 setSectionStates(initialStates);
 
                 const sectionsResponse = await draftApi.getSections(draftId);
+                try {
+                    const cssRes = await draftApi.getTemplateCss(draftId);
+                    if (cssRes.success && cssRes.template_css) setTemplateCss(cssRes.template_css);
+                } catch {
+                    // optional: section preview works without template CSS
+                }
 
                 if (sectionsResponse.success && sectionsResponse.sections) {
                     const updatedStates = { ...initialStates };
@@ -222,6 +244,12 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
         }
     }, [activeTab, draftId]);
 
+    // Close Update Instructions box when switching to another section so it doesn't appear on every section
+    useEffect(() => {
+        setShowPromptInput(false);
+        setUpdatePrompt('');
+    }, [activeTab]);
+
     const handleAddSection = async () => {
         if (!newSectionData.name.trim() || !draftId) return;
 
@@ -230,7 +258,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             sectionId,
             sectionName: newSectionData.name,
             sectionType: newSectionData.type,
-            customPrompt: newSectionData.prompt,
+            customPrompt: undefined,
             isDeleted: false
             // sortOrder will be handled by backend or next fetch? 
             // Better to assign sortOrder locally:
@@ -261,7 +289,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
 
             setActiveTab(sectionId);
             setShowAddSection(false);
-            setNewSectionData({ name: '', type: 'clause', prompt: '' });
+            setNewSectionData({ name: '', type: 'clause' });
             toast.success('Section added');
         } catch (error) {
             console.error(error);
@@ -396,7 +424,6 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             }
 
             const response = await draftApi.generateSection(draftId, sectionId, {
-                section_prompt: section?.defaultPrompt,
                 auto_validate: true
             });
 
@@ -455,33 +482,66 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
     };
 
 
+    const handleEditUndo = () => {
+        const el = editContentRef.current;
+        if (!el) return;
+        el.focus();
+        document.execCommand('undo');
+        // Do not update React state — keeps contentEditable uncontrolled so browser undo stack works
+    };
+
+    const handleEditRedo = () => {
+        const el = editContentRef.current;
+        if (!el) return;
+        el.focus();
+        document.execCommand('redo');
+        // Do not update React state — keeps contentEditable uncontrolled so browser redo stack works
+    };
+
     const handleEditSection = () => {
         const currentSection = sectionStates[activeTab];
-        // Set the HTML content directly for contenteditable editing
-        setEditContent(currentSection.content);
+        setEditContent(currentSection.content ?? '');
+        editSessionVersionIdRef.current = currentSection?.versionId ?? null;
         setIsEditing(true);
     };
+
+    /** Set contentEditable content once when entering edit mode so React doesn't overwrite on re-renders (fixes editing + undo/redo). */
+    useEffect(() => {
+        if (!isEditing || !editContentRef.current) return;
+        editContentRef.current.innerHTML = editContent || '<p></p>';
+    }, [isEditing]); // Only when entering edit mode; editContent is set in handleEditSection before isEditing becomes true
 
     const handleSaveEdit = async () => {
         if (!draftId) return;
 
         try {
-            // Use the edited HTML content directly (no conversion needed)
-            const htmlContent = editContent;
+            const htmlContent = editContentRef.current?.innerHTML ?? editContent;
 
-            // Update local state
-        setSectionStates(prev => ({
-            ...prev,
-            [activeTab]: { ...prev[activeTab], content: htmlContent }
-        }));
-
-            // Save to backend
-            const currentState = sectionStates[activeTab];
-
-            if (currentState.versionId) {
-                await draftApi.updateSectionVersion(draftId, activeTab, currentState.versionId, htmlContent);
+            // Use versionId captured when we opened Edit Content (avoids stale state from closure)
+            let versionIdToUse = editSessionVersionIdRef.current ?? sectionStates[activeTab]?.versionId;
+            if (!versionIdToUse) {
+                const res = await draftApi.getSection(draftId, activeTab);
+                if (res?.version?.version_id) {
+                    versionIdToUse = res.version.version_id;
+                    setSectionStates(prev => ({
+                        ...prev,
+                        [activeTab]: { ...prev[activeTab], versionId: versionIdToUse }
+                    }));
+                }
             }
 
+            if (versionIdToUse) {
+                await draftApi.updateSectionVersion(draftId, activeTab, versionIdToUse, htmlContent);
+            } else {
+                toast.error('Cannot save: no section version found. Generate the section first.');
+                return;
+            }
+
+            setSectionStates(prev => ({
+                ...prev,
+                [activeTab]: { ...prev[activeTab], content: htmlContent }
+            }));
+            editSessionVersionIdRef.current = null;
             setIsEditing(false);
             toast.success('Content updated successfully');
         } catch (error) {
@@ -585,9 +645,9 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 }
                 toast.success('Document assembled successfully!');
 
-                // Google Docs opens in the iframe on AssembledPreviewPage (no new tab)
+                // Pass the same response to preview so it shows exact content + Google Doc (no second assemble call)
                 if (onAssembleComplete) {
-                    onAssembleComplete();
+                    onAssembleComplete(response);
                 } else {
                     navigate(`/template-drafting/drafts/${draftId}/preview`);
                 }
@@ -620,15 +680,53 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
 
 
     return (
-        <div className={draftIdProp ? 'w-full' : "min-h-screen bg-gradient-to-b from-slate-50 via-gray-50 to-gray-100"}>
-            <div className={`max-w-7xl mx-auto ${draftIdProp ? 'p-10' : 'px-4 sm:px-6 lg:px-8 py-6 sm:py-8'}`}>
-                {/* Header - Show if not embedded OR if onBack is provided */}
+        <div className={draftIdProp ? 'w-full h-full flex flex-col overflow-hidden bg-gradient-to-b from-slate-50 via-gray-50 to-gray-100' : "min-h-screen bg-gradient-to-b from-slate-50 via-gray-50 to-gray-100"}>
+            {templateCss && <style dangerouslySetInnerHTML={{ __html: templateCss }} />}
+            <style>{`
+                .section-preview-a4 { text-align: left; }
+                .section-preview-a4-content { text-align: inherit; }
+                .section-preview-a4 p, .section-preview-a4-content p { margin: 0 0 0.5em 0; }
+                .section-preview-a4 h1, .section-preview-a4 h2, .section-preview-a4 h3,
+                .section-preview-a4-content h1, .section-preview-a4-content h2, .section-preview-a4-content h3 { margin: 0.75em 0 0.25em 0; }
+                /* Inner scrollbar in generated content - right edge, slim */
+                .section-preview-a4-content::-webkit-scrollbar { width: 5px; }
+                .section-preview-a4-content::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
+                .section-preview-a4-content::-webkit-scrollbar-thumb { background: #b0b0b0; border-radius: 3px; }
+                .section-preview-a4-content::-webkit-scrollbar-thumb:hover { background: #8e8e8e; }
+                /* Edit content scroll area - slim scrollbar */
+                .edit-content-scroll::-webkit-scrollbar { width: 5px; }
+                .edit-content-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
+                .edit-content-scroll::-webkit-scrollbar-thumb { background: #b0b0b0; border-radius: 3px; }
+                .edit-content-scroll::-webkit-scrollbar-thumb:hover { background: #8e8e8e; }
+                /* Enlarge popup: A4 pages with page-break lines, no grey */
+                .enlarge-popup-pages {
+                    width: 210mm;
+                    min-height: 297mm;
+                    padding: 2.54cm;
+                    box-sizing: border-box;
+                    font-family: "Times New Roman", Times, serif;
+                    font-size: 12pt;
+                    line-height: 1.5;
+                    background: white;
+                    background-image: repeating-linear-gradient(
+                        to bottom,
+                        transparent 0,
+                        transparent calc(297mm - 1px),
+                        rgba(0,0,0,0.12) calc(297mm - 1px),
+                        rgba(0,0,0,0.12) 297mm
+                    );
+                    background-origin: padding-box;
+                    background-position: 0 0;
+                }
+            `}</style>
+            <div className={`max-w-7xl mx-auto flex-1 flex flex-col min-h-0 overflow-hidden ${draftIdProp ? 'p-4 sm:p-6' : 'px-4 sm:px-6 lg:px-8 py-6 sm:py-8'}`}>
+                {/* Header - compact when embedded */}
                 {(onBack || !draftIdProp) && (
-                    <nav className="mb-6">
+                    <nav className={draftIdProp ? 'mb-1' : 'mb-4'}>
                         <button
                             type="button"
                             onClick={onBack ? onBack : () => navigate(`/draft-form/${draftId}`)}
-                            className="inline-flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-[#21C1B6] transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21C1B6] rounded-lg py-2 px-3 -ml-3 hover:bg-white/80"
+                            className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-[#21C1B6] transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#21C1B6] rounded-lg py-1.5 px-2 -ml-2 hover:bg-white/80"
                         >
                             <ArrowLeftIcon className="w-4 h-4 text-gray-400" />
                             {onBack ? 'Back to Sections' : 'Back to form'}
@@ -636,90 +734,49 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                     </nav>
                 )}
 
-                {/* Title */}
-                <div className="mb-6">
-                    <h1 className="text-2xl font-bold text-gray-900">Draft Sections</h1>
-                    <p className="text-sm text-gray-500 mt-1">
+                {/* Title - compact when embedded to maximize content area */}
+                <div className={`${draftIdProp ? 'mb-1 flex-shrink-0' : 'mb-3'}`}>
+                    <h1 className={draftIdProp ? 'text-lg font-bold text-gray-900' : 'text-2xl font-bold text-gray-900'}>Draft Sections</h1>
+                    <p className={`text-gray-500 ${draftIdProp ? 'text-xs mt-0' : 'text-sm mt-0.5'}`}>
                         Generate and refine each section separately, then assemble your document
                     </p>
                 </div>
 
-                {/* Vertical Layout: Sidebar + Content */}
-                <div className="flex gap-6">
-                    {/* Left Sidebar - Section List */}
-                    <div className="w-80 flex-shrink-0">
-                        <div className="bg-white rounded-xl border border-gray-200 shadow-sm sticky top-6">
-                            <div className="p-4 border-b border-gray-200">
-                                <h2 className="text-lg font-bold text-gray-900">Sections</h2>
-                                <p className="text-xs text-gray-500 mt-1">
-                                    {selectedSections.filter(id => sectionStates[id]?.isGenerated).length} of {selectedSections.length} generated
-                                </p>
-                            </div>
-                            <nav className="p-2 space-y-1 max-h-[calc(100vh-250px)] overflow-y-auto custom-scrollbar" aria-label="Sections">
-                                {allSections.map((section, index) => {
-                                    const sectionId = section.id;
-                                    const state = sectionStates[sectionId];
-                                    const isActive = activeTab === sectionId;
-
-                                    return (
-                                        <div key={sectionId} className="group relative flex items-center">
-                                            <button
-                                                onClick={() => setActiveTab(sectionId)}
-                                                className={`
-                                                    w-full text-left px-4 py-3 text-sm font-medium rounded-lg transition-all pr-12
-                                                    ${isActive
-                                                        ? 'bg-[#21C1B6] text-white shadow-md'
-                                                        : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'
-                                                    }
-                                                `}
-                                            >
-                                                <div className="flex items-center justify-between gap-2">
-                                                    <span className="truncate">{index + 1}. {section.title.replace(/^\d+\.\s*/, '')}</span>
-                                                    {state?.isGenerated && (
-                                                        <CheckCircleIcon className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-white' : 'text-green-500'}`} />
-                                                    )}
-                                                </div>
-                                            </button>
-
-                                            {/* Reorder/Delete Controls (visible on hover or active) */}
-                                            <div className={`absolute right-1 flex flex-col gap-0.5 ${isActive ? 'visible' : 'invisible group-hover:visible'}`}>
-                                                <button onClick={(e) => { e.stopPropagation(); handleReorder(index, 'up'); }} className={`p-0.5 rounded hover:bg-black/10 ${isActive ? 'text-white' : 'text-gray-400'}`} disabled={index === 0}>
-                                                    <ArrowUpIcon className="w-3 h-3" />
-                                                </button>
-                                                <button onClick={(e) => { e.stopPropagation(); handleReorder(index, 'down'); }} className={`p-0.5 rounded hover:bg-black/10 ${isActive ? 'text-white' : 'text-gray-400'}`} disabled={index === allSections.length - 1}>
-                                                    <ArrowDownIcon className="w-3 h-3" />
-                                                </button>
-                                                <button onClick={(e) => { e.stopPropagation(); handleDeleteSection(sectionId); }} className={`p-0.5 rounded hover:bg-red-500/20 ${isActive ? 'text-white hover:text-red-100' : 'text-gray-400 hover:text-red-600'}`}>
-                                                    <TrashIcon className="w-3 h-3" />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </nav>
-                            <div className="p-3 border-t border-gray-200">
-                                <button
-                                    onClick={() => setShowAddSection(true)}
-                                    className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-[#21C1B6] bg-green-50 rounded-lg hover:bg-green-100 transition-colors border border-green-200"
-                                >
-                                    <PlusIcon className="w-4 h-4" />
-                                    Add Section
-                                </button>
-                            </div>
-                        </div>
+                {/* Layout: Section button + Content (no outer scroll; only inner A4 panel scrolls) */}
+                <div className={`flex flex-col ${draftIdProp ? 'gap-1 flex-1 min-h-0 overflow-hidden' : 'gap-2'}`}>
+                    {/* Single button: current section name; opens section popup */}
+                    <div className="flex items-center gap-2 flex-wrap flex-shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => setShowSectionPopup(true)}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border-2 border-[#21C1B6] text-[#21C1B6] rounded-lg font-semibold text-sm hover:bg-[#21C1B6] hover:text-white transition-all shadow-sm"
+                            aria-label="Open sections"
+                        >
+                            <Squares2X2Icon className="w-4 h-4" />
+                            <span>
+                                {sectionConfig
+                                    ? `${selectedSections.indexOf(activeTab) + 1}. ${sectionConfig.title.replace(/^\d+\.\s*/, '')}`
+                                    : 'Select section'}
+                            </span>
+                            <span className="text-xs opacity-80">
+                                ({selectedSections.filter(id => sectionStates[id]?.isGenerated).length} of {selectedSections.length} generated)
+                            </span>
+                        </button>
                     </div>
 
-                    {/* Right Content Area */}
-                    <div className="flex-1 min-w-0">
-                        <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-                            <div className="p-6">
+                    {/* Content Area - A4 section preview; only this inner area scrolls */}
+                    <div className={`min-w-0 overflow-hidden ${draftIdProp ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
+                        <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${draftIdProp ? 'flex-1 min-h-0 flex flex-col overflow-hidden' : ''}`}>
+                            <div className={`${draftIdProp ? 'p-3 flex-1 min-h-0 flex flex-col overflow-hidden' : 'p-4'}`}>
                                 {currentSection && sectionConfig && (
-                                    <div className="space-y-6">
-                                        {/* Section Header */}
-                                        <div className="flex items-start justify-between">
-                                            <div>
-                                                <h2 className="text-xl font-bold text-gray-900">{selectedSections.indexOf(activeTab) + 1}. {sectionConfig.title.replace(/^\d+\.\s*/, '')}</h2>
-                                                <p className="text-sm text-gray-500 mt-1">{sectionConfig.description}</p>
+                                    <div className={draftIdProp ? 'flex flex-col flex-1 min-h-0 overflow-hidden' : 'space-y-6'}>
+                                        {/* Header: section title + Generate button when not generated */}
+                                        <div className={draftIdProp ? 'flex-shrink-0 space-y-3' : 'space-y-6'}>
+                                        {/* Section Header - compact when embedded; min-w-0 so long description wraps and does not overlap buttons */}
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0 flex-1">
+                                                <h2 className={`font-bold text-gray-900 ${draftIdProp ? 'text-base' : 'text-xl'}`}>{selectedSections.indexOf(activeTab) + 1}. {sectionConfig.title.replace(/^\d+\.\s*/, '')}</h2>
+                                                <p className={`text-gray-500 break-words ${draftIdProp ? 'text-xs mt-0.5' : 'text-sm mt-1'}`}>{sectionConfig.description}</p>
                                             </div>
 
                                             {!currentSection.isGenerated && (
@@ -733,100 +790,36 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                                 </button>
                                             )}
                                         </div>
+                                        </div>
 
-                                        {/* Critic Review */}
-                                        {currentSection.criticReview && (
-                                            <div className={`rounded-xl border-2 p-4 ${currentSection.criticReview.status === 'PASS'
-                                                ? 'border-green-200 bg-green-50'
-                                                : 'border-yellow-200 bg-yellow-50'
-                                                }`}>
-                                                <div className="flex items-start gap-3">
-                                                    {currentSection.criticReview.status === 'PASS' ? (
-                                                        <CheckCircleIcon className="w-6 h-6 text-green-600 flex-shrink-0" />
-                                                    ) : (
-                                                        <ExclamationTriangleIcon className="w-6 h-6 text-yellow-600 flex-shrink-0" />
-                                                    )}
-                                                    <div className="flex-1">
-                                                        <div className="flex items-center gap-3 mb-2">
-                                                            <h3 className="font-bold text-gray-900">
-                                                                Validation: {currentSection.criticReview.status}
-                                                            </h3>
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="text-sm font-semibold text-gray-700">
-                                                                    Confidence Score:
-                                                                </span>
-                                                                <span className={`text-lg font-bold ${currentSection.criticReview.score >= 70
-                                                                    ? 'text-green-600'
-                                                                    : 'text-yellow-600'
-                                                                    }`}>
-                                                                    {currentSection.criticReview.score}%
-                                                                </span>
-                                                            </div>
-                                                        </div>
-                                                        <p className="text-sm text-gray-700 mb-3">
-                                                            {currentSection.criticReview.feedback}
-                                                        </p>
-
-                                                        {currentSection.criticReview.issues.length > 0 && (
-                                                            <div className="mb-3">
-                                                                <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Issues:</h4>
-                                                                <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
-                                                                    {currentSection.criticReview.issues.map((issue, idx) => (
-                                                                        <li key={idx}>{issue}</li>
-                                                                    ))}
-                                                                </ul>
-                                                            </div>
-                                                        )}
-
-                                                        {currentSection.criticReview.suggestions.length > 0 && (
-                                                            <div className="mb-3">
-                                                                <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Suggestions:</h4>
-                                                                <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
-                                                                    {currentSection.criticReview.suggestions.map((suggestion, idx) => (
-                                                                        <li key={idx}>{suggestion}</li>
-                                                                    ))}
-                                                                </ul>
-                                                            </div>
-                                                        )}
-
-                                                        {currentSection.criticReview.sources && currentSection.criticReview.sources.length > 0 && (
-                                                            <div>
-                                                                <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Sources Used:</h4>
-                                                                <div className="flex flex-wrap gap-2">
-                                                                    {currentSection.criticReview.sources.map((source, idx) => (
-                                                                        <span key={idx} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800 border border-gray-200">
-                                                                            {source}
-                                                                        </span>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Content Display/Edit */}
+                                        {/* Generated content FIRST so user always sees the draft; validation appears below */}
+                                        {/* Content Display/Edit - inner scroll only; flex-1 so Cancel/Save stay visible when embedded */}
                                         {currentSection.isGenerated && (
-                                            <div className="space-y-4">
-                                                <div className="flex items-center justify-between">
-                                                    <h3 className="text-lg font-semibold text-gray-900">Generated Content</h3>
-                                                    <div className="flex gap-2">
-                                                        <button
-                                                            onClick={() => setShowPromptInput(!showPromptInput)}
-                                                            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                                                        >
-                                                            <SparklesIcon className="w-4 h-4" />
-                                                            Update with Prompt
-                                                        </button>
-                                                        <button
-                                                            onClick={handleEditSection}
-                                                            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                                                        >
-                                                            <PencilIcon className="w-4 h-4" />
-                                                            Edit Content
-                                                        </button>
-                                                    </div>
+                                            <div className={`flex flex-col overflow-hidden ${draftIdProp ? 'space-y-2 flex-1 min-h-0' : 'space-y-4'}`}>
+                                                <div className="flex items-center justify-end flex-shrink-0 gap-1.5 mt-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowEnlargePopup(true)}
+                                                        className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+                                                        title="View full A4 size"
+                                                    >
+                                                        <ArrowsPointingOutIcon className="w-3.5 h-3.5 shrink-0" />
+                                                        Enlarge
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setShowPromptInput(!showPromptInput)}
+                                                        className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+                                                    >
+                                                        <SparklesIcon className="w-3.5 h-3.5 shrink-0" />
+                                                        Update with Instruction
+                                                    </button>
+                                                    <button
+                                                        onClick={handleEditSection}
+                                                        className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+                                                    >
+                                                        <PencilIcon className="w-3.5 h-3.5 shrink-0" />
+                                                        Edit Content
+                                                    </button>
                                                 </div>
 
                                                 {/* Prompt Input */}
@@ -863,68 +856,209 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                                     </div>
                                                 )}
 
-                                                {/* Content Editor */}
+                                                {/* Content Editor - fills flex parent when embedded; maxHeight on full page so Cancel/Save bar stays visible */}
                                                 {isEditing ? (
-                                                    <div className="space-y-3">
-                                                        <div
-                                                            contentEditable
-                                                            suppressContentEditableWarning
-                                                            onInput={(e) => setEditContent(e.currentTarget.innerHTML)}
-                                                            dangerouslySetInnerHTML={{ __html: editContent }}
-                                                            className="w-full min-h-[400px] px-4 py-3 border-2 border-blue-300 rounded-lg focus:ring-2 focus:ring-[#21C1B6] focus:border-[#21C1B6] focus:outline-none max-w-none bg-white"
-                                                            style={{
-                                                                maxHeight: '600px',
-                                                                overflowY: 'auto',
-                                                                fontFamily: '"Times New Roman", Times, serif',
-                                                                fontSize: '12pt',
-                                                                lineHeight: 1.5,
-                                                                padding: '2.54cm'
-                                                            }}
-                                                        />
-                                                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                                                            <p className="text-xs text-blue-700">
-                                                                <strong>💡 Tip:</strong> You can edit the content directly above. All formatting, fonts, and styles will be preserved exactly as generated.
-                                                            </p>
+                                                    <div
+                                                        className="flex flex-col min-h-0 min-w-0 flex-1"
+                                                        style={draftIdProp ? undefined : { maxHeight: 'calc(100vh - 200px)' }}
+                                                    >
+                                                        <div className="edit-content-scroll flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
+                                                            <div
+                                                                ref={editContentRef}
+                                                                contentEditable
+                                                                suppressContentEditableWarning
+                                                                className="section-preview-a4 w-full min-h-[297mm] border-2 border-blue-300 rounded-lg focus:ring-2 focus:ring-[#21C1B6] focus:border-[#21C1B6] focus:outline-none max-w-none bg-white"
+                                                                style={{
+                                                                    width: '210mm',
+                                                                    minHeight: '297mm',
+                                                                    fontFamily: '"Times New Roman", Times, serif',
+                                                                    fontSize: '12pt',
+                                                                    lineHeight: 1.5,
+                                                                    padding: '2.54cm',
+                                                                    boxSizing: 'border-box',
+                                                                }}
+                                                            />
+                                                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3">
+                                                                <p className="text-xs text-blue-700">
+                                                                    <strong>💡 Tip:</strong> You can edit the content directly above. All formatting, fonts, and styles will be preserved exactly as generated.
+                                                                </p>
+                                                            </div>
                                                         </div>
-                                                        <div className="flex justify-end gap-2">
-                                                            <button
-                                                                onClick={() => setIsEditing(false)}
-                                                                className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                                                            >
-                                                                Cancel
-                                                            </button>
-                                                            <button
-                                                                onClick={handleSaveEdit}
-                                                                className="px-4 py-2 text-sm bg-[#21C1B6] text-white rounded-lg hover:bg-[#1AA49B] transition-colors"
-                                                            >
-                                                                Save Changes
-                                                            </button>
+                                                        <div className="flex-shrink-0 flex items-center justify-between gap-2 py-3 border-t border-gray-200 bg-white">
+                                                            <div className="flex items-center gap-1">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleEditUndo}
+                                                                    className="p-2 rounded-lg text-gray-600 hover:bg-gray-100 border border-gray-300 transition-colors"
+                                                                    title="Undo"
+                                                                    aria-label="Undo"
+                                                                >
+                                                                    <ArrowUturnLeftIcon className="w-5 h-5" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleEditRedo}
+                                                                    className="p-2 rounded-lg text-gray-600 hover:bg-gray-100 border border-gray-300 transition-colors"
+                                                                    title="Redo"
+                                                                    aria-label="Redo"
+                                                                >
+                                                                    <ArrowUturnRightIcon className="w-5 h-5" />
+                                                                </button>
+                                                            </div>
+                                                            <div className="flex gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setIsEditing(false)}
+                                                                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg border border-gray-300 transition-colors"
+                                                                >
+                                                                    Cancel
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleSaveEdit}
+                                                                    className="px-4 py-2 text-sm font-medium bg-[#21C1B6] text-white rounded-lg hover:bg-[#1AA49B] transition-colors"
+                                                                >
+                                                                    Save Changes
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <div className="bg-[#dadce0] rounded-lg p-4 flex justify-center">
+                                                    <div
+                                                        className={`section-gray-scroll bg-[#dadce0] rounded-lg p-4 flex justify-center w-full flex-1 min-h-0 overflow-hidden ${draftIdProp ? 'flex flex-col items-center' : ''}`}
+                                                        style={draftIdProp ? { minHeight: '78vh' } : undefined}
+                                                        aria-label="Section content at A4 paper width"
+                                                    >
                                                         <div
-                                                            className="section-preview-document bg-white rounded-lg overflow-y-auto border border-gray-100"
+                                                            className="section-preview-a4 bg-white rounded-lg border border-gray-100 shrink-0 flex flex-col overflow-hidden"
                                                             style={{
-                                                                minHeight: '297mm',
-                                                                padding: '2.54cm',
+                                                                width: '210mm',
+                                                                minWidth: '210mm',
+                                                                maxHeight: draftIdProp ? '100%' : '80vh',
+                                                                ...(draftIdProp ? { minHeight: 0, height: '100%' } : { minHeight: '297mm' }),
+                                                                padding: '2.54cm 0 2.54cm 2.54cm',
                                                                 fontFamily: '"Times New Roman", Times, serif',
                                                                 fontSize: '12pt',
                                                                 lineHeight: 1.5,
-                                                                width: '210mm',
-                                                                maxWidth: '100%',
                                                                 boxSizing: 'border-box',
-                                                                boxShadow: '0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.06)'
+                                                                boxShadow: '0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.06)',
                                                             }}
                                                             title="Section preview — A4 (210×297mm)"
-                                                            dangerouslySetInnerHTML={{
-                                                                __html: currentSection.content && currentSection.content.trim()
-                                                                    ? currentSection.content
-                                                                    : '<p class="text-gray-400 italic">Content is loading or empty. If this persists, try regenerating the section.</p>'
-                                                            }}
-                                                        />
+                                                        >
+                                                            <div
+                                                                className="section-preview-a4-content"
+                                                                style={{
+                                                                    width: '100%',
+                                                                    flex: 1,
+                                                                    minHeight: 0,
+                                                                    overflowY: 'auto',
+                                                                    overflowX: 'hidden',
+                                                                    paddingRight: '2.54cm',
+                                                                    boxSizing: 'border-box',
+                                                                }}
+                                                                dangerouslySetInnerHTML={{
+                                                                    __html: currentSection.content && currentSection.content.trim()
+                                                                        ? currentSection.content
+                                                                        : '<p class="text-gray-400 italic">Content is loading or empty. If this persists, try regenerating the section.</p>'
+                                                                }}
+                                                            />
+                                                        </div>
                                                     </div>
                                                 )}
+                                            </div>
+                                        )}
+
+                                        {/* Validation (Critic) — same width as content; constrained so it never resizes the layout */}
+                                        {currentSection.criticReview && !dismissedCriticSectionIds[activeTab] && (
+                                            <div className={`min-w-0 max-w-full overflow-hidden rounded-xl border-2 p-4 flex-shrink-0 relative ${currentSection.criticReview.status === 'PASS'
+                                                ? 'border-green-200 bg-green-50'
+                                                : 'border-yellow-200 bg-yellow-50'
+                                                }`}>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setDismissedCriticSectionIds(prev => ({ ...prev, [activeTab]: true }))}
+                                                    className="absolute top-3 right-3 p-1.5 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-black/5 transition-colors"
+                                                    aria-label="Hide validation"
+                                                    title="Hide validation"
+                                                >
+                                                    <XCircleIcon className="w-5 h-5" />
+                                                </button>
+                                                <div className="flex items-start gap-3 min-w-0">
+                                                    {currentSection.criticReview.status === 'PASS' ? (
+                                                        <CheckCircleIcon className="w-6 h-6 text-green-600 flex-shrink-0" />
+                                                    ) : (
+                                                        <ExclamationTriangleIcon className="w-6 h-6 text-yellow-600 flex-shrink-0" />
+                                                    )}
+                                                    <div className="flex-1 min-w-0 pr-8 overflow-hidden">
+                                                        <div className="flex items-center gap-3 mb-2 flex-wrap">
+                                                            <h3 className="font-bold text-gray-900">
+                                                                Validation: {currentSection.criticReview.status}
+                                                            </h3>
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-sm font-semibold text-gray-700">
+                                                                    Confidence Score:
+                                                                </span>
+                                                                <span className={`text-lg font-bold ${currentSection.criticReview.score >= 70
+                                                                    ? 'text-green-600'
+                                                                    : 'text-yellow-600'
+                                                                    }`}>
+                                                                    {currentSection.criticReview.score}%
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                        <p className="text-sm text-gray-700 mb-3 break-words">
+                                                            {currentSection.criticReview.feedback}
+                                                        </p>
+
+                                                        {currentSection.criticReview.issues.length > 0 && (
+                                                            <div className="mb-3">
+                                                                <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Issues:</h4>
+                                                                <ul className="list-disc list-inside text-sm text-gray-600 space-y-1 break-words">
+                                                                    {currentSection.criticReview.issues.map((issue, idx) => (
+                                                                        <li key={idx}>{issue}</li>
+                                                                    ))}
+                                                                </ul>
+                                                            </div>
+                                                        )}
+
+                                                        {currentSection.criticReview.suggestions.length > 0 && (
+                                                            <div className="mb-3">
+                                                                <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Suggestions:</h4>
+                                                                <ul className="list-disc list-inside text-sm text-gray-600 space-y-1 break-words">
+                                                                    {currentSection.criticReview.suggestions.map((suggestion, idx) => (
+                                                                        <li key={idx}>{suggestion}</li>
+                                                                    ))}
+                                                                </ul>
+                                                            </div>
+                                                        )}
+
+                                                        {currentSection.criticReview.sources && currentSection.criticReview.sources.length > 0 && (
+                                                            <div className="min-w-0 overflow-hidden">
+                                                                <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Sources Used:</h4>
+                                                                <div className="flex flex-wrap gap-2">
+                                                                    {currentSection.criticReview.sources.map((source, idx) => (
+                                                                        <span key={idx} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800 border border-gray-200 break-all max-w-full">
+                                                                            {source}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Show validation again when user has dismissed it */}
+                                        {currentSection.isGenerated && currentSection.criticReview && dismissedCriticSectionIds[activeTab] && (
+                                            <div className="flex-shrink-0">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setDismissedCriticSectionIds(prev => ({ ...prev, [activeTab]: false }))}
+                                                    className="text-xs font-medium text-gray-500 hover:text-[#21C1B6] transition-colors"
+                                                >
+                                                    Show validation ({currentSection.criticReview.status}, {currentSection.criticReview.score}%)
+                                                </button>
                                             </div>
                                         )}
 
@@ -945,25 +1079,189 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                     </div>
                 </div>
 
-                {/* Assemble Button */}
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mt-6">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <h3 className="text-lg font-semibold text-gray-900">Ready to Assemble?</h3>
-                            <p className="text-sm text-gray-500 mt-1">
-                                {selectedSections.filter(id => sectionStates[id]?.isGenerated).length} of {selectedSections.length} sections generated
-                            </p>
+                {/* Back / Next section bar: Back left, title center, Next or Assemble right */}
+                {(() => {
+                    const currentIndex = allSections.findIndex(s => s.id === activeTab);
+                    const isFirstSection = currentIndex <= 0;
+                    const isLastSection = allSections.length > 0 && currentIndex === allSections.length - 1;
+                    const prevSection = currentIndex > 0 ? allSections[currentIndex - 1] : null;
+                    const nextSection = currentIndex >= 0 && currentIndex < allSections.length - 1 ? allSections[currentIndex + 1] : null;
+                    return (
+                        <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${draftIdProp ? 'p-3 mt-3 flex-shrink-0' : 'p-6 mt-6'}`}>
+                            <div className="flex items-center justify-between gap-4">
+                                <div className="flex-shrink-0 w-[180px] flex justify-start">
+                                    {!isFirstSection && prevSection ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveTab(prevSection.id)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 text-[#21C1B6] border-2 border-[#21C1B6] bg-white rounded-xl font-bold hover:bg-[#21C1B6] hover:text-white transition-all text-sm"
+                                        >
+                                            <ChevronLeftIcon className="w-5 h-5" />
+                                            {prevSection.title.replace(/^\d+\.\s*/, '')}
+                                        </button>
+                                    ) : null}
+                                </div>
+                                <div className="flex-1 min-w-0 flex flex-col items-center justify-center text-center">
+                                    <h3 className={`font-semibold text-gray-900 ${draftIdProp ? 'text-base' : 'text-lg'}`}>
+                                        {isLastSection ? 'Ready to Assemble?' : 'Go to next section'}
+                                    </h3>
+                                    <p className={`text-gray-500 ${draftIdProp ? 'text-xs mt-0.5' : 'text-sm mt-1'}`}>
+                                        {selectedSections.filter(id => sectionStates[id]?.isGenerated).length} of {selectedSections.length} sections generated
+                                    </p>
+                                </div>
+                                <div className="flex-shrink-0 w-[180px] flex justify-end">
+                                    {isLastSection ? (
+                                        <button
+                                            onClick={handleAssemble}
+                                            disabled={isAssembling || !selectedSections.every(id => sectionStates[id]?.isGenerated)}
+                                            className="inline-flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-[#21C1B6] to-[#1AA49B] text-white rounded-xl font-bold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                                        >
+                                            <DocumentCheckIcon className="w-5 h-5" />
+                                            {isAssembling ? 'Assembling...' : 'Assemble Document'}
+                                        </button>
+                                    ) : nextSection ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveTab(nextSection.id)}
+                                            className="inline-flex items-center gap-2 px-4 py-2 bg-[#21C1B6] text-white rounded-xl font-bold hover:bg-[#1AA49B] transition-all text-sm"
+                                        >
+                                            Next: {nextSection.title.replace(/^\d+\.\s*/, '')}
+                                            <ChevronRightIcon className="w-5 h-5" />
+                                        </button>
+                                    ) : null}
+                                </div>
+                            </div>
                         </div>
-                        <button
-                            onClick={handleAssemble}
-                            disabled={isAssembling || !selectedSections.every(id => sectionStates[id]?.isGenerated)}
-                            className="inline-flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-[#21C1B6] to-[#1AA49B] text-white rounded-xl font-bold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
-                        >
-                            <DocumentCheckIcon className="w-5 h-5" />
-                            {isAssembling ? 'Assembling...' : 'Assemble Document'}
-                        </button>
+                    );
+                })()}
+
+                {/* Section management popup: page-wise navigation, highlight current, all operations */}
+                {showSectionPopup && (
+                    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowSectionPopup(false)}>
+                        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+                                <div>
+                                    <h3 className="text-lg font-bold text-gray-900">Sections</h3>
+                                    <p className="text-xs text-gray-500 mt-0.5">
+                                        {selectedSections.filter(id => sectionStates[id]?.isGenerated).length} of {selectedSections.length} generated
+                                    </p>
+                                </div>
+                                <button onClick={() => setShowSectionPopup(false)} className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700" aria-label="Close">
+                                    <XCircleIcon className="w-5 h-5" />
+                                </button>
+                            </div>
+                            {/* Page-wise: current section index and Prev/Next */}
+                            <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+                                <span className="text-sm font-medium text-gray-600">
+                                    Section {allSections.length ? selectedSections.indexOf(activeTab) + 1 : 0} of {allSections.length}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={() => {
+                                            const idx = allSections.findIndex(s => s.id === activeTab);
+                                            if (idx > 0) {
+                                                setActiveTab(allSections[idx - 1].id);
+                                            }
+                                        }}
+                                        disabled={!allSections.length || allSections.findIndex(s => s.id === activeTab) <= 0}
+                                        className="p-2 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        aria-label="Previous section"
+                                    >
+                                        <ChevronLeftIcon className="w-5 h-5" />
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const idx = allSections.findIndex(s => s.id === activeTab);
+                                            if (idx >= 0 && idx < allSections.length - 1) {
+                                                setActiveTab(allSections[idx + 1].id);
+                                            }
+                                        }}
+                                        disabled={!allSections.length || allSections.findIndex(s => s.id === activeTab) >= allSections.length - 1}
+                                        className="p-2 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        aria-label="Next section"
+                                    >
+                                        <ChevronRightIcon className="w-5 h-5" />
+                                    </button>
+                                </div>
+                            </div>
+                            <nav className="p-3 space-y-1 overflow-y-auto flex-1 min-h-0 custom-scrollbar" aria-label="Sections list">
+                                {allSections.map((section, index) => {
+                                    const sectionId = section.id;
+                                    const state = sectionStates[sectionId];
+                                    const isActive = activeTab === sectionId;
+                                    return (
+                                        <div key={sectionId} className="group relative flex items-center">
+                                            <button
+                                                onClick={() => setActiveTab(sectionId)}
+                                                className={`
+                                                    w-full text-left px-4 py-3 text-sm font-medium rounded-lg transition-all pr-12
+                                                    ${isActive ? 'bg-[#21C1B6] text-white shadow-md' : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'}
+                                                `}
+                                            >
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="truncate">{index + 1}. {section.title.replace(/^\d+\.\s*/, '')}</span>
+                                                    {state?.isGenerated && (
+                                                        <CheckCircleIcon className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-white' : 'text-green-500'}`} />
+                                                    )}
+                                                </div>
+                                            </button>
+                                            <div className={`absolute right-1 flex flex-col gap-0.5 ${isActive ? 'visible' : 'invisible group-hover:visible'}`}>
+                                                <button onClick={(e) => { e.stopPropagation(); handleReorder(index, 'up'); }} className={`p-0.5 rounded hover:bg-black/10 ${isActive ? 'text-white' : 'text-gray-400'}`} disabled={index === 0} aria-label="Move up"><ArrowUpIcon className="w-3 h-3" /></button>
+                                                <button onClick={(e) => { e.stopPropagation(); handleReorder(index, 'down'); }} className={`p-0.5 rounded hover:bg-black/10 ${isActive ? 'text-white' : 'text-gray-400'}`} disabled={index === allSections.length - 1} aria-label="Move down"><ArrowDownIcon className="w-3 h-3" /></button>
+                                                <button onClick={(e) => { e.stopPropagation(); handleDeleteSection(sectionId); }} className={`p-0.5 rounded hover:bg-red-500/20 ${isActive ? 'text-white hover:text-red-100' : 'text-gray-400 hover:text-red-600'}`} aria-label="Delete section"><TrashIcon className="w-3 h-3" /></button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </nav>
+                            <div className="p-3 border-t border-gray-200 flex-shrink-0">
+                                <button
+                                    onClick={() => { setShowAddSection(true); setShowSectionPopup(false); }}
+                                    className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-[#21C1B6] bg-green-50 rounded-lg hover:bg-green-100 transition-colors border border-green-200"
+                                >
+                                    <PlusIcon className="w-4 h-4" />
+                                    Add Section
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                </div>
+                )}
+
+                {/* Enlarge: A4-size popup, white background, visual page breaks every 297mm */}
+                {showEnlargePopup && currentSection?.content && sectionConfig && (
+                    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowEnlargePopup(false)}>
+                        <div className="bg-white rounded-2xl shadow-2xl max-w-[95vw] max-h-[95vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()} style={{ width: 'min(95vw, 230mm)' }}>
+                            <div className="flex-shrink-0 px-3 py-2 border-b border-gray-200 flex items-center justify-between">
+                                <h3 className="text-base font-bold text-gray-900">
+                                    {sectionConfig.title.replace(/^\d+\.\s*/, '')} — A4 view
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowEnlargePopup(false)}
+                                    className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-600 hover:text-gray-800"
+                                    aria-label="Close"
+                                >
+                                    <XCircleIcon className="w-5 h-5" />
+                                </button>
+                            </div>
+                            <div className="flex-1 min-h-0 overflow-y-auto flex justify-center bg-white p-4">
+                                <div
+                                    className="enlarge-popup-pages section-preview-a4 shrink-0"
+                                    style={{ textAlign: 'left' }}
+                                >
+                                    <div
+                                        className="section-preview-a4-content"
+                                        style={{ width: '100%', boxSizing: 'border-box' }}
+                                        dangerouslySetInnerHTML={{
+                                            __html: currentSection.content.trim() || '<p class="text-gray-400 italic">No content</p>',
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Add Section Modal */}
                 {showAddSection && (
                     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -998,16 +1296,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                         <option value="definitions">Definitions</option>
                                     </select>
                                 </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Instruction Prompt</label>
-                                    <textarea
-                                        value={newSectionData.prompt}
-                                        onChange={e => setNewSectionData({ ...newSectionData, prompt: e.target.value })}
-                                        rows={3}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-[#21C1B6] focus:border-[#21C1B6]"
-                                        placeholder="Describe what should be in this section..."
-                                    />
-                                </div>
+                                {/* Prompts are backend-only - sent to LLM at generation time */}
                             </div>
                             <div className="px-6 py-4 bg-gray-50 flex justify-end gap-3">
                                 <button

@@ -14,6 +14,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 PyJWT
-# DOCX export (assemble + download)
+# DOCX export (assemble + download); premailer inlines template CSS so Google Docs matches static preview
 python-docx
 htmldocx
+premailer

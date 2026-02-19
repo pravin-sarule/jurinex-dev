@@ -1,9 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 
-const PAGE_HEIGHT_MM = '297mm';
-const PAGE_WIDTH_MM = '210mm';
-const CONTENT_PADDING = '2.54cm';
 import { ArrowLeftIcon, ArrowDownTrayIcon, EyeIcon, ShareIcon } from '@heroicons/react/24/outline';
 import { draftApi } from '../services';
 import { toast } from 'react-toastify';
@@ -11,14 +8,24 @@ import { LoadingSpinner } from '../components/common';
 import ShareModal from '../../components/ShareModal';
 import googleDriveApi from '../../services/googleDriveApi';
 
+export interface AssembleResponse {
+    success: boolean;
+    final_document: string;
+    template_css?: string;
+    google_docs?: { googleFileId?: string; google_file_id?: string; iframeUrl?: string; iframe_url?: string; updated?: boolean };
+    metadata?: Record<string, any>;
+}
+
 interface AssembledPreviewPageProps {
     draftIdProp?: string;
     onBack?: () => void;
     onToggleEditor?: (active: boolean) => void;
     addActivity?: (agent: string, action: string, status?: 'in-progress' | 'completed' | 'pending') => void;
+    /** When coming from Assemble click, pass the response so we show the exact same content + Google Doc without re-calling assemble. */
+    initialAssembleResult?: AssembleResponse | null;
 }
 
-export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draftIdProp, onBack, onToggleEditor, addActivity }) => {
+export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draftIdProp, onBack, onToggleEditor, addActivity, initialAssembleResult }) => {
     const params = useParams<{ draftId: string }>();
     const draftId = draftIdProp || params.draftId;
     const navigate = useNavigate();
@@ -31,39 +38,11 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
     const [showGoogleDocs, setShowGoogleDocs] = useState(false);
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
-    const [sectionHeights, setSectionHeights] = useState<number[]>([]);
-    const [pageHeightPx, setPageHeightPx] = useState(1122);
-    const measureRef = useRef<HTMLDivElement>(null);
-    const pageRulerRef = useRef<HTMLDivElement>(null);
     const hasOpenedGoogleDocsRef = useRef(false);
 
     const sections = documentHtml
         ? documentHtml.split(/<!--\s*SECTION_BREAK\s*-->/).filter((h: string) => h.trim().length > 0)
         : [];
-
-    useEffect(() => {
-        if (!documentHtml || sections.length === 0) {
-            setSectionHeights([]);
-            return;
-        }
-        let timeoutId: ReturnType<typeof setTimeout> | undefined;
-        const run = () => {
-            if (!measureRef.current || !pageRulerRef.current) return;
-            const ph = pageRulerRef.current.offsetHeight;
-            if (ph > 0) setPageHeightPx(ph);
-            const sectionDivs = measureRef.current.querySelectorAll('.a4-measure-section');
-            const heights = Array.from(sectionDivs).map((el) => (el as HTMLElement).offsetHeight);
-            if (heights.length === sections.length) setSectionHeights(heights);
-        };
-        const rafId = requestAnimationFrame(() => {
-            run();
-            timeoutId = setTimeout(run, 200);
-        });
-        return () => {
-            cancelAnimationFrame(rafId);
-            if (timeoutId !== undefined) clearTimeout(timeoutId);
-        };
-    }, [documentHtml, sections.length]);
 
     // Sync with parent layout
     useEffect(() => {
@@ -87,13 +66,35 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
     }, [googleDocsInfo?.google_file_id, googleDocsInfo?.iframe_url, loading]);
 
     useEffect(() => {
+        // Use the exact result from Assemble click so preview and Google Docs iframe match what was just assembled (no second API call)
+        if (initialAssembleResult?.success && initialAssembleResult.final_document) {
+            setDocumentHtml(initialAssembleResult.final_document);
+            setTemplateCss(initialAssembleResult.template_css || '');
+            const rawInfo = {
+                ...(initialAssembleResult.metadata || {}),
+                ...(initialAssembleResult.google_docs || {})
+            };
+            const fid = rawInfo.google_file_id ?? rawInfo.googleFileId;
+            if (fid || rawInfo.iframe_url || rawInfo.iframeUrl) {
+                const iframeUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit?embedded=true` : undefined);
+                setGoogleDocsInfo({
+                    ...rawInfo,
+                    iframe_url: iframeUrl,
+                    google_file_id: fid,
+                    iframeKey: rawInfo.updated ? Date.now() : Date.now()
+                });
+                setShowGoogleDocs(true);
+            }
+            setLoading(false);
+            return;
+        }
+
         const loadAssembledDoc = async () => {
             if (!draftId) return;
 
             try {
                 setLoading(true);
 
-                // Get prompts to know which sections to assemble
                 const prompts = await draftApi.getSectionPrompts(draftId);
                 const activeSectionIds = prompts
                     .filter((p: any) => !p.is_deleted)
@@ -122,7 +123,6 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                         setTemplateCss(response.template_css);
                     }
 
-                    // Handle Google Docs metadata
                     const rawInfo = {
                         ...(response.metadata || {}),
                         ...(response.google_docs || {})
@@ -135,12 +135,10 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                             ...rawInfo,
                             iframe_url: iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit` : undefined),
                             google_file_id: fid,
-                            // Priority: 1. drafting-service ID (integer), 2. agent-draft UUID
-                            draft_id: rawInfo.draft?.id || rawInfo.draft_id || rawInfo.draftId
+                            draft_id: rawInfo.draft?.id || rawInfo.draft_id || rawInfo.draftId,
+                            iframeKey: rawInfo.updated ? Date.now() : (rawInfo.iframeKey ?? Date.now())
                         };
                         setGoogleDocsInfo(normalizedInfo);
-
-                        // When assembly is done, show the document directly in the Google Docs iframe
                         if (normalizedInfo.iframe_url) {
                             setShowGoogleDocs(true);
                         }
@@ -155,7 +153,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
         };
 
         loadAssembledDoc();
-    }, [draftId, navigate, draftIdProp]);
+    }, [draftId, navigate, draftIdProp, initialAssembleResult]);
 
 
     const handleDownloadDocx = async () => {
@@ -172,9 +170,10 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
             a.click();
             window.URL.revokeObjectURL(url);
             toast.success('DOCX downloaded successfully');
-        } catch (error) {
+        } catch (error: unknown) {
             console.error('Download failed:', error);
-            toast.error('Failed to download DOCX');
+            const message = error instanceof Error ? error.message : 'Failed to download DOCX';
+            toast.error(message);
         } finally {
             setIsDownloading(false);
         }
@@ -239,7 +238,8 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     .print-container.screen-only { display: none !important; }
                     .print-container.print-only-flow { display: block !important; width: 100% !important; background: white !important; padding: 0 !important; }
                     .assembled-doc-container { box-shadow: none !important; margin: 0 !important; margin-bottom: 0 !important; width: 210mm !important; min-height: 297mm !important; height: auto !important; overflow: visible !important; page-break-after: always; }
-                    .assembled-doc-container .assembled-doc-content { margin-top: 0 !important; }
+                    .assembled-doc-container .assembled-doc-content { margin-top: 0 !important; transform: none !important; }
+                    .assembled-doc-container .assembled-doc-clip { height: auto !important; overflow: visible !important; }
                     .assembled-doc-container .document-section { page-break-inside: auto; }
                 }
                 .print-container {
@@ -250,7 +250,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     padding-top: 1rem;
                 }
                 .print-container.print-only-flow { display: none; }
-                .print-container.screen-only { display: flex; }
+                .print-container.screen-only { display: flex; flex-direction: column; }
                 .assembled-doc-container {
                     background: white;
                     background-image: none !important;
@@ -268,9 +268,28 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     line-height: 1.5;
                     page-break-after: always;
                     position: relative;
+                    isolation: isolate;
                 }
-                .assembled-doc-container .assembled-doc-content { box-sizing: border-box; }
-                .assembled-doc-container .assembled-doc-content { position: relative; z-index: 1; }
+                .screen-only .assembled-doc-container { page-break-after: avoid !important; page-break-inside: avoid !important; }
+                .assembled-doc-container-flow {
+                    overflow: visible !important;
+                    max-height: none !important;
+                    height: auto !important;
+                    min-height: auto !important;
+                    page-break-after: avoid !important;
+                }
+                .screen-only .assembled-doc-container .page-break,
+                .screen-only .assembled-doc-container [class*="page-break"] {
+                    display: none !important;
+                }
+                .assembled-doc-container .assembled-doc-clip {
+                    overflow: hidden;
+                    width: 100%;
+                    position: relative;
+                }
+                .assembled-doc-container .assembled-doc-content { box-sizing: border-box; position: relative; }
+                .assembled-doc-container table { position: relative !important; }
+                .assembled-doc-container td, .assembled-doc-container th { position: relative !important; vertical-align: top !important; }
                 .assembled-doc-container .document-section { margin-bottom: 30px; page-break-inside: auto; }
                 .document-section { margin-bottom: 30px; }
                 .assembled-doc-container .page-break,
@@ -281,115 +300,80 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     margin: 0 !important;
                     padding: 0 !important;
                     border: none !important;
-                    background: #dadce0 !important;
+                    background: white !important;
                     overflow: hidden !important;
                     page-break-after: always;
                 }
             `}</style>
 
-            {/* Header - Only show if Google Docs editor is NOT active */}
-            {!showGoogleDocs && (
-                <div className="bg-white border-b border-gray-200 sticky top-0 z-10 no-print flex-shrink-0">
-                    <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                            {(onBack || !draftIdProp) && (
-                                <button
-                                    onClick={onBack ? onBack : () => navigate(`/template-drafting/drafts/${draftId}/sections`)}
-                                    className="p-2 hover:bg-gray-100 rounded-full transition-colors"
-                                >
-                                    <ArrowLeftIcon className="w-5 h-5 text-gray-600" />
-                                </button>
-                            )}
-                            <div>
-                                <h1 className="text-lg font-bold text-gray-900">Final Document Preview</h1>
-                                <p className="text-xs text-gray-500">Review your assembled draft before finalizing</p>
-                            </div>
-                        </div>
-
-                        <div className="flex items-center gap-3">
-                            {(googleDocsInfo?.iframe_url || googleDocsInfo?.google_file_id) && (
-                                <>
-                                    <button
-                                        onClick={() => {
-                                            const fid = googleDocsInfo?.google_file_id;
-                                            if (fid) window.open(`https://docs.google.com/document/d/${fid}/edit`, '_blank');
-                                        }}
-                                        className="px-4 py-1.5 text-xs font-bold bg-blue-600 text-white rounded-lg hover:bg-blue-700 shadow-sm flex items-center gap-2 transition-all"
-                                        title="Open in Google Docs (new tab)"
-                                    >
-                                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                                            <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
-                                        </svg>
-                                        Open in Google Docs
-                                    </button>
-                                    <button
-                                        onClick={() => setShowGoogleDocs(true)}
-                                        className="px-4 py-1.5 text-xs font-bold bg-[#21C1B6] text-white rounded-lg hover:bg-[#1AA49B] shadow-sm flex items-center gap-2 transition-all"
-                                    >
-                                        <EyeIcon className="w-4 h-4" />
-                                        Embed Editor
-                                    </button>
-                                </>
-                            )}
+            {/* Header with four-button bar: Exit Steps | Static Preview | Share & Collaborate | LIVE SYNC */}
+            <header className="bg-white border-b border-gray-200 sticky top-0 z-10 no-print flex-shrink-0">
+                <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                        {(onBack || !draftIdProp) && (
                             <button
-                                onClick={handleDownloadDocx}
-                                disabled={isDownloading}
-                                className="inline-flex items-center gap-2 px-4 py-1.5 text-xs font-bold text-white bg-[#21C1B6] rounded-lg hover:bg-[#1AA49B]"
+                                onClick={onBack ? onBack : () => navigate(`/template-drafting/drafts/${draftId}/sections`)}
+                                className="p-2 hover:bg-gray-100 rounded-full transition-colors"
                             >
-                                <ArrowDownTrayIcon className="w-4 h-4" />
-                                {isDownloading ? 'Downloading...' : 'Download DOCX'}
+                                <ArrowLeftIcon className="w-5 h-5 text-gray-600" />
                             </button>
+                        )}
+                        <div>
+                            <h1 className="text-lg font-bold text-gray-900">Final Document Preview</h1>
+                            <p className="text-xs text-gray-500">Review your assembled draft before finalizing</p>
                         </div>
                     </div>
+
+                    <div className="flex items-center gap-4">
+                        {/* Four-button bar only when in Google Docs embed view (hidden on static preview) */}
+                        {showGoogleDocs && (
+                            <div className="flex items-center gap-0 bg-white border border-gray-200 rounded-xl px-5 py-2.5 shadow-sm">
+                                <button
+                                    onClick={onBack}
+                                    className="flex items-center gap-2 text-gray-500 hover:text-red-600 font-semibold text-xs transition-colors whitespace-nowrap"
+                                    title="Exit to Drafting Steps"
+                                >
+                                    <ArrowLeftIcon className="w-4 h-4" />
+                                    Exit Steps
+                                </button>
+                                <div className="w-px h-4 bg-gray-200 mx-2" />
+                                <button
+                                    onClick={() => setShowGoogleDocs(false)}
+                                    className="flex items-center gap-2 text-blue-600 font-semibold text-xs transition-colors whitespace-nowrap"
+                                    title="Static preview of the document"
+                                >
+                                    <EyeIcon className="w-4 h-4" />
+                                    Static Preview
+                                </button>
+                            </div>
+                        )}
+                        {!showGoogleDocs && (googleDocsInfo?.iframe_url || googleDocsInfo?.google_file_id) && (
+                            <button
+                                onClick={() => setShowGoogleDocs(true)}
+                                className="px-3 py-2 text-xs font-semibold text-gray-600 hover:text-blue-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                                title="Open embedded Google Docs editor"
+                            >
+                                Embed Editor
+                            </button>
+                        )}
+                        <button
+                            onClick={handleDownloadDocx}
+                            disabled={isDownloading}
+                            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-[#21C1B6] rounded-lg hover:bg-[#1AA49B] transition-colors"
+                        >
+                            <ArrowDownTrayIcon className="w-4 h-4" />
+                            {isDownloading ? 'Downloading...' : 'Download DOCX'}
+                        </button>
+                    </div>
                 </div>
-            )}
+            </header>
 
             {/* Document Content */}
-            <div className={`w-full flex-1 relative ${!showGoogleDocs ? 'overflow-y-auto custom-scrollbar flex flex-col items-center p-6' : 'overflow-hidden bg-white'}`}>
+            <div className={`w-full flex-1 relative ${!showGoogleDocs ? 'overflow-y-auto custom-scrollbar flex flex-col items-center p-6 bg-white' : 'overflow-hidden bg-white'}`}>
                 {showGoogleDocs && googleDocsInfo?.iframe_url ? (
                     <div className="w-full h-full animate-fadeIn relative flex flex-col bg-[#F8F9FA]">
-                        {/* Unified Floating Editor Control Bar - Bottom Center */}
-                        <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-50 flex items-center gap-4 bg-white/95 backdrop-blur-md border border-gray-200 px-6 py-2.5 rounded-full shadow-[0_20px_50px_rgba(0,0,0,0.15)] transition-all hover:scale-[1.02] group">
-                            <button
-                                onClick={onBack}
-                                className="flex items-center gap-2 text-gray-600 hover:text-red-600 font-bold text-xs transition-colors whitespace-nowrap"
-                                title="Exit to Drafting Steps"
-                            >
-                                <ArrowLeftIcon className="w-4 h-4" />
-                                Exit Steps
-                            </button>
-
-                            <div className="w-px h-4 bg-gray-200" />
-
-                            <button
-                                onClick={() => setShowGoogleDocs(false)}
-                                className="flex items-center gap-2 text-blue-600 hover:text-blue-800 font-bold text-xs transition-colors whitespace-nowrap"
-                                title="Switch to Static Preview"
-                            >
-                                <EyeIcon className="w-4 h-4" />
-                                Static Preview
-                            </button>
-
-                            <div className="w-px h-4 bg-gray-200" />
-
-                            <button
-                                onClick={handleShare}
-                                className="flex items-center gap-2 text-green-700 hover:text-green-900 font-bold text-xs transition-colors whitespace-nowrap"
-                                title="Open in Google Docs to share with others"
-                            >
-                                <ShareIcon className="w-4 h-4" />
-                                Share & Collaborate
-                            </button>
-
-                            <div className="w-px h-4 bg-gray-200" />
-
-                            <div className="flex items-center gap-2 px-1">
-                                <div className="w-2.5 h-2.5 bg-green-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
-                                <span className="text-green-600 font-black text-[10px] tracking-wider whitespace-nowrap">LIVE SYNC</span>
-                            </div>
-                        </div>
-
                         <iframe
+                            key={googleDocsInfo.iframeKey ?? googleDocsInfo.google_file_id}
                             src={googleDocsInfo.iframe_url}
                             className="w-full h-full border-none shadow-inner"
                             title="Google Docs Editor"
@@ -398,67 +382,26 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     </div>
                 ) : (
                     <>
-                        {/* Hidden: measure section heights for pagination (same layout as real content) */}
-                        <div
-                            ref={measureRef}
-                            aria-hidden
-                            style={{
-                                position: 'absolute',
-                                left: -99999,
-                                top: 0,
-                                visibility: 'hidden',
-                                pointerEvents: 'none',
-                                width: '210mm',
-                            }}
-                        >
-                            <div ref={pageRulerRef} style={{ height: PAGE_HEIGHT_MM, width: '210mm' }} />
-                            {sections.map((html, i) => (
+                        {/* Screen: flowing layout - all content visible, scrollable (no clipping) */}
+                        <div className="print-container screen-only w-full max-w-5xl bg-white rounded-lg py-6 px-4" style={{ minHeight: '100%' }}>
+                            {sections.map((html, index) => (
                                 <div
-                                    key={i}
-                                    className="a4-measure-section"
-                                    style={{
-                                        width: PAGE_WIDTH_MM,
-                                        padding: CONTENT_PADDING,
-                                        boxSizing: 'border-box',
-                                        fontFamily: '"Times New Roman", Times, serif',
-                                        fontSize: '12pt',
-                                        lineHeight: 1.5,
-                                    }}
-                                    dangerouslySetInnerHTML={{ __html: html }}
-                                />
+                                    key={index}
+                                    className="assembled-doc-container assembled-doc-container-flow w-full mx-auto rounded-sm"
+                                    style={{ height: 'auto', overflow: 'visible' }}
+                                    title="Section"
+                                >
+                                    <div
+                                        className="assembled-doc-content"
+                                        style={{ boxSizing: 'border-box' }}
+                                        dangerouslySetInnerHTML={{ __html: html }}
+                                    />
+                                </div>
                             ))}
                         </div>
 
-                        {/* Screen: paginated A4 pages (text constrained inside each page) */}
-                        <div className="print-container screen-only w-full max-w-5xl bg-[#dadce0] rounded-lg py-6 px-4" style={{ minHeight: '100%' }}>
-                            {sections.map((html, sectionIndex) => {
-                                const h = sectionHeights[sectionIndex];
-                                const numPages = h !== undefined ? Math.max(1, Math.ceil(h / pageHeightPx)) : 1;
-                                return Array.from({ length: numPages }, (_, pageIndex) => {
-                                    const offsetPx = pageIndex * pageHeightPx;
-                                    return (
-                                        <div
-                                            key={`${sectionIndex}-${pageIndex}`}
-                                            className="assembled-doc-container w-full mx-auto rounded-sm"
-                                            style={{ height: PAGE_HEIGHT_MM }}
-                                            title={`A4 page ${pageIndex + 1}`}
-                                        >
-                                            <div
-                                                className="assembled-doc-content"
-                                                style={{
-                                                    marginTop: -offsetPx,
-                                                    boxSizing: 'border-box',
-                                                }}
-                                                dangerouslySetInnerHTML={{ __html: html }}
-                                            />
-                                        </div>
-                                    );
-                                });
-                            })}
-                        </div>
-
                         {/* Print only: single-flow content (no duplicate, browser handles page breaks) */}
-                        <div className="print-container print-only-flow w-full max-w-5xl bg-[#dadce0] rounded-lg py-6 px-4" style={{ minHeight: '100%' }}>
+                        <div className="print-container print-only-flow w-full max-w-5xl bg-white rounded-lg py-6 px-4" style={{ minHeight: '100%' }}>
                             {sections.map((html, index) => (
                                 <div
                                     key={index}

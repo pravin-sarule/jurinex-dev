@@ -91,7 +91,9 @@ def _resolve_retrieve_file_ids(
 
 
 def _attach_draft_field_data(out: Dict[str, Any], draft_id: Optional[str], user_id: int) -> None:
-    """Add field_values and draft_field_data to response when draft_id is provided."""
+    """Add merged field_values (autopopulated + draft) and draft_field_data when draft_id is provided.
+    Merged field_values so Drafter gets all data (petitioner name, court name, etc.) and avoids [] or blank placeholders.
+    """
     if not draft_id:
         return
     _did = str(draft_id or "").strip()
@@ -100,8 +102,9 @@ def _attach_draft_field_data(out: Dict[str, Any], draft_id: Optional[str], user_
     try:
         draft_field_data = draft_db_service.get_draft_field_data_for_retrieve(_did, user_id)
         if draft_field_data is not None:
-            out["field_values"] = draft_field_data.get("field_values", {})
             out["draft_field_data"] = draft_field_data
+            merged = draft_db_service.get_merged_field_values_for_draft(_did, user_id)
+            out["field_values"] = merged if merged else draft_field_data.get("field_values", {})
     except Exception:
         pass
 

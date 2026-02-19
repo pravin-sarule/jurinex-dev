@@ -121,7 +121,6 @@ const DraftFormPage = () => {
     setSearchParams({ step: String(nextStep) }, { replace: true });
   };
   const [subStepId, setSubStepId] = useState('inputs'); // 'inputs' or 'sections' for Step 3 prodigy flow
-  const [sectionPrompts, setSectionPrompts] = useState({});
   const [deletedSections, setDeletedSections] = useState(new Set());
   const [isFinalizing, setIsFinalizing] = useState(false);
 
@@ -137,8 +136,9 @@ const DraftFormPage = () => {
   const [loadingSections, setLoadingSections] = useState(false);
   const [templateSections, setTemplateSections] = useState([]);
   const [showAddSectionModal, setShowAddSectionModal] = useState(false);
-  const [newSectionData, setNewSectionData] = useState({ name: '', type: 'clause', prompt: '' });
+  const [newSectionData, setNewSectionData] = useState({ name: '', type: 'clause' });
   const [isGoogleDocsActive, setIsGoogleDocsActive] = useState(false);
+  const [lastAssembleResult, setLastAssembleResult] = useState(null);
 
   // Agent activity feed mock/state
   const [activities, setActivities] = useState([
@@ -228,7 +228,6 @@ const DraftFormPage = () => {
           }));
 
           // Populate sections
-          const promptsMap = {};
           const deletedSet = new Set();
           const detailMap = {};
           const orderMap = {};
@@ -236,9 +235,6 @@ const DraftFormPage = () => {
 
           if (Array.isArray(sectionsData)) {
             sectionsData.forEach(p => {
-              // Only use custom_prompt if it's real user content; if it equals section_intro treat as default
-              const isRealCustom = p.custom_prompt && p.custom_prompt !== (p.section_intro || '');
-              if (isRealCustom) promptsMap[p.section_id] = p.custom_prompt;
               if (p.is_deleted) deletedSet.add(p.section_id);
               if (p.detail_level) detailMap[p.section_id] = p.detail_level;
               if (p.language) lang = p.language;
@@ -246,7 +242,7 @@ const DraftFormPage = () => {
             });
           }
 
-          setSectionPrompts(promptsMap);
+          // Section prompts stay backend-only - not fetched or displayed on frontend
           setDeletedSections(deletedSet);
           setSectionDetailLevels(detailMap);
           setSelectedLanguage(lang);
@@ -262,7 +258,7 @@ const DraftFormPage = () => {
                   id: p.section_id,
                   title: p.section_name || 'Custom Section',
                   description: p.section_type || 'Custom',
-                  defaultPrompt: p.custom_prompt || p.default_prompt || '',
+                  defaultPrompt: '',
                   isCustom: true
                 });
               }
@@ -295,17 +291,25 @@ const DraftFormPage = () => {
 
           const isFresh = d.metadata?.is_fresh === true;
 
-          // Hydrate fields - ALWAYS load field_values (includes agent-extracted + user-saved values)
-          // Backend merges agent-extracted values with user edits, so always use d.field_values
+          // Hydrate fields - merge from getDraft (backend) + getTemplateUserFieldValues (InjectionAgent) for reliable autopopulation
           const raw = d.field_values;
-          const saved = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? { ...raw } : {};
+          let saved = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? { ...raw } : {};
+
+          // Also fetch template_user_field_values (InjectionAgent) and merge - backend merge can miss when agent writes async
+          if (d.template_id) {
+            try {
+              const tvRes = await getTemplateUserFieldValues(String(d.template_id), draftId);
+              if (tvRes?.field_values && typeof tvRes.field_values === 'object' && Object.keys(tvRes.field_values).length > 0) {
+                saved = { ...saved, ...tvRes.field_values };
+              }
+            } catch (_) {}
+          }
 
           if (isFresh) {
-            console.log('[DraftFormPage] Fresh template detected - loading agent-extracted values if available');
-            console.log(`[DraftFormPage] Found ${Object.keys(saved).length} field values from backend (agent-extracted + user edits)`);
+            console.log('[DraftFormPage] Fresh template - loaded agent-extracted values if available');
+            console.log(`[DraftFormPage] Found ${Object.keys(saved).length} field values`);
           } else {
-            console.log('[DraftFormPage] Loading saved draft data');
-            console.log(`[DraftFormPage] Found ${Object.keys(saved).length} saved field values`);
+            console.log(`[DraftFormPage] Loaded ${Object.keys(saved).length} saved field values`);
           }
 
           setFieldValues(saved);
@@ -349,18 +353,6 @@ const DraftFormPage = () => {
     });
     return order.map((sectionName) => ({ sectionName, fields: map[sectionName] }));
   }, [fields]);
-
-  useEffect(() => {
-    if (sections.length === 0) return;
-    setSectionPrompts((prev) => {
-      const next = { ...prev };
-      sections.forEach(({ sectionName }) => {
-        // Just ensuring keys exist could be useful, mainly for universal sections
-      });
-      return next;
-    });
-  }, [sections]);
-
 
   // Auto-Save
   useEffect(() => {
@@ -488,6 +480,17 @@ const DraftFormPage = () => {
       if (autopopulatePollRef.current) clearInterval(autopopulatePollRef.current);
     };
   }, []);
+
+  // When draft has case/file but fields are empty, poll for agent-extracted values (InjectionAgent runs async)
+  useEffect(() => {
+    if (!draftId || !draft || loading) return;
+    const hasCase = draft.metadata?.case_id || selectedCaseId;
+    const hasFile = uploadedFileName;
+    const fieldsEmpty = Object.keys(fieldValues).length === 0 || Object.values(fieldValues).every(v => v == null || String(v).trim() === '');
+    if ((hasCase || hasFile) && fieldsEmpty && draft.template_id) {
+      pollForAutopopulatedFields(draftId, String(draft.template_id));
+    }
+  }, [draftId, draft?.template_id, draft?.metadata?.case_id, selectedCaseId, uploadedFileName, loading, fieldValues]);
 
   const handleSelectCase = async (e) => {
     const caseId = e.target.value;
@@ -634,13 +637,11 @@ const DraftFormPage = () => {
     try {
       // Iterate orderedSections to include Custom Sections in the save process
       const savePromises = orderedSections.map(async (section, index) => {
-        const customPrompt = sectionPrompts[section.id];
         const isDeleted = deletedSections.has(section.id);
-        const defaultPrompt = section.defaultPrompt;
         const detailLevel = sectionDetailLevels[section.id] || 'concise';
 
         return draftApi.saveSectionPrompt(draftId, section.id, {
-          customPrompt: customPrompt || defaultPrompt,
+          customPrompt: undefined,
           isDeleted: isDeleted,
           detailLevel: detailLevel,
           language: selectedLanguage,
@@ -664,11 +665,6 @@ const DraftFormPage = () => {
     setNewDraftTitle(draft?.draft_title || draft?.template_name || '');
     setShowRenameModal(true);
   };
-
-  const handlePromptChange = (sectionId, value) => {
-    setSectionPrompts(prev => ({ ...prev, [sectionId]: value }));
-  };
-
 
   const handleRenameDraft = async () => {
     if (!newDraftTitle.trim()) return toast.error('Title cannot be empty');
@@ -694,19 +690,18 @@ const DraftFormPage = () => {
       sectionId,
       sectionName: newSectionData.name,
       sectionType: newSectionData.type,
-      customPrompt: newSectionData.prompt,
+      customPrompt: undefined,
       isDeleted: false
     };
 
     try {
       await draftApi.saveSectionPrompt(draftId, sectionId, newSection);
 
-      // Update local state
       const newItem = {
         id: sectionId,
         title: newSectionData.name,
         description: newSectionData.type,
-        defaultPrompt: newSectionData.prompt,
+        defaultPrompt: '',
         isCustom: true
       };
 
@@ -724,13 +719,8 @@ const DraftFormPage = () => {
         }
         return nextOrder;
       });
-      // Also update prompts map if provided
-      if (newSectionData.prompt) {
-        setSectionPrompts(prev => ({ ...prev, [sectionId]: newSectionData.prompt }));
-      }
-
       setShowAddSectionModal(false);
-      setNewSectionData({ name: '', type: 'clause', prompt: '' });
+      setNewSectionData({ name: '', type: 'clause' });
       addActivity('Orchestrator', `Added custom section: ${newSectionData.name}`, 'completed');
       toast.success('Section added');
     } catch (err) {
@@ -771,12 +761,6 @@ const DraftFormPage = () => {
         headerContent={
           <div className="flex items-center justify-between w-full">
             <div className="flex items-center gap-4">
-              <button
-                onClick={() => navigate('/draft-selection')}
-                className="p-2 hover:bg-slate-100 rounded-lg transition-all text-slate-400 hover:text-slate-600"
-              >
-                <ArrowLeftIcon className="w-5 h-5" />
-              </button>
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-lg font-bold text-slate-800 tracking-tight">
@@ -804,7 +788,12 @@ const DraftFormPage = () => {
               </div>
             </div>
 
-            {/* Removed Save Progress Button */}
+            <button
+              onClick={() => navigate('/draft-selection')}
+              className="px-3 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg border border-slate-200 transition-all"
+            >
+              Exit
+            </button>
           </div>
         }
       >
@@ -1058,7 +1047,6 @@ const DraftFormPage = () => {
                       return orderedSections.map((section) => {
                         const isDeleted = deletedSections.has(section.id);
                         if (!isDeleted) activeNumber++;
-                        const currentPrompt = sectionPrompts[section.id] ?? section.defaultPrompt ?? '';
 
                         return (
                           <Reorder.Item
@@ -1114,19 +1102,7 @@ const DraftFormPage = () => {
                                 </div>
                               </div>
 
-                              {!isDeleted && (
-                                <div className="ml-9 space-y-1.5">
-                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">
-                                    Instructions for AI Agent
-                                  </label>
-                                  <textarea
-                                    value={currentPrompt}
-                                    onChange={(e) => handlePromptChange(section.id, e.target.value)}
-                                    className="w-full bg-slate-50 border-2 border-slate-100 rounded-xl p-3 text-sm font-medium text-slate-700 min-h-[70px] focus:bg-white focus:border-[#21C1B6] focus:ring-0 transition-all resize-none"
-                                    placeholder="Enter specific instructions for this section..."
-                                  />
-                                </div>
-                              )}
+                              {/* Section prompts are backend-only and sent to LLM at generation time - not shown or editable on frontend */}
                             </div>
                           </Reorder.Item>
                         );
@@ -1193,13 +1169,14 @@ const DraftFormPage = () => {
             </div>
           )}
 
-          {/* STEP 5: REVIEW */}
+          {/* STEP 5: REVIEW - no outer scrollbar; only inner section preview scrolls */}
           {currentStep === 5 && (
-            <div className="animate-slideIn h-full overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="animate-slideIn h-full overflow-hidden flex flex-col">
               <SectionDraftingPage
                 draftIdProp={draftId}
                 addActivity={addActivity}
-                onAssembleComplete={() => {
+                onAssembleComplete={(response) => {
+                  setLastAssembleResult(response);
                   setCurrentStep(6);
                 }}
                 onBack={() => setCurrentStep(3)}
@@ -1215,6 +1192,7 @@ const DraftFormPage = () => {
                 addActivity={addActivity}
                 onBack={() => setCurrentStep(3)}
                 onToggleEditor={(active) => setIsGoogleDocsActive(active)}
+                initialAssembleResult={lastAssembleResult}
               />
             </div>
           )}
@@ -1288,16 +1266,7 @@ const DraftFormPage = () => {
                   <option value="definitions">Definitions</option>
                 </select>
               </div>
-              <div>
-                <label className="block text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Instruction Prompt</label>
-                <textarea
-                  value={newSectionData.prompt}
-                  onChange={e => setNewSectionData({ ...newSectionData, prompt: e.target.value })}
-                  rows={3}
-                  className="w-full px-3 py-2.5 bg-slate-50 border-2 border-slate-200 rounded-xl focus:bg-white focus:ring-[#21C1B6] focus:border-[#21C1B6] outline-none transition-all"
-                  placeholder="Describe what should be in this section..."
-                />
-              </div>
+              {/* Prompts are backend-only - sent to LLM at generation time */}
             </div>
             <div className="px-6 py-4 bg-slate-50 flex justify-end gap-3 border-t border-slate-100">
               <button

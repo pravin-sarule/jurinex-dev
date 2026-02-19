@@ -144,9 +144,9 @@ const DraftingLayout = ({
                     </div>
                 </header>
 
-                {/* Scrollable Content */}
+                {/* Scrollable Content - wider when agent activity is closed so section shows at A4 paper width */}
                 <div className="flex-1 overflow-y-auto custom-scrollbar relative">
-                    <div className="max-w-6xl mx-auto p-8 h-full">
+                    <div className={`mx-auto p-8 h-full ${isActivityOpen ? 'max-w-6xl' : 'max-w-[min(100%,1200px)]'}`}>
                         {children}
                     </div>
                 </div>

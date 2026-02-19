@@ -1737,13 +1737,15 @@ const checkWebhookConfig = async (req, res) => {
 
 /**
  * POST /api/drafts/finish-assembled
- * Complete the assembly process by saving the final DOCX to GCS and Drive
+ * Complete the assembly process by saving the final DOCX to GCS and Drive.
+ * If existing_google_file_id is provided (e.g. after section edits), updates that doc
+ * so the same Google Doc URL shows the latest content.
  * This is called by the Assembler agent (agent-draft-service)
  */
 const saveAssembledDraft = async (req, res) => {
   try {
     const userId = parseInt(req.headers['x-user-id'] || req.user?.id);
-    const { title, draft_id: agentDraftId } = req.body;
+    const { title, draft_id: agentDraftId, existing_google_file_id } = req.body;
     const file = req.file;
 
     if (!file) {
@@ -1757,29 +1759,82 @@ const saveAssembledDraft = async (req, res) => {
 
     const { uploadToUserDriveAsGoogleDoc } = require('../services/fileUploadService');
     const { getAuthorizedClient } = require('../utils/oauth2Client');
+    const { google } = require('googleapis');
+    const { Readable } = require('stream');
 
-    // Get authorized client for the user
     const userOAuthClient = await getAuthorizedClient(userId);
+    const drive = google.drive({ version: 'v3', auth: userOAuthClient });
 
-    const result = await uploadToUserDriveAsGoogleDoc(
-      file.buffer,
-      userId,
-      `${title || 'Assembled_Draft'}.docx`,
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      title,
-      userOAuthClient
-    );
+    let googleFileId;
+    let result;
 
-    // Step 4: Save to generated_documents table for versioning (if agentDraftId is provided)
+    const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+    if (existing_google_file_id && String(existing_google_file_id).trim() !== '') {
+      console.log(`[Draft] 🔄 UPDATING existing Google Doc: ${existing_google_file_id}`);
+      try {
+        const fileStream = Readable.from(file.buffer);
+        await drive.files.update({
+          fileId: String(existing_google_file_id).trim(),
+          media: {
+            mimeType: docxMime,
+            body: fileStream
+          },
+          fields: 'id, name, mimeType, webViewLink'
+        });
+        googleFileId = existing_google_file_id.trim();
+        console.log(`[Draft] ✅ Successfully UPDATED existing Google Doc: ${googleFileId}`);
+
+        const Draft = require('../models/Draft');
+        const existingDraft = await Draft.findByGoogleFileId(googleFileId);
+        if (existingDraft) {
+          await Draft.update(existingDraft.id, {
+            last_synced_at: new Date(),
+            title: title || existingDraft.title
+          });
+          result = {
+            draft: {
+              id: existingDraft.id,
+              google_file_id: googleFileId,
+              gcs_path: existingDraft.gcs_path,
+              title: title || existingDraft.title
+            }
+          };
+        } else {
+          result = { draft: { google_file_id: googleFileId, title: title || 'Assembled_Draft' } };
+        }
+      } catch (updateError) {
+        console.error(`[Draft] ❌ Failed to update existing file ${existing_google_file_id}:`, updateError.message);
+        console.log(`[Draft] 🔄 Falling back to creating new file`);
+        result = await uploadToUserDriveAsGoogleDoc(
+          file.buffer,
+          userId,
+          `${title || 'Assembled_Draft'}.docx`,
+          docxMime,
+          title,
+          userOAuthClient
+        );
+        googleFileId = result.draft.google_file_id;
+      }
+    } else {
+      console.log(`[Draft] ✨ CREATING new Google Doc`);
+      result = await uploadToUserDriveAsGoogleDoc(
+        file.buffer,
+        userId,
+        `${title || 'Assembled_Draft'}.docx`,
+        docxMime,
+        title,
+        userOAuthClient
+      );
+      googleFileId = result.draft.google_file_id;
+    }
+
     if (agentDraftId) {
       try {
         const pool = require('../config/db');
-
-        // Get next version number
         const versionQuery = 'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM generated_documents WHERE draft_id = $1';
         const versionRes = await pool.query(versionQuery, [agentDraftId]);
         const nextVersion = versionRes.rows[0].next_version;
-
         const genDocQuery = `
           INSERT INTO generated_documents (document_id, draft_id, version, is_final, generated_at, file_size, file_name, file_path, file_type)
           VALUES (gen_random_uuid(), $1, $2, $3, NOW(), $4, $5, $6, $7)
@@ -1788,13 +1843,12 @@ const saveAssembledDraft = async (req, res) => {
         const genDocValues = [
           agentDraftId,
           nextVersion,
-          true, // mark as final for now
+          true,
           file.size,
           `${title || 'Assembled_Draft'}.docx`,
-          result.draft.gcs_path,
+          result.draft.gcs_path || '',
           'docx'
         ];
-
         await pool.query(genDocQuery, genDocValues);
         console.log(`[Draft] ✅ Saved to generated_documents. Version: ${nextVersion}`);
       } catch (dbError) {
@@ -1802,14 +1856,15 @@ const saveAssembledDraft = async (req, res) => {
       }
     }
 
-    console.log(`[Draft] ✅ Assembled draft finished. Google File ID: ${result.draft.google_file_id}`);
+    console.log(`[Draft] ✅ Assembled draft finished. Google File ID: ${googleFileId}`);
 
     res.status(200).json({
       success: true,
-      message: 'Draft assembled and saved successfully',
-      googleFileId: result.draft.google_file_id,
-      iframeUrl: `https://docs.google.com/document/d/${result.draft.google_file_id}/edit?embedded=true`,
-      draft: result.draft
+      message: existing_google_file_id ? 'Draft updated successfully' : 'Draft assembled and saved successfully',
+      googleFileId,
+      iframeUrl: `https://docs.google.com/document/d/${googleFileId}/edit?embedded=true`,
+      draft: result.draft,
+      updated: !!(existing_google_file_id && String(existing_google_file_id).trim())
     });
 
   } catch (error) {

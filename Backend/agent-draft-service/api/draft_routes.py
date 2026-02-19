@@ -175,24 +175,9 @@ async def get_draft(
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
         
-        # Get field data (saved form state)
+        # Merged field values (autopopulated + draft) so form and Drafter get complete data
         field_data = draft_db.get_draft_field_data_for_retrieve(draft_id, user_id)
-        draft_field_values = (field_data.get("field_values") or {}) if field_data else {}
-        
-        # Merge autopopulated values (InjectionAgent) so attach-case / upload autofill shows
-        template_id = draft.get("template_id")
-        if template_id:
-            agent_row = draft_db.get_existing_user_field_values(
-                str(template_id), user_id, draft_session_id=draft_id
-            )
-            if agent_row and agent_row.get("field_values"):
-                agent_values = agent_row["field_values"]
-                # Agent values as base; saved draft values override (user edits take precedence)
-                merged = dict(agent_values)
-                for k, v in draft_field_values.items():
-                    if v is not None and str(v).strip() != "":
-                        merged[k] = v
-                draft_field_values = merged
+        draft_field_values = draft_db.get_merged_field_values_for_draft(draft_id, user_id)
         
         return {
             "success": True,
@@ -206,6 +191,29 @@ async def get_draft(
         raise
     except Exception as e:
         logger.exception(f"[get_draft] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/drafts/{draft_id}/template-css")
+async def get_draft_template_css(
+    draft_id: str,
+    user_id: int = Depends(require_user_id),
+) -> Dict[str, Any]:
+    """Return template CSS for the draft's template so section preview can match assembled format (A4, alignment)."""
+    try:
+        draft = draft_db.get_user_draft(draft_id=draft_id, user_id=user_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        template_id = str(draft.get("template_id") or "")
+        if not template_id:
+            return {"success": True, "template_css": None}
+        row = draft_db.get_template_css(template_id)
+        css_content = (row.get("css_content") or "").strip() if row else None
+        return {"success": True, "template_css": css_content or None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[get_draft_template_css] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -403,8 +411,10 @@ async def get_draft_section_prompts_db(
                         elif isinstance(prompts_list, dict):
                             default_prompt = (prompts_list.get("prompt") or "").strip()
                         break
-            row["default_prompt"] = default_prompt
-            row["section_intro"] = section_intro
+            # Prompts stay backend-only - not sent to frontend (fetched from DB and sent to LLM at generation time)
+            row["default_prompt"] = ""
+            row["custom_prompt"] = ""
+            row["section_intro"] = ""
             out.append(row)
         return {"success": True, "prompts": out}
     except Exception as e:

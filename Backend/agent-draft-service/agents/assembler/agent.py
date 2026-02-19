@@ -18,9 +18,10 @@ ASSEMBLY_ONLY_CHAR_THRESHOLD = 150_000  # ~40-50 pages
 ASSEMBLY_ONLY_SECTION_THRESHOLD = 8
 
 
+# Structural-only styles: do not set font/size/alignment so section content keeps exact template format
 A4_PAGE_STYLE = """<style type="text/css">
 @page { size: A4; margin: 2.54cm; }
-.document-section { font-family: "Times New Roman", Times, serif; margin-bottom: 0; }
+.document-section { margin-bottom: 0; }
 .page-break { page-break-before: always; break-before: page; height: 0; overflow: hidden; }
 @media print {
   .page-break { page-break-before: always; display: block; height: 0; margin: 0; padding: 0; }
@@ -29,16 +30,22 @@ A4_PAGE_STYLE = """<style type="text/css">
 </style>"""
 
 
-def _procedural_assembly(sections: list, template_url: str = None) -> str:
+def _procedural_assembly(sections: list, template_url: str = None, template_css: str = None) -> str:
     """
-    Combine sections procedurally without AI. Reference template format; output HTML.
+    Combine sections procedurally without AI. Preserves exact format of each section's
+    generated content (alignment, indentation, fonts from template).
     Uses A4 page size and proper page breaks. Supports documents of any size (500+ pages).
-    Strips citations from each section so the assembled document (preview, Google Docs, DOCX)
-    does not show citation lists or source references.
+    When template_css is provided, it is embedded in the output so the preview shows
+    the same format as the section-generated content.
+    Strips citations from each section so the assembled document does not show citation lists.
     """
     from services.assembled_doc_clean import strip_citations_for_assembled
 
-    parts = [A4_PAGE_STYLE]
+    parts = []
+    # Embed template CSS first so preview uses exact same styles as section view (format preservation)
+    if (template_css or "").strip():
+        parts.append("<style type=\"text/css\">\n" + template_css.strip() + "\n</style>")
+    parts.append(A4_PAGE_STYLE)
     for i, s in enumerate(sections):
         s_key = s.get("key", "section")
         s_content = (s.get("content", "") or "").strip()
@@ -92,20 +99,21 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.warning("Assembler: Template URL unreachable: %s", e)
 
-    # Always use procedural assembly: combine sections, reference template, no AI generation
-    # Supports documents up to 500+ pages without token/rate limits
-    final_document = _procedural_assembly(sections, template_url)
+    # Always use procedural assembly: combine sections, preserve exact section format in preview
+    template_css_raw = (payload.get("template_css") or "").strip() or None
+    final_document = _procedural_assembly(sections, template_url, template_css=template_css_raw)
     if use_assembly_only:
         logger.info("Assembler: Large document (%d sections, ~%d chars) assembled", len(sections), total_chars)
 
-    # Optional: Convert to DOCX and upload to Drafting Service (same format as Word download)
+    # Convert the same final_document to DOCX and upload so Google Docs / iframe matches the preview exactly
     upload_result = {}
     try:
         import io
         from services.docx_export import assembled_html_to_docx_bytes
 
-        logger.info("Assembler: Converting final HTML to DOCX (%d parts)", len(final_document.split("<!-- SECTION_BREAK -->")))
-        docx_bytes = assembled_html_to_docx_bytes(final_document)
+        template_css = template_css_raw
+        logger.info("Assembler: Converting final HTML to DOCX (%d parts, template_css=%s, template_url=%s)", len(final_document.split("<!-- SECTION_BREAK -->")), "yes" if template_css else "no", "yes" if template_url else "no")
+        docx_bytes = assembled_html_to_docx_bytes(final_document, template_css=template_css, template_url=template_url)
         doc_io = io.BytesIO(docx_bytes)
         doc_io.seek(0)
 

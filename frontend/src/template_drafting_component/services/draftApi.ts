@@ -213,10 +213,33 @@ export const draftApi = {
     ): Promise<Blob> => {
         const response = await api.post(
             `/drafts/${draftId}/export/docx`,
-            { html_content: htmlContent, css_content: cssContent || '' },
+            { html_content: htmlContent, template_css: cssContent || undefined, css_content: cssContent || '' },
             { responseType: 'blob', timeout: 300000 }
         );
-        return response.data as Blob;
+        const blob = response.data as Blob;
+        if (!(blob instanceof Blob) || blob.size === 0) {
+            throw new Error('Export returned no data');
+        }
+        if (blob.type === 'application/json' || (blob.size < 500 && blob.type.startsWith('text/'))) {
+            const text = await blob.text();
+            let msg = 'Export failed';
+            try {
+                const json = JSON.parse(text);
+                msg = json.detail || json.message || json.error || msg;
+            } catch {
+                if (text.length < 300) msg = text;
+            }
+            throw new Error(msg);
+        }
+        return blob;
+    },
+
+    /**
+     * Get template CSS for a draft (for section preview A4/format)
+     */
+    getTemplateCss: async (draftId: string): Promise<{ success: boolean; template_css?: string | null }> => {
+        const response = await api.get<{ success: boolean; template_css?: string | null }>(`/drafts/${draftId}/template-css`);
+        return response.data;
     },
 
     /**

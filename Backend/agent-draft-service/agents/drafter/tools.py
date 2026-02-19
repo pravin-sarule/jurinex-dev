@@ -184,23 +184,31 @@ def draft_section(
 **Instructions:** Generate ONLY new continuation content. Use only relevant chunks. Match template format (Times New Roman, CSS indent). Use proper word and line spacing (line-height, paragraph margin). Format tables with proper <table>/<tr>/<td>; do not show sources or [Source: ...] in content. Fill placeholders from Field Data and RAG; court name, petitioner name, respondent name must never be empty. Return ONLY new HTML; no markdown.
 """
         elif user_feedback and previous_content:
-            # Refinement: preserve structure; respect detail level; only accurate.
-            prompt = f"""Refine the section "{section_key}" based on user feedback. Use only the chunks relevant to this section from the context below. What to add and format come from System Instructions and TEMPLATE HTML FOR THIS SECTION ONLY. Fill empty fields from Field Data (from DB) first, then RAG.
+            # Refinement: TARGETED EDIT ONLY — change only what the user asked to add/change; leave everything else identical.
+            prompt = f"""You are making a TARGETED EDIT to the section "{section_key}". The user has given an instruction to add or change something specific. Your job is to change ONLY that part (the specific line, paragraph, or clause the user refers to) and leave ALL other content EXACTLY as in the Previous Content below.
 
-**Previous Content:**
+**CRITICAL — MINIMAL EDIT RULES:**
+1. Change ONLY what the user's instruction asks for (e.g. "add X in paragraph 2", "change the rent amount to Y", "make clause 5 more formal"). Do NOT rewrite, rephrase, or alter any other part of the document.
+2. Copy the Previous Content in full, then apply the minimal change: edit only the relevant line(s), paragraph(s), or clause(s). Every other paragraph, heading, and table must remain character-for-character identical where not affected by the instruction.
+3. Do NOT regenerate the whole section. Do NOT improve or reword other parts. Do NOT change formatting, structure, or content that the user did not ask to change.
+4. Preserve the exact HTML structure, tags, classes, and inline styles everywhere. Only the text/content inside the specific element(s) that the user's instruction targets may change.
+5. If the user asks to "add" something, add it only where they said (e.g. in that paragraph or after that line); leave the rest unchanged.
+6. Output the COMPLETE section HTML (so the frontend can replace the whole section), but with only the minimal edit applied — like a surgical patch, not a full rewrite.
+
+**Previous Content (full section — change only the part the user asks for):**
 {previous_content}
 
-**User Feedback:**
+**User instruction (apply ONLY this change; leave everything else as in Previous Content):**
 {user_feedback}
 
-**Context (RAG) — use only relevant chunks:**
+**Context (RAG) — use only if the user's instruction needs facts/figures from context:**
 {rag_context if rag_context else 'No additional context.'}
 
-**Field Data (from DB — use to fill empty fields/placeholders):**
+**Field Data (from DB — use only to fill values if the user's instruction refers to a placeholder):**
 {field_values}
 
 **Detail level:** {length_instruction}
-**Instructions:** Update content per feedback. Preserve HTML structure, classes, styling. Use proper word and line spacing. Keep tables properly formatted (<table>, <tr>, <td>). Do not include source references or [Source: ...] in the content. Replace placeholders from Field Data or RAG; court name, petitioner name, respondent name must never be empty. Return ONLY the HTML content; no markdown.
+**Instructions:** Apply the user's instruction as a minimal, targeted edit. Return the full section HTML with only that change. Preserve all other text and HTML exactly. No markdown; raw HTML only.
 """
         else:
             # Generation: respect user detail option (detailed=long, concise=moderate, short=short); only accurate.
@@ -216,7 +224,7 @@ def draft_section(
 **Retrieved Context (RAG) — use ONLY chunks relevant to this section; ignore the rest:**
 {rag_context if rag_context else 'No specific context.'}
 
-**Field Data (from DB — use this to fill ALL empty fields and placeholders first):**
+**Field Data (from DB — merged from autopopulation + draft; use in this and every section to fill ALL fields):**
 {field_values}
 
 **Detail level (user choice — follow strictly):** {length_instruction}

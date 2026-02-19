@@ -31,8 +31,8 @@ router = APIRouter(prefix="/api", tags=["sections"])
 
 def _invalidate_assembled_cache(draft_id: str, user_id: int):
     """
-    Invalidate the assembled document cache when sections are modified.
-    This ensures the next assembly will regenerate the document.
+    Invalidate the assembled document cache when sections are modified (Edit Content or Update with prompt).
+    Next Assemble will create a NEW Google Doc so the iframe shows the updated content (not the previous doc).
     """
     import json
     try:
@@ -41,7 +41,6 @@ def _invalidate_assembled_cache(draft_id: str, user_id: int):
             metadata = field_data.get("metadata", {})
             if "assembled_cache" in metadata:
                 del metadata["assembled_cache"]
-                
                 with draft_db.get_draft_conn() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
@@ -52,7 +51,7 @@ def _invalidate_assembled_cache(draft_id: str, user_id: int):
                             """,
                             (json.dumps(metadata), draft_id),
                         )
-                logger.info(f"[CACHE INVALIDATED] Cleared assembled cache for draft {draft_id}")
+                logger.info(f"[CACHE INVALIDATED] Cleared assembled cache for draft {draft_id}; next Assemble will create new Google Doc.")
     except Exception as e:
         logger.warning(f"Failed to invalidate cache for draft {draft_id}: {e}")
 
@@ -99,16 +98,8 @@ async def generate_section(
             raise HTTPException(status_code=404, detail="Draft not found")
         
         template_id = draft.get("template_id")
-        field_values = draft.get("field_values", {})
-        # Merge template_user_field_values (form/template user fields table) so court name, petitioner, respondent, etc. are never empty
-        if template_id:
-            agent_row = draft_db.get_existing_user_field_values(str(template_id), user_id, draft_session_id=draft_id)
-            if agent_row and agent_row.get("field_values"):
-                merged = dict(agent_row["field_values"])
-                for k, v in field_values.items():
-                    if v is not None and str(v).strip() != "":
-                        merged[k] = v
-                field_values = merged
+        # Merged field_values (autopopulated + draft) so Drafter gets all data in every section; no [] or blank placeholders
+        field_values = draft_db.get_merged_field_values_for_draft(draft_id, user_id)
 
         # Resolve template URL for multimodal visual reference (from template_assets table)
         if not template_url and template_id:
@@ -523,17 +514,8 @@ async def refine_section_endpoint(
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
         
-        field_values = draft.get("field_values", {})
         template_id = draft.get("template_id")
-        # Merge template_user_field_values so court name, petitioner, respondent, etc. are never empty
-        if template_id:
-            agent_row = draft_db.get_existing_user_field_values(str(template_id), user_id, draft_session_id=draft_id)
-            if agent_row and agent_row.get("field_values"):
-                merged = dict(agent_row["field_values"])
-                for k, v in field_values.items():
-                    if v is not None and str(v).strip() != "":
-                        merged[k] = v
-                field_values = merged
+        field_values = draft_db.get_merged_field_values_for_draft(draft_id, user_id)
 
         # Resolve template URL for multimodal visual reference (from template_assets table)
         if not template_url and template_id:
@@ -779,16 +761,16 @@ async def update_section_version(
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
         
-        # Update the version content
+        # Update by version_id + draft_id only (section_key in URL is for routing; version is unique)
         with draft_db.get_draft_conn() as conn:
             with conn.cursor(cursor_factory=draft_db.RealDictCursor) as cur:
-                # First verify the version exists and belongs to this draft/section
+                # Verify the version exists and belongs to this draft (no section_key match required)
                 cur.execute(
                     """
                     SELECT version_id FROM section_versions
-                    WHERE version_id = %s AND draft_id = %s AND LOWER(TRIM(section_key)) = LOWER(TRIM(%s))
+                    WHERE version_id = %s AND draft_id = %s
                     """,
-                    (version_id, draft_id, section_key),
+                    (version_id, draft_id),
                 )
                 existing = cur.fetchone()
                 
@@ -808,11 +790,11 @@ async def update_section_version(
                             '{manually_edited}',
                             'true'::jsonb
                         )
-                    WHERE version_id = %s
+                    WHERE version_id = %s AND draft_id = %s
                     RETURNING version_id, draft_id, section_key, version_number, 
                               content_html, is_active, created_at
                     """,
-                    (content_html, version_id),
+                    (content_html, version_id, draft_id),
                 )
                 updated_version = cur.fetchone()
                 conn.commit()

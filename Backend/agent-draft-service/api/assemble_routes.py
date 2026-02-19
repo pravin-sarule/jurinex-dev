@@ -44,12 +44,16 @@ async def assemble_document(
         
         template_id = str(draft["template_id"])
         
-        # 2. Get all active sections for this draft
+        # 2. Get all active sections for this draft (may have multiple versions per section; we want latest)
         all_sections = draft_db.get_all_active_sections(draft_id, user_id)
-        # Case-insensitive lookup for frontend section_id (e.g. "Prayer") vs stored section_key (e.g. "prayer")
+        # Case-insensitive lookup; keep FIRST (latest) version per section since list is ordered by version_number DESC
         def _norm(s: str) -> str:
             return (s or "").strip().lower().replace(" ", "_")
-        sections_map = {_norm(s["section_key"]): s for s in all_sections}
+        sections_map = {}
+        for s in all_sections:
+            k = _norm(s["section_key"])
+            if k not in sections_map:
+                sections_map[k] = s
         ordered_sections = []
         
         for section_id in section_ids:
@@ -119,7 +123,7 @@ async def assemble_document(
         
         logger.info(f"[CACHE MISS] Sections changed or no cache found, reassembling draft {draft_id}")
         
-        # 6. Get template asset (URL)
+        # 6. Get template asset (URL) and template CSS (so Google Docs/DOCX match static preview)
         primary_asset = draft_db.get_template_primary_asset(template_id)
         template_url = None
         if primary_asset:
@@ -127,21 +131,24 @@ async def assemble_document(
                 primary_asset["gcs_bucket"],
                 primary_asset["gcs_path"]
             )
+        template_css_row = draft_db.get_template_css(template_id)
+        css_content = template_css_row.get("css_content") if template_css_row else None
         
         # 7. Run Orchestrator with Assembler
         orchestrator = get_orchestrator(ingestion_only=False, retrieve_only=False)
         
-        # Get existing Google File ID from cache (if available) to update same document
-        existing_google_file_id = cached_metadata.get("google_file_id")
+        # Get existing Google File ID so we update the same doc (not create new) after edits
+        existing_google_file_id = cached_metadata.get("google_file_id") or metadata.get("last_google_file_id")
         
         assemble_payload = {
             "draft_id": draft_id,
             "user_id": user_id,
             "template_id": template_id,
             "template_url": template_url,
+            "template_css": css_content,
             "field_values": draft.get("field_values", {}),
             "sections": sections_data,
-            "existing_google_file_id": existing_google_file_id  # Pass to update existing doc
+            "existing_google_file_id": existing_google_file_id
         }
         
         if existing_google_file_id:
@@ -162,9 +169,10 @@ async def assemble_document(
         # Ensure assembled document never contains citations (preview, Google Docs, DOCX)
         final_doc = strip_citations_for_assembled(final_doc) if final_doc else final_doc
 
-        # 8. Get template CSS
-        template_css = draft_db.get_template_css(template_id)
-        css_content = template_css.get("css_content") if template_css else None
+        # 8. Use same template CSS for response and cache (already fetched above)
+        if css_content is None:
+            template_css = draft_db.get_template_css(template_id)
+            css_content = template_css.get("css_content") if template_css else None
         
         # 9. Cache the assembled document
         assembly_metadata = {
@@ -237,9 +245,22 @@ async def export_to_docx(
     html_content = body.get("html_content")
     if not html_content:
         raise HTTPException(status_code=400, detail="No html_content provided for export")
+    template_css = body.get("template_css") or body.get("css_content")
+    template_url = body.get("template_url")
+    if not template_url and draft_id:
+        try:
+            draft = draft_db.get_user_draft(draft_id, user_id)
+            if draft:
+                template_id = str(draft.get("template_id") or "")
+                if template_id:
+                    primary_asset = draft_db.get_template_primary_asset(template_id)
+                    if primary_asset and primary_asset.get("gcs_bucket") and primary_asset.get("gcs_path"):
+                        template_url = generate_signed_url(primary_asset["gcs_bucket"], primary_asset["gcs_path"])
+        except Exception as e:
+            logger.warning("Export DOCX: could not resolve template_url for draft %s: %s", draft_id, e)
 
     try:
-        docx_bytes = assembled_html_to_docx_bytes(html_content)
+        docx_bytes = assembled_html_to_docx_bytes(html_content, template_css=template_css, template_url=template_url)
         file_stream = io.BytesIO(docx_bytes)
         file_stream.seek(0)
 

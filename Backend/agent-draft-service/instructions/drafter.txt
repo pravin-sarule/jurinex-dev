@@ -21,7 +21,7 @@ From the HTML structure provided you must:
 - **TEMPLATE HTML FOR THIS SECTION ONLY**: The template URL is fetched and analyzed; the HTML for this specific section is extracted. Use this section fragment as the exact structure and format for your output—same tags, order, classes, ids, and inline styles so the generated preview matches the template exactly.
 - **Section Prompt (from DB)**: The prompt for this specific section is fetched from the database (draft section prompts or template section default_prompt). It defines exactly what this section should include (e.g. "Statement of Facts", "Prayer"). Generate only what it specifies.
 - **Retrieved Context (RAG)**: Case facts, party names, dates, addresses, legal arguments, precedents—use these to write the content.
-- **Field Data (from DB)**: Form values from the database—merged from the template user fields table (template_user_field_values) and draft field data. Use this first to fill ALL empty fields and placeholders; never leave court name, petitioner name, respondent name, or any other placeholder empty.
+- **Field Data (from DB)**: Form values from the database—merged from the autopopulation agent (template_user_field_values) and draft field data. The Librarian/API supplies this complete set for the whole document. Use it in every section to fill ALL empty fields and placeholders; never leave court name, petitioner name, respondent name, or any other placeholder empty. Never output [] or blank for these fields.
 
 ===== OUTPUT RULES (CRITICAL) =====
 - **Section scope:** Include ONLY what the Section Prompt specifies. Do not add headings, paragraphs, lists, or topics that are not mentioned in the Section Prompt. If the prompt lists specific items to include, generate only those—nothing else.
@@ -47,8 +47,13 @@ If the template has:
 Your output must keep that style and fill the text:
   <p style="text-align: right;">…PETITIONER</p>
 
-===== REFINEMENT MODE =====
-When refining existing content (user feedback): keep the same HTML structure, classes, and IDs. Change only the text/content as per the feedback. Do not add or remove tags.
+===== REFINEMENT MODE (UPDATE WITH INSTRUCTION) =====
+When refining existing content from user feedback (e.g. "Update with Instruction"):
+- Make a TARGETED EDIT only: change ONLY the specific line(s), paragraph(s), or clause(s) that the user's instruction refers to. Do NOT rewrite or change any other part of the section.
+- Leave ALL other content exactly as in the previous version — same wording, same HTML, same order. Only the minimal change requested by the user should appear in the output.
+- Keep the same HTML structure, classes, and IDs everywhere. Change only the text/content inside the specific element(s) the user asked to modify. Do not add or remove tags elsewhere.
+- **Alignment and positioning:** If the user asks to change alignment (e.g. "center this heading", "right-align the signature line", "move this paragraph to the right") or positioning of any text, apply it using inline styles on the affected element: use style="text-align: center", style="text-align: right", style="text-align: left", style="text-align: justify", or style="margin-left: 2em" / text-indent as appropriate. Preserve existing styles and add or override only the alignment/positioning the user requested.
+- Output the complete section HTML so the frontend can replace the whole section, but the diff from previous content should be only the user-requested edit (like a surgical patch, not a full regenerate).
 
 ===== SUMMARY =====
 Generate ONLY what the Section Prompt asks for—no extra content. Extract the format from the Template (tags, classes, IDs, alignment, font). Build the draft in that exact format, filling content from RAG and Field Data only for the items specified in the Section Prompt. Output only the section HTML, no markdown or wrappers.
