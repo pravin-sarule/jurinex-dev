@@ -14,6 +14,27 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="User Template Analyser Agent")
 
+# CORS must be added FIRST so it wraps all responses (including errors) and handles preflight OPTIONS
+_cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "https://jurinex-dev.netlify.app",
+    "https://nexintel.netlify.app",
+]
+_extra = os.environ.get("CORS_ORIGINS", "").strip()
+if _extra:
+    _cors_origins.extend(o.strip() for o in _extra.split(",") if o.strip())
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https://.*\.netlify\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 class RequestLogMiddleware(BaseHTTPMiddleware):
     """Log every incoming request so activity is visible in console."""
@@ -28,30 +49,7 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
         print(f"[Template Analyzer] <<< {method} {path} -> {response.status_code}", flush=True)
         return response
 
-
 app.add_middleware(RequestLogMiddleware)
-
-# Add CORS middleware (explicit origins required when allow_credentials=True)
-_cors_origins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-    "https://jurinex-dev.netlify.app",
-    "https://nexintel.netlify.app",
-]
-# Allow extra origins from env (comma-separated)
-_extra = os.environ.get("CORS_ORIGINS", "").strip()
-if _extra:
-    _cors_origins.extend(o.strip() for o in _extra.split(",") if o.strip())
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
 
 # Tables are created by migrations / Backend; we do not run create_all to avoid schema conflicts.
 @app.on_event("startup")
