@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import axios from 'axios';
 import { Reorder } from "framer-motion";
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -609,28 +608,18 @@ const DraftFormPage = () => {
     setOrderedSections(newOrder);
     if (draftId) {
       const orderIds = newOrder.map(s => s.id);
-      const token = localStorage.getItem('token');
-      // Fire and forget - silent save to ensure persistence
-      axios.post(
-        `http://localhost:8000/api/drafts/${draftId}/sections/order`,
-        { sectionIds: orderIds },
-        { headers: { Authorization: `Bearer ${token}` } }
-      ).catch(err => console.warn('Order auto-save failed', err));
+      // Fire and forget - silent save to ensure persistence (uses agent-draft-service)
+      draftApi.saveSectionOrder(draftId, orderIds).catch(err => console.warn('Order auto-save failed', err));
     }
   };
 
   const handleFinalizeDraft = async () => {
     if (!draftId) return;
 
-    // Save order
+    // Save order (uses agent-draft-service)
     try {
-      const token = localStorage.getItem('token');
       const orderIds = orderedSections.map(s => s.id);
-      await axios.post(
-        `http://localhost:8000/api/drafts/${draftId}/sections/order`,
-        { sectionIds: orderIds },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      await draftApi.saveSectionOrder(draftId, orderIds);
     } catch (err) { console.warn("Saving order failed", err); }
 
     setIsFinalizing(true);
@@ -707,15 +696,10 @@ const DraftFormPage = () => {
 
       setOrderedSections(prev => {
         const nextOrder = [...prev, newItem];
-        // Auto-save the new order immediately to ensure the new item has a sort_order in DB
+        // Auto-save the new order immediately (uses agent-draft-service)
         if (draftId) {
           const orderIds = nextOrder.map(s => s.id);
-          const token = localStorage.getItem('token');
-          axios.post(
-            `http://localhost:8000/api/drafts/${draftId}/sections/order`,
-            { sectionIds: orderIds },
-            { headers: { Authorization: `Bearer ${token}` } }
-          ).catch(err => console.warn('Order update failed after add', err));
+          draftApi.saveSectionOrder(draftId, orderIds).catch(err => console.warn('Order update failed after add', err));
         }
         return nextOrder;
       });

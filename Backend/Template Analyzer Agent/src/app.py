@@ -1,7 +1,8 @@
+import os
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-import logging
 from .routers import analysis
 from .database import engine, Base
 # Import all models to register them with Base.metadata
@@ -30,13 +31,26 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestLogMiddleware)
 
-# Add CORS middleware
+# Add CORS middleware (explicit origins required when allow_credentials=True)
+_cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "https://jurinex-dev.netlify.app",
+    "https://nexintel.netlify.app",
+]
+# Allow extra origins from env (comma-separated)
+_extra = os.environ.get("CORS_ORIGINS", "").strip()
+if _extra:
+    _cors_origins.extend(o.strip() for o in _extra.split(",") if o.strip())
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all origins for dev
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Tables are created by migrations / Backend; we do not run create_all to avoid schema conflicts.
