@@ -31,6 +31,8 @@ const getOAuth2Client = () => {
  * Initiate Google Drive OAuth flow
  * GET /google/drive
  */
+const STATE_DELIMITER = '___';
+
 const initiateAuth = async (req, res) => {
   try {
     const userId = req.userId;
@@ -39,6 +41,11 @@ const initiateAuth = async (req, res) => {
       return res.status(401).json({ message: 'User not authenticated' });
     }
 
+    const returnTo = req.query.returnTo;
+    const state = returnTo && typeof returnTo === 'string' && returnTo.startsWith('/')
+      ? `${userId}${STATE_DELIMITER}${returnTo}`
+      : userId.toString();
+
     const oauth2Client = getOAuth2Client();
     
     // Generate authorization URL
@@ -46,7 +53,7 @@ const initiateAuth = async (req, res) => {
       access_type: 'offline',
       scope: SCOPES,
       prompt: 'consent', // Force consent screen to get refresh token
-      state: userId.toString() // Include user ID in state for security
+      state // userId or userId___returnTo
     });
 
     res.json({ authUrl });
@@ -103,7 +110,11 @@ const handleCallbackGet = async (req, res) => {
       return res.redirect(`${frontendUrl}/auth/google/drive/callback?error=no_state`);
     }
 
-    const userId = parseInt(state);
+    const delimiterIndex = state.indexOf(STATE_DELIMITER);
+    const userIdStr = delimiterIndex >= 0 ? state.slice(0, delimiterIndex) : state;
+    const returnTo = delimiterIndex >= 0 ? state.slice(delimiterIndex + STATE_DELIMITER.length) : null;
+
+    const userId = parseInt(userIdStr);
     if (!userId || isNaN(userId)) {
       console.error('[GoogleDrive] Invalid state parameter:', state);
       return res.redirect(`${frontendUrl}/auth/google/drive/callback?error=invalid_state`);
@@ -145,8 +156,9 @@ const handleCallbackGet = async (req, res) => {
 
     console.log('[GoogleDrive] ✅ Tokens stored successfully for user:', userId);
 
-    // Redirect to frontend with success
-    res.redirect(`${frontendUrl}/auth/google/drive/callback?success=true`);
+    // Redirect to frontend with success; include returnTo so user goes back to assembled preview
+    const returnParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : '';
+    res.redirect(`${frontendUrl}/auth/google/drive/callback?success=true${returnParam}`);
   } catch (error) {
     console.error('[GoogleDrive] Error handling callback (GET):', error);
     console.error('[GoogleDrive] Error details:', {

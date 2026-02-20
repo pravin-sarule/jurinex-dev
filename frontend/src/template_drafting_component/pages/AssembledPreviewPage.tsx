@@ -203,7 +203,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
             const status = await googleDriveApi.getConnectionStatus();
             if (!status.connected) {
                 if (window.confirm('Google Drive is not connected. Connect now to enable sharing?')) {
-                    const authRes = await googleDriveApi.initiateAuth();
+                    const authRes = await googleDriveApi.initiateAuth(window.location.pathname);
                     if (authRes.authUrl) {
                         // Redirect to authorize, then user will be sent back
                         window.location.href = authRes.authUrl;
@@ -439,7 +439,8 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                         type="button"
                         onClick={async () => {
                             try {
-                                const authRes = await googleDriveApi.initiateAuth();
+                                const returnTo = window.location.pathname;
+                                const authRes = await googleDriveApi.initiateAuth(returnTo);
                                 if (authRes?.authUrl) {
                                     window.location.href = authRes.authUrl;
                                 } else {

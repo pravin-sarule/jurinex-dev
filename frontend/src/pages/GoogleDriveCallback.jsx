@@ -31,6 +31,8 @@ const GoogleDriveCallback = () => {
         setStatus('success');
         toast.success('Google Drive connected successfully!');
 
+        const returnTo = searchParams.get('returnTo');
+
         // If opened as popup, send success message to parent window
         if (window.opener) {
           window.opener.postMessage({
@@ -40,9 +42,10 @@ const GoogleDriveCallback = () => {
           // Close popup after short delay
           setTimeout(() => window.close(), 1500);
         } else {
-          // If not a popup, redirect to dashboard or previous page
+          // If not a popup, redirect to returnTo (e.g. assembled preview) or dashboard
+          const targetPath = returnTo && returnTo.startsWith('/') ? returnTo : '/dashboard';
           setTimeout(() => {
-            navigate('/dashboard', { replace: true });
+            navigate(targetPath, { replace: true });
           }, 1500);
         }
         return;
@@ -89,9 +92,10 @@ const GoogleDriveCallback = () => {
             // Close popup after short delay
             setTimeout(() => window.close(), 1500);
           } else {
-            // If not a popup, redirect to dashboard or previous page
+            const returnTo = searchParams.get('returnTo');
+            const targetPath = returnTo && returnTo.startsWith('/') ? returnTo : '/dashboard';
             setTimeout(() => {
-              navigate('/dashboard', { replace: true });
+              navigate(targetPath, { replace: true });
             }, 1500);
           }
         } catch (err) {
@@ -147,7 +151,7 @@ const GoogleDriveCallback = () => {
             <p className="text-gray-400">
               {window.opener 
                 ? 'This window will close automatically...' 
-                : 'Redirecting to dashboard...'}
+                : 'Redirecting...'}
             </p>
           </>
         )}

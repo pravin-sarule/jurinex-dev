@@ -13,11 +13,13 @@ const googleDriveApi = {
   /**
    * Initiate Google Drive OAuth flow
    * Returns the authorization URL to redirect user to
+   * @param {string} [returnTo] - Path to redirect after success (e.g. /template-drafting/drafts/123/preview)
    */
-  initiateAuth: async () => {
+  initiateAuth: async (returnTo) => {
+    const params = returnTo && returnTo.startsWith('/') ? { returnTo } : {};
     const response = await axios.get(
       GOOGLE_DRIVE_AUTH_URL,
-      { headers: getAuthHeader() }
+      { headers: getAuthHeader(), params }
     );
     return response.data;
   },
