@@ -16,7 +16,27 @@ import axios, { AxiosError } from 'axios';
 import { Logger } from '../utils/logger';
 import type { TemplateListItem } from '../types';
 import type { UploadTemplateResponse } from './types';
-import { getUserIdForDrafting } from '../../../config/apiConfig';
+
+/** Get user id for X-User-Id header (Template Analyzer requires it). */
+function getUserIdForDrafting(): string | null {
+    try {
+        const userStr = localStorage.getItem('user') || localStorage.getItem('userInfo');
+        if (userStr) {
+            const parsed = JSON.parse(userStr);
+            const id = parsed?.id ?? parsed?.userId ?? parsed?.user_id;
+            if (id != null) return String(id);
+        }
+        const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
+        if (token) {
+            const payload = JSON.parse(atob(token.split('.')[1] || '{}'));
+            const id = payload?.id ?? payload?.userId ?? payload?.user_id ?? payload?.sub;
+            if (id != null) return String(id);
+        }
+    } catch {
+        // ignore
+    }
+    return null;
+}
 
 // Template Analyzer Agent: drafting-agents Cloud Run - /analysis/templates, /analysis/upload-template, etc.
 const ANALYZER_API_BASE =
