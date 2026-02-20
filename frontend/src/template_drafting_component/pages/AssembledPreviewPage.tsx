@@ -433,8 +433,8 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
             {/* Hint when Google Docs sync failed - only static preview available */}
             {documentHtml && !googleDocsInfo?.iframe_url && !googleDocsInfo?.google_file_id && (
                 <div className="fixed bottom-8 right-8 bg-amber-50 border border-amber-200 shadow-lg px-5 py-3 rounded-xl max-w-sm z-50">
-                    <p className="text-amber-800 text-sm font-medium">Static preview only. Google Docs embed unavailable.</p>
-                    <p className="text-amber-600 text-xs mt-1">Ensure drafting-service is deployed and DRAFTING_SERVICE_URL is set in agent-draft-service.</p>
+                    <p className="text-amber-800 text-sm font-medium">Showing static preview. Live Google Docs editor unavailable.</p>
+                    <p className="text-amber-600 text-xs mt-1">Connect your Google account in settings to enable the embedded editor, or use Download DOCX below.</p>
                 </div>
             )}
             {/* Floating Hint when in static view and we have Google Docs */}
