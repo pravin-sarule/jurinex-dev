@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { ArrowLeftIcon, ArrowDownTrayIcon, EyeIcon, ShareIcon } from '@heroicons/react/24/outline';
 import { draftApi } from '../services';
@@ -27,6 +27,7 @@ interface AssembledPreviewPageProps {
 
 export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draftIdProp, onBack, onToggleEditor, addActivity, initialAssembleResult }) => {
     const params = useParams<{ draftId: string }>();
+    const [searchParams] = useSearchParams();
     const draftId = draftIdProp || params.draftId;
     const navigate = useNavigate();
 
@@ -121,7 +122,8 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     addActivity('Assembler Agent', 'Compiling individual sections into final document format...', 'in-progress');
                 }
 
-                const response: any = await draftApi.assemble(draftId, activeSectionIds);
+                const forceReassemble = searchParams.get('googleConnected') === '1';
+                const response: any = await draftApi.assemble(draftId, activeSectionIds, forceReassemble);
 
                 if (response.success) {
                     if (addActivity) {
@@ -166,7 +168,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
         };
 
         loadAssembledDoc();
-    }, [draftId, navigate, draftIdProp, initialAssembleResult]);
+    }, [draftId, navigate, draftIdProp, initialAssembleResult, searchParams]);
 
 
     const handleDownloadDocx = async () => {
@@ -203,7 +205,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
             const status = await googleDriveApi.getConnectionStatus();
             if (!status.connected) {
                 if (window.confirm('Google Drive is not connected. Connect now to enable sharing?')) {
-                    const authRes = await googleDriveApi.initiateAuth(window.location.pathname);
+                    const authRes = await googleDriveApi.initiateAuth(window.location.pathname + (window.location.search || ''));
                     if (authRes.authUrl) {
                         // Redirect to authorize, then user will be sent back
                         window.location.href = authRes.authUrl;
@@ -439,7 +441,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                         type="button"
                         onClick={async () => {
                             try {
-                                const returnTo = window.location.pathname;
+                                const returnTo = window.location.pathname + (window.location.search || '');
                                 const authRes = await googleDriveApi.initiateAuth(returnTo);
                                 if (authRes?.authUrl) {
                                     window.location.href = authRes.authUrl;

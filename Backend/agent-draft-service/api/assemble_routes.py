@@ -26,6 +26,7 @@ async def assemble_document(
     draft_id: str,
     user_id: int = Depends(require_user_id),
     section_ids: List[str] = Body(..., embed=True),
+    force_reassemble: bool = Body(False, embed=True),
 ) -> Dict[str, Any]:
     """
     Assemble all generated sections into a final document using Orchestrator.
@@ -94,6 +95,7 @@ async def assemble_document(
         cached_metadata = cached_assembly.get("metadata", {})
         
         # 5. If hash matches and we have a valid Google Doc (if template used), return cached version
+        # force_reassemble: bypass cache (e.g. user just connected Google Drive and needs new Google Doc)
         is_google_doc_valid = True
         if template_id and cached_metadata:
             # If we expect a Google Doc but don't have an iframe_url or have an error, cache is invalid
@@ -101,7 +103,7 @@ async def assemble_document(
                 is_google_doc_valid = False
                 logger.info(f"[CACHE INVALID] Cached Google Doc for draft {draft_id} is missing or has error. Reassembling.")
 
-        if cached_hash == current_hash and cached_document and is_google_doc_valid:
+        if not force_reassemble and cached_hash == current_hash and cached_document and is_google_doc_valid:
             logger.info(f"[CACHE HIT] Returning cached assembled document for draft {draft_id}")
             # Ensure citations are never shown in preview/export (strip from cached doc too)
             final_document_clean = strip_citations_for_assembled(cached_document)

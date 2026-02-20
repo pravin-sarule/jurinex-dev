@@ -157,7 +157,10 @@ const handleCallbackGet = async (req, res) => {
     console.log('[GoogleDrive] ✅ Tokens stored successfully for user:', userId);
 
     // Redirect to frontend with success; include returnTo so user goes back to assembled preview
-    const returnParam = returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : '';
+    // Append googleConnected=1 so frontend can trigger re-assemble for Google Docs iframe
+    const returnParam = returnTo
+      ? `&returnTo=${encodeURIComponent(returnTo.includes('?') ? `${returnTo}&googleConnected=1` : `${returnTo}?googleConnected=1`)}`
+      : '';
     res.redirect(`${frontendUrl}/auth/google/drive/callback?success=true${returnParam}`);
   } catch (error) {
     console.error('[GoogleDrive] Error handling callback (GET):', error);

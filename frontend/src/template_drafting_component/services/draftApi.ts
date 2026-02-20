@@ -244,11 +244,12 @@ export const draftApi = {
 
     /**
      * Assemble final document (supports up to 500+ pages)
+     * @param forceReassemble - Bypass cache (e.g. after user connects Google Drive)
      */
-    assemble: async (draftId: string, sectionIds: string[]): Promise<{ success: boolean; final_document: string; template_css?: string }> => {
+    assemble: async (draftId: string, sectionIds: string[], forceReassemble?: boolean): Promise<{ success: boolean; final_document: string; template_css?: string }> => {
         const response = await api.post<{ success: boolean; final_document: string; template_css?: string }>(
             `/drafts/${draftId}/assemble`,
-            { section_ids: sectionIds },
+            { section_ids: sectionIds, force_reassemble: !!forceReassemble },
             { timeout: 600000 }  // 10 min for large documents (500+ pages)
         );
         return response.data;
