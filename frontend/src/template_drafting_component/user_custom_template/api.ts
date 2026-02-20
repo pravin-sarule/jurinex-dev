@@ -1,28 +1,27 @@
 /**
  * Template Drafting Component - Custom Template API Service
- * Handles interactions with the User Template Analyzer Agent (via Gateway).
+ * Handles interactions with the User Template Analyzer Agent (drafting-agents Cloud Run).
  *
- * Backend: Template Analyzer Agent (e.g. port 5017)
- *   - GET  /analysis/templates          → list user templates (requires x-user-id from Gateway)
+ * Backend: Template Analyzer Agent - https://drafting-agents-120280829617.asia-south1.run.app
+ *   - GET  /analysis/templates          → list user templates (requires X-User-Id header)
  *   - POST /analysis/upload-template    → Form: name, category, subcategory?, description?, file, image?
  *   - GET  /analysis/template/{id}      → template details
  *   - PUT  /analysis/template/{id}      → JSON: template_name?, description?, category?, sub_category?
  *   - DELETE /analysis/template/{id}
  *
- * Gateway: /api/template-analysis/* → proxies to Analyzer with x-user-id from JWT.
- * Frontend must send Authorization: Bearer <token> so Gateway can inject x-user-id.
+ * Frontend sends Authorization: Bearer <token> and X-User-Id (from getUserIdForDrafting).
  */
 
 import axios, { AxiosError } from 'axios';
 import { Logger } from '../utils/logger';
 import type { TemplateListItem } from '../types';
 import type { UploadTemplateResponse } from './types';
+import { getUserIdForDrafting } from '../../../config/apiConfig';
 
-const GATEWAY_BASE =
-    (import.meta.env?.VITE_APP_GATEWAY_URL as string) ||
-    (import.meta.env?.VITE_APP_API_URL as string) ||
-    'https://gateway-service-120280829617.asia-south1.run.app';
-const ANALYZER_API_BASE = `${GATEWAY_BASE}/api/template-analysis`;
+// Template Analyzer Agent: drafting-agents Cloud Run - /analysis/templates, /analysis/upload-template, etc.
+const ANALYZER_API_BASE =
+    (import.meta.env?.VITE_APP_TEMPLATE_ANALYZER_URL as string) ||
+    'https://drafting-agents-120280829617.asia-south1.run.app/analysis';
 
 function getAuthToken(): string | null {
     return (
@@ -52,9 +51,13 @@ analyzerClient.interceptors.request.use(
         if (token) {
             config.headers.Authorization = `Bearer ${token}`;
         }
+        const userId = getUserIdForDrafting();
+        if (userId) {
+            config.headers['X-User-Id'] = userId;
+        }
         console.log(
             `[Custom Template API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`,
-            { hasAuth: !!token }
+            { hasAuth: !!token, hasXUserId: !!userId }
         );
         return config;
     },

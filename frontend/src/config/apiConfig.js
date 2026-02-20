@@ -30,16 +30,17 @@ export const DRAFTING_SERVICE_URL =
   import.meta.env.VITE_DRAFTING_SERVICE_URL ||
   'https://drafting-service-120280829617.asia-south1.run.app';
 
-// Agent-draft service: templates, drafts, fields, sections, autopopulation (API_POSTMAN.md)
-// Route through gateway to avoid 404; gateway proxies /api/drafting-templates/* to drafting template service
+// Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
+// Direct: all-drafting-agent Cloud Run - GET /api/templates, POST /api/drafts, etc.
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  `${GATEWAY_URL}/api/drafting-templates`;
+  'https://all-drafting-agent-120280829617.asia-south1.run.app';
 
-// Template Analyzer (user upload templates): via Gateway (API_DOCUMENTATION.md)
-// Full base: GATEWAY_URL + '/api/template-analysis' → POST /upload-template, GET /templates, GET /template/:id, etc.
+// Template Analyzer (user upload templates): User Template Analyzer Agent
+// Direct: drafting-agents Cloud Run - GET /analysis/templates, POST /analysis/upload-template, GET /analysis/template/:id
 export const TEMPLATE_ANALYZER_API_BASE =
-  import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL || `${GATEWAY_URL}/api/template-analysis`;
+  import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
+  'https://drafting-agents-120280829617.asia-south1.run.app/analysis';
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).
