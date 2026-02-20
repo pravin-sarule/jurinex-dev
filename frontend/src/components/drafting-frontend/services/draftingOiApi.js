@@ -12,8 +12,10 @@
  * - GET  /drafting/oi/:draftId/download
  */
 
+import { DRAFTING_SERVICE_URL } from '../../../config/apiConfig';
+
 const DRAFTING_API_BASE =
-    import.meta.env.VITE_DRAFTING_API_URL || "http://localhost:5000/api/drafting";
+    import.meta.env.VITE_DRAFTING_API_URL || DRAFTING_SERVICE_URL;
 
 /**
  * Get JWT token from localStorage

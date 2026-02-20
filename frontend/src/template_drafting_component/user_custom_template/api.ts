@@ -21,7 +21,7 @@ import type { UploadTemplateResponse } from './types';
 const GATEWAY_BASE =
     (import.meta.env?.VITE_APP_GATEWAY_URL as string) ||
     (import.meta.env?.VITE_APP_API_URL as string) ||
-    'http://localhost:5000';
+    'https://gateway-service-120280829617.asia-south1.run.app';
 const ANALYZER_API_BASE = `${GATEWAY_BASE}/api/template-analysis`;
 
 function getAuthToken(): string | null {

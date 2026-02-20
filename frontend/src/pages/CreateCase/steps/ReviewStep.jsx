@@ -530,7 +530,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
   
       console.log("Creating case with request body:", requestBody);
   
-      const response = await fetch("http://localhost:5000/docs/create", {
+      const response = await fetch(`${DOCS_BASE_URL}/create`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
