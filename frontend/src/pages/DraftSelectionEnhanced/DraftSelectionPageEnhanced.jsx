@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -34,6 +34,7 @@ const LIST_DRAFTS_TIMEOUT_MS = 8000; // Stop waiting so user isn't stuck when ba
 
 const DraftSelectionPageEnhanced = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [isConnecting, setIsConnecting] = useState(false);
   const [isCreatingDraft, setIsCreatingDraft] = useState(false);
   const [recentDrafts, setRecentDrafts] = useState([]);
@@ -230,7 +231,7 @@ const DraftSelectionPageEnhanced = () => {
               See all
             </button>
           </div>
-          <TemplateWizardGallery onTemplateClick={handleTemplateClick} />
+          <TemplateWizardGallery key={location.key} onTemplateClick={handleTemplateClick} />
         </div>
 
         {/* Recent drafts – latest drafts */}

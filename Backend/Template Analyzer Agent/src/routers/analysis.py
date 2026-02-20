@@ -23,31 +23,6 @@ doc_ai = DocumentAIService()
 async def analysis_root():
     return {"status": "active", "service": "User Template Analysis API", "endpoints": ["/templates", "/upload-template"]}
 
-def _template_to_dict(t: UserTemplate) -> dict:
-    """Build a JSON-serializable dict from UserTemplate; avoid mutating ORM and handle signed URL safely."""
-    image_url = t.image_url
-    if image_url and str(image_url).startswith("gs://"):
-        try:
-            image_url = doc_ai.generate_signed_url(image_url)
-        except Exception as e:
-            logger.warning(f"Failed to generate signed URL for template {t.template_id}: {e}")
-            image_url = None
-    return {
-        "template_id": str(t.template_id),
-        "template_name": t.template_name,
-        "category": t.category,
-        "sub_category": t.sub_category,
-        "language": t.language,
-        "status": t.status,
-        "description": t.description,
-        "user_id": t.user_id,
-        "image_url": image_url,
-        "file_url": t.file_url,
-        "created_at": t.created_at.isoformat() if t.created_at else None,
-        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
-    }
-
-
 @router.get("/templates")
 async def get_user_templates(
     status: Optional[str] = None,
@@ -67,19 +42,18 @@ async def get_user_templates(
     logger.info(f"Fetching templates for user_id: {user_id_int}, status filter: {status}")
     print(f"[Template Analyzer] GET /templates for user_id={user_id_int}, status={status}", flush=True)
     
-    try:
-        query = select(UserTemplate).where(UserTemplate.user_id == user_id_int)
-        if status and status.strip().lower() == "finalized":
-            query = query.where(UserTemplate.status == "finalized")
-        result = await db.execute(query)
-        templates = list(result.scalars().all())
-    except Exception as e:
-        logger.error(f"Database error in get_user_templates: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch templates")
+    query = select(UserTemplate).where(UserTemplate.user_id == user_id_int)
+    if status and status.strip().lower() == "finalized":
+        query = query.where(UserTemplate.status == "finalized")
+    result = await db.execute(query)
+    templates = list(result.scalars().all())
+    
+    for t in templates:
+        if t.image_url and t.image_url.startswith("gs://"):
+            t.image_url = doc_ai.generate_signed_url(t.image_url)
 
-    out = [_template_to_dict(t) for t in templates]
-    print(f"[Template Analyzer] GET /templates returning {len(out)} templates", flush=True)
-    return out
+    print(f"[Template Analyzer] GET /templates returning {len(templates)} templates", flush=True)
+    return templates
 
 @router.delete("/template/{template_id}")
 async def delete_template(

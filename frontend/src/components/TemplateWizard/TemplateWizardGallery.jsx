@@ -199,9 +199,10 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
           )}
 
           {isLoading ? (
-            [1, 2, 3, 4].map((i) => (
-              <div key={i} className="template-wizard-gallery__skeleton" />
-            ))
+            <div className="flex flex-col items-center justify-center gap-3 py-8 px-4 min-w-[200px]">
+              <div className="animate-spin rounded-full h-10 w-10 border-2 border-gray-200 border-t-[#21C1B6]" aria-hidden="true" />
+              <p className="text-sm font-medium text-gray-500">Loading templates…</p>
+            </div>
           ) : templates.length === 0 ? (
             <div className="flex items-center px-4 text-gray-500 text-sm">
               No templates available.

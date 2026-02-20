@@ -1,8 +1,7 @@
 import os
 import logging
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from .routers import analysis
 from .database import engine, Base
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="User Template Analyser Agent")
 
-# CORS must be added FIRST so it wraps all responses (including 5xx errors) and handles preflight OPTIONS
+# CORS must be added FIRST so it wraps all responses (including errors) and handles preflight OPTIONS
 _cors_origins = [
     "http://localhost:5173",
     "http://localhost:3000",
@@ -23,7 +22,6 @@ _cors_origins = [
     "http://127.0.0.1:3000",
     "https://jurinex-dev.netlify.app",
     "https://nexintel.netlify.app",
-    "https://jurinex.netlify.app",
 ]
 _extra = os.environ.get("CORS_ORIGINS", "").strip()
 if _extra:
@@ -37,16 +35,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Return JSON 500 with a safe message so the response still gets CORS headers from middleware."""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "message": str(exc)},
-    )
 
 class RequestLogMiddleware(BaseHTTPMiddleware):
     """Log every incoming request so activity is visible in console."""
