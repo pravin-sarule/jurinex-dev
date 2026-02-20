@@ -139,6 +139,11 @@ const DraftFormPage = () => {
   const [isGoogleDocsActive, setIsGoogleDocsActive] = useState(false);
   const [lastAssembleResult, setLastAssembleResult] = useState(null);
 
+  // Clear lastAssembleResult when draft changes so new draft's preview loads correctly
+  useEffect(() => {
+    setLastAssembleResult(null);
+  }, [draftId]);
+
   // Agent activity feed mock/state
   const [activities, setActivities] = useState([
     {

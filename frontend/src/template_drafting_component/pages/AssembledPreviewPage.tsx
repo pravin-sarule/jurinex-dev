@@ -51,9 +51,14 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
         }
     }, [showGoogleDocs, onToggleEditor]);
 
-    // Reset "already opened" when draft changes so a new assembly opens in Google Docs
+    // Reset state when draft changes so we don't show previous draft's content
     useEffect(() => {
         hasOpenedGoogleDocsRef.current = false;
+        setDocumentHtml('');
+        setTemplateCss('');
+        setGoogleDocsInfo(null);
+        setShowGoogleDocs(false);
+        setLoading(true);
     }, [draftId]);
 
     // Open in new tab only when we have a synced file but no iframe (so we show iframe by default when available)
@@ -76,12 +81,16 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
             };
             const fid = rawInfo.google_file_id ?? rawInfo.googleFileId;
             if (fid || rawInfo.iframe_url || rawInfo.iframeUrl) {
-                const iframeUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit?embedded=true` : undefined);
+                let baseUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit` : '');
+                if (baseUrl && !baseUrl.includes('embedded=true')) {
+                    baseUrl += baseUrl.includes('?') ? '&embedded=true' : '?embedded=true';
+                }
+                const iframeUrl = baseUrl ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}cb=${Date.now()}` : undefined;
                 setGoogleDocsInfo({
                     ...rawInfo,
                     iframe_url: iframeUrl,
                     google_file_id: fid,
-                    iframeKey: rawInfo.updated ? Date.now() : Date.now()
+                    iframeKey: Date.now()
                 });
                 setShowGoogleDocs(true);
             }
@@ -130,7 +139,11 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
 
                     if (rawInfo.iframeUrl || rawInfo.iframe_url || rawInfo.googleFileId || rawInfo.google_file_id) {
                         const fid = rawInfo.google_file_id ?? rawInfo.googleFileId;
-                        const iframeUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit?embedded=true` : undefined);
+                        let baseUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit` : '');
+                        if (baseUrl && !baseUrl.includes('embedded=true')) {
+                            baseUrl += baseUrl.includes('?') ? '&embedded=true' : '?embedded=true';
+                        }
+                        const iframeUrl = baseUrl ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}cb=${Date.now()}` : undefined;
                         const normalizedInfo = {
                             ...rawInfo,
                             iframe_url: iframeUrl,
