@@ -33,15 +33,26 @@ class UserProfessionalProfile {
     return profile;
   }
 
+  static ALLOWED_COLUMNS = new Set([
+    'is_profile_completed', 'preferred_tone', 'preferred_detail_level', 'citation_style',
+    'perspective', 'typical_client', 'highlights_in_summary', 'organization_name',
+    'primary_role', 'experience', 'primary_jurisdiction', 'main_areas_of_practice',
+    'organization_type', 'bar_enrollment_number'
+  ]);
+
   static async update(userId, fields) {
     const setClauses = [];
     const values = [];
     let paramIndex = 1;
 
     for (const key in fields) {
-      if (fields[key] !== undefined) {
-        setClauses.push(`${key} = $${paramIndex}`);
-        values.push(fields[key] === null ? null : fields[key]);
+      if (fields[key] !== undefined && this.ALLOWED_COLUMNS.has(key)) {
+        setClauses.push(`"${key}" = $${paramIndex}`);
+        let val = fields[key] === null ? null : fields[key];
+        if (Array.isArray(val) || (typeof val === 'object' && val !== null)) {
+          val = JSON.stringify(val);
+        }
+        values.push(val);
         paramIndex++;
       }
     }

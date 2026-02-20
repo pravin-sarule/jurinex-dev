@@ -912,6 +912,9 @@ const getProfessionalProfile = async (req, res) => {
 
 
 const updateProfessionalProfile = async (req, res) => {
+  if (!req.user || !req.user.id) {
+    return res.status(401).json({ type: "status", message: "Authentication required" });
+  }
   const userId = req.user.id;
 
   const {
@@ -1010,9 +1013,12 @@ const updateProfessionalProfile = async (req, res) => {
 
   } catch (error) {
     console.error("❌ Error updating profile:", error);
+    const message = process.env.NODE_ENV === 'development'
+      ? (error.message || 'Internal server error')
+      : 'Failed to update professional profile. Please try again.';
     res.status(500).json({
       type: "status",
-      message: "Internal server error",
+      message,
     });
   }
 };
