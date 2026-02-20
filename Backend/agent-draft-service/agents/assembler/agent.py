@@ -117,7 +117,10 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         doc_io = io.BytesIO(docx_bytes)
         doc_io.seek(0)
 
-        DRAFTING_SERVICE_URL = os.environ.get("DRAFTING_SERVICE_URL", "http://localhost:5005")
+        # In Cloud Run, use production drafting-service if not set (K_SERVICE is set by Cloud Run)
+        DRAFTING_SERVICE_URL = os.environ.get("DRAFTING_SERVICE_URL") or (
+            "https://drafting-service-120280829617.asia-south1.run.app" if os.environ.get("K_SERVICE") else "http://localhost:5005"
+        )
         existing_google_file_id = payload.get("existing_google_file_id")
         files = {
             "file": (
