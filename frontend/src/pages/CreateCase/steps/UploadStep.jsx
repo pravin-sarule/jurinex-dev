@@ -28,7 +28,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   const [jurisdictions, setJurisdictions] = useState([]);
   const [subTypes, setSubTypes] = useState([]);
   
-  const API_BASE_URL = "http://localhost:5002/api/content";
+  const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
   
   // Fetch dropdown options on component mount
   useEffect(() => {

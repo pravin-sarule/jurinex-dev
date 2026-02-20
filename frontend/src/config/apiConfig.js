@@ -31,9 +31,10 @@ export const DRAFTING_SERVICE_URL =
   'https://drafting-service-120280829617.asia-south1.run.app';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (API_POSTMAN.md)
+// Route through gateway to avoid 404; gateway proxies /api/drafting-templates/* to drafting template service
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'https://drafting-agents-120280829617.asia-south1.run.app';
+  `${GATEWAY_URL}/api/drafting-templates`;
 
 // Template Analyzer (user upload templates): via Gateway (API_DOCUMENTATION.md)
 // Full base: GATEWAY_URL + '/api/template-analysis' → POST /upload-template, GET /templates, GET /template/:id, etc.
@@ -68,7 +69,7 @@ export const DOCS_BASE_URL = `${GATEWAY_URL}/docs`;
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 // For direct service access (if needed, but prefer gateway)
-export const DOCUMENT_SERVICE_DIRECT = import.meta.env.VITE_DOCUMENT_SERVICE_URL || 'http://localhost:5002';
+export const DOCUMENT_SERVICE_DIRECT = import.meta.env.VITE_DOCUMENT_SERVICE_URL || 'https://document-service-120280829617.asia-south1.run.app';
 export const CONTENT_SERVICE_DIRECT = `${DOCUMENT_SERVICE_DIRECT}/api/content`;
 
 // Export default object for convenience
