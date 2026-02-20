@@ -1,4 +1,8 @@
-"""Application entry point for Jurynex-AI orchestrator."""
+"""Application entry point for Jurynex-AI orchestrator.
+
+- For HTTP/ASGI (uvicorn, Cloud Run): use `main:app` → FastAPI from api.app
+- For CLI: run `python main.py` → interactive orchestrator
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 from dotenv import load_dotenv
+
+# Re-export for uvicorn/ASGI: uvicorn main:app
+from api.app import app  # noqa: E402
 
 from agents.orchestrator.agent import OrchestratorAgent, OrchestratorConfig
 from agents.orchestrator.flow_controller import AgentName, FlowController
