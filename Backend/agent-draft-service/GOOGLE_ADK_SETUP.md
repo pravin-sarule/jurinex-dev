@@ -85,7 +85,7 @@ DOCUMENT_AI_LOCATION=us
 #### Test with Mock Mode (No API calls)
 
 ```bash
-JURYNEX_MODE=mock python main.py
+JURYNEX_MODE=mock python orchestrator_cli.py
 ```
 
 Enter test input when prompted. This uses mock responses for all agents.
@@ -93,7 +93,7 @@ Enter test input when prompted. This uses mock responses for all agents.
 #### Test with Google ADK
 
 ```bash
-python main.py
+python orchestrator_cli.py
 ```
 
 This will:

@@ -209,10 +209,10 @@ client = ADKClient(
 )
 ```
 
-Or use the `MockADKClient` from `main.py`:
+Or use the `MockADKClient` from `orchestrator_cli.py`:
 
 ```bash
-JURYNEX_MODE=mock python main.py
+JURYNEX_MODE=mock python orchestrator_cli.py
 ```
 
 ## Cost Optimization

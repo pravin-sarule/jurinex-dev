@@ -640,7 +640,7 @@ JWT_SECRET=your-secret
 
 ### ADK Client Configuration
 
-In `main.py` or service initialization:
+In `orchestrator_cli.py` or service initialization:
 
 ```python
 adk_client = ADKClient(
