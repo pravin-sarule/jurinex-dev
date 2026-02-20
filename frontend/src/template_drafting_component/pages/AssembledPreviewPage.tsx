@@ -432,9 +432,27 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
 
             {/* Hint when Google Docs sync failed - only static preview available */}
             {documentHtml && !googleDocsInfo?.iframe_url && !googleDocsInfo?.google_file_id && (
-                <div className="fixed bottom-8 right-8 bg-amber-50 border border-amber-200 shadow-lg px-5 py-3 rounded-xl max-w-sm z-50">
+                <div className="fixed bottom-8 right-8 bg-amber-50 border border-amber-200 shadow-lg px-5 py-4 rounded-xl max-w-sm z-50">
                     <p className="text-amber-800 text-sm font-medium">Showing static preview. Live Google Docs editor unavailable.</p>
-                    <p className="text-amber-600 text-xs mt-1">Connect your Google account in settings to enable the embedded editor, or use Download DOCX below.</p>
+                    <p className="text-amber-600 text-xs mt-1 mb-3">Connect Google Drive to embed the document, or use Download DOCX below.</p>
+                    <button
+                        type="button"
+                        onClick={async () => {
+                            try {
+                                const authRes = await googleDriveApi.initiateAuth();
+                                if (authRes?.authUrl) {
+                                    window.location.href = authRes.authUrl;
+                                } else {
+                                    toast.error('Could not start Google Drive connection');
+                                }
+                            } catch (e) {
+                                toast.error('Failed to connect Google Drive');
+                            }
+                        }}
+                        className="w-full px-4 py-2 bg-[#4285F4] hover:bg-[#3367D6] text-white text-sm font-semibold rounded-lg transition-colors"
+                    >
+                        Connect Google Drive
+                    </button>
                 </div>
             )}
             {/* Floating Hint when in static view and we have Google Docs */}
