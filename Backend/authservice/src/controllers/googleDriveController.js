@@ -41,8 +41,21 @@ const initiateAuth = async (req, res) => {
       return res.status(401).json({ message: 'User not authenticated' });
     }
 
-    const returnTo = req.query.returnTo;
-    const state = returnTo && typeof returnTo === 'string' && returnTo.startsWith('/')
+    let returnTo = req.query.returnTo;
+    if (returnTo && typeof returnTo === 'string') {
+      if (!returnTo.startsWith('/')) {
+        try {
+          const decoded = Buffer.from(
+            returnTo.replace(/-/g, '+').replace(/_/g, '/'),
+            'base64'
+          ).toString('utf8');
+          if (decoded.startsWith('/')) returnTo = decoded;
+        } catch (e) {
+          returnTo = null;
+        }
+      }
+    }
+    const state = returnTo && returnTo.startsWith('/')
       ? `${userId}${STATE_DELIMITER}${returnTo}`
       : userId.toString();
 

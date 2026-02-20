@@ -13,10 +13,20 @@ const googleDriveApi = {
   /**
    * Initiate Google Drive OAuth flow
    * Returns the authorization URL to redirect user to
-   * @param {string} [returnTo] - Path to redirect after success (e.g. /template-drafting/drafts/123/preview)
+   * @param {string} [returnTo] - Path to redirect after success (e.g. /draft-form/123?step=6)
+   * Uses base64url encoding to avoid query-string parsing issues with ? and & in returnTo.
    */
   initiateAuth: async (returnTo) => {
-    const params = returnTo && returnTo.startsWith('/') ? { returnTo } : {};
+    let params = {};
+    if (returnTo && typeof returnTo === 'string' && returnTo.startsWith('/')) {
+      try {
+        const b64 = btoa(unescape(encodeURIComponent(returnTo)))
+          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        params = { returnTo: b64 };
+      } catch {
+        params = { returnTo };
+      }
+    }
     const response = await axios.get(
       GOOGLE_DRIVE_AUTH_URL,
       { headers: getAuthHeader(), params }
