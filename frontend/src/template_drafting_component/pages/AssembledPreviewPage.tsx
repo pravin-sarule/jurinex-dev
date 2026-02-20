@@ -130,10 +130,10 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
 
                     if (rawInfo.iframeUrl || rawInfo.iframe_url || rawInfo.googleFileId || rawInfo.google_file_id) {
                         const fid = rawInfo.google_file_id ?? rawInfo.googleFileId;
-                        const iframeUrl = rawInfo.iframe_url || rawInfo.iframeUrl;
+                        const iframeUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit?embedded=true` : undefined);
                         const normalizedInfo = {
                             ...rawInfo,
-                            iframe_url: iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit` : undefined),
+                            iframe_url: iframeUrl,
                             google_file_id: fid,
                             draft_id: rawInfo.draft?.id || rawInfo.draft_id || rawInfo.draftId,
                             iframeKey: rawInfo.updated ? Date.now() : (rawInfo.iframeKey ?? Date.now())
@@ -225,7 +225,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
     }
 
     return (
-        <div className="h-full bg-white flex flex-col print-root relative overflow-hidden">
+        <div className="h-full min-h-0 bg-white flex flex-col print-root relative overflow-hidden">
             {/* Inject template CSS */}
             {templateCss && <style dangerouslySetInnerHTML={{ __html: templateCss }} />}
 
@@ -368,14 +368,14 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                 </div>
             </header>
 
-            {/* Document Content */}
-            <div className={`w-full flex-1 relative ${!showGoogleDocs ? 'overflow-y-auto custom-scrollbar flex flex-col items-center p-6 bg-white' : 'overflow-hidden bg-white'}`}>
+            {/* Document Content - min-h-0 allows flex child to shrink so iframe gets proper height */}
+            <div className={`w-full flex-1 min-h-0 relative ${!showGoogleDocs ? 'overflow-y-auto custom-scrollbar flex flex-col items-center p-6 bg-white' : 'overflow-hidden bg-white flex flex-col'}`}>
                 {showGoogleDocs && googleDocsInfo?.iframe_url ? (
-                    <div className="w-full h-full animate-fadeIn relative flex flex-col bg-[#F8F9FA]">
+                    <div className="w-full flex-1 min-h-[400px] animate-fadeIn relative flex flex-col bg-[#F8F9FA]">
                         <iframe
                             key={googleDocsInfo.iframeKey ?? googleDocsInfo.google_file_id}
                             src={googleDocsInfo.iframe_url}
-                            className="w-full h-full border-none shadow-inner"
+                            className="flex-1 w-full min-h-[400px] border-none shadow-inner"
                             title="Google Docs Editor"
                             allow="autoplay; clipboard-write; encrypted-media"
                         />

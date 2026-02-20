@@ -1168,9 +1168,9 @@ const DraftFormPage = () => {
             </div>
           )}
 
-          {/* STEP 6: ASSEMBLY */}
+          {/* STEP 6: ASSEMBLY - h-full ensures iframe gets proper height when Google Docs shown */}
           {currentStep === 6 && (
-            <div className={`animate-slideIn h-full overflow-y-auto custom-scrollbar flex flex-col ${isGoogleDocsActive ? 'overflow-hidden' : ''}`}>
+            <div className={`animate-slideIn h-full flex flex-col min-h-0 ${isGoogleDocsActive ? 'overflow-hidden' : 'overflow-y-auto custom-scrollbar'}`}>
               <AssembledPreviewPage
                 draftIdProp={draftId}
                 addActivity={addActivity}
