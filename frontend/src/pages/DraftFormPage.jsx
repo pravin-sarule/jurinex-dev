@@ -138,6 +138,7 @@ const DraftFormPage = () => {
   const [newSectionData, setNewSectionData] = useState({ name: '', type: 'clause' });
   const [isGoogleDocsActive, setIsGoogleDocsActive] = useState(false);
   const [lastAssembleResult, setLastAssembleResult] = useState(null);
+  const [sectionsFinalizedAt, setSectionsFinalizedAt] = useState(0);
 
   // Clear lastAssembleResult when draft changes so new draft's preview loads correctly
   useEffect(() => {
@@ -645,6 +646,10 @@ const DraftFormPage = () => {
           sortOrder: index // Explicitly save current index as sortOrder
         });
       });
+      // Wait for all section config saves to complete before navigating so the next
+      // step shows the correct finalized sections without requiring a refresh
+      await Promise.all(savePromises);
+      setSectionsFinalizedAt(Date.now());
       addActivity('Orchestrator', 'Configuring document structure and language preferences.', 'completed');
       setCurrentStep(5);
     } catch (err) {
@@ -1162,6 +1167,7 @@ const DraftFormPage = () => {
           {currentStep === 5 && (
             <div className="animate-slideIn h-full overflow-hidden flex flex-col">
               <SectionDraftingPage
+                key={`section-draft-${draftId}-${sectionsFinalizedAt}`}
                 draftIdProp={draftId}
                 addActivity={addActivity}
                 onAssembleComplete={(response) => {
