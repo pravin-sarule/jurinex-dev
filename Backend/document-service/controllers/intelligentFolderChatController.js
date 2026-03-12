@@ -743,7 +743,8 @@ exports.intelligentFolderChat = async (req, res) => {
 
     const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(
       userId,
-      authorizationHeader
+      authorizationHeader,
+      { accountType: req.user?.account_type }
     );
 
     const isFreeUser = TokenUsageService.isFreePlan(plan);
@@ -1910,7 +1911,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     sendStatus('analyzing', 'Analyzing query intent...');
 
-    const { usage, plan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage, plan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const isFreeUser = TokenUsageService.isFreePlan(plan);
     if (isFreeUser) {

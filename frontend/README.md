@@ -10,3 +10,11 @@ Currently, two official plugins are available:
 ## Expanding the ESLint configuration
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+
+
+Original                   Replace With
+
+http://localhost:5000	gateway-service
+http://localhost:5002	document-service
+http://localhost:5017	drafting-agents (Template Analyzer)
+http://localhost:8000	all-drafting-agent (agent-draft-service: templates, drafts)

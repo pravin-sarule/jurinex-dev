@@ -24,6 +24,8 @@ import {
   saveTemplateUserFieldValues,
   attachCaseToDraft,
   uploadDocumentForDraft,
+  uploadDocumentsForDraft,
+  getDraftJobStatus,
   setUploadedFileNameInDraft,
   linkFileToDraft,
   renameDraft,
@@ -98,6 +100,7 @@ const DraftFormPage = () => {
   const skipNextAutoSaveRef = useRef(true);
   const hasUserEditedRef = useRef(false);
   const fieldValuesRef = useRef(fieldValues);
+  const fileInputRef = useRef(null);
   fieldValuesRef.current = fieldValues;
   const autopopulatePollRef = useRef(null);
 
@@ -107,7 +110,8 @@ const DraftFormPage = () => {
   const [selectedCaseId, setSelectedCaseId] = useState(null);
   const [attachCaseLoading, setAttachCaseLoading] = useState(false);
   const [uploadFileLoading, setUploadFileLoading] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState(null);
+  const [uploadedFileName, setUploadedFileName] = useState(null); // legacy single-name display
+  const [uploadedDocuments, setUploadedDocuments] = useState([]); // { name, status: 'uploading'|'success'|'failed', fileId? }[]
   const [attachedCaseTitle, setAttachedCaseTitle] = useState(null);
   const [isAutopopulatingFields, setIsAutopopulatingFields] = useState(false);
 
@@ -326,6 +330,24 @@ const DraftFormPage = () => {
             setAttachedCaseTitle(d.metadata?.case_title || `Case ${caseId}`);
           }
           setUploadedFileName(d.metadata?.uploaded_file_name ?? null);
+          // Restore uploaded documents list so user sees them after refresh
+          const names = d.metadata?.uploaded_file_names;
+          const ids = d.metadata?.uploaded_file_ids;
+          if (Array.isArray(names) && names.length > 0) {
+            setUploadedDocuments(
+              names.map((name, i) => ({
+                name: name || `Document ${i + 1}`,
+                status: 'success',
+                fileId: Array.isArray(ids) ? ids[i] : undefined,
+              }))
+            );
+          } else if (d.metadata?.uploaded_file_name) {
+            setUploadedDocuments([
+              { name: d.metadata.uploaded_file_name, status: 'success' },
+            ]);
+          } else {
+            setUploadedDocuments([]);
+          }
 
           if (d.updated_at) setLastSaved(new Date(d.updated_at));
         }
@@ -490,12 +512,14 @@ const DraftFormPage = () => {
   useEffect(() => {
     if (!draftId || !draft || loading) return;
     const hasCase = draft.metadata?.case_id || selectedCaseId;
-    const hasFile = uploadedFileName;
+    const hasFile = uploadedDocuments.length > 0
+      ? uploadedDocuments.some((d) => d.status === 'success')
+      : !!uploadedFileName;
     const fieldsEmpty = Object.keys(fieldValues).length === 0 || Object.values(fieldValues).every(v => v == null || String(v).trim() === '');
     if ((hasCase || hasFile) && fieldsEmpty && draft.template_id) {
       pollForAutopopulatedFields(draftId, String(draft.template_id));
     }
-  }, [draftId, draft?.template_id, draft?.metadata?.case_id, selectedCaseId, uploadedFileName, loading, fieldValues]);
+  }, [draftId, draft?.template_id, draft?.metadata?.case_id, selectedCaseId, uploadedFileName, uploadedDocuments, loading, fieldValues]);
 
   const handleSelectCase = async (e) => {
     const caseId = e.target.value;
@@ -519,35 +543,95 @@ const DraftFormPage = () => {
   };
 
   const handleFileUpload = async (e) => {
-    const file = e.target?.files?.[0];
-    if (!file) return;
+    const fileInput = e.target;
+    const files = fileInput?.files ? Array.from(fileInput.files) : [];
+    if (files.length === 0) return;
+    fileInput.value = ''; // reset so same file can be selected again
     setUploadFileLoading(true);
+    setUploadedDocuments(files.map((f) => ({ name: f.name, status: 'uploading' })));
+    const options = {
+      draftId: draftId || undefined,
+      caseId: selectedCaseId ? String(selectedCaseId) : undefined,
+      templateId: draft?.template_id ? String(draft.template_id) : undefined,
+    };
     try {
-      const res = await uploadDocumentForDraft(file, {
-        draftId: draftId || undefined,
-        caseId: selectedCaseId ? String(selectedCaseId) : undefined,
-        templateId: draft?.template_id ? String(draft.template_id) : undefined,
-      });
-      setUploadedFileName(file.name);
-
-      if (draftId) {
-        try { await setUploadedFileNameInDraft(draftId, file.name); } catch (e) { }
+      if (files.length === 1) {
+        const file = files[0];
+        const res = await uploadDocumentForDraft(file, options);
         const fileId = res?.file_id ?? res?.state?.file_id;
-        if (fileId) {
-          try { await linkFileToDraft(draftId, fileId, file.name); } catch (e) { }
+        setUploadedFileName(file.name);
+        setUploadedDocuments([{ name: file.name, status: 'success', fileId }]);
+        if (draftId) {
+          try { await setUploadedFileNameInDraft(draftId, file.name); } catch (e) { }
+          if (fileId) {
+            try { await linkFileToDraft(draftId, fileId, file.name); } catch (e) { }
+          }
+        }
+        addActivity('System', `Extracting facts and evidence from ${file.name}...`, 'completed');
+        toast.success('Document uploaded. Form fields will update as soon as they are ready.');
+      } else {
+        const res = await uploadDocumentsForDraft(files, options);
+        const draftJobId = res?.draft_job_id;
+        if (draftJobId) {
+          const waitForComplete = () =>
+            new Promise((resolve, reject) => {
+              const poll = async () => {
+                try {
+                  const status = await getDraftJobStatus(draftJobId);
+                  if (status.status === 'complete' || status.all_done) {
+                    resolve(status);
+                    return;
+                  }
+                  setTimeout(poll, 2000);
+                } catch (err) {
+                  reject(err);
+                }
+              };
+              poll();
+            });
+          const status = await waitForComplete();
+          const jobs = status.jobs || [];
+          const list = files.map((f, i) => ({
+            name: f.name,
+            status: jobs[i]?.status === 'finished' ? 'success' : 'failed',
+            fileId: jobs[i]?.file_id,
+          }));
+          setUploadedDocuments(list);
+          setUploadedFileName(`${list.filter((d) => d.status === 'success').length} of ${files.length} documents`);
+          const fileIds = status.file_ids || [];
+          if (draftId && fileIds.length) {
+            try { await setUploadedFileNameInDraft(draftId, `${fileIds.length} documents`); } catch (e) { }
+            for (let i = 0; i < fileIds.length; i++) {
+              try { await linkFileToDraft(draftId, fileIds[i], files[i]?.name || `Document ${i + 1}`); } catch (e) { }
+            }
+          }
+          addActivity('System', `Extracting facts from ${files.length} documents...`, 'completed');
+          const successCount = list.filter((d) => d.status === 'success').length;
+          const failCount = list.filter((d) => d.status === 'failed').length;
+          if (failCount === 0) {
+            toast.success(`${successCount} documents uploaded. Form fields will update as soon as they are ready.`);
+          } else {
+            toast.warning(`${successCount} uploaded, ${failCount} failed. Check document types (PDF, DOC, DOCX, TXT only).`);
+          }
+          if (draftId && draft?.template_id && successCount > 0) {
+            pollForAutopopulatedFields(draftId, String(draft.template_id));
+          }
+        } else {
+          setUploadedDocuments(files.map((f) => ({ name: f.name, status: 'failed' })));
+          toast.success(`${files.length} documents queued for upload.`);
         }
       }
-      addActivity('System', `Extracting facts and evidence from ${file.name}...`, 'completed');
-      toast.success('Document uploaded. Form fields will update as soon as they are ready.');
-      if (draftId && draft?.template_id) {
-        pollForAutopopulatedFields(draftId, String(draft.template_id));
-      }
     } catch (err) {
-      toast.error('Upload failed');
+      setUploadedDocuments((prev) => prev.map((d) => ({ ...d, status: 'failed' })));
+      toast.error(err?.message || 'Upload failed');
     } finally {
       setUploadFileLoading(false);
-      e.target.value = '';
     }
+  };
+
+  const openFilePicker = () => {
+    if (uploadFileLoading) return;
+    fileInputRef.current?.click();
   };
 
   const handleFieldChange = (fieldName, value) => {
@@ -858,33 +942,86 @@ const DraftFormPage = () => {
                     </div>
                   </div>
 
-                  {uploadedFileName ? (
-                    <div className="p-4 bg-[#21C1B6]/5 border border-[#21C1B6]/20 rounded-2xl flex items-center gap-4">
-                      <div className="w-10 h-10 bg-[#21C1B6] text-white rounded-xl flex items-center justify-center shadow-lg">
-                        <DocumentTextIcon className="w-6 h-6" />
+                  {/* File input always in DOM so change event is never lost */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={handleFileUpload}
+                    accept=".pdf,.docx,.doc,.txt"
+                    aria-label="Select documents"
+                  />
+                  {uploadedDocuments.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs text-[#19a096] font-bold uppercase">Uploaded documents</p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={openFilePicker}
+                            disabled={uploadFileLoading}
+                            className="text-xs font-medium text-[#21C1B6] hover:text-[#19a096] disabled:opacity-50"
+                          >
+                            Add more
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setUploadedDocuments([]); setUploadedFileName(null); }}
+                            className="text-slate-400 hover:text-red-500 transition-colors text-xs font-medium"
+                          >
+                            Clear all
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex-1 overflow-hidden">
-                        <p className="text-xs text-[#19a096] font-bold uppercase">Data Source</p>
-                        <p className="text-sm text-slate-900 truncate font-semibold">{uploadedFileName}</p>
-                      </div>
-                      <button onClick={() => setUploadedFileName(null)} className="text-slate-300 hover:text-red-500 transition-colors">
-                        <XMarkIcon className="w-5 h-5" />
-                      </button>
+                      <ul className="max-h-48 overflow-y-auto space-y-2 pr-1">
+                        {uploadedDocuments.map((doc, idx) => (
+                          <li
+                            key={idx}
+                            className={`flex items-center gap-3 p-3 rounded-xl border ${
+                              doc.status === 'success'
+                                ? 'bg-[#21C1B6]/5 border-[#21C1B6]/20'
+                                : doc.status === 'failed'
+                                ? 'bg-red-50/50 border-red-200/50'
+                                : 'bg-slate-50 border-slate-200'
+                            }`}
+                          >
+                            {doc.status === 'uploading' && (
+                              <ArrowPathIcon className="w-5 h-5 text-[#21C1B6] animate-spin flex-shrink-0" />
+                            )}
+                            {doc.status === 'success' && (
+                              <CheckCircleIcon className="w-5 h-5 text-[#21C1B6] flex-shrink-0" />
+                            )}
+                            {doc.status === 'failed' && (
+                              <XMarkIcon className="w-5 h-5 text-red-500 flex-shrink-0" />
+                            )}
+                            <span className="text-sm text-slate-900 truncate flex-1 min-w-0" title={doc.name}>
+                              {doc.name}
+                            </span>
+                            <span className={`text-xs font-medium flex-shrink-0 ${doc.status === 'success' ? 'text-[#19a096]' : doc.status === 'failed' ? 'text-red-600' : 'text-slate-500'}`}>
+                              {doc.status === 'uploading' ? 'Uploading...' : doc.status === 'success' ? 'Uploaded' : 'Failed'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   ) : (
-                    <label className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl cursor-pointer transition-all ${uploadFileLoading ? 'bg-slate-50 opacity-50' : 'border-slate-200 bg-slate-50/50 hover:bg-white hover:border-[#21C1B6]'}`}>
-                      <div className="flex flex-col items-center justify-center">
-                        {uploadFileLoading ? (
-                          <ArrowPathIcon className="w-8 h-8 text-[#21C1B6] animate-spin" />
-                        ) : (
-                          <>
-                            <PlusIcon className="w-6 h-6 text-slate-400 mb-1" />
-                            <p className="text-[11px] font-bold text-slate-500 uppercase tracking-tighter">Add File</p>
-                          </>
-                        )}
-                      </div>
-                      <input type="file" className="hidden" onChange={handleFileUpload} accept=".pdf,.docx,.doc,.txt" />
-                    </label>
+                    <button
+                      type="button"
+                      onClick={openFilePicker}
+                      disabled={uploadFileLoading}
+                      className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl transition-all ${uploadFileLoading ? 'bg-slate-50 opacity-50 cursor-wait' : 'border-slate-200 bg-slate-50/50 hover:bg-white hover:border-[#21C1B6] cursor-pointer'}`}
+                    >
+                      {uploadFileLoading ? (
+                        <ArrowPathIcon className="w-8 h-8 text-[#21C1B6] animate-spin" />
+                      ) : (
+                        <>
+                          <PlusIcon className="w-6 h-6 text-slate-400 mb-1" />
+                          <p className="text-[11px] font-bold text-slate-500 uppercase tracking-tighter">Add File</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">PDF, DOCX, DOC, TXT</p>
+                        </>
+                      )}
+                    </button>
                   )}
                 </div>
               </div>

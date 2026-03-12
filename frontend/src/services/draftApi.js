@@ -45,7 +45,7 @@ export const draftApi = {
    */
   async getDocuments() {
     try {
-      // Always use gateway URL: http://localhost:5000/drafting/api/documents
+      // URL from apiConfig.DRAFTING_SERVICE_URL
       const response = await fetch(`${DRAFTING_SERVICE_URL}/api/documents`, {
         method: 'GET',
         headers: getHeaders(),
@@ -227,7 +227,7 @@ export const draftApi = {
         throw new Error('Authentication required. Please login first.');
       }
 
-      // Use gateway URL: http://localhost:5000/drafting/api/auth/signin
+      // URL from apiConfig.DRAFTING_SERVICE_URL
       const signInUrl = `${DRAFTING_SERVICE_URL}/api/auth/signin?token=${encodeURIComponent(token)}`;
       console.log('[draftApi] Redirecting to Microsoft sign-in');
       console.log('[draftApi] URL:', signInUrl);

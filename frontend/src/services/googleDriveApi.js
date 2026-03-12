@@ -1,8 +1,8 @@
 import axios from 'axios';
 import { GATEWAY_BASE_URL, DOCS_BASE_URL } from '../config/apiConfig';
 
-// Google Drive auth routes go through gateway /auth which rewrites to /api/auth
-const GOOGLE_DRIVE_AUTH_URL = `${GATEWAY_BASE_URL}/auth/google/drive`;
+// Google Drive auth routes go through gateway at /api (authProxy is mounted at /api)
+const GOOGLE_DRIVE_AUTH_URL = `${GATEWAY_BASE_URL}/api/auth/google/drive`;
 
 const getAuthHeader = () => {
   const token = localStorage.getItem('token');

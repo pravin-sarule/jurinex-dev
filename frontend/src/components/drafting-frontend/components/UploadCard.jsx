@@ -15,7 +15,7 @@ const ALLOWED_EXTENSIONS = ['.docx', '.doc', '.pdf'];
 
 /**
  * @param {Object} props
- * @param {Function} props.onUpload - Upload callback (receives File)
+ * @param {Function} props.onUpload - Upload callback (receives File or File[])
  * @param {boolean} props.isUploading - Uploading state
  * @param {number} props.progress - Upload progress (0-100)
  */
@@ -79,21 +79,30 @@ const UploadCard = ({ onUpload, isUploading = false, progress = 0 }) => {
 
         const files = e.dataTransfer?.files;
         if (files && files.length > 0) {
-            handleFile(files[0]);
+            const fileList = Array.from(files);
+            if (fileList.length === 1) {
+                handleFile(fileList[0]);
+            } else {
+                onUpload(fileList);
+            }
         }
-    }, [handleFile]);
+    }, [handleFile, onUpload]);
 
     /**
-     * Handle file input change
+     * Handle file input change (supports multiple selection)
      */
     const handleInputChange = useCallback((e) => {
         const files = e.target.files;
         if (files && files.length > 0) {
-            handleFile(files[0]);
+            const fileList = Array.from(files);
+            if (fileList.length === 1) {
+                handleFile(fileList[0]);
+            } else {
+                onUpload(fileList);
+            }
         }
-        // Reset input so same file can be selected again
         e.target.value = '';
-    }, [handleFile]);
+    }, [handleFile, onUpload]);
 
     /**
      * Open file picker
@@ -128,9 +137,11 @@ const UploadCard = ({ onUpload, isUploading = false, progress = 0 }) => {
                 <input
                     type="file"
                     ref={fileInputRef}
+                    multiple
                     onChange={handleInputChange}
                     accept={ALLOWED_EXTENSIONS.join(',')}
                     className="hidden"
+                    aria-label="Select one or more documents"
                 />
 
                 {isUploading ? (
@@ -158,7 +169,7 @@ const UploadCard = ({ onUpload, isUploading = false, progress = 0 }) => {
                             Drop file here or click to browse
                         </p>
                         <p className="text-gray-500 text-sm">
-                            DOCX, DOC, or PDF (max 50MB)
+                            DOCX, DOC, or PDF (max 50MB). You can select multiple files.
                         </p>
                     </div>
                 )}

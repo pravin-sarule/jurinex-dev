@@ -8,10 +8,18 @@ const checkDocumentUploadLimits = async (req, res, next) => {
         const userId = req.user?.id || req.userId;
         if (!userId) return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
 
+        // TEMPORARY: Skip subscription/plan limits for all firm users (FIRM_ADMIN and FIRM_USER) so they can access the site free
+        const accountType = (req.user?.account_type && String(req.user.account_type).trim())
+            ? String(req.user.account_type).toUpperCase()
+            : '';
+        if (accountType === 'FIRM_ADMIN' || accountType === 'FIRM_USER') {
+            return next();
+        }
+
         const authorizationHeader = req.headers.authorization;
         if (!authorizationHeader) return res.status(401).json({ message: 'Authorization header missing.' });
 
-        const { usage, plan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+        const { usage, plan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
         if (!plan) return res.status(403).json({ success: false, message: 'Failed to retrieve user plan.' });
 
         const requestedResources = {

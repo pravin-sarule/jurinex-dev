@@ -56,26 +56,30 @@ const useDraftingOi = () => {
     }, []);
 
     /**
-     * Handle file upload
+     * Handle file upload (single File or File[])
      */
-    const handleUpload = useCallback(async (file) => {
+    const handleUpload = useCallback(async (fileOrFiles) => {
+        const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+        if (files.length === 0) return;
+
         setIsUploading(true);
         setUploadProgress(0);
         setError(null);
 
         try {
-            // Simulate progress (actual progress would need XHR)
-            setUploadProgress(30);
-
-            const result = await uploadFile(file);
-
+            let lastResult;
+            for (let i = 0; i < files.length; i++) {
+                setUploadProgress(Math.round(((i + 0.5) / files.length) * 100));
+                lastResult = await uploadFile(files[i]);
+            }
             setUploadProgress(100);
-            setSuccessMessage(`"${result.title}" uploaded successfully`);
-
-            // Refresh list
+            setSuccessMessage(
+                files.length === 1
+                    ? `"${lastResult?.title}" uploaded successfully`
+                    : `${files.length} files uploaded successfully`
+            );
             await loadDrafts();
-
-            return result;
+            return lastResult;
         } catch (err) {
             console.error('[useDraftingOi] Upload failed:', err);
             setError(err.message);

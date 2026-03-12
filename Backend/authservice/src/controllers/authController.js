@@ -727,6 +727,7 @@ const fetchProfile = async (req, res) => {
         is_blocked: user.is_blocked,
         phone: user.phone,
         location: user.location,
+        account_type: user.account_type || 'SOLO',
         created_at: user.created_at,
         updated_at: user.updated_at,
       },
@@ -912,9 +913,6 @@ const getProfessionalProfile = async (req, res) => {
 
 
 const updateProfessionalProfile = async (req, res) => {
-  if (!req.user || !req.user.id) {
-    return res.status(401).json({ type: "status", message: "Authentication required" });
-  }
   const userId = req.user.id;
 
   const {
@@ -1013,12 +1011,9 @@ const updateProfessionalProfile = async (req, res) => {
 
   } catch (error) {
     console.error("❌ Error updating profile:", error);
-    const message = process.env.NODE_ENV === 'development'
-      ? (error.message || 'Internal server error')
-      : 'Failed to update professional profile. Please try again.';
     res.status(500).json({
       type: "status",
-      message,
+      message: "Internal server error",
     });
   }
 };
@@ -1350,9 +1345,10 @@ const getFirmStaff = async (req, res) => {
 
     const firm = await Firm.findByAdminUserId(adminUserId);
     if (!firm) {
-      return res.status(404).json({
-        success: false,
-        message: 'Firm not found'
+      return res.status(200).json({
+        success: true,
+        staff: [],
+        message: 'No firm linked to your account. Your account is marked as Firm Admin but no firm record exists. Please complete firm registration or contact support.'
       });
     }
 

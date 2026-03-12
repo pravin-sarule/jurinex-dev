@@ -71,7 +71,7 @@ class ApiService {
  }
 
  async login(credentials) {
- const response = await this.request("/auth/api/auth/login", {
+ const response = await this.request("/api/auth/login", {
  method: "POST",
  body: JSON.stringify(credentials),
  });
@@ -82,21 +82,21 @@ class ApiService {
  }
 
   async register(userData) {
-    return this.request("/auth/api/auth/register", {
+    return this.request("/api/auth/register", {
       method: "POST",
       body: JSON.stringify(userData),
     });
   }
 
   async registerSoloLawyer(userData) {
-    return this.request("/auth/api/auth/register/solo", {
+    return this.request("/api/auth/register/solo", {
       method: "POST",
       body: JSON.stringify(userData),
     });
   }
 
   async registerFirm(firmData) {
-    return this.request("/auth/api/auth/register/firm", {
+    return this.request("/api/auth/register/firm", {
       method: "POST",
       body: JSON.stringify(firmData),
     });
@@ -110,53 +110,53 @@ class ApiService {
  }
 
  async updateProfile(userData) {
- return this.request("/auth/api/auth/update", {
+ return this.request("/api/auth/update", {
  method: "PUT",
  body: JSON.stringify(userData),
  });
  }
 
   async updatePassword(passwordData) {
-    return this.request("/auth/api/auth/change-password", {
+    return this.request("/api/auth/change-password", {
       method: "PUT",
       body: JSON.stringify(passwordData),
     });
   }
 
   async setPassword(passwordData) {
-    return this.request("/auth/api/auth/set-password", {
+    return this.request("/api/auth/set-password", {
       method: "POST",
       body: JSON.stringify(passwordData),
     });
   }
 
  async getProfessionalProfile() {
- return this.request("/auth/api/auth/professional-profile", {
+ return this.request("/api/auth/professional-profile", {
  method: "GET",
  });
  }
 
  async updateProfessionalProfile(profileData) {
- return this.request("/auth/api/auth/professional-profile", {
+ return this.request("/api/auth/professional-profile", {
  method: "PUT",
  body: JSON.stringify(profileData),
  });
  }
 
  async deleteAccount() {
- return this.request("/auth/api/auth/delete", {
+ return this.request("/api/auth/delete", {
  method: "DELETE",
  });
  }
 
  async logoutUser() {
- return this.request("/auth/api/auth/logout", {
+ return this.request("/api/auth/logout", {
  method: "POST",
  });
  }
 
  async fetchProfile() {
- return this.request("/auth/api/auth/profile");
+ return this.request("/api/auth/profile");
  }
 
   async verifyOtp(email, otp, newPassword = null) {
@@ -164,7 +164,7 @@ class ApiService {
     if (newPassword) {
       body.newPassword = newPassword;
     }
-    const response = await this.request(`${API_BASE_URL}/auth/api/auth/verify-otp`, {
+    const response = await this.request(`${API_BASE_URL}/api/auth/verify-otp`, {
       method: "POST",
       body: JSON.stringify(body),
     });

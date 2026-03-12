@@ -32,7 +32,7 @@
 //   const fetchCourts = async () => {
 //     try {
 //       setError(null);
-//       const response = await fetch(`${API_BASE_URL}/courts`);
+//       const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts`);
 //       if (!response.ok) throw new Error('Failed to fetch courts');
 //       const data = await response.json();
 //       setCourts(data);
@@ -46,7 +46,7 @@
 //     try {
 //       setLoading(true);
 //       setError(null);
-//       const response = await fetch(`${API_BASE_URL}/courts/${courtId}`);
+//       const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts/${courtId}`);
 //       if (!response.ok) throw new Error('Failed to fetch court details');
 //       const data = await response.json();
 //       setSelectedCourtData(data);
@@ -268,6 +268,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Building2, X, Plus } from 'lucide-react';
+import { CONTENT_SERVICE_DIRECT } from '../../../config/apiConfig';
 
 const JurisdictionStep = ({ caseData, setCaseData }) => {
   const [judges, setJudges] = useState(caseData.judges || []);
@@ -276,8 +277,6 @@ const JurisdictionStep = ({ caseData, setCaseData }) => {
   const [selectedCourtData, setSelectedCourtData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-
-  const API_BASE_URL = 'https://document-service-120280829617.asia-south1.run.app/api/content';
 
   // Sync local judges state with caseData.judges when it changes (e.g., from draft load)
   useEffect(() => {
@@ -302,7 +301,7 @@ const JurisdictionStep = ({ caseData, setCaseData }) => {
   const fetchCourts = async () => {
     try {
       setError(null);
-      const response = await fetch(`${API_BASE_URL}/courts`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts`);
       if (!response.ok) throw new Error('Failed to fetch courts');
       const data = await response.json();
       setCourts(data);
@@ -316,7 +315,7 @@ const JurisdictionStep = ({ caseData, setCaseData }) => {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(`${API_BASE_URL}/courts/${courtId}`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts/${courtId}`);
       if (!response.ok) throw new Error('Failed to fetch court details');
       const data = await response.json();
       setSelectedCourtData(data);

@@ -5664,6 +5664,7 @@ const { v4: uuidv4 } = require("uuid");
 const pool = require("../config/db");
 
 const File = require("../models/File");
+const { getAllowedUserIds } = require("../utils/firmAccess");
 const FileChat = require("../models/FileChat");
 const FileChunk = require("../models/FileChunk");
 const ChunkVector = require("../models/ChunkVector");
@@ -6125,8 +6126,28 @@ async function processDocumentWithAI(
     await smoothProgressIncrement(fileId, "batch_queued", 1, 5, "Processing job created", 100);
 
     const isPDF = String(mimetype).toLowerCase() === 'application/pdf';
+    const isPlainText = String(mimetype).toLowerCase().startsWith('text/');
     let extractedTexts = [];
     let isDigitalNative = false;
+
+    // Plain text files: skip Document AI (it can fail with "Failed to process all documents" for text/plain).
+    // Extract text directly and run the same chunk/embed pipeline as digital-native PDF.
+    if (isPlainText) {
+      console.log(`\n${"🟢".repeat(40)}`);
+      console.log(`[TEXT EXTRACTION METHOD] ✅ PLAIN TEXT FILE`);
+      console.log(`[TEXT EXTRACTION METHOD] 📦 Using: direct UTF-8 read (no Document AI)`);
+      console.log(`[TEXT EXTRACTION METHOD] 📄 File Type: ${mimetype}`);
+      console.log(`${"🟢".repeat(40)}\n`);
+
+      await updateProgress(fileId, "processing", 18, "Extracting text from plain text file");
+
+      const rawText = fileBuffer.toString("utf-8");
+      extractedTexts = [{ text: rawText, page_start: 1, page_end: 1 }];
+
+      await updateProgress(fileId, "processing", 42, "Text extraction completed (plain text)");
+      await processDigitalNativePDF(fileId, extractedTexts, userId, secretId, jobId);
+      return;
+    }
 
     if (isPDF) {
       console.log(`\n${"🔍".repeat(40)}`);
@@ -7203,6 +7224,7 @@ async function createFolderInternal(userId, folderName, parentPath = "") {
 // };
 
 
+// Case creation: no subscription/plan check here. FIRM_ADMIN users skip plan limits at upload (checkDocumentUploadLimits) so they can create cases without a subscription.
 exports.createCase = async (req, res) => {
   const client = await pool.connect();
 
@@ -7243,11 +7265,18 @@ exports.createCase = async (req, res) => {
       temp_folder_name, // Temporary folder name for file migration
     } = req.body;
 
+    // Safely normalise and truncate fields that map to VARCHAR(100) columns
+    const truncate100 = (val) => {
+      if (val == null) return null;
+      const str = String(val);
+      return str.length > 100 ? str.slice(0, 100) : str;
+    };
+
     // Fields are now optional - allow case creation even if these fields are missing
-    // Use default values if missing
-    const finalCaseTitle = case_title || "Untitled Case";
-    const finalCaseType = case_type || "";
-    const finalCourtName = court_name || "";
+    // Use default values if missing, but ensure we respect VARCHAR(100) limits in the DB schema
+    const finalCaseTitle = truncate100(case_title || "Untitled Case");
+    const finalCaseType = truncate100(case_type || "");
+    const finalCourtName = truncate100(court_name || "");
 
     await client.query("BEGIN");
 
@@ -7276,34 +7305,35 @@ exports.createCase = async (req, res) => {
       RETURNING *;
     `;
 
+    // Apply safe truncation to all simple string fields that likely map to VARCHAR(100)
     const values = [
       userIdInt,
       finalCaseTitle,
-      case_number || null,
+      truncate100(case_number) || null,
       filing_date || null,
       finalCaseType,
-      sub_type || null,
+      truncate100(sub_type) || null,
       finalCourtName,
-      court_level,
-      bench_division,
-      jurisdiction,
+      truncate100(court_level),
+      truncate100(bench_division),
+      truncate100(jurisdiction),
       judges ? JSON.stringify(judges) : null,
-      court_room_no,
+      truncate100(court_room_no),
       petitioners ? JSON.stringify(petitioners) : null,
       respondents ? JSON.stringify(respondents) : null,
-      category_type,
-      primary_category,
-      sub_category,
-      complexity,
+      truncate100(category_type),
+      truncate100(primary_category),
+      truncate100(sub_category),
+      truncate100(complexity),
       monetary_value,
-      priority_level,
-      status,
-      case_prefix,
+      truncate100(priority_level),
+      truncate100(status),
+      truncate100(case_prefix),
       case_year ? parseInt(case_year) : null,
-      case_nature,
+      truncate100(case_nature),
       next_hearing_date,
-      document_type,
-      filed_by,
+      truncate100(document_type),
+      truncate100(filed_by),
     ];
 
     const { rows: caseRows } = await client.query(insertQuery, values);
@@ -7355,19 +7385,12 @@ exports.createCase = async (req, res) => {
                 await oldFile.copy(newFile);
                 console.log(`  ✅ Copied ${fileName} from ${oldGcsPath} to ${newGcsPath}`);
 
-                // Calculate correct folder_path for the file (folder's parent path + folder name)
-                const fileInsideFolderPath = folder.folder_path
-                  ? `${folder.folder_path}/${folder.originalname}`
-                  : folder.originalname;
-
-                console.log(`  🔄 Updating DB for ${doc.originalname}: folder_path=${fileInsideFolderPath}`);
-
                 // Update file record in database
                 await client.query(
                   `UPDATE user_files SET gcs_path = $1, folder_path = $2 WHERE id = $3::uuid AND user_id = $4`,
-                  [newGcsPath, fileInsideFolderPath, doc.id, userId]
+                  [newGcsPath, folder.folder_path, doc.id, userId]
                 );
-                console.log(`  ✅ Updated file record ${doc.id} with new folder_path: ${fileInsideFolderPath}`);
+                console.log(`  ✅ Updated file record ${doc.id} with new folder_path`);
 
                 // Delete old file from temp location (optional - keep for now, can be cleaned up later)
                 // await oldFile.delete().catch(err => console.warn(`⚠️ Failed to delete old file: ${err.message}`));
@@ -7439,10 +7462,15 @@ exports.deleteCase = async (req, res) => {
       return res.status(400).json({ error: "Case ID is required." });
     }
 
+    const allowedUserIds = await getAllowedUserIds(req);
+    if (allowedUserIds.length === 0) {
+      return res.status(404).json({ error: "Case not found or not authorized." });
+    }
+
     await client.query("BEGIN");
 
-    const getCaseQuery = `SELECT folder_id FROM cases WHERE id = $1 AND user_id = $2;`;
-    const { rows: caseRows } = await client.query(getCaseQuery, [caseId, userId]);
+    const getCaseQuery = `SELECT folder_id, user_id FROM cases WHERE id = $1 AND user_id = ANY($2::int[]);`;
+    const { rows: caseRows } = await client.query(getCaseQuery, [caseId, allowedUserIds]);
 
     if (caseRows.length === 0) {
       await client.query("ROLLBACK");
@@ -7450,9 +7478,10 @@ exports.deleteCase = async (req, res) => {
     }
 
     const folderId = caseRows[0].folder_id;
+    const caseOwnerId = caseRows[0].user_id;
 
     const deleteCaseQuery = `DELETE FROM cases WHERE id = $1 AND user_id = $2 RETURNING *;`;
-    const { rows: deletedCaseRows } = await client.query(deleteCaseQuery, [caseId, userId]);
+    const { rows: deletedCaseRows } = await client.query(deleteCaseQuery, [caseId, caseOwnerId]);
 
     if (deletedCaseRows.length === 0) {
       await client.query("ROLLBACK");
@@ -7461,7 +7490,7 @@ exports.deleteCase = async (req, res) => {
 
     if (folderId) {
       const getFolderQuery = `SELECT gcs_path FROM user_files WHERE id = $1::uuid AND user_id = $2 AND is_folder = TRUE;`;
-      const { rows: folderRows } = await client.query(getFolderQuery, [folderId, userId]);
+      const { rows: folderRows } = await client.query(getFolderQuery, [folderId, caseOwnerId]);
 
       if (folderRows.length > 0) {
         const gcsPath = folderRows[0].gcs_path;
@@ -7472,7 +7501,7 @@ exports.deleteCase = async (req, res) => {
       }
 
       const deleteFolderQuery = `DELETE FROM user_files WHERE id = $1::uuid AND user_id = $2;`;
-      await client.query(deleteFolderQuery, [folderId, userId]);
+      await client.query(deleteFolderQuery, [folderId, caseOwnerId]);
       console.log(`🗑️ Deleted folder record with ID: ${folderId}`);
     }
 
@@ -7506,6 +7535,19 @@ exports.updateCase = async (req, res) => {
     if (!caseId) {
       return res.status(400).json({ error: "Case ID is required." });
     }
+
+    const allowedUserIds = await getAllowedUserIds(req);
+    if (allowedUserIds.length === 0) {
+      return res.status(404).json({ error: "Case not found or not authorized." });
+    }
+    const { rows: caseRows } = await pool.query(
+      "SELECT user_id FROM cases WHERE id = $1 AND user_id = ANY($2::int[])",
+      [caseId, allowedUserIds]
+    );
+    if (caseRows.length === 0) {
+      return res.status(404).json({ error: "Case not found or not authorized." });
+    }
+    const caseOwnerId = caseRows[0].user_id;
 
     const {
       case_title,
@@ -7568,7 +7610,7 @@ exports.updateCase = async (req, res) => {
       RETURNING *;
     `;
 
-    const { rows: updatedCaseRows } = await client.query(updateQuery, [caseId, userId, ...values]);
+    const { rows: updatedCaseRows } = await client.query(updateQuery, [caseId, caseOwnerId, ...values]);
 
     if (updatedCaseRows.length === 0) {
       return res.status(404).json({ error: "Case not found or not authorized." });
@@ -7602,28 +7644,52 @@ exports.getCase = async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized user" });
     if (!caseId) return res.status(400).json({ error: "Case ID is required." });
 
+    const allowedUserIds = await getAllowedUserIds(req);
+    if (allowedUserIds.length === 0) {
+      return res.status(404).json({ error: "Case not found or not authorized." });
+    }
+
     const caseQuery = `
       SELECT * FROM cases
-      WHERE id = $1 AND user_id = $2;
+      WHERE id = $1 AND user_id = ANY($2::int[]);
     `;
-    const { rows: caseRows } = await pool.query(caseQuery, [caseId, userId]);
+    const { rows: caseRows } = await pool.query(caseQuery, [caseId, allowedUserIds]);
     if (caseRows.length === 0) {
       return res.status(404).json({ error: "Case not found or not authorized." });
     }
 
     const caseData = caseRows[0];
+    const caseOwnerId = caseData.user_id;
 
-    const folderQuery = `
-      SELECT *
-      FROM user_files
-      WHERE user_id = $1
-        AND is_folder = true
-        AND folder_path LIKE $2
-      ORDER BY created_at ASC
-      LIMIT 1;
-    `;
-    const folderPathPattern = `%${caseData.case_title}%`;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderPathPattern]);
+    // Prefer explicit folder_id linkage; fall back to case_title-based pattern match only if needed. Use case owner's user_id for folder.
+    let folderRows = [];
+    if (caseData.folder_id) {
+      const folderByIdQuery = `
+        SELECT id, originalname, folder_path, created_at, updated_at
+        FROM user_files
+        WHERE user_id = $1
+          AND id = $2
+          AND is_folder = true
+        LIMIT 1;
+      `;
+      const result = await pool.query(folderByIdQuery, [caseOwnerId, caseData.folder_id]);
+      folderRows = result.rows || [];
+    }
+
+    if (!folderRows.length) {
+      const folderQuery = `
+        SELECT id, originalname, folder_path, created_at, updated_at
+        FROM user_files
+        WHERE user_id = $1
+          AND is_folder = true
+          AND folder_path LIKE $2
+        ORDER BY created_at ASC
+        LIMIT 1;
+      `;
+      const folderPathPattern = `%${caseData.case_title}%`;
+      const result = await pool.query(folderQuery, [caseOwnerId, folderPathPattern]);
+      folderRows = result.rows || [];
+    }
 
     const folders = folderRows.map(folder => ({
       id: folder.id,
@@ -7651,16 +7717,22 @@ exports.getCase = async (req, res) => {
 exports.getFolders = async (req, res) => {
   try {
     const userId = req.user.id;
+    const allowedUserIds = await getAllowedUserIds(req);
+    if (allowedUserIds.length === 0) {
+      return res.status(200).json({ folders: [], files: [] });
+    }
 
-    // JOIN with cases to get the case_title if available
+    // JOIN with cases to get the case_title if available. For firm users, show folders from all firm members.
+    // user_files.user_id may be varchar in some DBs; compare as text to avoid "operator does not exist: character varying = integer"
+    const userIdsParam = allowedUserIds.map(String);
     const query = `
       SELECT uf.*, c.case_title 
       FROM user_files uf 
       LEFT JOIN cases c ON uf.id = c.folder_id 
-      WHERE uf.user_id = $1 
+      WHERE uf.user_id::text = ANY($1::text[])
       ORDER BY uf.is_folder DESC, uf.created_at DESC
     `;
-    const { rows: files } = await pool.query(query, [userId]);
+    const { rows: files } = await pool.query(query, [userIdsParam]);
 
     const folders = files
       .filter(file => file.is_folder)
@@ -7758,7 +7830,7 @@ exports.generateUploadUrl = async (req, res) => {
     }
 
     const authorizationHeader = req.headers.authorization;
-    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
 
@@ -7872,7 +7944,7 @@ exports.completeSignedUpload = async (req, res) => {
     }
 
     const authorizationHeader = req.headers.authorization;
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const [metadata] = await fileRef.getMetadata();
     const actualFileSize = parseInt(metadata.size) || parseInt(size);
@@ -8065,7 +8137,7 @@ exports.uploadDocumentsToCaseByFolderName = async (req, res) => {
     console.log(`📁 GCS path: ${folderRow.gcs_path}`);
 
     const authorizationHeader = req.headers.authorization;
-    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const uploadedFiles = [];
     for (const file of req.files) {
@@ -8238,7 +8310,7 @@ exports.getFolderSummary = async (req, res) => {
   try {
     const { folderName } = req.params;
 
-    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const files = await File.findByUserIdAndFolderPath(userId, folderName);
     console.log(`[getFolderSummary] Found files in folder '${folderName}' for user ${userId}:`, files.map(f => ({ id: f.id, originalname: f.originalname, status: f.status })));
@@ -8268,7 +8340,7 @@ exports.getFolderSummary = async (req, res) => {
     const summaryCost = Math.ceil(combinedText.length / 200); // Rough estimate
 
     const requestedResources = { tokens: summaryCost, ai_analysis: 1 };
-    const { allowed, message } = await TokenUsageService.enforceLimits(usage, plan, requestedResources);
+    const { allowed, message } = await TokenUsageService.enforceLimits(userId, usage, plan, requestedResources);
 
     if (!allowed) {
       return res.status(403).json({
@@ -8695,7 +8767,8 @@ exports.queryFolderDocuments = async (req, res) => {
 
     const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(
       userId,
-      authorizationHeader
+      authorizationHeader,
+      { accountType: req.user?.account_type }
     );
 
     const isFreeUser = TokenUsageService.isFreePlan(plan);
@@ -10147,9 +10220,8 @@ exports.uploadForProcessing = async (req, res) => {
     }
 
     // Step 1: Create temporary folder_path identifier (NO folder record in database)
-    const now = Date.now();
-    const tempFolderPath = `temp-case-${now}`;
-    const tempGcsPrefix = `${userId}/temp-uploads/${now}/`;
+    const tempFolderPath = `temp-case-${Date.now()}`;
+    const tempGcsPrefix = `${userId}/temp-uploads/${Date.now()}/`;
     console.log(`📁 Using temporary path: ${tempFolderPath} (NO folder record will be created)`);
 
     // Step 2: Upload files and initiate processing in parallel
@@ -11149,7 +11221,7 @@ exports.continueFolderChat = async (req, res) => {
     console.log(`[continueFolderChat] New question: ${question}`);
     console.log(`[continueFolderChat] Used secret prompt: ${used_secret_prompt}, secret_id: ${secret_id}, llm_name: ${llm_name}`);
 
-    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const existingChats = await FolderChat.findAll({
       where: {
@@ -11700,9 +11772,33 @@ exports.getDocumentsInFolder = async (req, res) => {
       return res.status(400).json({ error: "Folder name is required." });
     }
 
-    const files = await File.findByUserIdAndFolderPath(userId, folderName);
+    const allowedUserIds = await getAllowedUserIds(req);
+    let files = [];
+    if (allowedUserIds.length === 1) {
+      files = await File.findByUserIdAndFolderPath(allowedUserIds[0], folderName);
+    } else if (allowedUserIds.length > 1) {
+      const folderRow = await pool.query(
+        `SELECT id, user_id, folder_path, originalname FROM user_files
+         WHERE user_id::text = ANY($1::text[]) AND is_folder = true AND originalname = $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [allowedUserIds, folderName]
+      );
+      if (folderRow.rows.length > 0) {
+        const folder = folderRow.rows[0];
+        const storedPath = folder.folder_path || '';
+        const robustPath = folder.originalname && !storedPath.endsWith(folder.originalname)
+          ? (storedPath ? `${storedPath}/${folder.originalname}` : folder.originalname)
+          : storedPath;
+        const fileRows = await pool.query(
+          `SELECT * FROM user_files WHERE user_id = $1 AND is_folder = false
+           AND (folder_path = $2 OR folder_path LIKE $3) ORDER BY originalname ASC`,
+          [folder.user_id, robustPath, `${robustPath}/%`]
+        );
+        files = fileRows.rows || [];
+      }
+    }
 
-    const documents = files
+    const documents = (files || [])
       .filter(file => !file.is_folder)
       .map(file => ({
         id: file.id,
@@ -11739,6 +11835,15 @@ exports.getAllCases = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized user" });
     }
 
+    // FIRM_USER sees only their own cases; FIRM_ADMIN and others see firm/own cases
+    const accountType = (req.user?.account_type || "").toUpperCase();
+    const allowedUserIds = accountType === "FIRM_USER"
+      ? [userId]
+      : await getAllowedUserIds(req);
+    if (allowedUserIds.length === 0) {
+      return res.status(200).json({ message: "Cases fetched successfully.", cases: [], totalCases: 0 });
+    }
+
     const getAllCasesQuery = `
       SELECT
         c.*,
@@ -11761,10 +11866,10 @@ exports.getAllCases = async (req, res) => {
           WHEN c.court_name ~ '^[0-9]+$' THEN c.court_name::integer = co.id
           ELSE false
         END
-      WHERE c.user_id = $1
+      WHERE c.user_id = ANY($1::int[])
       ORDER BY c.created_at DESC;
     `;
-    const { rows: cases } = await pool.query(getAllCasesQuery, [userId]);
+    const { rows: cases } = await pool.query(getAllCasesQuery, [allowedUserIds]);
 
     const formattedCases = cases.map(caseData => {
       caseData.case_type = caseData.case_type_name || caseData.case_type;
@@ -11832,6 +11937,16 @@ exports.getCaseFilesByFolderName = async (req, res) => {
       return res.status(400).json({ error: "Folder name is required" });
     }
 
+    const allowedUserIds = await getAllowedUserIds(req);
+    if (allowedUserIds.length === 0) {
+      return res.status(200).json({
+        message: "Folder files fetched successfully, but no documents found.",
+        folder: null,
+        documents: [],
+        totalDocuments: 0,
+      });
+    }
+
     console.log(`📂 [getCaseFilesByFolderName] User: ${username}, Folder: ${folderName}`);
 
     let folder;
@@ -11840,13 +11955,13 @@ exports.getCaseFilesByFolderName = async (req, res) => {
 
     const folderQuery = `
       SELECT * FROM user_files
-      WHERE user_id = $1
+      WHERE user_id::text = ANY($1::text[])
         AND is_folder = true
         AND originalname = $2
       ORDER BY created_at DESC
       LIMIT 1;
     `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
+    const { rows: folderRows } = await pool.query(folderQuery, [allowedUserIds, folderName]);
 
     if (folderRows.length === 0) {
       console.warn(`⚠️ Folder record "${folderName}" not found for user ${userId}. Trying as direct path...`);
@@ -11873,6 +11988,8 @@ exports.getCaseFilesByFolderName = async (req, res) => {
     console.log(`✅ Folder found: ${folderName}`);
     console.log(`✅ Stored path: ${storedFolderPath}`);
     console.log(`✅ Full path: ${fullFolderPath}`);
+
+    const folderOwnerId = folder && folder.user_id != null ? folder.user_id : userId;
 
     const filesQuery = `
       SELECT
@@ -11905,10 +12022,10 @@ exports.getCaseFilesByFolderName = async (req, res) => {
     `;
 
     const queryParams = [
-      userId,
+      folderOwnerId,
       fullFolderPath,
       `${fullFolderPath}/%`,
-      folder.gcs_path ? `${folder.gcs_path}%` : `impossible_path_fallback`
+      folder && folder.gcs_path ? `${folder.gcs_path}%` : `impossible_path_fallback`
     ];
 
     const { rows: files } = await pool.query(filesQuery, queryParams);

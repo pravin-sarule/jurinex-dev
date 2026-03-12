@@ -434,7 +434,7 @@ exports.uploadDocument = async (req, res) => {
     const { originalname, mimetype, buffer, size } = req.file;
     const { secret_id } = req.body; // NEW: Get secret_id from request body
 
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
 
@@ -553,7 +553,7 @@ exports.generateUploadUrl = async (req, res) => {
       });
     }
 
-    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
 
@@ -655,7 +655,7 @@ exports.completeSignedUpload = async (req, res) => {
       mimetype = metadata.contentType;
     }
 
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(actualFileSize, userPlan);
     if (!fileSizeCheck.allowed) {
@@ -5517,7 +5517,8 @@ exports.batchUploadDocuments = async (req, res) => {
     try {
       usageAndPlan = await TokenUsageService.getUserUsageAndPlan(
         userId,
-        authorizationHeader
+        authorizationHeader,
+        { accountType: req.user?.account_type }
       );
     } catch (planError) {
       console.error(`❌ Failed to retrieve user plan for user ${userId}:`, planError.message);
@@ -5676,7 +5677,7 @@ exports.getUserUsageAndPlan = async (req, res) => {
       return res.status(400).json({ error: "User ID is required." });
     }
 
-    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     return res.status(200).json({
       success: true,

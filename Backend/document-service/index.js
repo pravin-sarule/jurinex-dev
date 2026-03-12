@@ -12,7 +12,6 @@ const contentRoutes = require('./routes/contentRoutes');
 const mindmapRoutes = require('./routes/mindmapRoutes');
 const multimodalRagRoutes = require('./routes/multimodalRagRoutes');
 const googleDriveRoutes = require('./routes/googleDriveRoutes');
-const llmModelsRoutes = require('./routes/llmModelsRoutes');
 
 const { warmQueue } = require('./queues/embeddingQueue');
 const { startEmbeddingWorker } = require('./workers/embeddingWorker');
@@ -60,7 +59,6 @@ app.use('/api/files', googleDriveRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/mindmap', mindmapRoutes);
 app.use('/api/multimodal-rag', multimodalRagRoutes);
-app.use('/api', llmModelsRoutes);
 
 app.get('/api/test-route', (req, res) => {
     res.send('✅ Test route is working!');

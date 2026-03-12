@@ -12,6 +12,7 @@ import {
   matchPriorityLevel,
   matchCourtLevel
 } from '../../../utils/fieldMatcher.js';
+import { CONTENT_SERVICE_DIRECT } from '../../../config/apiConfig';
 
 const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange }) => {
   const [selectedFiles, setSelectedFiles] = useState(caseData.uploadedFiles || []);
@@ -28,8 +29,6 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   const [jurisdictions, setJurisdictions] = useState([]);
   const [subTypes, setSubTypes] = useState([]);
   
-  const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
-  
   // Fetch dropdown options on component mount
   useEffect(() => {
     fetchDropdownOptions();
@@ -45,14 +44,14 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   const fetchDropdownOptions = async () => {
     try {
       // Fetch case types
-      const caseTypesRes = await fetch(`${API_BASE_URL}/case-types`);
+      const caseTypesRes = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types`);
       if (caseTypesRes.ok) {
         const caseTypesData = await caseTypesRes.json();
         setCaseTypes(Array.isArray(caseTypesData) ? caseTypesData : []);
       }
       
       // Fetch jurisdictions
-      const jurisdictionsRes = await fetch(`${API_BASE_URL}/jurisdictions`);
+      const jurisdictionsRes = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions`);
       if (jurisdictionsRes.ok) {
         const jurisdictionsData = await jurisdictionsRes.json();
         setJurisdictions(Array.isArray(jurisdictionsData) ? jurisdictionsData : []);
@@ -66,7 +65,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   
   const fetchCourtsByJurisdiction = async (jurisdictionId) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/jurisdictions/${jurisdictionId}/courts`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions/${jurisdictionId}/courts`);
       if (response.ok) {
         const data = await response.json();
         setCourts(Array.isArray(data) ? data : []);
@@ -78,7 +77,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
   
   const fetchSubTypes = async (caseTypeId) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/case-types/${caseTypeId}/sub-types`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types/${caseTypeId}/sub-types`);
       if (response.ok) {
         const data = await response.json();
         setSubTypes(Array.isArray(data) ? data : []);
@@ -345,7 +344,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
           await fetchCourtsByJurisdiction(matchedJurisdiction.value);
           await new Promise(resolve => setTimeout(resolve, 100));
           try {
-            const courtsRes = await fetch(`${API_BASE_URL}/jurisdictions/${matchedJurisdiction.value}/courts`);
+            const courtsRes = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions/${matchedJurisdiction.value}/courts`);
             if (courtsRes.ok) {
               fetchedCourts = await courtsRes.json();
               setCourts(Array.isArray(fetchedCourts) ? fetchedCourts : []);
@@ -376,7 +375,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
           await fetchSubTypes(matchedCaseType.value);
           await new Promise(resolve => setTimeout(resolve, 100));
           try {
-            const subTypesRes = await fetch(`${API_BASE_URL}/case-types/${matchedCaseType.value}/sub-types`);
+            const subTypesRes = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types/${matchedCaseType.value}/sub-types`);
             if (subTypesRes.ok) {
               fetchedSubTypes = await subTypesRes.json();
               setSubTypes(Array.isArray(fetchedSubTypes) ? fetchedSubTypes : []);
@@ -668,6 +667,7 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
       <div className="mb-8">
         <h2 className="text-2xl font-semibold text-gray-900 mb-2">Upload Documents</h2>
         <p className="text-sm text-gray-600">Upload your case documents to automatically extract and fill case information</p>
+        <p className="text-xs text-gray-500 mt-1">You can select multiple files at once in the file dialog (Ctrl/Cmd or Shift + click)</p>
       </div>
 
       {/* Upload Source Options */}
@@ -699,11 +699,11 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
       <input
         ref={fileInputRef}
         type="file"
-        multiple
+        multiple={true}
         onChange={handleFileChange}
         className="hidden"
         accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
-        aria-label="File Input"
+        aria-label="Select one or more files"
       />
 
       {/* Selected Files List */}

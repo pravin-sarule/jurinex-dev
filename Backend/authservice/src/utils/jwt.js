@@ -56,17 +56,28 @@ const generateUserUUID = (numericId) => {
  * - New 'user_uuid' field: UUID string (ADDED)
  * - Existing 'email' field: string (UNCHANGED)
  */
+// Normalize account_type from user row (DB may return different key casing)
+function getAccountType(user) {
+  if (!user) return 'SOLO';
+  const v = user.account_type ?? user.Account_Type ?? user.ACCOUNT_TYPE;
+  return (v && String(v).trim()) ? String(v).toUpperCase() : 'SOLO';
+}
+
 const generateToken = (user) => {
   const numericId = user.id;
   const userUuid = generateUserUUID(numericId);
+  const role = user.role || 'user';
+  const accountType = getAccountType(user);
 
-  console.log(`[JWT] Generating token for user: id=${numericId}, user_uuid=${userUuid}`);
+  console.log(`[JWT] Generating token for user: id=${numericId}, role=${role}, account_type=${accountType}`);
 
   return jwt.sign(
     {
       id: numericId,           // KEEP: numeric ID for existing services
       user_uuid: userUuid,     // ADD: UUID for new services (drafting-template-service)
-      email: user.email        // KEEP: email unchanged
+      email: user.email,       // KEEP: email unchanged
+      role,
+      account_type: accountType  // SOLO | FIRM_ADMIN | FIRM_USER - document-service skips plan limits for FIRM_ADMIN
     },
     process.env.JWT_SECRET,
     { expiresIn: '24h' }

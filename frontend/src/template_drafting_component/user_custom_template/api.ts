@@ -1,8 +1,7 @@
 /**
  * Template Drafting Component - Custom Template API Service
- * Handles interactions with the User Template Analyzer Agent (drafting-agents Cloud Run).
- *
- * Backend: Template Analyzer Agent - https://drafting-agents-120280829617.asia-south1.run.app
+ * Handles interactions with the User Template Analyzer Agent (drafting-agents).
+ * Base URL: from apiConfig.TEMPLATE_ANALYZER_API_BASE
  *   - GET  /analysis/templates          → list user templates (requires X-User-Id header)
  *   - POST /analysis/upload-template    → Form: name, category, subcategory?, description?, file, image?
  *   - GET  /analysis/template/{id}      → template details
@@ -13,6 +12,7 @@
  */
 
 import axios, { AxiosError } from 'axios';
+import { TEMPLATE_ANALYZER_API_BASE } from '../../config/apiConfig.js';
 import { Logger } from '../utils/logger';
 import type { TemplateListItem } from '../types';
 import type { UploadTemplateResponse } from './types';
@@ -38,11 +38,6 @@ function getUserIdForDrafting(): string | null {
     return null;
 }
 
-// Template Analyzer Agent: drafting-agents Cloud Run - /analysis/templates, /analysis/upload-template, etc.
-const ANALYZER_API_BASE =
-    (import.meta.env?.VITE_APP_TEMPLATE_ANALYZER_URL as string) ||
-    'https://drafting-agents-120280829617.asia-south1.run.app/analysis';
-
 function getAuthToken(): string | null {
     return (
         localStorage.getItem('token') ||
@@ -61,7 +56,7 @@ function getMessageFromError(error: unknown): string {
 }
 
 const analyzerClient = axios.create({
-    baseURL: ANALYZER_API_BASE,
+    baseURL: TEMPLATE_ANALYZER_API_BASE,
     timeout: 300000,
 });
 

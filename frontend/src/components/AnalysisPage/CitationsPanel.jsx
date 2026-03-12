@@ -1,30 +1,360 @@
-import React, { useState, useEffect } from 'react';
-import { FileText, X, ExternalLink } from 'lucide-react';
-import apiService from '../../services/api';
+// import React, { useState, useEffect } from 'react';
+// import { FileText, X, ExternalLink } from 'lucide-react';
+// import apiService from '../../services/api';
+// import { API_BASE_URL } from '../../config/apiConfig';
+
+// const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitationClick }) => {
+//   const [expandedCitations, setExpandedCitations] = useState({});
+//   const [loadingCitations, setLoadingCitations] = useState({});
+
+//   const formatPageLabel = (citation) => {
+//     if (citation.pageStart && citation.pageEnd && citation.pageStart !== citation.pageEnd) {
+//       return `Pages ${citation.pageStart}-${citation.pageEnd}`;
+//     } else if (citation.page || citation.pageStart) {
+//       return `Page ${citation.page || citation.pageStart}`;
+//     }
+//     return null;
+//   };
+
+//   const formatSource = (citation) => {
+//     const pageLabel = formatPageLabel(citation);
+//     if (pageLabel) {
+//       return `${citation.filename} - ${pageLabel}`;
+//     }
+//     return citation.filename || 'Unknown Document';
+//   };
+
+//   const handleCitationClick = (citation) => {
+//     if (onCitationClick) {
+//       onCitationClick(citation);
+//     } else {
+//       if (citation.viewUrl) {
+//         window.open(citation.viewUrl, '_blank');
+//       } else if (citation.fileId) {
+//         const page = citation.page || citation.pageStart || 1;
+//         const url = `${API_BASE_URL}/api/files/${citation.fileId}/view#page=${page}`;
+//         window.open(url, '_blank');
+//       }
+//     }
+//   };
+
+//   const truncateText = (text, maxLength = 150) => {
+//     if (!text) return '';
+//     if (text.length <= maxLength) return text;
+//     return text.substring(0, maxLength).trim() + '...';
+//   };
+
+//   return (
+//     <div className="h-full flex flex-col bg-white border-l border-gray-200 shadow-xl rounded-l-2xl" style={{ width: '380px', maxWidth: '380px' }}>
+//       <div className="px-4 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+//         <h2 className="text-lg font-semibold text-gray-900">Sources</h2>
+//         <button
+//           type="button"
+//           className="text-gray-400 hover:text-gray-500 p-1 rounded-md hover:bg-gray-100 transition-colors"
+//           onClick={onClose}
+//           aria-label="Close sources panel"
+//         >
+//           <X className="h-5 w-5" />
+//         </button>
+//       </div>
+
+//       <div className="flex-1 overflow-y-auto p-4 space-y-4" style={{ scrollbarWidth: 'thin' }}>
+//               {!citations || citations.length === 0 ? (
+//                 <div className="flex items-center justify-center h-full">
+//                   <p className="text-gray-500 text-sm">No sources found for this response.</p>
+//                 </div>
+//               ) : (
+//                 citations.map((citation, idx) => {
+//                   const pageLabel = formatPageLabel(citation);
+//                   const source = formatSource(citation);
+//                   const textSnippet = truncateText(citation.text);
+
+//                   return (
+//                     <div
+//                       key={idx}
+//                       className="citation-item bg-white rounded-lg shadow-sm border border-gray-200 p-4"
+//                     >
+//                       <div className="flex items-center mb-2">
+//                         <FileText className="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" />
+//                         <div className="flex-1 min-w-0">
+//                           <span className="filename text-sm font-medium text-gray-800 truncate block">
+//                             {citation.filename || 'Unknown Document'}
+//                           </span>
+//                           {pageLabel && (
+//                             <span className="page-badge text-xs text-gray-500">
+//                               • {pageLabel}
+//                             </span>
+//                           )}
+//                         </div>
+//                       </div>
+
+//                       {textSnippet && (
+//                         <p className="citation-text text-sm text-gray-600 mb-3">
+//                           {textSnippet}
+//                         </p>
+//                       )}
+
+//                       <button
+//                         onClick={() => handleCitationClick(citation)}
+//                         className="view-link inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+//                       >
+//                         <ExternalLink className="h-4 w-4 mr-2" />
+//                         View on {pageLabel || 'Document'}
+//                       </button>
+//                     </div>
+//                   );
+//                 })
+//               )}
+//             </div>
+//     </div>
+//   );
+// };
+
+// export default CitationsPanel;
+
+import React, { useState } from 'react';
+import { FileText, X, ExternalLink, Scale, ChevronDown, ChevronRight } from 'lucide-react';
 import { API_BASE_URL } from '../../config/apiConfig';
 
-const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitationClick }) => {
-  const [expandedCitations, setExpandedCitations] = useState({});
-  const [loadingCitations, setLoadingCitations] = useState({});
+// ── Source & audit config (mirrors CitationReportPage) ─────────────────────
+const SOURCE_CFG = {
+  local:          { icon: '🏛', label: 'Local DB',          bg: '#EFF4FF', border: '#C7D7FA', color: '#1A3A6B' },
+  indian_kanoon:  { icon: '📚', label: 'Indian Kanoon API', bg: '#F0FDF4', border: '#BBF7D0', color: '#15532D' },
+  google:         { icon: '🌐', label: 'Google Search',     bg: '#FFFBEB', border: '#FDE68A', color: '#92400E' },
+};
 
-  const formatPageLabel = (citation) => {
-    if (citation.pageStart && citation.pageEnd && citation.pageStart !== citation.pageEnd) {
-      return `Pages ${citation.pageStart}-${citation.pageEnd}`;
-    } else if (citation.page || citation.pageStart) {
-      return `Page ${citation.page || citation.pageStart}`;
-    }
+const AUDIT_CFG = {
+  VERIFIED:               { label: 'Verified',     dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', color: '#15532D' },
+  VERIFIED_WITH_WARNINGS: { label: 'Verified ⚠',  dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', color: '#15532D' },
+  NEEDS_REVIEW:           { label: 'Needs Review', dot: '#D97706', bg: '#FFFBEB', border: '#FDE68A', color: '#92400E' },
+  QUARANTINED:            { label: 'Quarantined',  dot: '#DC2626', bg: '#FEF2F2', border: '#FECACA', color: '#991B1B' },
+  not_audited:            { label: 'Not Audited',  dot: '#9CA3AF', bg: '#F9FAFB', border: '#E5E7EB', color: '#6B7280' },
+};
+
+const STATUS_CFG = {
+  GREEN:  { label: 'VERIFIED',       dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', text: '#15532D' },
+  YELLOW: { label: 'REVIEW ADVISED', dot: '#D97706', bg: '#FFFBEB', border: '#FDE68A', text: '#92400E' },
+  RED:    { label: 'UNVERIFIED',     dot: '#DC2626', bg: '#FEF2F2', border: '#FECACA', text: '#991B1B' },
+};
+
+function SourceBadge({ source }) {
+  const cfg = SOURCE_CFG[source] || { icon: '❓', label: source || 'Unknown', bg: '#F9FAFB', border: '#E5E7EB', color: '#6B7280' };
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      background: cfg.bg, border: `1px solid ${cfg.border}`,
+      padding: '1px 6px', borderRadius: 2,
+      fontFamily: 'monospace', fontSize: 9, fontWeight: 700, color: cfg.color,
+      letterSpacing: '0.04em', whiteSpace: 'nowrap',
+    }}>
+      {cfg.icon} {cfg.label}
+    </span>
+  );
+}
+
+function AuditBadge({ status }) {
+  const cfg = AUDIT_CFG[status] || AUDIT_CFG.not_audited;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      background: cfg.bg, border: `1px solid ${cfg.border}`,
+      padding: '1px 6px', borderRadius: 2,
+      fontFamily: 'monospace', fontSize: 9, fontWeight: 700, color: cfg.color,
+      letterSpacing: '0.04em', whiteSpace: 'nowrap',
+    }}>
+      <span style={{ width: 5, height: 5, borderRadius: '50%', background: cfg.dot, display: 'inline-block', flexShrink: 0 }} />
+      {cfg.label}
+    </span>
+  );
+}
+
+// True when the citation came from the citation service (has judgment-level fields)
+function isJudgmentCitation(c) {
+  return !!(c.caseName || c.primaryCitation || c.source || c.auditStatus || c.verificationStatus);
+}
+
+// ── Judgment citation card ─────────────────────────────────────────────────
+function JudgmentCitationCard({ citation, index }) {
+  const [expanded, setExpanded] = useState(false);
+  const statusCfg = STATUS_CFG[citation.verificationStatus] || STATUS_CFG.YELLOW;
+
+  return (
+    <div style={{
+      background: '#FAFAFA',
+      border: '1px solid #E5E7EB',
+      borderLeft: `3px solid ${statusCfg.dot}`,
+      borderRadius: 6,
+      overflow: 'hidden',
+    }}>
+      {/* Header */}
+      <button
+        onClick={() => setExpanded(e => !e)}
+        style={{
+          width: '100%', background: 'none', border: 'none', padding: '10px 12px',
+          textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 8,
+        }}
+      >
+        <Scale size={14} color="#1A3A6B" style={{ marginTop: 2, flexShrink: 0 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{
+            fontFamily: 'Georgia, serif', fontSize: 12, fontWeight: 600, color: '#111',
+            lineHeight: 1.4, marginBottom: 4,
+          }}>
+            {citation.caseName || 'Unknown Case'}
+          </div>
+          {citation.primaryCitation && citation.primaryCitation !== '—' && (
+            <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#6B7280', marginBottom: 5 }}>
+              {citation.primaryCitation}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+            {/* Verification status pill */}
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              background: statusCfg.bg, border: `1px solid ${statusCfg.border}`,
+              padding: '1px 6px', borderRadius: 2,
+              fontFamily: 'monospace', fontSize: 8, fontWeight: 700, color: statusCfg.text,
+              letterSpacing: '0.06em',
+            }}>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', background: statusCfg.dot, display: 'inline-block' }} />
+              {statusCfg.label}
+            </span>
+            {citation.confidence != null && (
+              <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF' }}>
+                {citation.confidence}%
+              </span>
+            )}
+            <SourceBadge source={citation.source} />
+            <AuditBadge status={citation.auditStatus} />
+          </div>
+        </div>
+        <span style={{ color: '#9CA3AF', flexShrink: 0 }}>
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </span>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div style={{ borderTop: '1px solid #EBEBEB', padding: '10px 12px', background: '#FFF' }}>
+          {/* Court & date */}
+          {(citation.court || citation.dateOfJudgment) && (
+            <div style={{ marginBottom: 8 }}>
+              {citation.court && citation.court !== '—' && (
+                <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#374151', marginBottom: 2 }}>
+                  <span style={{ color: '#9CA3AF' }}>Court: </span>{citation.court}
+                </div>
+              )}
+              {citation.dateOfJudgment && citation.dateOfJudgment !== '—' && (
+                <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#374151' }}>
+                  <span style={{ color: '#9CA3AF' }}>Date: </span>{citation.dateOfJudgment}
+                </div>
+              )}
+              {citation.coram && citation.coram !== '—' && (
+                <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#374151' }}>
+                  <span style={{ color: '#9CA3AF' }}>Coram: </span>{citation.coram}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Ratio */}
+          {citation.ratio && citation.ratio !== 'Ratio decidendi not extracted.' && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3 }}>
+                Ratio Decidendi
+              </div>
+              <div style={{ fontFamily: 'Georgia, serif', fontSize: 11, color: '#374151', lineHeight: 1.5 }}>
+                {citation.ratio.length > 300 ? citation.ratio.slice(0, 300) + '…' : citation.ratio}
+              </div>
+            </div>
+          )}
+
+          {/* Librarian status */}
+          {citation.librarianStatus && citation.librarianStatus !== 'not_validated' && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 2 }}>
+                Librarian
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#6B7280' }}>
+                {citation.librarianStatus.replace(/_/g, ' ')}
+              </div>
+            </div>
+          )}
+
+          {/* Source URL / footer */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, paddingTop: 6,
+            borderTop: '1px dashed #E8E8E8', flexWrap: 'wrap',
+          }}>
+            <SourceBadge source={citation.source} />
+            <AuditBadge status={citation.auditStatus} />
+            {citation.sourceUrl && citation.sourceUrl !== '—' && (
+              <a
+                href={citation.sourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 3,
+                  fontFamily: 'monospace', fontSize: 9, color: '#1A3A6B',
+                  textDecoration: 'none',
+                }}
+              >
+                <ExternalLink size={10} />
+                View Source
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Document citation card (original behaviour) ────────────────────────────
+function DocumentCitationCard({ citation, onCitationClick }) {
+  const formatPageLabel = (c) => {
+    if (c.pageStart && c.pageEnd && c.pageStart !== c.pageEnd) return `Pages ${c.pageStart}-${c.pageEnd}`;
+    if (c.page || c.pageStart) return `Page ${c.page || c.pageStart}`;
     return null;
   };
 
-  const formatSource = (citation) => {
-    const pageLabel = formatPageLabel(citation);
-    if (pageLabel) {
-      return `${citation.filename} - ${pageLabel}`;
-    }
-    return citation.filename || 'Unknown Document';
-  };
+  const pageLabel = formatPageLabel(citation);
+  const textSnippet = citation.text
+    ? (citation.text.length > 150 ? citation.text.slice(0, 150).trim() + '...' : citation.text)
+    : '';
 
-  const handleCitationClick = (citation) => {
+  return (
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+      <div className="flex items-center mb-2">
+        <FileText className="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" />
+        <div className="flex-1 min-w-0">
+          <span className="text-sm font-medium text-gray-800 truncate block">
+            {citation.filename || 'Unknown Document'}
+          </span>
+          {pageLabel && (
+            <span className="text-xs text-gray-500">• {pageLabel}</span>
+          )}
+        </div>
+      </div>
+
+      {textSnippet && (
+        <p className="text-sm text-gray-600 mb-3">{textSnippet}</p>
+      )}
+
+      <button
+        onClick={() => onCitationClick(citation)}
+        className="inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+      >
+        <ExternalLink className="h-4 w-4 mr-2" />
+        View on {pageLabel || 'Document'}
+      </button>
+    </div>
+  );
+}
+
+// ── Main panel ─────────────────────────────────────────────────────────────
+const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitationClick }) => {
+  const handleDocCitationClick = (citation) => {
     if (onCitationClick) {
       onCitationClick(citation);
     } else {
@@ -32,22 +362,37 @@ const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitatio
         window.open(citation.viewUrl, '_blank');
       } else if (citation.fileId) {
         const page = citation.page || citation.pageStart || 1;
-        const url = `${API_BASE_URL}/api/files/${citation.fileId}/view#page=${page}`;
-        window.open(url, '_blank');
+        window.open(`${API_BASE_URL}/api/files/${citation.fileId}/view#page=${page}`, '_blank');
       }
     }
   };
 
-  const truncateText = (text, maxLength = 150) => {
-    if (!text) return '';
-    if (text.length <= maxLength) return text;
-    return text.substring(0, maxLength).trim() + '...';
-  };
+  // Separate legal judgment citations from document citations
+  const judgmentCitations = citations.filter(isJudgmentCitation);
+  const documentCitations = citations.filter(c => !isJudgmentCitation(c));
+  const hasJudgments = judgmentCitations.length > 0;
 
   return (
     <div className="h-full flex flex-col bg-white border-l border-gray-200 shadow-xl rounded-l-2xl" style={{ width: '380px', maxWidth: '380px' }}>
+      {/* Header */}
       <div className="px-4 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-        <h2 className="text-lg font-semibold text-gray-900">Sources</h2>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Sources</h2>
+          {hasJudgments && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+              {judgmentCitations.length > 0 && (
+                <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#6B7280', letterSpacing: '0.08em' }}>
+                  {judgmentCitations.length} judgment{judgmentCitations.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              {documentCitations.length > 0 && (
+                <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#6B7280', letterSpacing: '0.08em' }}>
+                  · {documentCitations.length} document{documentCitations.length !== 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           className="text-gray-400 hover:text-gray-500 p-1 rounded-md hover:bg-gray-100 transition-colors"
@@ -59,56 +404,61 @@ const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitatio
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4" style={{ scrollbarWidth: 'thin' }}>
-              {!citations || citations.length === 0 ? (
-                <div className="flex items-center justify-center h-full">
-                  <p className="text-gray-500 text-sm">No sources found for this response.</p>
+        {!citations || citations.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-gray-500 text-sm">No sources found for this response.</p>
+          </div>
+        ) : (
+          <>
+            {/* Legal judgment citations */}
+            {hasJudgments && (
+              <div>
+                {documentCitations.length > 0 && (
+                  <div style={{
+                    fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF',
+                    letterSpacing: '0.12em', textTransform: 'uppercase',
+                    marginBottom: 8, paddingBottom: 4, borderBottom: '1px dashed #E5E7EB',
+                  }}>
+                    Legal Citations
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {judgmentCitations.map((c, idx) => (
+                    <JudgmentCitationCard key={c.id || idx} citation={c} index={idx + 1} />
+                  ))}
                 </div>
-              ) : (
-                citations.map((citation, idx) => {
-                  const pageLabel = formatPageLabel(citation);
-                  const source = formatSource(citation);
-                  const textSnippet = truncateText(citation.text);
+              </div>
+            )}
 
-                  return (
-                    <div
+            {/* Document citations */}
+            {documentCitations.length > 0 && (
+              <div>
+                {hasJudgments && (
+                  <div style={{
+                    fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF',
+                    letterSpacing: '0.12em', textTransform: 'uppercase',
+                    marginBottom: 8, paddingTop: 4, paddingBottom: 4,
+                    borderBottom: '1px dashed #E5E7EB', borderTop: hasJudgments ? '1px dashed #E5E7EB' : 'none',
+                  }}>
+                    Case File Documents
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {documentCitations.map((c, idx) => (
+                    <DocumentCitationCard
                       key={idx}
-                      className="citation-item bg-white rounded-lg shadow-sm border border-gray-200 p-4"
-                    >
-                      <div className="flex items-center mb-2">
-                        <FileText className="h-5 w-5 text-blue-500 mr-2 flex-shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <span className="filename text-sm font-medium text-gray-800 truncate block">
-                            {citation.filename || 'Unknown Document'}
-                          </span>
-                          {pageLabel && (
-                            <span className="page-badge text-xs text-gray-500">
-                              • {pageLabel}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {textSnippet && (
-                        <p className="citation-text text-sm text-gray-600 mb-3">
-                          {textSnippet}
-                        </p>
-                      )}
-
-                      <button
-                        onClick={() => handleCitationClick(citation)}
-                        className="view-link inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                      >
-                        <ExternalLink className="h-4 w-4 mr-2" />
-                        View on {pageLabel || 'Document'}
-                      </button>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+                      citation={c}
+                      onCitationClick={handleDocCitationClick}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 };
 
 export default CitationsPanel;
-

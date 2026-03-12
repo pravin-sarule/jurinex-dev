@@ -81,7 +81,7 @@ exports.uploadDocuments = async (req, res) => {
 
     console.log(`📤 [MindmapController] Uploading ${req.files.length} file(s) for user: ${userId}`);
 
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const uploadedFiles = [];
     const errors = [];
@@ -420,8 +420,8 @@ exports.generateUploadUrl = async (req, res) => {
       });
     }
 
-    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-    
+    const { plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
+
     const fileSizeBytes = typeof size === 'string' ? parseInt(size, 10) : Number(size);
     
     if (isNaN(fileSizeBytes) || fileSizeBytes <= 0) {
@@ -495,7 +495,7 @@ exports.completeSignedUpload = async (req, res) => {
     const [metadata] = await fileRef.getMetadata();
     const actualSize = parseInt(metadata.size) || size;
 
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     const storageLimitCheck = await checkStorageLimit(userId, actualSize, userPlan);
     if (!storageLimitCheck.allowed) {

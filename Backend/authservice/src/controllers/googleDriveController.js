@@ -11,17 +11,21 @@ const SCOPES = [
  * Get OAuth2 client for Google Drive
  */
 const getOAuth2Client = () => {
-  // Redirect URI should point to the backend/gateway, not frontend
-  // Google redirects to the backend, which then redirects to frontend
-  const redirectUri = process.env.GOOGLE_DRIVE_REDIRECT_URI || 
-                     process.env.GATEWAY_URL + '/api/auth/google/callback' ||
-                     'http://localhost:5000/api/auth/google/callback';
-  
+  // Redirect URI should point to the gateway (Google redirects here, then we redirect to frontend)
+  const base = process.env.GOOGLE_DRIVE_REDIRECT_URI ||
+    (process.env.GATEWAY_URL && process.env.GATEWAY_URL.trim()
+      ? process.env.GATEWAY_URL.replace(/\/$/, '') + '/api/auth/google/callback'
+      : 'http://localhost:5000/api/auth/google/callback');
+  const redirectUri = base.startsWith('http') ? base : 'http://localhost:5000/api/auth/google/callback';
+
   console.log('[GoogleDrive] Using redirect URI:', redirectUri);
-  
+
+  const clientId = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_DRIVE_CLIENT_SECRET;
+
   const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
+    clientId,
+    clientSecret,
     redirectUri
   );
   return oauth2Client;
@@ -31,33 +35,22 @@ const getOAuth2Client = () => {
  * Initiate Google Drive OAuth flow
  * GET /google/drive
  */
-const STATE_DELIMITER = '___';
-
 const initiateAuth = async (req, res) => {
   try {
     const userId = req.userId;
-    
+
     if (!userId) {
       return res.status(401).json({ message: 'User not authenticated' });
     }
 
-    let returnTo = req.query.returnTo;
-    if (returnTo && typeof returnTo === 'string') {
-      if (!returnTo.startsWith('/')) {
-        try {
-          const decoded = Buffer.from(
-            returnTo.replace(/-/g, '+').replace(/_/g, '/'),
-            'base64'
-          ).toString('utf8');
-          if (decoded.startsWith('/')) returnTo = decoded;
-        } catch (e) {
-          returnTo = null;
-        }
-      }
+    const clientId = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID;
+    if (!clientId || !clientId.trim()) {
+      console.error('[GoogleDrive] GOOGLE_CLIENT_ID (or GOOGLE_DRIVE_CLIENT_ID) is not set');
+      return res.status(500).json({
+        message: 'Google Drive OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the auth service environment.',
+        code: 'OAUTH_NOT_CONFIGURED'
+      });
     }
-    const state = returnTo && returnTo.startsWith('/')
-      ? `${userId}${STATE_DELIMITER}${returnTo}`
-      : userId.toString();
 
     const oauth2Client = getOAuth2Client();
     
@@ -66,7 +59,7 @@ const initiateAuth = async (req, res) => {
       access_type: 'offline',
       scope: SCOPES,
       prompt: 'consent', // Force consent screen to get refresh token
-      state // userId or userId___returnTo
+      state: userId.toString() // Include user ID in state for security
     });
 
     res.json({ authUrl });
@@ -123,11 +116,7 @@ const handleCallbackGet = async (req, res) => {
       return res.redirect(`${frontendUrl}/auth/google/drive/callback?error=no_state`);
     }
 
-    const delimiterIndex = state.indexOf(STATE_DELIMITER);
-    const userIdStr = delimiterIndex >= 0 ? state.slice(0, delimiterIndex) : state;
-    const returnTo = delimiterIndex >= 0 ? state.slice(delimiterIndex + STATE_DELIMITER.length) : null;
-
-    const userId = parseInt(userIdStr);
+    const userId = parseInt(state);
     if (!userId || isNaN(userId)) {
       console.error('[GoogleDrive] Invalid state parameter:', state);
       return res.redirect(`${frontendUrl}/auth/google/drive/callback?error=invalid_state`);
@@ -169,12 +158,8 @@ const handleCallbackGet = async (req, res) => {
 
     console.log('[GoogleDrive] ✅ Tokens stored successfully for user:', userId);
 
-    // Redirect to frontend with success; include returnTo so user goes back to assembled preview
-    // Append googleConnected=1 so frontend can trigger re-assemble for Google Docs iframe
-    const returnParam = returnTo
-      ? `&returnTo=${encodeURIComponent(returnTo.includes('?') ? `${returnTo}&googleConnected=1` : `${returnTo}?googleConnected=1`)}`
-      : '';
-    res.redirect(`${frontendUrl}/auth/google/drive/callback?success=true${returnParam}`);
+    // Redirect to frontend with success
+    res.redirect(`${frontendUrl}/auth/google/drive/callback?success=true`);
   } catch (error) {
     console.error('[GoogleDrive] Error handling callback (GET):', error);
     console.error('[GoogleDrive] Error details:', {

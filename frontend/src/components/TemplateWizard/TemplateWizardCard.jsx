@@ -30,9 +30,16 @@ const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
   };
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={handleCardClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleCardClick();
+        }
+      }}
       className="template-wizard-card group flex-shrink-0 w-full h-full min-h-0 bg-white rounded-lg border border-gray-200 shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:shadow-[0_6px_20px_rgba(0,0,0,0.1)] hover:border-gray-300 transition-all duration-300 cursor-pointer overflow-hidden flex flex-col text-left focus:outline-none"
     >
       {/* Preview area with preview icon on the right */}
@@ -68,7 +75,7 @@ const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
           {name || template.title || 'Untitled template'}
         </h3>
       </div>
-    </button>
+    </div>
   );
 };
 

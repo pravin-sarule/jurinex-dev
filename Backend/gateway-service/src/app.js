@@ -125,8 +125,8 @@ app.get("/api/auth/google/callback/", createProxyMiddleware({
   },
 }));
 
-// Mount proxies
-app.use(authProxy);
+// Mount proxies - authProxy must be at /api so /api/auth/* matches router's /auth/*
+app.use("/api", authProxy);
 app.use(fileProxy);
 // app.use(paymentProxy);
 app.use(paymentProxy);
@@ -202,5 +202,4 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = app;
-
 

@@ -360,4 +360,72 @@ export const uploadDocumentForDraft = async (file, options = {}) => {
     throw new Error(err.detail || err.message || `HTTP ${res.status}`);
   }
   return res.json();
-}
+};
+
+/**
+ * Upload multiple documents for the draft. Creates 1 Draft Job + N Document Jobs; parallel workers
+ * process each doc (OCR → chunk → embed → store). When all complete, draft job is marked complete.
+ * @param {File[]} files - Array of files to upload
+ * @param {{ draftId: string, caseId?: string, templateId?: string }} options - draftId required; optional caseId, templateId
+ * @returns {Promise<{ draft_job_id: string, batch_id: string, job_ids: string[], total: number, draft_id: string }>}
+ */
+export const uploadDocumentsForDraft = async (files, options = {}) => {
+  logApi('POST', `${AGENT_DRAFT_TEMPLATE_API}/api/orchestrate/upload-multiple`, 'uploadDocumentsForDraft (draft job + parallel workers)');
+  const h = headers();
+  const { 'Content-Type': _drop, ...authHeaders } = h;
+  const form = new FormData();
+  if (Array.isArray(files)) {
+    files.forEach((file) => form.append('files', file));
+  } else {
+    form.append('files', files);
+  }
+  if (options.draftId) form.append('draft_id', options.draftId);
+  if (options.caseId) form.append('case_id', options.caseId);
+  if (options.templateId) form.append('template_id', options.templateId);
+  const res = await fetch(`${AGENT_DRAFT_TEMPLATE_API}/api/orchestrate/upload-multiple`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get draft job status (1 parent job for N document jobs). Poll until status === 'complete', then all chunks are ready for draft generation.
+ * @param {string} draftJobId - From uploadDocumentsForDraft response (draft_job_id)
+ * @returns {Promise<{ draft_job_id: string, draft_id: string, status: 'processing'|'complete', jobs: object[], all_done: boolean, file_ids: string[], finished_count: number, failed_count: number, total: number }>}
+ */
+export const getDraftJobStatus = async (draftJobId) => {
+  const url = `${AGENT_DRAFT_TEMPLATE_API}/api/ingestion/draft-jobs/${draftJobId}`;
+  logApi('GET', url, 'getDraftJobStatus');
+  const res = await fetch(url, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
+ * Get ingestion batch status (for multi-document upload). jobIds optional (batch_id is draft_job_id).
+ * Prefer getDraftJobStatus(draftJobId) when you have draft_job_id.
+ * @param {string} batchId - Same as draft_job_id from uploadDocumentsForDraft
+ * @param {string[]} [jobIds] - Optional; if omitted, backend returns draft job status by batch_id
+ */
+export const getIngestionBatchStatus = async (batchId, jobIds) => {
+  const ids = Array.isArray(jobIds) ? jobIds : jobIds ? [jobIds] : [];
+  const url = ids.length
+    ? `${AGENT_DRAFT_TEMPLATE_API}/api/ingestion/batches/${batchId}?job_ids=${ids.join(',')}`
+    : `${AGENT_DRAFT_TEMPLATE_API}/api/ingestion/batches/${batchId}`;
+  logApi('GET', url, 'getIngestionBatchStatus');
+  const res = await fetch(url, { headers: headers() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};

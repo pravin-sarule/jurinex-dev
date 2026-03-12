@@ -371,7 +371,7 @@ import {
   Building2,
   FileText,
 } from "lucide-react";
-import { DOCS_BASE_URL } from "../../../config/apiConfig";
+import { DOCS_BASE_URL, CONTENT_SERVICE_DIRECT } from "../../../config/apiConfig";
 
 const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditStep, creationMode }) => {
   const navigate = useNavigate();
@@ -558,7 +558,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
           const payload = JSON.parse(atob(tokenParts[1]));
           const userId = payload.userId || payload.user_id || payload.id || payload.sub;
           if (userId) {
-            const draftResponse = await fetch(`https://document-service-120280829617.asia-south1.run.app/api/content/case-draft/${userId}`, {
+            const draftResponse = await fetch(`${CONTENT_SERVICE_DIRECT}/case-draft/${userId}`, {
               method: 'DELETE',
               headers: {
                 'Authorization': `Bearer ${token}`,

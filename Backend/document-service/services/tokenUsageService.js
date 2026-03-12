@@ -1,19 +1,27 @@
 const pool = require('../config/db');
 const axios = require('axios');
 const moment = require('moment-timezone');
+const { v4: uuidv4 } = require('uuid');
 
 const TIMEZONE = 'Asia/Calcutta'; // IST
 const DEFAULT_TOKEN_RENEWAL_INTERVAL_HOURS = 9.5; // fallback cooldown
 
+const FREE_TIER_PRODUCT_LABEL = 'India Kanoon free tier';
 const FREE_TIER_DAILY_TOKEN_LIMIT = 100000; // 100,000 tokens total (in + out) per day
 const FREE_TIER_MAX_FILE_SIZE_MB = 10; // 10 MB file size limit
 const FREE_TIER_MAX_FILE_SIZE_BYTES = FREE_TIER_MAX_FILE_SIZE_MB * 1024 * 1024;
 const FREE_TIER_MAX_EYEBALL_USES_PER_DAY = 1; // Only 1 Gemini Eyeball use per day (first prompt)
 const FREE_TIER_FORCED_MODEL = 'gemini-2.5-flash'; // Force gemini-2.5-flash for free users
 
+function isFirmPlan(userPlan) {
+  if (!userPlan) return false;
+  const planType = (userPlan.type || '').toLowerCase();
+  return planType === 'firm';
+}
+
 function isFreePlan(userPlan) {
   if (!userPlan) return false;
-  
+  if (isFirmPlan(userPlan)) return false; // Firm admins/users are not on free tier
   if (userPlan.price === 0 || userPlan.price === null) {
     return true;
   }
@@ -33,7 +41,26 @@ function isFreePlan(userPlan) {
 
 class TokenUsageService {
 
-    static async getUserUsageAndPlan(userId, authorizationHeader) {
+    static async getUserUsageAndPlan(userId, authorizationHeader, options = {}) {
+        const accountType = (options.accountType && String(options.accountType).trim())
+            ? String(options.accountType).toUpperCase()
+            : '';
+
+        const FIRM_PLAN = {
+            id: null,
+            name: 'Firm Plan',
+            type: 'firm',
+            price: null,
+            currency: 'INR',
+            interval: 'month',
+            token_limit: 999999999,
+            carry_over_limit: 0,
+            document_limit: 999999,
+            ai_analysis_limit: 999999,
+            storage_limit_gb: 100,
+            token_renew_interval_hours: 24
+        };
+
         let client;
         try {
             client = await pool.connect();
@@ -44,37 +71,41 @@ class TokenUsageService {
             );
             let userUsage = usageRes.rows[0];
 
-            const gatewayUrl = process.env.API_GATEWAY_URL || 'http://localhost:5000';
             let userPlan;
-            try {
-                const planResp = await axios.get(
-                    `${gatewayUrl}/user-resources/user-plan/${userId}`,
-                    { headers: { Authorization: authorizationHeader } }
-                );
-                userPlan = planResp.data?.data;
+            if (accountType === 'FIRM_ADMIN' || accountType === 'FIRM_USER') {
+                userPlan = FIRM_PLAN;
+            } else {
+                const gatewayUrl = process.env.API_GATEWAY_URL || 'http://localhost:5000';
+                try {
+                    const planResp = await axios.get(
+                        `${gatewayUrl}/user-resources/user-plan/${userId}`,
+                        { headers: { Authorization: authorizationHeader } }
+                    );
+                    userPlan = planResp.data?.data;
 
-                if (!userPlan) {
-                    throw new Error(`User plan not found for user ${userId}`);
-                }
-            } catch (err) {
-                if (err.response?.status === 404) {
-                    console.warn(`⚠️ No active plan found for user ${userId}, using default free plan`);
-                    userPlan = {
-                        id: null,
-                        name: 'Free',
-                        type: 'free',
-                        price: 0,
-                        currency: 'INR',
-                        interval: 'month',
-                        token_limit: 0,
-                        carry_over_limit: 0,
-                        document_limit: 0,
-                        ai_analysis_limit: 0,
-                        storage_limit_gb: 1, // 1 GB default for free tier
-                        token_renew_interval_hours: 24
-                    };
-                } else {
-                    throw new Error(`Failed to retrieve user plan: ${err.response?.status} ${err.message}`);
+                    if (!userPlan) {
+                        throw new Error(`User plan not found for user ${userId}`);
+                    }
+                } catch (err) {
+                    if (err.response?.status === 404) {
+                        console.warn(`⚠️ No active plan found for user ${userId}, using default free plan`);
+                        userPlan = {
+                            id: null,
+                            name: 'Free',
+                            type: 'free',
+                            price: 0,
+                            currency: 'INR',
+                            interval: 'month',
+                            token_limit: 0,
+                            carry_over_limit: 0,
+                            document_limit: 0,
+                            ai_analysis_limit: 0,
+                            storage_limit_gb: 1,
+                            token_renew_interval_hours: 24
+                        };
+                    } else {
+                        throw new Error(`Failed to retrieve user plan: ${err.response?.status} ${err.message}`);
+                    }
                 }
             }
 
@@ -108,15 +139,19 @@ class TokenUsageService {
             }
 
             if (!userUsage) {
+                // Ensure we provide a non-null primary key for user_usage.id, since the column is NOT NULL
+                const usageId = uuidv4();
+
                 await client.query(
                     `INSERT INTO user_usage (
-                        user_id, plan_id, tokens_used, documents_used, ai_analysis_used,
+                        id, user_id, plan_id, tokens_used, documents_used, ai_analysis_used,
                         storage_used_gb, carry_over_tokens, period_start, period_end, last_token_grant
-                    ) VALUES ($1,$2,0,0,0,0,0,$3,$4,NULL)`,
-                    [userId, userPlan.id, periodStart.toISOString(), periodEnd.toISOString()]
+                    ) VALUES ($1,$2,$3,0,0,0,0,0,$4,$5,NULL)`,
+                    [usageId, userId, userPlan.id, periodStart.toISOString(), periodEnd.toISOString()]
                 );
 
                 userUsage = {
+                    id: usageId,
                     user_id: userId,
                     plan_id: userPlan.id,
                     tokens_used: 0,
@@ -141,6 +176,14 @@ class TokenUsageService {
     }
 
     static async enforceLimits(userId, userUsage, userPlan, requestedResources = {}) {
+        if (isFirmPlan(userPlan)) {
+            return {
+                allowed: true,
+                message: 'Firm plan - no limits',
+                remainingTokens: 999999999
+            };
+        }
+
         const nowUTC = moment.utc();
         const nowIST = nowUTC.clone().tz(TIMEZONE);
 
@@ -162,9 +205,12 @@ class TokenUsageService {
                 const refreshedAvailableTokens = userPlan.token_limit + (refreshedUsage.carry_over_tokens || 0) - refreshedUsage.tokens_used;
 
                 if (requestedTokens > refreshedAvailableTokens) {
+                    const exhaustionMsg = isFreePlan(userPlan)
+                        ? `${FREE_TIER_PRODUCT_LABEL} limit exhausted. `
+                        : '';
                     return {
                         allowed: false,
-                        message: `Tokens just renewed, but you still don't have enough for this action.`,
+                        message: `${exhaustionMsg}Tokens just renewed, but you still don't have enough for this action.`,
                         remainingTokens: refreshedAvailableTokens
                     };
                 }
@@ -175,9 +221,12 @@ class TokenUsageService {
                 };
             } else {
                 const remaining = moment.duration(nextRenewUTC.diff(nowUTC));
+                const exhaustionMsg = isFreePlan(userPlan)
+                    ? `${FREE_TIER_PRODUCT_LABEL} limit reached. `
+                    : '';
                 return {
                     allowed: false,
-                    message: `Tokens exhausted. Wait ${Math.floor(remaining.asHours())}h ${remaining.minutes()}m ${remaining.seconds()}s for renewal at ${nextRenewUTC.clone().tz(TIMEZONE).format('DD-MM-YYYY hh:mm A')} IST`,
+                    message: `${exhaustionMsg}Tokens exhausted. Wait ${Math.floor(remaining.asHours())}h ${remaining.minutes()}m ${remaining.seconds()}s for renewal at ${nextRenewUTC.clone().tz(TIMEZONE).format('DD-MM-YYYY hh:mm A')} IST`,
                     nextRenewalTime: nextRenewUTC.clone().tz(TIMEZONE).format('DD-MM-YYYY hh:mm A'),
                     remainingTime: {
                         hours: Math.floor(remaining.asHours()),
@@ -193,9 +242,12 @@ class TokenUsageService {
             await this.updateLastGrant(userId, exhaustionUTC);
 
             const nextRenewUTC = nowUTC.clone().add(tokenRenewInterval, 'hours');
+            const exhaustionMsg = isFreePlan(userPlan)
+                ? `${FREE_TIER_PRODUCT_LABEL} limit exhausted. `
+                : '';
             return {
                 allowed: false,
-                message: `Tokens exhausted! Next renewal at ${nextRenewUTC.clone().tz(TIMEZONE).format('DD-MM-YYYY hh:mm A')} IST`,
+                message: `${exhaustionMsg}Tokens exhausted! Next renewal at ${nextRenewUTC.clone().tz(TIMEZONE).format('DD-MM-YYYY hh:mm A')} IST`,
                 nextRenewalTime: nextRenewUTC.clone().tz(TIMEZONE).format('DD-MM-YYYY hh:mm A'),
                 remainingTokens: 0
             };
@@ -293,8 +345,8 @@ class TokenUsageService {
             
             return {
                 allowed: false,
-                message: `🚫 Free Plan File Size Limit Exceeded\n\nYou are on a Free Plan which allows uploading files up to ${FREE_TIER_MAX_FILE_SIZE_MB} MB only.\n\nYour file size: ${sizeDisplay}\nMaximum allowed: ${FREE_TIER_MAX_FILE_SIZE_MB} MB\n\nPlease either:\n• Reduce your file size to ${FREE_TIER_MAX_FILE_SIZE_MB} MB or less\n• Upgrade to a paid plan to upload larger files\n\nUpgrade now to enjoy unlimited file sizes and more features!`,
-                shortMessage: `Free plan limit: Maximum file size is ${FREE_TIER_MAX_FILE_SIZE_MB} MB. Your file is ${sizeDisplay}.`,
+                message: `🚫 ${FREE_TIER_PRODUCT_LABEL} file size limit exceeded\n\n${FREE_TIER_PRODUCT_LABEL} allows uploading files up to ${FREE_TIER_MAX_FILE_SIZE_MB} MB only.\n\nYour file size: ${sizeDisplay}\nMaximum allowed: ${FREE_TIER_MAX_FILE_SIZE_MB} MB\n\nPlease either:\n• Reduce your file size to ${FREE_TIER_MAX_FILE_SIZE_MB} MB or less\n• Upgrade to a paid plan to upload larger files\n\nUpgrade now to enjoy unlimited file sizes and more features!`,
+                shortMessage: `${FREE_TIER_PRODUCT_LABEL} limit: Maximum file size is ${FREE_TIER_MAX_FILE_SIZE_MB} MB. Your file is ${sizeDisplay}.`,
                 fileSizeMB: fileSizeMB,
                 fileSizeGB: fileSizeGB,
                 maxSizeMB: FREE_TIER_MAX_FILE_SIZE_MB,
@@ -332,7 +384,7 @@ class TokenUsageService {
                 const remaining = FREE_TIER_DAILY_TOKEN_LIMIT - dailyTokensUsed;
                 return {
                     allowed: false,
-                    message: `Free tier daily token limit reached. Daily limit: ${FREE_TIER_DAILY_TOKEN_LIMIT.toLocaleString()} tokens. Used: ${dailyTokensUsed.toLocaleString()}. Remaining: ${remaining.toLocaleString()}. Limit resets at midnight IST.`,
+                    message: `${FREE_TIER_PRODUCT_LABEL} daily limit reached. Daily limit: ${FREE_TIER_DAILY_TOKEN_LIMIT.toLocaleString()} tokens. Used: ${dailyTokensUsed.toLocaleString()}. Remaining: ${remaining.toLocaleString()}. Limit resets at midnight IST.`,
                     dailyLimit: FREE_TIER_DAILY_TOKEN_LIMIT,
                     used: dailyTokensUsed,
                     remaining: remaining
@@ -376,7 +428,7 @@ class TokenUsageService {
             if (eyeballCount >= FREE_TIER_MAX_EYEBALL_USES_PER_DAY) {
                 return {
                     allowed: false,
-                    message: `Free tier limit: Only ${FREE_TIER_MAX_EYEBALL_USES_PER_DAY} Gemini Eyeball use(s) allowed per day (first prompt only). You've used ${eyeballCount} today. Subsequent chats must use RAG retrieval. Limit resets at midnight IST. Please upgrade to use Gemini Eyeball unlimited.`,
+                    message: `${FREE_TIER_PRODUCT_LABEL} limit: Only ${FREE_TIER_MAX_EYEBALL_USES_PER_DAY} Gemini Eyeball use(s) allowed per day (first prompt only). You've used ${eyeballCount} today. Subsequent chats must use RAG retrieval. Limit resets at midnight IST. Please upgrade to use Gemini Eyeball unlimited.`,
                     used: eyeballCount,
                     limit: FREE_TIER_MAX_EYEBALL_USES_PER_DAY
                 };
@@ -418,7 +470,7 @@ class TokenUsageService {
             if (accessCount >= 1) {
                 return {
                     allowed: false,
-                    message: `Free tier limit: ${controllerName} can only be accessed once per day. You've already used it today. Please upgrade to access unlimited times. Limit resets at midnight IST.`,
+                    message: `${FREE_TIER_PRODUCT_LABEL} limit: ${controllerName} can only be accessed once per day. You've already used it today. Please upgrade to access unlimited times. Limit resets at midnight IST.`,
                     used: accessCount,
                     limit: 1
                 };

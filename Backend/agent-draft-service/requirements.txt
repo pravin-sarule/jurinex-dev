@@ -18,3 +18,4 @@ PyJWT
 python-docx
 htmldocx
 premailer
+# Multi-document ingestion uses in-memory queue + background thread (no Redis)

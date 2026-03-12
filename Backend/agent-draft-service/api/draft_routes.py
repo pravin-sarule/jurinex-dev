@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, BackgroundTasks
 
@@ -553,20 +553,20 @@ async def add_uploaded_file_to_draft(
 async def link_file_to_draft(
     draft_id: str,
     file_id: str = Body(..., embed=True),
+    file_name: Optional[str] = Body(None, embed=True),
     user_id: int = Depends(require_user_id),
 ) -> Dict[str, Any]:
     """
-    Link an existing file to a draft.
-    This is an alias for the uploaded-file endpoint for compatibility.
+    Link an existing file to a draft. Optional file_name is stored so uploaded documents show after refresh.
     """
     try:
         logger.info(f"[link_file] draft_id={draft_id}, file_id={file_id}, user_id={user_id}")
         
-        # Link the file to the draft
         draft_db.add_uploaded_file_id_to_draft(
             draft_id=draft_id,
             user_id=user_id,
             file_id=file_id,
+            file_name=file_name,
         )
         
         logger.info(f"[link_file] Successfully linked file {file_id} to draft {draft_id}")

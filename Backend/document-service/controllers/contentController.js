@@ -1,5 +1,6 @@
 const pool = require('../config/db'); // PostgreSQL connection
 const UserProfileService = require('../services/userProfileService');
+const { getAllowedUserIds } = require('../utils/firmAccess');
 
 
 const getCaseTypes = async (req, res) => {
@@ -178,27 +179,43 @@ const saveCaseDraft = async (req, res) => {
     // If userId is an integer, we need to find a user file/folder
     // Since case_drafts.user_id references user_files(id), we need a file/folder UUID
     if (isInteger) {
-      // Try to find any existing file or folder for this user (prefer folders, then files)
       const fileResult = await pool.query(
         `SELECT id FROM user_files 
-         WHERE user_id = $1 
+         WHERE user_id::text = $1 
          ORDER BY is_folder DESC, created_at ASC 
          LIMIT 1`,
-        [parseInt(userId)]
+        [String(userId)]
       );
-      
+
       if (fileResult.rows.length > 0) {
         userFileId = fileResult.rows[0].id;
       } else {
-        // If no file/folder exists, we can't create a draft without a user_files entry
-        // Return error suggesting the frontend should send a file/folder UUID
-        return res.status(400).json({ 
-          error: 'No user file or folder found. Please upload a file or create a folder first.' 
-        });
+        const allowedUserIds = await getAllowedUserIds(req);
+        if (allowedUserIds.length > 1) {
+          const idsParam = allowedUserIds.map(String);
+          const firmFileResult = await pool.query(
+            `SELECT id FROM user_files 
+             WHERE user_id::text = ANY($1::text[]) 
+             ORDER BY is_folder DESC, created_at ASC 
+             LIMIT 1`,
+            [idsParam]
+          );
+          if (firmFileResult.rows.length > 0) {
+            userFileId = firmFileResult.rows[0].id;
+          } else {
+            return res.status(400).json({
+              error: 'No user file or folder found. Please upload a file or create a folder first.'
+            });
+          }
+        } else {
+          return res.status(400).json({
+            error: 'No user file or folder found. Please upload a file or create a folder first.'
+          });
+        }
       }
     } else if (!uuidRegex.test(String(userId))) {
-      return res.status(400).json({ 
-        error: 'Invalid userId format. Expected UUID format (e.g., 123e4567-e89b-12d3-a456-426614174000) or integer user ID' 
+      return res.status(400).json({
+        error: 'Invalid userId format. Expected UUID format or integer user ID'
       });
     }
 
@@ -231,30 +248,44 @@ const getCaseDraft = async (req, res) => {
 
   try {
     let userFileId = userId;
-    
-    // Check if userId is a UUID (for user_files.id) or integer (for users.id)
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const isInteger = /^\d+$/.test(String(userId));
-    
-    // If userId is an integer, find any user file/folder to get the UUID
+
     if (isInteger) {
       const fileResult = await pool.query(
         `SELECT id FROM user_files 
-         WHERE user_id = $1 
+         WHERE user_id::text = $1 
          ORDER BY is_folder DESC, created_at ASC 
          LIMIT 1`,
-        [parseInt(userId)]
+        [String(userId)]
       );
-      
+
       if (fileResult.rows.length > 0) {
         userFileId = fileResult.rows[0].id;
       } else {
-        // No file/folder found, return 404 (no draft can exist without a user_files entry)
-        return res.status(404).json({ message: 'No draft found' });
+        // For firm users: try any firm member's user_files so all can access the firm's draft
+        const allowedUserIds = await getAllowedUserIds(req);
+        if (allowedUserIds.length > 1) {
+          const idsParam = allowedUserIds.map(String);
+          const firmFileResult = await pool.query(
+            `SELECT id FROM user_files 
+             WHERE user_id::text = ANY($1::text[]) 
+             ORDER BY is_folder DESC, created_at ASC 
+             LIMIT 1`,
+            [idsParam]
+          );
+          if (firmFileResult.rows.length > 0) {
+            userFileId = firmFileResult.rows[0].id;
+          } else {
+            return res.status(200).json({ message: 'No draft found', draft: null });
+          }
+        } else {
+          return res.status(200).json({ message: 'No draft found', draft: null });
+        }
       }
     } else if (!uuidRegex.test(String(userId))) {
-      return res.status(400).json({ 
-        error: 'Invalid userId format. Expected UUID format (e.g., 123e4567-e89b-12d3-a456-426614174000) or integer user ID' 
+      return res.status(400).json({
+        error: 'Invalid userId format. Expected UUID format or integer user ID'
       });
     }
 
@@ -264,7 +295,7 @@ const getCaseDraft = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'No draft found' });
+      return res.status(200).json({ message: 'No draft found', draft: null });
     }
 
     res.status(200).json(result.rows[0]);
@@ -288,18 +319,34 @@ const deleteCaseDraft = async (req, res) => {
     if (isInteger) {
       const fileResult = await pool.query(
         `SELECT id FROM user_files 
-         WHERE user_id = $1 
+         WHERE user_id::text = $1 
          ORDER BY is_folder DESC, created_at ASC 
          LIMIT 1`,
-        [parseInt(userId)]
+        [String(userId)]
       );
-      
+
       if (fileResult.rows.length > 0) {
         userFileId = fileResult.rows[0].id;
       } else {
-        // No file/folder found, but still try to delete (might not exist anyway)
-        // Return success since the goal is to delete
-        return res.status(200).json({ message: 'Draft deleted successfully (no draft found)' });
+        // For firm users: try any firm member's user_files so they can delete the firm's draft
+        const allowedUserIds = await getAllowedUserIds(req);
+        if (allowedUserIds.length > 1) {
+          const idsParam = allowedUserIds.map(String);
+          const firmFileResult = await pool.query(
+            `SELECT id FROM user_files 
+             WHERE user_id::text = ANY($1::text[]) 
+             ORDER BY is_folder DESC, created_at ASC 
+             LIMIT 1`,
+            [idsParam]
+          );
+          if (firmFileResult.rows.length > 0) {
+            userFileId = firmFileResult.rows[0].id;
+          } else {
+            return res.status(200).json({ message: 'Draft deleted successfully (no draft found)' });
+          }
+        } else {
+          return res.status(200).json({ message: 'Draft deleted successfully (no draft found)' });
+        }
       }
     } else if (!uuidRegex.test(String(userId))) {
       return res.status(400).json({ 

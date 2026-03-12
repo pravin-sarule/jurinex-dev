@@ -33,21 +33,21 @@ router.use(
     target: targetAuth,
     changeOrigin: true,
     pathRewrite: (path, req) => {
-      // When using router.use("/auth", ...), Express strips /auth from the path
-      // Handle two patterns:
-      // 1. Old pattern: /auth/api/auth/... -> path is /api/auth/... (keep as is)
-      // 2. New pattern: /auth/google/drive/... -> path is /google/drive/... (add /api/auth prefix)
-      
+      // Mounted at /api, so path is /auth/... (e.g. /auth/google, /auth/login)
+      // Auth service expects /api/auth/...
+      // Handle: /api/auth (keep), /auth/... -> /api/auth/..., /... -> /api/auth/...
       if (path.startsWith('/api/auth')) {
-        // Old pattern - already has /api/auth, keep as is
-        console.log(`[GATEWAY] Auth path (old pattern): ${path}`);
+        console.log(`[GATEWAY] Auth path (already correct): ${path}`);
         return path;
-      } else {
-        // New pattern - add /api/auth prefix
-        const newPath = `/api/auth${path}`;
+      }
+      if (path.startsWith('/auth')) {
+        const newPath = '/api' + path;
         console.log(`[GATEWAY] Auth path rewrite: ${path} -> ${newPath}`);
         return newPath;
       }
+      const newPath = `/api/auth${path}`;
+      console.log(`[GATEWAY] Auth path rewrite: ${path} -> ${newPath}`);
+      return newPath;
     },
     onProxyReq: (proxyReq, req, res) => {
       console.log("[GATEWAY] Proxying auth to:", targetAuth + proxyReq.path);

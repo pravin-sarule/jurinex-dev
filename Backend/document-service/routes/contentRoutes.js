@@ -25,11 +25,11 @@ router.get('/courts/:courtId/benches', contentController.getBenchesByCourt);
 router.get('/judges', contentController.getJudgesByBench);
 
 
-router.post('/case-draft/save', contentController.saveCaseDraft);
+router.post('/case-draft/save', protect, contentController.saveCaseDraft);
 
-router.get('/case-draft/:userId', contentController.getCaseDraft);
+router.get('/case-draft/:userId', protect, contentController.getCaseDraft);
 
-router.delete('/case-draft/:userId', contentController.deleteCaseDraft);
+router.delete('/case-draft/:userId', protect, contentController.deleteCaseDraft);
 
 
 router.get('/user-professional-profile', protect, contentController.getUserProfessionalProfileContext);

@@ -8,39 +8,44 @@
 // Get base gateway URL from environment or use default
 const GATEWAY_URL = import.meta.env.VITE_APP_GATEWAY_URL ||
                     import.meta.env.VITE_APP_API_URL ||
-                    'https://gateway-service-120280829617.asia-south1.run.app';
+                    'http://localhost:5000';
 
 // API Base URLs for different services
 export const API_BASE_URL = GATEWAY_URL;
 export const GATEWAY_BASE_URL = GATEWAY_URL;
 
-// Service-specific endpoints (all go through gateway)
+// Service-specific endpoints (all go through gateway, unless noted)
 export const DOCUMENT_SERVICE_URL = `${GATEWAY_URL}/api/doc`;
 export const FILES_SERVICE_URL = `${GATEWAY_URL}/api/files`;
 export const CONTENT_SERVICE_URL = `${GATEWAY_URL}/api/content`;
 export const MINDMAP_SERVICE_URL = `${GATEWAY_URL}/api/mindmap`;
 export const VISUAL_SERVICE_URL = `${GATEWAY_URL}/visual`;
-export const AUTH_SERVICE_URL = `${GATEWAY_URL}/auth/api/auth`;
+export const AUTH_SERVICE_URL = `${GATEWAY_URL}/api/auth`;
 export const PAYMENT_SERVICE_URL = `${GATEWAY_URL}/payments`;
 export const USER_RESOURCES_SERVICE_URL = `${GATEWAY_URL}/user-resources`;
 export const CHAT_SERVICE_URL = `${GATEWAY_URL}/api/chat`;
 
+// Citation service (direct FastAPI service)
+// Default port 8001, can be overridden via VITE_APP_CITATION_SERVICE_URL
+export const CITATION_SERVICE_URL =
+  import.meta.env.VITE_APP_CITATION_SERVICE_URL || 'http://localhost:8001';
+
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
 export const DRAFTING_SERVICE_URL =
   import.meta.env.VITE_DRAFTING_SERVICE_URL ||
-  'https://drafting-service-120280829617.asia-south1.run.app';
+  'http://localhost:5005';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 // Direct: all-drafting-agent Cloud Run - GET /api/templates, POST /api/drafts, etc.
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'https://all-drafting-agent-120280829617.asia-south1.run.app';
+  'http://localhost:8000';
 
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 // Direct: drafting-agents Cloud Run - GET /analysis/templates, POST /analysis/upload-template, GET /analysis/template/:id
 export const TEMPLATE_ANALYZER_API_BASE =
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-  'https://drafting-agents-120280829617.asia-south1.run.app/analysis';
+  'http://localhost:5017/analysis';
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).
@@ -70,7 +75,7 @@ export const DOCS_BASE_URL = `${GATEWAY_URL}/docs`;
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 // For direct service access (if needed, but prefer gateway)
-export const DOCUMENT_SERVICE_DIRECT = import.meta.env.VITE_DOCUMENT_SERVICE_URL || 'https://document-service-120280829617.asia-south1.run.app';
+export const DOCUMENT_SERVICE_DIRECT = import.meta.env.VITE_DOCUMENT_SERVICE_URL || 'http://localhost:5002';
 export const CONTENT_SERVICE_DIRECT = `${DOCUMENT_SERVICE_DIRECT}/api/content`;
 
 // Export default object for convenience
@@ -90,6 +95,7 @@ const apiConfig = {
   PAYMENT_SERVICE_URL,
   USER_RESOURCES_SERVICE_URL,
   CHAT_SERVICE_URL,
+  CITATION_SERVICE_URL,
   DRAFTING_SERVICE_URL,
   DOCS_BASE_URL,
   FILES_BASE_URL,

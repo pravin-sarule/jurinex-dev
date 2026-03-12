@@ -1,6 +1,21 @@
+const axios = require('axios');
 const { verifyToken } = require('../utils/jwt');
 
-const authenticateToken = (req, res, next) => {
+const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';
+
+async function fetchAccountTypeFromAuth(userId) {
+  try {
+    const url = `${AUTH_SERVICE_URL}/api/auth/internal/user/${userId}/account-type`;
+    const res = await axios.get(url, { timeout: 3000 });
+    const v = res.data?.account_type;
+    return (v && String(v).trim()) ? String(v).toUpperCase() : 'SOLO';
+  } catch (err) {
+    console.warn('[Auth] Could not fetch account_type from auth service:', err.message);
+    return 'SOLO';
+  }
+}
+
+const authenticateToken = async (req, res, next) => {
   try {
     console.log("🔐 Checking token...");
 
@@ -26,10 +41,19 @@ const authenticateToken = (req, res, next) => {
       return res.status(400).json({ message: 'User ID missing from token' });
     }
 
+    let accountType = (decoded.account_type && String(decoded.account_type).trim())
+      ? String(decoded.account_type).toUpperCase()
+      : 'SOLO';
+    // Resolve from auth service when token has SOLO (e.g. old tokens without account_type) so FIRM_ADMIN works without re-login
+    if (accountType === 'SOLO') {
+      const resolved = await fetchAccountTypeFromAuth(userId);
+      if (resolved && resolved !== 'SOLO') accountType = resolved;
+    }
     req.user = {
       id: userId,
       email: decoded.email || null,
-      role: decoded.role || 'user', // Default to "user" if not provided
+      role: decoded.role || 'user',
+      account_type: accountType, // SOLO | FIRM_ADMIN | FIRM_USER - skip plan limits for FIRM_ADMIN
     };
     req.userId = userId;
 

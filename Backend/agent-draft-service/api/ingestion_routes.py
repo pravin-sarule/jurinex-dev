@@ -1,7 +1,10 @@
 """
-Ingestion agent API: direct ingest, orchestrate/upload, and field extraction.
+Ingestion agent API: direct ingest, orchestrate/upload, upload-multiple (queue), and field extraction.
 POST /api/ingest — Direct ingestion (no orchestrator).
-POST /api/orchestrate/upload — Orchestrator → Ingestion agent (GCS, Document AI, chunk, embed, DB).
+POST /api/orchestrate/upload — Orchestrator → Ingestion agent (single file).
+POST /api/orchestrate/upload-multiple — Enqueue multiple files for worker processing (queue + worker).
+GET /api/ingestion/jobs/{job_id} — Job status.
+GET /api/ingestion/batches/{batch_id} — Batch status (query: job_ids=id1,id2,...).
 POST /api/extract-fields — InjectionAgent: extract template fields from document text.
 """
 
@@ -9,11 +12,11 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from api.deps import require_user_id
 from api.orchestrator_helpers import get_orchestrator
@@ -248,3 +251,117 @@ async def orchestrate_upload(
         "agent_tasks": agent_tasks,
         "message": "Orchestrator pipeline completed.",
     }
+
+
+# ---- Multi-document upload (queue + worker) ------------------------------------
+
+@router.post("/orchestrate/upload-multiple")
+async def orchestrate_upload_multiple(
+    user_id: int = Depends(require_user_id),
+    files: List[UploadFile] = File(..., description="One or more documents to ingest for the draft"),
+    folder_path: str = Form(""),
+    draft_id: str = Form(""),
+    case_id: str = Form(""),
+    template_id: str = Form(""),
+) -> Dict[str, Any]:
+    """
+    Upload N documents for a draft. Creates 1 Draft Job (parent) and N Document Jobs (queue).
+    Parallel workers process each document: OCR → chunking → embeddings → store chunks.
+    When ALL document jobs complete, the draft job is marked COMPLETE. Then draft generation
+    can retrieve ALL chunks across ALL docs and generate the final draft.
+
+    **Body (form-data):** files (multiple File), optional folder_path, draft_id, case_id, template_id.
+    **Returns:** draft_job_id, job_ids[]; poll GET /api/ingestion/draft-jobs/{draft_job_id} for status.
+    """
+    from services.ingestion_queue import enqueue_draft_job
+
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    draft_id_val = (draft_id or "").strip()
+    if not draft_id_val:
+        raise HTTPException(status_code=400, detail="draft_id is required for multi-document upload")
+
+    payloads: List[Dict[str, Any]] = []
+    for file in files:
+        try:
+            content = await file.read()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to read file {file.filename or '?'}: {e}") from e
+        if not content:
+            continue
+        upload_payload: Dict[str, Any] = {
+            "user_id": str(user_id),
+            "file_content": base64.b64encode(content).decode("utf-8"),
+            "originalname": file.filename or "document",
+            "mimetype": file.content_type or "application/pdf",
+            "size": len(content),
+            "folder_path": folder_path,
+        }
+        upload_payload["draft_id"] = draft_id_val
+        if case_id and case_id.strip():
+            upload_payload["case_id"] = case_id.strip()
+        if template_id and template_id.strip():
+            upload_payload["template_id"] = template_id.strip()
+        payloads.append(upload_payload)
+
+    if not payloads:
+        raise HTTPException(status_code=400, detail="No valid file content to upload")
+
+    try:
+        result = enqueue_draft_job(
+            draft_id=draft_id_val,
+            user_id=user_id,
+            payloads=payloads,
+            template_id=template_id.strip() if template_id and template_id.strip() else None,
+        )
+    except Exception as e:
+        logger.exception("Failed to enqueue draft job for draft_id=%s", draft_id_val)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    draft_job_id = result["draft_job_id"]
+    job_ids = result["job_ids"]
+    logger.info(
+        "Upload-multiple: draft_job_id=%s, draft_id=%s, %s document job(s) enqueued (parallel workers)",
+        draft_job_id,
+        draft_id_val,
+        len(job_ids),
+    )
+
+    return {
+        "success": True,
+        "draft_job_id": draft_job_id,
+        "batch_id": draft_job_id,
+        "job_ids": job_ids,
+        "total": len(job_ids),
+        "draft_id": draft_id_val,
+        "message": "Draft job created. N document jobs queued for parallel processing (OCR → chunk → embed → store). Poll GET /api/ingestion/draft-jobs/{draft_job_id} until status is complete. Then all chunks are available for draft generation.",
+    }
+
+
+@router.get("/ingestion/jobs/{job_id}")
+async def get_ingestion_job_status(job_id: str) -> Dict[str, Any]:
+    """Return status of a single ingestion job (queued, started, finished, failed)."""
+    from services.ingestion_queue import get_job_status
+    return get_job_status(job_id)
+
+
+@router.get("/ingestion/draft-jobs/{draft_job_id}")
+async def get_draft_job_status(draft_job_id: str) -> Dict[str, Any]:
+    """Return draft job status (parent). When status is 'complete', all document jobs are done and chunks are ready for draft generation."""
+    from services.ingestion_queue import get_draft_job_status as get_draft_job
+    return get_draft_job(draft_job_id)
+
+
+@router.get("/ingestion/batches/{batch_id}")
+async def get_ingestion_batch_status(
+    batch_id: str,
+    job_ids: Optional[str] = Query(None, description="Optional comma-separated job IDs (batch_id is draft_job_id; job_ids can be omitted)"),
+) -> Dict[str, Any]:
+    """Return draft job / batch status. batch_id is the draft_job_id; job_ids optional (stored on draft job)."""
+    from services.ingestion_queue import get_draft_job_status, get_batch_status_for_job_ids
+    if job_ids:
+        ids = [j.strip() for j in job_ids.split(",") if j.strip()]
+        if ids:
+            return get_batch_status_for_job_ids(batch_id, ids)
+    return get_draft_job_status(batch_id)

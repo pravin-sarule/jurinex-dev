@@ -871,7 +871,9 @@ def attach_case_to_draft(
 
 
 def set_uploaded_file_name(draft_id: str, user_id: int, file_name: str) -> bool:
-    """Store the uploaded file name in draft_field_data.metadata so it shows when the draft is reopened."""
+    """Store the uploaded file name in draft_field_data.metadata so it shows when the draft is reopened.
+    IMPORTANT: Never overwrite uploaded_file_ids or uploaded_file_names when they contain multiple items
+    (multi-document upload); section generation uses ALL uploaded_file_ids for RAG retrieval."""
     import json
     uid = int(user_id)
     with get_draft_conn() as conn:
@@ -889,6 +891,11 @@ def set_uploaded_file_name(draft_id: str, user_id: int, file_name: str) -> bool:
             row = cur.fetchone()
             meta = dict(row["metadata"]) if row and row.get("metadata") else {}
             meta["uploaded_file_name"] = str(file_name) if file_name else ""
+            # Only set uploaded_file_names for single-file; multi-file names come from add_uploaded_file_id_to_draft
+            existing_names = meta.get("uploaded_file_names") or []
+            if file_name and str(file_name).strip() and len(existing_names) <= 1:
+                meta["uploaded_file_names"] = [str(file_name).strip()]
+            # Preserve uploaded_file_ids: never overwrite (section generation uses ALL for RAG)
             cur.execute(
                 "UPDATE draft_field_data SET metadata = %s::jsonb, updated_at = now() WHERE draft_id = %s",
                 (json.dumps(meta), draft_id),
@@ -900,10 +907,12 @@ def set_uploaded_file_name(draft_id: str, user_id: int, file_name: str) -> bool:
     return True
 
 
-def add_uploaded_file_id_to_draft(draft_id: str, user_id: int, file_id: str) -> bool:
+def add_uploaded_file_id_to_draft(draft_id: str, user_id: int, file_id: str, file_name: Optional[str] = None) -> bool:
     """
     Append a file_id to the draft's metadata.uploaded_file_ids so the Librarian
     only retrieves chunks from this draft's uploaded files (and/or attached case).
+    If file_name is provided, also appends to metadata.uploaded_file_names (same order as ids)
+    so the frontend can show document names after refresh.
     Verifies ownership. user_id is integer (JWT).
     """
     import json
@@ -928,9 +937,15 @@ def add_uploaded_file_id_to_draft(draft_id: str, user_id: int, file_id: str) -> 
             ids = list(meta.get("uploaded_file_ids") or [])
             if not isinstance(ids, list):
                 ids = [ids] if ids else []
+            names = list(meta.get("uploaded_file_names") or [])
+            if not isinstance(names, list):
+                names = [names] if names else []
+            name_val = str(file_name).strip() if file_name and str(file_name).strip() else ""
             if fid not in ids:
                 ids.append(fid)
+                names.append(name_val)
                 meta["uploaded_file_ids"] = ids
+                meta["uploaded_file_names"] = names
                 cur.execute(
                     "UPDATE draft_field_data SET metadata = %s::jsonb, updated_at = now() WHERE draft_id = %s",
                     (json.dumps(meta), draft_id),
@@ -940,6 +955,22 @@ def add_uploaded_file_id_to_draft(draft_id: str, user_id: int, file_id: str) -> 
                     (draft_id,),
                 )
                 print(f"[add_uploaded_file_id_to_draft] draft_id={draft_id} file_id={fid} (total {len(ids)} file(s) for this draft)")
+            elif name_val and fid in ids:
+                # File already linked (e.g. by worker); update name at same index
+                idx = ids.index(fid)
+                while len(names) <= idx:
+                    names.append("")
+                names[idx] = name_val
+                meta["uploaded_file_ids"] = ids
+                meta["uploaded_file_names"] = names
+                cur.execute(
+                    "UPDATE draft_field_data SET metadata = %s::jsonb, updated_at = now() WHERE draft_id = %s",
+                    (json.dumps(meta), draft_id),
+                )
+                cur.execute(
+                    "UPDATE user_drafts SET updated_at = now() WHERE draft_id = %s",
+                    (draft_id,),
+                )
     return True
 
 

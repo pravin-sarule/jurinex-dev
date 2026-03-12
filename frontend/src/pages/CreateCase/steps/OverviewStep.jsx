@@ -69,7 +69,7 @@
 //   const fetchCaseTypes = async () => {
 //     try {
 //       setLoading(true);
-//       const response = await fetch(`${API_BASE_URL}/case-types`);
+//       const response = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types`);
 //       const data = await response.json();
 //       setCaseTypes(data);
 //     } catch (error) {
@@ -83,7 +83,7 @@
 //     try {
 //       setLoading(true);
 //       const response = await fetch(
-//         `${API_BASE_URL}/case-types/${caseTypeId}/sub-types`
+//         `${CONTENT_SERVICE_DIRECT}/case-types/${caseTypeId}/sub-types`
 //       );
 //       const data = await response.json();
 //       setSubTypes(data);
@@ -108,7 +108,7 @@
 
 //   const fetchCourts = async () => {
 //     try {
-//       const response = await fetch(`${API_BASE_URL}/courts`);
+//       const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts`);
 //       const data = await response.json();
 //       setCourts(data);
 //     } catch (error) {
@@ -328,7 +328,7 @@
 //   const hasConvertedCaseType = React.useRef(false);
 //   const hasConvertedCourt = React.useRef(false);
 
-//   const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
+//   const API_BASE_URL = "http://localhost:5002/api/content";
 
 //   // Jurisdiction options
 //   const jurisdictionOptions = [
@@ -436,7 +436,7 @@
 //   const fetchCaseTypes = async () => {
 //     try {
 //       setLoading(true);
-//       const response = await fetch(`${API_BASE_URL}/case-types`);
+//       const response = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types`);
 //       const data = await response.json();
 //       setCaseTypes(data);
 //     } catch (error) {
@@ -450,7 +450,7 @@
 //     try {
 //       setLoading(true);
 //       const response = await fetch(
-//         `${API_BASE_URL}/case-types/${caseTypeId}/sub-types`
+//         `${CONTENT_SERVICE_DIRECT}/case-types/${caseTypeId}/sub-types`
 //       );
 //       const data = await response.json();
 //       setSubTypes(data);
@@ -476,7 +476,7 @@
 
 //   const fetchCourts = async () => {
 //     try {
-//       const response = await fetch(`${API_BASE_URL}/courts`);
+//       const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts`);
 //       const data = await response.json();
 //       setCourts(data);
 //     } catch (error) {
@@ -916,6 +916,7 @@
 import React, { useState, useEffect } from "react";
 import { Scale, Calendar } from "lucide-react";
 import SearchableSelect from "../../../components/SearchableSelect";
+import { CONTENT_SERVICE_DIRECT } from "../../../config/apiConfig";
 
 const OverviewStep = ({ caseData, setCaseData }) => {
   const [caseTypes, setCaseTypes] = useState([]);
@@ -927,8 +928,6 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   const [loading, setLoading] = useState(false);
   const hasConvertedCaseType = React.useRef(false);
   const hasConvertedCourt = React.useRef(false);
-
-  const API_BASE_URL = "https://document-service-120280829617.asia-south1.run.app/api/content";
 
   useEffect(() => {
     fetchCaseTypes();
@@ -1119,7 +1118,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   const fetchJurisdictions = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`${API_BASE_URL}/jurisdictions`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
@@ -1136,7 +1135,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   const fetchCourtsByJurisdiction = async (jurisdictionId) => {
     try {
       setLoading(true);
-      const response = await fetch(`${API_BASE_URL}/jurisdictions/${jurisdictionId}/courts`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions/${jurisdictionId}/courts`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
@@ -1153,7 +1152,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   const fetchBenchesByCourt = async (courtId) => {
     try {
       setLoading(true);
-      const response = await fetch(`${API_BASE_URL}/courts/${courtId}/benches`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts/${courtId}/benches`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
@@ -1170,7 +1169,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   const fetchCaseTypes = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`${API_BASE_URL}/case-types`);
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
@@ -1188,7 +1187,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
     try {
       setLoading(true);
       const response = await fetch(
-        `${API_BASE_URL}/case-types/${caseTypeId}/sub-types`
+        `${CONTENT_SERVICE_DIRECT}/case-types/${caseTypeId}/sub-types`
       );
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -1219,7 +1218,7 @@ const OverviewStep = ({ caseData, setCaseData }) => {
   // Removed fetchCourts - courts are now fetched by jurisdiction via fetchCourtsByJurisdiction
   // const fetchCourts = async () => {
   //   try {
-  //     const response = await fetch(`${API_BASE_URL}/courts`);
+  //     const response = await fetch(`${CONTENT_SERVICE_DIRECT}/courts`);
   //     const data = await response.json();
   //     setCourts(data);
   //   } catch (error) {

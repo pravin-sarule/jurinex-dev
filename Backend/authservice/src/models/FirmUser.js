@@ -29,7 +29,7 @@ class FirmUser {
 
   static async findByFirmId(firmId) {
     const result = await pool.query(
-      `SELECT fu.*, u.username, u.email, u.phone, u.is_active
+      `SELECT fu.*, u.username, u.email, u.phone, u.is_active, u.auth_type, u.account_type
        FROM firm_users fu
        JOIN users u ON fu.user_id = u.id
        WHERE fu.firm_id = $1
@@ -37,6 +37,15 @@ class FirmUser {
       [firmId]
     );
     return result.rows;
+  }
+
+  /** Get list of user_ids that belong to this firm (for document-service firm-scoped case visibility) */
+  static async getUserIdsByFirmId(firmId) {
+    const result = await pool.query(
+      'SELECT user_id FROM firm_users WHERE firm_id = $1',
+      [firmId]
+    );
+    return (result.rows || []).map((r) => r.user_id);
   }
 
   static async findAdminByFirmId(firmId) {

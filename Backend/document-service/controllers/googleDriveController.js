@@ -48,8 +48,8 @@ const downloadFromGoogleDrive = async (req, res) => {
     console.log(`[GoogleDrive] Downloaded: ${filename}, size: ${fileSizeBytes} bytes, type: ${mimeType}`);
 
     // Step 2: Check file size and plan limits (same as FileController)
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
-    
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
+
     const fileSizeCheck = TokenUsageService.checkFreeTierFileSize(fileSizeBytes, userPlan);
     if (!fileSizeCheck.allowed) {
       console.log(`[GoogleDrive] File size limit exceeded for user ${userId}`);
@@ -233,7 +233,7 @@ const downloadMultipleFromGoogleDrive = async (req, res) => {
     console.log(`[GoogleDrive] Batch download request from user ${userId} for ${files.length} files`);
 
     // Get user plan info once
-    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader);
+    const { usage: userUsage, plan: userPlan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
 
     // Find or determine folder
     let folderPath = null;
