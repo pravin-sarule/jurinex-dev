@@ -64,11 +64,12 @@ def _parts_to_user_message(parts: List[Union[str, Any]]) -> str:
     return "\n\n".join(p for p in parts if isinstance(p, str))
 
 
-# User detail option: controls output length. Always accurate only.
+# Detail level is only a hint — the Section Prompt always takes priority.
+# If the prompt says "generate an index", generate only an index regardless of detail_level.
 DETAIL_LEVEL_INSTRUCTIONS = {
-    "detailed": "LENGTH: LONG (2-10 A4 pages). Comprehensive, thorough, full paragraphs and details. Only accurate content—no filler.",
-    "concise": "LENGTH: CONCISE. Balanced, clear, moderate detail for this section. Only accurate content.",
-    "short": "LENGTH: SHORT. Brief, essential information only. One or a few focused paragraphs. Only accurate content.",
+    "detailed": "If the Section Prompt asks for comprehensive content, be thorough. Otherwise match the exact scope the Section Prompt specifies.",
+    "concise": "Match the exact scope the Section Prompt specifies. Be clear and well-structured.",
+    "short": "Match the exact scope the Section Prompt specifies. Be brief and to the point.",
 }
 
 
@@ -87,6 +88,7 @@ def draft_section(
     detail_level: Optional[str] = None,
     temperature: float = 0.7,
     agent_name: Optional[str] = None,
+    language: str = "English",
 ) -> Dict[str, Any]:
     """
     Generate or refine a legal section using Gemini or Claude (by model).
@@ -102,24 +104,40 @@ def draft_section(
     # ── System prompt: ONLY from DB agent config ─────────────────────────────
     # This tells the model HOW to behave (legal style, HTML-only output, rules).
     # Goes to Gemini system_instruction / Claude system prompt (NOT user message).
+    # ── Language enforcement block (appended to any system prompt) ──────────
+    # This is MANDATORY — it overrides and cannot be softened by DB prompt content.
+    lang = (language or "English").strip()
+    lang_directive = (
+        f" LANGUAGE: Every word of your output MUST be written in {lang} only. "
+        f"Do not include any text in any other language. "
+        f"All legal terms, headings, body text, and HTML content must be in {lang}."
+    ) if lang and lang.lower() != "english" else ""
+
     if system_prompt_override and system_prompt_override.strip():
-        system_prompt = system_prompt_override.strip()
+        system_prompt = system_prompt_override.strip() + lang_directive
         print(
-            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | "
+            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | Language={lang!r} | "
             f"System prompt from DB (length={len(system_prompt)}): {system_prompt[:120]}{'...' if len(system_prompt) > 120 else ''}"
         )
     else:
-        # Fallback when no DB prompt configured — minimal safe instructions.
+        # Fallback when no DB prompt configured — legal tone + strict scope.
         system_prompt = (
-            "You are an expert legal document drafter. "
-            "Output raw HTML ONLY — no markdown, no code fences, no prose. "
-            "Generate ONLY the content specified in the Section Prompt. "
+            "You are a senior advocate and expert legal document drafter with decades of courtroom experience. "
+            "Write with a formal, precise legal tone — use correct legal terminology, proper case references, "
+            "and the authoritative style expected in Indian court filings (pleadings, petitions, applications). "
+            "Structure content as a lawyer would: logical flow, numbered paragraphs where appropriate, "
+            "clear legal arguments, and no ambiguous language. "
+            "Output raw HTML ONLY — no markdown, no code fences, no prose outside HTML tags. "
+            "Generate EXACTLY and ONLY the content specified in the Section Prompt — nothing more. "
+            "If the Section Prompt asks for an index, output only the index. "
+            "If it asks for a title page, output only the title page. "
+            "Never add extra sections, preambles, conclusions, or unsolicited content. "
             "Follow the HTML template structure, fonts, and inline styles exactly. "
             "Fill every placeholder from Field Data; court name, petitioner name, and respondent name must never be empty. "
             "Do not include citation markers, source names, or [cite: ...] in output."
-        )
+        ) + lang_directive
         print(
-            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | "
+            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | Language={lang!r} | "
             "No DB system prompt — using built-in fallback."
         )
 
@@ -210,7 +228,10 @@ ADDITIONAL CASE CONTEXT (this batch — use only chunks relevant to this section
 
 FIELD DATA: {field_values}
 
-OUTPUT RULES: Output length: {length_instruction}
+OUTPUT RULES:
+- LANGUAGE: All output must be in {lang} only — no other language.
+- LEGAL TONE: Maintain formal legal language and advocate style throughout.
+- STRICT SCOPE: Continue ONLY within the scope the Section Prompt specifies — no new sections or unsolicited content.
 - Output ONLY NEW continuation HTML (not a repeat of Already Generated).
 - Match template structure and inline styles. Fill all placeholders. No markdown, no code fences.
 - Do NOT include citation/source markers.
@@ -237,6 +258,8 @@ CASE CONTEXT (use only if the instruction needs facts from context):
 FIELD DATA: {field_values}
 
 OUTPUT RULES:
+- LANGUAGE: All output must be in {lang} only — no other language permitted.
+- LEGAL TONE: Maintain formal legal language and advocate style.
 - Apply the User Instruction as a MINIMAL SURGICAL EDIT. Change ONLY the specific part referenced.
 - Return the COMPLETE section HTML with only that one change applied.
 - Preserve all other paragraphs, headings, tables, inline styles, and HTML tags exactly.
@@ -264,12 +287,17 @@ CASE CONTEXT (RAG — use only the chunks relevant to this section):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT RULES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Output length: {length_instruction}
-- Generate ONLY what the Section Prompt above specifies. Do not add unsolicited sections, preambles, or conclusions.
-- Match the HTML template structure above exactly (same tags, classes, inline styles, order).
+- LANGUAGE: Write ALL output exclusively in {lang}. Every word — headings, body, labels, tables — must be in {lang}. No other language permitted.
+- LEGAL TONE: Write as a senior advocate. Use formal legal language, precise terminology, and the authoritative style expected in court filings. Numbered paragraphs where appropriate.
+- STRICT SCOPE: Generate EXACTLY and ONLY what the Section Prompt specifies — nothing more, nothing less.
+  If the Section Prompt says "generate an index", output only the index entries.
+  If it says "generate a title page", output only the title page content.
+  Do NOT add preambles, introductions, extra sections, summaries, or any content not explicitly asked for.
+- Detail hint (only if Section Prompt does not already define scope): {length_instruction}
 - Fill EVERY placeholder: [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [CASE_NUMBER], [ADDRESS] etc.
   • Use Field Data first → then RAG → then safe fallback ("the Petitioner", "the Hon'ble Court").
   • Court name, petitioner name, and respondent name must NEVER be blank.
+- Match the HTML template structure above exactly (same tags, classes, inline styles, order).
 - Output raw HTML only. No markdown, no code fences, no prose outside HTML tags.
 - Use inline styles: font-family: 'Times New Roman', serif; font-size: 16px; line-height: 1.5; text-align: justify; margin-bottom: 1em.
 - Tables: use proper <table><tr><td> with border style. Headings: center-aligned.

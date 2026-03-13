@@ -50,6 +50,7 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_feedback = payload.get("user_feedback")
     detail_level = payload.get("detail_level") or "detailed"
     batch_info = payload.get("batch_info")
+    language = payload.get("language") or "English"
 
     if not section_prompt and mode not in ("refine", "continue"):
         return {"error": "section_prompt is required for generation"}
@@ -102,6 +103,7 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         detail_level=detail_level,
         temperature=temperature,
         agent_name=agent_name,
+        language=language,
     )
 
     if result.get("status") == "error":

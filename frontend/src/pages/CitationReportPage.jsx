@@ -212,6 +212,83 @@ function CourtHeading({ court }) {
   );
 }
 
+/* ─── Live Agent Logs Component ─── */
+function LiveAgentLogs({ logs }) {
+  const scrollRef = useRef(null);
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [logs]);
+
+  if (!logs || logs.length === 0) return null;
+
+  return (
+    <div style={{
+      marginTop: 16,
+      marginBottom: 8,
+      background: '#0F172A',
+      borderRadius: 12,
+      overflow: 'hidden',
+      border: '1px solid #1E293B',
+      boxShadow: '0 8px 32px rgba(15,23,42,.15)',
+      animation: 'fdUp .4s ease-out'
+    }}>
+      <div style={{
+        padding: '8px 14px',
+        background: '#1E293B',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        borderBottom: '1px solid #0F172A'
+      }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ width: 9, height: 9, borderRadius: '50%', background: '#EF4444', opacity: 0.8 }} />
+          <div style={{ width: 9, height: 9, borderRadius: '50%', background: '#F59E0B', opacity: 0.8 }} />
+          <div style={{ width: 9, height: 9, borderRadius: '50%', background: '#10B981', opacity: 0.8 }} />
+        </div>
+        <span style={{ fontSize: 10, fontWeight: 800, color: '#38BDF8', letterSpacing: '.06em', textTransform: 'uppercase' }}>📡 Agent Pipeline Pipeline Live Logs</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 9, fontWeight: 600, color: '#64748B' }}>{logs.length} entries</span>
+          <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#38BDF8', animation: 'pulsate 2s infinite' }} />
+        </div>
+      </div>
+      <div
+        ref={scrollRef}
+        style={{
+          maxHeight: 220,
+          overflowY: 'auto',
+          padding: '12px 14px',
+          fontFamily: '"JetBrains Mono", "Fira Code", "Menlo", monospace',
+          fontSize: 11,
+          lineHeight: 1.6,
+          color: '#94A3B8'
+        }}
+        className="sc-dark"
+      >
+        {logs.map((log, i) => {
+          const levelColor = { ERROR: '#F87171', WARNING: '#FCD34D', INFO: '#34D399', DEBUG: '#64748B' }[log.log_level] || '#94A3B8';
+          const ts = log.created_at ? new Date(log.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
+          const isSuccess = log.message?.includes('✅') || log.message?.includes('🎉') || log.message?.includes('Successfully');
+          return (
+            <div key={log.id || i} style={{ marginBottom: 5, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span style={{ color: '#0EA5E9', fontSize: 9, opacity: 0.6, flexShrink: 0, marginTop: 1, minWidth: 48 }}>{ts}</span>
+              <span style={{ color: levelColor, fontSize: 8, fontWeight: 800, flexShrink: 0, width: 64, marginTop: 2, textTransform: 'uppercase', letterSpacing: '.02em' }}>{log.agent_name || 'watchdog'}</span>
+              <span style={{ flex: 1, wordBreak: 'break-word', color: isSuccess ? '#34D399' : '#CBD5E1', fontSize: 11.5 }}>{log.message}</span>
+            </div>
+          );
+        })}
+      </div>
+      <style>{`
+        .sc-dark::-webkit-scrollbar { width: 5px; }
+        .sc-dark::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        .sc-dark::-webkit-scrollbar-track { background: #0F172A; }
+        @keyframes pulsate { 0% { opacity: 0.4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.4; transform: scale(1); } }
+      `}</style>
+    </div>
+  );
+}
+
 /* ─── Build plain-text content for RAG upload ─── */
 function buildReportText(c, query, generatedAt) {
   const exc = c.excerpt || {};
@@ -2763,7 +2840,7 @@ export default function CitationReportPage({ embedded = false }) {
                 </div>
               ))}
               {/* Live agent log panel */}
-              {/* Agent log panel temporarily disabled for build compatibility */}
+              <LiveAgentLogs logs={agentLogs} />
               <div ref={chatRef} />
             </div>
 

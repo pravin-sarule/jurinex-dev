@@ -20,7 +20,6 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from api.deps import require_user_id, optional_user_id
 from services import draft_db
 from agents.drafter.agent import run_drafter_agent
-from agents.citation.agent import run_citation_agent
 from agents.critic.agent import run_critic_agent
 from agents.librarian.agent import run_librarian_agent
 
@@ -284,20 +283,13 @@ async def generate_section(
         
         # Detail level controls output length; always require accurate content only
         # detailed = long (2-10 pages), concise = moderate, short = brief
-        detail_instructions = {
-            "detailed": "LONG OUTPUT: 2-10 A4 pages (~1000-5000 words). Comprehensive, thorough, extensive explanations. Still only accurate—no filler.",
-            "concise": "CONCISE OUTPUT: Balanced length for this section. Clear, well-structured, moderate detail. Only accurate content.",
-            "short": "SHORT OUTPUT: Brief, to-the-point. Only essential information. One or a few focused paragraphs. Only accurate content.",
-        }
-        length_instruction = detail_instructions.get(detail_level, detail_instructions["concise"])
-        
-        enhanced_prompt = f"""{section_prompt}
-
-IMPORTANT:
-- Language: {language}.
-- Detail level: {detail_level.upper()} — {length_instruction}
-- Give ONLY an accurate answer; do not add unsupported or generic filler.
-"""
+        # Pass the section_prompt exactly as-is. Do NOT append length instructions here —
+        # the section_prompt already defines WHAT to generate and its scope. Adding a length
+        # override causes the model to expand sections like indexes or title pages beyond what
+        # is asked. detail_level is forwarded to the drafter via the payload field.
+        enhanced_prompt = section_prompt
+        if language and language != "English":
+            enhanced_prompt = f"{section_prompt}\n\nIMPORTANT: Write in {language}."
         
         # Batch-wise generation: split chunks into batches, generate each batch, combine
         from agents.drafter.tools import CHUNKS_PER_BATCH
@@ -331,6 +323,7 @@ IMPORTANT:
                         "field_values": field_values,
                         "template_url": template_url,
                         "detail_level": detail_level,
+                        "language": language,
                     }
                 else:
                     drafter_payload = {
@@ -343,6 +336,7 @@ IMPORTANT:
                         "previous_content": content_html,
                         "batch_info": batch_info,
                         "detail_level": detail_level,
+                        "language": language,
                     }
                 
                 print(
@@ -374,33 +368,13 @@ IMPORTANT:
                 "field_values": field_values,
                 "template_url": template_url,
                 "detail_level": detail_level,
+                "language": language,
             }
             drafter_result = run_drafter_agent(drafter_payload)
             content_html = drafter_result.get("content_html", "")
 
         if not content_html:
             raise HTTPException(status_code=500, detail=drafter_result.get("error", "Drafter returned empty content"))
-
-        # Run Citation agent to add formal citations
-        print(f"[Orchestrator → Citation] Adding formal citations to content")
-        citation_payload = {
-            "draft_id": draft_id,
-            "section_key": section_key,
-            "content_html": content_html,
-            "rag_context": rag_context,
-            "chunks": chunks,
-            "field_values": field_values,
-            "user_id": user_id,
-            "file_ids": resolved_file_ids,
-        }
-        citation_result = run_citation_agent(citation_payload)
-
-        # Update content with citations
-        if citation_result.get("content_html"):
-            content_html = citation_result["content_html"]
-            print(f"[Citation → Orchestrator] Added {citation_result.get('citation_count', 0)} citations")
-        else:
-            print(f"[Citation → Orchestrator] No citations added (content unchanged)")
 
         # Run Critic validation if requested
         critic_result = None
@@ -429,6 +403,7 @@ IMPORTANT:
                     "previous_content": content_html,
                     "user_feedback": f"Critic feedback: {critic_result.get('feedback', '')}",
                     "detail_level": detail_level,
+                    "language": language,
                 }
                 drafter_result_retry = run_drafter_agent(drafter_payload_retry)
                 content_html_retry = drafter_result_retry.get("content_html", "")
@@ -451,15 +426,10 @@ IMPORTANT:
             rag_context_used=rag_context,
             generation_metadata={
                 "drafter": drafter_result.get("metadata", {}),
-                "citation": citation_result.get("metadata", {}),
-                "citations": citation_result.get("citations", []),
-                "citation_count": citation_result.get("citation_count", 0),
-                "citation_confidence": citation_result.get("confidence"),
-                "citation_sources": citation_result.get("sources", []),
                 "critic": critic_result if critic_result else None,
                 "rag_query": rag_query,
             },
-            created_by_agent="citation",
+            created_by_agent="drafter",
         )
         
         # Save critic review if validation was run
@@ -553,18 +523,27 @@ async def refine_section_endpoint(
         
         previous_content = latest_version.get("content_html", "")
         
-        # Use same detail_level as section config if set (for consistent length on refine)
+        # Use same detail_level and language as section config if set
         detail_level = "concise"
+        language = "English"
         section_settings = draft_db.get_draft_section_prompts_list(draft_id)
         section_config = next((s for s in section_settings if s.get("section_id") == section_key), None)
-        if section_config and section_config.get("detail_level"):
+        if section_config:
             detail_level = section_config.get("detail_level") or "concise"
-        
+            lang_code = section_config.get("language") or "en"
+            language_map = {
+                "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu",
+                "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada",
+                "ml": "Malayalam", "pa": "Punjabi", "or": "Odia", "as": "Assamese",
+                "ur": "Urdu", "sa": "Sanskrit"
+            }
+            language = language_map.get(lang_code, "English")
+
         # Get RAG context
         rag_context = ""
         if rag_query:
             print(f"[Orchestrator → Librarian] Fetching updated context")
-            librarian_payload = {"user_id": user_id, "query": rag_query, "top_k": 200, "file_ids": []}
+            librarian_payload = {"user_id": user_id, "query": rag_query, "top_k": 30, "file_ids": []}
             draft_field_data = draft_db.get_draft_field_data_for_retrieve(draft_id, user_id)
             if draft_field_data:
                 meta = draft_field_data.get("metadata", {})
@@ -573,19 +552,20 @@ async def refine_section_endpoint(
                 librarian_payload["file_ids"] = file_ids
             librarian_result = run_librarian_agent(librarian_payload)
             rag_context = librarian_result.get("context", "")
-        
+
         # Run Drafter in refinement mode
-        print(f"[Orchestrator → Drafter] Refining with user feedback (detail_level={detail_level})")
+        print(f"[Orchestrator → Drafter] Refining with user feedback (detail_level={detail_level}, language={language})")
         drafter_payload = {
             "mode": "refine",
             "section_key": section_key,
-            "section_prompt": user_feedback,  # Use feedback as refinement prompt
+            "section_prompt": user_feedback,
             "rag_context": rag_context,
             "field_values": field_values,
             "template_url": template_url,
             "previous_content": previous_content,
             "user_feedback": user_feedback,
             "detail_level": detail_level,
+            "language": language,
         }
         drafter_result = run_drafter_agent(drafter_payload)
         content_html = drafter_result.get("content_html", "")

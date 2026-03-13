@@ -9,7 +9,11 @@
       "Bash(\"c:/Users/ADMIN/jurinex-dev/Backend/citation-service/services/__init__.py\")",
       "Bash(find c:/Users/ADMIN/jurinex-dev -not -path */node_modules/* -not -path */venv* -not -path */.git/* -name *.tsx -o -name *.jsx)",
       "Bash(find c:/Users/ADMIN/jurinex-dev/Backend/citation-service -maxdepth 2 -name *.py ! -path */venv* ! -path */venv.linux.bak* ! -path */__pycache__/*)",
-      "Bash(npx vite:*)"
+      "Bash(npx vite:*)",
+      "Bash(node --input-type=module --eval \":*)",
+      "Bash(python -c \":*)",
+      "Bash(grep -r Configure --include=*.jsx --include=*.js frontend/src)",
+      "Bash(grep -r \"language\\\\|Language\\\\|DRAFT LANGUAGE\" --include=*.jsx --include=*.js frontend/src/pages frontend/src/components)"
     ]
   }
 }
