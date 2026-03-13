@@ -173,6 +173,10 @@ async def orchestrate_retrieve(
     When a case is attached to the draft: send only draft_id and query — no file_ids needed.
     **Body (JSON):** query (required), optional: draft_id, top_k, file_ids, case_id.
     """
+    merged_file_ids = _resolve_retrieve_file_ids(file_ids, case_id, draft_id, user_id)
+    query_payload: Dict[str, Any] = {
+        "user_id": user_id,
+        "query": (query or "").strip(),
         "top_k": max(1, min(top_k, 200)),
     }
     # Always pass file_ids so draft-scoped empty list returns no chunks (not all user chunks)
