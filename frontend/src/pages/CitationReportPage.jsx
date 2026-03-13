@@ -1437,14 +1437,27 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
    AGENT LOG PANEL
 ══════════════════════════════════════════════════ */
 const AGENT_ICONS = {
-  root: '🧠', watchdog: '🐕', fetcher: '📡', clerk: '📋',
-  librarian: '📚', auditor: '🔍', report_builder: '🏗',
-  keyword_extractor: '🔑', citation_agent: '⚖️',
+  root: '🧠',
+  watchdog: '🐕',
+  fetcher: '📡',
+  clerk: '📋',
+  librarian: '📚',
+  auditor: '🔍',
+  report_builder: '🏗',
+  keyword_extractor: '🔑',
+  citation_agent: '⚖️',
 };
+
 const AGENT_COLORS = {
-  root: '#6366F1', watchdog: '#10B981', fetcher: '#F59E0B',
-  clerk: '#8B5CF6', librarian: '#3B82F6', auditor: '#EF4444',
-  report_builder: '#14B8A6', keyword_extractor: '#EC4899', citation_agent: '#F97316',
+  root: '#6366F1',
+  watchdog: '#10B981',
+  fetcher: '#F59E0B',
+  clerk: '#8B5CF6',
+  librarian: '#3B82F6',
+  auditor: '#EF4444',
+  report_builder: '#14B8A6',
+  keyword_extractor: '#EC4899',
+  citation_agent: '#F97316',
 };
 const LEVEL_STYLE = {
   ERROR: { color: '#DC2626', left: '#DC2626' },
