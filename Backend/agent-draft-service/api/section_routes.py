@@ -64,25 +64,25 @@ async def generate_section(
     section_prompt: Optional[str] = Body(None, embed=True),
     rag_query: Optional[str] = Body(None, embed=True),
     template_url: Optional[str] = Body(None, embed=True),
-    auto_validate: bool = Body(True, embed=True),
+    auto_validate: bool = Body(False, embed=True),
 ) -> Dict[str, Any]:
     """
     Generate initial section content using Drafter agent.
-    
+
     Flow:
     1. Get template sections for this draft's template
     2. Use provided section_prompt or fetch from template_sections.default_prompt
     3. If rag_query provided → run Librarian to get context
     4. Run Drafter agent to generate content
-    5. If auto_validate=True → run Critic agent for validation
+    5. If auto_validate=True → run Critic agent for validation (default: False)
     6. If Critic FAIL → auto-retry once with feedback
     7. Save version to section_versions
-    
+
     Body:
       - section_prompt: Optional custom prompt (overrides template default)
       - rag_query: Optional query for Librarian context retrieval
       - template_url: Optional signed GCS URL for template visual reference
-      - auto_validate: Whether to run Critic validation (default true)
+      - auto_validate: Whether to run Critic validation (default false — saves 1-2 LLM calls)
     """
     logger.info(
         "API: POST /api/drafts/%s/sections/%s/generate — generateSection (Orchestrator → Librarian → Drafter → Critic)",
@@ -195,6 +195,11 @@ async def generate_section(
             # Prompt was explicitly provided in the request body — this is a user edit
             user_edited_prompt = section_prompt
         
+        print(
+            f"[Orchestrator] Section prompt resolved | section={section_key!r} | "
+            f"length={len(section_prompt)} chars | preview={section_prompt[:120]!r}"
+        )
+
         # Get RAG context (always try to fetch some context for variable filling if not provided)
         rag_context = ""
         effective_query = rag_query
@@ -212,7 +217,7 @@ async def generate_section(
         librarian_payload = {
             "user_id": user_id,
             "query": effective_query,
-            "top_k": 200,  # Fetch top 200 chunks for comprehensive context (batch-wise generation)
+            "top_k": 30,  # 30 chunks fits in a single LLM batch (CHUNKS_PER_BATCH=30); avoids 13+ sequential calls
             "file_ids": [], # Default to empty list to prevent searching ALL user files if draft context resolution fails
         }
         # Add draft_id to payload so Librarian uses draft-scoped files
@@ -340,7 +345,11 @@ IMPORTANT:
                         "detail_level": detail_level,
                     }
                 
-                print(f"[Orchestrator → Drafter] Batch {batch_idx + 1}/{num_batches} ({len(batch_chunks)} chunks)")
+                print(
+                    f"[Orchestrator → Drafter] Batch {batch_idx + 1}/{num_batches} "
+                    f"({len(batch_chunks)} chunks) | section={section_key!r} | "
+                    f"prompt_preview={enhanced_prompt[:80]!r}"
+                )
                 batch_result = run_drafter_agent(drafter_payload)
                 batch_html = batch_result.get("content_html", "")
                 drafter_result = batch_result
@@ -351,7 +360,12 @@ IMPORTANT:
                     print(f"[Orchestrator] Warning: Batch {batch_idx + 1} returned empty content")
         else:
             # Single batch: one API call
-            print(f"[Orchestrator → Drafter] Single-batch generation ({len(chunks)} chunks) in {language} with {detail_level} detail level")
+            print(
+                f"[Orchestrator → Drafter] Single-batch generation | "
+                f"section={section_key!r} | chunks={len(chunks)} | "
+                f"language={language} | detail={detail_level} | "
+                f"prompt_preview={enhanced_prompt[:80]!r}"
+            )
             drafter_payload = {
                 "mode": "generate",
                 "section_key": section_key,
@@ -483,7 +497,7 @@ async def refine_section_endpoint(
     user_feedback: str = Body(..., embed=True),
     rag_query: Optional[str] = Body(None, embed=True),
     template_url: Optional[str] = Body(None, embed=True),
-    auto_validate: bool = Body(True, embed=True),
+    auto_validate: bool = Body(False, embed=True),
 ) -> Dict[str, Any]:
     """
     Refine section content based on user feedback using Drafter agent.

@@ -6,22 +6,32 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-DOCUMENT_SERVICE_URL = os.environ.get("DOCUMENT_SERVICE_URL", "http://localhost:5002")
+DOCUMENT_SERVICE_URL = os.environ.get("DOCUMENT_SERVICE_URL", "https://document-service-120280829617.asia-south1.run.app")
 LLM_MODELS_PATH = "/api/llm-models"
 TIMEOUT = 15
+
+# ── In-process model list cache (TTL = 10 minutes) ───────────────────────────
+_MODELS_CACHE: Dict[str, Any] = {}  # {"data": [...], "ts": float}
+_MODELS_CACHE_TTL = 600  # seconds
 
 
 def fetch_models_from_document_service() -> List[Dict[str, Any]]:
     """
     GET document-service /api/llm-models and return list of { id, name }.
     Log each model name to console. On failure returns [].
+    Results are cached in-process for 10 minutes.
     """
+    cached = _MODELS_CACHE.get("data")
+    if cached is not None and (time.monotonic() - _MODELS_CACHE.get("ts", 0)) < _MODELS_CACHE_TTL:
+        return cached
+
     url = f"{DOCUMENT_SERVICE_URL.rstrip('/')}{LLM_MODELS_PATH}"
     try:
         resp = requests.get(url, timeout=TIMEOUT)
@@ -39,6 +49,8 @@ def fetch_models_from_document_service() -> List[Dict[str, Any]]:
             print(f"[document_service] Model: id={mid} -> name={name}")
         if names:
             print(f"[document_service] All model names: {', '.join(names)}")
+        _MODELS_CACHE["data"] = models
+        _MODELS_CACHE["ts"] = time.monotonic()
         return models
     except requests.RequestException as e:
         logger.warning("[document_service] Failed to fetch models from %s: %s", url, e)

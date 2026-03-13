@@ -103,10 +103,10 @@ def is_claude_model(model_name: str) -> bool:
 
 
 def is_valid_model(model_name: str) -> bool:
-    """Return True if model_name is a supported Gemini or Claude model."""
+    """Return True if model_name is a supported Gemini or Claude model (including display names)."""
     if not model_name:
         return False
-    return model_name in GEMINI_MODELS or is_claude_model(model_name)
+    return model_name in GEMINI_MODELS or is_claude_model(model_name) or model_name in CLAUDE_DISPLAY_TO_API_ID
 
 
 def claude_api_model_id(model_name: str) -> str:

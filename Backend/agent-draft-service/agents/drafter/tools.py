@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-flash-lite-latest"
 
+# ── Template HTML cache ───────────────────────────────────────────────────────
+# Templates change very rarely. Cache per URL for the process lifetime to avoid
+# a network fetch on every section generation call.
+_TEMPLATE_HTML_CACHE: dict[str, str] = {}
+
 def _strip_citation_sources(text: str) -> str:
     """Remove [cite: ...], [Source: ...], and similar citation/source strings from generated content."""
     if not text:
@@ -51,7 +56,7 @@ def _clean_html_response(text: str) -> str:
     cleaned = re.sub(r'(<br\s*/?>)\s*(<br\s*/?>)\s*(<br\s*/?>\s*)+', r'\1\2', cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
-CHUNKS_PER_BATCH = 15  # Process ~15 chunks per API call to avoid token limits
+CHUNKS_PER_BATCH = 30  # Process ~30 chunks per API call; larger batch = fewer sequential LLM calls
 
 
 def _parts_to_user_message(parts: List[Union[str, Any]]) -> str:
@@ -80,38 +85,55 @@ def draft_section(
     model: str = DEFAULT_MODEL,
     system_prompt_override: Optional[str] = None,
     detail_level: Optional[str] = None,
+    temperature: float = 0.7,
+    agent_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate or refine a legal section using Gemini or Claude (by model).
-    Drafter instructions (what to do) come FROM DB ONLY (agent_prompts.prompt for drafting).
-    When DB prompt is empty, use a minimal fallback so the agent still follows section prompt and template.
+
+    Separation of concerns:
+      - system_prompt (system_instruction) = drafter agent instructions from DB → HOW to write
+      - section_prompt (user message)      = what to generate for THIS section → WHAT to write
+      - template HTML                      = reference for structure/format
+      - RAG context + field_values         = actual content / placeholder values
     """
     from config.gemini_models import is_claude_model, claude_api_model_id
 
-    # System prompt: ONLY from DB (draft instruction). No instructions file—DB defines what the drafter does.
-    system_prompt = ""
+    # ── System prompt: ONLY from DB agent config ─────────────────────────────
+    # This tells the model HOW to behave (legal style, HTML-only output, rules).
+    # Goes to Gemini system_instruction / Claude system prompt (NOT user message).
     if system_prompt_override and system_prompt_override.strip():
         system_prompt = system_prompt_override.strip()
-        print(f"[Drafter tools] Using draft instruction from DB only (length={len(system_prompt)})")
-    else:
-        # Minimal fallback when DB has no prompt: follow section prompt and template; aim for high confidence (90+).
-        system_prompt = (
-            "You are a legal document drafter. Your instructions come from the DB (agent_prompts for drafting). "
-            "When no DB prompt is set: (1) Use ONLY the context chunks relevant to this section—ignore the rest. "
-            "(2) Generate ONLY the parts explicitly mentioned in the Section Prompt; do not generate beyond what is asked. "
-            "(3) Follow the HTML template structure exactly. (4) Produce draft that will score 90+ on validation: "
-            "follow template, use only relevant chunks. Do not include source names or citations in the output. Output raw HTML only, no markdown."
+        print(
+            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | "
+            f"System prompt from DB (length={len(system_prompt)}): {system_prompt[:120]}{'...' if len(system_prompt) > 120 else ''}"
         )
-        print("[Drafter tools] No DB prompt; using minimal fallback (draft instruction should be set in DB).")
+    else:
+        # Fallback when no DB prompt configured — minimal safe instructions.
+        system_prompt = (
+            "You are an expert legal document drafter. "
+            "Output raw HTML ONLY — no markdown, no code fences, no prose. "
+            "Generate ONLY the content specified in the Section Prompt. "
+            "Follow the HTML template structure, fonts, and inline styles exactly. "
+            "Fill every placeholder from Field Data; court name, petitioner name, and respondent name must never be empty. "
+            "Do not include citation markers, source names, or [cite: ...] in output."
+        )
+        print(
+            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | "
+            "No DB system prompt — using built-in fallback."
+        )
+
+    print(f"[Drafter tools] Section={section_key!r} | Mode={mode!r} | DetailLevel={detail_level!r} | Temperature={temperature}")
+    print(f"[Drafter tools] Section prompt preview: {section_prompt[:160]}{'...' if len(section_prompt) > 160 else ''}")
 
     detail_level = (detail_level or "concise").lower().strip()
     length_instruction = DETAIL_LEVEL_INSTRUCTIONS.get(detail_level, DETAIL_LEVEL_INSTRUCTIONS["concise"])
 
     try:
+        # system_prompt goes to system_instruction (not into parts / user message)
         parts = []
-
-        if system_prompt:
-            parts.append(f"System Instructions:\n{system_prompt}\n\n")
+        # NOTE: Do NOT add system_prompt to parts — it is passed separately to call_llm
+        # as system_prompt → Gemini system_instruction / Claude system.
 
         # Fetch template, extract HTML for this specific section only, then section-wise format
         template_content = ""
@@ -124,7 +146,10 @@ def draft_section(
                     get_template_format_for_section,
                     extract_section_fragment,
                 )
-                template_content = fetch_template_html(template_url)
+                # Cache template HTML per URL to avoid repeated network fetches
+                if template_url not in _TEMPLATE_HTML_CACHE:
+                    _TEMPLATE_HTML_CACHE[template_url] = fetch_template_html(template_url)
+                template_content = _TEMPLATE_HTML_CACHE[template_url]
                 if template_content:
                     # Section-wise: analyze template and extract HTML for only this section
                     section_template_html = extract_section_fragment(template_content, section_key)
@@ -165,112 +190,109 @@ def draft_section(
                 logger.warning("Could not load/fetch template_url: %s", e)
 
         if mode == "continue" and previous_content:
-            # Continuation: respect detail_level length; only accurate content.
-            prompt = f"""CONTINUE the section "{section_key}" with ADDITIONAL content. Use ONLY the chunks relevant to this section from the context below. What to add and how to format come from System Instructions and the TEMPLATE HTML FOR THIS SECTION ONLY above. Fill empty fields and placeholders from Field Data (from DB) first, then RAG.
+            # ── Batch continuation ────────────────────────────────────────────
+            prompt = f"""SECTION: {section_key} — CONTINUATION {batch_info or ''}
 
-**Content already generated (DO NOT REPEAT):**
-{previous_content}
-
-**Additional Context (RAG) — use only chunks relevant to this section:**
-{rag_context if rag_context else 'No additional context.'}
-
-**Field Data (from DB — use to fill empty fields/placeholders):**
-{field_values}
-
-{batch_info or ''}
-
-**Detail level:** {length_instruction}
-**Instructions:** Generate ONLY new continuation content. Use only relevant chunks. Match template format (Times New Roman, CSS indent). Use proper word and line spacing (line-height, paragraph margin). Format tables with proper <table>/<tr>/<td>; do not show sources or [Source: ...] in content. Fill placeholders from Field Data and RAG; court name, petitioner name, respondent name must never be empty. Return ONLY new HTML; no markdown.
-"""
-        elif user_feedback and previous_content:
-            # Refinement: TARGETED EDIT ONLY — change only what the user asked to add/change; leave everything else identical.
-            prompt = f"""You are making a TARGETED EDIT to the section "{section_key}". The user has given an instruction to add or change something specific. Your job is to change ONLY that part (the specific line, paragraph, or clause the user refers to) and leave ALL other content EXACTLY as in the Previous Content below.
-
-**CRITICAL — MINIMAL EDIT RULES:**
-1. Change ONLY what the user's instruction asks for (e.g. "add X in paragraph 2", "change the rent amount to Y", "make clause 5 more formal"). Do NOT rewrite, rephrase, or alter any other part of the document.
-2. Copy the Previous Content in full, then apply the minimal change: edit only the relevant line(s), paragraph(s), or clause(s). Every other paragraph, heading, and table must remain character-for-character identical where not affected by the instruction.
-3. Do NOT regenerate the whole section. Do NOT improve or reword other parts. Do NOT change formatting, structure, or content that the user did not ask to change.
-4. Preserve the exact HTML structure, tags, classes, and inline styles everywhere. Only the text/content inside the specific element(s) that the user's instruction targets may change.
-5. If the user asks to "add" something, add it only where they said (e.g. in that paragraph or after that line); leave the rest unchanged.
-6. Output the COMPLETE section HTML (so the frontend can replace the whole section), but with only the minimal edit applied — like a surgical patch, not a full rewrite.
-
-**Previous Content (full section — change only the part the user asks for):**
-{previous_content}
-
-**User instruction (apply ONLY this change; leave everything else as in Previous Content):**
-{user_feedback}
-
-**Context (RAG) — use only if the user's instruction needs facts/figures from context:**
-{rag_context if rag_context else 'No additional context.'}
-
-**Field Data (from DB — use only to fill values if the user's instruction refers to a placeholder):**
-{field_values}
-
-**Detail level:** {length_instruction}
-**Instructions:** Apply the user's instruction as a minimal, targeted edit. Return the full section HTML with only that change. Preserve all other text and HTML exactly. No markdown; raw HTML only.
-"""
-        else:
-            # Generation: respect user detail option (detailed=long, concise=moderate, short=short); only accurate.
-            prompt = f"""Generate ONLY what the Section Prompt below asks for—no extra content. You have been given multiple context chunks; use ONLY the chunks that are relevant to this section and ignore the rest. Use the **HTML Template Structure** above for format (tags, classes, IDs, alignment). 
-
-**STRICT SCOPE RULE:** Only generate the text and topics specifically mentioned in the Section Prompt. Do not add background, introductory text, or concluding remarks unless explicitly requested.
-
-**INDIAN COURT STANDARDS:**
-- Adhere to typical Indian legal drafting styles (e.g., mention of Hon'ble Court, Petitioner/Respondent terminology).
-- Use the **complete context** provided from all files in the case. Even if a file was added later, it contains crucial details that must be integrated into the draft.
-- Ensure the draft is "properly built" by combining facts from multiple chunks into a cohesive narrative.
-
-**AESTHETIC REQUIREMENTS (Standard Legal Format):**
-- **Font**: "Times New Roman", serif.
-- **Size**: 12pt (16px).
-- **Line Spacing**: 1.5 line-height.
-- **Alignment**: justify (except headings).
-- **Paragraphs**: margin-bottom: 1em.
-
-**Rules:** (1) **Section Prompt** below is the prompt for this section **fetched from the database** (configured for this draft/template). Generate ONLY what it specifies—nothing else. (2) **Format:** Use the TEMPLATE HTML FOR THIS SECTION ONLY above as the base. Your output MUST use the **exact same format**: same tags, same order, same class and id attributes, same inline styles (font-family, font-size, margin, padding, text-align, text-indent). (3) **Empty fields and placeholders** must be filled from **Field Data (from DB)** and RAG; use Field Data first, then RAG, then fallbacks.
-
-**IMPORTANT:** You are processing batches of many chunks (up to 200). Use EVERY relevant detail from EVERY chunk to build the most comprehensive and legally accurate draft possible. Do not skip details from later chunks.
-
-**Section to draft:** {section_key}
-
-**Section Prompt from DB (MISSION CRITICAL — generate ONLY what is listed here):**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION PROMPT (same as initial — generate more content that fulfills it):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {section_prompt}
 
-**Retrieved Context (RAG) — use ONLY chunks relevant to this section:**
-{rag_context if rag_context else 'No specific context.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ALREADY GENERATED (DO NOT REPEAT — append new content only):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{previous_content}
 
-**Field Data (from DB — use to fill ALL fields):**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ADDITIONAL CASE CONTEXT (this batch — use only chunks relevant to this section):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{rag_context if rag_context else 'No additional context.'}
+
+FIELD DATA: {field_values}
+
+OUTPUT RULES: Output length: {length_instruction}
+- Output ONLY NEW continuation HTML (not a repeat of Already Generated).
+- Match template structure and inline styles. Fill all placeholders. No markdown, no code fences.
+- Do NOT include citation/source markers.
+"""
+        elif user_feedback and previous_content:
+            # ── Targeted refinement ───────────────────────────────────────────
+            prompt = f"""SECTION: {section_key} — TARGETED EDIT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+USER INSTRUCTION (apply ONLY this change — change nothing else):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{user_feedback}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PREVIOUS CONTENT (change only what the instruction refers to; copy everything else exactly):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{previous_content}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CASE CONTEXT (use only if the instruction needs facts from context):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{rag_context if rag_context else 'No additional context.'}
+
+FIELD DATA: {field_values}
+
+OUTPUT RULES:
+- Apply the User Instruction as a MINIMAL SURGICAL EDIT. Change ONLY the specific part referenced.
+- Return the COMPLETE section HTML with only that one change applied.
+- Preserve all other paragraphs, headings, tables, inline styles, and HTML tags exactly.
+- No markdown, no code fences. Raw HTML only.
+"""
+        else:
+            # ── Fresh generation ──────────────────────────────────────────────
+            prompt = f"""SECTION TO DRAFT: {section_key}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION PROMPT (THIS IS WHAT YOU MUST GENERATE — follow exactly):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{section_prompt}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIELD DATA (fill ALL placeholders from this first):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {field_values}
 
-**Detail level:** {length_instruction}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CASE CONTEXT (RAG — use only the chunks relevant to this section):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{rag_context if rag_context else 'No case context available. Use Field Data to fill values.'}
 
-**CRITICAL — FILL ALL PLACEHOLDERS (no empty brackets):**
-- **Court name, petitioner name, and respondent name must NEVER be empty.** Fill them from Field Data first, then RAG, then fallbacks ("the Hon'ble Court", "the Petitioner", "the Respondent").
-- Replace EVERY [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [ADDRESS], [CASE_NUMBER], etc. with real values.
-
-**Instructions:**
-1. Generate ONLY the parts explicitly mentioned in the Section Prompt.
-2. Use "Times New Roman", 12pt, 1.5 line-height everywhere.
-3. Use justify alignment for paragraphs.
-4. Tables: Use proper <table> structure with borders.
-5. Do NOT show citation/source strings in content.
-6. Output ONLY raw HTML. No markdown.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Output length: {length_instruction}
+- Generate ONLY what the Section Prompt above specifies. Do not add unsolicited sections, preambles, or conclusions.
+- Match the HTML template structure above exactly (same tags, classes, inline styles, order).
+- Fill EVERY placeholder: [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [CASE_NUMBER], [ADDRESS] etc.
+  • Use Field Data first → then RAG → then safe fallback ("the Petitioner", "the Hon'ble Court").
+  • Court name, petitioner name, and respondent name must NEVER be blank.
+- Output raw HTML only. No markdown, no code fences, no prose outside HTML tags.
+- Use inline styles: font-family: 'Times New Roman', serif; font-size: 16px; line-height: 1.5; text-align: justify; margin-bottom: 1em.
+- Tables: use proper <table><tr><td> with border style. Headings: center-aligned.
+- Do NOT include [cite: ...], [Source: ...], or any citation markers in output.
 """
         parts.append(prompt)
 
-        print(f"[Drafter tools] Model for this request: {model!r}")
-
         from services.llm_service import call_llm
-        
-        # Combined user message
         from agents.drafter.tools import _parts_to_user_message
+
         user_message = _parts_to_user_message(parts)
-        
+
+        print(
+            f"[Drafter tools] Calling LLM → Agent={agent_name!r} | Model={model!r} | "
+            f"Temp={temperature} | UserMsg={len(user_message)} chars | SysPrompt={len(system_prompt)} chars"
+        )
+
         content_html = call_llm(
             prompt=user_message,
-            system_prompt=system_prompt,
+            system_prompt=system_prompt,   # → Gemini system_instruction / Claude system
             model=model,
-            use_google_search=True # Drafter always uses search if available
+            temperature=temperature,
+            use_google_search=False,       # RAG context already provides all facts; web search adds latency
         )
 
         if content_html is None:

@@ -30,7 +30,15 @@ def _resolve_drafter_model(payload: Dict[str, Any], agent: Optional[Dict[str, An
 
 def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Run the Drafter agent: use drafting tools and report results.
+    Run the Drafter agent.
+
+    Agent config (type='drafting') is fetched from DB:
+      - agent.name   → identifies which agent is active (shown in logs)
+      - agent.prompt → system_instruction sent to LLM (HOW to draft)
+      - agent.resolved_model → model to use (overridden by payload['model'] if set)
+      - agent.temperature    → sampling temperature passed to LLM
+
+    section_prompt (from payload) = WHAT to generate (from template_analysis_sections).
     """
     mode = payload.get("mode", "generate")
     section_key = payload.get("section_key", "unknown")
@@ -40,21 +48,45 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     template_url = payload.get("template_url")
     previous_content = payload.get("previous_content")
     user_feedback = payload.get("user_feedback")
-    detail_level = payload.get("detail_level") or "concise"  # detailed | concise | short
+    detail_level = payload.get("detail_level") or "detailed"
+    batch_info = payload.get("batch_info")
 
-    if not section_prompt and mode != "refine":
+    if not section_prompt and mode not in ("refine", "continue"):
         return {"error": "section_prompt is required for generation"}
 
-    # Fetch agent from DB once: used for model resolution and prompt
+    # ── Fetch drafting agent config from DB ───────────────────────────────────
     from services.agent_config_service import get_agent_by_type
     agent = get_agent_by_type("drafting")
-    model = _resolve_drafter_model(payload, agent=agent)
-    print(f"[Drafter] Using model: {model!r} (from DB agent config or payload)")
-    db_prompt = (agent.get("prompt") or "").strip() if agent else ""
 
-    # Use the tool
-    mode = payload.get("mode", "generate")
-    batch_info = payload.get("batch_info")
+    agent_name = (agent.get("name") or "unknown-agent") if agent else "no-agent-in-db"
+    agent_id   = (agent.get("id") or "—") if agent else "—"
+    db_prompt  = (agent.get("prompt") or "").strip() if agent else ""
+    temperature = float((agent.get("temperature") or 0.7) if agent else 0.7)
+    llm_params  = (agent.get("llm_parameters") or {}) if agent else {}
+
+    # Allow payload to override temperature
+    temperature = float(payload.get("temperature") or temperature)
+
+    model = _resolve_drafter_model(payload, agent=agent)
+
+    # ── Detailed log: agent identity, model, prompt, section prompt ───────────
+    print(
+        f"\n{'='*70}\n"
+        f"[Drafter] AGENT CONFIG\n"
+        f"  Agent name : {agent_name!r} (id={agent_id})\n"
+        f"  Model      : {model!r}\n"
+        f"  Temperature: {temperature}\n"
+        f"  LLM params : {llm_params}\n"
+        f"  System prompt ({len(db_prompt)} chars): "
+        f"{db_prompt[:200]}{'...' if len(db_prompt) > 200 else ''}\n"
+        f"[Drafter] SECTION REQUEST\n"
+        f"  Section key   : {section_key!r}\n"
+        f"  Mode          : {mode!r}\n"
+        f"  Detail level  : {detail_level!r}\n"
+        f"  Section prompt: {section_prompt[:200]}{'...' if len(section_prompt) > 200 else ''}\n"
+        f"{'='*70}"
+    )
+
     result = draft_section(
         section_key=section_key,
         section_prompt=section_prompt,
@@ -68,21 +100,33 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         model=model,
         system_prompt_override=db_prompt or None,
         detail_level=detail_level,
+        temperature=temperature,
+        agent_name=agent_name,
     )
 
     if result.get("status") == "error":
         error = result.get("error_message", "Unknown error")
+        print(f"[Drafter] ERROR for section={section_key!r}: {error}")
         return {
             "content_html": _placeholder_generate(section_key, error),
-            "error": error
+            "error": error,
         }
 
+    print(
+        f"[Drafter] SUCCESS section={section_key!r} | "
+        f"HTML length={len(result.get('content_html', ''))} chars | "
+        f"Agent={agent_name!r} | Model={model!r}"
+    )
     return {
         "content_html": result.get("content_html", ""),
         "metadata": {
+            "agent_name": agent_name,
+            "agent_id": str(agent_id),
             "model": model,
+            "temperature": temperature,
             "section_key": section_key,
             "mode": mode,
+            "detail_level": detail_level,
         },
     }
 
