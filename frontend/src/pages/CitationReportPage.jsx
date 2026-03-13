@@ -1436,29 +1436,6 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
 /* ══════════════════════════════════════════════════
    AGENT LOG PANEL
 ══════════════════════════════════════════════════ */
-const AGENT_ICONS = {
-  root: '🧠',
-  watchdog: '🐕',
-  fetcher: '📡',
-  clerk: '📋',
-  librarian: '📚',
-  auditor: '🔍',
-  report_builder: '🏗',
-  keyword_extractor: '🔑',
-  citation_agent: '⚖️',
-};
-
-const AGENT_COLORS = {
-  root: '#6366F1',
-  watchdog: '#10B981',
-  fetcher: '#F59E0B',
-  clerk: '#8B5CF6',
-  librarian: '#3B82F6',
-  auditor: '#EF4444',
-  report_builder: '#14B8A6',
-  keyword_extractor: '#EC4899',
-  citation_agent: '#F97316',
-};
 const LEVEL_STYLE = {
   ERROR: { color: '#DC2626', left: '#DC2626' },
   WARNING: { color: '#B45309', left: '#F59E0B' },
@@ -1505,14 +1482,14 @@ function AgentLogPanel({ logs, runId }) {
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
 
   const PIPELINE_STAGES = [
-    { id: 'start', label: 'Start', icon: '🧠', agent: 'root' },
-    { id: 'keyword_extractor', label: 'Keywords', icon: '🔑', agent: 'keyword_extractor' },
-    { id: 'watchdog', label: 'Watchdog', icon: '🐕', agent: 'watchdog' },
-    { id: 'fetcher', label: 'Fetcher', icon: '📡', agent: 'fetcher' },
-    { id: 'clerk', label: 'Clerk', icon: '📋', agent: 'clerk' },
-    { id: 'librarian', label: 'Librarian', icon: '📚', agent: 'librarian' },
-    { id: 'auditor', label: 'Auditor', icon: '🔍', agent: 'auditor' },
-    { id: 'report_builder', label: 'Report', icon: '🏗', agent: 'report_builder' },
+    { id: 'start', label: 'Start', icon: 'S', agent: 'root' },
+    { id: 'keyword_extractor', label: 'Keywords', icon: 'K', agent: 'keyword_extractor' },
+    { id: 'watchdog', label: 'Watchdog', icon: 'W', agent: 'watchdog' },
+    { id: 'fetcher', label: 'Fetcher', icon: 'F', agent: 'fetcher' },
+    { id: 'clerk', label: 'Clerk', icon: 'C', agent: 'clerk' },
+    { id: 'librarian', label: 'Librarian', icon: 'L', agent: 'librarian' },
+    { id: 'auditor', label: 'Auditor', icon: 'A', agent: 'auditor' },
+    { id: 'report_builder', label: 'Report', icon: 'R', agent: 'report_builder' },
   ];
 
   const reachedAgents = new Set(logs.map(l => l.agent_name));
@@ -1543,7 +1520,7 @@ function AgentLogPanel({ logs, runId }) {
         {PIPELINE_STAGES.map((s, i) => {
           const done = reachedAgents.has(s.agent) || reachedStages.has(s.id);
           const active = activeAgent === s.agent || (s.id === 'fetcher' && activeAgent === 'fetcher');
-          const color = AGENT_COLORS[s.agent] || '#94A3B8';
+          const color = '#94A3B8';
           return (
             <React.Fragment key={s.id}>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 54 }}>
@@ -1576,8 +1553,8 @@ function AgentLogPanel({ logs, runId }) {
         ) : (
           logs.map((log, i) => {
             const ls = LEVEL_STYLE[log.log_level] || LEVEL_STYLE.INFO;
-            const icon = AGENT_ICONS[log.agent_name] || '⚙️';
-            const agentColor = AGENT_COLORS[log.agent_name] || '#64748B';
+            const icon = '⚙️';
+            const agentColor = '#64748B';
             const ts = log.created_at
               ? new Date(log.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
               : '';
