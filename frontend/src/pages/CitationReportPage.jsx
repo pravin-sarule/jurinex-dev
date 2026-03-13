@@ -708,8 +708,8 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
 
   return (
     <>
-    <div style={{ background: '#EAECF0', minHeight: '100vh', padding: '20px 14px 64px' }}>
-      <style>{`
+      <div style={{ background: '#EAECF0', minHeight: '100vh', padding: '20px 14px 64px' }}>
+        <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Source+Sans+3:wght@400;600;700&display=swap');
         @keyframes fdIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
         .doc-selR{cursor:pointer;transition:background .12s}.doc-selR:hover{background:#EEF2FF !important}
@@ -730,21 +730,96 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
         .doc-foot-btn{font-family:'Source Sans 3',sans-serif;font-size:10px;font-weight:700;letter-spacing:.05em;padding:7px 16px;border-radius:4px;cursor:pointer;border:1px solid;text-transform:uppercase}
       `}</style>
 
-      <div style={{ maxWidth: 740, margin: '0 auto' }}>
+        <div style={{ maxWidth: 740, margin: '0 auto' }}>
 
-        {/* Citation point selector */}
-        <div style={{ background: W, marginBottom: 14, border: '1px solid #D4D9E2', borderRadius: 6, overflow: 'hidden', boxShadow: '0 1px 5px rgba(15,23,42,.06)' }}>
-          <div style={{ background: '#1E3A8A', padding: '7px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span className="doc-sans" style={{ fontSize: 9, letterSpacing: '0.14em', color: '#BFDBFE', textTransform: 'uppercase' }}>Citation Points</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span className="doc-sans" style={{ fontSize: 9, color: '#93C5FD' }}>{sel.size} of {citations.length} selected</span>
-              {pendingCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#7C3AED', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>⏳ {pendingCits.length} pending</span>}
-              {redCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#DC2626', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>❌ {redCits.length} unverified</span>}
+          {/* Citation point selector */}
+          <div style={{ background: W, marginBottom: 14, border: '1px solid #D4D9E2', borderRadius: 6, overflow: 'hidden', boxShadow: '0 1px 5px rgba(15,23,42,.06)' }}>
+            <div style={{ background: '#1E3A8A', padding: '7px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="doc-sans" style={{ fontSize: 9, letterSpacing: '0.14em', color: '#BFDBFE', textTransform: 'uppercase' }}>Citation Points</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="doc-sans" style={{ fontSize: 9, color: '#93C5FD' }}>{sel.size} of {citations.length} selected</span>
+                {pendingCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#7C3AED', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>⏳ {pendingCits.length} pending</span>}
+                {redCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#DC2626', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>❌ {redCits.length} unverified</span>}
+              </div>
             </div>
+            {citations.map((c, idx) => {
+              const s = SCFG[c.verificationStatus] || SCFG.YELLOW;
+              const isSel = sel.has(c.id);
+              const srcKey = c.source || 'unknown';
+              let srcIcon = '🤖';
+              let srcLabel = c.sourceApplication || c.sourceLabel || 'Unknown Source';
+              if (srcKey === 'local') {
+                srcIcon = '🏛';
+                srcLabel = 'Local DB';
+              } else if (srcKey === 'indian_kanoon') {
+                srcIcon = '📚';
+                srcLabel = 'Indian Kanoon';
+              } else if (srcKey === 'google') {
+                srcIcon = '🌐';
+                srcLabel = 'Google Search (Gemini)';
+              }
+              return (
+                <div key={c.id} className="doc-selR" onClick={() => toggle(c.id)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px', background: isSel ? '#EEF2FF' : W, borderBottom: idx < citations.length - 1 ? '1px solid #F1F4F8' : 'none' }}>
+                  <div style={{ width: 13, height: 13, flexShrink: 0, border: `2px solid ${isSel ? '#1E3A8A' : '#C5CAD3'}`, background: isSel ? '#1E3A8A' : W, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {isSel && <span style={{ color: W, fontSize: 9, lineHeight: 1, marginTop: -1 }}>✓</span>}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="doc-serif" style={{ fontSize: 12.5, fontWeight: 600, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.caseName}</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <span className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#1E3A8A' }}>{c.primaryCitation}</span>
+                        {c.court && c.court !== 'Court not specified' && <><span style={{ color: '#CBD5E1' }}>·</span><span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>{c.court}</span></>}
+                      </div>
+                      <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span>{srcIcon}</span>
+                        <span>{srcLabel}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: s.bg, border: `1px solid ${s.border}`, padding: '2px 7px', borderRadius: 2, flexShrink: 0 }}>
+                    <Dot c={s.dot} s={5} />
+                    <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: s.text }}>{s.label}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          {citations.map((c, idx) => {
-            const s = SCFG[c.verificationStatus] || SCFG.YELLOW;
-            const isSel = sel.has(c.id);
+
+          {selCites.length === 0 && (
+            <div className="doc-paper" style={{ padding: '52px 32px', textAlign: 'center' }}>
+              <div className="doc-serif" style={{ fontSize: 15, fontStyle: 'italic', color: '#9CA3AF' }}>Select a citation point above to view the full report.</div>
+            </div>
+          )}
+
+          {citations.length === 0 && (pendingCits.length > 0 || redCits.length > 0) && (
+            <div className="doc-paper" style={{ padding: '32px', textAlign: 'center', marginBottom: 18 }}>
+              <div className="doc-serif" style={{ fontSize: 14, fontStyle: 'italic', color: '#9CA3AF' }}>No verified citations available. See sections below.</div>
+            </div>
+          )}
+
+          {selCites.map((c, idx) => {
+            const score = (c.proposition || {}).matchScore ?? 0;
+            const verdict = (c.proposition || {}).verdict || 'REVIEW';
+            const matchLabel = score >= 80 ? 'MATCH CONFIRMED' : score >= 60 ? 'PARTIAL MATCH' : 'LOW MATCH';
+            const matchColor = score >= 80 ? '#0D9488' : score >= 60 ? '#D97706' : '#DC2626';
+            const treat = c.treatment || {};
+            const followedList = treat.followedList || [];
+            const distinguishedList = treat.distinguishedList || [];
+            const overruledList = treat.overruledList || [];
+            const reversedList = treat.reversedList || [];
+            const reliedOnList = treat.reliedOnList || [];
+            const appliedList = treat.appliedList || [];
+            const citedList = treat.citedList || [];
+            const referredList = treat.referredList || [];
+            const approvedList = treat.approvedList || [];
+            const judges = (c.coram || '').split(/[,;]/).map(j => j.trim()).filter(Boolean);
+            const excerptRaw = (c.excerpt || {}).text || '';
+            const excerptDisplay = (() => {
+              // Backend already strips most HTML/CSS noise; here we just normalise whitespace
+              const t = excerptRaw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              return t || '—';
+            })();
             const srcKey = c.source || 'unknown';
             let srcIcon = '🤖';
             let srcLabel = c.sourceApplication || c.sourceLabel || 'Unknown Source';
@@ -758,856 +833,604 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
               srcIcon = '🌐';
               srcLabel = 'Google Search (Gemini)';
             }
+            const treatRows = [
+              ...followedList.map(name => ({ name, type: 'FOLLOWED', col: '#166534', bg: '#F0FDF4', bdr: '#BBF7D0' })),
+              ...distinguishedList.map(name => ({ name, type: 'DISTINGUISHED', col: '#92400E', bg: '#FFFBEB', bdr: '#FDE68A' })),
+              ...overruledList.map(name => ({ name, type: 'OVERRULED', col: '#991B1B', bg: '#FEF2F2', bdr: '#FECACA' })),
+              ...reversedList.map(name => ({ name, type: 'REVERSED', col: '#7B1FA2', bg: '#F3E5F5', bdr: '#CE93D8' })),
+              ...reliedOnList.map(name => ({ name, type: 'RELIED ON', col: '#0D47A1', bg: '#E3F2FD', bdr: '#90CAF9' })),
+              ...appliedList.map(name => ({ name, type: 'APPLIED', col: '#1565C0', bg: '#E8F4FD', bdr: '#90CAF9' })),
+              ...citedList.map(name => ({ name, type: 'CITED', col: '#2E7D32', bg: '#E8F5E9', bdr: '#A5D6A7' })),
+              ...referredList.map(name => ({ name, type: 'REFERRED TO', col: '#4E342E', bg: '#EFEBE9', bdr: '#BCAAA4' })),
+              ...approvedList.map(name => ({ name, type: 'APPROVED', col: '#1B5E20', bg: '#F1F8E9', bdr: '#C5E1A5' })),
+            ];
+
             return (
-              <div key={c.id} className="doc-selR" onClick={() => toggle(c.id)}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px', background: isSel ? '#EEF2FF' : W, borderBottom: idx < citations.length - 1 ? '1px solid #F1F4F8' : 'none' }}>
-                <div style={{ width: 13, height: 13, flexShrink: 0, border: `2px solid ${isSel ? '#1E3A8A' : '#C5CAD3'}`, background: isSel ? '#1E3A8A' : W, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {isSel && <span style={{ color: W, fontSize: 9, lineHeight: 1, marginTop: -1 }}>✓</span>}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="doc-serif" style={{ fontSize: 12.5, fontWeight: 600, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.caseName}</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <span className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#1E3A8A' }}>{c.primaryCitation}</span>
-                      {c.court && c.court !== 'Court not specified' && <><span style={{ color: '#CBD5E1' }}>·</span><span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>{c.court}</span></>}
+              <div key={c.id} className="doc-paper" style={{ marginBottom: 18, animation: `fdIn .3s ease ${idx * .07}s both` }}>
+                <div style={{ padding: '26px 32px 22px' }}>
+
+                  {/* STALE warning banner */}
+                  {c.verificationStatus === 'STALE' && (
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 6, padding: '11px 14px', marginBottom: 18 }}>
+                      <span style={{ fontSize: 16, flexShrink: 0 }}>🔄</span>
+                      <div>
+                        <div className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#EA580C', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 3 }}>Freshness Check Pending</div>
+                        <div className="doc-sans" style={{ fontSize: 11, color: '#7C2D12', lineHeight: 1.55 }}>
+                          {c.staleReason || 'This citation was previously verified but a recent development may have affected its validity. We are re-checking.'}
+                        </div>
+                        <div className="doc-sans" style={{ fontSize: 10, color: '#EA580C', marginTop: 4, fontWeight: 600 }}>Do not rely on this citation until the check completes.</div>
+                      </div>
                     </div>
-                    <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <span>{srcIcon}</span>
-                      <span>{srcLabel}</span>
+                  )}
+
+                  {/* YELLOW review banner */}
+                  {c.verificationStatus === 'YELLOW' && (
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 6, padding: '11px 14px', marginBottom: 18 }}>
+                      <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
+                      <div style={{ flex: 1 }}>
+                        <div className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#D97706', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 3 }}>Review Suggested — Source Attached</div>
+                        <div className="doc-sans" style={{ fontSize: 11, color: '#92400E', lineHeight: 1.55 }}>
+                          This citation exists but the way it was used may not precisely match the holding. Please read the excerpt below and verify independently before relying on it in court.
+                        </div>
+                        {/* Alignment score bar */}
+                        <div style={{ marginTop: 9 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                            <span className="doc-sans" style={{ fontSize: 9, color: '#92400E', fontWeight: 700 }}>Proposition Alignment</span>
+                            <span className="doc-sans" style={{ fontSize: 9, color: '#D97706', fontWeight: 700 }}>{score}%</span>
+                          </div>
+                          <div style={{ height: 6, background: '#FDE68A', borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${score}%`, background: score >= 75 ? '#D97706' : '#EF4444', borderRadius: 3, transition: 'width .6s ease' }} />
+                          </div>
+                        </div>
+                        {/* Side-by-side: claimed vs actual */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+                          <div style={{ background: '#FFFDE7', border: '1px solid #FDE68A', borderRadius: 4, padding: '8px 10px' }}>
+                            <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#B45309', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>What was claimed</div>
+                            <div className="doc-serif" style={{ fontSize: 11, color: '#1E293B', lineHeight: 1.55, fontStyle: 'italic' }}>"{(c.proposition || {}).query || query || '—'}"</div>
+                          </div>
+                          <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 4, padding: '8px 10px' }}>
+                            <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#166534', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>Actual holding</div>
+                            <div className="doc-serif" style={{ fontSize: 11, color: '#1E293B', lineHeight: 1.55 }}>{(c.ratio || '—').slice(0, 220)}{(c.ratio || '').length > 220 ? '…' : ''}</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Court header */}
+                  <CourtHeading court={c.court} />
+
+                  {/* Case name */}
+                  <h1 className="doc-serif" style={{ textAlign: 'center', fontSize: 21, fontWeight: 700, color: '#0F172A', lineHeight: 1.3, marginBottom: 18 }}>
+                    {c.caseName}
+                  </h1>
+
+                  {/* Citation strip — 3 columns with dividers */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 155px', border: '1px solid #E2E8F0', borderRadius: 4, marginBottom: 16, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 14px', borderRight: '1px solid #E2E8F0' }}>
+                      <div className="doc-lbl">Primary Citation</div>
+                      <div className="doc-serif" style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{c.primaryCitation || '—'}</div>
+                    </div>
+                    <div style={{ padding: '10px 14px', borderRight: '1px solid #E2E8F0' }}>
+                      <div className="doc-lbl">Equivalent Citations</div>
+                      <div className="doc-serif" style={{ fontSize: 11.5, color: '#334155', lineHeight: 1.5 }}>{(c.alternateCitations || []).join('; ') || '—'}</div>
+                    </div>
+                    <div style={{ padding: '10px 14px' }}>
+                      <div className="doc-lbl">Date of Judgment</div>
+                      <div className="doc-serif" style={{ fontSize: 12, fontWeight: 600, color: '#0F172A' }}>{c.dateOfJudgment || '—'}</div>
                     </div>
                   </div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: s.bg, border: `1px solid ${s.border}`, padding: '2px 7px', borderRadius: 2, flexShrink: 0 }}>
-                  <Dot c={s.dot} s={5} />
-                  <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: s.text }}>{s.label}</span>
+
+                  {/* Coram + Statutory Provisions */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 6 }}>
+                    <div>
+                      <div className="doc-lbl">Coram / Bench</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
+                        {judges.length > 0
+                          ? judges.map((j, i) => (
+                            <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                              <JudgeIcon />
+                              <span className="doc-serif" style={{ fontSize: 12, color: '#1E293B' }}>{j}</span>
+                            </div>
+                          ))
+                          : <span className="doc-serif" style={{ fontSize: 12, color: '#94A3B8' }}>—</span>
+                        }
+                        {c.benchType && c.benchType !== '—' && (
+                          <div className="doc-sans" style={{ fontSize: 9, color: '#64748B', marginTop: 2 }}>{c.benchType}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="doc-lbl">Statutory Provisions</div>
+                      <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap' }}>
+                        {(c.statutes || []).length
+                          ? (c.statutes || []).map((st, i) => <span key={i} className="doc-chip">{st}</span>)
+                          : <span className="doc-serif" style={{ fontSize: 12, color: '#94A3B8' }}>—</span>
+                        }
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* I. Legal Analysis & Ratio */}
+                  <div className="doc-sec-h">I. Legal Analysis &amp; Ratio</div>
+                  <blockquote className="doc-ratio">
+                    "{c.ratio || '—'}"
+                  </blockquote>
+
+                  {/* Proposition Verification */}
+                  <div className="doc-sub-h">Proposition Verification</div>
+                  <div className="doc-prop">
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, borderRadius: '50%', background: '#DBEAFE', color: '#1D4ED8', fontSize: 9, fontWeight: 900, flexShrink: 0, marginTop: 1 }}>i</span>
+                      <div>
+                        <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 3 }}>Query</div>
+                        <div className="doc-serif" style={{ fontSize: 12.5, color: '#1E293B', lineHeight: 1.65 }}>{(c.proposition || {}).query || query || '—'}</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+                      <span className="doc-match" style={{ background: matchColor }}>
+                        <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'rgba(255,255,255,.65)', display: 'inline-block', flexShrink: 0 }} />
+                        {matchLabel}
+                      </span>
+                      <span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>
+                        Semantic Similarity: {(score / 100).toFixed(2)} ({verdict.charAt(0) + verdict.slice(1).toLowerCase() + '-Sbert'})
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Source Excerpt */}
+                  <div className="doc-sub-h">Source Excerpt ({(c.excerpt || {}).para || 'Para —'})</div>
+                  <div className="doc-excerpt">
+                    "{excerptDisplay}"
+                  </div>
+
+                  {/* III. Indian Kanoon Enrichment */}
+                  {(c.originalCourtCopyUrl || (c.ikFragment && c.ikFragment.headline) || (c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0) || (c.ikDocMeta && Object.keys(c.ikDocMeta).length > 0)) && (
+                    <div style={{ marginTop: 24 }}>
+                      <div className="doc-sec-h">III. Indian Kanoon Enrichment</div>
+
+                      {/* Original Court Copy */}
+                      {c.originalCourtCopyUrl && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div className="doc-sub-h">Original Court Copy</div>
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <button
+                              onClick={() => setOrigDocModal({ url: c.originalCourtCopyUrl, caseName: c.caseName, isPdf: c.isOriginalCopyPdf })}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 7,
+                                padding: '7px 14px', background: '#1E3A8A', color: '#FFFFFF',
+                                borderRadius: 5, border: 'none', cursor: 'pointer',
+                                fontSize: 11, fontWeight: 700, letterSpacing: '.04em',
+                              }}
+                            >
+                              <span>📄</span>
+                              <span>{c.isOriginalCopyPdf ? 'View Original PDF' : 'View Original Document'}</span>
+                            </button>
+                            <a
+                              href={c.originalCourtCopyUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 5,
+                                padding: '7px 12px', background: 'transparent', color: '#1E3A8A',
+                                borderRadius: 5, border: '1px solid #1E3A8A',
+                                fontSize: 11, fontWeight: 600, textDecoration: 'none',
+                              }}
+                            >
+                              <span>↗</span><span>Open in Tab</span>
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* IK Relevant Fragment */}
+                      {c.ikFragment && c.ikFragment.headline && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div className="doc-sub-h">Relevant Fragment (Indian Kanoon)</div>
+                          <div style={{
+                            background: '#F0F9FF', border: '1px solid #BAE6FD',
+                            borderLeft: '3px solid #0369A1', borderRadius: 4,
+                            padding: '10px 14px', fontSize: 12, color: '#0C4A6E', lineHeight: 1.7,
+                            fontStyle: 'italic',
+                          }}>
+                            {c.ikFragment.headline}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* IK Doc Metadata */}
+                      {c.ikDocMeta && (c.ikDocMeta.publishdate || c.ikDocMeta.docsource || c.ikDocMeta.numcites != null) && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div className="doc-sub-h">Document Metadata</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                            {c.ikDocMeta.publishdate && (
+                              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Published</span>
+                                <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.publishdate}</span>
+                              </div>
+                            )}
+                            {c.ikDocMeta.docsource && (
+                              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Court</span>
+                                <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.docsource}</span>
+                              </div>
+                            )}
+                            {c.ikDocMeta.numcites != null && (
+                              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Total Citations</span>
+                                <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.numcites}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* IK Citation Network */}
+                      {((c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0)) && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div className="doc-sub-h">Citation Network (Indian Kanoon)</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                            {/* Cases Cited */}
+                            <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
+                              <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                                  Cases Cited ({(c.ikCiteList || []).length})
+                                </span>
+                              </div>
+                              {(c.ikCiteList || []).length === 0 ? (
+                                <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
+                              ) : (
+                                <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+                                  {(c.ikCiteList || []).map((item, i) => (
+                                    <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCiteList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
+                                      <a
+                                        href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
+                                      >
+                                        {item.title || `Doc #${item.tid}`}
+                                      </a>
+                                      {item.docsource && (
+                                        <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Cited By */}
+                            <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
+                              <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                                  Cited By ({(c.ikCitedByList || []).length})
+                                </span>
+                              </div>
+                              {(c.ikCitedByList || []).length === 0 ? (
+                                <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
+                              ) : (
+                                <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+                                  {(c.ikCitedByList || []).map((item, i) => (
+                                    <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCitedByList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
+                                      <a
+                                        href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
+                                      >
+                                        {item.title || `Doc #${item.tid}`}
+                                      </a>
+                                      {item.docsource && (
+                                        <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* IV. Subsequent Treatment */}
+                  <div className="doc-sec-h" style={{ marginTop: 24 }}>IV. Subsequent Treatment</div>
+
+                  {/* Primary 3 stats */}
+                  <div style={{ display: 'flex', border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden', marginBottom: 10 }}>
+                    {[
+                      { count: followedList.length, label: 'Followed In', col: '#166534', bg: '#F0FDF4', bdr: '#BBF7D0' },
+                      { count: distinguishedList.length, label: 'Distinguished In', col: '#92400E', bg: '#FFFBEB', bdr: '#FDE68A' },
+                      { count: overruledList.length, label: 'Overruled By', col: overruledList.length ? '#991B1B' : '#475569', bg: overruledList.length ? '#FEF2F2' : '#F8FAFC', bdr: overruledList.length ? '#FECACA' : '#E2E8F0' },
+                    ].map((p, i, arr) => (
+                      <div key={i} className="doc-treat-stat" style={{ background: p.bg, borderRight: i < arr.length - 1 ? `1px solid ${p.bdr}` : 'none' }}>
+                        <div className="doc-serif" style={{ fontSize: 28, fontWeight: 700, color: p.col, lineHeight: 1 }}>{p.count}</div>
+                        <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: p.col, marginTop: 4 }}>{p.label}</div>
+                        <div className="doc-sans" style={{ fontSize: 10, color: p.col, marginTop: 2 }}>Cases</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Secondary treatment counts (relied on, applied, cited, referred, reversed, approved) */}
+                  {(reliedOnList.length + appliedList.length + citedList.length + referredList.length + reversedList.length + approvedList.length) > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                      {[
+                        { list: reliedOnList, label: 'Relied On', col: '#0D47A1', bg: '#E3F2FD', bdr: '#90CAF9' },
+                        { list: appliedList, label: 'Applied', col: '#1565C0', bg: '#E8F4FD', bdr: '#90CAF9' },
+                        { list: citedList, label: 'Cited', col: '#2E7D32', bg: '#E8F5E9', bdr: '#A5D6A7' },
+                        { list: referredList, label: 'Referred To', col: '#4E342E', bg: '#EFEBE9', bdr: '#BCAAA4' },
+                        { list: reversedList, label: 'Reversed', col: '#7B1FA2', bg: '#F3E5F5', bdr: '#CE93D8' },
+                        { list: approvedList, label: 'Approved', col: '#1B5E20', bg: '#F1F8E9', bdr: '#C5E1A5' },
+                      ].filter(p => p.list.length > 0).map((p, i) => (
+                        <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: p.bg, border: `1px solid ${p.bdr}`, borderRadius: 5, padding: '4px 10px' }}>
+                          <span style={{ fontSize: 14, fontWeight: 800, color: p.col }}>{p.list.length}</span>
+                          <span style={{ fontSize: 9, fontWeight: 700, color: p.col, textTransform: 'uppercase', letterSpacing: '.07em' }}>{p.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* All case rows */}
+                  {treatRows.length > 0 ? (
+                    <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden', marginBottom: 6 }}>
+                      {treatRows.map((item, i) => (
+                        <div key={i} className="doc-case-row" style={{ borderBottom: i < treatRows.length - 1 ? '1px solid #F1F5F9' : 'none', background: W }}>
+                          <div className="doc-serif" style={{ fontSize: 13, fontWeight: 600, color: '#1E293B' }}>{item.name}</div>
+                          <span className="doc-case-badge" style={{ background: item.bg, color: item.col, border: `1px solid ${item.bdr}` }}>{item.type}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, color: '#94A3B8', padding: '8px 0', fontStyle: 'italic' }}>No subsequent treatment references found in judgment text.</div>
+                  )}
+
+                  {/* Footer */}
+                  <div style={{ marginTop: 24, paddingTop: 14, borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
+                    <div>
+                      <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, letterSpacing: '.15em', color: '#1E3A8A', textTransform: 'uppercase', marginBottom: 4 }}>Jurinex Legal Intelligence Report</div>
+                      <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 2 }}>Generated on {generatedAt || '—'}</div>
+                      {(c.importSourceLink || c.sourceUrl || c.officialSourceLink) && (
+                        <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 5, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
+                          <span>Source:</span>
+                          <span>{srcIcon}</span>
+                          <span>{srcLabel}</span>
+                          <span style={{ color: '#CBD5E1' }}>·</span>
+                          <a href={c.importSourceLink || c.sourceUrl || c.officialSourceLink} target="_blank" rel="noopener noreferrer" style={{ color: '#1D4ED8', textDecoration: 'none' }}>Open document</a>
+                        </div>
+                      )}
+                      {onViewFullJudgment && c.canonicalId && !String(c.canonicalId).startsWith('placeholder_') && (
+                        <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 5 }}>
+                          <button type="button" onClick={() => onViewFullJudgment(c.canonicalId, c.caseName)} style={{ background: 'none', border: 'none', padding: 0, color: '#1D4ED8', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>View complete judgment</button>
+                        </div>
+                      )}
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 9px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 3 }}>
+                        <Dot c="#16A34A" s={5} />
+                        <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#15803D', letterSpacing: '.07em' }}>AUTHENTICATED RESEARCH DOCUMENT</span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      <button className="doc-foot-btn"
+                        style={{ background: '#F0F9FF', color: '#0369A1', borderColor: '#BAE6FD' }}
+                        onClick={() => { setAtcCitId(atcCitId === c.id ? null : c.id); setAtcCase(''); setAtcStatus(null); setAtcPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; }); }}>
+                        + Add to Case Folder
+                      </button>
+                      {c.verificationStatus === 'YELLOW' && exportWarnId !== c.id ? (
+                        <button className="doc-foot-btn" style={{ background: '#FFFBEB', color: '#D97706', borderColor: '#FDE68A' }}
+                          onClick={() => setExportWarnId(c.id)}>
+                          ⚠ Download PDF
+                        </button>
+                      ) : c.verificationStatus === 'YELLOW' && exportWarnId === c.id ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
+                          <span className="doc-sans" style={{ fontSize: 9, color: '#92400E', maxWidth: 260, textAlign: 'right', lineHeight: 1.45 }}>I acknowledge this citation requires independent verification before use in court submissions.</span>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button className="doc-foot-btn" style={{ background: '#D97706', color: W, borderColor: '#D97706' }}
+                              onClick={() => { downloadCitationPDF(c, query, generatedAt); setExportWarnId(null); }}>
+                              Confirm & Download
+                            </button>
+                            <button className="doc-foot-btn" style={{ background: W, color: '#64748B', borderColor: '#E2E8F0' }}
+                              onClick={() => setExportWarnId(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      ) : c.verificationStatus === 'STALE' ? (
+                        <button className="doc-foot-btn" style={{ background: '#FFF7ED', color: '#EA580C', borderColor: '#FED7AA', cursor: 'not-allowed', opacity: 0.7 }}
+                          title="Cannot export while freshness check is pending">
+                          🔄 Check Pending
+                        </button>
+                      ) : (
+                        <button className="doc-foot-btn" style={{ background: '#1E3A8A', color: W, borderColor: '#1E3A8A' }}
+                          onClick={() => downloadCitationPDF(c, query, generatedAt)}>
+                          Download PDF
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Add to Case Folder panel */}
+                  {atcCitId === c.id && (
+                    <div style={{ marginTop: 12, padding: '14px 16px', background: '#F0F9FF', border: '1px solid #BAE6FD', borderRadius: 6 }}>
+                      <div className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#0369A1', marginBottom: 8, letterSpacing: '.06em', textTransform: 'uppercase' }}>
+                        Add Citation to Case Folder
+                      </div>
+                      {atcStatus === 'done' ? (
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 4, marginBottom: atcPreviewUrl ? 10 : 0 }}>
+                            <Dot c="#16A34A" s={7} />
+                            <span className="doc-sans" style={{ fontSize: 11, color: '#166534', fontWeight: 600 }}>Successfully uploaded as PDF! The citation is now indexed for RAG queries on this case.</span>
+                          </div>
+                          {atcPreviewUrl && (
+                            <div style={{ border: '1px solid #E2E8F0', borderRadius: 6, overflow: 'hidden', marginTop: 4 }}>
+                              <div style={{ background: '#1E3A8A', padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.12em', textTransform: 'uppercase', color: '#BFDBFE' }}>PDF Preview — Uploaded to Case Folder</span>
+                              </div>
+                              <iframe
+                                src={atcPreviewUrl}
+                                style={{ width: '100%', height: 520, border: 'none', display: 'block', background: '#F8FAFC' }}
+                                title="Citation Report PDF Preview"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ) : atcStatus && atcStatus.error ? (
+                        <div style={{ padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 4, fontSize: 11, color: '#991B1B', fontFamily: "'Source Sans 3',sans-serif" }}>
+                          {atcStatus.error}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="doc-sans" style={{ fontSize: 10, color: '#0C4A6E', marginBottom: 8, lineHeight: 1.5 }}>
+                            Select a case from your cases to attach this citation. The report will be chunked, embedded, and indexed for AI search on that case.
+                          </div>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <select
+                              value={atcCase}
+                              onChange={e => { setAtcCase(e.target.value); setAtcStatus(null); }}
+                              disabled={atcStatus === 'uploading'}
+                              title="Cases you have access to"
+                              style={{ flex: 1, minWidth: 200, padding: '7px 10px', border: '1px solid #BAE6FD', borderRadius: 4, fontSize: 11, outline: 'none', background: W, fontFamily: "'Source Sans 3',sans-serif", cursor: 'pointer' }}>
+                              <option value="">— Select a case —</option>
+                              {cases.map(cs => <option key={cs.id} value={cs.id}>{cs.case_title || cs.name || cs.id}</option>)}
+                            </select>
+                            <button
+                              onClick={() => handleAddToCase(c)}
+                              disabled={!atcCase || atcStatus === 'uploading'}
+                              style={{ padding: '7px 18px', background: atcCase ? '#0369A1' : '#BAE6FD', color: W, border: 'none', borderRadius: 4, fontSize: 11, fontWeight: 700, cursor: atcCase ? 'pointer' : 'default', fontFamily: "'Source Sans 3',sans-serif", display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                              {atcStatus === 'uploading' ? <><Spin /> Uploading…</> : 'Upload & Index'}
+                            </button>
+                            <button onClick={() => { setAtcCitId(null); setAtcStatus(null); setAtcPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; }); }}
+                              style={{ padding: '7px 12px', background: 'transparent', color: '#64748B', border: '1px solid #E2E8F0', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontFamily: "'Source Sans 3',sans-serif" }}>
+                              Cancel
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                 </div>
               </div>
             );
           })}
-        </div>
 
-        {selCites.length === 0 && (
-          <div className="doc-paper" style={{ padding: '52px 32px', textAlign: 'center' }}>
-            <div className="doc-serif" style={{ fontSize: 15, fontStyle: 'italic', color: '#9CA3AF' }}>Select a citation point above to view the full report.</div>
-          </div>
-        )}
-
-        {citations.length === 0 && (pendingCits.length > 0 || redCits.length > 0) && (
-          <div className="doc-paper" style={{ padding: '32px', textAlign: 'center', marginBottom: 18 }}>
-            <div className="doc-serif" style={{ fontSize: 14, fontStyle: 'italic', color: '#9CA3AF' }}>No verified citations available. See sections below.</div>
-          </div>
-        )}
-
-        {selCites.map((c, idx) => {
-          const score = (c.proposition || {}).matchScore ?? 0;
-          const verdict = (c.proposition || {}).verdict || 'REVIEW';
-          const matchLabel = score >= 80 ? 'MATCH CONFIRMED' : score >= 60 ? 'PARTIAL MATCH' : 'LOW MATCH';
-          const matchColor = score >= 80 ? '#0D9488' : score >= 60 ? '#D97706' : '#DC2626';
-          const treat = c.treatment || {};
-          const followedList = treat.followedList || [];
-          const distinguishedList = treat.distinguishedList || [];
-          const overruledList = treat.overruledList || [];
-          const reversedList = treat.reversedList || [];
-          const reliedOnList = treat.reliedOnList || [];
-          const appliedList = treat.appliedList || [];
-          const citedList = treat.citedList || [];
-          const referredList = treat.referredList || [];
-          const approvedList = treat.approvedList || [];
-          const judges = (c.coram || '').split(/[,;]/).map(j => j.trim()).filter(Boolean);
-          const excerptRaw = (c.excerpt || {}).text || '';
-          const excerptDisplay = (() => {
-            // Backend already strips most HTML/CSS noise; here we just normalise whitespace
-            const t = excerptRaw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-            return t || '—';
-          })();
-          const srcKey = c.source || 'unknown';
-          let srcIcon = '🤖';
-          let srcLabel = c.sourceApplication || c.sourceLabel || 'Unknown Source';
-          if (srcKey === 'local') {
-            srcIcon = '🏛';
-            srcLabel = 'Local DB';
-          } else if (srcKey === 'indian_kanoon') {
-            srcIcon = '📚';
-            srcLabel = 'Indian Kanoon';
-          } else if (srcKey === 'google') {
-            srcIcon = '🌐';
-            srcLabel = 'Google Search (Gemini)';
-          }
-          const treatRows = [
-            ...followedList.map(name => ({ name, type: 'FOLLOWED', col: '#166534', bg: '#F0FDF4', bdr: '#BBF7D0' })),
-            ...distinguishedList.map(name => ({ name, type: 'DISTINGUISHED', col: '#92400E', bg: '#FFFBEB', bdr: '#FDE68A' })),
-            ...overruledList.map(name => ({ name, type: 'OVERRULED', col: '#991B1B', bg: '#FEF2F2', bdr: '#FECACA' })),
-            ...reversedList.map(name => ({ name, type: 'REVERSED', col: '#7B1FA2', bg: '#F3E5F5', bdr: '#CE93D8' })),
-            ...reliedOnList.map(name => ({ name, type: 'RELIED ON', col: '#0D47A1', bg: '#E3F2FD', bdr: '#90CAF9' })),
-            ...appliedList.map(name => ({ name, type: 'APPLIED', col: '#1565C0', bg: '#E8F4FD', bdr: '#90CAF9' })),
-            ...citedList.map(name => ({ name, type: 'CITED', col: '#2E7D32', bg: '#E8F5E9', bdr: '#A5D6A7' })),
-            ...referredList.map(name => ({ name, type: 'REFERRED TO', col: '#4E342E', bg: '#EFEBE9', bdr: '#BCAAA4' })),
-            ...approvedList.map(name => ({ name, type: 'APPROVED', col: '#1B5E20', bg: '#F1F8E9', bdr: '#C5E1A5' })),
-          ];
-
-          return (
-            <div key={c.id} className="doc-paper" style={{ marginBottom: 18, animation: `fdIn .3s ease ${idx * .07}s both` }}>
-              <div style={{ padding: '26px 32px 22px' }}>
-
-                {/* STALE warning banner */}
-                {c.verificationStatus === 'STALE' && (
-                  <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 6, padding: '11px 14px', marginBottom: 18 }}>
-                    <span style={{ fontSize: 16, flexShrink: 0 }}>🔄</span>
-                    <div>
-                      <div className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#EA580C', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 3 }}>Freshness Check Pending</div>
-                      <div className="doc-sans" style={{ fontSize: 11, color: '#7C2D12', lineHeight: 1.55 }}>
-                        {c.staleReason || 'This citation was previously verified but a recent development may have affected its validity. We are re-checking.'}
-                      </div>
-                      <div className="doc-sans" style={{ fontSize: 10, color: '#EA580C', marginTop: 4, fontWeight: 600 }}>Do not rely on this citation until the check completes.</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* YELLOW review banner */}
-                {c.verificationStatus === 'YELLOW' && (
-                  <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 6, padding: '11px 14px', marginBottom: 18 }}>
-                    <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
-                    <div style={{ flex: 1 }}>
-                      <div className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#D97706', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 3 }}>Review Suggested — Source Attached</div>
-                      <div className="doc-sans" style={{ fontSize: 11, color: '#92400E', lineHeight: 1.55 }}>
-                        This citation exists but the way it was used may not precisely match the holding. Please read the excerpt below and verify independently before relying on it in court.
-                      </div>
-                      {/* Alignment score bar */}
-                      <div style={{ marginTop: 9 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                          <span className="doc-sans" style={{ fontSize: 9, color: '#92400E', fontWeight: 700 }}>Proposition Alignment</span>
-                          <span className="doc-sans" style={{ fontSize: 9, color: '#D97706', fontWeight: 700 }}>{score}%</span>
-                        </div>
-                        <div style={{ height: 6, background: '#FDE68A', borderRadius: 3, overflow: 'hidden' }}>
-                          <div style={{ height: '100%', width: `${score}%`, background: score >= 75 ? '#D97706' : '#EF4444', borderRadius: 3, transition: 'width .6s ease' }} />
-                        </div>
-                      </div>
-                      {/* Side-by-side: claimed vs actual */}
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
-                        <div style={{ background: '#FFFDE7', border: '1px solid #FDE68A', borderRadius: 4, padding: '8px 10px' }}>
-                          <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#B45309', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>What was claimed</div>
-                          <div className="doc-serif" style={{ fontSize: 11, color: '#1E293B', lineHeight: 1.55, fontStyle: 'italic' }}>"{(c.proposition || {}).query || query || '—'}"</div>
-                        </div>
-                        <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 4, padding: '8px 10px' }}>
-                          <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#166534', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 4 }}>Actual holding</div>
-                          <div className="doc-serif" style={{ fontSize: 11, color: '#1E293B', lineHeight: 1.55 }}>{(c.ratio || '—').slice(0, 220)}{(c.ratio || '').length > 220 ? '…' : ''}</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Court header */}
-                <CourtHeading court={c.court} />
-
-                {/* Case name */}
-                <h1 className="doc-serif" style={{ textAlign: 'center', fontSize: 21, fontWeight: 700, color: '#0F172A', lineHeight: 1.3, marginBottom: 18 }}>
-                  {c.caseName}
-                </h1>
-
-                {/* Citation strip — 3 columns with dividers */}
-                <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 155px', border: '1px solid #E2E8F0', borderRadius: 4, marginBottom: 16, overflow: 'hidden' }}>
-                  <div style={{ padding: '10px 14px', borderRight: '1px solid #E2E8F0' }}>
-                    <div className="doc-lbl">Primary Citation</div>
-                    <div className="doc-serif" style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{c.primaryCitation || '—'}</div>
-                  </div>
-                  <div style={{ padding: '10px 14px', borderRight: '1px solid #E2E8F0' }}>
-                    <div className="doc-lbl">Equivalent Citations</div>
-                    <div className="doc-serif" style={{ fontSize: 11.5, color: '#334155', lineHeight: 1.5 }}>{(c.alternateCitations || []).join('; ') || '—'}</div>
-                  </div>
-                  <div style={{ padding: '10px 14px' }}>
-                    <div className="doc-lbl">Date of Judgment</div>
-                    <div className="doc-serif" style={{ fontSize: 12, fontWeight: 600, color: '#0F172A' }}>{c.dateOfJudgment || '—'}</div>
+          {/* ── UNDER VERIFICATION — PENDING citations ───────────────────── */}
+          {pendingCits.length > 0 && (
+            <div style={{ marginBottom: 18 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <div style={{ flex: 1, height: 1, background: '#DDD6FE' }} />
+                <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#7C3AED', letterSpacing: '.12em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+                  ⏳ Under Verification ({pendingCits.length})
+                </span>
+                <div style={{ flex: 1, height: 1, background: '#DDD6FE' }} />
+              </div>
+              <div style={{ background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 8, overflow: 'hidden', marginBottom: 8 }}>
+                <div style={{ background: '#EDE9FE', padding: '10px 16px', borderBottom: '1px solid #DDD6FE' }}>
+                  <div className="doc-sans" style={{ fontSize: 11, color: '#4C1D95', lineHeight: 1.55 }}>
+                    ⏳ <strong>Under Verification.</strong> These citations were found on the web but could not be confirmed in authoritative sources. A legal expert is reviewing each one. Click "Notify Me" and we'll alert you when resolved.
                   </div>
                 </div>
-
-                {/* Coram + Statutory Provisions */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 6 }}>
-                  <div>
-                    <div className="doc-lbl">Coram / Bench</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
-                      {judges.length > 0
-                        ? judges.map((j, i) => (
-                          <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-                            <JudgeIcon />
-                            <span className="doc-serif" style={{ fontSize: 12, color: '#1E293B' }}>{j}</span>
+                {pendingCits.map((c, i) => {
+                  const ticketId = c.hitlTicketId || '';
+                  const nst = notifyStatus[ticketId];
+                  const ps = c.priorityScore || 0;
+                  return (
+                    <div key={c.id} style={{ padding: '14px 16px', borderBottom: i < pendingCits.length - 1 ? '1px solid #EDE9FE' : 'none', background: W }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+                        <div style={{ flex: 1, minWidth: 200 }}>
+                          <div className="doc-serif" style={{ fontSize: 13, fontWeight: 600, color: '#0F172A', marginBottom: 3 }}>{c.caseName || '—'}</div>
+                          <div className="doc-sans" style={{ fontSize: 10, color: '#7C3AED', fontWeight: 700, marginBottom: 2 }}>{c.primaryCitation || '—'}</div>
+                          {c.importSourceLink && (
+                            <div className="doc-sans" style={{ fontSize: 9, color: '#64748B' }}>
+                              🌐 Found at: <a href={c.importSourceLink} target="_blank" rel="noopener noreferrer" style={{ color: '#7C3AED', textDecoration: 'none' }}>{c.importSourceLink.slice(0, 60)}{c.importSourceLink.length > 60 ? '…' : ''}</a>
+                            </div>
+                          )}
+                          {ps > 0 && (
+                            <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginTop: 3 }}>
+                              Review SLA: <span style={{ fontWeight: 700, color: ps >= 0.85 ? '#DC2626' : ps >= 0.70 ? '#D97706' : '#64748B' }}>{_slaLabel(ps)}</span>
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ flexShrink: 0, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 3 }}>
+                            <Dot c="#7C3AED" s={5} />
+                            <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#4C1D95' }}>PENDING</span>
                           </div>
-                        ))
-                        : <span className="doc-serif" style={{ fontSize: 12, color: '#94A3B8' }}>—</span>
-                      }
-                      {c.benchType && c.benchType !== '—' && (
-                        <div className="doc-sans" style={{ fontSize: 9, color: '#64748B', marginTop: 2 }}>{c.benchType}</div>
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="doc-lbl">Statutory Provisions</div>
-                    <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap' }}>
-                      {(c.statutes || []).length
-                        ? (c.statutes || []).map((st, i) => <span key={i} className="doc-chip">{st}</span>)
-                        : <span className="doc-serif" style={{ fontSize: 12, color: '#94A3B8' }}>—</span>
-                      }
-                    </div>
-                  </div>
-                </div>
-
-                {/* I. Legal Analysis & Ratio */}
-                <div className="doc-sec-h">I. Legal Analysis &amp; Ratio</div>
-                <blockquote className="doc-ratio">
-                  "{c.ratio || '—'}"
-                </blockquote>
-
-                {/* Proposition Verification */}
-                <div className="doc-sub-h">Proposition Verification</div>
-                <div className="doc-prop">
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, borderRadius: '50%', background: '#DBEAFE', color: '#1D4ED8', fontSize: 9, fontWeight: 900, flexShrink: 0, marginTop: 1 }}>i</span>
-                    <div>
-                      <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 3 }}>Query</div>
-                      <div className="doc-serif" style={{ fontSize: 12.5, color: '#1E293B', lineHeight: 1.65 }}>{(c.proposition || {}).query || query || '—'}</div>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
-                    <span className="doc-match" style={{ background: matchColor }}>
-                      <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'rgba(255,255,255,.65)', display: 'inline-block', flexShrink: 0 }} />
-                      {matchLabel}
-                    </span>
-                    <span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>
-                      Semantic Similarity: {(score / 100).toFixed(2)} ({verdict.charAt(0) + verdict.slice(1).toLowerCase() + '-Sbert'})
-                    </span>
-                  </div>
-                </div>
-
-                {/* Source Excerpt */}
-                <div className="doc-sub-h">Source Excerpt ({(c.excerpt || {}).para || 'Para —'})</div>
-                <div className="doc-excerpt">
-                  "{excerptDisplay}"
-                </div>
-
-                {/* III. Indian Kanoon Enrichment */}
-                {(c.originalCourtCopyUrl || (c.ikFragment && c.ikFragment.headline) || (c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0) || (c.ikDocMeta && Object.keys(c.ikDocMeta).length > 0)) && (
-                  <div style={{ marginTop: 24 }}>
-                    <div className="doc-sec-h">III. Indian Kanoon Enrichment</div>
-
-                    {/* Original Court Copy */}
-                    {c.originalCourtCopyUrl && (
-                      <div style={{ marginBottom: 14 }}>
-                        <div className="doc-sub-h">Original Court Copy</div>
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                          <button
-                            onClick={() => setOrigDocModal({ url: c.originalCourtCopyUrl, caseName: c.caseName, isPdf: c.isOriginalCopyPdf })}
-                            style={{
-                              display: 'inline-flex', alignItems: 'center', gap: 7,
-                              padding: '7px 14px', background: '#1E3A8A', color: '#FFFFFF',
-                              borderRadius: 5, border: 'none', cursor: 'pointer',
-                              fontSize: 11, fontWeight: 700, letterSpacing: '.04em',
-                            }}
-                          >
-                            <span>📄</span>
-                            <span>{c.isOriginalCopyPdf ? 'View Original PDF' : 'View Original Document'}</span>
-                          </button>
-                          <a
-                            href={c.originalCourtCopyUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{
-                              display: 'inline-flex', alignItems: 'center', gap: 5,
-                              padding: '7px 12px', background: 'transparent', color: '#1E3A8A',
-                              borderRadius: 5, border: '1px solid #1E3A8A',
-                              fontSize: 11, fontWeight: 600, textDecoration: 'none',
-                            }}
-                          >
-                            <span>↗</span><span>Open in Tab</span>
-                          </a>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* IK Relevant Fragment */}
-                    {c.ikFragment && c.ikFragment.headline && (
-                      <div style={{ marginBottom: 14 }}>
-                        <div className="doc-sub-h">Relevant Fragment (Indian Kanoon)</div>
-                        <div style={{
-                          background: '#F0F9FF', border: '1px solid #BAE6FD',
-                          borderLeft: '3px solid #0369A1', borderRadius: 4,
-                          padding: '10px 14px', fontSize: 12, color: '#0C4A6E', lineHeight: 1.7,
-                          fontStyle: 'italic',
-                        }}>
-                          {c.ikFragment.headline}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* IK Doc Metadata */}
-                    {c.ikDocMeta && (c.ikDocMeta.publishdate || c.ikDocMeta.docsource || c.ikDocMeta.numcites != null) && (
-                      <div style={{ marginBottom: 14 }}>
-                        <div className="doc-sub-h">Document Metadata</div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                          {c.ikDocMeta.publishdate && (
-                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
-                              <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Published</span>
-                              <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.publishdate}</span>
-                            </div>
-                          )}
-                          {c.ikDocMeta.docsource && (
-                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
-                              <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Court</span>
-                              <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.docsource}</span>
-                            </div>
-                          )}
-                          {c.ikDocMeta.numcites != null && (
-                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
-                              <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Total Citations</span>
-                              <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.numcites}</span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* IK Citation Network */}
-                    {((c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0)) && (
-                      <div style={{ marginBottom: 14 }}>
-                        <div className="doc-sub-h">Citation Network (Indian Kanoon)</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                          {/* Cases Cited */}
-                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
-                            <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
-                              <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
-                                Cases Cited ({(c.ikCiteList || []).length})
-                              </span>
-                            </div>
-                            {(c.ikCiteList || []).length === 0 ? (
-                              <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
+                          {ticketId && (
+                            nst === 'done' ? (
+                              <span className="doc-sans" style={{ fontSize: 9, color: '#16A34A', fontWeight: 600 }}>✓ You'll be notified</span>
                             ) : (
-                              <div style={{ maxHeight: 180, overflowY: 'auto' }}>
-                                {(c.ikCiteList || []).map((item, i) => (
-                                  <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCiteList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
-                                    <a
-                                      href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
-                                    >
-                                      {item.title || `Doc #${item.tid}`}
-                                    </a>
-                                    {item.docsource && (
-                                      <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Cited By */}
-                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
-                            <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
-                              <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
-                                Cited By ({(c.ikCitedByList || []).length})
-                              </span>
-                            </div>
-                            {(c.ikCitedByList || []).length === 0 ? (
-                              <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
-                            ) : (
-                              <div style={{ maxHeight: 180, overflowY: 'auto' }}>
-                                {(c.ikCitedByList || []).map((item, i) => (
-                                  <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCitedByList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
-                                    <a
-                                      href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
-                                    >
-                                      {item.title || `Doc #${item.tid}`}
-                                    </a>
-                                    {item.docsource && (
-                                      <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
+                              <button className="doc-foot-btn"
+                                disabled={nst === 'sending'}
+                                style={{ background: '#7C3AED', color: W, borderColor: '#7C3AED', opacity: nst === 'sending' ? 0.6 : 1 }}
+                                onClick={() => handleNotifyMe(ticketId)}>
+                                {nst === 'sending' ? 'Registering…' : '🔔 Notify Me'}
+                              </button>
+                            )
+                          )}
                         </div>
                       </div>
-                    )}
-                  </div>
-                )}
-
-                {/* IV. Subsequent Treatment */}
-                <div className="doc-sec-h" style={{ marginTop: 24 }}>IV. Subsequent Treatment</div>
-
-                {/* Primary 3 stats */}
-                <div style={{ display: 'flex', border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden', marginBottom: 10 }}>
-                  {[
-                    { count: followedList.length, label: 'Followed In', col: '#166534', bg: '#F0FDF4', bdr: '#BBF7D0' },
-                    { count: distinguishedList.length, label: 'Distinguished In', col: '#92400E', bg: '#FFFBEB', bdr: '#FDE68A' },
-                    { count: overruledList.length, label: 'Overruled By', col: overruledList.length ? '#991B1B' : '#475569', bg: overruledList.length ? '#FEF2F2' : '#F8FAFC', bdr: overruledList.length ? '#FECACA' : '#E2E8F0' },
-                  ].map((p, i, arr) => (
-                    <div key={i} className="doc-treat-stat" style={{ background: p.bg, borderRight: i < arr.length - 1 ? `1px solid ${p.bdr}` : 'none' }}>
-                      <div className="doc-serif" style={{ fontSize: 28, fontWeight: 700, color: p.col, lineHeight: 1 }}>{p.count}</div>
-                      <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: p.col, marginTop: 4 }}>{p.label}</div>
-                      <div className="doc-sans" style={{ fontSize: 10, color: p.col, marginTop: 2 }}>Cases</div>
                     </div>
-                  ))}
-                </div>
-
-                {/* Secondary treatment counts (relied on, applied, cited, referred, reversed, approved) */}
-                {(reliedOnList.length + appliedList.length + citedList.length + referredList.length + reversedList.length + approvedList.length) > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-                    {[
-                      { list: reliedOnList, label: 'Relied On', col: '#0D47A1', bg: '#E3F2FD', bdr: '#90CAF9' },
-                      { list: appliedList, label: 'Applied', col: '#1565C0', bg: '#E8F4FD', bdr: '#90CAF9' },
-                      { list: citedList, label: 'Cited', col: '#2E7D32', bg: '#E8F5E9', bdr: '#A5D6A7' },
-                      { list: referredList, label: 'Referred To', col: '#4E342E', bg: '#EFEBE9', bdr: '#BCAAA4' },
-                      { list: reversedList, label: 'Reversed', col: '#7B1FA2', bg: '#F3E5F5', bdr: '#CE93D8' },
-                      { list: approvedList, label: 'Approved', col: '#1B5E20', bg: '#F1F8E9', bdr: '#C5E1A5' },
-                    ].filter(p => p.list.length > 0).map((p, i) => (
-                      <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: p.bg, border: `1px solid ${p.bdr}`, borderRadius: 5, padding: '4px 10px' }}>
-                        <span style={{ fontSize: 14, fontWeight: 800, color: p.col }}>{p.list.length}</span>
-                        <span style={{ fontSize: 9, fontWeight: 700, color: p.col, textTransform: 'uppercase', letterSpacing: '.07em' }}>{p.label}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* All case rows */}
-                {treatRows.length > 0 ? (
-                  <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden', marginBottom: 6 }}>
-                    {treatRows.map((item, i) => (
-                      <div key={i} className="doc-case-row" style={{ borderBottom: i < treatRows.length - 1 ? '1px solid #F1F5F9' : 'none', background: W }}>
-                        <div className="doc-serif" style={{ fontSize: 13, fontWeight: 600, color: '#1E293B' }}>{item.name}</div>
-                        <span className="doc-case-badge" style={{ background: item.bg, color: item.col, border: `1px solid ${item.bdr}` }}>{item.type}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: 11, color: '#94A3B8', padding: '8px 0', fontStyle: 'italic' }}>No subsequent treatment references found in judgment text.</div>
-                )}
-
-                {/* Footer */}
-                <div style={{ marginTop: 24, paddingTop: 14, borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
-                  <div>
-                    <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, letterSpacing: '.15em', color: '#1E3A8A', textTransform: 'uppercase', marginBottom: 4 }}>Jurinex Legal Intelligence Report</div>
-                    <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 2 }}>Generated on {generatedAt || '—'}</div>
-                    {(c.importSourceLink || c.sourceUrl || c.officialSourceLink) && (
-                      <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 5, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
-                        <span>Source:</span>
-                        <span>{srcIcon}</span>
-                        <span>{srcLabel}</span>
-                        <span style={{ color: '#CBD5E1' }}>·</span>
-                        <a href={c.importSourceLink || c.sourceUrl || c.officialSourceLink} target="_blank" rel="noopener noreferrer" style={{ color: '#1D4ED8', textDecoration: 'none' }}>Open document</a>
-                      </div>
-                    )}
-                    {onViewFullJudgment && c.canonicalId && !String(c.canonicalId).startsWith('placeholder_') && (
-                      <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 5 }}>
-                        <button type="button" onClick={() => onViewFullJudgment(c.canonicalId, c.caseName)} style={{ background: 'none', border: 'none', padding: 0, color: '#1D4ED8', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>View complete judgment</button>
-                      </div>
-                    )}
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 9px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 3 }}>
-                      <Dot c="#16A34A" s={5} />
-                      <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#15803D', letterSpacing: '.07em' }}>AUTHENTICATED RESEARCH DOCUMENT</span>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    <button className="doc-foot-btn"
-                      style={{ background: '#F0F9FF', color: '#0369A1', borderColor: '#BAE6FD' }}
-                      onClick={() => { setAtcCitId(atcCitId === c.id ? null : c.id); setAtcCase(''); setAtcStatus(null); setAtcPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; }); }}>
-                      + Add to Case Folder
-                    </button>
-                    {c.verificationStatus === 'YELLOW' && exportWarnId !== c.id ? (
-                      <button className="doc-foot-btn" style={{ background: '#FFFBEB', color: '#D97706', borderColor: '#FDE68A' }}
-                        onClick={() => setExportWarnId(c.id)}>
-                        ⚠ Download PDF
-                      </button>
-                    ) : c.verificationStatus === 'YELLOW' && exportWarnId === c.id ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
-                        <span className="doc-sans" style={{ fontSize: 9, color: '#92400E', maxWidth: 260, textAlign: 'right', lineHeight: 1.45 }}>I acknowledge this citation requires independent verification before use in court submissions.</span>
-                        <div style={{ display: 'flex', gap: 6 }}>
-                          <button className="doc-foot-btn" style={{ background: '#D97706', color: W, borderColor: '#D97706' }}
-                            onClick={() => { downloadCitationPDF(c, query, generatedAt); setExportWarnId(null); }}>
-                            Confirm & Download
-                          </button>
-                          <button className="doc-foot-btn" style={{ background: W, color: '#64748B', borderColor: '#E2E8F0' }}
-                            onClick={() => setExportWarnId(null)}>Cancel</button>
-                        </div>
-                      </div>
-                    ) : c.verificationStatus === 'STALE' ? (
-                      <button className="doc-foot-btn" style={{ background: '#FFF7ED', color: '#EA580C', borderColor: '#FED7AA', cursor: 'not-allowed', opacity: 0.7 }}
-                        title="Cannot export while freshness check is pending">
-                        🔄 Check Pending
-                      </button>
-                    ) : (
-                      <button className="doc-foot-btn" style={{ background: '#1E3A8A', color: W, borderColor: '#1E3A8A' }}
-                        onClick={() => downloadCitationPDF(c, query, generatedAt)}>
-                        Download PDF
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Add to Case Folder panel */}
-                {atcCitId === c.id && (
-                  <div style={{ marginTop: 12, padding: '14px 16px', background: '#F0F9FF', border: '1px solid #BAE6FD', borderRadius: 6 }}>
-                    <div className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#0369A1', marginBottom: 8, letterSpacing: '.06em', textTransform: 'uppercase' }}>
-                      Add Citation to Case Folder
-                    </div>
-                    {atcStatus === 'done' ? (
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 4, marginBottom: atcPreviewUrl ? 10 : 0 }}>
-                          <Dot c="#16A34A" s={7} />
-                          <span className="doc-sans" style={{ fontSize: 11, color: '#166534', fontWeight: 600 }}>Successfully uploaded as PDF! The citation is now indexed for RAG queries on this case.</span>
-                        </div>
-                        {atcPreviewUrl && (
-                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 6, overflow: 'hidden', marginTop: 4 }}>
-                            <div style={{ background: '#1E3A8A', padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                              <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.12em', textTransform: 'uppercase', color: '#BFDBFE' }}>PDF Preview — Uploaded to Case Folder</span>
-                            </div>
-                            <iframe
-                              src={atcPreviewUrl}
-                              style={{ width: '100%', height: 520, border: 'none', display: 'block', background: '#F8FAFC' }}
-                              title="Citation Report PDF Preview"
-                            />
-                          </div>
-                        )}
-                      </div>
-                    ) : atcStatus && atcStatus.error ? (
-                      <div style={{ padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 4, fontSize: 11, color: '#991B1B', fontFamily: "'Source Sans 3',sans-serif" }}>
-                        {atcStatus.error}
-                      </div>
-                    ) : (
-                      <>
-                        <div className="doc-sans" style={{ fontSize: 10, color: '#0C4A6E', marginBottom: 8, lineHeight: 1.5 }}>
-                          Select a case from your cases to attach this citation. The report will be chunked, embedded, and indexed for AI search on that case.
-                        </div>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                          <select
-                            value={atcCase}
-                            onChange={e => { setAtcCase(e.target.value); setAtcStatus(null); }}
-                            disabled={atcStatus === 'uploading'}
-                            title="Cases you have access to"
-                            style={{ flex: 1, minWidth: 200, padding: '7px 10px', border: '1px solid #BAE6FD', borderRadius: 4, fontSize: 11, outline: 'none', background: W, fontFamily: "'Source Sans 3',sans-serif", cursor: 'pointer' }}>
-                            <option value="">— Select a case —</option>
-                            {cases.map(cs => <option key={cs.id} value={cs.id}>{cs.case_title || cs.name || cs.id}</option>)}
-                          </select>
-                          <button
-                            onClick={() => handleAddToCase(c)}
-                            disabled={!atcCase || atcStatus === 'uploading'}
-                            style={{ padding: '7px 18px', background: atcCase ? '#0369A1' : '#BAE6FD', color: W, border: 'none', borderRadius: 4, fontSize: 11, fontWeight: 700, cursor: atcCase ? 'pointer' : 'default', fontFamily: "'Source Sans 3',sans-serif", display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                            {atcStatus === 'uploading' ? <><Spin /> Uploading…</> : 'Upload & Index'}
-                          </button>
-                          <button onClick={() => { setAtcCitId(null); setAtcStatus(null); setAtcPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; }); }}
-                            style={{ padding: '7px 12px', background: 'transparent', color: '#64748B', border: '1px solid #E2E8F0', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontFamily: "'Source Sans 3',sans-serif" }}>
-                            Cancel
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-
+                  );
+                })}
               </div>
             </div>
-          );
-        })}
+          )}
 
-        {/* ── UNDER VERIFICATION — PENDING citations ───────────────────── */}
-        {pendingCits.length > 0 && (
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-              <div style={{ flex: 1, height: 1, background: '#DDD6FE' }} />
-              <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#7C3AED', letterSpacing: '.12em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
-                ⏳ Under Verification ({pendingCits.length})
-              </span>
-              <div style={{ flex: 1, height: 1, background: '#DDD6FE' }} />
-            </div>
-            <div style={{ background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 8, overflow: 'hidden', marginBottom: 8 }}>
-              <div style={{ background: '#EDE9FE', padding: '10px 16px', borderBottom: '1px solid #DDD6FE' }}>
-                <div className="doc-sans" style={{ fontSize: 11, color: '#4C1D95', lineHeight: 1.55 }}>
-                  ⏳ <strong>Under Verification.</strong> These citations were found on the web but could not be confirmed in authoritative sources. A legal expert is reviewing each one. Click "Notify Me" and we'll alert you when resolved.
-                </div>
+          {/* ── UNVERIFIED CITATIONS — RED, collapsed ─────────────────────── */}
+          {redCits.length > 0 && (
+            <div style={{ marginBottom: 18 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <div style={{ flex: 1, height: 1, background: '#FECACA' }} />
+                <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#DC2626', letterSpacing: '.12em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+                  ❌ Unverified Citations ({redCits.length})
+                </span>
+                <div style={{ flex: 1, height: 1, background: '#FECACA' }} />
               </div>
-              {pendingCits.map((c, i) => {
-                const ticketId = c.hitlTicketId || '';
-                const nst = notifyStatus[ticketId];
-                const ps = c.priorityScore || 0;
-                return (
-                  <div key={c.id} style={{ padding: '14px 16px', borderBottom: i < pendingCits.length - 1 ? '1px solid #EDE9FE' : 'none', background: W }}>
+              <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, overflow: 'hidden' }}>
+                {/* Collapsed header */}
+                <button type="button" onClick={() => setRedExpanded(p => !p)}
+                  style={{ width: '100%', background: '#FEE2E2', border: 'none', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: redExpanded ? '1px solid #FECACA' : 'none' }}>
+                  <div className="doc-sans" style={{ fontSize: 11, color: '#991B1B', lineHeight: 1.55, textAlign: 'left' }}>
+                    ❌ <strong>Unverified — Manual Check Required.</strong> These citations could not be confirmed in our verified database or external sources. Do not use without independent verification from the primary source.
+                  </div>
+                  <span className="doc-sans" style={{ fontSize: 11, color: '#DC2626', flexShrink: 0, marginLeft: 12 }}>{redExpanded ? '▲ Hide' : '▼ Show'}</span>
+                </button>
+                {redExpanded && redCits.map((c, i) => (
+                  <div key={c.id} style={{ padding: '14px 16px', borderBottom: i < redCits.length - 1 ? '1px solid #FECACA' : 'none', background: W }}>
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
                       <div style={{ flex: 1, minWidth: 200 }}>
                         <div className="doc-serif" style={{ fontSize: 13, fontWeight: 600, color: '#0F172A', marginBottom: 3 }}>{c.caseName || '—'}</div>
-                        <div className="doc-sans" style={{ fontSize: 10, color: '#7C3AED', fontWeight: 700, marginBottom: 2 }}>{c.primaryCitation || '—'}</div>
-                        {c.importSourceLink && (
-                          <div className="doc-sans" style={{ fontSize: 9, color: '#64748B' }}>
-                            🌐 Found at: <a href={c.importSourceLink} target="_blank" rel="noopener noreferrer" style={{ color: '#7C3AED', textDecoration: 'none' }}>{c.importSourceLink.slice(0, 60)}{c.importSourceLink.length > 60 ? '…' : ''}</a>
-                          </div>
-                        )}
-                        {ps > 0 && (
-                          <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginTop: 3 }}>
-                            Review SLA: <span style={{ fontWeight: 700, color: ps >= 0.85 ? '#DC2626' : ps >= 0.70 ? '#D97706' : '#64748B' }}>{_slaLabel(ps)}</span>
+                        <div className="doc-sans" style={{ fontSize: 10, color: '#DC2626', fontWeight: 700, marginBottom: 4 }}>{c.primaryCitation || '—'}</div>
+                        {c.failureReason && (
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', background: '#FFF5F5', border: '1px solid #FECACA', borderRadius: 4, padding: '7px 10px' }}>
+                            <span style={{ fontSize: 12, flexShrink: 0 }}>⚠</span>
+                            <div className="doc-sans" style={{ fontSize: 10, color: '#991B1B', lineHeight: 1.55 }}>{c.failureReason}</div>
                           </div>
                         )}
                       </div>
-                      <div style={{ flexShrink: 0, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 3 }}>
-                          <Dot c="#7C3AED" s={5} />
-                          <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#4C1D95' }}>PENDING</span>
+                      <div style={{ flexShrink: 0 }}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 3, marginBottom: 6 }}>
+                          <Dot c="#DC2626" s={5} />
+                          <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#991B1B' }}>UNVERIFIED</span>
                         </div>
-                        {ticketId && (
-                          nst === 'done' ? (
-                            <span className="doc-sans" style={{ fontSize: 9, color: '#16A34A', fontWeight: 600 }}>✓ You'll be notified</span>
-                          ) : (
-                            <button className="doc-foot-btn"
-                              disabled={nst === 'sending'}
-                              style={{ background: '#7C3AED', color: W, borderColor: '#7C3AED', opacity: nst === 'sending' ? 0.6 : 1 }}
-                              onClick={() => handleNotifyMe(ticketId)}>
-                              {nst === 'sending' ? 'Registering…' : '🔔 Notify Me'}
-                            </button>
-                          )
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* ── UNVERIFIED CITATIONS — RED, collapsed ─────────────────────── */}
-        {redCits.length > 0 && (
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-              <div style={{ flex: 1, height: 1, background: '#FECACA' }} />
-              <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#DC2626', letterSpacing: '.12em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
-                ❌ Unverified Citations ({redCits.length})
-              </span>
-              <div style={{ flex: 1, height: 1, background: '#FECACA' }} />
-            </div>
-            <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, overflow: 'hidden' }}>
-              {/* Collapsed header */}
-              <button type="button" onClick={() => setRedExpanded(p => !p)}
-                style={{ width: '100%', background: '#FEE2E2', border: 'none', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: redExpanded ? '1px solid #FECACA' : 'none' }}>
-                <div className="doc-sans" style={{ fontSize: 11, color: '#991B1B', lineHeight: 1.55, textAlign: 'left' }}>
-                  ❌ <strong>Unverified — Manual Check Required.</strong> These citations could not be confirmed in our verified database or external sources. Do not use without independent verification from the primary source.
-                </div>
-                <span className="doc-sans" style={{ fontSize: 11, color: '#DC2626', flexShrink: 0, marginLeft: 12 }}>{redExpanded ? '▲ Hide' : '▼ Show'}</span>
-              </button>
-              {redExpanded && redCits.map((c, i) => (
-                <div key={c.id} style={{ padding: '14px 16px', borderBottom: i < redCits.length - 1 ? '1px solid #FECACA' : 'none', background: W }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
-                    <div style={{ flex: 1, minWidth: 200 }}>
-                      <div className="doc-serif" style={{ fontSize: 13, fontWeight: 600, color: '#0F172A', marginBottom: 3 }}>{c.caseName || '—'}</div>
-                      <div className="doc-sans" style={{ fontSize: 10, color: '#DC2626', fontWeight: 700, marginBottom: 4 }}>{c.primaryCitation || '—'}</div>
-                      {c.failureReason && (
-                        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', background: '#FFF5F5', border: '1px solid #FECACA', borderRadius: 4, padding: '7px 10px' }}>
-                          <span style={{ fontSize: 12, flexShrink: 0 }}>⚠</span>
-                          <div className="doc-sans" style={{ fontSize: 10, color: '#991B1B', lineHeight: 1.55 }}>{c.failureReason}</div>
+                        <div>
+                          <button className="doc-foot-btn"
+                            style={{ background: '#FEF2F2', color: '#DC2626', borderColor: '#FECACA', fontSize: 9 }}
+                            title="Export blocked — this citation failed verification. Do not use in court submissions."
+                            onClick={() => alert('⚠ Export blocked.\n\nThis citation could not be verified. Do not use in court submissions without independent verification from the primary source.')}>
+                            ⛔ Export Blocked
+                          </button>
                         </div>
-                      )}
-                    </div>
-                    <div style={{ flexShrink: 0 }}>
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 3, marginBottom: 6 }}>
-                        <Dot c="#DC2626" s={5} />
-                        <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: '#991B1B' }}>UNVERIFIED</span>
-                      </div>
-                      <div>
-                        <button className="doc-foot-btn"
-                          style={{ background: '#FEF2F2', color: '#DC2626', borderColor: '#FECACA', fontSize: 9 }}
-                          title="Export blocked — this citation failed verification. Do not use in court submissions."
-                          onClick={() => alert('⚠ Export blocked.\n\nThis citation could not be verified. Do not use in court submissions without independent verification from the primary source.')}>
-                          ⛔ Export Blocked
-                        </button>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
+        </div>
       </div>
-    </div>
-  );
-}
-
-/* ══════════════════════════════════════════════════
-   AGENT LOG PANEL
-══════════════════════════════════════════════════ */
-function getLevelStyle(level) {
-  switch (level) {
-    case 'ERROR':
-      return { color: '#DC2626', left: '#DC2626' };
-    case 'WARNING':
-      return { color: '#B45309', left: '#F59E0B' };
-    case 'DEBUG':
-      return { color: '#9CA3AF', left: 'transparent' };
-    case 'INFO':
-    default:
-      return { color: '#374151', left: 'transparent' };
-  }
-}
-
-// Extract count badges from metadata
-function MetaBadges({ meta }) {
-  if (!meta) return null;
-  const badges = [];
-  const pairs = [
-    ['local_count', '🏛', '#10B981'],
-    ['ik_count', '📚', '#3B82F6'],
-    ['google_count', '🌐', '#F59E0B'],
-    ['ik_fetched', '📥', '#3B82F6'],
-    ['google_fetched', '📥', '#F59E0B'],
-    ['ik_ingested', '✅', '#3B82F6'],
-    ['google_ingested', '✅', '#F59E0B'],
-    ['total_ingested', '📦', '#8B5CF6'],
-    ['validated', '✓', '#10B981'],
-    ['flagged', '⚠', '#F59E0B'],
-    ['rejected', '✗', '#EF4444'],
-    ['approved', '✅', '#10B981'],
-    ['quarantined', '🚫', '#EF4444'],
-    ['citation_count', '📜', '#14B8A6'],
-    ['keyword_sets_count', '🔑', '#EC4899'],
-    ['count', '#', '#64748B'],
-  ];
-  for (const [key, icon, color] of pairs) {
-    if (meta[key] !== undefined && meta[key] !== null) {
-      badges.push(
-        <span key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 2, background: color + '22', border: `1px solid ${color}55`, borderRadius: 4, padding: '0 5px', fontSize: 9, color, fontWeight: 700, marginLeft: 4 }}>
-          {icon} {meta[key]}
-        </span>
-      );
-    }
-  }
-  return badges.length ? <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 2, marginLeft: 4 }}>{badges}</span> : null;
-}
-
-function AgentLogPanel({ logs, runId }) {
-  const bottomRef = useRef(null);
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
-
-  const PIPELINE_STAGES = [
-    { id: 'start', label: 'Start', icon: '🧠', agent: 'root' },
-    { id: 'keyword_extractor', label: 'Keywords', icon: '🔑', agent: 'keyword_extractor' },
-    { id: 'watchdog', label: 'Watchdog', icon: '🐕', agent: 'watchdog' },
-    { id: 'fetcher', label: 'Fetcher', icon: '📡', agent: 'fetcher' },
-    { id: 'clerk', label: 'Clerk', icon: '📋', agent: 'clerk' },
-    { id: 'librarian', label: 'Librarian', icon: '📚', agent: 'librarian' },
-    { id: 'auditor', label: 'Auditor', icon: '🔍', agent: 'auditor' },
-    { id: 'report_builder', label: 'Report', icon: '🏗', agent: 'report_builder' },
-  ];
-
-  const reachedAgents = new Set(logs.map(l => l.agent_name));
-  const reachedStages = new Set(logs.map(l => l.stage));
-  const lastLog = logs.length > 0 ? logs[logs.length - 1] : null;
-  const activeAgent = lastLog?.agent_name;
-
-  // Compute live stats from metadata
-  const statsByAgent = {};
-  for (const log of logs) {
-    if (log.metadata) {
-      statsByAgent[log.agent_name] = { ...(statsByAgent[log.agent_name] || {}), ...log.metadata };
-    }
-  }
-
-  return (
-    <div style={{ width: '100%', marginBottom: 14, animation: 'fdUp .25s ease', border: '1px solid #E2E8F0', borderRadius: 12, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
-      {/* Header */}
-      <div style={{ background: 'linear-gradient(90deg,#F0FDF4,#EFF6FF)', padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid #E2E8F0' }}>
-        <Spin />
-        <span style={{ fontSize: 12, fontWeight: 700, color: '#0F766E', letterSpacing: '.04em' }}>PIPELINE RUNNING</span>
-        <span style={{ fontSize: 10, color: '#94A3B8', marginLeft: 6 }}>— {logs.length} log{logs.length !== 1 ? 's' : ''}</span>
-        {runId && <span style={{ fontSize: 9, color: '#CBD5E1', marginLeft: 'auto', fontFamily: 'monospace' }}>{runId.slice(0, 8)}…</span>}
-      </div>
-
-      {/* Stage progress bar */}
-      <div style={{ background: '#F8FAFC', padding: '10px 14px', display: 'flex', gap: 0, alignItems: 'center', overflowX: 'auto', borderBottom: '1px solid #E2E8F0' }}>
-        {PIPELINE_STAGES.map((s, i) => {
-          const done = reachedAgents.has(s.agent) || reachedStages.has(s.id);
-          const active = activeAgent === s.agent || (s.id === 'fetcher' && activeAgent === 'fetcher');
-          const color = '#94A3B8';
-          return (
-            <React.Fragment key={s.id}>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 54 }}>
-                <div style={{
-                  width: 30, height: 30, borderRadius: '50%',
-                  background: done ? color + '22' : active ? color + '15' : '#F1F5F9',
-                  border: `2px solid ${done ? color : active ? color : '#CBD5E1'}`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: done ? 14 : 13, transition: 'all .3s',
-                  boxShadow: active ? `0 0 8px ${color}55` : 'none',
-                }}>
-                  {done ? '✓' : s.icon}
-                </div>
-                <span style={{ fontSize: 8, color: done ? color : active ? color : '#94A3B8', fontWeight: done || active ? 700 : 400, whiteSpace: 'nowrap' }}>{s.label}</span>
-              </div>
-              {i < PIPELINE_STAGES.length - 1 && (
-                <div style={{ flex: 1, height: 2, background: done ? color : '#E2E8F0', minWidth: 8, marginBottom: 14, transition: 'background .5s' }} />
-              )}
-            </React.Fragment>
-          );
-        })}
-      </div>
-
-      {/* Log stream */}
-      <div style={{ background: '#FFFFFF', maxHeight: 320, overflowY: 'auto', padding: '6px 0', fontFamily: '"JetBrains Mono", "Fira Code", monospace' }}>
-        {logs.length === 0 ? (
-          <div style={{ padding: '16px 14px', fontSize: 11, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Spin size="small" /> Waiting for pipeline to start…
-          </div>
-        ) : (
-          logs.map((log, i) => {
-            const ls = getLevelStyle(log.log_level);
-            const icon = '⚙️';
-            const agentColor = '#64748B';
-            const ts = log.created_at
-              ? new Date(log.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
-              : '';
-            const isSection = log.message?.startsWith('✅') || log.message?.startsWith('🎉');
-
-            if (log.metadata && log.metadata.type === 'AGENT_PROMPT_INFO') {
-              return (
-                <div key={log.id || i} style={{ margin: '14px 14px', padding: '12px 16px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderLeft: '3px solid #6366F1', borderRadius: 8, fontFamily: '"JetBrains Mono", "Fira Code", monospace', fontSize: 11, color: '#334155' }}>
-                  <div style={{ fontWeight: 800, color: '#0F172A', marginBottom: 10, fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {icon} {log.metadata.agent}
-                  </div>
-                  {log.metadata.prompt_key && <div style={{ marginBottom: 4 }}><span style={{ color: '#64748B', display: 'inline-block', width: 90 }}>Prompt Key:</span> <b>{log.metadata.prompt_key}</b></div>}
-                  <div style={{ marginBottom: 4 }}>
-                    <span style={{ color: '#64748B', display: 'inline-block', width: 90 }}>Source:</span> <b>{log.metadata.source}</b> {log.metadata.source?.toUpperCase() === 'DATABASE' ? '🟢' : log.metadata.source?.toUpperCase() === 'DEFAULT' ? '🟡' : ''}
-                  </div>
-                  {log.metadata.model && <div style={{ marginBottom: 4 }}><span style={{ color: '#64748B', display: 'inline-block', width: 90 }}>Model:</span> {log.metadata.model}</div>}
-                  {(log.metadata.temperature !== undefined && log.metadata.max_tokens !== undefined) && (
-                    <div style={{ marginBottom: 4 }}><span style={{ color: '#64748B', display: 'inline-block', width: 90 }}>Config:</span> temp={log.metadata.temperature} | max_tokens={log.metadata.max_tokens}</div>
-                  )}
-                  <div><span style={{ color: '#64748B', display: 'inline-block', width: 90 }}>Runtime:</span> {log.metadata.runtime?.toFixed(2)}s</div>
-                </div>
-              );
-            }
-
-            return (
-              <div key={log.id || i} style={{
-                padding: isSection ? '6px 14px' : '3px 14px',
-                borderLeft: `3px solid ${ls.left}`,
-                display: 'flex', gap: 8, alignItems: 'flex-start',
-                borderBottom: '1px solid #F1F5F9',
-                background: isSection ? agentColor + '0D' : 'transparent',
-              }}>
-                <span style={{ fontSize: 11, flexShrink: 0, marginTop: 2, opacity: 0.9 }}>{icon}</span>
-                <span style={{ fontSize: 9, color: '#0EA5E9', flexShrink: 0, minWidth: 56, marginTop: 3, letterSpacing: '.02em' }}>{ts}</span>
-                <span style={{ fontSize: 8, color: agentColor, flexShrink: 0, minWidth: 68, fontWeight: 700, textTransform: 'uppercase', marginTop: 3, letterSpacing: '.06em' }}>{log.agent_name}</span>
-                <span style={{ fontSize: 11, color: ls.color, lineHeight: 1.6, wordBreak: 'break-word', flex: 1 }}>
-                  {log.message}
-                  <MetaBadges meta={log.metadata} />
-                </span>
-              </div>
-            );
-          })
-        )}
-        <div ref={bottomRef} />
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -1647,25 +1470,9 @@ const COURTS = [
   'Nagaland HC',
   'Goa HC',
 ];
-const AREAS = ['Constitutional', 'Commercial', 'IT Law', 'Criminal', 'Family', 'Labour', 'Environmental', 'Tax', 'IPR', 'Administrative', 'Consumer', 'Arbitration', 'Company Law', 'Insolvency', 'Property', 'Tort'];
-const AUDIT_BADGE = {
-  VERIFIED: { label: 'Verified', dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', color: '#15532D' },
-  VERIFIED_WITH_WARNINGS: { label: 'Verified', dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', color: '#15532D' },
-  NEEDS_REVIEW: { label: 'Review', dot: '#D97706', bg: '#FFFBEB', border: '#FDE68A', color: '#92400E' },
-  QUARANTINED: { label: 'Unverified', dot: '#DC2626', bg: '#FEF2F2', border: '#FECACA', color: '#991B1B' },
-  not_audited: { label: 'Unverified', dot: '#DC2626', bg: '#FEF2F2', border: '#FECACA', color: '#991B1B' },
-};
+const AREAS = [];
 
-function StatusBadge({ status }) {
-  const cfg = AUDIT_BADGE[status] || AUDIT_BADGE.not_audited;
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 700, color: cfg.color }}>
-      <span style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.dot, display: 'inline-block' }} />
-      {cfg.label}
-    </span>
-  );
-}
-
+// Case search tab temporarily disabled for build compatibility.
 function CaseSearchTab() {
   const [query, setQuery] = useState('');
   const [courtFilter, setCourtFilter] = useState('');
@@ -1769,229 +1576,230 @@ function CaseSearchTab() {
   };
 
   return (
-    <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
-      {/* Sidebar */}
-      <div style={{ width: 210, flexShrink: 0, borderRight: `1px solid ${g200}`, background: g50, display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: '16px 12px', gap: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: N, display: 'flex', alignItems: 'center', gap: 6 }}>🔍 Filters</div>
+    <>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+        {/* Sidebar */}
+        <div style={{ width: 210, flexShrink: 0, borderRight: `1px solid ${g200}`, background: g50, display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: '16px 12px', gap: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: N, display: 'flex', alignItems: 'center', gap: 6 }}>🔍 Filters</div>
 
-        {/* Court name filter — type to filter displayed results */}
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Court Name</div>
-          <input
-            value={courtNameFilter}
-            onChange={e => setCourtNameFilter(e.target.value)}
-            placeholder="e.g. Delhi, Supreme"
-            style={{ width: '100%', padding: '6px 8px', fontSize: 11, borderRadius: 5, border: `1px solid ${g300}`, outline: 'none', color: g700, marginBottom: 6 }}
-          />
-        </div>
+          {/* Court name filter — type to filter displayed results */}
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Court Name</div>
+            <input
+              value={courtNameFilter}
+              onChange={e => setCourtNameFilter(e.target.value)}
+              placeholder="e.g. Delhi, Supreme"
+              style={{ width: '100%', padding: '6px 8px', fontSize: 11, borderRadius: 5, border: `1px solid ${g300}`, outline: 'none', color: g700, marginBottom: 6 }}
+            />
+          </div>
 
-        {/* Court filter — preset list */}
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Court (preset)</div>
-          <div style={{ maxHeight: 140, overflowY: 'auto', marginBottom: 4 }}>
-            {['', ...COURTS].map(c => (
-              <div key={c || 'all'} onClick={() => { setCourtFilter(c); doSearch(query, c, areaFilter); }}
-                style={{ padding: '5px 8px', borderRadius: 5, fontSize: 11, cursor: 'pointer', fontWeight: courtFilter === c ? 700 : 400, color: courtFilter === c ? N : g600, background: courtFilter === c ? g200 : 'transparent', marginBottom: 2 }}>
-                {c || 'All Courts'}
-              </div>
-            ))}
+          {/* Court filter — preset list */}
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Court (preset)</div>
+            <div style={{ maxHeight: 140, overflowY: 'auto', marginBottom: 4 }}>
+              {['', ...COURTS].map(c => (
+                <div key={c || 'all'} onClick={() => { setCourtFilter(c); doSearch(query, c, areaFilter); }}
+                  style={{ padding: '5px 8px', borderRadius: 5, fontSize: 11, cursor: 'pointer', fontWeight: courtFilter === c ? 700 : 400, color: courtFilter === c ? N : g600, background: courtFilter === c ? g200 : 'transparent', marginBottom: 2 }}>
+                  {c || 'All Courts'}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Area of law filter — type to filter displayed results */}
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Area of Law</div>
+            <input
+              value={areaLawFilter}
+              onChange={e => setAreaLawFilter(e.target.value)}
+              placeholder="e.g. Criminal, Commercial"
+              style={{ width: '100%', padding: '6px 8px', fontSize: 11, borderRadius: 5, border: `1px solid ${g300}`, outline: 'none', color: g700, marginBottom: 6 }}
+            />
+            <div style={{ maxHeight: 120, overflowY: 'auto' }}>
+              {['', ...AREAS].map(a => (
+                <div key={a || 'all'} onClick={() => { setAreaFilter(a); doSearch(query, courtFilter, a); }}
+                  style={{ padding: '5px 8px', borderRadius: 5, fontSize: 11, cursor: 'pointer', fontWeight: areaFilter === a ? 700 : 400, color: areaFilter === a ? N : g600, background: areaFilter === a ? g200 : 'transparent', marginBottom: 2 }}>
+                  {a || 'All Areas'}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Citation Vault */}
+          <div style={{ borderTop: `1px solid ${g200}`, paddingTop: 14 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 5 }}>🗄 Citation Vault</div>
+            <div style={{ textAlign: 'center', marginBottom: 10 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: N }}>{displayResults.length}</div>
+              <div style={{ fontSize: 10, color: g500 }}>{courtNameFilter || areaLawFilter ? 'Filtered citations' : 'Citations'}</div>
+            </div>
+            <button onClick={exportJSON}
+              style={{ width: '100%', padding: '6px 0', background: N, color: W, borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', marginBottom: 5 }}>
+              🗃 Export JSON
+            </button>
+            <button onClick={exportCSV}
+              style={{ width: '100%', padding: '6px 0', background: N, color: W, borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', marginBottom: 5 }}>
+              📋 Export CSV
+            </button>
+            <button onClick={exportCompleteReport}
+              style={{ width: '100%', padding: '6px 0', background: '#166534', color: W, borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', marginBottom: 5 }}>
+              📄 Complete Citation Report
+            </button>
+            <button onClick={() => setVault([])}
+              style={{ width: '100%', padding: '6px 0', background: W, color: '#DC2626', borderRadius: 6, border: '1px solid #FECACA', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+              🗑 Reset Vault
+            </button>
           </div>
         </div>
 
-        {/* Area of law filter — type to filter displayed results */}
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Area of Law</div>
-          <input
-            value={areaLawFilter}
-            onChange={e => setAreaLawFilter(e.target.value)}
-            placeholder="e.g. Criminal, Commercial"
-            style={{ width: '100%', padding: '6px 8px', fontSize: 11, borderRadius: 5, border: `1px solid ${g300}`, outline: 'none', color: g700, marginBottom: 6 }}
-          />
-          <div style={{ maxHeight: 120, overflowY: 'auto' }}>
-            {['', ...AREAS].map(a => (
-              <div key={a || 'all'} onClick={() => { setAreaFilter(a); doSearch(query, courtFilter, a); }}
-                style={{ padding: '5px 8px', borderRadius: 5, fontSize: 11, cursor: 'pointer', fontWeight: areaFilter === a ? 700 : 400, color: areaFilter === a ? N : g600, background: areaFilter === a ? g200 : 'transparent', marginBottom: 2 }}>
-                {a || 'All Areas'}
-              </div>
-            ))}
+        {/* Main content */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          {/* Search bar */}
+          <div style={{ padding: '16px 20px', borderBottom: `1px solid ${g200}`, display: 'flex', gap: 10 }}>
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleSearch()}
+              placeholder="Search cases, statutes, holdings… (AND, OR, NOT)"
+              style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: `1px solid ${g300}`, fontSize: 13, outline: 'none', color: g700 }}
+            />
+            <button onClick={handleSearch}
+              style={{ padding: '10px 22px', background: N, color: W, borderRadius: 8, border: 'none', fontWeight: 700, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+              🔍 Search
+            </button>
           </div>
-        </div>
 
-        {/* Citation Vault */}
-        <div style={{ borderTop: `1px solid ${g200}`, paddingTop: 14 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: g500, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 5 }}>🗄 Citation Vault</div>
-          <div style={{ textAlign: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 28, fontWeight: 800, color: N }}>{displayResults.length}</div>
-            <div style={{ fontSize: 10, color: g500 }}>{courtNameFilter || areaLawFilter ? 'Filtered citations' : 'Citations'}</div>
+          {/* Results */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
+            {loading && <div style={{ textAlign: 'center', padding: 40, color: g400, fontSize: 13 }}><Spin /> Loading…</div>}
+            {error && <div style={{ color: R, fontSize: 13, padding: 20 }}>{error}</div>}
+            {!loading && !error && (
+              <>
+                <div style={{ fontSize: 12, color: g500, marginBottom: 10 }}>{displayResults.length} results{(courtNameFilter || areaLawFilter) ? ' (filtered)' : ''}</div>
+                {displayResults.length === 0 && <div style={{ color: g400, fontSize: 13, textAlign: 'center', padding: 40 }}>No cases found.</div>}
+                {displayResults.map((r, i) => {
+                  const inVault = vault.includes(r.canonicalId);
+                  const pct = r.matchPct;
+                  const borderColor = pct >= 80 ? '#16A34A' : pct >= 60 ? '#D97706' : pct >= 40 ? '#DC2626' : g300;
+                  return (
+                    <div key={r.canonicalId || i} style={{ border: `1px solid ${g200}`, borderLeft: `3px solid ${borderColor}`, borderRadius: 8, padding: '12px 16px', marginBottom: 8, background: W, display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer', transition: 'box-shadow .15s' }}
+                      onMouseEnter={e => e.currentTarget.style.boxShadow = '0 2px 8px #0002'}
+                      onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
+                      onClick={() => toggleVault(r.canonicalId)}>
+                      {/* Vault checkbox */}
+                      <div style={{ flexShrink: 0, marginTop: 2 }}>
+                        <span style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${inVault ? '#16A34A' : g300}`, background: inVault ? '#16A34A' : W, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: W }}>
+                          {inVault ? '✓' : ''}
+                        </span>
+                      </div>
+                      {/* Info */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: N, marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.caseName}</div>
+                        {r.primaryCitation && <div style={{ fontSize: 11, color: g500, marginBottom: 5 }}>{r.primaryCitation}</div>}
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                          {/* Status badge temporarily disabled */}
+                          {r.court && <span style={{ fontSize: 10, color: g600, background: g100, borderRadius: 4, padding: '2px 6px' }}>{r.court}</span>}
+                          {r.year && <span style={{ fontSize: 10, color: g600, background: g100, borderRadius: 4, padding: '2px 6px' }}>{r.year}</span>}
+                          {r.area && <span style={{ fontSize: 10, color: B, background: BS, borderRadius: 4, padding: '2px 6px' }}>{r.area}</span>}
+                        </div>
+                      </div>
+                      {/* Match % */}
+                      {pct !== null && pct !== undefined && (
+                        <div style={{ flexShrink: 0, textAlign: 'right' }}>
+                          <div style={{ fontSize: 20, fontWeight: 800, color: matchColor(pct) }}>{pct}%</div>
+                          <div style={{ fontSize: 9, color: g400, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em' }}>Match</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            )}
           </div>
-          <button onClick={exportJSON}
-            style={{ width: '100%', padding: '6px 0', background: N, color: W, borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', marginBottom: 5 }}>
-            🗃 Export JSON
-          </button>
-          <button onClick={exportCSV}
-            style={{ width: '100%', padding: '6px 0', background: N, color: W, borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', marginBottom: 5 }}>
-            📋 Export CSV
-          </button>
-          <button onClick={exportCompleteReport}
-            style={{ width: '100%', padding: '6px 0', background: '#166534', color: W, borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', marginBottom: 5 }}>
-            📄 Complete Citation Report
-          </button>
-          <button onClick={() => setVault([])}
-            style={{ width: '100%', padding: '6px 0', background: W, color: '#DC2626', borderRadius: 6, border: '1px solid #FECACA', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
-            🗑 Reset Vault
-          </button>
         </div>
       </div>
 
-      {/* Main content */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-        {/* Search bar */}
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${g200}`, display: 'flex', gap: 10 }}>
-          <input
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSearch()}
-            placeholder="Search cases, statutes, holdings… (AND, OR, NOT)"
-            style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: `1px solid ${g300}`, fontSize: 13, outline: 'none', color: g700 }}
-          />
-          <button onClick={handleSearch}
-            style={{ padding: '10px 22px', background: N, color: W, borderRadius: 8, border: 'none', fontWeight: 700, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-            🔍 Search
-          </button>
-        </div>
-
-        {/* Results */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
-          {loading && <div style={{ textAlign: 'center', padding: 40, color: g400, fontSize: 13 }}><Spin /> Loading…</div>}
-          {error && <div style={{ color: R, fontSize: 13, padding: 20 }}>{error}</div>}
-          {!loading && !error && (
-            <>
-              <div style={{ fontSize: 12, color: g500, marginBottom: 10 }}>{displayResults.length} results{(courtNameFilter || areaLawFilter) ? ' (filtered)' : ''}</div>
-              {displayResults.length === 0 && <div style={{ color: g400, fontSize: 13, textAlign: 'center', padding: 40 }}>No cases found.</div>}
-              {displayResults.map((r, i) => {
-                const inVault = vault.includes(r.canonicalId);
-                const pct = r.matchPct;
-                const borderColor = pct >= 80 ? '#16A34A' : pct >= 60 ? '#D97706' : pct >= 40 ? '#DC2626' : g300;
-                return (
-                  <div key={r.canonicalId || i} style={{ border: `1px solid ${g200}`, borderLeft: `3px solid ${borderColor}`, borderRadius: 8, padding: '12px 16px', marginBottom: 8, background: W, display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer', transition: 'box-shadow .15s' }}
-                    onMouseEnter={e => e.currentTarget.style.boxShadow = '0 2px 8px #0002'}
-                    onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
-                    onClick={() => toggleVault(r.canonicalId)}>
-                    {/* Vault checkbox */}
-                    <div style={{ flexShrink: 0, marginTop: 2 }}>
-                      <span style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${inVault ? '#16A34A' : g300}`, background: inVault ? '#16A34A' : W, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: W }}>
-                        {inVault ? '✓' : ''}
-                      </span>
-                    </div>
-                    {/* Info */}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: N, marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.caseName}</div>
-                      {r.primaryCitation && <div style={{ fontSize: 11, color: g500, marginBottom: 5 }}>{r.primaryCitation}</div>}
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <StatusBadge status={r.auditStatus} />
-                        {r.court && <span style={{ fontSize: 10, color: g600, background: g100, borderRadius: 4, padding: '2px 6px' }}>{r.court}</span>}
-                        {r.year && <span style={{ fontSize: 10, color: g600, background: g100, borderRadius: 4, padding: '2px 6px' }}>{r.year}</span>}
-                        {r.area && <span style={{ fontSize: 10, color: B, background: BS, borderRadius: 4, padding: '2px 6px' }}>{r.area}</span>}
-                      </div>
-                    </div>
-                    {/* Match % */}
-                    {pct !== null && pct !== undefined && (
-                      <div style={{ flexShrink: 0, textAlign: 'right' }}>
-                        <div style={{ fontSize: 20, fontWeight: 800, color: matchColor(pct) }}>{pct}%</div>
-                        <div style={{ fontSize: 9, color: g400, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em' }}>Match</div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-
-    {/* ── Original Court Copy PDF Modal ── */}
-    {origDocModal && (
-      <div
-        onClick={() => setOrigDocModal(null)}
-        style={{
-          position: 'fixed', inset: 0, zIndex: 9999,
-          background: 'rgba(0,0,0,0.72)', display: 'flex',
-          alignItems: 'center', justifyContent: 'center',
-        }}
-      >
+      {/* ── Original Court Copy PDF Modal ── */}
+      {origDocModal && (
         <div
-          onClick={e => e.stopPropagation()}
+          onClick={() => setOrigDocModal(null)}
           style={{
-            width: '92vw', maxWidth: 1100, height: '88vh',
-            background: '#fff', borderRadius: 10, overflow: 'hidden',
-            display: 'flex', flexDirection: 'column',
-            boxShadow: '0 24px 80px rgba(0,0,0,0.45)',
+            position: 'fixed', inset: 0, zIndex: 9999,
+            background: 'rgba(0,0,0,0.72)', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
           }}
         >
-          {/* Modal header */}
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '10px 16px', background: '#1E3A8A', color: '#fff', flexShrink: 0,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 16 }}>📄</span>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.04em' }}>
-                  {origDocModal.isPdf ? 'Original Court Copy (PDF)' : 'Original Court Document'}
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: '92vw', maxWidth: 1100, height: '88vh',
+              background: '#fff', borderRadius: 10, overflow: 'hidden',
+              display: 'flex', flexDirection: 'column',
+              boxShadow: '0 24px 80px rgba(0,0,0,0.45)',
+            }}
+          >
+            {/* Modal header */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 16px', background: '#1E3A8A', color: '#fff', flexShrink: 0,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 16 }}>📄</span>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.04em' }}>
+                    {origDocModal.isPdf ? 'Original Court Copy (PDF)' : 'Original Court Document'}
+                  </div>
+                  {origDocModal.caseName && (
+                    <div style={{ fontSize: 10, opacity: 0.8, marginTop: 1 }}>{origDocModal.caseName}</div>
+                  )}
                 </div>
-                {origDocModal.caseName && (
-                  <div style={{ fontSize: 10, opacity: 0.8, marginTop: 1 }}>{origDocModal.caseName}</div>
-                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <a
+                  href={origDocModal.url}
+                  download
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    padding: '5px 11px', background: 'rgba(255,255,255,0.15)',
+                    color: '#fff', borderRadius: 4, textDecoration: 'none',
+                    fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.3)',
+                  }}
+                >
+                  ⬇ Download
+                </a>
+                <a
+                  href={origDocModal.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    padding: '5px 11px', background: 'rgba(255,255,255,0.15)',
+                    color: '#fff', borderRadius: 4, textDecoration: 'none',
+                    fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.3)',
+                  }}
+                >
+                  ↗ New Tab
+                </a>
+                <button
+                  onClick={() => setOrigDocModal(null)}
+                  style={{
+                    background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)',
+                    color: '#fff', borderRadius: 4, padding: '5px 11px',
+                    cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                  }}
+                >
+                  ✕
+                </button>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <a
-                href={origDocModal.url}
-                download
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 5,
-                  padding: '5px 11px', background: 'rgba(255,255,255,0.15)',
-                  color: '#fff', borderRadius: 4, textDecoration: 'none',
-                  fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.3)',
-                }}
-              >
-                ⬇ Download
-              </a>
-              <a
-                href={origDocModal.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 5,
-                  padding: '5px 11px', background: 'rgba(255,255,255,0.15)',
-                  color: '#fff', borderRadius: 4, textDecoration: 'none',
-                  fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.3)',
-                }}
-              >
-                ↗ New Tab
-              </a>
-              <button
-                onClick={() => setOrigDocModal(null)}
-                style={{
-                  background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)',
-                  color: '#fff', borderRadius: 4, padding: '5px 11px',
-                  cursor: 'pointer', fontSize: 13, fontWeight: 700,
-                }}
-              >
-                ✕
-              </button>
-            </div>
+            {/* PDF iframe viewer */}
+            <iframe
+              src={origDocModal.url + (origDocModal.isPdf ? '#toolbar=1&navpanes=1' : '')}
+              title="Original Court Copy"
+              style={{ flex: 1, border: 'none', width: '100%' }}
+            />
           </div>
-          {/* PDF iframe viewer */}
-          <iframe
-            src={origDocModal.url + (origDocModal.isPdf ? '#toolbar=1&navpanes=1' : '')}
-            title="Original Court Copy"
-            style={{ flex: 1, border: 'none', width: '100%' }}
-          />
         </div>
-      </div>
-    )}
+      )}
     </>
   );
 }
@@ -2955,7 +2763,7 @@ export default function CitationReportPage({ embedded = false }) {
                 </div>
               ))}
               {/* Live agent log panel */}
-              {sending && <AgentLogPanel logs={agentLogs} runId={runId} />}
+              {/* Agent log panel temporarily disabled for build compatibility */}
               <div ref={chatRef} />
             </div>
 
