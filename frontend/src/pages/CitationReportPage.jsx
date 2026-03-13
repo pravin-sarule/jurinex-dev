@@ -613,6 +613,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
   const [redExpanded, setRedExpanded] = useState(false);
   const [notifyStatus, setNotifyStatus] = useState({}); // ticketId → 'done'|'sending'
   const [exportWarnId, setExportWarnId] = useState(null); // citation id awaiting export confirm
+  const [origDocModal, setOrigDocModal] = useState(null); // { url, caseName, isPdf }
   const allCitations = report?.report_format?.citations || [];
   const generatedAt = report?.report_format?.generatedAt || '';
   const kwByRoute = report?.report_format?.searchKeywordsByRoute || {};
@@ -706,6 +707,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
   );
 
   return (
+    <>
     <div style={{ background: '#EAECF0', minHeight: '100vh', padding: '20px 14px 64px' }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Source+Sans+3:wght@400;600;700&display=swap');
@@ -982,8 +984,159 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                   "{excerptDisplay}"
                 </div>
 
-                {/* II. Subsequent Treatment */}
-                <div className="doc-sec-h" style={{ marginTop: 24 }}>II. Subsequent Treatment</div>
+                {/* III. Indian Kanoon Enrichment */}
+                {(c.originalCourtCopyUrl || (c.ikFragment && c.ikFragment.headline) || (c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0) || (c.ikDocMeta && Object.keys(c.ikDocMeta).length > 0)) && (
+                  <div style={{ marginTop: 24 }}>
+                    <div className="doc-sec-h">III. Indian Kanoon Enrichment</div>
+
+                    {/* Original Court Copy */}
+                    {c.originalCourtCopyUrl && (
+                      <div style={{ marginBottom: 14 }}>
+                        <div className="doc-sub-h">Original Court Copy</div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <button
+                            onClick={() => setOrigDocModal({ url: c.originalCourtCopyUrl, caseName: c.caseName, isPdf: c.isOriginalCopyPdf })}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 7,
+                              padding: '7px 14px', background: '#1E3A8A', color: '#FFFFFF',
+                              borderRadius: 5, border: 'none', cursor: 'pointer',
+                              fontSize: 11, fontWeight: 700, letterSpacing: '.04em',
+                            }}
+                          >
+                            <span>📄</span>
+                            <span>{c.isOriginalCopyPdf ? 'View Original PDF' : 'View Original Document'}</span>
+                          </button>
+                          <a
+                            href={c.originalCourtCopyUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 5,
+                              padding: '7px 12px', background: 'transparent', color: '#1E3A8A',
+                              borderRadius: 5, border: '1px solid #1E3A8A',
+                              fontSize: 11, fontWeight: 600, textDecoration: 'none',
+                            }}
+                          >
+                            <span>↗</span><span>Open in Tab</span>
+                          </a>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* IK Relevant Fragment */}
+                    {c.ikFragment && c.ikFragment.headline && (
+                      <div style={{ marginBottom: 14 }}>
+                        <div className="doc-sub-h">Relevant Fragment (Indian Kanoon)</div>
+                        <div style={{
+                          background: '#F0F9FF', border: '1px solid #BAE6FD',
+                          borderLeft: '3px solid #0369A1', borderRadius: 4,
+                          padding: '10px 14px', fontSize: 12, color: '#0C4A6E', lineHeight: 1.7,
+                          fontStyle: 'italic',
+                        }}>
+                          {c.ikFragment.headline}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* IK Doc Metadata */}
+                    {c.ikDocMeta && (c.ikDocMeta.publishdate || c.ikDocMeta.docsource || c.ikDocMeta.numcites != null) && (
+                      <div style={{ marginBottom: 14 }}>
+                        <div className="doc-sub-h">Document Metadata</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {c.ikDocMeta.publishdate && (
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Published</span>
+                              <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.publishdate}</span>
+                            </div>
+                          )}
+                          {c.ikDocMeta.docsource && (
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Court</span>
+                              <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.docsource}</span>
+                            </div>
+                          )}
+                          {c.ikDocMeta.numcites != null && (
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em' }}>Total Citations</span>
+                              <span style={{ fontSize: 11, color: '#1E293B', fontWeight: 600 }}>{c.ikDocMeta.numcites}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* IK Citation Network */}
+                    {((c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0)) && (
+                      <div style={{ marginBottom: 14 }}>
+                        <div className="doc-sub-h">Citation Network (Indian Kanoon)</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                          {/* Cases Cited */}
+                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
+                            <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                                Cases Cited ({(c.ikCiteList || []).length})
+                              </span>
+                            </div>
+                            {(c.ikCiteList || []).length === 0 ? (
+                              <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
+                            ) : (
+                              <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+                                {(c.ikCiteList || []).map((item, i) => (
+                                  <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCiteList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
+                                    <a
+                                      href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
+                                    >
+                                      {item.title || `Doc #${item.tid}`}
+                                    </a>
+                                    {item.docsource && (
+                                      <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Cited By */}
+                          <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
+                            <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                                Cited By ({(c.ikCitedByList || []).length})
+                              </span>
+                            </div>
+                            {(c.ikCitedByList || []).length === 0 ? (
+                              <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
+                            ) : (
+                              <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+                                {(c.ikCitedByList || []).map((item, i) => (
+                                  <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCitedByList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
+                                    <a
+                                      href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
+                                    >
+                                      {item.title || `Doc #${item.tid}`}
+                                    </a>
+                                    {item.docsource && (
+                                      <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* IV. Subsequent Treatment */}
+                <div className="doc-sec-h" style={{ marginTop: 24 }}>IV. Subsequent Treatment</div>
 
                 {/* Primary 3 stats */}
                 <div style={{ display: 'flex', border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden', marginBottom: 10 }}>
@@ -1759,6 +1912,90 @@ function CaseSearchTab() {
         </div>
       </div>
     </div>
+
+    {/* ── Original Court Copy PDF Modal ── */}
+    {origDocModal && (
+      <div
+        onClick={() => setOrigDocModal(null)}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.72)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
+        }}
+      >
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            width: '92vw', maxWidth: 1100, height: '88vh',
+            background: '#fff', borderRadius: 10, overflow: 'hidden',
+            display: 'flex', flexDirection: 'column',
+            boxShadow: '0 24px 80px rgba(0,0,0,0.45)',
+          }}
+        >
+          {/* Modal header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '10px 16px', background: '#1E3A8A', color: '#fff', flexShrink: 0,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 16 }}>📄</span>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.04em' }}>
+                  {origDocModal.isPdf ? 'Original Court Copy (PDF)' : 'Original Court Document'}
+                </div>
+                {origDocModal.caseName && (
+                  <div style={{ fontSize: 10, opacity: 0.8, marginTop: 1 }}>{origDocModal.caseName}</div>
+                )}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <a
+                href={origDocModal.url}
+                download
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  padding: '5px 11px', background: 'rgba(255,255,255,0.15)',
+                  color: '#fff', borderRadius: 4, textDecoration: 'none',
+                  fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.3)',
+                }}
+              >
+                ⬇ Download
+              </a>
+              <a
+                href={origDocModal.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  padding: '5px 11px', background: 'rgba(255,255,255,0.15)',
+                  color: '#fff', borderRadius: 4, textDecoration: 'none',
+                  fontSize: 11, fontWeight: 600, border: '1px solid rgba(255,255,255,0.3)',
+                }}
+              >
+                ↗ New Tab
+              </a>
+              <button
+                onClick={() => setOrigDocModal(null)}
+                style={{
+                  background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)',
+                  color: '#fff', borderRadius: 4, padding: '5px 11px',
+                  cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          {/* PDF iframe viewer */}
+          <iframe
+            src={origDocModal.url + (origDocModal.isPdf ? '#toolbar=1&navpanes=1' : '')}
+            title="Original Court Copy"
+            style={{ flex: 1, border: 'none', width: '100%' }}
+          />
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -1801,6 +2038,9 @@ export default function CitationReportPage({ embedded = false }) {
   // live agent logs
   const [agentLogs, setAgentLogs] = useState([]);
   const [runId, setRunId] = useState(null);
+  const [showFetchLog, setShowFetchLog] = useState(false);
+  const [reportLogs, setReportLogs] = useState([]);
+  const [reportLogsLoading, setReportLogsLoading] = useState(false);
   const logPollRef = useRef(null);
   const statusPollRef = useRef(null);
   const [fullJudgmentModal, setFullJudgmentModal] = useState(null); // null | { loading } | { error } | { caseName, fullText, sourceUrl }
@@ -2196,6 +2436,24 @@ export default function CitationReportPage({ embedded = false }) {
     if (fileRef.current) fileRef.current.value = '';
   };
 
+  const handleToggleFetchLog = async () => {
+    if (showFetchLog) { setShowFetchLog(false); return; }
+    setShowFetchLog(true);
+    const rid = report?.run_id || runId;
+    if (!rid || reportLogs.length > 0) return;
+    setReportLogsLoading(true);
+    try {
+      const base = window.CITATION_API_BASE || 'http://localhost:8003';
+      const res = await fetch(`${base}/citation/runs/${rid}/logs?limit=500`);
+      const data = await res.json();
+      setReportLogs(data.logs || []);
+    } catch (e) {
+      setReportLogs([]);
+    } finally {
+      setReportLogsLoading(false);
+    }
+  };
+
   const handleDeleteReport = async (rId, e) => {
     if (e) e.stopPropagation();
     if (!window.confirm('Delete this citation report? This cannot be undone.')) return;
@@ -2244,6 +2502,22 @@ export default function CitationReportPage({ embedded = false }) {
           <span style={{ color: g300 }}>|</span>
           <span style={{ fontSize: 12, color: g400 }}>Verified Citation Report · {report?.report_format?.citations?.length || 0} citations</span>
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            {(report?.run_id || runId) && (
+              <button
+                onClick={handleToggleFetchLog}
+                style={{
+                  padding: '6px 12px', fontSize: 11, fontWeight: 600,
+                  color: showFetchLog ? '#0F766E' : '#374151',
+                  background: showFetchLog ? '#F0FDF4' : W,
+                  border: `1px solid ${showFetchLog ? '#6EE7B7' : g200}`,
+                  borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+                }}
+                title="Show IK API fetch log for this report"
+              >
+                <span style={{ fontSize: 12 }}>📋</span>
+                {showFetchLog ? 'Hide Log' : 'Fetch Log'}
+              </button>
+            )}
             <button
               onClick={() => handleOpenShare(currentReportId)}
               style={{ padding: '6px 14px', fontSize: 11, fontWeight: 600, color: N, background: W, border: `1px solid ${g200}`, borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
@@ -2293,6 +2567,45 @@ export default function CitationReportPage({ embedded = false }) {
             )}
           </div>
         )}
+        {/* ── IK Fetch Log panel ── */}
+        {showFetchLog && (
+          <div style={{ background: '#0F172A', borderBottom: '2px solid #1E3A5F', maxHeight: 340, overflowY: 'auto', flexShrink: 0 }}>
+            <div style={{ padding: '8px 16px', background: '#1E293B', display: 'flex', alignItems: 'center', gap: 8, position: 'sticky', top: 0, zIndex: 1 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#38BDF8', letterSpacing: '.06em', textTransform: 'uppercase' }}>📋 Pipeline Fetch Log</span>
+              <span style={{ fontSize: 9, color: '#475569', marginLeft: 4 }}>
+                {report?.run_id ? `run: ${report.run_id.slice(0, 8)}…` : ''}
+              </span>
+              {reportLogsLoading && <span style={{ fontSize: 10, color: '#38BDF8', marginLeft: 6 }}>Loading…</span>}
+              <span style={{ marginLeft: 'auto', fontSize: 9, color: '#475569' }}>{reportLogs.length} entries</span>
+            </div>
+            <div style={{ fontFamily: '"JetBrains Mono","Fira Code",monospace', padding: '4px 0' }}>
+              {reportLogsLoading && reportLogs.length === 0 ? (
+                <div style={{ padding: '12px 16px', fontSize: 11, color: '#475569' }}>Loading logs…</div>
+              ) : reportLogs.length === 0 ? (
+                <div style={{ padding: '12px 16px', fontSize: 11, color: '#475569' }}>No logs found for this run.</div>
+              ) : reportLogs.map((log, i) => {
+                const isIK = log.agent_name === 'fetcher' || log.message?.includes('/doc/') || log.message?.includes('/docfragment/') || log.message?.includes('/docmeta/') || log.message?.includes('/origdoc/') || log.message?.includes('CACHE');
+                const isSec = log.message?.startsWith('✅') || log.message?.startsWith('🎉') || log.message?.startsWith('📡') || log.message?.startsWith('🗄');
+                const levelColor = { ERROR: '#F87171', WARNING: '#FCD34D', INFO: '#86EFAC', DEBUG: '#94A3B8' }[log.log_level] || '#94A3B8';
+                const ts = log.created_at ? new Date(log.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }) : '';
+                return (
+                  <div key={log.id || i} style={{
+                    display: 'flex', gap: 8, alignItems: 'flex-start',
+                    padding: isSec ? '5px 16px' : '2px 16px',
+                    borderBottom: '1px solid #1E293B',
+                    background: isIK && isSec ? '#0C2847' : isIK ? '#0D1B2A' : 'transparent',
+                  }}>
+                    <span style={{ fontSize: 9, color: '#0EA5E9', flexShrink: 0, minWidth: 56, marginTop: 2 }}>{ts}</span>
+                    <span style={{ fontSize: 8, color: '#475569', flexShrink: 0, minWidth: 60, marginTop: 2, textTransform: 'uppercase', letterSpacing: '.05em' }}>{log.agent_name}</span>
+                    <span style={{ fontSize: 8, color: levelColor, flexShrink: 0, minWidth: 36, marginTop: 2 }}>{log.log_level}</span>
+                    <span style={{ fontSize: 11, color: isIK ? '#BAE6FD' : '#64748B', lineHeight: 1.5, flex: 1, wordBreak: 'break-word' }}>{log.message}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           <ReportDoc report={report} query={query} cases={cases} onViewFullJudgment={handleViewFullJudgment} />
         </div>

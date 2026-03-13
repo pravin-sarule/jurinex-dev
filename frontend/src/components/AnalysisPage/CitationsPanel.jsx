@@ -281,6 +281,65 @@ function JudgmentCitationCard({ citation, index }) {
             </div>
           )}
 
+          {/* IK: Original Court Copy */}
+          {citation.originalCourtCopyUrl && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3 }}>
+                Original Court Copy
+              </div>
+              <a
+                href={citation.originalCourtCopyUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '4px 10px', background: '#1E3A8A', color: '#FFF',
+                  borderRadius: 4, textDecoration: 'none',
+                  fontFamily: 'monospace', fontSize: 9, fontWeight: 700,
+                }}
+              >
+                <ExternalLink size={10} />
+                {citation.isOriginalCopyPdf ? 'Open PDF (Court Copy)' : 'View Original Document'}
+              </a>
+            </div>
+          )}
+
+          {/* IK: Relevant Fragment */}
+          {citation.ikFragment && citation.ikFragment.headline && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3 }}>
+                IK Relevant Fragment
+              </div>
+              <div style={{
+                background: '#F0F9FF', border: '1px solid #BAE6FD', borderLeft: '2px solid #0369A1',
+                borderRadius: 3, padding: '6px 8px', fontFamily: 'Georgia, serif',
+                fontSize: 10, color: '#0C4A6E', lineHeight: 1.6, fontStyle: 'italic',
+              }}>
+                {citation.ikFragment.headline.length > 250
+                  ? citation.ikFragment.headline.slice(0, 250) + '…'
+                  : citation.ikFragment.headline}
+              </div>
+            </div>
+          )}
+
+          {/* IK: Citation counts */}
+          {((citation.ikCiteList && citation.ikCiteList.length > 0) || (citation.ikCitedByList && citation.ikCitedByList.length > 0)) && (
+            <div style={{ marginBottom: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {citation.ikCiteList && citation.ikCiteList.length > 0 && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', background: '#F0F9FF', border: '1px solid #BAE6FD', borderRadius: 3 }}>
+                  <span style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 700, color: '#0369A1' }}>{citation.ikCiteList.length}</span>
+                  <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.06em' }}>Cases Cited</span>
+                </div>
+              )}
+              {citation.ikCitedByList && citation.ikCitedByList.length > 0 && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 3 }}>
+                  <span style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 700, color: '#15803D' }}>{citation.ikCitedByList.length}</span>
+                  <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.06em' }}>Cited By</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Source URL / footer */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8, paddingTop: 6,
