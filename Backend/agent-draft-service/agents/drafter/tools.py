@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Union
 
-from google import genai
-from google.genai import types
+from config.gemini_models import is_claude_model, claude_api_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ def _strip_citation_sources(text: str) -> str:
     """Remove [cite: ...], [Source: ...], and similar citation/source strings from generated content."""
     if not text:
         return ""
-    import re
     # [cite: filename.pdf] or [cite: anything]
     text = re.sub(r'\[cite:\s*[^\]]*\]', '', text, flags=re.IGNORECASE)
     # [Source: ...]
@@ -261,45 +260,22 @@ def draft_section(
 
         print(f"[Drafter tools] Model for this request: {model!r}")
 
-        # Claude path: use Anthropic API
-        if is_claude_model(model):
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                return {"error": "ANTHROPIC_API_KEY not set for Claude model"}
-            user_message = _parts_to_user_message(parts)
-            api_model = claude_api_model_id(model)
-            from services.claude_client import complete as claude_complete
-            content_html = claude_complete(
-                system_prompt=system_prompt,
-                user_message=user_message,
-                model=api_model,
-            )
-            if content_html is None:
-                return {"status": "error", "error_message": "Claude API returned no content"}
-            return {"status": "success", "content_html": _clean_html_response(content_html)}
-
-        # Gemini path
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            return {"error": "API Key not found"}
-        client = genai.Client(api_key=api_key)
-
-        # gemini-2.5-pro (and some others) only work in thinking mode: budget must be > 0
-        THINKING_MODELS = ("gemini-2.5-pro", "gemini-3-pro-preview")
-        thinking_budget = 1024 if model in THINKING_MODELS else 0
-        tools = [types.Tool(googleSearch=types.GoogleSearch())]
-        generate_content_config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-            tools=tools,
-        )
-
-        response = client.models.generate_content(
+        from services.llm_service import call_llm
+        
+        # Combined user message
+        from agents.drafter.tools import _parts_to_user_message
+        user_message = _parts_to_user_message(parts)
+        
+        content_html = call_llm(
+            prompt=user_message,
+            system_prompt=system_prompt,
             model=model,
-            contents=parts,
-            config=generate_content_config,
+            use_google_search=True # Drafter always uses search if available
         )
 
-        content_html = response.text if response and response.text else ""
+        if content_html is None:
+            return {"status": "error", "error_message": "LLM returned no content"}
+            
         return {"status": "success", "content_html": _clean_html_response(content_html)}
 
     except Exception as e:

@@ -1,14 +1,11 @@
-"""Citation Agent Tools - Powered by Gemini."""
+"""Citation Agent Tools - Powered by Gemini and Claude."""
 
 from __future__ import annotations
 
 import logging
 import os
 import re
-from typing import Any, Dict, List
-
-from google import genai
-from google.genai import types
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +16,12 @@ def extract_claims_needing_citation(
     system_prompt_override: Optional[str] = None
 ) -> List[Dict[str, str]]:
     """
-    Use Gemini to identify factual claims, legal arguments, and precedents
+    Use LLM to identify factual claims, legal arguments, and precedents
     that require citation.
     """
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        logger.warning("No GEMINI_API_KEY found, skipping claim extraction")
+        logger.warning("No API key found, skipping claim extraction")
         return []
 
     # Use DB prompt if provided, else use default logic
@@ -35,8 +32,7 @@ def extract_claims_needing_citation(
         system_instructions = "You are a legal citation expert. Identify statements that require formal citation."
 
     try:
-        client = genai.Client(api_key=api_key)
-
+        from services.llm_service import call_llm
         prompt = f"""{system_instructions}
 
 **Section:** {section_key}
@@ -61,19 +57,15 @@ Return as JSON array:
 - Focus on specific facts, dates, case names.
 - Output ONLY the JSON array.
 """
-
-        response = client.models.generate_content(
+        response_text = call_llm(
+            prompt=prompt,
             model=model,
-            contents=[prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            )
+            response_mime_type="application/json"
         )
 
         import json
-        claims = json.loads(response.text) if response.text else []
-        logger.info(f"Extracted {len(claims)} claims from Gemini")
+        claims = json.loads(response_text) if response_text else []
+        logger.info(f"Extracted {len(claims)} claims")
         return claims if isinstance(claims, list) else []
 
     except Exception as e:
@@ -90,22 +82,6 @@ def match_claims_to_sources(
 ) -> List[Dict[str, Any]]:
     """
     Match each claim to its source chunk.
-
-    Strategy:
-    1. Check if claim already has [Source: filename] marker in rag_context
-    2. If yes, extract citation from existing marker
-    3. If no, query Librarian for supporting chunk
-    4. Build citation metadata
-
-    Args:
-        claims: List of claims needing citation
-        rag_context: RAG context with [Source: filename] markers
-        chunks: Full chunk metadata from Librarian
-        user_id: User ID for Librarian queries
-        file_ids: File IDs to restrict search
-
-    Returns:
-        List of citation dicts with metadata
     """
     from agents.librarian.agent import run_librarian_agent
     from services.db import get_filenames_by_ids
@@ -130,7 +106,6 @@ def match_claims_to_sources(
             continue
 
         # Strategy 1: Check if source marker exists in rag_context near this claim
-        # Look for [Source: filename] pattern
         source_pattern = r'\[Source:\s*([^\]]+)\]'
         source_matches = re.findall(source_pattern, rag_context)
 
@@ -215,24 +190,15 @@ def format_citations_html(
     model: str = "gemini-flash-lite-latest"
 ) -> str:
     """
-    Use Gemini to insert <sup>N</sup> markers and generate footnotes section.
-
-    Args:
-        content_html: Original HTML content
-        citations: List of citation metadata
-        section_key: Section name
-        model: Gemini model to use
-
-    Returns:
-        HTML content with citations
+    Use LLM to insert <sup>N</sup> markers and generate footnotes section.
     """
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key or not citations:
         logger.info("No API key or no citations, returning original content")
         return content_html
 
     try:
-        client = genai.Client(api_key=api_key)
+        from services.llm_service import call_llm
 
         # Build citation reference list
         citation_refs = "\n".join([
@@ -273,16 +239,12 @@ def format_citations_html(
   <p><sup>1</sup> Case_Document.pdf, Page 3-5.</p>
 </div>
 """
-
-        response = client.models.generate_content(
-            model=model,
-            contents=[prompt],
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            )
+        response_text = call_llm(
+            prompt=prompt,
+            model=model
         )
 
-        content_with_citations = response.text if response.text else content_html
+        content_with_citations = response_text if response_text else content_html
 
         # Clean markdown artifacts (```html``` blocks)
         content_with_citations = re.sub(

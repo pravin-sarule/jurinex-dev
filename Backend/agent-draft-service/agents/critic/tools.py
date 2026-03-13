@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
@@ -60,7 +61,7 @@ def review_section(
         system_prompt = "You are a legal document auditor. Review the content for accuracy and quality."
 
     try:
-        client = genai.Client(api_key=api_key)
+        from services.llm_service import call_llm
         
         prompt = ""
         if system_prompt:
@@ -93,13 +94,20 @@ def review_section(
   "sources": ["string"]
 }}
 """
-        response = client.models.generate_content(
+        response_text = call_llm(
+            prompt=prompt,
             model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            response_mime_type="application/json"
         )
 
-        review_json = json.loads(response.text)
+        if not response_text:
+            return {"status": "error", "error_message": "LLM returned no content"}
+            
+        # Clean potential markdown (though llm_service handles it partly, Claude might wrap it)
+        cleaned_json = re.sub(r"^```(?:json)?\s*", "", response_text.strip())
+        cleaned_json = re.sub(r"\s*```$", "", cleaned_json).strip()
+
+        review_json = json.loads(cleaned_json)
         # Validate with pydantic
         review = CriticReview(**review_json)
         

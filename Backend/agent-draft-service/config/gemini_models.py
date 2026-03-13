@@ -66,7 +66,11 @@ CLAUDE_DISPLAY_TO_API_ID: dict[str, str] = {
     "Claude Opus 4.5": "claude-opus-4-5",
     "Claude Opus 4.1": "claude-opus-4-1",
     "Claude Sonnet 4": "claude-sonnet-4",
-    "Claude Sonnet 3.7": "claude-sonnet-3-7",
+    "Claude Sonnet 3.7": "claude-3-7-sonnet-20250219",
+    "Claude 3.7 Sonnet": "claude-3-7-sonnet-latest",
+    "Claude 3.5 Sonnet": "claude-3-5-sonnet-latest",
+    "Claude 3.5 Haiku": "claude-3-5-haiku-latest",
+    "Claude 3 Opus": "claude-3-opus-latest",
     "Claude Opus 4": "claude-opus-4",
     "Claude Haiku 3": "claude-haiku-3",
 }

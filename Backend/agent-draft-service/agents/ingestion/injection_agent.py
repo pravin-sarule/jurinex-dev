@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-flash-lite-latest"
 
 # Termination reasons (used in return contract)
 REASON_SCHEMA_MISSING = "schema_missing"
@@ -97,11 +97,11 @@ Example: {{"field_name_1": "value1", "field_name_2": 12345, "field_name_3": null
 """
 
 
-def _parse_gemini_json(raw_text: str) -> Optional[Dict[str, Any]]:
+def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
     """
-    Parse JSON from Gemini response, stripping markdown code blocks if present.
+    Parse JSON from LLM response, stripping markdown code blocks if present.
 
-    WHY: Gemini sometimes wraps JSON in ```json ... ``` blocks despite
+    WHY: LLMs sometimes wrap JSON in ```json ... ``` blocks despite
     instructions. We handle both clean JSON and wrapped JSON.
     """
     if not raw_text:
@@ -117,10 +117,10 @@ def _parse_gemini_json(raw_text: str) -> Optional[Dict[str, Any]]:
     try:
         parsed = json.loads(cleaned)
         
-        # Handle case where Gemini returns a list [ { ... } ]
+        # Handle case where LLM returns a list [ { ... } ]
         if isinstance(parsed, list):
             if len(parsed) > 0 and isinstance(parsed[0], dict):
-                logger.info("[InjectionAgent][JSON_PARSE] Gemini returned a list, using first element")
+                logger.info("[InjectionAgent][JSON_PARSE] LLM returned a list, using first element")
                 return parsed[0]
             else:
                 logger.warning("[InjectionAgent][JSON_PARSE] Parsed value is a list but empty or first element not dict")
@@ -232,48 +232,48 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("[InjectionAgent][PROMPT] Prompt built: %d chars, %d fields", len(prompt), len(fields_schema))
 
     # ------------------------------------------------------------------
-    # Step 5: Call Gemini
+    # Step 5: Call LLM (Gemini or Claude)
     # ------------------------------------------------------------------
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        logger.error("[InjectionAgent][GEMINI] No API key found (GEMINI_API_KEY / GOOGLE_API_KEY)")
-        _safe_update_status(template_id, user_id, draft_session_id, "failed", "Gemini API key not configured")
-        return _terminated(REASON_AI_FAILURE, "Gemini API key not configured")
-
     try:
-        from google import genai
-        from google.genai import types
+        from services.agent_config_service import get_agent_by_type
+        from services.llm_service import call_llm
 
-        client = genai.Client(api_key=api_key)
+        # Injection agent usually doesn't have a specific prompt in DB, 
+        # but we check anyway. If not found, _build_extraction_prompt is used.
+        agent = get_agent_by_type("injection") or get_agent_by_type("extraction")
+        model = agent.get("resolved_model") if agent else DEFAULT_MODEL
+        db_system_prompt = (agent.get("prompt") or "").strip() if agent else ""
 
-        # WHY JSON mode: Ensures Gemini returns parseable JSON instead of prose
-        generate_config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-            response_mime_type="application/json",
+        # Build prompt using our template logic
+        extraction_prompt = _build_extraction_prompt(fields_schema, document_text)
+        
+        logger.info("[InjectionAgent][LLM] Calling model=%s", model)
+        gemini_text = call_llm(
+            prompt=extraction_prompt,
+            system_prompt=db_system_prompt,
+            model=model,
+            response_mime_type="application/json"
         )
 
-        logger.info("[InjectionAgent][GEMINI] Calling Gemini model=%s", DEFAULT_MODEL)
-        response = client.models.generate_content(
-            model=DEFAULT_MODEL,
-            contents=[prompt],
-            config=generate_config,
-        )
+        if not gemini_text:
+            logger.error("[InjectionAgent][LLM] LLM returned no content")
+            _safe_update_status(template_id, user_id, draft_session_id, "failed", "LLM returned no content")
+            return _terminated(REASON_AI_FAILURE, "LLM returned no content")
 
-        gemini_text = response.text if response and response.text else ""
         logger.info(
-            "[InjectionAgent][GEMINI] Response received: %d chars (preview: %s...)",
-            len(gemini_text), gemini_text[:200].replace("\n", " "),
+            "[InjectionAgent][LLM] Response received: %d chars",
+            len(gemini_text)
         )
 
     except Exception as e:
-        logger.exception("[InjectionAgent][GEMINI] Gemini call failed")
-        _safe_update_status(template_id, user_id, draft_session_id, "failed", f"Gemini API error: {e}")
-        return _terminated(REASON_AI_FAILURE, f"Gemini call failed: {e}")
+        logger.exception("[InjectionAgent][LLM] LLM call failed")
+        _safe_update_status(template_id, user_id, draft_session_id, "failed", f"LLM API error: {e}")
+        return _terminated(REASON_AI_FAILURE, f"LLM call failed: {e}")
 
     # ------------------------------------------------------------------
     # Step 6: Parse JSON response
     # ------------------------------------------------------------------
-    parsed_fields = _parse_gemini_json(gemini_text)
+    parsed_fields = _parse_llm_json(gemini_text)
 
     if parsed_fields is None:
         logger.error("[InjectionAgent][JSON_PARSE] Could not parse Gemini response as JSON")
