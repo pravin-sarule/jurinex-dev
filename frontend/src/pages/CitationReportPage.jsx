@@ -1436,16 +1436,6 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
 /* ══════════════════════════════════════════════════
    AGENT LOG PANEL
 ══════════════════════════════════════════════════ */
-const AGENT_ICONS = {
-  root: '🧠', watchdog: '🐕', fetcher: '📡', clerk: '📋',
-  librarian: '📚', auditor: '🔍', report_builder: '🏗',
-  keyword_extractor: '🔑', citation_agent: '⚖️',
-};
-const AGENT_COLORS = {
-  root: '#6366F1', watchdog: '#10B981', fetcher: '#F59E0B',
-  clerk: '#8B5CF6', librarian: '#3B82F6', auditor: '#EF4444',
-  report_builder: '#14B8A6', keyword_extractor: '#EC4899', citation_agent: '#F97316',
-};
 function getLevelStyle(level) {
   switch (level) {
     case 'ERROR':
@@ -1537,7 +1527,7 @@ function AgentLogPanel({ logs, runId }) {
         {PIPELINE_STAGES.map((s, i) => {
           const done = reachedAgents.has(s.agent) || reachedStages.has(s.id);
           const active = activeAgent === s.agent || (s.id === 'fetcher' && activeAgent === 'fetcher');
-          const color = AGENT_COLORS[s.agent] || '#94A3B8';
+          const color = '#94A3B8';
           return (
             <React.Fragment key={s.id}>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, minWidth: 54 }}>
@@ -1570,8 +1560,8 @@ function AgentLogPanel({ logs, runId }) {
         ) : (
           logs.map((log, i) => {
             const ls = getLevelStyle(log.log_level);
-            const icon = AGENT_ICONS[log.agent_name] || '⚙️';
-            const agentColor = AGENT_COLORS[log.agent_name] || '#64748B';
+            const icon = '⚙️';
+            const agentColor = '#64748B';
             const ts = log.created_at
               ? new Date(log.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
               : '';
