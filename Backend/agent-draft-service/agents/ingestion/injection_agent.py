@@ -1,11 +1,13 @@
 """
 InjectionAgent: Auto-extract template form fields from uploaded documents.
 
-Given a template_id and document text, this agent:
+Given a template_id and document, this agent:
 1. Fetches the template's allowed field schema
-2. Uses Gemini to extract ONLY those fields from the document
-3. Performs field-level merge (never overwrites user-edited fields)
-4. Upserts extracted values into template_user_field_values
+2. Builds smart RAG queries from field labels and runs multi-query vector search
+3. Deduplicates and ranks retrieved chunks (hybrid: vector + keyword scoring)
+4. Uses LLM to extract ONLY the allowed fields from the retrieved context
+5. Performs field-level merge (never overwrites user-edited fields)
+6. Upserts extracted values into template_user_field_values
 
 Called standalone via POST /api/extract-fields or as a best-effort
 step after document ingestion in orchestrate_upload.
@@ -213,7 +215,7 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # Step 3: Fetch document text
     # ------------------------------------------------------------------
-    document_text = _resolve_document_text(raw_text, source_document_id, user_id)
+    document_text = _resolve_document_text(raw_text, source_document_id, user_id, fields_schema=fields_schema)
 
     if not document_text or not document_text.strip():
         logger.warning("[InjectionAgent][DOC_FETCH] Document text is empty → terminating")
@@ -427,65 +429,200 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _build_rag_queries(fields_schema: List[Dict[str, Any]]) -> List[str]:
+    """
+    Build 3 complementary search queries from field labels.
+
+    WHY: A single query can't surface all field types equally. Splitting by
+    field category (parties, dates/amounts, location/property) covers more
+    of the document in fewer vector calls than querying per-field.
+    """
+    # Collect all human-readable labels from the schema
+    labels = [
+        (f.get("field_label") or f.get("field_name") or "").strip()
+        for f in fields_schema
+        if f.get("field_label") or f.get("field_name")
+    ]
+    label_text = ", ".join(labels[:30]) if labels else ""
+
+    queries = [
+        # Global catch-all — surfaces the most content-dense chunks
+        f"parties names addresses dates amounts payment agreement contract details {label_text}",
+        # Party-focused
+        "petitioner respondent applicant plaintiff defendant client name address contact",
+        # Dates and financial
+        "date of agreement execution payment amount fee consideration stamp duty registration",
+    ]
+    return queries
+
+
+def _fetch_context_via_rag(
+    fields_schema: List[Dict[str, Any]],
+    source_document_id: Optional[str],
+    user_id: Any,
+    top_k_per_query: int = 15,
+) -> Optional[str]:
+    """
+    Multi-query RAG retrieval: run 3 vector searches, deduplicate, rank.
+
+    Strategy:
+      1. Build 3 complementary queries from field labels (parties, dates, amounts, etc.)
+      2. Embed each query and run vector search scoped to this document
+      3. Deduplicate chunks by chunk_id; boost chunks appearing in multiple queries
+      4. Take top-30 unique chunks ordered by combined score
+      5. Return their content joined as context for the LLM
+
+    WHY better than full-text dump:
+      - Large documents (100+ pages) overflow the context window
+      - Relevant field values are often in a small subset of pages
+      - Multi-query covers different field types without per-field overhead
+    """
+    try:
+        from services.db import find_nearest_chunks
+        from services.embedding_service import generate_embeddings
+
+        file_ids = [str(source_document_id)] if source_document_id else None
+        queries = _build_rag_queries(fields_schema)
+
+        # chunk_id → {"content": ..., "score": float, "hits": int}
+        chunk_map: Dict[str, Any] = {}
+
+        for q in queries:
+            try:
+                embeddings = generate_embeddings([q])
+                if not embeddings or not embeddings[0]:
+                    continue
+                rows = find_nearest_chunks(
+                    embedding=embeddings[0],
+                    limit=top_k_per_query,
+                    file_ids=file_ids,
+                    user_id=int(user_id),
+                )
+                for row in rows:
+                    cid = str(row.get("chunk_id") or "")
+                    content = row.get("content") or ""
+                    if not cid or not content.strip():
+                        continue
+                    similarity = float(row.get("similarity") or (1 - float(row.get("distance") or 1)))
+                    if cid in chunk_map:
+                        # Seen in multiple queries → boost score and increment hit count
+                        chunk_map[cid]["score"] = max(chunk_map[cid]["score"], similarity)
+                        chunk_map[cid]["hits"] += 1
+                    else:
+                        chunk_map[cid] = {
+                            "content": content,
+                            "score": similarity,
+                            "hits": 1,
+                            "page": row.get("page_start"),
+                            "heading": row.get("heading") or "",
+                        }
+            except Exception as e:
+                logger.warning("[InjectionAgent][RAG] Query failed (continuing): %s", e)
+
+        if not chunk_map:
+            logger.warning("[InjectionAgent][RAG] Vector search returned no chunks; falling back to ordered text")
+            return _fetch_ordered_text(source_document_id, user_id)
+
+        # Rank: primary = hit count (multi-query coverage), secondary = similarity score
+        ranked = sorted(
+            chunk_map.values(),
+            key=lambda c: (c["hits"], c["score"]),
+            reverse=True,
+        )
+
+        # Cap to top 30 chunks to stay within reasonable context size
+        top_chunks = ranked[:30]
+        logger.info(
+            "[InjectionAgent][RAG] Retrieved %d unique chunks from %d queries (top %d used)",
+            len(chunk_map), len(queries), len(top_chunks),
+        )
+
+        # Build context with optional heading/page labels for better LLM accuracy
+        parts = []
+        for c in top_chunks:
+            header = ""
+            if c.get("heading"):
+                header = f"[{c['heading']}] "
+            elif c.get("page") is not None:
+                header = f"[Page {c['page']}] "
+            parts.append(f"{header}{c['content'].strip()}")
+
+        context = "\n\n---\n\n".join(parts)
+        logger.info("[InjectionAgent][RAG] Context assembled: %d chars", len(context))
+        return context
+
+    except Exception as e:
+        logger.exception("[InjectionAgent][RAG] RAG retrieval failed; falling back to ordered text")
+        return _fetch_ordered_text(source_document_id, user_id)
+
+
+def _fetch_ordered_text(
+    source_document_id: Optional[str],
+    user_id: Any,
+    max_chars: int = 40000,
+) -> Optional[str]:
+    """
+    Fallback: fetch chunks in page order, truncated to max_chars.
+    Used when RAG/vector search is unavailable or returns no results.
+    """
+    if not source_document_id:
+        return None
+    try:
+        from services.db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT content FROM file_chunks
+                    WHERE file_id = %s::uuid
+                    ORDER BY chunk_index ASC
+                    LIMIT 100
+                    """,
+                    (str(source_document_id),),
+                )
+                rows = cur.fetchall()
+        if rows:
+            text = "\n".join(r[0] for r in rows if r[0])
+            if len(text) > max_chars:
+                text = text[:max_chars]
+                logger.info("[InjectionAgent][FALLBACK] Text truncated to %d chars", max_chars)
+            logger.info("[InjectionAgent][FALLBACK] Ordered text: %d chunks, %d chars", len(rows), len(text))
+            return text
+    except Exception as e:
+        logger.exception("[InjectionAgent][FALLBACK] DB lookup failed for file_id=%s", source_document_id)
+    return None
+
+
 def _resolve_document_text(
     raw_text: Optional[str],
     source_document_id: Optional[str],
     user_id: Any,
+    fields_schema: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
-    Resolve document text from either raw_text param or DB lookup.
+    Resolve document context using RAG retrieval (primary) or raw_text (if provided directly).
 
-    WHY: Callers may provide text directly (from a just-ingested document)
-    or reference an already-stored document by ID.
+    Priority:
+      1. raw_text provided directly → use as-is (truncated to 40k chars if very large)
+      2. source_document_id → multi-query RAG retrieval (vector search on file_chunks)
+      3. Fallback → ordered chunk text (first 40k chars)
     """
-    # Prefer raw_text if provided
     if raw_text and raw_text.strip():
-        logger.info("[InjectionAgent][DOC_FETCH] Using provided raw_text (%d chars)", len(raw_text))
-        return raw_text.strip()
+        text = raw_text.strip()
+        if len(text) > 40000:
+            text = text[:40000]
+            logger.info("[InjectionAgent][DOC_FETCH] raw_text truncated to 40000 chars")
+        else:
+            logger.info("[InjectionAgent][DOC_FETCH] Using provided raw_text (%d chars)", len(text))
+        return text
 
-    # Fall back to DB lookup by source_document_id
     if source_document_id:
-        try:
-            from services.db import get_conn
-            logger.info(
-                "[InjectionAgent][DOC_FETCH] Looking up document text for file_id=%s",
-                source_document_id,
-            )
-            with get_conn() as conn:
-                from psycopg2.extras import RealDictCursor
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    # Fetch and concatenate chunk text for this document
-                    cur.execute(
-                        """
-                        SELECT content
-                        FROM file_chunks
-                        WHERE file_id = %s::uuid
-                        ORDER BY chunk_index ASC
-                        """,
-                        (str(source_document_id),),
-                    )
-                    rows = cur.fetchall()
-
-            if rows:
-                full_text = "\n".join(r["content"] for r in rows if r.get("content"))
-                logger.info(
-                    "[InjectionAgent][DOC_FETCH] Assembled %d chunks → %d chars",
-                    len(rows), len(full_text),
-                )
-                return full_text
-            else:
-                logger.warning(
-                    "[InjectionAgent][DOC_FETCH] No chunks found for file_id=%s",
-                    source_document_id,
-                )
-                return None
-
-        except Exception as e:
-            logger.exception(
-                "[InjectionAgent][DOC_FETCH] DB lookup failed for file_id=%s",
-                source_document_id,
-            )
-            return None
+        logger.info("[InjectionAgent][DOC_FETCH] Running RAG retrieval for file_id=%s", source_document_id)
+        return _fetch_context_via_rag(
+            fields_schema=fields_schema or [],
+            source_document_id=source_document_id,
+            user_id=user_id,
+        )
 
     logger.warning("[InjectionAgent][DOC_FETCH] No raw_text and no source_document_id provided")
     return None

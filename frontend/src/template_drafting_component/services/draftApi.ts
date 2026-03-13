@@ -161,7 +161,7 @@ export const draftApi = {
     generateSection: async (
         draftId: string,
         sectionKey: string,
-        body: { section_prompt?: string; auto_validate?: boolean }
+        body: { section_prompt?: string; auto_validate?: boolean; language?: string }
     ): Promise<{ success: boolean; version: any; critic_review?: any }> => {
         const response = await api.post(
             `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/generate`,
@@ -177,7 +177,7 @@ export const draftApi = {
     refineSection: async (
         draftId: string,
         sectionKey: string,
-        body: { user_feedback: string; rag_query?: string; auto_validate?: boolean }
+        body: { user_feedback: string; rag_query?: string; auto_validate?: boolean; language?: string }
     ): Promise<{ success: boolean; version: any; critic_review?: any }> => {
         const response = await api.post(
             `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/refine`,

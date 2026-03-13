@@ -64,6 +64,18 @@ app.get('/api/test-route', (req, res) => {
     res.send('✅ Test route is working!');
 });
 
+// LLM Models endpoint — used by agent-draft-service to resolve model IDs to names
+const pool = require('./config/db');
+app.get('/api/llm-models', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT id, name FROM llm_models ORDER BY id');
+        return res.json({ success: true, models: result.rows });
+    } catch (err) {
+        console.error('/api/llm-models error:', err.message);
+        return res.status(500).json({ success: false, models: [], error: err.message });
+    }
+});
+
 function errorHandler(err, req, res, next) {
     console.error(err.stack);
     const statusCode = err.statusCode || 500; 

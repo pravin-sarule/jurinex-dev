@@ -26,10 +26,11 @@ export const generateSection = async (
   sectionKey,
   sectionPrompt = null,
   ragQuery = null,
-  templateUrl = null
+  templateUrl = null,
+  language = null
 ) => {
-  console.log(`[API] POST /api/drafts/${draftId}/sections/${sectionKey}/generate`);
-  
+  console.log(`[API] POST /api/drafts/${draftId}/sections/${sectionKey}/generate language=${language}`);
+
   const response = await fetch(
     `${API_URL}/api/drafts/${draftId}/sections/${sectionKey}/generate`,
     {
@@ -39,7 +40,8 @@ export const generateSection = async (
         section_prompt: sectionPrompt,
         rag_query: ragQuery,
         template_url: templateUrl,
-        auto_validate: true,
+        auto_validate: false,
+        ...(language ? { language } : {}),
       }),
     }
   );
@@ -60,10 +62,11 @@ export const refineSection = async (
   sectionKey,
   userFeedback,
   ragQuery = null,
-  templateUrl = null
+  templateUrl = null,
+  language = null
 ) => {
-  console.log(`[API] POST /api/drafts/${draftId}/sections/${sectionKey}/refine`);
-  
+  console.log(`[API] POST /api/drafts/${draftId}/sections/${sectionKey}/refine language=${language}`);
+
   const response = await fetch(
     `${API_URL}/api/drafts/${draftId}/sections/${sectionKey}/refine`,
     {
@@ -73,7 +76,8 @@ export const refineSection = async (
         user_feedback: userFeedback,
         rag_query: ragQuery,
         template_url: templateUrl,
-        auto_validate: true,
+        auto_validate: false,
+        ...(language ? { language } : {}),
       }),
     }
   );

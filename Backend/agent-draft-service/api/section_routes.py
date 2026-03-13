@@ -64,6 +64,7 @@ async def generate_section(
     rag_query: Optional[str] = Body(None, embed=True),
     template_url: Optional[str] = Body(None, embed=True),
     auto_validate: bool = Body(False, embed=True),
+    language: Optional[str] = Body(None, embed=True),
 ) -> Dict[str, Any]:
     """
     Generate initial section content using Drafter agent.
@@ -265,21 +266,30 @@ async def generate_section(
             print(f"[Librarian → Orchestrator] WARNING: Empty context returned!")
         
         # Determine Language and Detail Level
-        language = "English"  # Default
+        # Priority: request body `language` param > per-section DB config > default English
+        language_map = {
+            "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu",
+            "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada",
+            "ml": "Malayalam", "pa": "Punjabi", "or": "Odia", "as": "Assamese",
+            "ur": "Urdu", "sa": "Sanskrit"
+        }
+        # Request-body language takes highest priority (frontend passes global draft language)
+        if language:
+            # Accept both language codes ("hi") and full names ("Hindi")
+            language = language_map.get(language, language)
+        else:
+            language = "English"  # Default
+
         detail_level = "detailed"  # Default to detailed for multi-page section output
-        
+
         if section_config:
-            lang_code = section_config.get("language") or "en"
             detail_level = section_config.get("detail_level") or "detailed"
-            
-            # Map language codes to full names
-            language_map = {
-                "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu",
-                "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada",
-                "ml": "Malayalam", "pa": "Punjabi", "or": "Odia", "as": "Assamese",
-                "ur": "Urdu", "sa": "Sanskrit"
-            }
-            language = language_map.get(lang_code, "English")
+            # Only use DB section language if no request-body language was provided
+            if not language or language == "English":
+                lang_code = section_config.get("language") or "en"
+                language = language_map.get(lang_code, "English")
+
+        print(f"[Orchestrator] Language={language!r} (source: {'request_body' if language and language != 'English' else 'section_config/default'})")
         
         # Detail level controls output length; always require accurate content only
         # detailed = long (2-10 pages), concise = moderate, short = brief
@@ -468,6 +478,7 @@ async def refine_section_endpoint(
     rag_query: Optional[str] = Body(None, embed=True),
     template_url: Optional[str] = Body(None, embed=True),
     auto_validate: bool = Body(False, embed=True),
+    language: Optional[str] = Body(None, embed=True),
 ) -> Dict[str, Any]:
     """
     Refine section content based on user feedback using Drafter agent.
@@ -523,21 +534,26 @@ async def refine_section_endpoint(
         
         previous_content = latest_version.get("content_html", "")
         
-        # Use same detail_level and language as section config if set
+        # Use detail_level from section config; language: request body > section config > default
+        language_map = {
+            "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu",
+            "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada",
+            "ml": "Malayalam", "pa": "Punjabi", "or": "Odia", "as": "Assamese",
+            "ur": "Urdu", "sa": "Sanskrit"
+        }
+        if language:
+            language = language_map.get(language, language)
+        else:
+            language = "English"
+
         detail_level = "concise"
-        language = "English"
         section_settings = draft_db.get_draft_section_prompts_list(draft_id)
         section_config = next((s for s in section_settings if s.get("section_id") == section_key), None)
         if section_config:
             detail_level = section_config.get("detail_level") or "concise"
-            lang_code = section_config.get("language") or "en"
-            language_map = {
-                "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu",
-                "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada",
-                "ml": "Malayalam", "pa": "Punjabi", "or": "Odia", "as": "Assamese",
-                "ur": "Urdu", "sa": "Sanskrit"
-            }
-            language = language_map.get(lang_code, "English")
+            if not language or language == "English":
+                lang_code = section_config.get("language") or "en"
+                language = language_map.get(lang_code, "English")
 
         # Get RAG context
         rag_context = ""

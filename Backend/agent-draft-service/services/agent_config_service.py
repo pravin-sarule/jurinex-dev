@@ -28,7 +28,10 @@ _AGENT_CACHE_TTL = 300  # seconds
 def _get_cached_agent(agent_type: str) -> Optional[Dict[str, Any]]:
     entry = _AGENT_CACHE.get(agent_type)
     if entry and (time.monotonic() - entry["ts"]) < _AGENT_CACHE_TTL:
-        return entry["data"]
+        data = entry["data"]
+        if data:
+            print(f"[agent_config] Cache HIT for {agent_type!r}: resolved_model={data.get('resolved_model')!r}, model_ids={data.get('model_ids')}")
+        return data
     return None
 
 
@@ -131,8 +134,36 @@ def get_agent_by_type(agent_type: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _fetch_model_id_to_name_from_document_db() -> Dict[int, str]:
+    """Query llm_models directly from Document_DB (DATABASE_URL — same cluster as document-service)."""
+    import psycopg2
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return {}
+    try:
+        conn = psycopg2.connect(db_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, name FROM llm_models WHERE name IS NOT NULL AND name != ''")
+                rows = cur.fetchall()
+                result = {int(row[0]): str(row[1]) for row in rows if row[0] is not None}
+                if result:
+                    print(f"[agent_config] llm_models from Document_DB: {result}")
+                return result
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("agent_config_service: could not query llm_models from Document_DB: %s", e)
+        return {}
+
+
 def _fetch_model_id_to_name_from_document_service() -> Dict[int, str]:
-    """Fetch llm_models from document-service and return { id: name }."""
+    """Fetch llm_models — tries Document_DB direct query first, then document-service HTTP."""
+    # Primary: direct DB query (fast, no HTTP overhead)
+    db_map = _fetch_model_id_to_name_from_document_db()
+    if db_map:
+        return db_map
+    # Fallback: document-service HTTP (works both locally and in production)
     try:
         from services.document_service_client import build_id_to_name_map_from_document_service
         return build_id_to_name_map_from_document_service()
@@ -148,13 +179,24 @@ def _resolved_model_from_ids(model_ids: List[int], id_to_name: Dict[int, str]) -
     to their Anthropic API model ID via claude_api_model_id().
     """
     from config.gemini_models import get_model_name, is_valid_model, DEFAULT_GEMINI_MODEL, claude_api_model_id, is_claude_model, CLAUDE_DISPLAY_TO_API_ID
+    print(f"[agent_config] _resolved_model_from_ids: model_ids={model_ids}, id_to_name_keys={list(id_to_name.keys())}")
     for mid in model_ids:
-        name = id_to_name.get(mid) or get_model_name(mid)
+        from_doc_service = id_to_name.get(mid)
+        from_local_map = get_model_name(mid)
+        name = from_doc_service or from_local_map
+        print(f"[agent_config]   model_id={mid}: doc_service={from_doc_service!r}, local_map={from_local_map!r}, resolved_name={name!r}, is_valid={is_valid_model(name) if name else False}")
         if name and is_valid_model(name):
             # Resolve display names (e.g. "Claude Sonnet 4.5") to API model ID
             if name in CLAUDE_DISPLAY_TO_API_ID:
-                return CLAUDE_DISPLAY_TO_API_ID[name]
+                resolved = CLAUDE_DISPLAY_TO_API_ID[name]
+                print(f"[agent_config]   → Resolved display name {name!r} to API ID {resolved!r}")
+                return resolved
             return name
+        # If name exists but failed is_valid_model, check if it's a claude- prefix (API ID not in our list)
+        if name and isinstance(name, str) and name.strip().lower().startswith("claude-"):
+            print(f"[agent_config]   → Accepting unregistered Claude model by prefix: {name!r}")
+            return name.strip()
+    print(f"[agent_config]   → No valid model resolved from model_ids={model_ids}, using default={DEFAULT_GEMINI_MODEL!r}")
     return DEFAULT_GEMINI_MODEL
 
 

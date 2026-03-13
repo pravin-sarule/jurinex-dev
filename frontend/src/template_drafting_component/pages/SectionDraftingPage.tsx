@@ -57,13 +57,15 @@ interface SectionState {
 
 interface SectionDraftingPageProps {
     draftIdProp?: string;
+    /** Language code for the entire draft (e.g. 'hi', 'en'). Overrides per-section DB language. */
+    draftLanguage?: string;
     /** Called after successful assemble; receives the same response shown in preview (so preview can use it without re-calling assemble). */
     onAssembleComplete?: (response: { success: boolean; final_document: string; template_css?: string; google_docs?: any; metadata?: any }) => void;
     onBack?: () => void;
     addActivity?: (agent: string, action: string, status?: 'in-progress' | 'completed' | 'pending') => void;
 }
 
-export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftIdProp, onAssembleComplete, onBack, addActivity }) => {
+export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftIdProp, draftLanguage, onAssembleComplete, onBack, addActivity }) => {
     const params = useParams<{ draftId: string }>();
     const draftId = draftIdProp || params.draftId;
     const navigate = useNavigate();
@@ -424,7 +426,8 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             }
 
             const response = await draftApi.generateSection(draftId, sectionId, {
-                auto_validate: true
+                auto_validate: false,
+                ...(draftLanguage ? { language: draftLanguage } : {}),
             });
 
             timeouts.forEach(t => clearTimeout(t));
@@ -572,7 +575,8 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             const response = await draftApi.refineSection(draftId, activeTab, {
                 user_feedback: updatePrompt,
                 rag_query: autoRagQuery,
-                auto_validate: true
+                auto_validate: false,
+                ...(draftLanguage ? { language: draftLanguage } : {}),
             });
 
             if (response.success) {

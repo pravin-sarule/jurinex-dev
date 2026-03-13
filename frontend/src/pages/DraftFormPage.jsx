@@ -1306,6 +1306,7 @@ const DraftFormPage = () => {
               <SectionDraftingPage
                 key={`section-draft-${draftId}-${sectionsFinalizedAt}`}
                 draftIdProp={draftId}
+                draftLanguage={selectedLanguage}
                 addActivity={addActivity}
                 onAssembleComplete={(response) => {
                   setLastAssembleResult(response);
