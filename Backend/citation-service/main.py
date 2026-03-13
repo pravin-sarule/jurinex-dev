@@ -372,8 +372,15 @@ def startup():
 
 
 @app.get("/")
-def root() -> Dict[str, str]:
-    return {"status": "citation-service-running"}
+def root() -> Dict[str, Any]:
+    return {
+        "service": "JuriNex Citation Service",
+        "docs": "/docs",
+        "report": "POST /citation/report (query, user_id, case_file_context)",
+        "reports_list": "GET /citation/reports?user_id=...",
+        "report_by_id": "GET /citation/reports/{report_id}",
+        "claude_proxy": "POST /api/claude (forward to Anthropic)",
+    }
 
 
 @app.post("/api/claude")

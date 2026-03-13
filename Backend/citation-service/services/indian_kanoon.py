@@ -175,10 +175,10 @@ def ik_fetch_doc(
 def ik_fetch_origdoc(doc_id: str) -> Dict[str, Any]:
     """
     Fetch the original court copy for an IK document.
-    Returns { content_type, data_bytes, gcs_url, gcs_path, is_pdf, error }.
+    Returns { content_type, data_bytes, gcs_url, gcs_path, error }.
 
-    Both PDF and HTML responses are uploaded to GCS (bucket: GCS_BUCKET_NAME,
-    subfolder: ik_origdocs/). Returns a signed URL (7 days) or public URL.
+    If the response is a PDF it is uploaded to GCS and the public/signed URL is returned.
+    If HTML, content is returned as text (not uploaded).
     """
     result: Dict[str, Any] = {
         "doc_id": doc_id,
@@ -210,24 +210,20 @@ def ik_fetch_origdoc(doc_id: str) -> Dict[str, Any]:
         if not gcs_url:
             result["error"] = "GCS upload failed"
     else:
-        # HTML or plain text — decode and also upload to GCS for direct access
+        # HTML or plain text — just decode, don't upload
         try:
             result["html_content"] = raw.decode("utf-8", errors="replace")
         except Exception:
             result["html_content"] = None
-        ct = "text/html" if "html" in content_type else "text/plain"
-        gcs_url, gcs_path = _upload_origdoc_to_gcs(doc_id, raw, ct, suffix=".html")
-        result["gcs_url"] = gcs_url
-        result["gcs_path"] = gcs_path
-        result["error"] = None if gcs_url else "GCS upload failed (HTML)"
+        result["error"] = None
 
     return result
 
 
-def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str, suffix: str = ".pdf") -> tuple[Optional[str], Optional[str]]:
+def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str) -> tuple[Optional[str], Optional[str]]:
     """
-    Upload original court copy to GCS.
-    Returns (signed_url_or_public_url, gcs_path) or (None, None) on failure.
+    Upload original court copy PDF to GCS.
+    Returns (public_url, gcs_path) or (None, None) on failure.
     Bucket is resolved from env: GCS_BUCKET_NAME (defaults to 'draft_templates').
     Subfolder: 'ik_origdocs/'.
     """
@@ -239,7 +235,6 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str, suffix: 
         gcs_key_b64 = os.environ.get("GCS_KEY_BASE64")
         project_id = os.environ.get("GCS_PROJECT_ID") or os.environ.get("GCLOUD_PROJECT_ID")
 
-        creds = None
         if gcs_key_b64:
             key_json = base64.b64decode(gcs_key_b64).decode("utf-8")
             info = json.loads(key_json)
@@ -248,8 +243,7 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str, suffix: 
         else:
             client = gcs_storage.Client(project=project_id)
 
-        ext = suffix if suffix.startswith(".") else f".{suffix}"
-        gcs_path = f"ik_origdocs/{doc_id}{ext}"
+        gcs_path = f"ik_origdocs/{doc_id}.pdf"
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(gcs_path)
 
@@ -260,7 +254,7 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str, suffix: 
             blob.upload_from_string(data, content_type=content_type)
             logger.info("[IK_ORIGDOC] Uploaded: gs://%s/%s (%d bytes)", bucket_name, gcs_path, len(data))
 
-        # Generate signed URL valid for 7 days (requires service account key for v4 signing)
+        # Generate signed URL valid for 7 days
         try:
             from datetime import timedelta
             signed_url = blob.generate_signed_url(
@@ -269,9 +263,8 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str, suffix: 
                 version="v4",
             )
             return signed_url, gcs_path
-        except Exception as _se:
-            logger.warning("[IK_ORIGDOC] Signed URL failed for %s, using public URL: %s", gcs_path, _se)
-            # Fallback: public URL (works if bucket/object is publicly readable)
+        except Exception:
+            # Fallback: public URL (if bucket is public)
             public_url = f"https://storage.googleapis.com/{bucket_name}/{gcs_path}"
             return public_url, gcs_path
 
@@ -398,9 +391,7 @@ def ik_enrich_candidate_cached(
             age_hours = 999
 
         raw_resp = cached.get("raw_api_response") or {}
-        # Only use cache if we have a gcs url for origdoc (or origdoc wasn't needed)
-        cached_orig_url = cached.get("orig_doc_url") or (raw_resp.get("origdoc_result") or {}).get("gcs_url") or ""
-        if raw_resp and age_hours < cache_ttl_hours and (cached_orig_url or not fetch_origdoc):
+        if raw_resp and age_hours < cache_ttl_hours:
             # Reconstruct enriched dict from cached raw API response
             logger.info("[IK_CACHE] HIT for doc_id=%s (age=%.1fh) — skipping API calls", doc_id, age_hours)
             api_log.append({"endpoint": "CACHE", "status": "HIT", "age_hours": round(age_hours, 1),
@@ -410,33 +401,6 @@ def ik_enrich_candidate_cached(
                 _ik_get(doc_id, increment_hit=True)
             except Exception:
                 pass
-            enriched = dict(raw_resp)
-            enriched["_cache_hit"] = True
-            enriched["_cache_age_hours"] = round(age_hours, 1)
-            enriched["_api_log"] = api_log
-            return enriched
-        elif raw_resp and age_hours < cache_ttl_hours and not cached_orig_url and fetch_origdoc:
-            # Cache hit but origdoc URL is missing — re-fetch just origdoc and update cache
-            logger.info("[IK_CACHE] HIT for doc_id=%s but no origdoc URL — re-fetching origdoc only", doc_id)
-            orig = ik_fetch_origdoc(doc_id)
-            if orig.get("gcs_url"):
-                raw_resp["origdoc_result"] = {k: v for k, v in orig.items() if k not in ("data_bytes", "html_content")}
-                try:
-                    from db.client import ik_asset_upsert
-                    ik_asset_upsert(
-                        doc_id=doc_id,
-                        canonical_id=cached.get("canonical_id"),
-                        orig_doc_url=orig["gcs_url"],
-                        orig_doc_gcs_path=orig.get("gcs_path"),
-                        orig_doc_content_type="application/pdf" if orig.get("is_pdf") else "text/html",
-                        raw_api_response=raw_resp,
-                    )
-                except Exception as _ue:
-                    logger.warning("[IK_CACHE] Failed to update origdoc in cache for doc_id=%s: %s", doc_id, _ue)
-            api_log.append({"endpoint": f"/origdoc/{doc_id}/", "status": "OK" if orig.get("gcs_url") else "FAIL",
-                             "is_pdf": orig.get("is_pdf"), "gcs_url": orig.get("gcs_url", "")[:80]})
-            api_log.append({"endpoint": "CACHE", "status": "PARTIAL_HIT", "age_hours": round(age_hours, 1),
-                             "doc_id": doc_id, "title": cached.get("title", "")})
             enriched = dict(raw_resp)
             enriched["_cache_hit"] = True
             enriched["_cache_age_hours"] = round(age_hours, 1)
