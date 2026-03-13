@@ -108,7 +108,11 @@ def _verify_via_indian_kanoon(title: str, citation: str, jid: str) -> Dict[str, 
     Cross-check a citation against the Indian Kanoon API.
     Tries direct doc fetch (if IK tid available from jid prefix) then falls back to search.
     """
-    token = os.environ.get("INDIAN_KANOON_API_TOKEN") or os.environ.get("IK_API_TOKEN")
+    token = (
+        os.environ.get("INDIAN_KANOON_TOKEN")
+        or os.environ.get("INDIAN_KANOON_API_TOKEN")
+        or os.environ.get("IK_API_TOKEN")
+    )
     if not token:
         return {"verified": False, "method": "ik_unavailable", "confidence": 0, "notes": "No IK API token configured"}
 

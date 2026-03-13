@@ -53,8 +53,12 @@ def _search_local(query: str, limit: int = 10, run_id: Optional[str] = None) -> 
 
 
 def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Call Indian Kanoon API search. Requires INDIAN_KANOON_API_TOKEN. Returns list of { tid, title, headline, docsource }."""
-    token = os.environ.get("INDIAN_KANOON_API_TOKEN") or os.environ.get("IK_API_TOKEN")
+    """Call Indian Kanoon API search. Requires INDIAN_KANOON_API_TOKEN (or INDIAN_KANOON_TOKEN / IK_API_TOKEN). Returns list of { tid, title, headline, docsource }."""
+    token = (
+        os.environ.get("INDIAN_KANOON_TOKEN")
+        or os.environ.get("INDIAN_KANOON_API_TOKEN")
+        or os.environ.get("IK_API_TOKEN")
+    )
     if not token:
         logger.warning("INDIAN_KANOON_API_TOKEN not set; skipping Indian Kanoon search.")
         _db_log(run_id, "watchdog", "watchdog", "WARNING", "📚 Indian Kanoon skipped — API token not configured")
@@ -257,7 +261,11 @@ def run_watchdog(
         len(local), len(candidates_ik), len(candidates_google),
     )
 
-    ik_enabled = bool(os.environ.get("INDIAN_KANOON_API_TOKEN") or os.environ.get("IK_API_TOKEN"))
+    ik_enabled = bool(
+        os.environ.get("INDIAN_KANOON_TOKEN")
+        or os.environ.get("INDIAN_KANOON_API_TOKEN")
+        or os.environ.get("IK_API_TOKEN")
+    )
     google_enabled = bool(os.environ.get("SERPER_API_KEY"))
     search_keywords_by_route = {
         "local": _unique_nonempty([primary_query]) if primary_query else [],

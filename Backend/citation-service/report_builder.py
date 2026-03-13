@@ -136,6 +136,24 @@ def _strip_html(text: str) -> str:
     return text
 
 
+def _format_ik_cite_list(raw: Any) -> List[Dict[str, str]]:
+    """Normalize IK citeList / citedbyList to [{tid, title, docsource, url}]."""
+    if not raw or not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw[:50]:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("tid") or "")
+        out.append({
+            "tid":       tid,
+            "title":     str(item.get("title") or ""),
+            "docsource": str(item.get("docsource") or ""),
+            "url":       f"https://indiankanoon.org/doc/{tid}/" if tid else "",
+        })
+    return out
+
+
 def _looks_like_css(text: str) -> bool:
     if not text:
         return False
@@ -273,19 +291,16 @@ def _enrich_with_gemini(j: Dict[str, Any], query: str) -> Dict[str, Any]:
 
     try:
         from google import genai as _genai
-        from google.generativeai import types
         client = _genai.Client(api_key=api_key)
 
         # Start with safelist config from PromptConfig, merge explicit settings
         config_kw: Dict[str, Any] = pc.gemini_config
         config_kw["responseMimeType"] = "application/json"
-        
-        config = types.GenerateContentConfig(**config_kw)
 
-        resp   = client.models.generate_content(
-            model    = model,
-            contents = prompt,
-            config   = config,
+        resp = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=_genai.types.GenerateContentConfig(**config_kw),
         )
         text = (resp.text or "").strip()
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -755,6 +770,21 @@ def _judgement_to_citation(
         "staleReason":           stale_reason,
         "priorityScore":         priority_score,
         "hitlTicketId":          None,  # filled by caller after HITL insert
+        # ── Indian Kanoon enrichment ───────────────────────────────────────
+        # IK document fragments — relevant excerpts matching the query
+        "ikFragment": {
+            "headline":    j.get("ik_fragment_headline") or (j.get("ik_fragments") or {}).get("headline") or "",
+            "headlineHtml": j.get("ik_fragment_html") or (j.get("ik_fragments") or {}).get("headline_html") or "",
+            "formInput":   j.get("ik_form_input") or (j.get("ik_fragments") or {}).get("form_input") or "",
+        },
+        # Original court copy — GCS-hosted PDF link (open directly in browser)
+        "originalCourtCopyUrl":  j.get("ik_orig_doc_url") or j.get("original_copy_url") or "",
+        "isOriginalCopyPdf":     bool(j.get("ik_orig_doc_url") or j.get("original_copy_url")),
+        # IK citation network from /doc/ API (citeList / citedbyList)
+        "ikCiteList":    _format_ik_cite_list(j.get("ik_cite_list") or []),
+        "ikCitedByList": _format_ik_cite_list(j.get("ik_cited_by_list") or []),
+        # Lightweight metadata from /docmeta/
+        "ikDocMeta":    j.get("ik_doc_meta") or {},
     }
 
 
@@ -800,6 +830,20 @@ def _build_text_report(
         imp_link = c.get("importSourceLink") or c.get("sourceUrl") or c.get("officialSourceLink")
         if imp_link and str(imp_link).strip() not in ("—", ""):
             lines.append(f"Data imported from: {imp_link}")
+        # IK-specific extras
+        orig_url = c.get("originalCourtCopyUrl") or ""
+        if orig_url:
+            lines.append(f"Original Court Copy (PDF): {orig_url}")
+        frag = c.get("ikFragment") or {}
+        frag_text = frag.get("headline") or ""
+        if frag_text:
+            lines.append(f"IK Relevant Fragment: {frag_text[:300]}")
+        cite_list = c.get("ikCiteList") or []
+        if cite_list:
+            lines.append(f"Cases Cited ({len(cite_list)}): " + "; ".join(x.get("title", "") for x in cite_list[:5]))
+        cited_by = c.get("ikCitedByList") or []
+        if cited_by:
+            lines.append(f"Cited By ({len(cited_by)}): " + "; ".join(x.get("title", "") for x in cited_by[:5]))
         lines.append(f"Issue: {c.get('issue') or '—'}")
         lines.append(f"Relevance: {c.get('relevanceToCurrentCase') or '—'}")
         lines.append(f"Source (where fetched from): {c.get('fetchedFrom') or '—'}")

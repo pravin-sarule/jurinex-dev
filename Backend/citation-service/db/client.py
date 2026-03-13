@@ -246,6 +246,63 @@ def init_db() -> None:
             except Exception:
                 pass
 
+            # ── Indian Kanoon enrichment columns on judgments ──────────────
+            for _col_sql in [
+                "ALTER TABLE judgments ADD COLUMN IF NOT EXISTS ik_orig_doc_url TEXT",
+                "ALTER TABLE judgments ADD COLUMN IF NOT EXISTS ik_fragments JSONB",
+                "ALTER TABLE judgments ADD COLUMN IF NOT EXISTS ik_cite_list JSONB",
+                "ALTER TABLE judgments ADD COLUMN IF NOT EXISTS ik_cited_by_list JSONB",
+                "ALTER TABLE judgments ADD COLUMN IF NOT EXISTS ik_doc_meta JSONB",
+            ]:
+                try:
+                    cur.execute(_col_sql)
+                except Exception:
+                    pass
+
+            # ── ik_document_assets: stores all IK API responses per document ──
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ik_document_assets (
+                    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    doc_id                VARCHAR(64) NOT NULL,
+                    canonical_id          VARCHAR(128),
+                    meta                  JSONB,
+                    fragments             JSONB,
+                    cite_list             JSONB,
+                    cited_by_list         JSONB,
+                    orig_doc_url          TEXT,
+                    orig_doc_gcs_path     TEXT,
+                    orig_doc_content_type VARCHAR(64),
+                    raw_api_response      JSONB,
+                    title                 TEXT,
+                    docsource             TEXT,
+                    doc_char_count        INTEGER,
+                    cache_hit_count       INTEGER DEFAULT 0,
+                    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (doc_id)
+                )
+                """
+            )
+            # Migrations for existing tables
+            for _col in [
+                "ALTER TABLE ik_document_assets ADD COLUMN IF NOT EXISTS raw_api_response JSONB",
+                "ALTER TABLE ik_document_assets ADD COLUMN IF NOT EXISTS title TEXT",
+                "ALTER TABLE ik_document_assets ADD COLUMN IF NOT EXISTS docsource TEXT",
+                "ALTER TABLE ik_document_assets ADD COLUMN IF NOT EXISTS doc_char_count INTEGER",
+                "ALTER TABLE ik_document_assets ADD COLUMN IF NOT EXISTS cache_hit_count INTEGER DEFAULT 0",
+            ]:
+                try:
+                    cur.execute(_col)
+                except Exception:
+                    pass
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ik_assets_doc_id ON ik_document_assets(doc_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ik_assets_canonical ON ik_document_assets(canonical_id)"
+            )
+
         conn.commit()
     finally:
         conn.close()
@@ -337,7 +394,8 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                            judgment_date, year, bench_size, outcome, source_type,
                            verification_status, confidence_score, citation_frequency,
                            qdrant_vector_id, neo4j_node_id, es_doc_id,
-                           ingested_at, last_verified_at, citation_data
+                           ingested_at, last_verified_at, citation_data,
+                           ik_orig_doc_url, ik_fragments, ik_cite_list, ik_cited_by_list, ik_doc_meta
                       FROM judgments
                      WHERE canonical_id = %s
                     """,
@@ -457,7 +515,55 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         "librarian_issues": es_doc.get("librarian_issues"),
         "area": es_doc.get("area"),
         "refreshed_at": _fmt_date(row.get("last_verified_at") or row.get("ingested_at")),
+        # Indian Kanoon enrichment columns (from judgments table)
+        "ik_orig_doc_url":    row.get("ik_orig_doc_url") or "",
+        "ik_fragments":       row.get("ik_fragments") or {},
+        "ik_cite_list":       row.get("ik_cite_list") or [],
+        "ik_cited_by_list":   row.get("ik_cited_by_list") or [],
+        "ik_doc_meta":        row.get("ik_doc_meta") or {},
     }
+
+    # ── IK fallback: if judgments IK columns are empty, pull from ik_document_assets ──
+    _needs_ik_fallback = (
+        not result.get("ik_orig_doc_url")
+        and not result.get("ik_cite_list")
+        and not result.get("ik_cited_by_list")
+        and not result.get("ik_doc_meta")
+    )
+    if _needs_ik_fallback:
+        _ik_conn = get_pg_conn()
+        if _ik_conn:
+            try:
+                with _ik_conn.cursor(cursor_factory=RealDictCursor) as _cur:
+                    _cur.execute(
+                        """SELECT orig_doc_url, fragments, cite_list, cited_by_list, meta, raw_api_response
+                             FROM ik_document_assets
+                            WHERE canonical_id = %s
+                            ORDER BY updated_at DESC NULLS LAST LIMIT 1""",
+                        (canonical_id,),
+                    )
+                    _ik_row = _cur.fetchone()
+                    if _ik_row:
+                        result["ik_orig_doc_url"] = _ik_row.get("orig_doc_url") or ""
+                        result["ik_fragments"] = _ik_row.get("fragments") or {}
+                        result["ik_doc_meta"] = _ik_row.get("meta") or {}
+                        # cite_list/cited_by_list may be NULL due to old field-name bug;
+                        # fall back to raw_api_response.doc_data.cites / .citedby
+                        _cite = _ik_row.get("cite_list") or []
+                        _citedby = _ik_row.get("cited_by_list") or []
+                        if not _cite or not _citedby:
+                            _raw = _ik_row.get("raw_api_response") or {}
+                            _doc_data = _raw.get("doc_data") or {}
+                            _cite = _cite or _doc_data.get("cites") or _doc_data.get("citeList") or []
+                            _citedby = _citedby or _doc_data.get("citedby") or _doc_data.get("citedbyList") or []
+                        result["ik_cite_list"] = _cite
+                        result["ik_cited_by_list"] = _citedby
+            except Exception as _exc:
+                logger.warning("[DB] IK fallback from ik_document_assets failed for %s: %s", canonical_id, _exc)
+            finally:
+                _ik_conn.close()
+
+    return result
 
 
 def judgement_search_local(query: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -1267,5 +1373,156 @@ def report_citation_insert(
                 (report_id, canonical_id, status, Json(citation_snapshot) if citation_snapshot else None, hitl_queue_id),
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ─── Indian Kanoon document assets ────────────────────────────────────────────
+
+def ik_asset_upsert(
+    doc_id: str,
+    canonical_id: Optional[str] = None,
+    meta: Optional[Dict] = None,
+    fragments: Optional[Dict] = None,
+    cite_list: Optional[List] = None,
+    cited_by_list: Optional[List] = None,
+    orig_doc_url: Optional[str] = None,
+    orig_doc_gcs_path: Optional[str] = None,
+    orig_doc_content_type: Optional[str] = None,
+    raw_api_response: Optional[Dict] = None,
+    title: Optional[str] = None,
+    docsource: Optional[str] = None,
+    doc_char_count: Optional[int] = None,
+) -> None:
+    """
+    Insert or update the IK asset record for a given doc_id.
+    Stores ALL IK API responses (doc, fragment, meta, origdoc) in raw_api_response JSONB
+    for cache reuse on subsequent queries.
+    Also mirrors orig_doc_url, ik_fragments, ik_cite_list, ik_cited_by_list,
+    and ik_doc_meta into the judgments row (by canonical_id) for report builder access.
+    """
+    doc_id = (doc_id or "").strip()
+    if not doc_id:
+        return
+    conn = get_pg_conn()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ik_document_assets
+                    (doc_id, canonical_id, meta, fragments, cite_list, cited_by_list,
+                     orig_doc_url, orig_doc_gcs_path, orig_doc_content_type,
+                     raw_api_response, title, docsource, doc_char_count, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (doc_id) DO UPDATE SET
+                    canonical_id          = COALESCE(EXCLUDED.canonical_id, ik_document_assets.canonical_id),
+                    meta                  = COALESCE(EXCLUDED.meta, ik_document_assets.meta),
+                    fragments             = COALESCE(EXCLUDED.fragments, ik_document_assets.fragments),
+                    cite_list             = COALESCE(EXCLUDED.cite_list, ik_document_assets.cite_list),
+                    cited_by_list         = COALESCE(EXCLUDED.cited_by_list, ik_document_assets.cited_by_list),
+                    orig_doc_url          = COALESCE(EXCLUDED.orig_doc_url, ik_document_assets.orig_doc_url),
+                    orig_doc_gcs_path     = COALESCE(EXCLUDED.orig_doc_gcs_path, ik_document_assets.orig_doc_gcs_path),
+                    orig_doc_content_type = COALESCE(EXCLUDED.orig_doc_content_type, ik_document_assets.orig_doc_content_type),
+                    raw_api_response      = COALESCE(EXCLUDED.raw_api_response, ik_document_assets.raw_api_response),
+                    title                 = COALESCE(EXCLUDED.title, ik_document_assets.title),
+                    docsource             = COALESCE(EXCLUDED.docsource, ik_document_assets.docsource),
+                    doc_char_count        = COALESCE(EXCLUDED.doc_char_count, ik_document_assets.doc_char_count),
+                    updated_at            = NOW()
+                """,
+                (
+                    doc_id,
+                    canonical_id,
+                    Json(meta) if meta else None,
+                    Json(fragments) if fragments else None,
+                    Json(cite_list) if cite_list else None,
+                    Json(cited_by_list) if cited_by_list else None,
+                    orig_doc_url or None,
+                    orig_doc_gcs_path or None,
+                    orig_doc_content_type or None,
+                    Json(raw_api_response) if raw_api_response else None,
+                    title or None,
+                    docsource or None,
+                    doc_char_count or None,
+                ),
+            )
+            # Mirror to judgments table if canonical_id provided
+            if canonical_id:
+                cur.execute(
+                    """
+                    UPDATE judgments SET
+                        ik_orig_doc_url    = COALESCE(%s, ik_orig_doc_url),
+                        ik_fragments       = COALESCE(%s, ik_fragments),
+                        ik_cite_list       = COALESCE(%s, ik_cite_list),
+                        ik_cited_by_list   = COALESCE(%s, ik_cited_by_list),
+                        ik_doc_meta        = COALESCE(%s, ik_doc_meta)
+                    WHERE canonical_id = %s
+                    """,
+                    (
+                        orig_doc_url or None,
+                        Json(fragments) if fragments else None,
+                        Json(cite_list) if cite_list else None,
+                        Json(cited_by_list) if cited_by_list else None,
+                        Json(meta) if meta else None,
+                        canonical_id,
+                    ),
+                )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("[DB] ik_asset_upsert failed for doc_id=%s: %s", doc_id, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def ik_asset_get(doc_id: str, increment_hit: bool = False) -> Optional[Dict]:
+    """Retrieve stored IK asset for a doc_id. Optionally increments cache_hit_count."""
+    doc_id = (doc_id or "").strip()
+    if not doc_id:
+        return None
+    conn = get_pg_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM ik_document_assets WHERE doc_id = %s LIMIT 1",
+                (doc_id,),
+            )
+            row = cur.fetchone()
+            if row and increment_hit:
+                try:
+                    cur.execute(
+                        "UPDATE ik_document_assets SET cache_hit_count = COALESCE(cache_hit_count,0) + 1 WHERE doc_id = %s",
+                        (doc_id,),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+            return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def ik_asset_list_recent(limit: int = 50) -> List[Dict]:
+    """List recently stored IK assets for admin/debug view."""
+    conn = get_pg_conn()
+    if not conn:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT doc_id, canonical_id, title, docsource, doc_char_count,
+                          orig_doc_url, cache_hit_count, created_at, updated_at
+                     FROM ik_document_assets
+                    ORDER BY updated_at DESC NULLS LAST
+                    LIMIT %s""",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()

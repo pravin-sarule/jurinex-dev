@@ -1177,6 +1177,55 @@ async def get_run_logs(
         conn.close()
 
 
+@app.get("/citation/ik-cache")
+async def get_ik_cache(
+    limit: int = Query(50, le=200),
+) -> Dict[str, Any]:
+    """
+    List recently stored Indian Kanoon document assets (DB cache).
+    Returns doc_id, title, docsource, char count, origdoc URL, cache hit count, timestamps.
+    """
+    try:
+        from db.client import ik_asset_list_recent
+        rows = ik_asset_list_recent(limit=limit)
+        from datetime import timezone
+        out = []
+        for r in rows:
+            r2 = dict(r)
+            for ts_key in ("created_at", "updated_at"):
+                ts = r2.get(ts_key)
+                if ts and hasattr(ts, "isoformat"):
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    r2[ts_key] = ts.isoformat()
+            out.append(r2)
+        return {"success": True, "count": len(out), "assets": out}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/citation/ik-cache/{doc_id}")
+async def get_ik_cache_doc(doc_id: str) -> Dict[str, Any]:
+    """Get full cached IK asset for a specific doc_id (includes raw_api_response)."""
+    try:
+        from db.client import ik_asset_get
+        asset = ik_asset_get(doc_id)
+        if not asset:
+            raise HTTPException(status_code=404, detail=f"No cached data for doc_id={doc_id}")
+        from datetime import timezone
+        for ts_key in ("created_at", "updated_at"):
+            ts = asset.get(ts_key)
+            if ts and hasattr(ts, "isoformat"):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                asset[ts_key] = ts.isoformat()
+        return {"success": True, "asset": asset}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/citation/analytics/enterprise")
 async def get_enterprise_analytics(
     request: Request,

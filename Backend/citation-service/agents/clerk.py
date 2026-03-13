@@ -354,6 +354,16 @@ def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Op
             "source_type": "indian_kanoon",
             "source_url": source_url or info.get("official_source_url") or "",
             "case_id": case_id,
+            # IK-specific enrichment fields from fetcher
+            "ik_orig_doc_url":    doc.get("original_copy_url") or "",
+            "ik_fragments":       {
+                "headline": doc.get("ik_fragment_headline") or "",
+                "headline_html": doc.get("ik_fragment_html") or "",
+                "form_input": doc.get("ik_form_input") or "",
+            },
+            "ik_cite_list":       doc.get("cite_list") or [],
+            "ik_cited_by_list":   doc.get("cited_by_list") or [],
+            "ik_doc_meta":        doc.get("ik_doc_meta") or {},
         }
 
         try:
@@ -370,6 +380,27 @@ def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Op
                 continue
         if out.get("status") in ("success", "skipped") and out.get("canonical_id"):
             new_ids.append(out["canonical_id"])
+            # Persist IK asset data to ik_document_assets table
+            if tid:
+                try:
+                    from db.client import ik_asset_upsert
+                    ik_asset_upsert(
+                        doc_id=tid,
+                        canonical_id=out["canonical_id"],
+                        meta=doc.get("ik_doc_meta") or {},
+                        fragments={
+                            "headline": doc.get("ik_fragment_headline") or "",
+                            "headline_html": doc.get("ik_fragment_html") or "",
+                            "form_input": doc.get("ik_form_input") or "",
+                        },
+                        cite_list=doc.get("cite_list") or [],
+                        cited_by_list=doc.get("cited_by_list") or [],
+                        orig_doc_url=doc.get("original_copy_url") or "",
+                        orig_doc_gcs_path=doc.get("original_copy_gcs_path") or "",
+                        orig_doc_content_type="application/pdf" if doc.get("is_original_copy_pdf") else "text/html",
+                    )
+                except Exception as _ae:
+                    logger.warning("[CLERK] ik_asset_upsert failed for tid=%s: %s", tid, _ae)
     return new_ids
 
 
