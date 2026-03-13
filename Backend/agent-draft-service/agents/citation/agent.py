@@ -67,14 +67,21 @@ def run_citation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
             "metadata": {"model": DEFAULT_MODEL, "section_key": section_key, "cited_by_agent": "citation"}
         }
 
+    # Fetch agent from DB once: used for model resolution and prompt
+    from services.agent_config_service import get_agent_by_type, get_resolved_model_for_agent
+    agent = get_agent_by_type("citation")
+    model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
+    db_prompt = (agent.get("prompt") or "").strip() if agent else ""
+
     try:
-        logger.info(f"Citation: Processing section '{section_key}' with {len(chunks)} chunks available")
+        logger.info(f"Citation: Processing section '{section_key}' with {len(chunks)} chunks available using model {model}")
 
         # Step 1: Extract claims needing citation using Gemini
         claims = extract_claims_needing_citation(
             content_html=content_html,
             section_key=section_key,
-            model=DEFAULT_MODEL
+            model=model,
+            system_prompt_override=db_prompt or None
         )
         logger.info(f"Citation: Identified {len(claims)} claims needing citation")
 
@@ -110,7 +117,7 @@ def run_citation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
             content_html=content_html,
             citations=citations,
             section_key=section_key,
-            model=DEFAULT_MODEL
+            model=model
         )
 
         # Confidence (0-100): target 90+ when no errors; no lengthy description

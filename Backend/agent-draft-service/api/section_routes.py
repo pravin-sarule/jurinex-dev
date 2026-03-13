@@ -212,7 +212,7 @@ async def generate_section(
         librarian_payload = {
             "user_id": user_id,
             "query": effective_query,
-            "top_k": 80,  # Fetch top 80 chunks for comprehensive context (batch-wise generation)
+            "top_k": 200,  # Fetch top 200 chunks for comprehensive context (batch-wise generation)
             "file_ids": [], # Default to empty list to prevent searching ALL user files if draft context resolution fails
         }
         # Add draft_id to payload so Librarian uses draft-scoped files
@@ -550,7 +550,7 @@ async def refine_section_endpoint(
         rag_context = ""
         if rag_query:
             print(f"[Orchestrator → Librarian] Fetching updated context")
-            librarian_payload = {"user_id": user_id, "query": rag_query, "top_k": 80, "file_ids": []}
+            librarian_payload = {"user_id": user_id, "query": rag_query, "top_k": 200, "file_ids": []}
             draft_field_data = draft_db.get_draft_field_data_for_retrieve(draft_id, user_id)
             if draft_field_data:
                 meta = draft_field_data.get("metadata", {})

@@ -9,6 +9,7 @@ console.log(`[Gateway] PAYMENT_SERVICE_URL: ${process.env.PAYMENT_SERVICE_URL}`)
 console.log(`[Gateway] Gateway Port: ${process.env.PORT || 5000}`);
 
 const { createProxyMiddleware } = require("http-proxy-middleware");
+const axios = require("axios");
 const { authMiddleware } = require("./middlewares/authMiddleware");
 const authProxy = require("./routes/authProxy");
 const fileProxy = require("./routes/fileProxy");
@@ -26,6 +27,9 @@ const draftingAiProxy = require("./routes/draftingAiProxy");
 const templateAnalyzerProxy = require("./routes/templateAnalyzerProxy");
 
 const app = express();
+
+// ✅ Support JSON bodies for direct routes
+app.use(express.json({ limit: '10mb' }));
 
 // Target URL for auth service
 const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
@@ -125,7 +129,40 @@ app.get("/api/auth/google/callback/", createProxyMiddleware({
   },
 }));
 
-// Mount proxies - authProxy must be at /api so /api/auth/* matches router's /auth/*
+// ✅ Direct Authentication route using axios
+// This handles POST /api/auth/login explicitly as requested
+app.post("/api/auth/login", async (req, res) => {
+  console.log(`[Gateway] Direct Login Route: ${req.method} ${req.url}`);
+  try {
+    // Forward the request to the auth service
+    // targetAuth is process.env.AUTH_SERVICE_URL
+    const authUrl = `${targetAuth}/api/auth/login`;
+    console.log(`[Gateway] Forwarding login to: ${authUrl}`);
+
+    const response = await axios.post(authUrl, req.body, {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    // Return the response data and status code back to the client
+    res.status(response.status).json(response.data);
+  } catch (error) {
+    console.error(`[Gateway] Login Error:`, error.message);
+    if (error.response) {
+      // The auth service returned an error response
+      return res.status(error.response.status).json(error.response.data);
+    }
+    // Network or other generic error
+    res.status(502).json({
+      success: false,
+      error: "Authentication service unavailable",
+      message: error.message
+    });
+  }
+});
+
+// Mount proxies - authProxy handles other /api/auth/* routes
 app.use("/api", authProxy);
 app.use(fileProxy);
 // app.use(paymentProxy);

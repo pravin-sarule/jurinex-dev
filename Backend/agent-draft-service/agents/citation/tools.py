@@ -15,29 +15,29 @@ logger = logging.getLogger(__name__)
 def extract_claims_needing_citation(
     content_html: str,
     section_key: str,
-    model: str = "gemini-flash-lite-latest"
+    model: str = "gemini-flash-lite-latest",
+    system_prompt_override: Optional[str] = None
 ) -> List[Dict[str, str]]:
     """
     Use Gemini to identify factual claims, legal arguments, and precedents
     that require citation.
-
-    Args:
-        content_html: The HTML content to analyze
-        section_key: The section name (for context)
-        model: Gemini model to use
-
-    Returns:
-        List of {"claim_text": str, "claim_type": str, "context_snippet": str}
     """
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         logger.warning("No GEMINI_API_KEY found, skipping claim extraction")
         return []
 
+    # Use DB prompt if provided, else use default logic
+    system_instructions = ""
+    if system_prompt_override and system_prompt_override.strip():
+        system_instructions = system_prompt_override.strip()
+    else:
+        system_instructions = "You are a legal citation expert. Identify statements that require formal citation."
+
     try:
         client = genai.Client(api_key=api_key)
 
-        prompt = f"""You are a legal citation expert. Analyze the following legal document section and identify statements that require formal citation.
+        prompt = f"""{system_instructions}
 
 **Section:** {section_key}
 
@@ -57,11 +57,9 @@ Return as JSON array:
 ]
 
 **Rules:**
-- Ignore generic legal statements (e.g., "The law provides...")
-- Focus on specific facts, dates, case names, statutory references
-- If a statement already has a source marker like [Source: filename], still include it
-- Return ONLY the JSON array, no markdown, no explanations
-- Limit to maximum 10 most important claims
+- Ignore generic legal statements.
+- Focus on specific facts, dates, case names.
+- Output ONLY the JSON array.
 """
 
         response = client.models.generate_content(

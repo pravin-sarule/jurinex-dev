@@ -13,24 +13,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "models/gemini-2.5-pro"
 
-def run_critic_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Run the Critic agent: use review tools and report results.
-    """
-    section_content = payload.get("section_content", "")
-    section_key = payload.get("section_key", "unknown")
-    rag_context = payload.get("rag_context", "")
-    field_values = payload.get("field_values", {})
-    section_prompt = payload.get("section_prompt", "")
-
-    if not section_content:
-        return {
-            "status": "FAIL",
-            "score": 0,
-            "feedback": "No content provided for validation",
-            "issues": ["Empty content"],
-            "suggestions": [],
-        }
+    # Fetch agent from DB once: used for model resolution and prompt
+    from services.agent_config_service import get_agent_by_type, get_resolved_model_for_agent
+    agent = get_agent_by_type("critic")
+    model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
+    db_prompt = (agent.get("prompt") or "").strip() if agent else ""
 
     # Use the tool
     result = review_section(
@@ -39,6 +26,8 @@ def run_critic_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         rag_context=rag_context,
         field_values=field_values,
         section_prompt=section_prompt,
+        model=model,
+        system_prompt_override=db_prompt or None,
     )
 
     if result.get("status") == "error":

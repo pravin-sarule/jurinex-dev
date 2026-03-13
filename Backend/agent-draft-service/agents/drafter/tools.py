@@ -212,42 +212,50 @@ def draft_section(
 """
         else:
             # Generation: respect user detail option (detailed=long, concise=moderate, short=short); only accurate.
-            prompt = f"""Generate ONLY what the Section Prompt below asks for—no extra content. You have been given multiple context chunks; use ONLY the chunks that are relevant to this section and ignore the rest. Use the **HTML Template Structure** above for format (tags, classes, IDs, alignment). Build draft in that format so it scores 90+ on validation.
+            prompt = f"""Generate ONLY what the Section Prompt below asks for—no extra content. You have been given multiple context chunks; use ONLY the chunks that are relevant to this section and ignore the rest. Use the **HTML Template Structure** above for format (tags, classes, IDs, alignment). 
 
-**Rules:** (1) **Section Prompt** below is the prompt for this section **fetched from the database** (configured for this draft/template). Generate only what it specifies—nothing else. (2) **Format:** The TEMPLATE HTML FOR THIS SECTION ONLY above was extracted from the template URL for this section. Your output MUST use the **exact same format**: same tags, same order, same class and id attributes, same inline styles (font-family, font-size, margin, padding, text-align, text-indent). The frontend preview displays your HTML with the template styles—so matching the template exactly ensures the generated preview looks correct. (3) **Empty fields and placeholders** must be filled from **Field Data (from DB)** and RAG; use Field Data first, then RAG, then fallbacks.
+**STRICT SCOPE RULE:** Only generate the text and topics specifically mentioned in the Section Prompt. Do not add background, introductory text, or concluding remarks unless explicitly requested.
+
+**INDIAN COURT STANDARDS:**
+- Adhere to typical Indian legal drafting styles (e.g., mention of Hon'ble Court, Petitioner/Respondent terminology).
+- Use the **complete context** provided from all files in the case. Even if a file was added later, it contains crucial details that must be integrated into the draft.
+- Ensure the draft is "properly built" by combining facts from multiple chunks into a cohesive narrative.
+
+**AESTHETIC REQUIREMENTS (Standard Legal Format):**
+- **Font**: "Times New Roman", serif.
+- **Size**: 12pt (16px).
+- **Line Spacing**: 1.5 line-height.
+- **Alignment**: justify (except headings).
+- **Paragraphs**: margin-bottom: 1em.
+
+**Rules:** (1) **Section Prompt** below is the prompt for this section **fetched from the database** (configured for this draft/template). Generate ONLY what it specifies—nothing else. (2) **Format:** Use the TEMPLATE HTML FOR THIS SECTION ONLY above as the base. Your output MUST use the **exact same format**: same tags, same order, same class and id attributes, same inline styles (font-family, font-size, margin, padding, text-align, text-indent). (3) **Empty fields and placeholders** must be filled from **Field Data (from DB)** and RAG; use Field Data first, then RAG, then fallbacks.
+
+**IMPORTANT:** You are processing batches of many chunks (up to 200). Use EVERY relevant detail from EVERY chunk to build the most comprehensive and legally accurate draft possible. Do not skip details from later chunks.
 
 **Section to draft:** {section_key}
 
-**Section Prompt from DB (generate ONLY what is listed here—do not include anything not mentioned):**
+**Section Prompt from DB (MISSION CRITICAL — generate ONLY what is listed here):**
 {section_prompt}
 
-**Retrieved Context (RAG) — use ONLY chunks relevant to this section; ignore the rest:**
+**Retrieved Context (RAG) — use ONLY chunks relevant to this section:**
 {rag_context if rag_context else 'No specific context.'}
 
-**Field Data (from DB — merged from autopopulation + draft; use in this and every section to fill ALL fields):**
+**Field Data (from DB — use to fill ALL fields):**
 {field_values}
 
-**Detail level (user choice — follow strictly):** {length_instruction}
+**Detail level:** {length_instruction}
 
 **CRITICAL — FILL ALL PLACEHOLDERS (no empty brackets):**
-- **Court name, petitioner name, and respondent name must NEVER be empty.** Fill them from Field Data (template user fields + draft) first, then RAG, then fallbacks ("the Hon'ble Court", "the Petitioner", "the Respondent"). No blank court/petitioner/respondent in the generated section.
-- Replace EVERY [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [ADDRESS], [CASE_NUMBER], and any [FIELD_NAME] or _____ with real values.
-- Step 1: Look in **Field Data** above for the exact key (e.g. petitioner_name, respondent_name, court_name, date). Use that value.
-- Step 2: If not in Field Data, look in **Retrieved Context (RAG)** from the attached files — extract the name, date, or address from the text.
-- Step 3: If still not found, use a proper fallback: "the Petitioner", "the Respondent", "the Hon'ble Court", "the said date", "the registered address" — NEVER output [PETITIONER_NAME] or leave a blank. No empty placeholders in the generated content.
-- Your output must contain ZERO instances of unfilled brackets like [PETITIONER_NAME] or empty blanks. Every placeholder must be replaced with either actual data (from Field Data or RAG) or a fallback phrase.
-
-**Spacing (words and lines):**
-- Use proper spacing between words (single space; no double spaces or missing spaces).
-- Use proper line spacing: add line-height (e.g. 1.5 or 1.6) and margin between paragraphs (e.g. margin-bottom: 0.5em or 1em) so lines and paragraphs are readable. Match the template if it specifies line-height or paragraph margin; otherwise use clear, professional spacing.
+- **Court name, petitioner name, and respondent name must NEVER be empty.** Fill them from Field Data first, then RAG, then fallbacks ("the Hon'ble Court", "the Petitioner", "the Respondent").
+- Replace EVERY [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [ADDRESS], [CASE_NUMBER], etc. with real values.
 
 **Instructions:**
-1. Use only the chunks that are needed for this section. Do not use or repeat content from irrelevant chunks.
-2. **Strict section scope:** Generate ONLY the parts explicitly listed or described in the Section Prompt above. Do not add any heading, paragraph, list, or topic that is not mentioned in the Section Prompt. If the prompt says "include X, Y, Z", output only X, Y, Z—no other content.
-3. Use the TEMPLATE FORMAT above exactly. Match the HTML structure (tags, classes, IDs, alignment). No &nbsp; for indent—use CSS.
-4. **Tables:** Format tabular data properly. Use <table>, <thead>, <tbody>, <tr>, <th>, <td> with border/cell spacing from the template. Preserve table classes (e.g. class="data-table"). Align headers and cells; do not output raw text where a table is required.
-5. **Do NOT show citation/source strings in the content:** The template or context may contain [cite: filename.pdf] or [Source: ...]. You must NOT include these in your output. Omit every [cite: ...] and [Source: ...] from the generated HTML. Use the context only to extract facts and names—never display source names, filenames, or citation tags in the final content.
-6. Fill ALL placeholders from Field Data and RAG; never show [PETITIONER_NAME] or empty. Apply proper word and line spacing. Output ONLY raw HTML. No markdown. Aim for high confidence (90+).
+1. Generate ONLY the parts explicitly mentioned in the Section Prompt.
+2. Use "Times New Roman", 12pt, 1.5 line-height everywhere.
+3. Use justify alignment for paragraphs.
+4. Tables: Use proper <table> structure with borders.
+5. Do NOT show citation/source strings in content.
+6. Output ONLY raw HTML. No markdown.
 """
         parts.append(prompt)
 

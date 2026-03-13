@@ -34,6 +34,7 @@ def review_section(
     field_values: Dict[str, Any],
     section_prompt: str,
     model: str = DEFAULT_MODEL,
+    system_prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Review a generated section for legal accuracy and quality.
@@ -44,13 +45,19 @@ def review_section(
 
     # Load system prompt
     system_prompt = ""
-    try:
-        from pathlib import Path
-        instr_path = Path(__file__).parent.parent.parent / "instructions" / "critic.txt"
-        if instr_path.exists():
-            system_prompt = instr_path.read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
+    if system_prompt_override and system_prompt_override.strip():
+        system_prompt = system_prompt_override.strip()
+    else:
+        try:
+            from pathlib import Path
+            instr_path = Path(__file__).parent.parent.parent / "instructions" / "critic.txt"
+            if instr_path.exists():
+                system_prompt = instr_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    
+    if not system_prompt:
+        system_prompt = "You are a legal document auditor. Review the content for accuracy and quality."
 
     try:
         client = genai.Client(api_key=api_key)

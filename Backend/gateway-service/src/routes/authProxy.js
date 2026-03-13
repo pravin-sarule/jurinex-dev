@@ -51,6 +51,13 @@ router.use(
     },
     onProxyReq: (proxyReq, req, res) => {
       console.log("[GATEWAY] Proxying auth to:", targetAuth + proxyReq.path);
+      // Forward the body if it has been parsed by express.json()
+      if (req.body && Object.keys(req.body).length) {
+        const bodyData = JSON.stringify(req.body);
+        proxyReq.setHeader('Content-Type', 'application/json');
+        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        proxyReq.write(bodyData);
+      }
     },
     onError: (err, req, res) => {
       console.error("[GATEWAY] Proxy error:", err.message);
