@@ -4,10 +4,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "echo \"Running tests...\"" 
+    "test": "echo \"Running tests...\""
   },
   "engines": {
-    "node": "18.x"
+    "node": "22.x"
   },
   "description": "API Gateway for the microservices architecture.",
   "keywords": ["gateway", "api", "node", "express"],
