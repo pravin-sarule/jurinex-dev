@@ -707,6 +707,15 @@ def _judgement_to_citation(
         "judgment",
     ):
         case_name = primary_cit if primary_cit and primary_cit not in ("—", "Further research needed") else "Unknown Case"
+
+    # Generate headnote via Claude (non-blocking: empty string returned on failure)
+    headnote = ""
+    try:
+        from agents.headnote_agent import generate_headnote_from_judgement
+        headnote = generate_headnote_from_judgement(j)
+    except Exception as _he:
+        logger.warning("[HEADNOTE] Generation failed for %s: %s", case_name[:60], _he)
+
     return {
         "id":                    f"cit-{index:03d}",
         "verificationStatus":    status,
@@ -723,6 +732,7 @@ def _judgement_to_citation(
         "benchType":             j.get("bench_type") or "—",
         "dateOfJudgment":        j.get("date_judgment") or "—",
         "statutes":              statutes if statutes else [],
+        "headnote":              headnote,
         "ratio":                 ratio or "Ratio decidendi not available.",
         "proposition": {
             "query":      query,

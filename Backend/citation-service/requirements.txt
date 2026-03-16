@@ -3,6 +3,7 @@ gunicorn
 uvicorn[standard]
 python-dotenv
 google-genai>=1.0.0
+anthropic>=0.40.0
 psycopg2-binary
 elasticsearch
 qdrant-client

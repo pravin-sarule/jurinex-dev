@@ -469,6 +469,156 @@ async def generate_section(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/drafts/{draft_id}/sections/{section_key}/generate-html")
+async def generate_html_section(
+    draft_id: str,
+    section_key: str,
+    user_id: int = Depends(require_user_id),
+    section_prompt: Optional[str] = Body(None, embed=True),
+    rag_query: Optional[str] = Body(None, embed=True),
+    template_url: Optional[str] = Body(None, embed=True),
+    model: Optional[str] = Body(None, embed=True),
+    top_k: int = Body(30, embed=True),
+) -> Dict[str, Any]:
+    """
+    Generate a complete self-contained HTML draft using the 3-agent pipeline.
+
+    Pipeline:
+      1. Librarian Agent — retrieves chunks + fetches/parses template HTML
+      2. Draft Generator — 2-pass LLM (template analysis → content generation)
+      3. Critic Agent    — 5-dimension confidence report
+      Self-repair loop   — up to 3 retries on non-"approved" verdict
+
+    Returns DraftResponse:
+      {
+        "html": "<complete renderable HTML>",
+        "critic_report": { scores, overall_confidence, verdict, critical_issues, one_line_summary },
+        "retries_used": int,
+        "gaps": ["gap text 1", ...],
+        "template_url": str,
+        "status": "approved" | "needs_revision" | "rejected",
+        "validation": { is_valid, unfilled_placeholders, missing_classes, ... }
+      }
+    """
+    logger.info(
+        "API: POST /api/drafts/%s/sections/%s/generate-html (HTML pipeline)",
+        draft_id, section_key,
+    )
+
+    try:
+        from agents.draft_pipeline import run_html_draft_pipeline, HtmlDraftRequest
+
+        # Verify draft ownership
+        draft = draft_db.get_user_draft(draft_id, user_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        template_id = draft.get("template_id")
+
+        # Resolve template_url if not supplied
+        if not template_url and template_id:
+            asset = draft_db.get_template_primary_asset(template_id)
+            if asset:
+                from services.gcs_signed_url import generate_signed_url
+                template_url = generate_signed_url(asset["gcs_bucket"], asset["gcs_path"])
+                if template_url:
+                    print(f"[HtmlPipeline] Resolved template_url from assets: {asset['original_file_name']}")
+
+        if not template_url:
+            raise HTTPException(
+                status_code=400,
+                detail="template_url is required (provide in request body or attach a template to the draft)"
+            )
+
+        # Resolve section_prompt
+        if not section_prompt:
+            template_sections = draft_db.get_template_sections(str(template_id)) if template_id else []
+            for sec in template_sections:
+                sk = (sec.get("section_key") or "").strip().lower()
+                if sk == section_key.strip().lower():
+                    section_prompt = sec.get("default_prompt") or ""
+                    break
+            if not section_prompt:
+                section_prompt = (
+                    f"Generate comprehensive content for the section titled "
+                    f"'{section_key.replace('_', ' ').title()}'. "
+                    "Use the provided source material and fill every placeholder with real data."
+                )
+
+        # Resolve section title (human-readable)
+        section_title = section_key.replace("_", " ").replace("-", " ").title()
+
+        # Resolve file_ids for RAG scoping
+        file_ids: Optional[List[str]] = None
+        draft_field_data = draft_db.get_draft_field_data_for_retrieve(draft_id, user_id)
+        if draft_field_data:
+            meta = draft_field_data.get("metadata", {})
+            case_id = meta.get("case_id")
+            from api.librarian_routes import _resolve_retrieve_file_ids
+            file_ids = _resolve_retrieve_file_ids(None, case_id, draft_id, user_id)
+
+        # Build RAG query
+        effective_query = rag_query or (
+            f"All factual details, names, dates, addresses, and case specifics "
+            f"relevant to: {section_title}"
+        )
+
+        # Run pipeline
+        pipeline_request = HtmlDraftRequest(
+            user_id=user_id,
+            query=effective_query,
+            file_ids=file_ids,
+            top_k=top_k,
+            template_url=template_url,
+            section_title=section_title,
+            section_prompt=section_prompt,
+            model=model,
+        )
+
+        pipeline_response = run_html_draft_pipeline(pipeline_request)
+
+        if pipeline_response.error:
+            raise HTTPException(status_code=500, detail=pipeline_response.error)
+
+        # Persist the generated HTML as a section version
+        version = draft_db.save_section_version(
+            draft_id=draft_id,
+            user_id=user_id,
+            section_key=section_key,
+            content_html=pipeline_response.html,
+            user_prompt_override=section_prompt if section_prompt else None,
+            rag_context_used=effective_query,
+            generation_metadata={
+                "pipeline": "html_draft_pipeline",
+                "retries_used": pipeline_response.retries_used,
+                "verdict": pipeline_response.status,
+                "critic_report": pipeline_response.critic_report,
+                "validation": pipeline_response.validation,
+            },
+            created_by_agent="html_draft_generator",
+        )
+
+        _invalidate_assembled_cache(draft_id, user_id)
+
+        return {
+            "success": True,
+            "html": pipeline_response.html,
+            "critic_report": pipeline_response.critic_report,
+            "retries_used": pipeline_response.retries_used,
+            "gaps": pipeline_response.gaps,
+            "template_url": pipeline_response.template_url,
+            "status": pipeline_response.status,
+            "validation": pipeline_response.validation,
+            "version": version,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("generate_html_section failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/drafts/{draft_id}/sections/{section_key}/refine")
 async def refine_section_endpoint(
     draft_id: str,

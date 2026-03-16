@@ -1,6 +1,7 @@
 """
 JuriNex Citation Service — Watchdog → Fetcher → Clerk → Verified Citation Report.
 
+- POST /citation/build-report — 2-stage Claude pipeline (Extraction → Render); returns HTML/MD report.
 - POST /citation/report — Run full pipeline (query + user_id); returns report in frontend format.
 - GET /citation/reports — List user's reports.
 - GET /citation/reports/:id — Get one report (same format as HTML/React).
@@ -24,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from citation_agent import run_citation_agent
 from claude_proxy import forward_to_claude
+from report_builder_claude import build_report, build_report_from_files
 from db.client import (
     init_db,
     report_get,
@@ -654,6 +656,105 @@ async def search_judgements(
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/citation/build-report")
+async def build_citation_report(
+    query: str = Body(..., embed=True, description="Search query / case context"),
+    case_title: Optional[str] = Body(None, embed=True, description="Case title (used as Stage 1 title field)"),
+    raw_judgment: Optional[str] = Body(None, embed=True, description="Full raw judgment text (preferred)"),
+    case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True, description="Attached case files [{name, content/snippet}]"),
+    output_format: str = Body("html", embed=True, description="'html' or 'markdown'"),
+    case_id: Optional[str] = Body(None, embed=True),
+    user_id: Optional[str] = Body("anonymous", embed=True),
+    request: Request = None,
+) -> Dict[str, Any]:
+    """
+    2-Stage Claude Report Builder.
+
+    Stage 1 — Extraction Agent (claude-sonnet-4-6, max_tokens=2048):
+      Reads raw judgment text and extracts a 14-field Citation JSON
+      (caseName, primaryCitation, court, coram, dateOfJudgment, statutes,
+       ratio, excerptPara, excerptText, subsequentTreatment, verificationStatus, …).
+
+    Stage 2 — Render Agent (claude-sonnet-4-6, max_tokens=3000/2000):
+      Receives the Citation JSON and renders a professional Legal Citation Report
+      in HTML or Markdown following SCC/AIR Indian legal publishing conventions.
+
+    If verificationStatus == 'Invalid / not found', Stage 2 is skipped and an
+    error card payload is returned instead.
+
+    **Input (pick one):**
+    - `raw_judgment`: full text of the judgment (best quality)
+    - `case_file_context`: list of attached documents with content/snippet fields
+
+    **Returns:**
+    ```json
+    {
+        "success": true,
+        "report": "<html>…</html>",
+        "citationJson": { … },
+        "format": "html",
+        "verificationStatus": "Verified and authentic"
+    }
+    ```
+    """
+    query = (query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+
+    # Fetch case context if case_id provided but no files/raw text
+    if case_id and not case_file_context and not raw_judgment:
+        auth_header = request.headers.get("authorization") if request else None
+        case_file_context, _ = await _fetch_case_context(case_id, auth_header)
+
+    try:
+        if raw_judgment and raw_judgment.strip():
+            result = build_report(
+                case_title=case_title or query[:120],
+                query_context=query,
+                raw_judgment_text=raw_judgment,
+                output_format=output_format,
+            )
+        elif case_file_context:
+            result = build_report_from_files(
+                query_context=query,
+                case_file_context=case_file_context,
+                output_format=output_format,
+                case_title=case_title,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either raw_judgment text or case_file_context with document content.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[build-report] Pipeline failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if result.get("error"):
+        status_val = result.get("status", "failed")
+        # Invalid judgment → return error card (not a 500)
+        if status_val == "Invalid / not found":
+            return {
+                "success": False,
+                "status": "Invalid / not found",
+                "citationJson": result.get("data"),
+                "report": None,
+            }
+        raise HTTPException(status_code=500, detail=result.get("message", "Report build failed"))
+
+    return {
+        "success": True,
+        "report": result["report"],
+        "citationJson": result["citationJson"],
+        "format": result.get("format", output_format),
+        "verificationStatus": result.get("verificationStatus", ""),
+        "case_id": case_id,
+        "user_id": user_id,
+    }
 
 
 @app.post("/citation/report")

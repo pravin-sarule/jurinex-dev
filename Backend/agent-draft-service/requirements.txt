@@ -18,4 +18,6 @@ PyJWT
 python-docx
 htmldocx
 premailer
+beautifulsoup4
+requests
 # Multi-document ingestion uses in-memory queue + background thread (no Redis)

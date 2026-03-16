@@ -132,6 +132,65 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
     }
 
+def run_html_draft_generator(payload: dict) -> dict:
+    """
+    HTML Draft Generator Agent — 2-pass LLM pipeline.
+
+    Expects payload:
+      - section_title: str
+      - section_prompt: str
+      - template_raw_html: str       (from librarian output)
+      - chunks: list                 (from librarian output)
+      - repair_context: Optional[str]   (non-None on repair pass)
+      - previous_draft: Optional[str]   (non-None on repair pass)
+      - model: Optional[str]
+
+    Returns { status, html, template_analysis, validation, error? }
+    """
+    from agents.drafter.tools import generate_html_draft, validate_generated_html
+    from services.agent_config_service import get_agent_by_type
+
+    section_title = payload.get("section_title") or payload.get("section_key", "Document Section")
+    section_prompt = payload.get("section_prompt", "")
+    template_raw_html = payload.get("template_raw_html", "")
+    chunks = payload.get("chunks", [])
+    repair_context = payload.get("repair_context")
+    previous_draft = payload.get("previous_draft")
+
+    agent = get_agent_by_type("drafting")
+    model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
+    temperature = float(payload.get("temperature") or (agent.get("temperature") if agent else 0.4))
+
+    logger.info(
+        "[HtmlDraftGenerator] section=%r model=%r template_len=%d chunks=%d repair=%s",
+        section_title, model, len(template_raw_html), len(chunks), bool(repair_context),
+    )
+
+    result = generate_html_draft(
+        section_title=section_title,
+        section_prompt=section_prompt,
+        template_raw_html=template_raw_html,
+        chunks=chunks,
+        model=model,
+        temperature=temperature,
+        repair_context=repair_context,
+        previous_draft=previous_draft,
+    )
+
+    if result.get("status") == "error":
+        return result
+
+    html = result["html"]
+    validation = validate_generated_html(html, template_raw_html, chunks)
+
+    return {
+        "status": "success",
+        "html": html,
+        "template_analysis": result.get("template_analysis", {}),
+        "validation": validation.model_dump(),
+    }
+
+
 def _placeholder_generate(section_key: str, error: str) -> str:
     """Fallback UI for errors."""
     clean_error = error

@@ -23,6 +23,7 @@ def call_llm(
 ) -> Optional[str]:
     """
     Unified LLM call. system_prompt is sent as system_instruction (Gemini) or system prompt (Claude).
+    Raises RuntimeError with the real error message on failure so callers can surface it to the user.
     """
     if is_claude_model(model):
         return _call_claude(prompt, system_prompt, model, temperature)
@@ -36,8 +37,11 @@ def call_llm(
 def _call_claude(prompt: str, system_prompt: str, model: str, temperature: float = 0.7) -> Optional[str]:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        logger.warning("ANTHROPIC_API_KEY not set")
-        return None
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. "
+            "The agent is configured to use a Claude model but the API key is missing. "
+            "Add ANTHROPIC_API_KEY to your .env file."
+        )
 
     api_model = claude_api_model_id(model)
     logger.info(
@@ -110,7 +114,11 @@ def _call_gemini(
             contents=[prompt],
             config=types.GenerateContentConfig(**config_args),
         )
-        return response.text if response and response.text else ""
+        if not response or not response.text:
+            logger.warning("[LLM] Gemini returned empty response for model=%r", model)
+            return ""
+        return response.text
     except Exception as e:
         logger.exception("Gemini call failed: %s", e)
-        return None
+        # Re-raise with the actual error so callers can surface it to the user
+        raise RuntimeError(f"Gemini API error (model={model!r}): {e}") from e

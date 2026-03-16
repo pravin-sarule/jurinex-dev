@@ -323,11 +323,303 @@ OUTPUT RULES:
             use_google_search=False,       # RAG context already provides all facts; web search adds latency
         )
 
-        if content_html is None:
-            return {"status": "error", "error_message": "LLM returned no content"}
-            
+        if not content_html:
+            return {"status": "error", "error_message": f"LLM returned empty content (model={model!r})"}
+
         return {"status": "success", "content_html": _clean_html_response(content_html)}
 
     except Exception as e:
         logger.exception("Drafting tool failed")
         return {"status": "error", "error_message": str(e)}
+
+
+# ── HTML Draft Generator (2-pass LLM pipeline) ───────────────────────────────
+
+from pydantic import BaseModel as _BaseModel
+from typing import List as _List
+
+
+class HTMLValidation(_BaseModel):
+    is_valid: bool
+    unfilled_placeholders: _List[str]
+    missing_classes: _List[str]
+    uncited_blocks: _List[str]
+    gaps_count: int
+    warnings: _List[str]
+
+
+_TEMPLATE_ANALYSER_SYSTEM = """You are an expert HTML/CSS template analyst.
+You will receive a raw HTML template. Your job is to deeply understand its structure
+before any content is written into it.
+Analyse and return a JSON object with:
+{
+  "layout_description": "one paragraph describing the visual layout and purpose",
+  "sections": [
+    {
+      "selector": "#section-id or .class-name",
+      "role": "hero | summary | body | table | chart | footer | sidebar",
+      "content_type": "heading | paragraph | list | table | image | chart | mixed",
+      "max_words_estimate": 120,
+      "placeholder_text": "current placeholder text in this slot",
+      "css_classes_to_preserve": ["class1", "class2"]
+    }
+  ],
+  "typography": {
+    "heading_class": "...",
+    "body_class": "...",
+    "accent_class": "..."
+  },
+  "interactivity_needed": ["tab switching", "accordion", "chart render", "none"],
+  "data_tables_present": true,
+  "charts_present": false
+}
+Return ONLY valid JSON. No explanation text."""
+
+_DRAFT_GENERATOR_SYSTEM = """You are an expert technical writer and frontend developer combined.
+You generate complete, production-ready HTML documents that are:
+- Fully self-contained (all CSS inline or in a <style> block, no external files except fonts)
+- Visually identical to the provided template in layout, spacing, and typography
+- Populated with accurate, grounded content from the provided source chunks
+
+STRICT CONTENT RULES:
+- Every piece of factual content you write MUST come from the provided source chunks.
+- Tag each paragraph or cell internally in an HTML comment: <!-- CHUNK-N -->
+- If a section has no supporting chunk data, insert:
+  <div class="draft-gap" data-gap="true"><p>[INFORMATION NOT AVAILABLE IN SOURCES]</p></div>
+- Never fabricate statistics, dates, names, or claims not present in chunks.
+- Never leave placeholder text like "Lorem ipsum" or "Insert content here" in output.
+
+STRICT HTML/CSS RULES:
+- Preserve ALL original CSS classes from the template exactly.
+- Preserve the template's color tokens (--primary, --accent etc) in :root.
+- Carry forward all Google Fonts @import links exactly.
+- Do NOT restructure the layout — fill the existing structure.
+- All text must be properly aligned per the template's existing alignment classes.
+- Tables must have proper <thead>, <tbody>, correct colspan/rowspan.
+- If the template has a chart placeholder (canvas, .chart-container, #chart-*):
+  Use Chart.js from CDN: https://cdn.jsdelivr.net/npm/chart.js
+  Generate the chart data from chunks.
+  Initialise the chart in a <script> block at end of <body>.
+- If the template has tabs or accordions, implement them with vanilla JS — no jQuery.
+- All <script> blocks go at the end of <body>, never in <head>.
+
+OUTPUT FORMAT:
+Return ONLY the complete HTML. No markdown fences. No explanation. Just raw HTML
+starting with <!DOCTYPE html> and ending with </html>."""
+
+
+def _format_chunks_for_prompt(chunks: list) -> str:
+    """Format chunks list into numbered prompt block."""
+    parts = []
+    for i, chunk in enumerate(chunks, 1):
+        doc_id = chunk.get("file_id") or chunk.get("doc_id") or "unknown"
+        page = chunk.get("page_start") or chunk.get("page") or "?"
+        score = chunk.get("similarity") or chunk.get("relevance_score") or 0
+        text = (chunk.get("content") or chunk.get("text") or "").strip()
+        if text:
+            parts.append(
+                f"[CHUNK-{i}] | doc: {doc_id} | page: {page} | score: {score:.3f}\n{text}"
+            )
+    return "\n\n".join(parts)
+
+
+def generate_html_draft(
+    section_title: str,
+    section_prompt: str,
+    template_raw_html: str,
+    chunks: list,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.4,
+    repair_context: Optional[str] = None,
+    previous_draft: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    2-pass LLM pipeline to generate a complete self-contained HTML draft.
+
+    Pass 1 — Template Analysis: Understand the template structure and slots.
+    Pass 2 — Content Generation: Fill the template with content from chunks.
+
+    Returns { status, html, template_analysis, error_message? }
+    """
+    from services.llm_service import call_llm
+
+    if not template_raw_html:
+        return {"status": "error", "error_message": "template_raw_html is required"}
+
+    # ── Pass 1: Template Analysis ─────────────────────────────────────────────
+    analysis_user_msg = (
+        f"Analyse this HTML template:\n{template_raw_html}\n\n"
+        "Identify every slot where content will be injected."
+    )
+    logger.info("[DraftGenerator] Pass 1 — template analysis (model=%s)", model)
+    analysis_raw = call_llm(
+        prompt=analysis_user_msg,
+        system_prompt=_TEMPLATE_ANALYSER_SYSTEM,
+        model=model,
+        temperature=0.1,
+        response_mime_type="application/json",
+    )
+    if not analysis_raw:
+        return {"status": "error", "error_message": "Template analysis LLM call returned no content"}
+
+    import json as _json
+    import re as _re
+    # Strip markdown fences if present
+    analysis_clean = _re.sub(r'^```(?:json)?\s*', '', analysis_raw.strip())
+    analysis_clean = _re.sub(r'\s*```$', '', analysis_clean).strip()
+    try:
+        template_analysis = _json.loads(analysis_clean)
+    except Exception:
+        template_analysis = {"raw": analysis_clean}
+
+    template_analysis_json = _json.dumps(template_analysis, indent=2)
+    logger.info(
+        "[DraftGenerator] Pass 1 complete — sections=%d, charts=%s",
+        len(template_analysis.get("sections", [])),
+        template_analysis.get("charts_present", False),
+    )
+
+    # ── Pass 2: Content Generation ────────────────────────────────────────────
+    chunks_text = _format_chunks_for_prompt(chunks)
+
+    repair_block = ""
+    if repair_context and previous_draft:
+        repair_block = (
+            f"\n\nREPAIR INSTRUCTIONS (apply to previous draft):\n{repair_context}\n\n"
+            f"PREVIOUS DRAFT (fix only the issues above, preserve everything else):\n"
+            f"{previous_draft[:8000]}{'...[truncated]' if len(previous_draft) > 8000 else ''}\n"
+        )
+
+    generation_user_msg = (
+        f"SECTION TO DRAFT\n"
+        f"Title: {section_title}\n"
+        f"Writing Instructions: {section_prompt}\n\n"
+        f"TEMPLATE ANALYSIS\n{template_analysis_json}\n\n"
+        f"RAW TEMPLATE HTML\n{template_raw_html}\n\n"
+        f"SOURCE CHUNKS (use ONLY these for content)\n{chunks_text or '[No source chunks provided]'}"
+        f"{repair_block}\n\n"
+        "TASK\n"
+        "- Preserve the template's exact layout, classes, colors, fonts\n"
+        "- Fill every section with content from the chunks above\n"
+        "- Cite every paragraph with an HTML comment <!-- CHUNK-N -->\n"
+        "- Mark any gaps with <div class=\"draft-gap\">\n"
+        "- Implement any required JS (charts, tabs, accordions)\n"
+        "- Return ONLY raw HTML starting with <!DOCTYPE html>"
+    )
+
+    logger.info("[DraftGenerator] Pass 2 — content generation (model=%s, chunks=%d)", model, len(chunks))
+    generated_html = call_llm(
+        prompt=generation_user_msg,
+        system_prompt=_DRAFT_GENERATOR_SYSTEM,
+        model=model,
+        temperature=temperature,
+    )
+    if not generated_html:
+        return {"status": "error", "error_message": "Content generation LLM call returned no content"}
+
+    # Strip markdown code fences if the model wrapped the output
+    generated_html = _re.sub(r'^```(?:html)?\s*', '', generated_html.strip())
+    generated_html = _re.sub(r'\s*```$', '', generated_html).strip()
+
+    return {
+        "status": "success",
+        "html": generated_html,
+        "template_analysis": template_analysis,
+    }
+
+
+def validate_generated_html(
+    html: str,
+    template_raw_html: str,
+    chunks: list,
+) -> HTMLValidation:
+    """
+    Programmatic post-generation validation.
+
+    Check 1 — No placeholder text remaining
+    Check 2 — All original CSS classes preserved
+    Check 3 — draft-gap elements are reasonable
+    Check 4 — Basic script syntax guard (unmatched braces)
+    Check 5 — Chunk citation coverage (3+ sentences without <!-- CHUNK-N --> comment)
+    """
+    import re as _re
+
+    warnings: _List[str] = []
+    unfilled: _List[str] = []
+    missing_classes: _List[str] = []
+    uncited_blocks: _List[str] = []
+
+    # Check 1 — Unfilled placeholders
+    PLACEHOLDER_PATTERNS = [
+        r'lorem\s+ipsum', r'\bplaceholder\b', r'insert content here',
+        r'coming soon', r'\{\{[^}]+\}\}', r'\[DRAFT\]', r'\bTBD\b', r'\bTODO\b',
+    ]
+    html_lower = html.lower()
+    for pat in PLACEHOLDER_PATTERNS:
+        for m in _re.finditer(pat, html_lower):
+            snippet = html[max(0, m.start()-20):m.end()+20].strip()
+            unfilled.append(snippet)
+
+    # Check 2 — Missing CSS classes from template
+    try:
+        from bs4 import BeautifulSoup as _BS
+        tpl_soup = _BS(template_raw_html, "html.parser")
+        tpl_classes: set = set()
+        for el in tpl_soup.find_all(True):
+            for c in (el.get("class") or []):
+                if c:
+                    tpl_classes.add(c)
+
+        gen_soup = _BS(html, "html.parser")
+        gen_classes: set = set()
+        for el in gen_soup.find_all(True):
+            for c in (el.get("class") or []):
+                if c:
+                    gen_classes.add(c)
+
+        missing_classes = sorted(tpl_classes - gen_classes)
+    except ImportError:
+        warnings.append("beautifulsoup4 not available; class check skipped")
+    except Exception as e:
+        warnings.append(f"class check error: {e}")
+
+    # Check 3 — Count gap markers
+    gaps_count = len(_re.findall(r'class=["\'][^"\']*draft-gap', html, _re.IGNORECASE))
+
+    # Check 4 — Script syntax guard (unmatched braces)
+    script_blocks = _re.findall(r'<script[^>]*>([\s\S]*?)</script>', html, _re.IGNORECASE)
+    for i, block in enumerate(script_blocks):
+        opens = block.count('{')
+        closes = block.count('}')
+        if abs(opens - closes) > 5:
+            warnings.append(f"Script block {i+1}: possible unmatched braces ({opens} open, {closes} close)")
+
+    # Check 5 — Uncited blocks (3+ sentences without <!-- CHUNK-N -->)
+    # Split on <!-- CHUNK-N --> comments and check sentence density
+    comment_pattern = _re.compile(r'<!--\s*CHUNK-\d+\s*-->', _re.IGNORECASE)
+    text_only = _re.sub(r'<[^>]+>', ' ', html)
+    segments = comment_pattern.split(text_only)
+    sentence_pattern = _re.compile(r'[.!?]+\s+[A-Z]')
+    for seg in segments:
+        seg_stripped = seg.strip()
+        if len(seg_stripped) < 50:
+            continue
+        sentence_count = len(sentence_pattern.findall(seg_stripped))
+        if sentence_count >= 3:
+            preview = seg_stripped[:120].replace('\n', ' ')
+            uncited_blocks.append(preview)
+
+    is_valid = (
+        len(unfilled) == 0
+        and len(missing_classes) == 0
+        and len(warnings) == 0
+    )
+
+    return HTMLValidation(
+        is_valid=is_valid,
+        unfilled_placeholders=unfilled[:10],
+        missing_classes=missing_classes[:20],
+        uncited_blocks=uncited_blocks[:10],
+        gaps_count=gaps_count,
+        warnings=warnings,
+    )

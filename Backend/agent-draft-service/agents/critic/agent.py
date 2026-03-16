@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from agents.critic.tools import review_section
+from agents.critic.tools import review_section, review_html_draft
 
 logger = logging.getLogger(__name__)
 
@@ -68,3 +68,56 @@ def run_critic_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
             "section_key": section_key,
         },
     }
+
+
+def run_html_draft_critic(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    HTML Draft Critic Agent — 5-dimension confidence report.
+
+    Expects payload:
+      - generated_html: str
+      - chunks: list
+      - section_prompt: str
+      - model: Optional[str]
+
+    Returns { status, report: CriticReport dict } or { status: "error", ... }
+    """
+    generated_html = payload.get("generated_html", "")
+    chunks = payload.get("chunks", [])
+    section_prompt = payload.get("section_prompt", "")
+
+    if not generated_html:
+        return {"status": "error", "error_message": "generated_html is required"}
+
+    from services.agent_config_service import get_agent_by_type
+    agent = get_agent_by_type("critic")
+    model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
+
+    logger.info(
+        "[HtmlDraftCritic] reviewing draft (len=%d, chunks=%d, model=%s)",
+        len(generated_html), len(chunks), model,
+    )
+
+    result = review_html_draft(
+        generated_html=generated_html,
+        chunks=chunks,
+        section_prompt=section_prompt,
+        model=model,
+    )
+
+    if result.get("status") == "error":
+        # Return a minimal fallback report on error so the pipeline can continue
+        logger.warning("[HtmlDraftCritic] review failed: %s", result.get("error_message"))
+        return {
+            "status": "error",
+            "error_message": result.get("error_message"),
+            "report": {
+                "scores": {k: 0.5 for k in ("factual_grounding", "completeness", "template_fidelity", "content_quality", "technical_correctness")},
+                "overall_confidence": 0.5,
+                "verdict": "needs_revision",
+                "critical_issues": [result.get("error_message", "Critic failed")],
+                "one_line_summary": "Critic evaluation failed; manual review recommended.",
+            },
+        }
+
+    return result

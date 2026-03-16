@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from agents.librarian.tools import fetch_relevant_chunks
+from agents.librarian.tools import fetch_relevant_chunks, fetch_template
 from services.embedding_service import generate_embeddings
 
 logger = logging.getLogger(__name__)
@@ -103,9 +103,39 @@ def run_librarian_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     logger.info("Librarian: reported %s chunks to orchestrator (top_k=%s)", len(chunks), top_k)
-    return {
+    result: dict = {
         "chunks": chunks,
         "context": context,
         "raw_text": context,
         "embeddings": [query_embedding] if query_embedding else [],
     }
+
+    # ── Optional template fetching (for HTML draft pipeline) ─────────────────
+    template_url = payload.get("template_url")
+    if template_url:
+        template_data = fetch_template(template_url)
+        if template_data:
+            result["template_raw_html"] = template_data.raw_html
+            result["template_url"] = template_data.template_url
+            result["layout_type"] = template_data.layout_type
+            result["placeholders"] = [p.model_dump() for p in template_data.placeholders]
+            result["css_classes"] = template_data.css_classes
+            result["color_tokens"] = template_data.color_tokens
+            result["fonts"] = template_data.fonts
+            logger.info(
+                "Librarian: fetched template (layout=%s, placeholders=%d, classes=%d)",
+                template_data.layout_type,
+                len(template_data.placeholders),
+                len(template_data.css_classes),
+            )
+        else:
+            logger.warning("Librarian: could not fetch template from %s", template_url)
+            result["template_raw_html"] = ""
+            result["template_url"] = template_url
+            result["layout_type"] = "single-column"
+            result["placeholders"] = []
+            result["css_classes"] = []
+            result["color_tokens"] = {}
+            result["fonts"] = []
+
+    return result
