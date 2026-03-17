@@ -50,6 +50,7 @@ CLAUDE_MODELS: List[str] = [
     "claude-opus-4-6",
     "claude-sonnet-4-5",
     "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001",  # Haiku 4.5 full API model ID
     "claude-opus-4-5",
     "claude-opus-4-1",
     "claude-sonnet-4",
@@ -62,7 +63,7 @@ CLAUDE_MODELS: List[str] = [
 CLAUDE_DISPLAY_TO_API_ID: dict[str, str] = {
     "Claude Opus 4.6": "claude-opus-4-6",
     "Claude Sonnet 4.5": "claude-sonnet-4-5",
-    "Claude Haiku 4.5": "claude-haiku-4-5",
+    "Claude Haiku 4.5": "claude-haiku-4-5-20251001",
     "Claude Opus 4.5": "claude-opus-4-5",
     "Claude Opus 4.1": "claude-opus-4-1",
     "Claude Sonnet 4": "claude-sonnet-4",

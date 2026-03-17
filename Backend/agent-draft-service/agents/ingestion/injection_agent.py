@@ -1,13 +1,14 @@
 """
-InjectionAgent: Auto-extract template form fields from uploaded documents.
+InjectionAgent v2: Auto-extract and synthesize ALL template form fields from case documents.
 
-Given a template_id and document, this agent:
-1. Fetches the template's allowed field schema
-2. Builds smart RAG queries from field labels and runs multi-query vector search
-3. Deduplicates and ranks retrieved chunks (hybrid: vector + keyword scoring)
-4. Uses LLM to extract ONLY the allowed fields from the retrieved context
-5. Performs field-level merge (never overwrites user-edited fields)
-6. Upserts extracted values into template_user_field_values
+Key improvements over v1:
+- Uses Claude claude-haiku-4-5-20251001 (or configured model from DB) — superior legal comprehension
+- Fetches ALL case documents via get_file_ids_for_case (not just one best file)
+- Per-field targeted RAG queries for precise, high-coverage chunk retrieval
+- Dual-mode LLM prompt: strict extraction for short fields, intelligent synthesis for long-text
+- Filters null/empty values — only stores actually populated fields
+- Accepts case_id in payload for full multi-document case context
+- Checks DB agent config for "injection"/"extraction"/"autopopulation" types first
 
 Called standalone via POST /api/extract-fields or as a best-effort
 step after document ingestion in orchestrate_upload.
@@ -27,7 +28,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "gemini-flash-lite-latest"
+# Default: Claude Haiku 4.5 — fast, cost-efficient, excellent at legal extraction
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+# Field types that should be strictly extracted (no synthesis)
+EXTRACTABLE_TYPES = {"text", "date", "number", "select", "email", "phone", "url", "integer", "float"}
+# Field types that should be synthesized / composed from context
+SYNTHESIS_TYPES = {"textarea", "long_text", "paragraph", "rich_text", "multiline", "text_area"}
 
 # Termination reasons (used in return contract)
 REASON_SCHEMA_MISSING = "schema_missing"
@@ -49,7 +56,42 @@ def _terminated(reason: str, error_msg: Optional[str] = None) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini prompt builder
+# Field classification helpers
+# ---------------------------------------------------------------------------
+
+def _is_synthesis_field(field: Dict[str, Any]) -> bool:
+    """Return True if field requires synthesis (long-text composition), not just extraction."""
+    ftype = (field.get("field_type") or "text").lower().strip()
+    fname = (field.get("field_name") or "").lower()
+    flabel = (field.get("field_label") or "").lower()
+
+    if ftype in SYNTHESIS_TYPES:
+        return True
+
+    # Name/label heuristic — these fields always need composed paragraphs
+    synthesis_keywords = (
+        "facts", "grounds", "prayer", "relief", "background", "detail",
+        "description", "narrative", "statement", "information", "particulars",
+        "summary", "submission", "argument", "cause", "reason", "question",
+        "interim", "allegation", "charge", "complaint", "dispute",
+    )
+    combined = fname + " " + flabel
+    return any(kw in combined for kw in synthesis_keywords)
+
+
+def _classify_fields(fields_schema: List[Dict[str, Any]]) -> tuple[List[Dict], List[Dict]]:
+    """Return (extractable_fields, synthesis_fields)."""
+    extractable, synthesis = [], []
+    for f in fields_schema:
+        if _is_synthesis_field(f):
+            synthesis.append(f)
+        else:
+            extractable.append(f)
+    return extractable, synthesis
+
+
+# ---------------------------------------------------------------------------
+# LLM prompt builders
 # ---------------------------------------------------------------------------
 
 def _build_extraction_prompt(
@@ -57,46 +99,86 @@ def _build_extraction_prompt(
     document_text: str,
 ) -> str:
     """
-    Build the Gemini prompt that instructs the model to extract field values.
+    Build a dual-mode extraction prompt:
+    - Extractable fields (text/date/number/select): strict extraction from document
+    - Synthesis fields (textarea/paragraph/long_text): intelligent composition from context
 
-    WHY: We pass the exact field schema so the model extracts ONLY allowed
-    fields and doesn't hallucinate extra keys. We mandate JSON output so
-    parsing is deterministic.
+    WHY: A single "don't hallucinate" prompt causes the LLM to return null for every
+    complex field like facts_of_case, grounds, prayer_reliefs. Those fields NEED
+    synthesis — they cannot be extracted verbatim from a document.
     """
-    # Build human-readable field descriptions for the LLM
-    field_descriptions = []
-    for f in fields_schema:
-        name = f.get("field_name", "")
-        label = f.get("field_label", name)
-        ftype = f.get("field_type", "text")
-        required = f.get("is_required", False)
-        desc = f"- {name} ({ftype}): {label}"
-        if required:
-            desc += " [REQUIRED]"
-        field_descriptions.append(desc)
+    extractable_fields, synthesis_fields = _classify_fields(fields_schema)
 
-    fields_block = "\n".join(field_descriptions)
+    # Build extractable field descriptions
+    extractable_block = ""
+    if extractable_fields:
+        lines = []
+        for f in extractable_fields:
+            name = f.get("field_name", "")
+            label = f.get("field_label", name)
+            ftype = f.get("field_type", "text")
+            req = " [REQUIRED]" if f.get("is_required") else ""
+            lines.append(f"  - {name} ({ftype}): {label}{req}")
+        extractable_block = "\n".join(lines)
 
-    return f"""You are a legal document analyst. Extract field values from the
-document text below and return them as a JSON object.
+    # Build synthesis field descriptions
+    synthesis_block = ""
+    if synthesis_fields:
+        lines = []
+        for f in synthesis_fields:
+            name = f.get("field_name", "")
+            label = f.get("field_label", name)
+            ftype = f.get("field_type", "textarea")
+            req = " [REQUIRED]" if f.get("is_required") else ""
+            lines.append(f"  - {name} ({ftype}): {label}{req}")
+        synthesis_block = "\n".join(lines)
 
-RULES:
-1. Extract ONLY the fields listed below. Do NOT add extra fields.
-2. If a field value cannot be found in the document, set its value to null.
-3. Do NOT hallucinate or guess values. Only extract what is explicitly stated.
-4. For date fields, use ISO format (YYYY-MM-DD) when possible.
-5. For number fields, return numeric values without currency symbols.
-6. Return ONLY a valid JSON object. No markdown, no explanation, no code blocks.
+    prompt = f"""You are an expert legal document analyst. Populate ALL the fields listed below for a legal document template by analyzing the provided document context.
 
-ALLOWED FIELDS:
-{fields_block}
-
-DOCUMENT TEXT:
+DOCUMENT CONTEXT:
 {document_text}
 
-Return a JSON object with field names as keys and extracted values as values.
-Example: {{"field_name_1": "value1", "field_name_2": 12345, "field_name_3": null}}
+==============================
+PART A — EXTRACTABLE FIELDS (text, date, number, select)
+Extract exact values from the document. Use common legal synonyms:
+  - petitioner = plaintiff = applicant = complainant = claimant
+  - respondent = defendant = accused = opposite party
+  - For dates: use DD/MM/YYYY format
+  - For court/case numbers: extract exactly as written
+  - Return null ONLY if absolutely no related information exists anywhere in the document
+
+FIELDS TO EXTRACT:
+{extractable_block if extractable_block else "(none)"}
+
+==============================
+PART B — SYNTHESIS FIELDS (textarea, paragraph, long_text)
+Compose comprehensive, legally appropriate plain text content based on ALL available context.
+These fields require intelligent synthesis — DO NOT return null for these.
+Guidelines:
+  - facts_of_case / case_facts / background: Write numbered paragraphs (1., 2., 3.) describing who the parties are, what happened, chronology of events, key dates, amounts, and relevant circumstances
+  - grounds / legal_grounds: Write lettered grounds (a., b., c.) with legal arguments and basis for the claim
+  - prayer_reliefs / relief_sought / prayers: Write what relief/orders/directions are being sought, e.g. "a. That... b. That..."
+  - questions_of_law: Write the legal questions raised in the case
+  - interim_relief: Write the urgent relief sought pending final disposal
+  - For any other synthesis field: Compose a thorough, coherent paragraph drawn from the document context
+  - Write in plain text only. No markdown, no bullet symbols (use letters/numbers instead).
+  - If context is limited, write what can be reasonably inferred and composed from available information
+
+FIELDS TO SYNTHESIZE:
+{synthesis_block if synthesis_block else "(none)"}
+
+==============================
+OUTPUT FORMAT:
+Return ONLY a valid JSON object. No markdown, no explanation, no code blocks.
+Keys must exactly match the field names listed above.
+Example: {{"field_name_1": "extracted value", "field_name_2": "Composed paragraph text..."}}
+
+IMPORTANT:
+- Fill EVERY field to the best of your ability using the document context
+- For synthesis fields, always provide composed content — never return null
+- Only return null for extractable fields where the value genuinely cannot be found
 """
+    return prompt
 
 
 def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
@@ -118,7 +200,7 @@ def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
 
     try:
         parsed = json.loads(cleaned)
-        
+
         # Handle case where LLM returns a list [ { ... } ]
         if isinstance(parsed, list):
             if len(parsed) > 0 and isinstance(parsed[0], dict):
@@ -127,10 +209,10 @@ def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
             else:
                 logger.warning("[InjectionAgent][JSON_PARSE] Parsed value is a list but empty or first element not dict")
                 return None
-        
+
         if isinstance(parsed, dict):
             return parsed
-            
+
         logger.warning("[InjectionAgent][JSON_PARSE] Parsed value is not a dict or list[dict]: %s", type(parsed))
         return None
     except json.JSONDecodeError as e:
@@ -144,13 +226,15 @@ def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
 
 def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Run the InjectionAgent. Extracts template field values from document text.
+    Run the InjectionAgent. Extracts and synthesizes ALL template field values from case documents.
 
     Payload:
         - template_id: str (required) — which template's fields to extract
         - user_id: int (required) — owner of the field values
         - draft_session_id: str (optional) — links to a specific draft session
-        - source_document_id: str (optional) — document to fetch text from
+        - case_id: str (optional) — case ID to fetch ALL case documents from DB
+        - file_ids: list[str] (optional) — explicit list of file IDs to search
+        - source_document_id: str (optional) — single document fallback
         - raw_text: str (optional) — if provided, use directly instead of DB lookup
 
     Returns:
@@ -171,6 +255,8 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_id = payload.get("user_id")
     draft_session_id = payload.get("draft_session_id")
     source_document_id = payload.get("source_document_id")
+    case_id = payload.get("case_id")
+    file_ids_from_payload = payload.get("file_ids") or []
     raw_text = payload.get("raw_text")
 
     if not template_id:
@@ -183,9 +269,10 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(
         "[InjectionAgent][VALIDATE] Inputs valid: template_id=%s, user_id=%s, "
-        "draft_session_id=%s, source_document_id=%s, raw_text_len=%s",
-        template_id, user_id, draft_session_id,
-        source_document_id, len(raw_text) if raw_text else 0,
+        "draft_session_id=%s, case_id=%s, source_document_id=%s, file_ids=%s, raw_text_len=%s",
+        template_id, user_id, draft_session_id, case_id,
+        source_document_id, file_ids_from_payload,
+        len(raw_text) if raw_text else 0,
     )
 
     # ------------------------------------------------------------------
@@ -210,12 +297,45 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # Build the set of allowed field names for validation
     allowed_fields = {f.get("field_name") for f in fields_schema if f.get("field_name")}
-    logger.info("[InjectionAgent][SCHEMA_FETCH] Allowed fields: %s", sorted(allowed_fields))
+    logger.info("[InjectionAgent][SCHEMA_FETCH] Allowed fields (%d): %s", len(allowed_fields), sorted(allowed_fields))
 
     # ------------------------------------------------------------------
-    # Step 3: Fetch document text
+    # Step 3: Resolve all file IDs for context fetching
     # ------------------------------------------------------------------
-    document_text = _resolve_document_text(raw_text, source_document_id, user_id, fields_schema=fields_schema)
+    resolved_file_ids: List[str] = list(file_ids_from_payload)
+
+    # If case_id provided, get ALL files in that case (primary source)
+    if case_id and not resolved_file_ids:
+        try:
+            from services.db import get_file_ids_for_case
+            case_file_ids = get_file_ids_for_case(str(case_id), int(user_id))
+            if case_file_ids:
+                resolved_file_ids = case_file_ids
+                logger.info(
+                    "[InjectionAgent][FILE_RESOLVE] Resolved %d files from case_id=%s",
+                    len(case_file_ids), case_id,
+                )
+            else:
+                logger.warning("[InjectionAgent][FILE_RESOLVE] case_id=%s returned no files", case_id)
+        except Exception as e:
+            logger.warning("[InjectionAgent][FILE_RESOLVE] Could not fetch case files: %s", e)
+
+    # Fall back to single source_document_id if still no file_ids
+    if not resolved_file_ids and source_document_id:
+        resolved_file_ids = [str(source_document_id)]
+        logger.info("[InjectionAgent][FILE_RESOLVE] Using source_document_id as single file: %s", source_document_id)
+
+    logger.info("[InjectionAgent][FILE_RESOLVE] Final file_ids for RAG: %s", resolved_file_ids)
+
+    # ------------------------------------------------------------------
+    # Step 4: Fetch document text via multi-doc RAG
+    # ------------------------------------------------------------------
+    document_text = _resolve_document_text(
+        raw_text=raw_text,
+        file_ids=resolved_file_ids,
+        user_id=user_id,
+        fields_schema=fields_schema,
+    )
 
     if not document_text or not document_text.strip():
         logger.warning("[InjectionAgent][DOC_FETCH] Document text is empty → terminating")
@@ -224,48 +344,61 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(
         "[InjectionAgent][DOC_FETCH] Document text resolved: %d chars (preview: %s...)",
-        len(document_text), document_text[:100].replace("\n", " "),
+        len(document_text), document_text[:120].replace("\n", " "),
     )
 
     # ------------------------------------------------------------------
-    # Step 4: Build Gemini prompt
+    # Step 5: Build dual-mode LLM prompt
     # ------------------------------------------------------------------
     prompt = _build_extraction_prompt(fields_schema, document_text)
     logger.info("[InjectionAgent][PROMPT] Prompt built: %d chars, %d fields", len(prompt), len(fields_schema))
 
     # ------------------------------------------------------------------
-    # Step 5: Call LLM (Gemini or Claude)
+    # Step 6: Resolve model — DB config → default Claude Haiku 4.5
     # ------------------------------------------------------------------
+    model = DEFAULT_MODEL
+    db_system_prompt = ""
+    temperature = 0.3
+
     try:
         from services.agent_config_service import get_agent_by_type
+
+        # Try injection-specific agent types in priority order
+        agent = (
+            get_agent_by_type("injection")
+            or get_agent_by_type("extraction")
+            or get_agent_by_type("autopopulation")
+        )
+        if agent:
+            model = agent.get("resolved_model") or DEFAULT_MODEL
+            db_system_prompt = (agent.get("prompt") or "").strip()
+            temperature = float(agent.get("temperature") or 0.3)
+            logger.info("[InjectionAgent][CONFIG] Using DB agent config: model=%s, temp=%s", model, temperature)
+        else:
+            logger.info("[InjectionAgent][CONFIG] No DB agent config found, using default model=%s", model)
+    except Exception as e:
+        logger.warning("[InjectionAgent][CONFIG] Could not fetch agent config: %s — using default", e)
+
+    # ------------------------------------------------------------------
+    # Step 7: Call LLM
+    # ------------------------------------------------------------------
+    try:
         from services.llm_service import call_llm
 
-        # Injection agent usually doesn't have a specific prompt in DB, 
-        # but we check anyway. If not found, _build_extraction_prompt is used.
-        agent = get_agent_by_type("injection") or get_agent_by_type("extraction")
-        model = agent.get("resolved_model") if agent else DEFAULT_MODEL
-        db_system_prompt = (agent.get("prompt") or "").strip() if agent else ""
-
-        # Build prompt using our template logic
-        extraction_prompt = _build_extraction_prompt(fields_schema, document_text)
-        
-        logger.info("[InjectionAgent][LLM] Calling model=%s", model)
-        gemini_text = call_llm(
-            prompt=extraction_prompt,
+        logger.info("[InjectionAgent][LLM] Calling model=%s, temperature=%s", model, temperature)
+        llm_response = call_llm(
+            prompt=prompt,
             system_prompt=db_system_prompt,
             model=model,
-            response_mime_type="application/json"
+            temperature=temperature,
         )
 
-        if not gemini_text:
+        if not llm_response:
             logger.error("[InjectionAgent][LLM] LLM returned no content")
             _safe_update_status(template_id, user_id, draft_session_id, "failed", "LLM returned no content")
             return _terminated(REASON_AI_FAILURE, "LLM returned no content")
 
-        logger.info(
-            "[InjectionAgent][LLM] Response received: %d chars",
-            len(gemini_text)
-        )
+        logger.info("[InjectionAgent][LLM] Response received: %d chars", len(llm_response))
 
     except Exception as e:
         logger.exception("[InjectionAgent][LLM] LLM call failed")
@@ -273,37 +406,51 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         return _terminated(REASON_AI_FAILURE, f"LLM call failed: {e}")
 
     # ------------------------------------------------------------------
-    # Step 6: Parse JSON response
+    # Step 8: Parse JSON response
     # ------------------------------------------------------------------
-    parsed_fields = _parse_llm_json(gemini_text)
+    parsed_fields = _parse_llm_json(llm_response)
 
     if parsed_fields is None:
-        logger.error("[InjectionAgent][JSON_PARSE] Could not parse Gemini response as JSON")
-        _safe_update_status(template_id, user_id, draft_session_id, "failed", "JSON parse error on Gemini response")
-        return _terminated(REASON_JSON_PARSE_ERROR, "Could not parse Gemini response as JSON")
+        logger.error("[InjectionAgent][JSON_PARSE] Could not parse LLM response as JSON")
+        _safe_update_status(template_id, user_id, draft_session_id, "failed", "JSON parse error on LLM response")
+        return _terminated(REASON_JSON_PARSE_ERROR, "Could not parse LLM response as JSON")
 
-    # Validate: keep only keys that exist in the allowed field set
+    # Validate: keep only allowed field keys; filter out nulls and empty strings
     validated_fields: Dict[str, Any] = {}
     discarded_keys: List[str] = []
+    null_keys: List[str] = []
+
     for key, value in parsed_fields.items():
-        if key in allowed_fields:
-            validated_fields[key] = value
-        else:
+        if key not in allowed_fields:
             discarded_keys.append(key)
+            continue
+        # Filter out nulls and empty values — don't pollute DB with blanks
+        if value is None:
+            null_keys.append(key)
+            continue
+        if isinstance(value, str) and not value.strip():
+            null_keys.append(key)
+            continue
+        validated_fields[key] = value
 
     if discarded_keys:
         logger.warning(
             "[InjectionAgent][JSON_PARSE] Discarded %d unknown keys: %s",
             len(discarded_keys), discarded_keys,
         )
+    if null_keys:
+        logger.info(
+            "[InjectionAgent][JSON_PARSE] Filtered %d null/empty fields: %s",
+            len(null_keys), null_keys,
+        )
 
     logger.info(
-        "[InjectionAgent][JSON_PARSE] Validated %d fields from Gemini response",
-        len(validated_fields),
+        "[InjectionAgent][JSON_PARSE] Validated %d non-null fields from %d total LLM fields",
+        len(validated_fields), len(parsed_fields),
     )
 
     # ------------------------------------------------------------------
-    # Step 7: Field-level merge with existing user-edited fields
+    # Step 9: Field-level merge with existing user-edited fields
     # ------------------------------------------------------------------
     try:
         from services.draft_db import get_existing_user_field_values
@@ -357,21 +504,27 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         merged_fields = validated_fields
         logger.info("[InjectionAgent][MERGE] No existing user edits — using all %d extracted fields", len(merged_fields))
 
-    # Determine status based on how many fields were extracted vs skipped
+    # Determine status based on field coverage
+    total_fields = len(fields_schema)
+    filled_count = len(merged_fields) - len(skipped_fields)
+    fill_ratio = filled_count / total_fields if total_fields > 0 else 0
+
     if not validated_fields:
         status = "partial"
-    elif skipped_fields:
+    elif fill_ratio >= 0.7:
+        status = "completed"
+    elif skipped_fields or fill_ratio > 0:
         status = "partial"
     else:
-        status = "completed"
+        status = "partial"
 
     logger.info(
-        "[InjectionAgent][MERGE] Merge complete: %d filled, %d skipped → status=%s",
-        len(merged_fields) - len(skipped_fields), len(skipped_fields), status,
+        "[InjectionAgent][MERGE] Merge complete: %d filled / %d total (%.0f%%), %d skipped → status=%s",
+        filled_count, total_fields, fill_ratio * 100, len(skipped_fields), status,
     )
 
     # ------------------------------------------------------------------
-    # Step 8: Upsert to database
+    # Step 10: Upsert to database
     # ------------------------------------------------------------------
     try:
         from services.draft_db import upsert_extracted_field_values
@@ -403,11 +556,8 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # ------------------------------------------------------------------
-    # Step 9: Return result
+    # Step 11: Return result
     # ------------------------------------------------------------------
-    # WHY we return extracted_fields (not merged_fields): The caller needs to
-    # know what the agent extracted. Skipped_fields tells them what was
-    # protected. The merged result is already in the DB.
     result = {
         "status": status,
         "reason": None,
@@ -417,71 +567,78 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     logger.info(
-        "[InjectionAgent][DONE] Agent terminated successfully: status=%s, "
-        "extracted=%d, skipped=%d",
-        status, len(validated_fields), len(skipped_fields),
+        "[InjectionAgent][DONE] Agent completed: status=%s, extracted=%d/%d (%.0f%%), skipped=%d",
+        status, filled_count, total_fields, fill_ratio * 100, len(skipped_fields),
     )
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# RAG helpers
 # ---------------------------------------------------------------------------
 
 def _build_rag_queries(fields_schema: List[Dict[str, Any]]) -> List[str]:
     """
-    Build 3 complementary search queries from field labels.
+    Build targeted search queries from field labels + global legal queries.
 
-    WHY: A single query can't surface all field types equally. Splitting by
-    field category (parties, dates/amounts, location/property) covers more
-    of the document in fewer vector calls than querying per-field.
+    WHY: A single query can't surface all field types equally. We build:
+    - Global catch-all queries (parties, dates, amounts)
+    - Per-field targeted queries for every field label
+    This ensures every field has a good chance of finding relevant chunks.
     """
-    # Collect all human-readable labels from the schema
     labels = [
         (f.get("field_label") or f.get("field_name") or "").strip()
         for f in fields_schema
         if f.get("field_label") or f.get("field_name")
     ]
-    label_text = ", ".join(labels[:30]) if labels else ""
+    label_text = ", ".join(labels[:40]) if labels else ""
 
     queries = [
-        # Global catch-all — surfaces the most content-dense chunks
-        f"parties names addresses dates amounts payment agreement contract details {label_text}",
-        # Party-focused
-        "petitioner respondent applicant plaintiff defendant client name address contact",
-        # Dates and financial
-        "date of agreement execution payment amount fee consideration stamp duty registration",
+        # Global catch-all — surfaces dense content chunks
+        f"parties names addresses dates amounts payment agreement contract details case facts {label_text}",
+        # Party identity and details
+        "petitioner respondent applicant plaintiff defendant claimant name address contact occupation",
+        # Legal case structure
+        "facts of case background dispute grievance cause of action legal grounds prayer relief sought",
+        # Dates, financial, and procedural details
+        "date of agreement execution payment amount fee consideration stamp duty registration court case number",
+        # Location and property details
+        "property address description plot survey number district taluka state jurisdiction court",
     ]
+
+    # Add per-field targeted queries for better coverage on specific fields
+    for field in fields_schema:
+        label = (field.get("field_label") or field.get("field_name") or "").strip()
+        if label and len(label) > 3:
+            queries.append(f"{label} details information")
+
     return queries
 
 
 def _fetch_context_via_rag(
     fields_schema: List[Dict[str, Any]],
-    source_document_id: Optional[str],
+    file_ids: Optional[List[str]],
     user_id: Any,
-    top_k_per_query: int = 15,
+    top_k_per_query: int = 20,
 ) -> Optional[str]:
     """
-    Multi-query RAG retrieval: run 3 vector searches, deduplicate, rank.
+    Multi-query RAG retrieval across ALL case files: run queries, deduplicate, rank.
 
     Strategy:
-      1. Build 3 complementary queries from field labels (parties, dates, amounts, etc.)
-      2. Embed each query and run vector search scoped to this document
+      1. Build targeted queries from field labels + global legal queries
+      2. Embed each query and run vector search scoped to all case file_ids
       3. Deduplicate chunks by chunk_id; boost chunks appearing in multiple queries
-      4. Take top-30 unique chunks ordered by combined score
+      4. Take top-50 unique chunks ordered by combined score
       5. Return their content joined as context for the LLM
 
-    WHY better than full-text dump:
-      - Large documents (100+ pages) overflow the context window
-      - Relevant field values are often in a small subset of pages
-      - Multi-query covers different field types without per-field overhead
+    WHY: Multi-document, multi-query approach covers all case files and all
+    field types, giving the LLM comprehensive context to fill every field.
     """
     try:
         from services.db import find_nearest_chunks
         from services.embedding_service import generate_embeddings
 
-        file_ids = [str(source_document_id)] if source_document_id else None
         queries = _build_rag_queries(fields_schema)
 
         # chunk_id → {"content": ..., "score": float, "hits": int}
@@ -495,7 +652,7 @@ def _fetch_context_via_rag(
                 rows = find_nearest_chunks(
                     embedding=embeddings[0],
                     limit=top_k_per_query,
-                    file_ids=file_ids,
+                    file_ids=file_ids if file_ids else None,
                     user_id=int(user_id),
                 )
                 for row in rows:
@@ -505,7 +662,6 @@ def _fetch_context_via_rag(
                         continue
                     similarity = float(row.get("similarity") or (1 - float(row.get("distance") or 1)))
                     if cid in chunk_map:
-                        # Seen in multiple queries → boost score and increment hit count
                         chunk_map[cid]["score"] = max(chunk_map[cid]["score"], similarity)
                         chunk_map[cid]["hits"] += 1
                     else:
@@ -521,7 +677,7 @@ def _fetch_context_via_rag(
 
         if not chunk_map:
             logger.warning("[InjectionAgent][RAG] Vector search returned no chunks; falling back to ordered text")
-            return _fetch_ordered_text(source_document_id, user_id)
+            return _fetch_ordered_text(file_ids, user_id)
 
         # Rank: primary = hit count (multi-query coverage), secondary = similarity score
         ranked = sorted(
@@ -530,14 +686,14 @@ def _fetch_context_via_rag(
             reverse=True,
         )
 
-        # Cap to top 30 chunks to stay within reasonable context size
-        top_chunks = ranked[:30]
+        # Top 50 chunks for comprehensive coverage
+        top_chunks = ranked[:50]
         logger.info(
-            "[InjectionAgent][RAG] Retrieved %d unique chunks from %d queries (top %d used)",
-            len(chunk_map), len(queries), len(top_chunks),
+            "[InjectionAgent][RAG] Retrieved %d unique chunks from %d queries (top %d used) across %d files",
+            len(chunk_map), len(queries), len(top_chunks), len(file_ids) if file_ids else 0,
         )
 
-        # Build context with optional heading/page labels for better LLM accuracy
+        # Build context with heading/page labels for better LLM accuracy
         parts = []
         for c in top_chunks:
             header = ""
@@ -553,78 +709,85 @@ def _fetch_context_via_rag(
 
     except Exception as e:
         logger.exception("[InjectionAgent][RAG] RAG retrieval failed; falling back to ordered text")
-        return _fetch_ordered_text(source_document_id, user_id)
+        return _fetch_ordered_text(file_ids, user_id)
 
 
 def _fetch_ordered_text(
-    source_document_id: Optional[str],
+    file_ids: Optional[List[str]],
     user_id: Any,
-    max_chars: int = 40000,
+    max_chars: int = 60000,
 ) -> Optional[str]:
     """
-    Fallback: fetch chunks in page order, truncated to max_chars.
+    Fallback: fetch chunks in page order for all file_ids, truncated to max_chars.
     Used when RAG/vector search is unavailable or returns no results.
     """
-    if not source_document_id:
+    if not file_ids:
         return None
     try:
         from services.db import get_conn
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT content FROM file_chunks
-                    WHERE file_id = %s::uuid
-                    ORDER BY chunk_index ASC
-                    LIMIT 100
-                    """,
-                    (str(source_document_id),),
-                )
-                rows = cur.fetchall()
-        if rows:
-            text = "\n".join(r[0] for r in rows if r[0])
+        all_parts = []
+        for fid in file_ids:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT content FROM file_chunks
+                        WHERE file_id = %s::uuid
+                        ORDER BY chunk_index ASC
+                        LIMIT 150
+                        """,
+                        (str(fid),),
+                    )
+                    rows = cur.fetchall()
+            if rows:
+                all_parts.append("\n".join(r[0] for r in rows if r[0]))
+        if all_parts:
+            text = "\n\n---\n\n".join(all_parts)
             if len(text) > max_chars:
                 text = text[:max_chars]
                 logger.info("[InjectionAgent][FALLBACK] Text truncated to %d chars", max_chars)
-            logger.info("[InjectionAgent][FALLBACK] Ordered text: %d chunks, %d chars", len(rows), len(text))
+            logger.info("[InjectionAgent][FALLBACK] Ordered text: %d files, %d chars", len(file_ids), len(text))
             return text
     except Exception as e:
-        logger.exception("[InjectionAgent][FALLBACK] DB lookup failed for file_id=%s", source_document_id)
+        logger.exception("[InjectionAgent][FALLBACK] DB lookup failed for file_ids=%s", file_ids)
     return None
 
 
 def _resolve_document_text(
     raw_text: Optional[str],
-    source_document_id: Optional[str],
+    file_ids: Optional[List[str]],
     user_id: Any,
     fields_schema: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
-    Resolve document context using RAG retrieval (primary) or raw_text (if provided directly).
+    Resolve document context using multi-doc RAG (primary) or raw_text (if provided directly).
 
     Priority:
-      1. raw_text provided directly → use as-is (truncated to 40k chars if very large)
-      2. source_document_id → multi-query RAG retrieval (vector search on file_chunks)
-      3. Fallback → ordered chunk text (first 40k chars)
+      1. raw_text provided directly → use as-is (truncated to 60k chars if very large)
+      2. file_ids → multi-query RAG retrieval across ALL files in the list
+      3. Fallback → ordered chunk text from all files
     """
     if raw_text and raw_text.strip():
         text = raw_text.strip()
-        if len(text) > 40000:
-            text = text[:40000]
-            logger.info("[InjectionAgent][DOC_FETCH] raw_text truncated to 40000 chars")
+        if len(text) > 60000:
+            text = text[:60000]
+            logger.info("[InjectionAgent][DOC_FETCH] raw_text truncated to 60000 chars")
         else:
             logger.info("[InjectionAgent][DOC_FETCH] Using provided raw_text (%d chars)", len(text))
         return text
 
-    if source_document_id:
-        logger.info("[InjectionAgent][DOC_FETCH] Running RAG retrieval for file_id=%s", source_document_id)
+    if file_ids:
+        logger.info(
+            "[InjectionAgent][DOC_FETCH] Running multi-doc RAG retrieval for %d files",
+            len(file_ids),
+        )
         return _fetch_context_via_rag(
             fields_schema=fields_schema or [],
-            source_document_id=source_document_id,
+            file_ids=file_ids,
             user_id=user_id,
         )
 
-    logger.warning("[InjectionAgent][DOC_FETCH] No raw_text and no source_document_id provided")
+    logger.warning("[InjectionAgent][DOC_FETCH] No raw_text and no file_ids provided")
     return None
 
 
@@ -637,10 +800,6 @@ def _safe_update_status(
 ) -> None:
     """
     Best-effort status update. If DB write fails, log and move on.
-
-    WHY: When the agent terminates due to an error, we want the status
-    in the DB to reflect that. But if the DB itself is down, we must not
-    crash — just log.
     """
     try:
         from services.draft_db import update_extraction_status

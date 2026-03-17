@@ -313,29 +313,46 @@ async def attach_case_to_draft_endpoint(
         
         logger.info(f"[attach_case_to_draft] Successfully attached case {case_id} to draft {draft_id}")
         
-        # --- Auto-populate fields from case document ---
+        # --- Auto-populate fields from ALL case documents ---
         try:
             # 1. Get draft to find template_id
             draft_info = draft_db.get_user_draft(draft_id, user_id)
             if draft_info and draft_info.get("template_id"):
                 template_id = str(draft_info["template_id"])
-                
-                # 2. Find case document (best one with chunks)
-                source_doc_id = doc_db.get_best_source_document(case_id, user_id)
-                
-                if source_doc_id:
-                    logger.info(f"[attach_case] Triggering background auto-population from case file {source_doc_id}")
-                    
+
+                # 2. Fetch ALL file IDs for this case (multi-document context)
+                all_file_ids = doc_db.get_file_ids_for_case(str(case_id), user_id)
+
+                if all_file_ids:
+                    logger.info(
+                        f"[attach_case] Triggering background auto-population from {len(all_file_ids)} case files"
+                    )
                     payload = {
                         "template_id": template_id,
                         "user_id": user_id,
                         "draft_session_id": draft_id,
-                        "source_document_id": source_doc_id,
-                        # raw_text is None, so agent will fetch from DB using source_document_id
+                        "case_id": str(case_id),
+                        "file_ids": all_file_ids,
+                        # raw_text is None — agent fetches chunks from DB using file_ids
                     }
                     background_tasks.add_task(run_injection_agent, payload)
                 else:
-                    logger.warning(f"[attach_case] Case {case_id} has no valid files with content. Skipping auto-population.")
+                    # Fallback: try single best document
+                    source_doc_id = doc_db.get_best_source_document(case_id, user_id)
+                    if source_doc_id:
+                        logger.info(f"[attach_case] No case files via folder, using best document {source_doc_id}")
+                        payload = {
+                            "template_id": template_id,
+                            "user_id": user_id,
+                            "draft_session_id": draft_id,
+                            "case_id": str(case_id),
+                            "source_document_id": source_doc_id,
+                        }
+                        background_tasks.add_task(run_injection_agent, payload)
+                    else:
+                        logger.warning(
+                            f"[attach_case] Case {case_id} has no files with content. Skipping auto-population."
+                        )
         except Exception as e:
             logger.error(f"[attach_case] Failed to trigger auto-population: {e}")
         
