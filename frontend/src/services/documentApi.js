@@ -370,9 +370,12 @@
 
 
 import axios from 'axios';
-import { DOCS_BASE_URL } from '../config/apiConfig';
+import { DOCS_BASE_URL, FILES_BASE_URL } from '../config/apiConfig';
 
+// Docs-related operations (folders, summaries, etc.) go through the docs gateway prefix.
 const API_BASE_URL = DOCS_BASE_URL;
+// Case CRUD lives on the file-service side (`/api/files/cases` → gateway `/files/cases`).
+const CASES_BASE_URL = FILES_BASE_URL;
 
 const getAuthHeader = () => {
   const token = localStorage.getItem('token');
@@ -818,14 +821,14 @@ const documentApi = {
   },
 
   getCases: async () => {
-    const response = await axios.get(`${API_BASE_URL}/cases`, {
+    const response = await axios.get(`${CASES_BASE_URL}/cases`, {
       headers: getAuthHeader(),
     });
     return response.data;
   },
 
   getCaseById: async (caseId) => {
-    const response = await axios.get(`${API_BASE_URL}/cases/${caseId}`, {
+    const response = await axios.get(`${CASES_BASE_URL}/cases/${caseId}`, {
       headers: getAuthHeader(),
     });
     return response.data;
@@ -833,7 +836,7 @@ const documentApi = {
 
   updateCase: async (caseId, caseData) => {
     const response = await axios.put(
-      `${API_BASE_URL}/cases/${caseId}`,
+      `${CASES_BASE_URL}/cases/${caseId}`,
       caseData,
       { headers: getAuthHeader() }
     );
@@ -841,7 +844,7 @@ const documentApi = {
   },
 
   deleteCase: async (caseId) => {
-    const response = await axios.delete(`${API_BASE_URL}/cases/${caseId}`, {
+    const response = await axios.delete(`${CASES_BASE_URL}/cases/${caseId}`, {
       headers: getAuthHeader(),
     });
     return response.data;

@@ -81,8 +81,10 @@ export function getUserIdForDrafting() {
   return null;
 }
 
-// Legacy support - backward compatibility (docs via document service when direct)
-export const DOCS_BASE_URL = DOCUMENT_SERVICE_URL.replace(/\/$/, '');
+// Legacy support - backward compatibility
+// Docs API continues to go through the gateway so routes like `/docs/cases`
+// and other aggregated endpoints remain stable.
+export const DOCS_BASE_URL = `${GATEWAY_URL}/docs`;
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 // For direct service access (document service)
