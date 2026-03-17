@@ -5,7 +5,7 @@
  * Environment variables are supported with sensible defaults.
  */
 
-// Get base gateway URL from environment or use deployed default
+// Get base gateway URL from environment or use local default for development
 const GATEWAY_URL =
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||

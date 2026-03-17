@@ -305,11 +305,18 @@ const DraftFormPage = () => {
           let saved = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? { ...raw } : {};
 
           // Also fetch template_user_field_values (InjectionAgent) and merge - backend merge can miss when agent writes async
+          // Agent values go underneath — user-saved values take precedence
           if (d.template_id) {
             try {
               const tvRes = await getTemplateUserFieldValues(String(d.template_id), draftId);
-              if (tvRes?.field_values && typeof tvRes.field_values === 'object' && Object.keys(tvRes.field_values).length > 0) {
-                saved = { ...saved, ...tvRes.field_values };
+              if (tvRes?.field_values && typeof tvRes.field_values === 'object') {
+                // Only apply filled agent values, never overwrite user-saved values with null
+                const agentFilled = Object.fromEntries(
+                  Object.entries(tvRes.field_values).filter(([, v]) => v != null && String(v).trim() !== '')
+                );
+                if (Object.keys(agentFilled).length > 0) {
+                  saved = { ...agentFilled, ...saved }; // user-saved values win
+                }
               }
             } catch (_) {}
           }
@@ -458,30 +465,40 @@ const DraftFormPage = () => {
   const pollForAutopopulatedFields = (draftIdParam, templateIdParam, onApplied) => {
     if (autopopulatePollRef.current) clearInterval(autopopulatePollRef.current);
     setIsAutopopulatingFields(true);
-    const POLL_INTERVAL_MS = 1500;
-    const MAX_ATTEMPTS = 20;
+    const POLL_INTERVAL_MS = 2000;
+    const MAX_ATTEMPTS = 30; // 60 seconds total — agent can take time on large docs
     let attempts = 0;
     const intervalId = setInterval(async () => {
       attempts++;
       try {
-        const draftRes = await getDraft(draftIdParam);
-        const d = draftRes?.draft;
-        let fromDraft = (d?.field_values && typeof d.field_values === 'object') ? d.field_values : {};
         let fromTemplate = {};
+        let extractionStatus = null;
         if (templateIdParam) {
           try {
             const tvRes = await getTemplateUserFieldValues(templateIdParam, draftIdParam);
             if (tvRes?.field_values && typeof tvRes.field_values === 'object') {
               fromTemplate = tvRes.field_values;
             }
+            extractionStatus = tvRes?.extraction_status || null;
           } catch (_) {}
         }
-        const merged = { ...fieldValuesRef.current, ...fromDraft, ...fromTemplate };
-        const hasNewData = Object.keys(fromDraft).length > 0 || Object.keys(fromTemplate).length > 0;
-        if (hasNewData && Object.keys(merged).length > 0) {
+
+        // Only count values that are actually filled (not null / empty string)
+        const filledFromTemplate = Object.entries(fromTemplate).filter(
+          ([, v]) => v != null && String(v).trim() !== ''
+        );
+
+        // Stop polling when: agent reports done (completed/partial) AND has filled values
+        const agentDone = extractionStatus === 'completed' || extractionStatus === 'partial';
+        const hasFilled = filledFromTemplate.length > 0;
+
+        if (agentDone && hasFilled) {
           clearInterval(intervalId);
           autopopulatePollRef.current = null;
           setIsAutopopulatingFields(false);
+
+          // Merge: keep user-edited values on top, overlay agent values beneath
+          const merged = { ...fromTemplate, ...fieldValuesRef.current };
           setFieldValues(merged);
           await updateDraftFields(draftIdParam, merged, Object.keys(merged));
           if (templateIdParam) {
@@ -489,7 +506,7 @@ const DraftFormPage = () => {
               await saveTemplateUserFieldValues(templateIdParam, merged, Object.keys(merged), draftIdParam);
             } catch (e) { /* non-blocking */ }
           }
-          toast.success('Form fields auto-filled from document.');
+          toast.success(`Form auto-filled: ${filledFromTemplate.length} field(s) populated.`);
           if (onApplied) onApplied();
         }
       } catch (_) {}
