@@ -12,7 +12,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, BackgroundTasks
 
 from api.deps import require_user_id
 from services import draft_db, db as doc_db
-from agents.ingestion.injection_agent import run_injection_agent
+from agents.ingestion.autopopulation_agent import run_autopopulation_agent
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +335,7 @@ async def attach_case_to_draft_endpoint(
                         "file_ids": all_file_ids,
                         # raw_text is None — agent fetches chunks from DB using file_ids
                     }
-                    background_tasks.add_task(run_injection_agent, payload)
+                    background_tasks.add_task(run_autopopulation_agent, payload)
                 else:
                     # Fallback: try single best document
                     source_doc_id = doc_db.get_best_source_document(case_id, user_id)
@@ -348,7 +348,7 @@ async def attach_case_to_draft_endpoint(
                             "case_id": str(case_id),
                             "source_document_id": source_doc_id,
                         }
-                        background_tasks.add_task(run_injection_agent, payload)
+                        background_tasks.add_task(run_autopopulation_agent, payload)
                     else:
                         logger.warning(
                             f"[attach_case] Case {case_id} has no files with content. Skipping auto-population."
@@ -526,20 +526,15 @@ async def rename_draft_endpoint(
 async def add_uploaded_file_to_draft(
     draft_id: str,
     user_id: int = Depends(require_user_id),
-    file_id: str = Body(None, embed=True),
-    body: Dict[str, Any] = Body(None),
+    body: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
     """
     Add an uploaded file to a draft.
-    This endpoint is called by the frontend after a file is uploaded.
-    Accepts file_id from either {"file_id": "..."} or direct body.
+    Body: { "file_id": "..." }  (also accepts "fileId")
     """
     try:
-        # Try to get file_id from either parameter or body
-        actual_file_id = file_id
-        if not actual_file_id and body:
-            actual_file_id = body.get("file_id") or body.get("fileId")
-        
+        actual_file_id = body.get("file_id") or body.get("fileId")
+
         if not actual_file_id:
             raise HTTPException(status_code=400, detail="file_id is required")
         

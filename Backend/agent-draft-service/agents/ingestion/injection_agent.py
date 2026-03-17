@@ -1,5 +1,5 @@
 """
-InjectionAgent v2: Auto-extract and synthesize ALL template form fields from case documents.
+AutopopulationAgent v2: Auto-extract and synthesize ALL template form fields from case documents.
 
 Key improvements over v1:
 - Uses Claude claude-haiku-4-5-20251001 (or configured model from DB) — superior legal comprehension
@@ -16,6 +16,7 @@ step after document ingestion in orchestrate_upload.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Default: Claude Haiku 4.5 — fast, cost-efficient, excellent at legal extraction
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 
 # Field types that should be strictly extracted (no synthesis)
 # NOTE: "string" is the most common type in templates (maps from JSON "type": "string")
@@ -47,6 +48,9 @@ SYNTHESIS_TYPES = {
 # When total chunks for all files is below this threshold, fetch ALL chunks
 # instead of using RAG selection (ensures complete document coverage for short docs)
 FULL_DOC_CHUNK_THRESHOLD = 80
+FULL_TEXT_MAX_CHARS = 120000
+FIELD_CONTEXT_MAX_CHARS = 24000
+MAX_PARALLEL_FIELD_CALLS = 8
 
 # Termination reasons (used in return contract)
 REASON_SCHEMA_MISSING = "schema_missing"
@@ -100,6 +104,99 @@ def _classify_fields(fields_schema: List[Dict[str, Any]]) -> tuple[List[Dict], L
         else:
             extractable.append(f)
     return extractable, synthesis
+
+
+def _normalize_field_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=True)
+        except Exception:
+            return str(value).strip()
+    return str(value).strip()
+
+
+def _truncate_text(value: str, max_chars: int) -> str:
+    if not value:
+        return ""
+    return value[:max_chars] if len(value) > max_chars else value
+
+
+def _field_lookup_keys(field: Dict[str, Any]) -> set[str]:
+    keys = {
+        _normalize_field_token(field.get("field_id")),
+        _normalize_field_token(field.get("field_name")),
+        _normalize_field_token(field.get("field_label")),
+    }
+    return {key for key in keys if key}
+
+
+def _resolve_section_field_mappings(template_id: str, fields_schema: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Build field_name -> section metadata using template_analysis_sections.section_prompts.
+    """
+    mapping: Dict[str, Dict[str, Any]] = {}
+    if not template_id or not fields_schema:
+        return mapping
+
+    try:
+        from services.draft_db import get_template_analysis_sections
+        sections = get_template_analysis_sections(str(template_id))
+    except Exception as e:
+        logger.warning("[InjectionAgent][SECTION_MAP] Could not fetch section mappings: %s", e)
+        return mapping
+
+    token_to_field_names: Dict[str, List[str]] = {}
+    for field in fields_schema:
+        field_name = field.get("field_name")
+        if not field_name:
+            continue
+        for token in _field_lookup_keys(field):
+            token_to_field_names.setdefault(token, []).append(field_name)
+
+    for section in sections:
+        prompts = section.get("section_prompts") or []
+        if isinstance(prompts, dict):
+            prompts = [prompts]
+        if not isinstance(prompts, list):
+            continue
+
+        default_prompt = ""
+        for idx, prompt_item in enumerate(prompts):
+            if not isinstance(prompt_item, dict):
+                continue
+
+            prompt_text = _safe_text(prompt_item.get("prompt"))
+            if idx == 0 and prompt_text:
+                default_prompt = prompt_text
+
+            field_ref = (
+                prompt_item.get("field_id")
+                or prompt_item.get("field_name")
+                or prompt_item.get("field_key")
+            )
+            matched_fields = token_to_field_names.get(_normalize_field_token(field_ref), []) if field_ref else []
+            if not matched_fields:
+                continue
+
+            for field_name in matched_fields:
+                mapping[field_name] = {
+                    "section_key": _safe_text(section.get("section_key")) or _normalize_field_token(section.get("section_name")),
+                    "section_name": _safe_text(section.get("section_name")) or "section",
+                    "section_purpose": _safe_text(section.get("section_purpose")),
+                    "section_intro": _safe_text(section.get("section_intro")),
+                    "default_prompt": default_prompt,
+                    "field_prompt": prompt_text,
+                }
+
+    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +288,246 @@ Return ONLY a valid JSON object. No markdown fences, no explanation text.
 Use exactly the field names shown above as JSON keys.
 Example: {{"licensor_name": "Ramesh Kumar", "licensor_age": 45, "agreement_date_in_words": "First day of January, Two Thousand Twenty-Four"}}
 
-CRITICAL: Extract values for ALL fields listed. Missing nothing.
+    CRITICAL: Extract values for ALL fields listed. Missing nothing.
 """
     return prompt
+
+
+def _build_field_extraction_prompt(
+    field: Dict[str, Any],
+    field_context: str,
+    full_document_text: str,
+    section_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    field_name = field.get("field_name", "")
+    field_label = field.get("field_label") or field_name
+    field_type = (field.get("field_type") or "text").lower().strip()
+    is_synthesis = _is_synthesis_field(field)
+    instructions = []
+
+    hint = _safe_text(field.get("help_text") or field.get("placeholder"))
+    if hint:
+        instructions.append(f"Field hint: {hint}")
+    validation_rules = _safe_text(field.get("validation_rules"))
+    if validation_rules:
+        instructions.append(f"Validation rules: {validation_rules}")
+    options = _safe_text(field.get("options"))
+    if options:
+        instructions.append(f"Allowed options: {options}")
+    if section_meta:
+        section_name = _safe_text(section_meta.get("section_name"))
+        section_purpose = _safe_text(section_meta.get("section_purpose"))
+        section_prompt = _safe_text(section_meta.get("field_prompt") or section_meta.get("default_prompt"))
+        if section_name:
+            instructions.append(f"Template section: {section_name}")
+        if section_purpose:
+            instructions.append(f"Section purpose: {section_purpose}")
+        if section_prompt:
+            instructions.append(f"Section prompt: {section_prompt}")
+
+    extraction_rule = (
+        "Extract the exact supported value. Return null only if the value is genuinely absent."
+        if not is_synthesis else
+        "Compose the value from supported facts in the database text. Return null only if there is truly no support."
+    )
+    formatting_rule = (
+        "Return plain scalar text with no markdown."
+        if field_type in EXTRACTABLE_TYPES else
+        "Return plain text only. Use clean numbering only when the field naturally needs multiple points."
+    )
+
+    instruction_block = "\n".join(f"- {item}" for item in instructions) if instructions else "- Use the field label and field type carefully."
+    return f"""You are filling exactly one legal template field from case documents stored in the database.
+
+FIELD:
+- key: {field_name}
+- label: {field_label}
+- type: {field_type}
+- required: {"yes" if field.get("is_required") else "no"}
+
+RULES:
+{instruction_block}
+- {extraction_rule}
+- {formatting_rule}
+- Prefer the targeted context first, then use the complete database text to fill missing detail.
+- Do not invent unsupported parties, dates, addresses, amounts, or legal claims.
+
+TARGETED FIELD CONTEXT:
+{field_context or "(none)"}
+
+COMPLETE DATABASE TEXT:
+{full_document_text or "(none)"}
+
+OUTPUT:
+Return ONLY valid JSON in this exact shape:
+{{"field_name": "{field_name}", "value": <value or null>}}
+"""
+
+
+def _parse_single_field_result(raw_text: str, expected_field_name: str) -> Optional[Any]:
+    parsed = _parse_llm_json(raw_text)
+    if not isinstance(parsed, dict):
+        return None
+    actual_name = parsed.get("field_name")
+    if actual_name and _normalize_field_token(actual_name) != _normalize_field_token(expected_field_name):
+        logger.warning(
+            "[InjectionAgent][FIELD_PARSE] Expected field %s but got %s",
+            expected_field_name,
+            actual_name,
+        )
+    return parsed.get("value")
+
+
+def _build_field_query(field: Dict[str, Any], section_meta: Optional[Dict[str, Any]] = None) -> str:
+    parts = [
+        _safe_text(field.get("field_label")),
+        _safe_text(field.get("field_name")),
+        _safe_text(field.get("help_text")),
+        _safe_text(field.get("placeholder")),
+        _safe_text((section_meta or {}).get("section_name")),
+        _safe_text((section_meta or {}).get("section_purpose")),
+    ]
+    query = " ".join(part for part in parts if part)
+    return query or _safe_text(field.get("field_name")) or "legal field details"
+
+
+def _fetch_targeted_field_context(
+    file_ids: Optional[List[str]],
+    user_id: Any,
+    field: Dict[str, Any],
+    section_meta: Optional[Dict[str, Any]] = None,
+    max_chars: int = FIELD_CONTEXT_MAX_CHARS,
+) -> str:
+    if not file_ids:
+        return ""
+    try:
+        from services.db import find_nearest_chunks
+        from services.embedding_service import generate_embeddings
+
+        query = _build_field_query(field, section_meta)
+        embeddings = generate_embeddings([query])
+        if not embeddings or not embeddings[0]:
+            return ""
+
+        rows = find_nearest_chunks(
+            embedding=embeddings[0],
+            limit=12,
+            file_ids=file_ids,
+            user_id=int(user_id),
+        )
+        parts: List[str] = []
+        total_chars = 0
+        for row in rows:
+            content = _safe_text(row.get("content"))
+            if not content:
+                continue
+            heading = _safe_text(row.get("heading"))
+            page = row.get("page_start")
+            prefix = f"[{heading}] " if heading else (f"[Page {page}] " if page is not None else "")
+            block = f"{prefix}{content}"
+            if total_chars + len(block) > max_chars:
+                remaining = max_chars - total_chars
+                if remaining > 0:
+                    parts.append(block[:remaining])
+                break
+            parts.append(block)
+            total_chars += len(block)
+        return "\n\n---\n\n".join(parts)
+    except Exception as e:
+        logger.warning(
+            "[InjectionAgent][FIELD_CONTEXT] Targeted retrieval failed for %s: %s",
+            field.get("field_name"),
+            e,
+        )
+        return ""
+
+
+def _extract_field_with_llm(
+    field: Dict[str, Any],
+    file_ids: Optional[List[str]],
+    user_id: Any,
+    full_document_text: str,
+    model: str,
+    system_prompt: str,
+    temperature: float,
+    section_meta: Optional[Dict[str, Any]] = None,
+) -> tuple[str, Any]:
+    from services.llm_service import call_llm
+
+    field_name = field.get("field_name") or ""
+    targeted_context = _fetch_targeted_field_context(file_ids, user_id, field, section_meta)
+    prompt = _build_field_extraction_prompt(
+        field=field,
+        field_context=targeted_context,
+        full_document_text=_truncate_text(full_document_text, FULL_TEXT_MAX_CHARS),
+        section_meta=section_meta,
+    )
+
+    response = call_llm(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        model=model,
+        temperature=temperature,
+        response_mime_type="application/json",
+    )
+    return field_name, _parse_single_field_result(response or "", field_name)
+
+
+def _run_parallel_field_extraction(
+    fields_schema: List[Dict[str, Any]],
+    file_ids: Optional[List[str]],
+    user_id: Any,
+    full_document_text: str,
+    template_id: str,
+    model: str,
+    system_prompt: str,
+    temperature: float,
+) -> Dict[str, Any]:
+    extracted: Dict[str, Any] = {}
+    if not fields_schema:
+        return extracted
+
+    section_map = _resolve_section_field_mappings(template_id, fields_schema)
+    max_workers = max(1, min(MAX_PARALLEL_FIELD_CALLS, len(fields_schema)))
+    logger.info(
+        "[InjectionAgent][PARALLEL] Running parallel extraction for %d fields with %d workers",
+        len(fields_schema),
+        max_workers,
+    )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(
+                _extract_field_with_llm,
+                field,
+                file_ids,
+                user_id,
+                full_document_text,
+                model,
+                system_prompt,
+                temperature,
+                section_map.get(field.get("field_name") or ""),
+            ): field
+            for field in fields_schema
+            if field.get("field_name")
+        }
+
+        for future in as_completed(future_map):
+            field = future_map[future]
+            field_name = field.get("field_name") or ""
+            try:
+                _, value = future.result()
+                extracted[field_name] = value
+                logger.info(
+                    "[InjectionAgent][PARALLEL] Completed field '%s' (%s)",
+                    field_name,
+                    "filled" if value not in (None, "") else "empty",
+                )
+            except Exception as e:
+                logger.exception("[InjectionAgent][PARALLEL] Field '%s' failed: %s", field_name, e)
+                extracted[field_name] = None
+
+    return extracted
 
 
 def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
@@ -239,7 +573,7 @@ def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
 # Main agent entry point
 # ---------------------------------------------------------------------------
 
-def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
+def run_autopopulation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run the InjectionAgent. Extracts and synthesizes ALL template field values from case documents.
 
@@ -363,13 +697,12 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ------------------------------------------------------------------
-    # Step 5: Build dual-mode LLM prompt
+    # Step 5: Parallel extraction uses per-field prompts, so no single monolithic prompt here
     # ------------------------------------------------------------------
-    prompt = _build_extraction_prompt(fields_schema, document_text)
-    logger.info("[InjectionAgent][PROMPT] Prompt built: %d chars, %d fields", len(prompt), len(fields_schema))
+    logger.info("[InjectionAgent][PROMPT] Using section-aware per-field prompts for %d fields", len(fields_schema))
 
     # ------------------------------------------------------------------
-    # Step 6: Resolve model — DB config → default Claude Haiku 4.5
+    # Step 6: Resolve model — DB config → default Claude Sonnet 4.5
     # ------------------------------------------------------------------
     model = DEFAULT_MODEL
     db_system_prompt = ""
@@ -395,27 +728,19 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning("[InjectionAgent][CONFIG] Could not fetch agent config: %s — using default", e)
 
     # ------------------------------------------------------------------
-    # Step 7: Call LLM
+    # Step 7: Call LLMs in parallel, one field at a time
     # ------------------------------------------------------------------
     try:
-        from services.llm_service import call_llm
-
-        logger.info("[InjectionAgent][LLM] Calling model=%s, temperature=%s", model, temperature)
-        llm_response = call_llm(
-            prompt=prompt,
-            system_prompt=db_system_prompt,
+        parsed_fields = _run_parallel_field_extraction(
+            fields_schema=fields_schema,
+            file_ids=resolved_file_ids,
+            user_id=user_id,
+            full_document_text=document_text,
+            template_id=str(template_id),
             model=model,
+            system_prompt=db_system_prompt,
             temperature=temperature,
-            # Force JSON output for Gemini models; Claude ignores this (uses prompt instruction)
-            response_mime_type="application/json",
         )
-
-        if not llm_response:
-            logger.error("[InjectionAgent][LLM] LLM returned no content")
-            _safe_update_status(template_id, user_id, draft_session_id, "failed", "LLM returned no content")
-            return _terminated(REASON_AI_FAILURE, "LLM returned no content")
-
-        logger.info("[InjectionAgent][LLM] Response received: %d chars", len(llm_response))
 
     except Exception as e:
         logger.exception("[InjectionAgent][LLM] LLM call failed")
@@ -423,9 +748,24 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         return _terminated(REASON_AI_FAILURE, f"LLM call failed: {e}")
 
     # ------------------------------------------------------------------
-    # Step 8: Parse JSON response
+    # Step 8: Fallback to legacy single-shot extraction if parallel mode returned nothing
     # ------------------------------------------------------------------
-    parsed_fields = _parse_llm_json(llm_response)
+    if not any(value not in (None, "") for value in parsed_fields.values()):
+        try:
+            from services.llm_service import call_llm
+
+            prompt = _build_extraction_prompt(fields_schema, document_text)
+            logger.info("[InjectionAgent][LLM] Parallel mode returned no values; retrying legacy single prompt")
+            llm_response = call_llm(
+                prompt=prompt,
+                system_prompt=db_system_prompt,
+                model=model,
+                temperature=temperature,
+                response_mime_type="application/json",
+            )
+            parsed_fields = _parse_llm_json(llm_response or "")
+        except Exception as e:
+            logger.warning("[InjectionAgent][LLM] Legacy fallback failed: %s", e)
 
     if parsed_fields is None:
         logger.error("[InjectionAgent][JSON_PARSE] Could not parse LLM response as JSON")
@@ -589,6 +929,10 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     return result
+
+
+# Backwards-compatible alias so existing "InjectionAgent" wiring keeps working
+run_injection_agent = run_autopopulation_agent
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +1114,53 @@ def _fetch_ordered_text(
     return None
 
 
+def _fetch_full_text_from_db(
+    file_ids: Optional[List[str]],
+    user_id: Any,
+    max_chars: int = FULL_TEXT_MAX_CHARS,
+) -> Optional[str]:
+    """
+    Prefer the complete full_text_content already stored in Document DB before rebuilding
+    context from chunks. This gives the extractor the most complete JSON/text payload available.
+    """
+    if not file_ids:
+        return None
+    try:
+        from services.db import get_files_full_text
+
+        rows = get_files_full_text(file_ids, user_id)
+        if not rows:
+            return None
+
+        parts: List[str] = []
+        total_chars = 0
+        for row in rows:
+            full_text = _safe_text(row.get("full_text_content"))
+            if not full_text:
+                continue
+            title = _safe_text(row.get("originalname")) or str(row.get("id"))
+            block = f"[FILE: {title}]\n{full_text}"
+            if total_chars + len(block) > max_chars:
+                remaining = max_chars - total_chars
+                if remaining > 0:
+                    parts.append(block[:remaining])
+                break
+            parts.append(block)
+            total_chars += len(block)
+
+        if parts:
+            combined = "\n\n---\n\n".join(parts)
+            logger.info(
+                "[InjectionAgent][DOC_FETCH] Loaded full_text_content from DB for %d files (%d chars)",
+                len(parts),
+                len(combined),
+            )
+            return combined
+    except Exception as e:
+        logger.warning("[InjectionAgent][DOC_FETCH] Could not fetch full_text_content from DB: %s", e)
+    return None
+
+
 def _count_total_chunks(file_ids: List[str]) -> int:
     """Count total chunks across all given file IDs (used to decide full-doc vs RAG strategy)."""
     try:
@@ -817,6 +1208,10 @@ def _resolve_document_text(
     if not file_ids:
         logger.warning("[InjectionAgent][DOC_FETCH] No raw_text and no file_ids provided")
         return None
+
+    db_text = _fetch_full_text_from_db(file_ids, user_id, max_chars=FULL_TEXT_MAX_CHARS)
+    if db_text and db_text.strip():
+        return db_text
 
     # Check total chunk count to decide strategy
     total_chunks = _count_total_chunks(file_ids)

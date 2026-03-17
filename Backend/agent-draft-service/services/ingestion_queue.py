@@ -83,10 +83,34 @@ def _worker_loop() -> None:
             logger.exception("Worker loop error: %s", e)
 
 
+def _run_autopopulation_background(payload: Dict[str, Any]) -> None:
+    """Run autopopulation agent with all file_ids once all documents in a draft job are ingested."""
+    try:
+        from agents.ingestion.autopopulation_agent import run_autopopulation_agent
+        file_count = len(payload.get("file_ids") or [])
+        logger.info(
+            "[ingestion_queue] Running autopopulation for draft_session_id=%s with %d file(s)",
+            payload.get("draft_session_id"), file_count,
+        )
+        result = run_autopopulation_agent(payload)
+        logger.info(
+            "[ingestion_queue] Autopopulation complete: status=%s, filled=%d fields",
+            result.get("status"),
+            len(result.get("extracted_fields") or {}),
+        )
+    except Exception as e:
+        logger.warning("[ingestion_queue] Autopopulation failed (non-blocking): %s", e)
+
+
 def _on_document_job_done(job_id: str, draft_job_id: Optional[str]) -> None:
-    """When a document job finishes or fails, check if all docs in this draft job are done; if so mark draft job complete."""
+    """When a document job finishes or fails, check if all docs in this draft job are done.
+    If so, mark draft job complete and trigger autopopulation with ALL collected file_ids."""
     if not draft_job_id:
         return
+
+    trigger_autopopulation = False
+    autopopulation_payload: Optional[Dict[str, Any]] = None
+
     with _draft_jobs_lock:
         draft = _draft_jobs.get(draft_job_id)
         if not draft:
@@ -99,6 +123,35 @@ def _on_document_job_done(job_id: str, draft_job_id: Optional[str]) -> None:
             draft["status"] = "complete"
             draft["updated_at"] = time.time()
             logger.info("Draft job %s complete: all %s document jobs finished", draft_job_id, len(doc_ids))
+
+            # Build autopopulation payload if we have what we need
+            template_id = draft.get("template_id")
+            draft_id = draft.get("draft_id")
+            user_id = draft.get("user_id")
+            if template_id and draft_id and user_id:
+                with _states_lock:
+                    all_file_ids = [
+                        _job_states[jid]["file_id"]
+                        for jid in doc_ids
+                        if _job_states.get(jid, {}).get("status") == "finished"
+                        and _job_states[jid].get("file_id")
+                    ]
+                if all_file_ids:
+                    trigger_autopopulation = True
+                    autopopulation_payload = {
+                        "template_id": template_id,
+                        "user_id": user_id,
+                        "draft_session_id": draft_id,
+                        "file_ids": all_file_ids,
+                    }
+
+    # Run autopopulation outside the lock — it's a long-running LLM call
+    if trigger_autopopulation and autopopulation_payload:
+        threading.Thread(
+            target=_run_autopopulation_background,
+            args=(autopopulation_payload,),
+            daemon=True,
+        ).start()
 
 
 def _ensure_workers_started() -> None:
@@ -142,6 +195,7 @@ def enqueue_draft_job(
             "draft_job_id": draft_job_id,
             "draft_id": draft_id,
             "user_id": user_id,
+            "template_id": template_id,  # needed for post-completion autopopulation
             "document_job_ids": [],
             "status": "processing",
             "created_at": time.time(),

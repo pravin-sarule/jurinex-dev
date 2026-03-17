@@ -104,6 +104,41 @@ def update_file_full_text(file_id: str, full_text: str) -> None:
             )
 
 
+def get_files_full_text(
+    file_ids: List[str],
+    user_id: int | str,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch full_text_content for specific files owned by the user.
+    Returns rows ordered by created_at so multi-document case context stays stable.
+    """
+    valid = [f for f in (file_ids or []) if f and _is_uuid(f)]
+    if not valid:
+        return []
+
+    uid_str = str(user_id)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    originalname,
+                    folder_path,
+                    gcs_path,
+                    full_text_content,
+                    created_at
+                FROM user_files
+                WHERE id = ANY(%s::uuid[])
+                  AND user_id = %s
+                ORDER BY created_at ASC, originalname ASC
+                """,
+                (valid, uid_str),
+            )
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 def update_file_processed(file_id: str) -> None:
     """Mirrors documentModel.updateFileProcessedAt."""
     with get_conn() as conn:

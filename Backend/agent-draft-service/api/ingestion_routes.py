@@ -78,7 +78,7 @@ async def ingest_document(
     }
 
 
-# ---- Field Extraction (InjectionAgent) ------------------------------------
+# ---- Field Extraction (Autopopulation agent) ------------------------------
 
 class ExtractFieldsRequest(BaseModel):
     """Request body for POST /api/extract-fields."""
@@ -94,7 +94,7 @@ async def extract_fields(
     user_id: int = Depends(require_user_id),
 ) -> Dict[str, Any]:
     """
-    Trigger the InjectionAgent to extract template field values from a document.
+    Trigger the Autopopulation agent to extract template field values from a document.
 
     The agent reads the document text (from raw_text or source_document_id),
     extracts ONLY the fields allowed by the template schema, and upserts
@@ -112,7 +112,7 @@ async def extract_fields(
     )
 
     try:
-        from agents.ingestion.injection_agent import run_injection_agent
+        from agents.ingestion.autopopulation_agent import run_autopopulation_agent
 
         payload = {
             "template_id": body.template_id,
@@ -121,7 +121,7 @@ async def extract_fields(
             "source_document_id": body.source_document_id,
             "raw_text": body.raw_text,
         }
-        result = run_injection_agent(payload)
+        result = run_autopopulation_agent(payload)
 
     except Exception as e:
         logger.exception("[API] extract-fields failed unexpectedly")
@@ -201,29 +201,27 @@ async def orchestrate_upload(
         except Exception as e:
             logger.warning("Could not link file to draft: %s", e)
 
-    # --- Best-effort InjectionAgent: auto-extract fields if template_id given ---
+    # --- Best-effort autopopulation: extract fields if template_id given ---
     template_id_val = upload_payload.get("template_id") or (template_id.strip() if template_id else "")
     if template_id_val and file_id:
         try:
-            from agents.ingestion.injection_agent import run_injection_agent
+            from agents.ingestion.autopopulation_agent import run_autopopulation_agent
 
-            raw_text = (state.get("raw_text") or "").strip()
-            injection_payload = {
+            autopopulation_payload = {
                 "template_id": template_id_val,
                 "user_id": user_id,
                 "draft_session_id": draft_id_from_upload,
-                "source_document_id": file_id,
-                "raw_text": raw_text if raw_text else None,
+                "file_ids": [file_id],
             }
-            injection_result = run_injection_agent(injection_payload)
+            autopopulation_result = run_autopopulation_agent(autopopulation_payload)
             logger.info(
-                "InjectionAgent completed: status=%s, extracted=%d fields",
-                injection_result.get("status"),
-                len(injection_result.get("extracted_fields") or {}),
+                "Autopopulation completed: status=%s, extracted=%d fields",
+                autopopulation_result.get("status"),
+                len(autopopulation_result.get("extracted_fields") or {}),
             )
         except Exception as e:
             # Best-effort: failure must NOT block the upload
-            logger.warning("InjectionAgent failed (non-blocking): %s", e)
+            logger.warning("Autopopulation failed (non-blocking): %s", e)
 
     if not final_document and state.get("chunks_count", 0) > 0:
         out: Dict[str, Any] = {

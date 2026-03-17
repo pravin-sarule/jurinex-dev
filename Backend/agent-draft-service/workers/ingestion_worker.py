@@ -72,21 +72,10 @@ def process_ingestion_job(payload: Dict[str, Any]) -> Dict[str, Any]:
             # Non-fatal: ingestion succeeded, only linking failed
             out["link_error"] = str(e)
 
-    # Best-effort InjectionAgent when template_id is provided
-    if template_id and file_id:
-        try:
-            from agents.ingestion.injection_agent import run_injection_agent
-            injection_payload = {
-                "template_id": template_id,
-                "user_id": user_id,
-                "draft_session_id": draft_id,
-                "source_document_id": file_id,
-                "raw_text": raw_text if raw_text else None,
-            }
-            run_injection_agent(injection_payload)
-            logger.info("InjectionAgent completed for file_id=%s", file_id)
-        except Exception as e:
-            logger.warning("InjectionAgent failed (non-blocking): %s", e)
-            out["injection_error"] = str(e)
+    # NOTE: Autopopulation is intentionally NOT run here for multi-doc drafts.
+    # Running it per-file causes race conditions and each run only has one document's
+    # context. Instead, ingestion_queue._on_document_job_done triggers a single
+    # autopopulation call with ALL file_ids once every document job is complete.
+    # Single-file uploads (no draft_id) still get autopopulation via the caller.
 
     return out
