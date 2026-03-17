@@ -32,9 +32,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 # Field types that should be strictly extracted (no synthesis)
-EXTRACTABLE_TYPES = {"text", "date", "number", "select", "email", "phone", "url", "integer", "float"}
+# NOTE: "string" is the most common type in templates (maps from JSON "type": "string")
+EXTRACTABLE_TYPES = {
+    "text", "string", "date", "number", "integer", "float",
+    "select", "email", "phone", "url", "address", "currency",
+    "short_text", "single_line",
+}
 # Field types that should be synthesized / composed from context
-SYNTHESIS_TYPES = {"textarea", "long_text", "paragraph", "rich_text", "multiline", "text_area"}
+SYNTHESIS_TYPES = {
+    "textarea", "long_text", "text_long", "paragraph", "rich_text",
+    "multiline", "text_area", "multi_line",
+}
+
+# When total chunks for all files is below this threshold, fetch ALL chunks
+# instead of using RAG selection (ensures complete document coverage for short docs)
+FULL_DOC_CHUNK_THRESHOLD = 80
 
 # Termination reasons (used in return contract)
 REASON_SCHEMA_MISSING = "schema_missing"
@@ -109,7 +121,7 @@ def _build_extraction_prompt(
     """
     extractable_fields, synthesis_fields = _classify_fields(fields_schema)
 
-    # Build extractable field descriptions
+    # Build extractable field descriptions with description hints
     extractable_block = ""
     if extractable_fields:
         lines = []
@@ -118,10 +130,12 @@ def _build_extraction_prompt(
             label = f.get("field_label", name)
             ftype = f.get("field_type", "text")
             req = " [REQUIRED]" if f.get("is_required") else ""
-            lines.append(f"  - {name} ({ftype}): {label}{req}")
+            hint = f.get("help_text") or f.get("placeholder") or ""
+            hint_part = f" — {hint}" if hint else ""
+            lines.append(f"  - {name} ({ftype}): {label}{req}{hint_part}")
         extractable_block = "\n".join(lines)
 
-    # Build synthesis field descriptions
+    # Build synthesis field descriptions with description hints
     synthesis_block = ""
     if synthesis_fields:
         lines = []
@@ -130,53 +144,54 @@ def _build_extraction_prompt(
             label = f.get("field_label", name)
             ftype = f.get("field_type", "textarea")
             req = " [REQUIRED]" if f.get("is_required") else ""
-            lines.append(f"  - {name} ({ftype}): {label}{req}")
+            hint = f.get("help_text") or f.get("placeholder") or ""
+            hint_part = f" — {hint}" if hint else ""
+            lines.append(f"  - {name} ({ftype}): {label}{req}{hint_part}")
         synthesis_block = "\n".join(lines)
 
-    prompt = f"""You are an expert legal document analyst. Populate ALL the fields listed below for a legal document template by analyzing the provided document context.
+    prompt = f"""You are an expert legal document analyst. Your task is to extract ALL field values from the document context below and return them as a single JSON object.
 
 DOCUMENT CONTEXT:
 {document_text}
 
 ==============================
-PART A — EXTRACTABLE FIELDS (text, date, number, select)
-Extract exact values from the document. Use common legal synonyms:
-  - petitioner = plaintiff = applicant = complainant = claimant
-  - respondent = defendant = accused = opposite party
+PART A — EXTRACT THESE FIELDS (text, string, date, number, address, currency)
+Read the document carefully and extract the exact values for each field.
+Important extraction rules:
+  - licensor = property owner = landlord = party of the first part
+  - licensee = tenant = occupant = party of the second part = person paying rent
+  - For agreement_date_in_words: convert the date to words, e.g. "First day of January, Two Thousand Twenty-Four"
   - For dates: use DD/MM/YYYY format
-  - For court/case numbers: extract exactly as written
-  - Return null ONLY if absolutely no related information exists anywhere in the document
+  - For currency/amounts: extract the numeric value only (e.g., 25000)
+  - For amounts in words: e.g., "Twenty-Five Thousand Only"
+  - For addresses: include the complete address as one string
+  - For parentage (S/o, D/o, W/o): look for "son of", "daughter of", "wife of" or abbreviations S/o, D/o, W/o
+  - For PAN: look for a 10-character alphanumeric code (e.g., ABCDE1234F)
+  - For Aadhaar: look for a 12-digit number
+  - For boundaries (North/South/East/West): look in the schedule or boundary table
+  - Return null ONLY if the value is genuinely absent from the entire document
 
 FIELDS TO EXTRACT:
 {extractable_block if extractable_block else "(none)"}
 
 ==============================
-PART B — SYNTHESIS FIELDS (textarea, paragraph, long_text)
-Compose comprehensive, legally appropriate plain text content based on ALL available context.
-These fields require intelligent synthesis — DO NOT return null for these.
-Guidelines:
-  - facts_of_case / case_facts / background: Write numbered paragraphs (1., 2., 3.) describing who the parties are, what happened, chronology of events, key dates, amounts, and relevant circumstances
-  - grounds / legal_grounds: Write lettered grounds (a., b., c.) with legal arguments and basis for the claim
-  - prayer_reliefs / relief_sought / prayers: Write what relief/orders/directions are being sought, e.g. "a. That... b. That..."
-  - questions_of_law: Write the legal questions raised in the case
-  - interim_relief: Write the urgent relief sought pending final disposal
-  - For any other synthesis field: Compose a thorough, coherent paragraph drawn from the document context
-  - Write in plain text only. No markdown, no bullet symbols (use letters/numbers instead).
-  - If context is limited, write what can be reasonably inferred and composed from available information
+PART B — SYNTHESIZE THESE FIELDS (textarea, paragraph, long_text)
+Compose well-written plain text content from the available document context.
+DO NOT return null for these — always compose something meaningful.
+  - Write in plain text only (no markdown, no special symbols)
+  - Use numbered lists (1., 2., 3.) for facts/background
+  - Use lettered items (a., b., c.) for grounds and prayers
 
 FIELDS TO SYNTHESIZE:
 {synthesis_block if synthesis_block else "(none)"}
 
 ==============================
 OUTPUT FORMAT:
-Return ONLY a valid JSON object. No markdown, no explanation, no code blocks.
-Keys must exactly match the field names listed above.
-Example: {{"field_name_1": "extracted value", "field_name_2": "Composed paragraph text..."}}
+Return ONLY a valid JSON object. No markdown fences, no explanation text.
+Use exactly the field names shown above as JSON keys.
+Example: {{"licensor_name": "Ramesh Kumar", "licensor_age": 45, "agreement_date_in_words": "First day of January, Two Thousand Twenty-Four"}}
 
-IMPORTANT:
-- Fill EVERY field to the best of your ability using the document context
-- For synthesis fields, always provide composed content — never return null
-- Only return null for extractable fields where the value genuinely cannot be found
+CRITICAL: Extract values for ALL fields listed. Missing nothing.
 """
     return prompt
 
@@ -391,6 +406,8 @@ def run_injection_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
             system_prompt=db_system_prompt,
             model=model,
             temperature=temperature,
+            # Force JSON output for Gemini models; Claude ignores this (uses prompt instruction)
+            response_mime_type="application/json",
         )
 
         if not llm_response:
@@ -753,6 +770,23 @@ def _fetch_ordered_text(
     return None
 
 
+def _count_total_chunks(file_ids: List[str]) -> int:
+    """Count total chunks across all given file IDs (used to decide full-doc vs RAG strategy)."""
+    try:
+        from services.db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM file_chunks WHERE file_id = ANY(%s::uuid[])",
+                    (file_ids,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as e:
+        logger.warning("[InjectionAgent][CHUNK_COUNT] Could not count chunks: %s", e)
+        return 9999  # Unknown → assume large, use RAG
+
+
 def _resolve_document_text(
     raw_text: Optional[str],
     file_ids: Optional[List[str]],
@@ -760,12 +794,16 @@ def _resolve_document_text(
     fields_schema: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
-    Resolve document context using multi-doc RAG (primary) or raw_text (if provided directly).
+    Resolve document context with smart strategy:
 
     Priority:
-      1. raw_text provided directly → use as-is (truncated to 60k chars if very large)
-      2. file_ids → multi-query RAG retrieval across ALL files in the list
-      3. Fallback → ordered chunk text from all files
+      1. raw_text provided directly → use as-is (truncated to 60k chars)
+      2. file_ids with SMALL total chunk count (≤ FULL_DOC_CHUNK_THRESHOLD):
+         → Fetch ALL chunks in page order (complete document coverage)
+         This is critical for complete agreements/contracts where every section has fields
+      3. file_ids with LARGE total chunk count:
+         → Multi-query RAG retrieval (top-50 semantically relevant chunks)
+      4. Fallback → ordered chunk text
     """
     if raw_text and raw_text.strip():
         text = raw_text.strip()
@@ -776,19 +814,38 @@ def _resolve_document_text(
             logger.info("[InjectionAgent][DOC_FETCH] Using provided raw_text (%d chars)", len(text))
         return text
 
-    if file_ids:
-        logger.info(
-            "[InjectionAgent][DOC_FETCH] Running multi-doc RAG retrieval for %d files",
-            len(file_ids),
-        )
-        return _fetch_context_via_rag(
-            fields_schema=fields_schema or [],
-            file_ids=file_ids,
-            user_id=user_id,
-        )
+    if not file_ids:
+        logger.warning("[InjectionAgent][DOC_FETCH] No raw_text and no file_ids provided")
+        return None
 
-    logger.warning("[InjectionAgent][DOC_FETCH] No raw_text and no file_ids provided")
-    return None
+    # Check total chunk count to decide strategy
+    total_chunks = _count_total_chunks(file_ids)
+    logger.info(
+        "[InjectionAgent][DOC_FETCH] Total chunks across %d files: %d (threshold=%d)",
+        len(file_ids), total_chunks, FULL_DOC_CHUNK_THRESHOLD,
+    )
+
+    if total_chunks <= FULL_DOC_CHUNK_THRESHOLD:
+        # Small document(s) — fetch ALL chunks for complete coverage
+        # This ensures a complete Leave and Licence Agreement / Sale Deed gets ALL its fields extracted
+        logger.info(
+            "[InjectionAgent][DOC_FETCH] Small document(s) — fetching ALL %d chunks in page order",
+            total_chunks,
+        )
+        full_text = _fetch_ordered_text(file_ids, user_id, max_chars=80000)
+        if full_text and full_text.strip():
+            return full_text
+
+    # Large document(s) or fallback — use RAG for targeted retrieval
+    logger.info(
+        "[InjectionAgent][DOC_FETCH] Using RAG retrieval for %d files (%d chunks)",
+        len(file_ids), total_chunks,
+    )
+    return _fetch_context_via_rag(
+        fields_schema=fields_schema or [],
+        file_ids=file_ids,
+        user_id=user_id,
+    )
 
 
 def _safe_update_status(
