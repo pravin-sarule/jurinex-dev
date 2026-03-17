@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import citationApi from '../services/citationApi';
 import documentApi from '../services/documentApi';
+import { CITATION_SERVICE_URL } from '../config/apiConfig';
 import html2pdf from 'html2pdf.js';
 
 /* ── tokens ── */
@@ -33,6 +34,279 @@ function _slaLabel(score) {
 function Dot({ c, s = 7 }) { return <span style={{ width: s, height: s, borderRadius: '50%', background: c, display: 'inline-block', flexShrink: 0 }} />; }
 function Spin() { return (<span style={{ display: 'inline-flex', gap: 4 }}>{[0, .18, .36].map((d, i) => <span key={i} style={{ width: 7, height: 7, borderRadius: '50%', background: T, animation: `sp 1.2s ${d}s ease-in-out infinite` }} />)}<style>{`@keyframes sp{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}`}</style></span>); }
 
+/* ─── Inline Citation Network (Manupatra-style SVG radial graph) ─── */
+let _icnCounter = 0;
+function InlineCitationNetwork({ c }) {
+  // Unique ID per instance so SVG defs (markers, gradients) don't conflict across multiple graphs on the same page
+  const uid = useRef(`icn${++_icnCounter}`).current;
+
+  const cites     = (c.ikCiteList    || []).slice(0, 7);
+  const citedBy   = (c.ikCitedByList || []).slice(0, 7);
+  const citeExtra = Math.max(0, (c.ikCiteList    || []).length - 7);
+  const cbyExtra  = Math.max(0, (c.ikCitedByList || []).length - 7);
+  if (!cites.length && !citedBy.length) return null;
+
+  // viewBox wide enough to hold labels without clipping
+  const VW = 860, VH = 420, CX = VW / 2, CY = VH / 2;
+  // Orbit: distance from center to satellite node centers
+  const ORBIT = 210, CR = 36, NR = 20;
+  // Label column X positions (labels are placed at these fixed X columns, not floating beside nodes)
+  const CITE_LABEL_X = 14;   // right-aligned label column for CITES
+  const CBY_LABEL_X  = VW - 14; // left-aligned label column for CITED BY
+  const toRad = d => (d * Math.PI) / 180;
+
+  const placeArc = (items, startDeg, endDeg) => {
+    if (!items.length) return [];
+    const s = toRad(startDeg), e = toRad(endDeg);
+    return items.map((item, i) => {
+      const t = items.length === 1 ? 0.5 : i / (items.length - 1);
+      const a = s + t * (e - s);
+      const x = CX + ORBIT * Math.cos(a);
+      const y = CY + ORBIT * Math.sin(a);
+      return {
+        ...item,
+        id: `${uid}-${item.tid || i}`,
+        x, y,
+        label: item.title || `Doc #${item.tid}`,
+        url: item.url || (item.tid ? `https://indiankanoon.org/doc/${item.tid}/` : null),
+      };
+    });
+  };
+
+  // CITES on the left arc (135°→225°), CITED-BY on the right arc (−45°→45°)
+  const cnodes  = placeArc(cites,   135, 225);
+  const cbnodes = placeArc(citedBy, -45,  45);
+
+  const trim = (s, n = 30) => !s ? '—' : s.length > n ? s.slice(0, n - 1) + '…' : s;
+
+  // Edge endpoint helper — stops at the node circle surface
+  const ep = (x1, y1, x2, y2, r1, r2) => {
+    const dx = x2 - x1, dy = y2 - y1, d = Math.sqrt(dx * dx + dy * dy) || 1;
+    return { x1: x1 + (dx / d) * r1, y1: y1 + (dy / d) * r1,
+             x2: x2 - (dx / d) * r2, y2: y2 - (dy / d) * r2 };
+  };
+
+  // Center node label: split at word boundary to fit inside the circle (≤14 chars per line)
+  const centerWords = (c.caseName || '').split(/\s+/).filter(Boolean);
+  let cl1 = '', cl2 = '';
+  for (const w of centerWords) {
+    if (!cl1 && w.length <= 12) { cl1 = w; continue; }
+    if (cl1 && !cl2 && (cl1 + ' ' + w).length <= 12) { cl1 += ' ' + w; continue; }
+    if (!cl2 && w.length <= 12) { cl2 = w; continue; }
+    if (cl2 && (cl2 + ' ' + w).length <= 12) { cl2 += ' ' + w; continue; }
+    break;
+  }
+  if (!cl1) cl1 = (c.caseName || '').slice(0, 12);
+
+  const followed      = (c.treatment?.followedList      || []).slice(0, 4);
+  const distinguished = (c.treatment?.distinguishedList || []).slice(0, 4);
+  const overruled     = (c.treatment?.overruledList     || []).slice(0, 3);
+  const hasTreat = followed.length || distinguished.length || overruled.length;
+
+  return (
+    <div>
+      {/* Header bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    padding: '7px 14px', background: '#EEF6FA',
+                    border: '1px solid #C5E4EE', borderBottom: 'none', borderRadius: '6px 6px 0 0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#2563EB', display: 'inline-block' }} />
+          <span style={{ fontSize: 10, fontWeight: 700, color: '#1E40AF', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+            ← Cases Cited&nbsp;({(c.ikCiteList||[]).length})
+          </span>
+        </div>
+        <span style={{ fontSize: 9, color: '#64748B', fontStyle: 'italic', fontFamily: "'Source Serif 4',serif" }}>
+          {trim(c.caseName, 60)}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, color: '#0F766E', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+            Cited By&nbsp;({(c.ikCitedByList||[]).length})&nbsp;→
+          </span>
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#0D9488', display: 'inline-block' }} />
+        </div>
+      </div>
+
+      {/* SVG graph */}
+      <div style={{ background: '#F8FBFD', border: '1px solid #C5E4EE', borderRadius: '0 0 6px 6px', overflowX: 'auto' }}>
+        <svg viewBox={`0 0 ${VW} ${VH}`} style={{ display: 'block', width: '100%', minWidth: 520 }}>
+          <defs>
+            {/* Unique marker + gradient IDs per instance to avoid page-wide ID conflicts */}
+            <marker id={`arr-c-${uid}`}  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563EB" opacity="0.85" />
+            </marker>
+            <marker id={`arr-cb-${uid}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#0D9488" opacity="0.85" />
+            </marker>
+            <radialGradient id={`cgrad-${uid}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#2C4066" />
+              <stop offset="100%" stopColor="#1B2A4A" />
+            </radialGradient>
+            <clipPath id={`cnclip-${uid}`}>
+              <circle cx="0" cy="0" r={CR - 2} />
+            </clipPath>
+          </defs>
+
+          {/* Subtle concentric guide rings */}
+          <circle cx={CX} cy={CY} r={ORBIT} fill="none" stroke="#D4E8EE" strokeWidth="0.8" strokeDasharray="4 6" />
+          <circle cx={CX} cy={CY} r={ORBIT * 0.52} fill="none" stroke="#D4E8EE" strokeWidth="0.6" strokeDasharray="3 8" />
+
+          {/* ── Leader lines: node circle → label column (CITES, left) ── */}
+          {cnodes.map((n, i) => {
+            const ly = n.y;
+            return (
+              <polyline key={`cl-${n.id}`}
+                points={`${n.x - NR - 2},${n.y} ${CITE_LABEL_X + 160},${ly}`}
+                fill="none" stroke="#93C5FD" strokeWidth="0.9" strokeDasharray="3 3" opacity="0.7" />
+            );
+          })}
+          {/* ── Leader lines: node circle → label column (CITED BY, right) ── */}
+          {cbnodes.map((n, i) => {
+            const ly = n.y;
+            return (
+              <polyline key={`cbl-${n.id}`}
+                points={`${n.x + NR + 2},${n.y} ${CBY_LABEL_X - 160},${ly}`}
+                fill="none" stroke="#6EE7B7" strokeWidth="0.9" strokeDasharray="3 3" opacity="0.7" />
+            );
+          })}
+
+          {/* ── Edges — CITES (dashed arrow, center → satellite) ── */}
+          {cnodes.map(n => {
+            const p = ep(CX, CY, n.x, n.y, CR + 2, NR + 2);
+            return <line key={`ce-${n.id}`} x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2}
+              stroke="#2563EB" strokeWidth="1.5" strokeOpacity="0.45" strokeDasharray="5 3"
+              markerEnd={`url(#arr-c-${uid})`} />;
+          })}
+
+          {/* ── Edges — CITED BY (solid arrow, satellite → center) ── */}
+          {cbnodes.map(n => {
+            const p = ep(n.x, n.y, CX, CY, NR + 2, CR + 2);
+            return <line key={`cbe-${n.id}`} x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2}
+              stroke="#0D9488" strokeWidth="1.5" strokeOpacity="0.45"
+              markerEnd={`url(#arr-cb-${uid})`} />;
+          })}
+
+          {/* Center glow rings */}
+          <circle cx={CX} cy={CY} r={CR + 16} fill="#21C1B6" fillOpacity="0.06" />
+          <circle cx={CX} cy={CY} r={CR + 8}  fill="#21C1B6" fillOpacity="0.11" />
+
+          {/* Center node circle */}
+          <circle cx={CX} cy={CY} r={CR} fill={`url(#cgrad-${uid})`} stroke="#21C1B6" strokeWidth="2.5" />
+          {/* Center node label — clipped to circle, word-split */}
+          <text x={CX} y={CY + (cl2 ? -6 : 3)} textAnchor="middle" fontSize="9" fontWeight="700"
+            fill="#FFFFFF" fontFamily="'Source Sans 3',sans-serif">{cl1}</text>
+          {cl2 && <text x={CX} y={CY + 8} textAnchor="middle" fontSize="8.5" fontWeight="600"
+            fill="#CBD5E1" fontFamily="'Source Sans 3',sans-serif">{cl2}</text>}
+
+          {/* ── CITES satellite nodes (clickable) ── */}
+          {cnodes.map(n => (
+            <a key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer"
+               style={{ cursor: n.url ? 'pointer' : 'default' }}>
+              <title>{n.label}{n.docsource ? ` — ${n.docsource}` : ''}</title>
+              {/* Hit area */}
+              <circle cx={n.x} cy={n.y} r={NR + 4} fill="transparent" />
+              <circle cx={n.x} cy={n.y} r={NR} fill="#EFF6FF" stroke="#2563EB" strokeWidth="1.8" />
+              {/* Short abbreviation inside node */}
+              <text x={n.x} y={n.y + 3.5} textAnchor="middle" fontSize="7" fill="#1E40AF"
+                fontFamily="'Source Sans 3',sans-serif" fontWeight="700">
+                {(n.label || '').split(/\s+/).slice(0, 2).join(' ').slice(0, 10)}
+              </text>
+              {/* Full label in the left column */}
+              <text x={CITE_LABEL_X + 158} y={n.y + 4} textAnchor="end" fontSize="9" fill="#1E3A8A"
+                fontFamily="'Source Sans 3',sans-serif" fontWeight="600">{trim(n.label, 30)}</text>
+              {n.docsource && <text x={CITE_LABEL_X + 158} y={n.y + 15} textAnchor="end" fontSize="7.5"
+                fill="#94A3B8" fontFamily="'Source Sans 3',sans-serif">{n.docsource.slice(0, 24)}</text>}
+            </a>
+          ))}
+
+          {/* ── CITED BY satellite nodes (clickable) ── */}
+          {cbnodes.map(n => (
+            <a key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer"
+               style={{ cursor: n.url ? 'pointer' : 'default' }}>
+              <title>{n.label}{n.docsource ? ` — ${n.docsource}` : ''}</title>
+              {/* Hit area */}
+              <circle cx={n.x} cy={n.y} r={NR + 4} fill="transparent" />
+              <circle cx={n.x} cy={n.y} r={NR} fill="#F0FDFA" stroke="#0D9488" strokeWidth="1.8" />
+              {/* Short abbreviation inside node */}
+              <text x={n.x} y={n.y + 3.5} textAnchor="middle" fontSize="7" fill="#0F766E"
+                fontFamily="'Source Sans 3',sans-serif" fontWeight="700">
+                {(n.label || '').split(/\s+/).slice(0, 2).join(' ').slice(0, 10)}
+              </text>
+              {/* Full label in the right column */}
+              <text x={CBY_LABEL_X - 158} y={n.y + 4} textAnchor="start" fontSize="9" fill="#0F766E"
+                fontFamily="'Source Sans 3',sans-serif" fontWeight="600">{trim(n.label, 30)}</text>
+              {n.docsource && <text x={CBY_LABEL_X - 158} y={n.y + 15} textAnchor="start" fontSize="7.5"
+                fill="#94A3B8" fontFamily="'Source Sans 3',sans-serif">{n.docsource.slice(0, 24)}</text>}
+            </a>
+          ))}
+
+          {/* "+N more" overflow counters */}
+          {citeExtra > 0 && (
+            <text x={CITE_LABEL_X + 80} y={VH - 14} textAnchor="middle" fontSize="10" fill="#2563EB"
+              fontFamily="'Source Sans 3',sans-serif" fontWeight="700">+{citeExtra} more</text>
+          )}
+          {cbyExtra > 0 && (
+            <text x={CBY_LABEL_X - 80} y={VH - 14} textAnchor="middle" fontSize="10" fill="#0D9488"
+              fontFamily="'Source Sans 3',sans-serif" fontWeight="700">+{cbyExtra} more</text>
+          )}
+        </svg>
+      </div>
+
+      {/* Treatment badges */}
+      {hasTreat > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+          {followed.map((nm, i) => (
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#F0FDF4',
+              border: '1px solid #BBF7D0', borderRadius: 4, padding: '4px 10px', fontSize: 10, color: '#166534', fontWeight: 600 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16A34A', flexShrink: 0 }} />
+              Followed: {nm.slice(0, 38)}{nm.length > 38 ? '…' : ''}
+            </span>
+          ))}
+          {distinguished.map((nm, i) => (
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#FFFBEB',
+              border: '1px solid #FDE68A', borderRadius: 4, padding: '4px 10px', fontSize: 10, color: '#92400E', fontWeight: 600 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#D97706', flexShrink: 0 }} />
+              Distinguished: {nm.slice(0, 36)}{nm.length > 36 ? '…' : ''}
+            </span>
+          ))}
+          {overruled.map((nm, i) => (
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#FEF2F2',
+              border: '1px solid #FECACA', borderRadius: 4, padding: '4px 10px', fontSize: 10, color: '#991B1B', fontWeight: 600 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#DC2626', flexShrink: 0 }} />
+              Overruled: {nm.slice(0, 38)}{nm.length > 38 ? '…' : ''}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Legend */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 10, padding: '7px 14px',
+                    background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 4 }}>
+        <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase',
+                       letterSpacing: '.06em', alignSelf: 'center' }}>Legend</span>
+        {[
+          { col: '#2563EB', lbl: 'Cites (prior art)', dash: true },
+          { col: '#0D9488', lbl: 'Cited By (posterior)' },
+          { col: '#16A34A', lbl: 'Followed' },
+          { col: '#D97706', lbl: 'Distinguished' },
+          { col: '#DC2626', lbl: 'Overruled' },
+        ].map(({ col, lbl, dash }) => (
+          <div key={lbl} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <svg width="22" height="10" style={{ flexShrink: 0 }}>
+              <line x1="0" y1="5" x2="16" y2="5" stroke={col} strokeWidth="2"
+                strokeDasharray={dash ? '4 2' : undefined} />
+              <polygon points="13,2 20,5 13,8" fill={col} />
+            </svg>
+            <span style={{ fontSize: 9, color: '#475569', fontWeight: 600 }}>{lbl}</span>
+          </div>
+        ))}
+        <span style={{ fontSize: 9, color: '#64748B', marginLeft: 'auto', alignSelf: 'center' }}>
+          Click any node to open source
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Citation Force Graph (Canvas) ─── */
 const EDGE_COLORS = { FOLLOWS: '#16A34A', DISTINGUISHES: '#E65100', OVERRULES: '#B71C1C', CITES: '#0D47A1' };
 const NODE_COLORS = { FOLLOWS: '#16A34A', DISTINGUISHES: '#E65100', OVERRULES: '#B71C1C', CITES: '#0D47A1' };
@@ -41,6 +315,10 @@ function CitationGraphSVG({ nodes, edges }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const rafRef = useRef(null);
+  // posRef holds the live layout positions — shared between draw loop and event handlers
+  const posRef = useRef({});
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -68,7 +346,9 @@ function CitationGraphSVG({ nodes, edges }) {
 
     // Initialize positions — spread related nodes in a circle
     const related = nodes.filter(n => n.id !== center?.id);
-    const pos = {};
+    const pos = posRef.current;
+    // Reset
+    Object.keys(pos).forEach(k => delete pos[k]);
     if (center) pos[center.id] = { x: W / 2, y: H / 2, vx: 0, vy: 0, fixed: true };
     related.forEach((n, i) => {
       const angle = (i / Math.max(related.length, 1)) * 2 * Math.PI - Math.PI / 2;
@@ -117,7 +397,20 @@ function CitationGraphSVG({ nodes, edges }) {
 
     const shortLabel = (s, max = 22) => (!s ? '—' : s.length > max ? s.slice(0, max - 1) + '…' : s);
 
-    const draw = () => {
+    // Helper: find which node (if any) is under canvas coordinates (cx, cy)
+    const hitTest = (cx, cy) => {
+      for (const n of nodesRef.current) {
+        const p = pos[n.id];
+        if (!p) continue;
+        const isCenter = n.id === center?.id;
+        const r = isCenter ? 22 : 15;
+        const dx = cx - p.x, dy = cy - p.y;
+        if (dx * dx + dy * dy <= (r + 4) * (r + 4)) return n;
+      }
+      return null;
+    };
+
+    const draw = (hoverId = null) => {
       ctx.clearRect(0, 0, W, H);
 
       // Edges
@@ -138,23 +431,24 @@ function CitationGraphSVG({ nodes, edges }) {
         const p = pos[n.id];
         if (!p) return;
         const isCenter = n.id === center?.id;
+        const isHovered = n.id === hoverId;
         const r = isCenter ? 22 : 15;
         const color = isCenter ? '#1B2A4A' : (NODE_COLORS[nodeType[n.id]] || '#4B5563');
 
-        // Glow for center
-        if (isCenter) {
+        // Glow for center or hovered
+        if (isCenter || isHovered) {
           ctx.beginPath();
-          ctx.arc(p.x, p.y, r + 7, 0, Math.PI * 2);
-          ctx.fillStyle = '#21C1B620';
+          ctx.arc(p.x, p.y, r + (isHovered && !isCenter ? 5 : 7), 0, Math.PI * 2);
+          ctx.fillStyle = isCenter ? '#21C1B620' : color + '30';
           ctx.fill();
         }
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = color;
+        ctx.fillStyle = isHovered && !isCenter ? color + 'EE' : color;
         ctx.fill();
-        ctx.strokeStyle = isCenter ? '#21C1B6' : color + 'CC';
-        ctx.lineWidth = isCenter ? 2.5 : 1;
+        ctx.strokeStyle = isCenter ? '#21C1B6' : isHovered ? '#FFFFFF' : color + 'CC';
+        ctx.lineWidth = isCenter ? 2.5 : isHovered ? 2 : 1;
         ctx.stroke();
 
         // Label
@@ -162,21 +456,64 @@ function CitationGraphSVG({ nodes, edges }) {
         ctx.font = `${isCenter ? '600 ' : ''}11px sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = '#1E293B';
+        ctx.fillStyle = isHovered ? '#0F172A' : '#1E293B';
         ctx.fillText(label, p.x, p.y + r + 4);
+
+        // Clickable hint on hover
+        if (isHovered && !isCenter) {
+          const nodeData = nodesRef.current.find(nd => nd.id === n.id);
+          const hint = nodeData?.url ? '🔗 click to open' : '';
+          if (hint) {
+            ctx.font = '9px sans-serif';
+            ctx.fillStyle = '#64748B';
+            ctx.fillText(hint, p.x, p.y + r + 17);
+          }
+        }
       });
     };
 
     let frame = 0;
+    let hoveredId = null;
     const loop = () => {
       if (frame < 300) simulate();
-      draw();
+      draw(hoveredId);
       frame++;
       rafRef.current = requestAnimationFrame(loop);
     };
     rafRef.current = requestAnimationFrame(loop);
 
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    // Mouse move — update hover state
+    const onMouseMove = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = W / rect.width, scaleY = H / rect.height;
+      const cx = (e.clientX - rect.left) * scaleX;
+      const cy = (e.clientY - rect.top) * scaleY;
+      const hit = hitTest(cx, cy);
+      hoveredId = hit?.id || null;
+      canvas.style.cursor = (hit && hit.id !== center?.id) ? 'pointer' : 'default';
+    };
+
+    // Click — open URL
+    const onClick = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = W / rect.width, scaleY = H / rect.height;
+      const cx = (e.clientX - rect.left) * scaleX;
+      const cy = (e.clientY - rect.top) * scaleY;
+      const hit = hitTest(cx, cy);
+      if (!hit || hit.id === center?.id) return;
+      const url = hit.url || (hit.canonicalId ? `https://indiankanoon.org/doc/${hit.canonicalId}/` : null)
+                           || (hit.id ? `https://indiankanoon.org/doc/${hit.id}/` : null);
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    };
+
+    canvas.addEventListener('mousemove', onMouseMove);
+    canvas.addEventListener('click', onClick);
+
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      canvas.removeEventListener('mousemove', onMouseMove);
+      canvas.removeEventListener('click', onClick);
+    };
   }, [nodes, edges]);
 
   return (
@@ -366,15 +703,15 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
 .lbl{font-family:'Source Sans 3',sans-serif;font-size:8px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#94A3B8;margin-bottom:4px}
 .sub-h{font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#64748B;margin:14px 0 7px}
 .chip{display:inline-block;border:1px solid #BFDBFE;background:#EFF6FF;color:#1D4ED8;font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;padding:2px 8px;border-radius:3px;margin:2px 3px 2px 0}
-.ratio-block{border-left:3px solid #0EA5E9;background:#F0F9FF;padding:13px 16px;font-family:'Source Serif 4',serif;font-size:13px;font-style:italic;line-height:1.9;color:#0F172A}
+.ratio-block{border-left:3px solid #21C1B6;background:#F0FFFE;padding:16px 20px;font-family:'Source Serif 4',serif;font-size:15px;font-style:italic;line-height:2;color:#0F172A}.headnote-block{border-left:3px solid #21C1B6;background:#F0FFFE;border:1px solid #99E6E3;padding:16px 20px;border-radius:4px}
 .prop-box{border:1px solid #E2E8F0;background:#F8FAFC;padding:11px 14px;border-radius:4px}
-.excerpt-box{border:1px solid #E2E8F0;background:#FFFDF7;padding:13px 16px;font-family:'Source Serif 4',serif;font-size:12.5px;line-height:1.95;color:#1E293B;border-radius:4px}
+.excerpt-box{border:1px solid #D4E2E8;background:#FFFDFB;padding:16px 20px;font-family:'Source Serif 4',serif;font-size:14px;line-height:2;color:#1B2A4A;border-radius:4px}
 @media print{.paper{page-break-inside:avoid}.paper+.paper{page-break-before:always}}
 `;
 
   const titleHtml = `
 <div style="background:#FFFFFF;border:1px solid #D4D9E2;border-radius:6px;padding:40px 24px;text-align:center;margin-bottom:18px">
-  <div class="serif" style="font-size:22px;font-weight:700;color:#1E3A8A;margin-bottom:8px">JURINEX CITATION REPORT</div>
+  <div class="serif" style="font-size:22px;font-weight:700;color:#1B2A4A;margin-bottom:8px">JURINEX CITATION REPORT</div>
   <div class="sans" style="font-size:13px;color:#334155;margin-top:8px">${esc(query)}</div>
   <div class="sans" style="font-size:11px;color:#64748B;margin-top:14px">Generated: ${esc(generatedAt)}</div>
   <div class="sans" style="font-size:11px;color:#64748B;margin-top:6px">${citations.length} citation(s)</div>
@@ -548,8 +885,9 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
       </td>
     </tr></table>
 
-    <div style="margin:20px 0 10px;border-left:3px solid #1E3A8A;padding-left:9px">
-      <span class="sans" style="font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1E3A8A">I. Legal Analysis &amp; Ratio</span>
+    ${c.headnote && c.headnote.trim() ? `<div style="margin:22px 0 10px;border-left:3px solid #21C1B6;padding-left:9px"><span class="sans" style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1B2A4A">Judgment Headnote</span></div><div class="headnote-block">${c.headnote.split('\n').filter(l=>l.trim()).map(l=>`<div class="serif" style="font-size:14px;color:#1B2A4A;line-height:1.9;margin-bottom:9px">${esc(l)}</div>`).join('')}</div>` : ''}
+    <div style="margin:22px 0 10px;border-left:3px solid #21C1B6;padding-left:9px">
+      <span class="sans" style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1B2A4A">I. Legal Analysis &amp; Ratio</span>
     </div>
     <div class="ratio-block">"${esc(c.ratio || '—')}"</div>
 
@@ -573,8 +911,8 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
     <div class="sub-h">Source Excerpt (${esc(exc.para || 'Para —')})</div>
     <div class="excerpt-box">"${esc(excerptText)}"</div>
 
-    <div style="margin:24px 0 10px;border-left:3px solid #1E3A8A;padding-left:9px">
-      <span class="sans" style="font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1E3A8A">II. Subsequent Treatment</span>
+    <div style="margin:24px 0 10px;border-left:3px solid #21C1B6;padding-left:9px">
+      <span class="sans" style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1B2A4A">II. Subsequent Treatment</span>
     </div>
     ${treatStats3}
     ${secondaryHtml}
@@ -582,7 +920,7 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
 
     <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;padding-top:14px;border-top:1px solid #E2E8F0"><tr>
       <td style="vertical-align:bottom">
-        <div class="sans" style="font-size:8px;font-weight:700;letter-spacing:.15em;color:#1E3A8A;text-transform:uppercase;margin-bottom:4px">Jurinex Legal Intelligence Report</div>
+        <div class="sans" style="font-size:9px;font-weight:700;letter-spacing:.15em;color:#1B2A4A;text-transform:uppercase;margin-bottom:4px">Jurinex Legal Intelligence Report</div>
         <div class="sans" style="font-size:9px;color:#94A3B8;margin-bottom:2px">Generated on ${esc(generatedAt || '—')}</div>
         ${srcLinkHtml}
         <span style="display:inline-block;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:3px;padding:2px 9px">
@@ -628,12 +966,12 @@ h1{font-family:'Source Serif 4',serif;font-size:20px;font-weight:700;text-align:
 .lbl{font-size:7px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#94A3B8;margin-bottom:3px}
 .val{font-family:'Source Serif 4',serif;font-size:12px;font-weight:700;color:#0F172A}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px}
-.sec-h{border-left:3px solid #1E3A8A;padding-left:9px;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1E3A8A;margin:18px 0 8px}
-.ratio{border-left:3px solid #0EA5E9;background:#F0F9FF;padding:12px 16px;font-family:'Source Serif 4',serif;font-size:12.5px;font-style:italic;line-height:1.9;color:#0F172A}
+.sec-h{border-left:3px solid #21C1B6;padding-left:9px;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1B2A4A;margin:20px 0 10px}
+.ratio{border-left:3px solid #21C1B6;background:#F0FFFE;padding:16px 20px;font-family:'Source Serif 4',serif;font-size:15px;font-style:italic;line-height:2;color:#0F172A}.headnote{border-left:3px solid #21C1B6;background:#F0FFFE;border:1px solid #99E6E3;padding:16px 20px;border-radius:4px}
 .sub-h{font-size:8px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#64748B;margin:12px 0 5px}
 .prop{border:1px solid #E2E8F0;background:#F8FAFC;padding:10px 14px;border-radius:4px}
 .match{display:inline-block;color:#fff;font-size:8px;font-weight:700;padding:2px 9px;border-radius:3px;margin-right:8px;letter-spacing:.06em}
-.excerpt{border:1px solid #E2E8F0;background:#FFFDF7;padding:12px 16px;font-family:'Source Serif 4',serif;font-size:12px;line-height:1.9;border-radius:4px}
+.excerpt{border:1px solid #D4E2E8;background:#FFFDFB;padding:16px 20px;font-family:'Source Serif 4',serif;font-size:14px;line-height:2;color:#1B2A4A;border-radius:4px}
 .chip{display:inline-block;border:1px solid #BFDBFE;background:#EFF6FF;color:#1D4ED8;font-size:8px;font-weight:700;padding:2px 7px;border-radius:3px;margin:2px 3px 2px 0}
 .treats{display:grid;grid-template-columns:1fr 1fr 1fr;border:1px solid #E2E8F0;border-radius:4px;overflow:hidden;margin-bottom:10px}
 .tstat{padding:10px 16px}.tcount{font-family:'Source Serif 4',serif;font-size:26px;font-weight:700;line-height:1}
@@ -653,6 +991,7 @@ ${showJuris ? '<div class="juris">CRIMINAL APPELLATE JURISDICTION</div>' : ''}
   <div><div class="lbl">Coram / Bench</div><div style="margin-top:4px">${judges.map(j => `<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px"><span style="color:#94A3B8;font-size:10px">◉</span><span style="font-family:'Source Serif 4',serif;font-size:12px">${j}</span></div>`).join('') || '—'}</div>${c.benchType && c.benchType !== '—' ? `<div style="font-size:9px;color:#64748B;margin-top:3px">${c.benchType}</div>` : ''}</div>
   <div><div class="lbl">Statutory Provisions</div><div style="margin-top:4px">${(c.statutes || []).map(s => `<span class="chip">${s}</span>`).join('') || '—'}</div></div>
 </div>
+${c.headnote && c.headnote.trim() ? `<div class="sec-h">Judgment Headnote</div><div class="headnote">${c.headnote.split('\n').filter(l=>l.trim()).map(l=>`<div style="font-family:'Source Serif 4',serif;font-size:14px;color:#1B2A4A;line-height:1.9;margin-bottom:9px">${l}</div>`).join('')}</div>` : ''}
 <div class="sec-h">I. Legal Analysis &amp; Ratio</div>
 <div class="ratio">"${c.ratio || '—'}"</div>
 <div class="sub-h">Proposition Verification</div>
@@ -671,7 +1010,7 @@ ${showJuris ? '<div class="juris">CRIMINAL APPELLATE JURISDICTION</div>' : ''}
   <div class="tstat" style="background:#F8FAFC"><div class="tcount" style="color:#475569">${treat.overruled ?? 0}</div><div style="font-size:8px;font-weight:700;color:#475569;margin-top:3px;letter-spacing:.08em;text-transform:uppercase">Overruled By</div><div style="font-size:9px;color:#475569">Cases</div></div>
 </div>
 <div class="footer">
-  <div style="font-size:7px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:#1E3A8A;margin-bottom:3px">Jurinex Legal Intelligence Report</div>
+  <div style="font-size:8px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:#1B2A4A;margin-bottom:3px">Jurinex Legal Intelligence Report</div>
   <div style="font-size:8px;color:#94A3B8">Generated on ${generatedAt || '—'}</div>
   <div class="auth">● AUTHENTICATED RESEARCH DOCUMENT</div>
 </div>
@@ -789,32 +1128,35 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
         <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Source+Sans+3:wght@400;600;700&display=swap');
         @keyframes fdIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-        .doc-selR{cursor:pointer;transition:background .12s}.doc-selR:hover{background:#EEF2FF !important}
+        .doc-selR{cursor:pointer;transition:background .12s}.doc-selR:hover{background:#F0FFFF !important}
         .doc-paper{background:#FFFFFF;border:1px solid #D4D9E2;box-shadow:0 2px 14px rgba(15,23,42,.07);border-radius:6px;overflow:hidden}
         .doc-serif{font-family:'Source Serif 4','Georgia',serif}
         .doc-sans{font-family:'Source Sans 3','Helvetica Neue',Arial,sans-serif}
-        .doc-lbl{font-family:'Source Sans 3',sans-serif;font-size:8px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#94A3B8;margin-bottom:4px}
-        .doc-sec-h{display:flex;align-items:center;gap:0;margin:20px 0 10px;border-left:3px solid #1E3A8A;padding-left:9px;font-family:'Source Sans 3',sans-serif;font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1E3A8A}
-        .doc-sub-h{font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#64748B;margin:14px 0 7px}
-        .doc-chip{display:inline-flex;align-items:center;border:1px solid #BFDBFE;background:#EFF6FF;color:#1D4ED8;font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;padding:2px 8px;border-radius:3px;margin:2px 3px 2px 0}
-        .doc-ratio{border-left:3px solid #0EA5E9;background:#F0F9FF;padding:13px 16px;font-family:'Source Serif 4',serif;font-size:13px;font-style:italic;line-height:1.9;color:#0F172A;margin:0}
-        .doc-prop{border:1px solid #E2E8F0;background:#F8FAFC;padding:11px 14px;border-radius:4px}
-        .doc-excerpt{border:1px solid #E2E8F0;background:#FFFDF7;padding:13px 16px;font-family:'Source Serif 4',serif;font-size:12.5px;line-height:1.95;color:#1E293B;border-radius:4px}
-        .doc-match{display:inline-flex;align-items:center;gap:5px;color:#FFFFFF;font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;letter-spacing:.07em;padding:3px 10px;border-radius:3px}
+        .doc-lbl{font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#94A3B8;margin-bottom:4px}
+        .doc-sec-h{display:flex;align-items:center;gap:0;margin:22px 0 12px;border-left:3px solid #21C1B6;padding-left:9px;font-family:'Source Sans 3',sans-serif;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1B2A4A}
+        .doc-sub-h{font-family:'Source Sans 3',sans-serif;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#4B5E6E;margin:16px 0 8px}
+        .doc-chip{display:inline-flex;align-items:center;border:1px solid #99E6E3;background:#F0FFFE;color:#0D7B76;font-family:'Source Sans 3',sans-serif;font-size:10px;font-weight:700;padding:3px 9px;border-radius:3px;margin:2px 3px 2px 0}
+        .doc-ratio{border-left:3px solid #21C1B6;background:#F0FFFE;padding:16px 20px;font-family:'Source Serif 4',serif;font-size:15px;font-style:italic;line-height:2;color:#0F172A;margin:0}
+        .doc-prop{border:1px solid #D4E2E8;background:#F7FBFC;padding:13px 16px;border-radius:4px}
+        .doc-excerpt{border:1px solid #D4E2E8;background:#FFFDFB;padding:16px 20px;font-family:'Source Serif 4',serif;font-size:14px;line-height:2;color:#1B2A4A;border-radius:4px}
+        .doc-match{display:inline-flex;align-items:center;gap:5px;color:#FFFFFF;font-family:'Source Sans 3',sans-serif;font-size:10px;font-weight:700;letter-spacing:.07em;padding:3px 10px;border-radius:3px}
         .doc-treat-stat{display:flex;flex-direction:column;padding:12px 18px;flex:1;min-width:110px}
         .doc-case-row{display:flex;justify-content:space-between;align-items:flex-start;padding:9px 14px;gap:10px}
-        .doc-case-badge{font-family:'Source Sans 3',sans-serif;font-size:8px;font-weight:700;padding:2px 8px;border-radius:2px;letter-spacing:.06em;white-space:nowrap;flex-shrink:0}
-        .doc-foot-btn{font-family:'Source Sans 3',sans-serif;font-size:10px;font-weight:700;letter-spacing:.05em;padding:7px 16px;border-radius:4px;cursor:pointer;border:1px solid;text-transform:uppercase}
+        .doc-case-badge{font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;padding:2px 8px;border-radius:2px;letter-spacing:.06em;white-space:nowrap;flex-shrink:0}
+        .doc-foot-btn{font-family:'Source Sans 3',sans-serif;font-size:11px;font-weight:700;letter-spacing:.05em;padding:8px 18px;border-radius:4px;cursor:pointer;border:1px solid;text-transform:uppercase}
+        .doc-headnote{border-left:3px solid #21C1B6;background:#F0FFFE;border:1px solid #99E6E3;border-left-width:3px;padding:16px 20px;border-radius:4px}
+        .doc-headnote-line{font-family:'Source Serif 4',serif;font-size:14px;color:#1B2A4A;line-height:1.9;margin-bottom:10px}
+        .doc-headnote-line:last-child{margin-bottom:0}
       `}</style>
 
         <div style={{ maxWidth: 740, margin: '0 auto' }}>
 
           {/* Citation point selector */}
           <div style={{ background: W, marginBottom: 14, border: '1px solid #D4D9E2', borderRadius: 6, overflow: 'hidden', boxShadow: '0 1px 5px rgba(15,23,42,.06)' }}>
-            <div style={{ background: '#1E3A8A', padding: '7px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span className="doc-sans" style={{ fontSize: 9, letterSpacing: '0.14em', color: '#BFDBFE', textTransform: 'uppercase' }}>Citation Points</span>
+            <div style={{ background: N, padding: '9px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="doc-sans" style={{ fontSize: 10, letterSpacing: '0.14em', color: '#99E6E3', textTransform: 'uppercase', fontWeight: 700 }}>Citation Points</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="doc-sans" style={{ fontSize: 9, color: '#93C5FD' }}>{sel.size} of {citations.length} selected</span>
+                <span className="doc-sans" style={{ fontSize: 10, color: '#A5F3F0' }}>{sel.size} of {citations.length} selected</span>
                 {pendingCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#7C3AED', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>⏳ {pendingCits.length} pending</span>}
                 {redCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#DC2626', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>❌ {redCits.length} unverified</span>}
               </div>
@@ -838,14 +1180,14 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
               return (
                 <div key={c.id} className="doc-selR" onClick={() => toggle(c.id)}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px', background: isSel ? '#EEF2FF' : W, borderBottom: idx < citations.length - 1 ? '1px solid #F1F4F8' : 'none' }}>
-                  <div style={{ width: 13, height: 13, flexShrink: 0, border: `2px solid ${isSel ? '#1E3A8A' : '#C5CAD3'}`, background: isSel ? '#1E3A8A' : W, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ width: 14, height: 14, flexShrink: 0, border: `2px solid ${isSel ? T : '#C5CAD3'}`, background: isSel ? T : W, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     {isSel && <span style={{ color: W, fontSize: 9, lineHeight: 1, marginTop: -1 }}>✓</span>}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="doc-serif" style={{ fontSize: 12.5, fontWeight: 600, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.caseName}</div>
+                    <div className="doc-serif" style={{ fontSize: 13.5, fontWeight: 600, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.caseName}</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                        <span className="doc-sans" style={{ fontSize: 10, fontWeight: 700, color: '#1E3A8A' }}>{c.primaryCitation}</span>
+                        <span className="doc-sans" style={{ fontSize: 11, fontWeight: 700, color: T }}>{c.primaryCitation}</span>
                         {c.court && c.court !== 'Court not specified' && <><span style={{ color: '#CBD5E1' }}>·</span><span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>{c.court}</span></>}
                       </div>
                       <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -1028,6 +1370,18 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                     </div>
                   </div>
 
+                  {/* Judgment Headnote */}
+                  {c.headnote && c.headnote.trim() && (
+                    <div style={{ marginTop: 22, marginBottom: 4 }}>
+                      <div className="doc-sec-h">Judgment Headnote</div>
+                      <div className="doc-headnote">
+                        {c.headnote.split('\n').filter(l => l.trim()).map((line, i) => (
+                          <div key={i} className="doc-headnote-line">{line}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* I. Legal Analysis & Ratio */}
                   <div className="doc-sec-h">I. Legal Analysis &amp; Ratio</div>
                   <blockquote className="doc-ratio">
@@ -1075,9 +1429,9 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                               onClick={() => setOrigDocModal({ url: c.originalCourtCopyUrl, caseName: c.caseName, isPdf: c.isOriginalCopyPdf })}
                               style={{
                                 display: 'inline-flex', alignItems: 'center', gap: 7,
-                                padding: '7px 14px', background: '#1E3A8A', color: '#FFFFFF',
+                                padding: '7px 14px', background: N, color: '#FFFFFF',
                                 borderRadius: 5, border: 'none', cursor: 'pointer',
-                                fontSize: 11, fontWeight: 700, letterSpacing: '.04em',
+                                fontSize: 12, fontWeight: 700, letterSpacing: '.04em',
                               }}
                             >
                               <span>📄</span>
@@ -1089,9 +1443,9 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                               rel="noopener noreferrer"
                               style={{
                                 display: 'inline-flex', alignItems: 'center', gap: 5,
-                                padding: '7px 12px', background: 'transparent', color: '#1E3A8A',
-                                borderRadius: 5, border: '1px solid #1E3A8A',
-                                fontSize: 11, fontWeight: 600, textDecoration: 'none',
+                                padding: '7px 12px', background: 'transparent', color: N,
+                                borderRadius: 5, border: `1px solid ${N}`,
+                                fontSize: 12, fontWeight: 600, textDecoration: 'none',
                               }}
                             >
                               <span>↗</span><span>Open in Tab</span>
@@ -1105,9 +1459,9 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                         <div style={{ marginBottom: 14 }}>
                           <div className="doc-sub-h">Relevant Fragment (Indian Kanoon)</div>
                           <div style={{
-                            background: '#F0F9FF', border: '1px solid #BAE6FD',
-                            borderLeft: '3px solid #0369A1', borderRadius: 4,
-                            padding: '10px 14px', fontSize: 12, color: '#0C4A6E', lineHeight: 1.7,
+                            background: '#F0FFFE', border: '1px solid #99E6E3',
+                            borderLeft: '3px solid #21C1B6', borderRadius: 4,
+                            padding: '12px 16px', fontSize: 13, color: '#1B2A4A', lineHeight: 1.8,
                             fontStyle: 'italic',
                           }}>
                             {c.ikFragment.headline}
@@ -1146,67 +1500,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                       {((c.ikCiteList && c.ikCiteList.length > 0) || (c.ikCitedByList && c.ikCitedByList.length > 0)) && (
                         <div style={{ marginBottom: 14 }}>
                           <div className="doc-sub-h">Citation Network (Indian Kanoon)</div>
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                            {/* Cases Cited */}
-                            <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
-                              <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
-                                <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
-                                  Cases Cited ({(c.ikCiteList || []).length})
-                                </span>
-                              </div>
-                              {(c.ikCiteList || []).length === 0 ? (
-                                <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
-                              ) : (
-                                <div style={{ maxHeight: 180, overflowY: 'auto' }}>
-                                  {(c.ikCiteList || []).map((item, i) => (
-                                    <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCiteList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
-                                      <a
-                                        href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
-                                      >
-                                        {item.title || `Doc #${item.tid}`}
-                                      </a>
-                                      {item.docsource && (
-                                        <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-
-                            {/* Cited By */}
-                            <div style={{ border: '1px solid #E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
-                              <div style={{ padding: '6px 10px', background: '#F1F5F9', borderBottom: '1px solid #E2E8F0' }}>
-                                <span style={{ fontSize: 9, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.08em' }}>
-                                  Cited By ({(c.ikCitedByList || []).length})
-                                </span>
-                              </div>
-                              {(c.ikCitedByList || []).length === 0 ? (
-                                <div style={{ padding: '8px 10px', fontSize: 10, color: '#94A3B8', fontStyle: 'italic' }}>None recorded</div>
-                              ) : (
-                                <div style={{ maxHeight: 180, overflowY: 'auto' }}>
-                                  {(c.ikCitedByList || []).map((item, i) => (
-                                    <div key={i} style={{ padding: '6px 10px', borderBottom: i < c.ikCitedByList.length - 1 ? '1px solid #F1F5F9' : 'none', background: '#FFFFFF' }}>
-                                      <a
-                                        href={item.url || `https://indiankanoon.org/doc/${item.tid}/`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        style={{ fontSize: 11, color: '#1D4ED8', textDecoration: 'none', lineHeight: 1.45, display: 'block' }}
-                                      >
-                                        {item.title || `Doc #${item.tid}`}
-                                      </a>
-                                      {item.docsource && (
-                                        <span style={{ fontSize: 9, color: '#94A3B8' }}>{item.docsource}</span>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
+                          <InlineCitationNetwork c={c} />
                         </div>
                       )}
                     </div>
@@ -1266,7 +1560,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                   {/* Footer */}
                   <div style={{ marginTop: 24, paddingTop: 14, borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
                     <div>
-                      <div className="doc-sans" style={{ fontSize: 8, fontWeight: 700, letterSpacing: '.15em', color: '#1E3A8A', textTransform: 'uppercase', marginBottom: 4 }}>Jurinex Legal Intelligence Report</div>
+                      <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.15em', color: N, textTransform: 'uppercase', marginBottom: 4 }}>Jurinex Legal Intelligence Report</div>
                       <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 2 }}>Generated on {generatedAt || '—'}</div>
                       {(c.importSourceLink || c.sourceUrl || c.officialSourceLink) && (
                         <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', marginBottom: 5, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
@@ -1316,7 +1610,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                           🔄 Check Pending
                         </button>
                       ) : (
-                        <button className="doc-foot-btn" style={{ background: '#1E3A8A', color: W, borderColor: '#1E3A8A' }}
+                        <button className="doc-foot-btn" style={{ background: N, color: W, borderColor: N }}
                           onClick={() => downloadCitationPDF(c, query, generatedAt)}>
                           Download PDF
                         </button>
@@ -1338,7 +1632,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                           </div>
                           {atcPreviewUrl && (
                             <div style={{ border: '1px solid #E2E8F0', borderRadius: 6, overflow: 'hidden', marginTop: 4 }}>
-                              <div style={{ background: '#1E3A8A', padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                              <div style={{ background: N, padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                                 <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.12em', textTransform: 'uppercase', color: '#BFDBFE' }}>PDF Preview — Uploaded to Case Folder</span>
                               </div>
                               <iframe
@@ -1817,7 +2111,7 @@ function CaseSearchTab() {
             {/* Modal header */}
             <div style={{
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '10px 16px', background: '#1E3A8A', color: '#fff', flexShrink: 0,
+              padding: '10px 16px', background: N, color: '#fff', flexShrink: 0,
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span style={{ fontSize: 16 }}>📄</span>
@@ -2325,7 +2619,7 @@ export default function CitationReportPage({ embedded = false }) {
     if (!rid || reportLogs.length > 0) return;
     setReportLogsLoading(true);
     try {
-      const base = window.CITATION_API_BASE || 'http://localhost:8003';
+      const base = window.CITATION_API_BASE || CITATION_SERVICE_URL;
       const res = await fetch(`${base}/citation/runs/${rid}/logs?limit=500`);
       const data = await res.json();
       setReportLogs(data.logs || []);

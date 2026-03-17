@@ -1,6 +1,6 @@
 /**
  * Citation Service API — Verified Citation Reports (Watchdog → Fetcher → Clerk).
- * Base URL: CITATION_SERVICE_URL (default http://localhost:8001)
+ * Base URL: CITATION_SERVICE_URL (citation-service Cloud Run)
  */
 import { CITATION_SERVICE_URL, AUTH_SERVICE_URL } from '../config/apiConfig';
 

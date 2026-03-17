@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate, Link, useLocation } from "react-router-dom";
 import { Eye, EyeOff, CheckCircle, ArrowLeft } from "lucide-react";
 import { auth, googleProvider } from '../../config/firebase';
-import { API_BASE_URL } from '../../config/apiConfig';
+import { AUTH_SERVICE_URL } from '../../config/apiConfig';
 import { signInWithPopup } from 'firebase/auth';
 import { useAuth } from '../../context/AuthContext';
 import JuriNexLogo from '../../assets/JuriNex_gavel_logo.png';
@@ -112,7 +112,7 @@ const LoginPage = () => {
  
  const idToken = await user.getIdToken();
  
- const response = await fetch(`${API_BASE_URL}/api/auth/google`, {
+ const response = await fetch(`${AUTH_SERVICE_URL}/api/auth/google`, {
  method: 'POST',
  headers: {
  'Content-Type': 'application/json',

@@ -15,19 +15,30 @@ const GATEWAY_URL =
 export const API_BASE_URL = GATEWAY_URL;
 export const GATEWAY_BASE_URL = GATEWAY_URL;
 
-// Service-specific endpoints (all go through gateway, unless noted)
-export const DOCUMENT_SERVICE_URL = `${GATEWAY_URL}/api/doc`;
+// Service-specific endpoints (gateway proxies; can override with direct URLs via env)
+export const AUTH_SERVICE_URL =
+  import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
+  'https://authservice-120280829617.asia-south1.run.app';
+export const CHAT_MODEL_BASE_URL =
+  import.meta.env.VITE_APP_CHAT_MODEL_URL ||
+  'https://chat-model-120280829617.asia-south1.run.app';
+export const PAYMENT_SERVICE_URL =
+  import.meta.env.VITE_APP_PAYMENT_SERVICE_URL ||
+  'https://payment-service-120280829617.asia-south1.run.app';
+export const VISUAL_SERVICE_URL =
+  import.meta.env.VITE_APP_VISUAL_SERVICE_URL ||
+  'https://visual-service-120280829617.asia-south1.run.app';
+
+export const DOCUMENT_SERVICE_URL =
+  import.meta.env.VITE_APP_DOCUMENT_SERVICE_URL ||
+  'https://document-service-120280829617.asia-south1.run.app';
 export const FILES_SERVICE_URL = `${GATEWAY_URL}/api/files`;
 export const CONTENT_SERVICE_URL = `${GATEWAY_URL}/api/content`;
 export const MINDMAP_SERVICE_URL = `${GATEWAY_URL}/api/mindmap`;
-export const VISUAL_SERVICE_URL = `${GATEWAY_URL}/visual`;
-export const AUTH_SERVICE_URL = `${GATEWAY_URL}/api/auth`;
-export const PAYMENT_SERVICE_URL = `${GATEWAY_URL}/payments`;
 export const USER_RESOURCES_SERVICE_URL = `${GATEWAY_URL}/user-resources`;
-export const CHAT_SERVICE_URL = `${GATEWAY_URL}/api/chat`;
+export const CHAT_SERVICE_URL = CHAT_MODEL_BASE_URL;
 
 // Citation service (direct FastAPI service)
-// Deployed Cloud Run URL; can be overridden via VITE_APP_CITATION_SERVICE_URL
 export const CITATION_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_SERVICE_URL ||
   'https://citation-service-120280829617.asia-south1.run.app';
@@ -38,13 +49,11 @@ export const DRAFTING_SERVICE_URL =
   'https://drafting-service-120280829617.asia-south1.run.app';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
-// Direct: all-drafting-agent Cloud Run - GET /api/templates, POST /api/drafts, etc.
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
   'https://all-drafting-agent-120280829617.asia-south1.run.app';
 
 // Template Analyzer (user upload templates): User Template Analyzer Agent
-// Direct: drafting-agents Cloud Run - GET /analysis/templates, POST /analysis/upload-template, GET /analysis/template/:id
 export const TEMPLATE_ANALYZER_API_BASE =
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
   'https://drafting-agents-120280829617.asia-south1.run.app';
@@ -72,11 +81,11 @@ export function getUserIdForDrafting() {
   return null;
 }
 
-// Legacy support - backward compatibility
-export const DOCS_BASE_URL = `${GATEWAY_URL}/docs`;
+// Legacy support - backward compatibility (docs via document service when direct)
+export const DOCS_BASE_URL = DOCUMENT_SERVICE_URL.replace(/\/$/, '');
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
-// For direct service access (if needed, but prefer gateway)
+// For direct service access (document service)
 export const DOCUMENT_SERVICE_DIRECT =
   import.meta.env.VITE_DOCUMENT_SERVICE_URL ||
   'https://document-service-120280829617.asia-south1.run.app';
@@ -87,6 +96,7 @@ const apiConfig = {
   GATEWAY_URL,
   API_BASE_URL,
   GATEWAY_BASE_URL,
+  CHAT_MODEL_BASE_URL,
   AGENT_DRAFT_TEMPLATE_API,
   TEMPLATE_ANALYZER_API_BASE,
   getUserIdForDrafting,

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find c:/Users/ADMIN/jurinex-dev/frontend/src -type f -name *citation* -o -name *report*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\ADMIN\\jurinex-dev\\Backend\\agent-draft-service\\src"
+    ]
+  }
+}

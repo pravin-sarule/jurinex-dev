@@ -1,4 +1,4 @@
-import { API_BASE_URL } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, AUTH_SERVICE_URL } from '../config/apiConfig';
 
 class ApiService {
  constructor() {
@@ -164,7 +164,7 @@ class ApiService {
     if (newPassword) {
       body.newPassword = newPassword;
     }
-    const response = await this.request(`${API_BASE_URL}/api/auth/verify-otp`, {
+    const response = await this.request(`${AUTH_SERVICE_URL}/api/auth/verify-otp`, {
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -461,7 +461,6 @@ class ApiService {
  }
 
  async chatModelRequest(endpoint, options = {}) {
- const CHAT_MODEL_BASE_URL = API_BASE_URL;
  const url = endpoint.startsWith("http://") || endpoint.startsWith("https://")
    ? endpoint
    : `${CHAT_MODEL_BASE_URL}${endpoint}`;
@@ -531,7 +530,6 @@ class ApiService {
  }
 
  async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null) {
- const CHAT_MODEL_BASE_URL = API_BASE_URL;
  const token = this.getAuthToken();
  
  const body = { question, file_id: fileId };

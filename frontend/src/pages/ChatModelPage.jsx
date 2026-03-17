@@ -1,6 +1,6 @@
 import '../styles/AnalysisPage.css';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { API_BASE_URL } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL } from '../config/apiConfig';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
@@ -390,7 +390,6 @@ const ChatModelPage = () => {
 
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        const CHAT_MODEL_BASE_URL = API_BASE_URL;
 
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
@@ -1312,7 +1311,7 @@ const ChatModelPage = () => {
         body.llm_name = llm_name;
       }
 
-      const response = await fetch(`${API_BASE_URL}/files/chat/stream`, {
+      const response = await fetch(`${CHAT_MODEL_BASE_URL}/files/chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1590,7 +1589,7 @@ const ChatModelPage = () => {
 
       setUploadProgress(40);
 
-      const response = await fetch(`${API_BASE_URL}/chat/google-drive/upload`, {
+      const response = await fetch(`${CHAT_MODEL_BASE_URL}/chat/google-drive/upload`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
