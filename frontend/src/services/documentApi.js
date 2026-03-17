@@ -370,12 +370,11 @@
 
 
 import axios from 'axios';
-import { DOCS_BASE_URL, FILES_BASE_URL } from '../config/apiConfig';
+import { DOCS_BASE_URL } from '../config/apiConfig';
 
-// Docs-related operations (folders, summaries, etc.) go through the docs gateway prefix.
+// Docs and cases both go through the docs gateway prefix (`/docs/*` → document-service `/api/files/*`).
 const API_BASE_URL = DOCS_BASE_URL;
-// Case CRUD lives on the file-service side (`/api/files/cases` → gateway `/files/cases`).
-const CASES_BASE_URL = FILES_BASE_URL;
+const CASES_BASE_URL = DOCS_BASE_URL;
 
 const getAuthHeader = () => {
   const token = localStorage.getItem('token');
