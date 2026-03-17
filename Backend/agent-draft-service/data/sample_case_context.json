@@ -1,0 +1,100 @@
+{
+  "petitioner_name": "Rajesh Kumar Singh",
+  "petitioner": "Rajesh Kumar Singh",
+  "applicant_name": "Rajesh Kumar Singh",
+  "client_name": "Rajesh Kumar Singh",
+  "party_name": "Rajesh Kumar Singh",
+
+  "petitioner_address": "Flat No. 204, Sunder Apartments, Sector 12, Dwarka, New Delhi - 110078",
+  "address": "Flat No. 204, Sunder Apartments, Sector 12, Dwarka, New Delhi - 110078",
+  "residence": "Flat No. 204, Sunder Apartments, Sector 12, Dwarka, New Delhi - 110078",
+  "petitioner_residence": "Flat No. 204, Sunder Apartments, Sector 12, Dwarka, New Delhi - 110078",
+  "client_address": "Flat No. 204, Sunder Apartments, Sector 12, Dwarka, New Delhi - 110078",
+
+  "case_facts": "The petitioner, Rajesh Kumar Singh, aged 52 years, is a retired government servant who served as a Senior Accounts Officer in the Ministry of Finance, Government of India for over 25 years. The petitioner retired on 31st March 2021 upon attaining the age of superannuation. Upon retirement, the petitioner was entitled to receive pensionary benefits including monthly pension, gratuity, and leave encashment as per the Central Civil Services (Pension) Rules, 1972.\n\nHowever, the Pension Commissioner, Ministry of Finance, Respondent No. 2 herein, unlawfully withheld the petitioner's entire pensionary benefits citing alleged irregularities in the service record without issuing any show cause notice or conducting any formal inquiry as mandated by law. The impugned order dated 15.09.2021 was passed without affording the petitioner any opportunity of being heard, thereby violating the principles of natural justice enshrined under Article 14 and Article 21 of the Constitution of India.\n\nThe petitioner made numerous representations to the Union of India through the Ministry of Finance and to the Pension Commissioner between October 2021 and December 2023, all of which remained unaddressed. On 10.01.2024, the petitioner received a cryptic communication refusing to reconsider the matter without any reasons being assigned. Left with no alternative, the petitioner has approached this Hon'ble Court under Article 32 of the Constitution of India seeking enforcement of his fundamental rights.",
+  "factual_background": "The petitioner is a retired government servant who retired on 31.03.2021. His pensionary benefits have been illegally withheld since October 2021 without notice, hearing, or valid reason by the Pension Commissioner, Ministry of Finance.",
+  "case_summary": "Illegal withholding of pension benefits of a retired government employee by the Pension Commissioner without due process, violating Articles 14 and 21.",
+  "incident_details": "Impugned order dated 15.09.2021 withholding pension without show cause notice or opportunity of hearing.",
+  "background": "Petitioner retired from Ministry of Finance on 31.03.2021; pension illegally withheld from October 2021 without notice.",
+  "narration": "Senior Accounts Officer with 25+ years of service had pensionary benefits withheld by Pension Commissioner without due process.",
+
+  "writ_type": "MANDAMUS",
+  "type_of_writ": "MANDAMUS",
+  "writ": "MANDAMUS",
+  "remedy_type": "MANDAMUS",
+  "constitutional_remedy": "MANDAMUS",
+
+  "constitutional_article": "32",
+  "article": "32",
+  "article_number": "32",
+  "under_article": "32",
+  "article_32": "32",
+
+  "relief_sought": "The petitioner seeks a writ of mandamus directing the respondents to forthwith release all pending pensionary benefits including arrears of monthly pension from 01.04.2021, gratuity amounting to Rs. 15,20,000, and leave encashment of Rs. 4,80,000 along with interest at 12% per annum.",
+  "prayers": "Writ of mandamus directing release of pension, gratuity, and leave encashment with interest; quashing of impugned order dated 15.09.2021",
+  "remedies": "Mandamus to release pensionary benefits; quash impugned order; award costs",
+  "orders_sought": "Quash impugned order dated 15.09.2021; direct release of pension and gratuity with interest",
+  "directions_sought": "Direct respondents to release pension arrears from April 2021 with 12% interest",
+
+  "respondent_name": "1. Union of India through the Secretary, Ministry of Finance\n2. Pension Commissioner, Ministry of Finance, New Delhi",
+  "respondents": "1. Union of India through the Secretary, Ministry of Finance\n2. Pension Commissioner, Ministry of Finance, New Delhi",
+  "opposite_party": "Union of India; Pension Commissioner, Ministry of Finance",
+  "defendant": "Union of India through Ministry of Finance",
+  "government_party": "Union of India, Ministry of Finance",
+  "authority": "Pension Commissioner, Ministry of Finance",
+
+  "advocate_name": "Adv. Priya Sharma",
+  "lawyer_name": "Adv. Priya Sharma",
+  "counsel": "Priya Sharma",
+  "filed_by": "Adv. Priya Sharma",
+  "attorney_name": "Adv. Priya Sharma",
+  "advocate_on_record": "Adv. Priya Sharma",
+
+  "filing_year": "2024",
+  "year": "2024",
+  "case_year": "2024",
+  "petition_year": "2024",
+
+  "filing_date": "15.03.2024",
+  "date_of_filing": "15.03.2024",
+  "filed_on": "15.03.2024",
+  "petition_date": "15.03.2024",
+  "date": "15.03.2024",
+
+  "court_name": "SUPREME COURT OF INDIA",
+  "court": "SUPREME COURT OF INDIA",
+  "forum": "SUPREME COURT OF INDIA",
+  "tribunal": "SUPREME COURT OF INDIA",
+
+  "violated_articles": ["Article 14", "Article 21", "Article 32"],
+  "legal_provisions": [
+    "Article 14 of the Constitution of India (Right to Equality)",
+    "Article 21 of the Constitution of India (Right to Life and Personal Liberty)",
+    "Article 32 of the Constitution of India (Right to Constitutional Remedies)",
+    "Central Civil Services (Pension) Rules, 1972"
+  ],
+
+  "impugned_order": {
+    "date": "15.09.2021",
+    "passed_by": "Pension Commissioner, Ministry of Finance",
+    "nature": "Order withholding all pensionary benefits"
+  },
+
+  "amounts": {
+    "monthly_pension": "Rs. 45,000 per month",
+    "gratuity": "Rs. 15,20,000",
+    "leave_encashment": "Rs. 4,80,000",
+    "total_arrears": "Approximately Rs. 35 lakhs (April 2021 onwards)",
+    "interest_rate": "12% per annum"
+  },
+
+  "prior_representations": [
+    {"date": "05.10.2021", "to": "Secretary, Ministry of Finance", "outcome": "No response"},
+    {"date": "12.03.2022", "to": "Pension Commissioner", "outcome": "No response"},
+    {"date": "20.08.2023", "to": "Department of Pension and Pensioners Welfare", "outcome": "No response"},
+    {"date": "10.01.2024", "to": "Ministry of Finance", "outcome": "Rejection without reasons"}
+  ],
+
+  "case_title": "Rajesh Kumar Singh vs. Union of India & Anr.",
+  "subject_matter": "Illegal withholding of pensionary benefits without notice or hearing"
+}

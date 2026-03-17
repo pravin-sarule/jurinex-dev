@@ -1,0 +1,86 @@
+# Writ Petition Auto-Population System Configuration
+
+model:
+  extraction: claude-sonnet-4-6
+  population: claude-sonnet-4-6
+  extraction_temperature: 0.1    # Low – we want consistent structured output
+  population_temperature: 0.3    # Slightly higher – allows natural language variation
+  max_tokens_extraction: 4000
+  max_tokens_population: 2000
+
+confidence:
+  threshold: 0.70          # Minimum score to accept a field value
+  high: 0.85               # >= high → "high confidence" in metrics
+  medium: 0.70             # >= medium and < high → "medium confidence"
+  low: 0.0                 # < threshold → reported as low/empty
+
+population:
+  # Processing order: dependencies first (facts before questions, writ before article)
+  field_order:
+    - petition_number
+    - year
+    - court_name
+    - petitioner_name
+    - petitioner_address
+    - writ_type
+    - constitutional_article
+    - respondent_name
+    - filing_date
+    - advocate_name
+    - opposite_party_advocate
+    - facts_of_case
+    - questions_of_law
+    - grounds
+    - prayer_reliefs
+    - interim_relief
+
+  # Fields that trigger Stage 2.5 LLM synthesis
+  llm_fields:
+    - facts_of_case
+    - questions_of_law
+    - grounds
+    - prayer_reliefs
+    - interim_relief
+
+  use_llm: true
+  llm_fallback_to_basic: true    # Fall through to Stage 3+ if LLM fails
+  cache_llm_responses: true      # Cache by (field_id, context_hash)
+
+extraction:
+  use_llm: true
+  fallback_to_patterns: true     # Pattern extraction if LLM fails or no API key
+  max_template_chars: 12000      # Truncate very long templates before sending to Claude
+
+vector_db:
+  search_threshold: 0.70         # Minimum similarity to return a result
+  semantic_top_k: 10             # Max chunks to return from semantic_search
+  fuzzy_threshold: 0.70          # Minimum Jaccard-based similarity
+
+formatting:
+  wrap_width: 80                 # Characters per line in formatted output
+  sentences_per_paragraph: 3     # For numbered_paragraphs style
+  default_style: plain           # plain | numbered_paragraphs | lettered_list | roman_numerals
+
+logging:
+  level: INFO                    # DEBUG | INFO | WARNING | ERROR
+  file: logs/autopopulator.log   # Set to null to disable file logging
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+cost:
+  track_usage: true
+  warn_on_tokens_per_field: 1000  # Log warning if a field uses more tokens
+  max_monthly_budget_usd: 50.0
+
+# Template-specific overrides (extend for other document types)
+document_types:
+  writ_petition:
+    typical_fields: 16
+    primary_article_options:
+      - "32"   # Supreme Court
+      - "226"  # High Court
+    supported_writs:
+      - MANDAMUS
+      - CERTIORARI
+      - PROHIBITION
+      - QUO WARRANTO
+      - HABEAS CORPUS
