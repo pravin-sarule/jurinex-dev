@@ -115,10 +115,7 @@ def draft_section(
 
     if system_prompt_override and system_prompt_override.strip():
         system_prompt = system_prompt_override.strip() + lang_directive
-        print(
-            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | Language={lang!r} | "
-            f"System prompt from DB (length={len(system_prompt)}): {system_prompt[:120]}{'...' if len(system_prompt) > 120 else ''}"
-        )
+        prompt_source = "DB"
     else:
         # Fallback when no DB prompt configured — legal tone + strict scope.
         system_prompt = (
@@ -136,13 +133,25 @@ def draft_section(
             "Fill every placeholder from Field Data; court name, petitioner name, and respondent name must never be empty. "
             "Do not include citation markers, source names, or [cite: ...] in output."
         ) + lang_directive
-        print(
-            f"[Drafter tools] Agent={agent_name!r} | Model={model!r} | Language={lang!r} | "
-            "No DB system prompt — using built-in fallback."
-        )
+        prompt_source = "DEFAULT (no DB prompt configured)"
 
-    print(f"[Drafter tools] Section={section_key!r} | Mode={mode!r} | DetailLevel={detail_level!r} | Temperature={temperature}")
-    print(f"[Drafter tools] Section prompt preview: {section_prompt[:160]}{'...' if len(section_prompt) > 160 else ''}")
+    print(
+        f"\n{'─'*70}\n"
+        f"[Drafter] PROMPT & MODEL CONFIG\n"
+        f"  Agent        : {agent_name!r}\n"
+        f"  Model        : {model!r}  (source: payload > DB > default)\n"
+        f"  Temperature  : {temperature}\n"
+        f"  Language     : {lang!r}\n"
+        f"  Prompt source: {prompt_source}\n"
+        f"  Prompt length: {len(system_prompt)} chars\n"
+        f"  Prompt preview: {system_prompt[:200]}{'...' if len(system_prompt) > 200 else ''}\n"
+        f"[Drafter] SECTION REQUEST\n"
+        f"  Section key  : {section_key!r}\n"
+        f"  Mode         : {mode!r}\n"
+        f"  Detail level : {detail_level!r}\n"
+        f"  Section prompt ({len(section_prompt)} chars): {section_prompt[:200]}{'...' if len(section_prompt) > 200 else ''}\n"
+        f"{'─'*70}"
+    )
 
     detail_level = (detail_level or "concise").lower().strip()
     length_instruction = DETAIL_LEVEL_INSTRUCTIONS.get(detail_level, DETAIL_LEVEL_INSTRUCTIONS["concise"])

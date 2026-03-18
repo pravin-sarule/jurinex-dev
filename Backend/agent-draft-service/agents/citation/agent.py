@@ -68,10 +68,37 @@ def run_citation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # Fetch agent from DB once: used for model resolution and prompt
-    from services.agent_config_service import get_agent_by_type, get_resolved_model_for_agent
-    agent = get_agent_by_type("citation")
+    from services.agent_config_service import get_agent_by_preferences
+    agent = get_agent_by_preferences(
+        agent_type="citation",
+        preferred_names=[
+            payload.get("db_agent_name"),
+            payload.get("agent_name"),
+            "Jurinex Citation Agent",
+            "Citation Agent",
+        ],
+    )
     model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
     db_prompt = (agent.get("prompt") or "").strip() if agent else ""
+
+    model_source = "payload override" if payload.get("model") else ("DB agent config" if agent else "DEFAULT hardcoded")
+    prompt_source = f"DB (agent_id={agent.get('id')}, {len(db_prompt)} chars)" if db_prompt else "DEFAULT (no DB prompt — hardcoded fallback)"
+    logger.info(
+        "\n%s\n[Citation] AGENT CONFIG\n"
+        "  Agent name   : %s (id=%s)\n"
+        "  Model        : %r  ← from %s\n"
+        "  Prompt source: %s\n"
+        "  Prompt preview: %s\n"
+        "  Section key  : %r | chunks=%d\n%s",
+        "─" * 70,
+        agent.get("name") if agent else "no-agent-in-db",
+        agent.get("id") if agent else "—",
+        model, model_source,
+        prompt_source,
+        (db_prompt[:200] + "..." if len(db_prompt) > 200 else db_prompt) if db_prompt else "(none — using hardcoded: 'You are a legal citation expert...')",
+        section_key, len(chunks),
+        "─" * 70,
+    )
 
     try:
         logger.info(f"Citation: Processing section '{section_key}' with {len(chunks)} chunks available using model {model}")

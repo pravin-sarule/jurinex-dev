@@ -28,10 +28,37 @@ def run_critic_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "section_content is required for review"}
 
     # Fetch agent from DB once: used for model resolution and prompt
-    from services.agent_config_service import get_agent_by_type
-    agent = get_agent_by_type("critic")
+    from services.agent_config_service import get_agent_by_preferences
+    agent = get_agent_by_preferences(
+        agent_type="critic",
+        preferred_names=[
+            payload.get("db_agent_name"),
+            payload.get("agent_name"),
+            "Jurinex Critic Agent",
+            "Critic Agent",
+        ],
+    )
     model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
     db_prompt = (agent.get("prompt") or "").strip() if agent else ""
+
+    model_source = "payload override" if payload.get("model") else ("DB agent config" if agent else "DEFAULT hardcoded")
+    prompt_source = f"DB (agent_id={agent.get('id')}, {len(db_prompt)} chars)" if db_prompt else "DEFAULT (no DB prompt — fallback will be used)"
+    logger.info(
+        "\n%s\n[Critic] AGENT CONFIG\n"
+        "  Agent name   : %s (id=%s)\n"
+        "  Model        : %r  ← from %s\n"
+        "  Prompt source: %s\n"
+        "  Prompt preview: %s\n"
+        "  Section key  : %r\n%s",
+        "─" * 70,
+        agent.get("name") if agent else "no-agent-in-db",
+        agent.get("id") if agent else "—",
+        model, model_source,
+        prompt_source,
+        (db_prompt[:200] + "..." if len(db_prompt) > 200 else db_prompt) if db_prompt else "(none — using critic.txt or hardcoded fallback)",
+        section_key,
+        "─" * 70,
+    )
 
     # Use the tool
     result = review_section(
@@ -89,8 +116,16 @@ def run_html_draft_critic(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not generated_html:
         return {"status": "error", "error_message": "generated_html is required"}
 
-    from services.agent_config_service import get_agent_by_type
-    agent = get_agent_by_type("critic")
+    from services.agent_config_service import get_agent_by_preferences
+    agent = get_agent_by_preferences(
+        agent_type="critic",
+        preferred_names=[
+            payload.get("db_agent_name"),
+            payload.get("agent_name"),
+            "Jurinex Critic Agent",
+            "Critic Agent",
+        ],
+    )
     model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
 
     logger.info(

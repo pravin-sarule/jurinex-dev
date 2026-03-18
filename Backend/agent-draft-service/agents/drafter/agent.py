@@ -28,6 +28,22 @@ def _resolve_drafter_model(payload: Dict[str, Any], agent: Optional[Dict[str, An
     return get_resolved_model_for_agent("drafting", override_model=override)
 
 
+def _resolve_drafting_agent_config(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Resolve the drafting-agent DB row by specific name before falling back to generic type."""
+    from services.agent_config_service import get_agent_by_preferences
+
+    return get_agent_by_preferences(
+        agent_type="drafting",
+        preferred_names=[
+            payload.get("db_agent_name"),
+            payload.get("agent_name"),
+            payload.get("agent_config_name"),
+            "Jurinex Drafter Agent",
+            "Drafter Agent",
+        ],
+    )
+
+
 def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run the Drafter agent.
@@ -56,8 +72,7 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "section_prompt is required for generation"}
 
     # ── Fetch drafting agent config from DB ───────────────────────────────────
-    from services.agent_config_service import get_agent_by_type
-    agent = get_agent_by_type("drafting")
+    agent = _resolve_drafting_agent_config(payload)
 
     agent_name = (agent.get("name") or "unknown-agent") if agent else "no-agent-in-db"
     agent_id   = (agent.get("id") or "—") if agent else "—"
@@ -70,21 +85,17 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     model = _resolve_drafter_model(payload, agent=agent)
 
-    # ── Detailed log: agent identity, model, prompt, section prompt ───────────
+    # ── Agent config log (prompt resolution happens inside draft_section) ───────
+    prompt_source = f"DB (agent_id={agent_id}, {len(db_prompt)} chars)" if db_prompt else "DEFAULT (no DB prompt — fallback will be used)"
     print(
         f"\n{'='*70}\n"
         f"[Drafter] AGENT CONFIG\n"
-        f"  Agent name : {agent_name!r} (id={agent_id})\n"
-        f"  Model      : {model!r}\n"
-        f"  Temperature: {temperature}\n"
-        f"  LLM params : {llm_params}\n"
-        f"  System prompt ({len(db_prompt)} chars): "
-        f"{db_prompt[:200]}{'...' if len(db_prompt) > 200 else ''}\n"
-        f"[Drafter] SECTION REQUEST\n"
-        f"  Section key   : {section_key!r}\n"
-        f"  Mode          : {mode!r}\n"
-        f"  Detail level  : {detail_level!r}\n"
-        f"  Section prompt: {section_prompt[:200]}{'...' if len(section_prompt) > 200 else ''}\n"
+        f"  Agent name   : {agent_name!r} (id={agent_id})\n"
+        f"  Model        : {model!r}  ← from DB agent config\n"
+        f"  Temperature  : {temperature}\n"
+        f"  LLM params   : {llm_params}\n"
+        f"  Prompt source: {prompt_source}\n"
+        f"  Prompt preview: {db_prompt[:200]}{'...' if len(db_prompt) > 200 else ''}\n"
         f"{'='*70}"
     )
 
@@ -148,7 +159,6 @@ def run_html_draft_generator(payload: dict) -> dict:
     Returns { status, html, template_analysis, validation, error? }
     """
     from agents.drafter.tools import generate_html_draft, validate_generated_html
-    from services.agent_config_service import get_agent_by_type
 
     section_title = payload.get("section_title") or payload.get("section_key", "Document Section")
     section_prompt = payload.get("section_prompt", "")
@@ -157,7 +167,7 @@ def run_html_draft_generator(payload: dict) -> dict:
     repair_context = payload.get("repair_context")
     previous_draft = payload.get("previous_draft")
 
-    agent = get_agent_by_type("drafting")
+    agent = _resolve_drafting_agent_config(payload)
     model = payload.get("model") or (agent.get("resolved_model") if agent else DEFAULT_MODEL)
     temperature = float(payload.get("temperature") or (agent.get("temperature") if agent else 0.4))
 

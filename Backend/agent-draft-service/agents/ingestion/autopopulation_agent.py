@@ -703,12 +703,23 @@ def _call_chunk_llm(
     model: str,
     temperature: float,
     is_retry: bool = False,
+    db_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Make a single LLM call for a chunk and return field_name → value dict."""
     from services.llm_service import call_llm
 
-    system = _RETRY_SYSTEM_PROMPT if is_retry else _SYSTEM_PROMPT_STRICT
+    if is_retry:
+        system = (db_prompt + "\n\n" + _RETRY_SYSTEM_PROMPT) if db_prompt else _RETRY_SYSTEM_PROMPT
+        sys_source = f"DB({len(db_prompt)}c) + hardcoded _RETRY_SYSTEM_PROMPT" if db_prompt else "DEFAULT _RETRY_SYSTEM_PROMPT"
+    else:
+        system = (db_prompt + "\n\n" + _SYSTEM_PROMPT_STRICT) if db_prompt else _SYSTEM_PROMPT_STRICT
+        sys_source = f"DB({len(db_prompt)}c) + hardcoded _SYSTEM_PROMPT_STRICT" if db_prompt else "DEFAULT _SYSTEM_PROMPT_STRICT"
     prompt = _build_chunk_prompt(chunk_label, fields, canonical_data, document_text, is_retry)
+
+    logger.info(
+        "[AutopopulationAgent][LLM] chunk=%r | model=%r | temp=%s | prompt_source=%s | system=%d chars | user=%d chars",
+        chunk_label, model, temperature, sys_source, len(system), len(prompt),
+    )
 
     try:
         raw = call_llm(
@@ -743,6 +754,7 @@ def _retry_missing_fields(
     document_text: str,
     model: str,
     temperature: float,
+    db_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Stage 4: Collect any fields still null/missing after Stage 3 and send
@@ -782,7 +794,8 @@ def _retry_missing_fields(
                 document_text,
                 model,
                 temperature,
-                True,   # is_retry=True
+                True,       # is_retry=True
+                db_prompt,
             ): chunk
             for idx, chunk in enumerate(retry_chunks)
         }
@@ -913,18 +926,78 @@ def run_autopopulation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     # ── Agent config ──────────────────────────────────────────────────────────
     model       = DEFAULT_MODEL
     temperature = 0.3
+    db_prompt: Optional[str] = None
+    config_source = "DEFAULT hardcoded"
+    selected_agent_name = "no-agent-in-db"
+    selected_agent_id = "—"
+    selected_agent_type = "drafting"
     try:
-        from services.agent_config_service import get_agent_by_type
-        agent = (
-            get_agent_by_type("injection")
-            or get_agent_by_type("extraction")
-            or get_agent_by_type("autopopulation")
+        from services.agent_config_service import get_agent_by_preferences
+        agent = get_agent_by_preferences(
+            agent_type="drafting",
+            preferred_names=[
+                payload.get("db_agent_name"),
+                payload.get("agent_name"),
+                "Jurinex Autopopulation Agent",
+            ],
         )
         if agent:
             model       = agent.get("resolved_model") or DEFAULT_MODEL
             temperature = float(agent.get("temperature") or 0.3)
+            db_prompt   = (agent.get("prompt") or "").strip() or None
+            selected_agent_name = agent.get("name") or "unknown-agent"
+            selected_agent_id = agent.get("id") or "—"
+            selected_agent_type = agent.get("agent_type") or "drafting"
+            config_source = "DB agent config"
+            prompt_source = f"DB (agent_id={agent.get('id')}, name={agent.get('name')!r}, {len(db_prompt)} chars)" if db_prompt else "DEFAULT (DB agent found but prompt is empty — hardcoded fallback)"
+        else:
+            prompt_source = f"DEFAULT (no DB agent found for agent_type='drafting', name='Jurinex Autopopulation Agent' — model={DEFAULT_MODEL!r})"
+        logger.info(
+            "\n%s\n[AutopopulationAgent] AGENT CONFIG\n"
+            "  Agent name   : %s (id=%s)\n"
+            "  Model        : %r  ← from %s\n"
+            "  Temperature  : %s\n"
+            "  Prompt source: %s\n"
+            "  Prompt preview: %s\n%s",
+            "─" * 70,
+            agent.get("name") if agent else "no-agent-in-db",
+            agent.get("id") if agent else "—",
+            model, "DB agent config" if agent else "DEFAULT hardcoded",
+            temperature,
+            prompt_source,
+            (db_prompt[:200] + "..." if len(db_prompt) > 200 else db_prompt) if db_prompt else "(none — _SYSTEM_PROMPT_STRICT hardcoded will be used)",
+            "─" * 70,
+        )
+        print(
+            f"\n{'=' * 78}\n"
+            f"[AutopopulationAgent] MODEL & PROMPT RESOLUTION\n"
+            f"  Config source : {config_source}\n"
+            f"  Agent name    : {selected_agent_name!r}\n"
+            f"  Agent id      : {selected_agent_id}\n"
+            f"  Agent type    : {selected_agent_type!r}\n"
+            f"  Model in use  : {model!r}\n"
+            f"  Temperature   : {temperature}\n"
+            f"  Prompt source : {prompt_source}\n"
+            f"  Prompt chars  : {len(db_prompt) if db_prompt else 0}\n"
+            f"  Prompt preview: "
+            f"{(db_prompt[:240] + '...') if db_prompt and len(db_prompt) > 240 else (db_prompt or '[DEFAULT _SYSTEM_PROMPT_STRICT]')}\n"
+            f"{'=' * 78}"
+        )
     except Exception as e:
         logger.warning("[AutopopulationAgent][CONFIG] Could not fetch agent config: %s — using default", e)
+        print(
+            f"\n{'=' * 78}\n"
+            f"[AutopopulationAgent] MODEL & PROMPT RESOLUTION\n"
+            f"  Config source : DEFAULT hardcoded (exception while fetching DB config)\n"
+            f"  Agent name    : 'Jurinex Autopopulation Agent'\n"
+            f"  Agent type    : 'drafting'\n"
+            f"  Model in use  : {model!r}\n"
+            f"  Temperature   : {temperature}\n"
+            f"  Prompt source : [DEFAULT _SYSTEM_PROMPT_STRICT]\n"
+            f"  Prompt chars  : 0\n"
+            f"  Error         : {e}\n"
+            f"{'=' * 78}"
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # STAGE 1: Extract CanonicalData
@@ -958,6 +1031,7 @@ def run_autopopulation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
                 model,
                 temperature,
                 False,
+                db_prompt,
             ): chunk_label
             for chunk_label, chunk_fields in field_chunks
         }
@@ -987,6 +1061,7 @@ def run_autopopulation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         document_text=document_text,
         model=model,
         temperature=temperature,
+        db_prompt=db_prompt,
     )
 
     stage4_filled = sum(1 for v in all_results.values() if v not in (None, ""))

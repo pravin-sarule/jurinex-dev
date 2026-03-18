@@ -44,21 +44,31 @@ def review_section(
     if not api_key:
         return {"error": "API Key not found"}
 
-    # Load system prompt
+    # Load system prompt — priority: DB override → critic.txt file → hardcoded fallback
     system_prompt = ""
     if system_prompt_override and system_prompt_override.strip():
         system_prompt = system_prompt_override.strip()
+        prompt_source = f"DB override ({len(system_prompt)} chars)"
     else:
         try:
             from pathlib import Path
             instr_path = Path(__file__).parent.parent.parent / "instructions" / "critic.txt"
             if instr_path.exists():
                 system_prompt = instr_path.read_text(encoding="utf-8").strip()
+                prompt_source = f"instructions/critic.txt ({len(system_prompt)} chars)"
+            else:
+                prompt_source = "critic.txt NOT FOUND"
         except Exception:
-            pass
-    
+            prompt_source = "critic.txt read error"
+
     if not system_prompt:
         system_prompt = "You are a legal document auditor. Review the content for accuracy and quality."
+        prompt_source = "DEFAULT hardcoded fallback (1 line)"
+
+    logger.info(
+        "[Critic][LLM] section=%r | model=%r | prompt_source=%s | system=%d chars",
+        section_key, model, prompt_source, len(system_prompt),
+    )
 
     try:
         from services.llm_service import call_llm
