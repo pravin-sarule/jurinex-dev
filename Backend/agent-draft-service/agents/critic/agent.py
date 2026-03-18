@@ -88,6 +88,7 @@ def run_critic_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         "score": review.get("score", 0),
         "feedback": review.get("feedback", ""),
         "issues": review.get("issues") or [],
+        "action": review.get("action", "NONE"),
         "suggestions": review.get("suggestions") or [],
         "sources": review.get("sources") or [],
         "metadata": {

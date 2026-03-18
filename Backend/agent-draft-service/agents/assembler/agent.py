@@ -40,6 +40,7 @@ def _procedural_assembly(sections: list, template_url: str = None, template_css:
     Strips citations from each section so the assembled document does not show citation lists.
     """
     from services.assembled_doc_clean import strip_citations_for_assembled
+    from services.text_cleaner import clean_assembled_html
 
     parts = []
     # Embed template CSS first so preview uses exact same styles as section view (format preservation)
@@ -55,7 +56,8 @@ def _procedural_assembly(sections: list, template_url: str = None, template_css:
                 parts.append(f'<div class="document-section" id="section-{s_key}">{s_content}</div>')
             if i < len(sections) - 1:
                 parts.append("<!-- SECTION_BREAK -->")
-    return "\n".join(parts) if parts else ""
+    assembled = "\n".join(parts) if parts else ""
+    return clean_assembled_html(assembled)
 
 
 def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,12 +76,14 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     template_url = payload.get("template_url")
     draft_id = payload.get("draft_id", "unknown")
 
+    from services.text_cleaner import clean_section_html, remove_cross_section_duplication, clean_assembled_html
+
     if not sections:
         draft_content = payload.get("draft", "")
         if not draft_content:
             logger.warning("Assembler: No sections or draft provided for assembly")
             return {"final_document": "", "error": "No content provided"}
-        return {"final_document": draft_content, "format": "html"}
+        return {"final_document": clean_assembled_html(draft_content), "format": "html"}
 
     total_chars = sum(len((s.get("content", "") or "")) for s in sections)
     use_assembly_only = (
@@ -99,9 +103,17 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.warning("Assembler: Template URL unreachable: %s", e)
 
+    prepared_sections = []
+    for section in sections:
+        updated = dict(section)
+        updated["content"] = clean_section_html(updated.get("content", "") or updated.get("content_html", ""))
+        prepared_sections.append(updated)
+    prepared_sections = remove_cross_section_duplication(prepared_sections)
+
     # Always use procedural assembly: combine sections, preserve exact section format in preview
     template_css_raw = (payload.get("template_css") or "").strip() or None
-    final_document = _procedural_assembly(sections, template_url, template_css=template_css_raw)
+    final_document = _procedural_assembly(prepared_sections, template_url, template_css=template_css_raw)
+    final_document = clean_assembled_html(final_document)
     if use_assembly_only:
         logger.info("Assembler: Large document (%d sections, ~%d chars) assembled", len(sections), total_chars)
 
@@ -157,7 +169,7 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "final_document": final_document,
         "format": "html",
-        "sections_assembled": len(sections),
+        "sections_assembled": len(prepared_sections),
         "google_docs": upload_result,
         "metadata": {
             "draft_id": draft_id,

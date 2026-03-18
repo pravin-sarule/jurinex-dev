@@ -116,6 +116,18 @@ import React, { useState } from 'react';
 import { FileText, X, ExternalLink, Scale, ChevronDown, ChevronRight } from 'lucide-react';
 import { API_BASE_URL } from '../../config/apiConfig';
 
+function toPlainText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.map(toPlainText).filter(Boolean).join('');
+  if (typeof v === 'object') {
+    if (typeof v.text === 'string' || typeof v.text === 'number') return String(v.text);
+    // Common LLM content-part shape: { type: 'text', text: '...' }
+    if (v.type && v.text != null) return toPlainText(v.text);
+  }
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
 // ── Source & audit config (mirrors CitationReportPage) ─────────────────────
 const SOURCE_CFG = {
   local:          { icon: '🏛', label: 'Local DB',          bg: '#EFF4FF', border: '#C7D7FA', color: '#1A3A6B' },
@@ -378,8 +390,9 @@ function DocumentCitationCard({ citation, onCitationClick }) {
   };
 
   const pageLabel = formatPageLabel(citation);
-  const textSnippet = citation.text
-    ? (citation.text.length > 150 ? citation.text.slice(0, 150).trim() + '...' : citation.text)
+  const rawText = toPlainText(citation.text);
+  const textSnippet = rawText
+    ? (rawText.length > 150 ? rawText.slice(0, 150).trim() + '...' : rawText)
     : '';
 
   return (

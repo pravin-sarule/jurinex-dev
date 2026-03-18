@@ -24,9 +24,88 @@ class CriticReview(BaseModel):
     status: str = Field(..., pattern="^(PASS|FAIL)$")
     score: int = Field(..., ge=0, le=100)
     feedback: str
-    issues: List[str] = Field(default_factory=list)
+    issues: List[Dict[str, Any]] = Field(default_factory=list)
     suggestions: List[str] = Field(default_factory=list)
     sources: List[str] = Field(default_factory=list)
+    action: str = "NONE"
+
+
+def _plain_text_from_html(html: str) -> str:
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _hard_validate_section(section_content: str, field_values: Dict[str, Any]) -> List[Dict[str, Any]]:
+    issues: List[Dict[str, Any]] = []
+    plain_text = _plain_text_from_html(section_content)
+
+    for match in re.finditer(r"\b(\w+)\s+\1\b", plain_text, flags=re.IGNORECASE):
+        issues.append({
+            "type": "DUPLICATE_TOKEN",
+            "text": match.group(0),
+        })
+
+    repeated_sentences = set()
+    seen_sentences = set()
+    for sentence in re.split(r"(?<=[.!?])\s+", plain_text):
+        normalized = _normalize_text(sentence).strip(" .,:;")
+        if len(normalized) < 12:
+            continue
+        if normalized in seen_sentences:
+            repeated_sentences.add(sentence.strip())
+        else:
+            seen_sentences.add(normalized)
+    for sentence in sorted(repeated_sentences):
+        issues.append({
+            "type": "REPEATED_SENTENCE",
+            "text": sentence,
+        })
+
+    for match in re.finditer(r"[A-Za-z][^<>\n]{0,60}/[^<>\n]{0,60}", plain_text):
+        issues.append({
+            "type": "RAW_FIELD_DUMP",
+            "text": match.group(0).strip(),
+        })
+
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(section_content or "", "html.parser")
+    paragraph_seen = set()
+    for node in soup.find_all(["p", "li", "td"]):
+        normalized = _normalize_text(node.get_text(" ", strip=True))
+        if len(normalized) < 20:
+            continue
+        if normalized in paragraph_seen:
+            issues.append({
+                "type": "DUPLICATE_PARAGRAPH",
+                "text": node.get_text(" ", strip=True)[:240],
+            })
+        else:
+            paragraph_seen.add(normalized)
+
+    final_address = _normalize_text(field_values.get("final_address"))
+    if final_address:
+        address_hits = 0
+        for node in soup.find_all(["p", "div", "td", "li"]):
+            normalized = _normalize_text(node.get_text(" ", strip=True))
+            if final_address and final_address in normalized:
+                address_hits += 1
+        if address_hits > 1:
+            issues.append({"type": "REDUNDANT_ADDRESS"})
+
+    # Keep deterministic hard-validator output compact and unique.
+    unique_issues: List[Dict[str, Any]] = []
+    seen = set()
+    for issue in issues:
+        key = (issue.get("type"), issue.get("text"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_issues.append(issue)
+    return unique_issues
 
 def review_section(
     section_content: str,
@@ -71,12 +150,29 @@ def review_section(
     )
 
     try:
+        hard_issues = _hard_validate_section(section_content, field_values)
+        if hard_issues:
+            feedback = "Rewrite required. Hard validation failed for duplication, formatting, or deterministic field usage."
+            return {
+                "status": "success",
+                "review": {
+                    "status": "FAIL",
+                    "score": 35,
+                    "feedback": feedback,
+                    "issues": hard_issues,
+                    "suggestions": [
+                        "Remove duplicate tokens and repeated sentences.",
+                        "Use normalized field values exactly once.",
+                        "Replace slash-separated raw dumps with clean legal phrasing.",
+                    ],
+                    "sources": [],
+                    "action": "REWRITE_REQUIRED",
+                },
+            }
+
         from services.llm_service import call_llm
-        
+
         prompt = ""
-        if system_prompt:
-            prompt += f"System Instructions:\n{system_prompt}\n\n"
-        
         prompt += f"""You are a legal document auditor. Review this content for "{section_key}". Target confidence 90+ when the draft follows the template, uses sources, and has no critical errors.
 
 **Generated Content:**
@@ -99,13 +195,15 @@ def review_section(
   "status": "PASS" | "FAIL",
   "score": 0-100,
   "feedback": "string",
-  "issues": ["string"],
+  "issues": [{{"type": "ISSUE_TYPE", "text": "optional snippet"}}],
   "suggestions": ["string"],
-  "sources": ["string"]
+  "sources": ["string"],
+  "action": "NONE" | "REWRITE_REQUIRED"
 }}
 """
         response_text = call_llm(
             prompt=prompt,
+            system_prompt=system_prompt,
             model=model,
             response_mime_type="application/json"
         )
@@ -118,6 +216,8 @@ def review_section(
         cleaned_json = re.sub(r"\s*```$", "", cleaned_json).strip()
 
         review_json = json.loads(cleaned_json)
+        review_json.setdefault("issues", [])
+        review_json.setdefault("action", "NONE")
         # Validate with pydantic
         review = CriticReview(**review_json)
         

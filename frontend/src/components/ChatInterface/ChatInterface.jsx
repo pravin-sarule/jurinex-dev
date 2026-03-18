@@ -3710,6 +3710,17 @@ const ChatInterface = () => {
 
   useEffect(() => {
     const fetchCitations = async () => {
+      const toPlainText = (v) => {
+        if (v == null) return '';
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+        if (Array.isArray(v)) return v.map(toPlainText).filter(Boolean).join('');
+        if (typeof v === 'object') {
+          if (typeof v.text === 'string' || typeof v.text === 'number') return String(v.text);
+          if (v.type && v.text != null) return toPlainText(v.text);
+        }
+        try { return JSON.stringify(v); } catch { return String(v); }
+      };
+
       const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
       if (!selectedMessageId || !folderName) {
         console.log('[Citations] Missing selectedMessageId or selectedFolder:', { selectedMessageId, selectedFolder, folderName });
@@ -3738,7 +3749,7 @@ const ChatInterface = () => {
           const pageLabel = chunk.page_label || (page ? `Page ${page}` : null);
           const filename = chunk.filename || 'document.pdf';
           const fileId = chunk.file_id || chunk.fileId;
-          const text = chunk.content_preview || chunk.content || chunk.text || '';
+          const text = toPlainText(chunk.content_preview || chunk.content || chunk.text || '');
 
           const source = pageLabel
             ? `${filename} - ${pageLabel}`
@@ -3789,7 +3800,7 @@ const ChatInterface = () => {
             source: source,
             filename: citation.filename || 'document.pdf',
             fileId: citation.fileId || citation.file_id,
-            text: citation.text || citation.content || citation.text_preview || '',
+            text: toPlainText(citation.text || citation.content || citation.text_preview || ''),
             link: `${citation.filename || 'document.pdf'}#page=${page || pageStart || 1}`,
             viewUrl: citation.viewUrl || (citation.fileId ? `${API_BASE_URL}/docs/file/${citation.fileId}/view?page=${page || pageStart || 1}` : null)
           };

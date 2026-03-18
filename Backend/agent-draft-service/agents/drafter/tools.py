@@ -81,6 +81,7 @@ def draft_section(
     template_url: Optional[str] = None,
     previous_content: Optional[str] = None,
     user_feedback: Optional[str] = None,
+    critic_issues: Optional[List[Dict[str, Any]]] = None,
     mode: str = "generate",
     batch_info: Optional[str] = None,
     model: str = DEFAULT_MODEL,
@@ -89,6 +90,8 @@ def draft_section(
     temperature: float = 0.7,
     agent_name: Optional[str] = None,
     language: str = "English",
+    final_address: Optional[str] = None,
+    field_values_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate or refine a legal section using Gemini or Claude (by model).
@@ -135,6 +138,17 @@ def draft_section(
         ) + lang_directive
         prompt_source = "DEFAULT (no DB prompt configured)"
 
+    deterministic_rules = (
+        "\n DETERMINISTIC FIELD USAGE RULES:"
+        "\n - Use normalized Field Data exactly as provided."
+        "\n - If final_address is provided, use final_address EXACTLY as provided."
+        "\n - Do NOT reconstruct, expand, or paraphrase the address."
+        "\n - Do NOT repeat any token, phrase, paragraph, or address block twice."
+        "\n - Do NOT output slash-separated raw field dumps."
+        "\n - Prefer Field Data over RAG when both contain the same fact."
+    )
+    system_prompt = system_prompt + deterministic_rules
+
     print(
         f"\n{'─'*70}\n"
         f"[Drafter] PROMPT & MODEL CONFIG\n"
@@ -161,6 +175,10 @@ def draft_section(
         parts = []
         # NOTE: Do NOT add system_prompt to parts — it is passed separately to call_llm
         # as system_prompt → Gemini system_instruction / Claude system.
+
+        field_block = field_values_text or str(field_values)
+        if final_address:
+            field_block = f"{field_block}\nfinal_address: {final_address}"
 
         # Fetch template, extract HTML for this specific section only, then section-wise format
         template_content = ""
@@ -235,7 +253,8 @@ ADDITIONAL CASE CONTEXT (this batch — use only chunks relevant to this section
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {rag_context if rag_context else 'No additional context.'}
 
-FIELD DATA: {field_values}
+FIELD DATA:
+{field_block}
 
 OUTPUT RULES:
 - LANGUAGE: All output must be in {lang} only — no other language.
@@ -247,12 +266,16 @@ OUTPUT RULES:
 """
         elif user_feedback and previous_content:
             # ── Targeted refinement ───────────────────────────────────────────
+            issues_block = critic_issues if critic_issues else "[]"
             prompt = f"""SECTION: {section_key} — TARGETED EDIT
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 USER INSTRUCTION (apply ONLY this change — change nothing else):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {user_feedback}
+
+VALIDATION ISSUES TO FIX:
+{issues_block}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PREVIOUS CONTENT (change only what the instruction refers to; copy everything else exactly):
@@ -264,12 +287,15 @@ CASE CONTEXT (use only if the instruction needs facts from context):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {rag_context if rag_context else 'No additional context.'}
 
-FIELD DATA: {field_values}
+FIELD DATA:
+{field_block}
 
 OUTPUT RULES:
 - LANGUAGE: All output must be in {lang} only — no other language permitted.
 - LEGAL TONE: Maintain formal legal language and advocate style.
 - Apply the User Instruction as a MINIMAL SURGICAL EDIT. Change ONLY the specific part referenced.
+- Fix every validation issue listed above.
+- If final_address is provided, use it exactly once unless the section prompt explicitly requires repetition.
 - Return the COMPLETE section HTML with only that one change applied.
 - Preserve all other paragraphs, headings, tables, inline styles, and HTML tags exactly.
 - No markdown, no code fences. Raw HTML only.
@@ -286,7 +312,7 @@ SECTION PROMPT (THIS IS WHAT YOU MUST GENERATE — follow exactly):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIELD DATA (fill ALL placeholders from this first):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{field_values}
+{field_block}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CASE CONTEXT (RAG — use only the chunks relevant to this section):
@@ -306,6 +332,9 @@ OUTPUT RULES:
 - Fill EVERY placeholder: [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [CASE_NUMBER], [ADDRESS] etc.
   • Use Field Data first → then RAG → then safe fallback ("the Petitioner", "the Hon'ble Court").
   • Court name, petitioner name, and respondent name must NEVER be blank.
+- If final_address is provided, use that exact address string and do not reconstruct it from components.
+- Do NOT repeat any sentence, token, paragraph, heading, or address block.
+- Do NOT output slash-separated strings like "Village/Taluka/District" or "A / B / C".
 - Match the HTML template structure above exactly (same tags, classes, inline styles, order).
 - Output raw HTML only. No markdown, no code fences, no prose outside HTML tags.
 - Use inline styles: font-family: 'Times New Roman', serif; font-size: 16px; line-height: 1.5; text-align: justify; margin-bottom: 1em.
@@ -335,7 +364,10 @@ OUTPUT RULES:
         if not content_html:
             return {"status": "error", "error_message": f"LLM returned empty content (model={model!r})"}
 
-        return {"status": "success", "content_html": _clean_html_response(content_html)}
+        cleaned_html = _clean_html_response(content_html)
+        from services.text_cleaner import clean_section_html
+        cleaned_html = clean_section_html(cleaned_html, final_address=final_address)
+        return {"status": "success", "content_html": cleaned_html}
 
     except Exception as e:
         logger.exception("Drafting tool failed")

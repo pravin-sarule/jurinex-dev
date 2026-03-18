@@ -1,6 +1,15 @@
 import React, { useState } from 'react';
 import { PencilIcon, CheckIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outline';
 
+const formatCriticIssue = (issue) => {
+  if (typeof issue === 'string') return issue;
+  if (!issue || typeof issue !== 'object') return String(issue ?? '');
+  const issueType = issue.type ? issue.type.replace(/_/g, ' ') : '';
+  const issueText = typeof issue.text === 'string' ? issue.text.trim() : '';
+  if (issueType && issueText) return `${issueType}: ${issueText}`;
+  return issueText || issueType || JSON.stringify(issue);
+};
+
 /**
  * SectionCard Component
  * 
@@ -174,7 +183,7 @@ const SectionCard = ({
               {criticReview.issues && criticReview.issues.length > 0 && (
                 <ul className="list-disc list-inside text-sm text-red-700">
                   {criticReview.issues.map((issue, idx) => (
-                    <li key={idx}>{issue}</li>
+                    <li key={idx}>{formatCriticIssue(issue)}</li>
                   ))}
                 </ul>
               )}

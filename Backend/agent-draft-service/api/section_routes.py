@@ -10,6 +10,7 @@ GET /api/drafts/{draft_id}/sections/{section_key}/versions - Get version history
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -53,6 +54,27 @@ def _invalidate_assembled_cache(draft_id: str, user_id: int):
                 logger.info(f"[CACHE INVALIDATED] Cleared assembled cache for draft {draft_id}; next Assemble will create new Google Doc.")
     except Exception as e:
         logger.warning(f"Failed to invalidate cache for draft {draft_id}: {e}")
+
+
+def _prepare_drafting_payload_inputs(
+    raw_field_values: Dict[str, Any],
+    rag_chunks: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    from services.draft_preprocessor import preprocess_drafting_inputs
+
+    return preprocess_drafting_inputs(raw_field_values, rag_chunks or [])
+
+
+def _build_rewrite_feedback(critic_result: Optional[Dict[str, Any]]) -> str:
+    if not critic_result:
+        return "Rewrite required."
+    issues = critic_result.get("issues") or []
+    if not issues:
+        return critic_result.get("feedback") or "Rewrite required."
+    return (
+        "Rewrite required. Fix every validator issue below and keep the section legally precise.\n"
+        + json.dumps(issues, ensure_ascii=True)
+    )
 
 
 @router.post("/drafts/{draft_id}/sections/{section_key}/generate")
@@ -265,6 +287,13 @@ async def generate_section(
         else:
             print(f"[Librarian → Orchestrator] WARNING: Empty context returned!")
         
+        prepared_inputs = _prepare_drafting_payload_inputs(field_values, chunks)
+        field_values = prepared_inputs["field_values"]
+        filtered_chunks = prepared_inputs["filtered_chunks"]
+        rag_context = prepared_inputs["rag_context"]
+        final_address = prepared_inputs["final_address"]
+        field_values_text = prepared_inputs["field_values_text"]
+
         # Determine Language and Detail Level
         # Priority: request body `language` param > per-section DB config > default English
         language_map = {
@@ -307,21 +336,17 @@ async def generate_section(
         content_html = ""
         drafter_result = {}
         
-        if chunks and len(chunks) > batch_size:
+        if filtered_chunks and len(filtered_chunks) > batch_size:
             # Multiple batches: generate batch 1, then continue with batches 2+
-            num_batches = (len(chunks) + batch_size - 1) // batch_size
-            print(f"[Orchestrator → Drafter] Batch-wise generation: {len(chunks)} chunks → {num_batches} batches")
+            num_batches = (len(filtered_chunks) + batch_size - 1) // batch_size
+            print(f"[Orchestrator → Drafter] Batch-wise generation: {len(filtered_chunks)} filtered chunks → {num_batches} batches")
             
             for batch_idx in range(num_batches):
                 start = batch_idx * batch_size
-                end = min(start + batch_size, len(chunks))
-                batch_chunks = chunks[start:end]
-                batch_context_parts = []
-                for c in batch_chunks:
-                    cnt = c.get("content", "").strip()
-                    if cnt:
-                        batch_context_parts.append(cnt)
-                batch_rag = "\n\n---\n\n".join(batch_context_parts)
+                end = min(start + batch_size, len(filtered_chunks))
+                batch_chunks = filtered_chunks[start:end]
+                batch_prep = _prepare_drafting_payload_inputs(field_values, batch_chunks)
+                batch_rag = batch_prep["rag_context"]
                 batch_info = f"**Batch {batch_idx + 1} of {num_batches}** (chunks {start + 1}-{end})"
                 
                 if batch_idx == 0:
@@ -331,6 +356,8 @@ async def generate_section(
                         "section_prompt": enhanced_prompt,
                         "rag_context": batch_rag,
                         "field_values": field_values,
+                        "final_address": final_address,
+                        "field_values_text": field_values_text,
                         "template_url": template_url,
                         "detail_level": detail_level,
                         "language": language,
@@ -342,6 +369,8 @@ async def generate_section(
                         "section_prompt": enhanced_prompt,
                         "rag_context": batch_rag,
                         "field_values": field_values,
+                        "final_address": final_address,
+                        "field_values_text": field_values_text,
                         "template_url": template_url,
                         "previous_content": content_html,
                         "batch_info": batch_info,
@@ -366,7 +395,7 @@ async def generate_section(
             # Single batch: one API call
             print(
                 f"[Orchestrator → Drafter] Single-batch generation | "
-                f"section={section_key!r} | chunks={len(chunks)} | "
+                f"section={section_key!r} | chunks={len(filtered_chunks)} | "
                 f"language={language} | detail={detail_level} | "
                 f"prompt_preview={enhanced_prompt[:80]!r}"
             )
@@ -376,6 +405,8 @@ async def generate_section(
                 "section_prompt": enhanced_prompt,
                 "rag_context": rag_context,
                 "field_values": field_values,
+                "final_address": final_address,
+                "field_values_text": field_values_text,
                 "template_url": template_url,
                 "detail_level": detail_level,
                 "language": language,
@@ -386,45 +417,46 @@ async def generate_section(
         if not content_html:
             raise HTTPException(status_code=500, detail=drafter_result.get("error", "Drafter returned empty content"))
 
-        # Run Critic validation if requested
-        critic_result = None
-        if auto_validate:
-            print(f"[Orchestrator → Critic] Validating generated content")
-            critic_payload = {
-                "section_content": content_html,
+        from services.text_cleaner import clean_section_html
+        content_html = clean_section_html(content_html, final_address=final_address)
+
+        print(f"[Orchestrator → Critic] Validating generated content")
+        critic_payload = {
+            "section_content": content_html,
+            "section_key": section_key,
+            "rag_context": rag_context,
+            "field_values": field_values,
+            "section_prompt": section_prompt,
+        }
+        critic_result = run_critic_agent(critic_payload)
+
+        if critic_result.get("status") == "FAIL":
+            print(f"[Critic → Orchestrator] FAIL (score={critic_result.get('score')}). Auto-retry with feedback.")
+            drafter_payload_retry = {
+                "mode": "refine",
                 "section_key": section_key,
+                "section_prompt": section_prompt,
                 "rag_context": rag_context,
                 "field_values": field_values,
-                "section_prompt": section_prompt,
+                "final_address": final_address,
+                "field_values_text": field_values_text,
+                "template_url": template_url,
+                "previous_content": content_html,
+                "user_feedback": _build_rewrite_feedback(critic_result),
+                "critic_issues": critic_result.get("issues") or [],
+                "detail_level": detail_level,
+                "language": language,
             }
-            critic_result = run_critic_agent(critic_payload)
-            
-            # Auto-retry once if FAIL
-            if critic_result.get("status") == "FAIL":
-                print(f"[Critic → Orchestrator] FAIL (score={critic_result.get('score')}). Auto-retry with feedback.")
-                # Retry with Critic feedback
-                drafter_payload_retry = {
-                    "mode": "refine",
-                    "section_key": section_key,
-                    "section_prompt": section_prompt,
-                    "rag_context": rag_context,
-                    "field_values": field_values,
-                    "template_url": template_url,
-                    "previous_content": content_html,
-                    "user_feedback": f"Critic feedback: {critic_result.get('feedback', '')}",
-                    "detail_level": detail_level,
-                    "language": language,
-                }
-                drafter_result_retry = run_drafter_agent(drafter_payload_retry)
-                content_html_retry = drafter_result_retry.get("content_html", "")
-                
-                if content_html_retry:
-                    content_html = content_html_retry
-                    print(f"[Drafter → Orchestrator] Retry completed")
-                    # Re-validate retry
-                    critic_payload["section_content"] = content_html
-                    critic_result = run_critic_agent(critic_payload)
-                    print(f"[Critic → Orchestrator] Retry validation: {critic_result.get('status')}")
+            drafter_result_retry = run_drafter_agent(drafter_payload_retry)
+            content_html_retry = drafter_result_retry.get("content_html", "")
+
+            if content_html_retry:
+                content_html = clean_section_html(content_html_retry, final_address=final_address)
+                drafter_result = drafter_result_retry
+                print(f"[Drafter → Orchestrator] Retry completed")
+                critic_payload["section_content"] = content_html
+                critic_result = run_critic_agent(critic_payload)
+                print(f"[Critic → Orchestrator] Retry validation: {critic_result.get('status')}")
         
         # Save version
         version = draft_db.save_section_version(
@@ -438,6 +470,10 @@ async def generate_section(
                 "drafter": drafter_result.get("metadata", {}),
                 "critic": critic_result if critic_result else None,
                 "rag_query": rag_query,
+                "preprocessor": {
+                    "final_address": final_address,
+                    "filtered_chunks_count": len(filtered_chunks),
+                },
             },
             created_by_agent="drafter",
         )
@@ -719,6 +755,14 @@ async def refine_section_endpoint(
             librarian_result = run_librarian_agent(librarian_payload)
             rag_context = librarian_result.get("context", "")
 
+        prepared_inputs = _prepare_drafting_payload_inputs(field_values, [])
+        field_values = prepared_inputs["field_values"]
+        final_address = prepared_inputs["final_address"]
+        field_values_text = prepared_inputs["field_values_text"]
+        if rag_context:
+            prepared_rag = _prepare_drafting_payload_inputs(field_values, librarian_result.get("chunks", []) if rag_query else [])
+            rag_context = prepared_rag["rag_context"] or rag_context
+
         # Run Drafter in refinement mode
         print(f"[Orchestrator → Drafter] Refining with user feedback (detail_level={detail_level}, language={language})")
         drafter_payload = {
@@ -727,6 +771,8 @@ async def refine_section_endpoint(
             "section_prompt": user_feedback,
             "rag_context": rag_context,
             "field_values": field_values,
+            "final_address": final_address,
+            "field_values_text": field_values_text,
             "template_url": template_url,
             "previous_content": previous_content,
             "user_feedback": user_feedback,
@@ -738,19 +784,43 @@ async def refine_section_endpoint(
         
         if not content_html:
             raise HTTPException(status_code=500, detail="Drafter returned empty content")
-        
-        # Run Critic validation
-        critic_result = None
-        if auto_validate:
-            print(f"[Orchestrator → Critic] Validating refined content")
-            critic_payload = {
-                "section_content": content_html,
+
+        from services.text_cleaner import clean_section_html
+        content_html = clean_section_html(content_html, final_address=final_address)
+
+        print(f"[Orchestrator → Critic] Validating refined content")
+        critic_payload = {
+            "section_content": content_html,
+            "section_key": section_key,
+            "rag_context": rag_context,
+            "field_values": field_values,
+            "section_prompt": user_feedback,
+        }
+        critic_result = run_critic_agent(critic_payload)
+
+        if critic_result.get("status") == "FAIL":
+            drafter_payload_retry = {
+                "mode": "refine",
                 "section_key": section_key,
+                "section_prompt": user_feedback,
                 "rag_context": rag_context,
                 "field_values": field_values,
-                "section_prompt": user_feedback,
+                "final_address": final_address,
+                "field_values_text": field_values_text,
+                "template_url": template_url,
+                "previous_content": content_html,
+                "user_feedback": _build_rewrite_feedback(critic_result),
+                "critic_issues": critic_result.get("issues") or [],
+                "detail_level": detail_level,
+                "language": language,
             }
-            critic_result = run_critic_agent(critic_payload)
+            drafter_result_retry = run_drafter_agent(drafter_payload_retry)
+            retry_html = drafter_result_retry.get("content_html", "")
+            if retry_html:
+                content_html = clean_section_html(retry_html, final_address=final_address)
+                drafter_result = drafter_result_retry
+                critic_payload["section_content"] = content_html
+                critic_result = run_critic_agent(critic_payload)
         
         # Save new version (increments version_number)
         version = draft_db.save_section_version(
@@ -764,6 +834,9 @@ async def refine_section_endpoint(
                 "drafter": drafter_result.get("metadata", {}),
                 "critic": critic_result if critic_result else None,
                 "rag_query": rag_query,
+                "preprocessor": {
+                    "final_address": final_address,
+                },
             },
             created_by_agent="drafter",
         )

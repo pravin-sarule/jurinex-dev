@@ -2388,7 +2388,18 @@ export default function CitationReportPage({ embedded = false }) {
     setShareSaving(false);
   };
 
-  const addMsg = (role, text, extra = {}) => setMsgs(p => [...p, { role, text, ts: Date.now(), ...extra }]);
+  const toPlainText = useCallback((v) => {
+    if (v == null) return '';
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (Array.isArray(v)) return v.map(toPlainText).filter(Boolean).join('');
+    if (typeof v === 'object') {
+      if (typeof v.text === 'string' || typeof v.text === 'number') return String(v.text);
+      if (v.type && v.text != null) return toPlainText(v.text);
+    }
+    try { return JSON.stringify(v); } catch { return String(v); }
+  }, []);
+
+  const addMsg = (role, text, extra = {}) => setMsgs(p => [...p, { role, text: toPlainText(text), ts: Date.now(), ...extra }]);
 
   const stopPolling = useCallback(() => {
     if (logPollRef.current) { clearInterval(logPollRef.current); logPollRef.current = null; }
@@ -3120,14 +3131,14 @@ export default function CitationReportPage({ embedded = false }) {
               {msgs.map((m, i) => (
                 <div key={i} style={{ marginBottom: 12, display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', animation: 'fdUp .25s ease' }}>
                   {m.role === 'user' ? (
-                    <div style={{ maxWidth: '82%', padding: '10px 14px', background: `linear-gradient(135deg,${N},${NL})`, color: W, borderRadius: '12px 12px 2px 12px', fontSize: 13, lineHeight: 1.6 }}>{m.text}</div>
+                    <div style={{ maxWidth: '82%', padding: '10px 14px', background: `linear-gradient(135deg,${N},${NL})`, color: W, borderRadius: '12px 12px 2px 12px', fontSize: 13, lineHeight: 1.6 }}>{toPlainText(m.text)}</div>
                   ) : m.role === 'status' ? (
                     <div style={{ background: g50, border: `1px solid ${g200}`, borderRadius: '12px 12px 12px 2px', padding: '10px 14px', fontSize: 12, color: g500, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Spin /> {m.text}
+                      <Spin /> {toPlainText(m.text)}
                     </div>
                   ) : (
                     <div style={{ maxWidth: '85%', padding: '10px 14px', background: m.role === 'error' ? RS : g50, border: `1px solid ${m.role === 'error' ? '#FECACA' : g200}`, borderRadius: '12px 12px 12px 2px', fontSize: 13, color: m.role === 'error' ? R : g700, lineHeight: 1.7 }}>
-                      <span dangerouslySetInnerHTML={{ __html: m.text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} />
+                      <span dangerouslySetInnerHTML={{ __html: toPlainText(m.text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} />
                       {m.reportId && <button className="view-rep-btn" onClick={() => setShowReport(true)}>📄 View Full Report →</button>}
                     </div>
                   )}

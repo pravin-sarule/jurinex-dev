@@ -48,12 +48,21 @@ interface SectionState {
         status: 'PASS' | 'FAIL' | null;
         score: number;
         feedback: string;
-        issues: string[];
+        issues: Array<string | { type?: string; text?: string }>;
         suggestions: string[];
         sources?: string[];
     } | null;
     versionId: string | null;
 }
+
+const formatCriticIssue = (issue: string | { type?: string; text?: string }) => {
+    if (typeof issue === 'string') return issue;
+    if (!issue || typeof issue !== 'object') return String(issue ?? '');
+    const issueType = issue.type?.replace(/_/g, ' ');
+    const issueText = issue.text?.trim();
+    if (issueType && issueText) return `${issueType}: ${issueText}`;
+    return issueText || issueType || JSON.stringify(issue);
+};
 
 interface SectionDraftingPageProps {
     draftIdProp?: string;
@@ -1019,7 +1028,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                                                 <h4 className="text-xs font-semibold text-gray-700 uppercase mb-1">Issues:</h4>
                                                                 <ul className="list-disc list-inside text-sm text-gray-600 space-y-1 break-words">
                                                                     {currentSection.criticReview.issues.map((issue, idx) => (
-                                                                        <li key={idx}>{issue}</li>
+                                                                        <li key={idx}>{formatCriticIssue(issue)}</li>
                                                                     ))}
                                                                 </ul>
                                                             </div>

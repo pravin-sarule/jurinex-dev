@@ -61,9 +61,12 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     section_prompt = payload.get("section_prompt", "")
     rag_context = payload.get("rag_context", "")
     field_values = payload.get("field_values", {})
+    final_address = payload.get("final_address")
+    field_values_text = payload.get("field_values_text")
     template_url = payload.get("template_url")
     previous_content = payload.get("previous_content")
     user_feedback = payload.get("user_feedback")
+    critic_issues = payload.get("critic_issues")
     detail_level = payload.get("detail_level") or "detailed"
     batch_info = payload.get("batch_info")
     language = payload.get("language") or "English"
@@ -107,6 +110,7 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         template_url=template_url,
         previous_content=previous_content,
         user_feedback=user_feedback,
+        critic_issues=critic_issues,
         mode=mode,
         batch_info=batch_info,
         model=model,
@@ -115,6 +119,8 @@ def run_drafter_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         temperature=temperature,
         agent_name=agent_name,
         language=language,
+        final_address=final_address,
+        field_values_text=field_values_text,
     )
 
     if result.get("status") == "error":
