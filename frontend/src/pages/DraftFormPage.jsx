@@ -79,6 +79,19 @@ const DETAIL_LEVELS = [
   { value: 'short', label: 'Short', description: 'Brief and to the point' }
 ];
 
+const buildAssembledResumePayload = (draftMetadata) => {
+  const assembledCache = draftMetadata?.assembled_cache;
+  if (!assembledCache?.final_document) return null;
+
+  return {
+    success: true,
+    final_document: assembledCache.final_document,
+    template_css: assembledCache.template_css || '',
+    google_docs: assembledCache.metadata?.google_docs,
+    metadata: assembledCache.metadata || {},
+  };
+};
+
 const DraftFormPage = () => {
   const { draftId } = useParams();
   const navigate = useNavigate();
@@ -114,6 +127,7 @@ const DraftFormPage = () => {
   const [uploadedDocuments, setUploadedDocuments] = useState([]); // { name, status: 'uploading'|'success'|'failed', fileId? }[]
   const [attachedCaseTitle, setAttachedCaseTitle] = useState(null);
   const [isAutopopulatingFields, setIsAutopopulatingFields] = useState(false);
+  const [autopopulationFilledCount, setAutopopulationFilledCount] = useState(0);
 
   // Steps (initial from URL so refresh preserves current step)
   const [currentStep, setCurrentStepState] = useState(initialStep);
@@ -256,6 +270,16 @@ const DraftFormPage = () => {
           setSectionDetailLevels(detailMap);
           setSelectedLanguage(lang);
 
+          const assembledResumePayload = buildAssembledResumePayload(d.metadata);
+          const hasExplicitStep = searchParams.has('step');
+          if (assembledResumePayload) {
+            setLastAssembleResult(assembledResumePayload);
+            if (!hasExplicitStep) {
+              setCurrentStep(6);
+              console.log('[DraftFormPage] Resuming completed draft in assembled editor view');
+            }
+          }
+
           // Identify custom sections added by user (not in template)
           const templateSectionIds = new Set(baseSections.map(s => s.id));
           const customSections = [];
@@ -369,7 +393,7 @@ const DraftFormPage = () => {
     };
     load();
     return () => { cancelled = true; };
-  }, [draftId, navigate]);
+  }, [draftId, navigate, searchParams]);
 
 
   // Initialize Section Prompts map when fields change (if needed)
@@ -465,6 +489,7 @@ const DraftFormPage = () => {
   const pollForAutopopulatedFields = (draftIdParam, templateIdParam, onApplied) => {
     if (autopopulatePollRef.current) clearInterval(autopopulatePollRef.current);
     setIsAutopopulatingFields(true);
+    setAutopopulationFilledCount(0);
     const POLL_INTERVAL_MS = 2000;
     const MAX_ATTEMPTS = 30; // 60 seconds total — agent can take time on large docs
     let attempts = 0;
@@ -487,6 +512,9 @@ const DraftFormPage = () => {
         const filledFromTemplate = Object.entries(fromTemplate).filter(
           ([, v]) => v != null && String(v).trim() !== ''
         );
+
+        // Update live counter on every tick so the UI reflects progress
+        setAutopopulationFilledCount(filledFromTemplate.length);
 
         // Stop polling when: agent reports done (completed/partial) AND has filled values
         const agentDone = extractionStatus === 'completed' || extractionStatus === 'partial';
@@ -1047,9 +1075,16 @@ const DraftFormPage = () => {
               {isAutopopulatingFields && (
                 <div className="flex items-center gap-3 p-4 bg-[#21C1B6]/10 border border-[#21C1B6]/20 rounded-2xl">
                   <ArrowPathIcon className="w-6 h-6 text-[#21C1B6] animate-spin flex-shrink-0" />
-                  <div>
-                    <p className="text-sm font-semibold text-slate-800">Fetching form fields from document...</p>
-                    <p className="text-xs text-slate-500">Next step will be enabled when fields are ready.</p>
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold text-slate-800">
+                      AI is reading your documents and filling form fields...
+                      {autopopulationFilledCount > 0 && (
+                        <span className="ml-2 text-[#21C1B6]">{autopopulationFilledCount} field{autopopulationFilledCount !== 1 ? 's' : ''} filled so far</span>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      "Continue to Drafting" will unlock once all fields are ready.
+                    </p>
                   </div>
                 </div>
               )}
@@ -1132,6 +1167,22 @@ const DraftFormPage = () => {
                 </div>
               </div>
 
+              {/* Autopopulation in-progress banner on Step 2 */}
+              {isAutopopulatingFields && (
+                <div className="flex items-center gap-3 px-4 py-3 bg-[#21C1B6]/10 border border-[#21C1B6]/20 rounded-2xl flex-shrink-0">
+                  <ArrowPathIcon className="w-5 h-5 text-[#21C1B6] animate-spin flex-shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold text-slate-800">
+                      AI is filling your fields from documents...
+                      {autopopulationFilledCount > 0 && (
+                        <span className="ml-2 text-[#21C1B6]">{autopopulationFilledCount} field{autopopulationFilledCount !== 1 ? 's' : ''} filled</span>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-500">"Configure Sections" will unlock once all field values are fetched.</p>
+                  </div>
+                </div>
+              )}
+
               <div className="flex justify-between pt-6 border-t border-slate-100 flex-shrink-0">
                 <button onClick={() => setCurrentStep(1)} className="h-11 flex items-center gap-2 px-6 text-slate-500 hover:text-slate-900 font-bold">
                   <ArrowLeftIcon className="w-5 h-5" /> Back
@@ -1144,10 +1195,24 @@ const DraftFormPage = () => {
                       setCurrentStep(3);
                     }
                   }}
-                  className="h-11 flex items-center gap-3 bg-[#21C1B6] hover:bg-[#19a096] text-white px-8 rounded-2xl font-bold shadow-xl transition-all hover:scale-105 shadow-[#21C1B6]/20"
+                  disabled={isAutopopulatingFields}
+                  className={`h-11 flex items-center gap-3 px-8 rounded-2xl font-bold shadow-xl transition-all active:scale-95 ${
+                    isAutopopulatingFields
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed shadow-none'
+                      : 'bg-[#21C1B6] hover:bg-[#19a096] text-white hover:scale-105 shadow-[#21C1B6]/20'
+                  }`}
                 >
-                  Configure Sections
-                  <ChevronRightIcon className="w-5 h-5" />
+                  {isAutopopulatingFields ? (
+                    <>
+                      <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                      Fetching Fields...
+                    </>
+                  ) : (
+                    <>
+                      Configure Sections
+                      <ChevronRightIcon className="w-5 h-5" />
+                    </>
+                  )}
                 </button>
               </div>
             </div>
