@@ -9,7 +9,7 @@
 const GATEWAY_URL =
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  '';
+  'h';
 
 // API Base URLs for different services
 export const API_BASE_URL = GATEWAY_URL;
@@ -56,7 +56,7 @@ export const AGENT_DRAFT_TEMPLATE_API =
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE =
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-  'https://template-analyzer-agent-120280829617.asia-south1.run.app';
+  'https://drafting-agents-120280829617.asia-south1.run.app';
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).

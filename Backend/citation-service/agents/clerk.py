@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE    = 1200
 CHUNK_OVERLAP = 200
 CLERK_DOC_WORKERS = max(1, min(12, int(os.environ.get("CITATION_CLERK_DOC_WORKERS", "6"))))
+_EXPECTED_CLERK_KEYS = {
+    "caseName",
+    "primaryCitation",
+    "alternateCitations",
+    "court",
+    "coram",
+    "benchType",
+    "dateOfJudgment",
+    "statutes",
+    "ratio",
+    "excerptPara",
+    "excerptText",
+    "subsequentTreatment",
+    "verificationStatus",
+    "officialSourceUrl",
+}
 
 
 class _SafeFormatDict(dict):
@@ -97,6 +113,14 @@ def _parse_model_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _is_expected_clerk_payload(payload: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return False
+    if "content_html" in payload:
+        return False
+    return bool(_EXPECTED_CLERK_KEYS.intersection(payload.keys()))
+
+
 # ─── Chunking ────────────────────────────────────────────────────────────────
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
@@ -169,18 +193,22 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
         return None
 
     # Resolve prompt, model, temperature from DB → fallback to defaults
-    config_kw: Dict[str, Any] = {
+    default_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    default_config_kw: Dict[str, Any] = {
         "temperature": 0.1,
         "maxOutputTokens": 1536,
         "responseMimeType": "application/json",
     }
+    prompt = _safe_prompt_format(_DEFAULT_CLERK_PROMPT, title=title, query=query, excerpt=excerpt)
+    model = default_model
+    config_kw: Dict[str, Any] = default_config_kw.copy()
     try:
         from utils.prompt_resolver import resolve_prompt
         pc = resolve_prompt(
             name="Clerk",
             agent_type="citation",
             default_prompt=_DEFAULT_CLERK_PROMPT,
-            default_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+            default_model=default_model,
             default_temperature=0.1,
             default_max_tokens=1536,
         )
@@ -194,9 +222,8 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
     except Exception as exc:
         logger.warning("[CLERK] Prompt resolver failed (%s), using default", exc)
         prompt = _safe_prompt_format(_DEFAULT_CLERK_PROMPT, title=title, query=query, excerpt=excerpt)
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-        temperature = 0.1
-        max_tokens = 1536
+        model = default_model
+        config_kw = default_config_kw.copy()
 
     try:
         client = genai.Client(api_key=api_key)
@@ -208,9 +235,20 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
             config=config,
         )
         parsed = _parse_model_json(resp.text or "")
-        if parsed is not None:
+        if _is_expected_clerk_payload(parsed):
             return parsed
-        logger.warning("[CLERK] Gemini returned non-parseable JSON; falling back to default merge")
+        logger.warning("[CLERK] Gemini returned unexpected JSON shape; retrying with default Clerk prompt")
+
+        fallback_resp = client.models.generate_content(
+            model=default_model,
+            contents=_safe_prompt_format(_DEFAULT_CLERK_PROMPT, title=title, query=query, excerpt=excerpt),
+            config=genai.types.GenerateContentConfig(**default_config_kw),
+        )
+        fallback_parsed = _parse_model_json(fallback_resp.text or "")
+        if _is_expected_clerk_payload(fallback_parsed):
+            return fallback_parsed
+
+        logger.warning("[CLERK] Gemini returned non-parseable or mismatched JSON; falling back to default merge")
         return None
     except Exception as e:
         logger.warning("[CLERK] Gemini extraction failed: %s", e)

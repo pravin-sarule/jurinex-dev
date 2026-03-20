@@ -1253,7 +1253,8 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
   const citations = allCitations.filter(c => ['GREEN', 'YELLOW', 'STALE'].includes(c.verificationStatus));
   const pendingCits = allCitations.filter(c => c.verificationStatus === 'PENDING');
   const redCits = allCitations.filter(c => c.verificationStatus === 'RED');
-  const searchableCitations = citations.map(c => {
+  const primaryListCitations = citations.length > 0 ? citations : [...pendingCits, ...redCits];
+  const searchableCitations = primaryListCitations.map(c => {
     const normalizedCourt = normalizeCourtKey(c.court);
     const searchableText = normalizeSearchText([
       c.caseName,
@@ -1463,7 +1464,9 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
                   No citations found for this filter
                 </div>
                 <div className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>
-                  Switch to All to review every verified citation in this report.
+                  {citations.length > 0
+                    ? 'Switch to All to review every verified citation in this report.'
+                    : 'No verified citations were produced for this report. Review the pending or unverified citations shown here.'}
                 </div>
               </div>
             ) : (() => {
@@ -1540,7 +1543,9 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
 
           {citations.length === 0 && (pendingCits.length > 0 || redCits.length > 0) && (
             <div className="doc-paper" style={{ padding: '32px', textAlign: 'center', marginBottom: 18 }}>
-              <div className="doc-serif" style={{ fontSize: 14, fontStyle: 'italic', color: '#9CA3AF' }}>No verified citations available. See sections below.</div>
+              <div className="doc-serif" style={{ fontSize: 14, fontStyle: 'italic', color: '#9CA3AF' }}>
+                No verified citations are available yet. Pending and unverified citations are shown in the main list for review.
+              </div>
             </div>
           )}
 
@@ -2853,9 +2858,12 @@ export default function CitationReportPage({ embedded = false }) {
       const rid = startData.run_id;
       setRunId(rid);
 
-      // Poll agent logs every 1.5s (incremental, timestamp-based)
+      // Poll agent logs at a calmer interval and never overlap requests.
       let lastLogTime = '';
+      let logPollInFlight = false;
       logPollRef.current = setInterval(async () => {
+        if (logPollInFlight) return;
+        logPollInFlight = true;
         try {
           const logData = await citationApi.getRunLogs(rid, lastLogTime);
           const newLogs = logData.logs || [];
@@ -2864,11 +2872,14 @@ export default function CitationReportPage({ embedded = false }) {
             setAgentLogs(prev => [...prev, ...newLogs]);
           }
         } catch (_) { }
-      }, 1500);
+        finally { logPollInFlight = false; }
+      }, 4000);
 
-      // Poll status every 3s — auto-abort after 15 minutes
+      // Poll status every 5s and avoid overlapping requests.
       const pollStarted = Date.now();
+      let statusPollInFlight = false;
       statusPollRef.current = setInterval(async () => {
+        if (statusPollInFlight) return;
         if (Date.now() - pollStarted > 15 * 60 * 1000) {
           stopPolling();
           addMsg('error', '❌ Pipeline timed out after 15 minutes. Please try again.');
@@ -2876,6 +2887,7 @@ export default function CitationReportPage({ embedded = false }) {
           setSending(false); setGenerating(false);
           return;
         }
+        statusPollInFlight = true;
         try {
           const st = await citationApi.getRunStatus(rid);
           if (st.status === 'completed' || st.status === 'failed') {
@@ -2908,7 +2920,8 @@ export default function CitationReportPage({ embedded = false }) {
             setSending(false); setGenerating(false);
           }
         } catch (_) { }
-      }, 3000);
+        finally { statusPollInFlight = false; }
+      }, 5000);
 
     } catch (e) {
       stopPolling();
