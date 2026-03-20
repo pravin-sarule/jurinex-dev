@@ -18,7 +18,7 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'https://authservice-120280829617.asia-south1.run.app';
+  'http://localhost:5001';
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
   'https://chat-model-120280829617.asia-south1.run.app';
@@ -31,7 +31,7 @@ export const VISUAL_SERVICE_URL =
 
 export const DOCUMENT_SERVICE_URL =
   import.meta.env.VITE_APP_DOCUMENT_SERVICE_URL ||
-  'https://document-service-120280829617.asia-south1.run.app';
+  'http://localhost:5002';
 export const FILES_SERVICE_URL = `${GATEWAY_URL}/api/files`;
 export const CONTENT_SERVICE_URL = `${GATEWAY_URL}/api/content`;
 export const MINDMAP_SERVICE_URL = `${GATEWAY_URL}/api/mindmap`;
@@ -41,22 +41,22 @@ export const CHAT_SERVICE_URL = CHAT_MODEL_BASE_URL;
 // Citation service (direct FastAPI service)
 export const CITATION_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_SERVICE_URL ||
-  'https://citation-service-120280829617.asia-south1.run.app';
+  'http://localhost:8001';
 
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
 export const DRAFTING_SERVICE_URL =
   import.meta.env.VITE_DRAFTING_SERVICE_URL ||
-  'https://drafting-service-120280829617.asia-south1.run.app';
+  'http://localhost:5005';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'https://all-drafting-agent-120280829617.asia-south1.run.app';
+  'http://localhost:8000';
 
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE =
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-  'https://drafting-agents-120280829617.asia-south1.run.app';
+  'http://localhost:8002';
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).

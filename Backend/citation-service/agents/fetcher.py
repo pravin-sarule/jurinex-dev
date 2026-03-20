@@ -214,9 +214,15 @@ def fetch_ik_candidates(
     return out
 
 
+_IK_WEB_URL_RE = re.compile(
+    r"https?://(?:www\.)?indiankanoon\.org/(?:doc|docfragment)/(\d+)/?", re.I
+)
+
+
 def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     For each Google candidate (with link), fetch URL content. Simple GET; for PDFs we store URL.
+    IK web URLs (indiankanoon.org/doc/{tid}/) are redirected to the IK API automatically.
     Returns list of { link, title, raw_content, source } for Clerk.
     """
     _db_log(run_id, "fetcher", "fetcher", "INFO",
@@ -229,6 +235,24 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
         title = (c.get("title") or link)[:70]
         if not link:
             continue
+
+        # Detect indiankanoon.org web URLs and route them to the IK API instead
+        ik_match = _IK_WEB_URL_RE.match(link)
+        if ik_match:
+            tid = ik_match.group(1)
+            _db_log(run_id, "fetcher", "fetcher", "INFO",
+                    f"  🔀 IK web URL detected → routing to IK API (tid={tid}): {title}")
+            ik_result = fetch_ik_candidates(
+                [{"external_id": tid, "title": c.get("title", "")}],
+                run_id=run_id,
+                fetch_origdoc=False,
+            )
+            if ik_result:
+                out.extend(ik_result)
+            else:
+                skipped += 1
+            continue
+
         _db_log(run_id, "fetcher", "fetcher", "INFO",
                 f"  🌐 Fetching: {title} | {link[:60]}")
         try:

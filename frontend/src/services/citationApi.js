@@ -5,7 +5,7 @@
 import { CITATION_SERVICE_URL, AUTH_SERVICE_URL } from '../config/apiConfig';
 
 function getAuthHeader() {
-  const token = localStorage.getItem('token');
+  const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -42,9 +42,15 @@ export const citationApi = {
   async listReports(userId, caseId = null) {
     let url = `${CITATION_SERVICE_URL}/citation/reports?user_id=${encodeURIComponent(userId)}`;
     if (caseId) url += `&case_id=${encodeURIComponent(caseId)}`;
-    const res = await fetch(url, { headers: getAuthHeader() });
-    if (!res.ok) throw new Error('Failed to list reports');
-    return res.json();
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(url, { headers: getAuthHeader(), signal: controller.signal });
+      if (!res.ok) throw new Error('Failed to list reports');
+      return res.json();
+    } finally {
+      clearTimeout(tid);
+    }
   },
 
   /**

@@ -327,7 +327,8 @@ class AuditorAgent(BaseAgent):
                 j = judgement_get(jid)
                 title = ((j or {}).get("title") or jid)[:60]
                 status = det.get("audit_status", "?")
-                conf = det.get("confidence", 0)
+                conf_raw = det.get("final_confidence") or det.get("confidence") or 0
+                conf = conf_raw / 100.0 if conf_raw > 1 else conf_raw  # normalise 0-100 → 0-1 for % format
                 status_icon = {
                     "VERIFIED": "✅", "VERIFIED_WITH_WARNINGS": "✓⚠",
                     "NEEDS_REVIEW": "🔎", "QUARANTINED": "🚫"
@@ -335,7 +336,7 @@ class AuditorAgent(BaseAgent):
                 msg = f"  {status_icon} {title} — {status} (confidence: {conf:.0%})"
                 level = "WARNING" if status == "QUARANTINED" else "INFO"
                 agent_log_insert(run_id, None, "auditor", "auditor", level, msg,
-                                 {"jid": jid, "status": status, "confidence": conf})
+                                 {"jid": jid, "status": status, "confidence": conf_raw})
         except Exception:
             pass
 

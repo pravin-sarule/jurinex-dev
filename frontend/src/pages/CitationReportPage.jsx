@@ -2866,8 +2866,16 @@ export default function CitationReportPage({ embedded = false }) {
         } catch (_) { }
       }, 1500);
 
-      // Poll status every 3s
+      // Poll status every 3s — auto-abort after 8 minutes
+      const pollStarted = Date.now();
       statusPollRef.current = setInterval(async () => {
+        if (Date.now() - pollStarted > 8 * 60 * 1000) {
+          stopPolling();
+          addMsg('error', '❌ Pipeline timed out after 8 minutes. Please try again.');
+          setReportError('Pipeline timed out.');
+          setSending(false); setGenerating(false);
+          return;
+        }
         try {
           const st = await citationApi.getRunStatus(rid);
           if (st.status === 'completed' || st.status === 'failed') {

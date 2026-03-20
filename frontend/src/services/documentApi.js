@@ -401,7 +401,7 @@ const documentApi = {
   getDocumentsInFolder: async (folderName) => {
     const response = await axios.get(
       `${API_BASE_URL}/${folderName}/files`,
-      { headers: getAuthHeader() }
+      { headers: getAuthHeader(), timeout: 8000 }
     );
     return response.data;
   },
@@ -822,6 +822,7 @@ const documentApi = {
   getCases: async () => {
     const response = await axios.get(`${CASES_BASE_URL}/cases`, {
       headers: getAuthHeader(),
+      timeout: 8000,
     });
     return response.data;
   },
@@ -829,6 +830,7 @@ const documentApi = {
   getCaseById: async (caseId) => {
     const response = await axios.get(`${CASES_BASE_URL}/cases/${caseId}`, {
       headers: getAuthHeader(),
+      timeout: 8000,
     });
     return response.data;
   },

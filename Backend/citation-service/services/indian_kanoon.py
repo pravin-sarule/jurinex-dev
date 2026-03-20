@@ -391,9 +391,10 @@ def ik_enrich_candidate_cached(
             age_hours = 999
 
         raw_resp = cached.get("raw_api_response") or {}
-        if raw_resp and age_hours < cache_ttl_hours:
+        cached_char_count = cached.get("doc_char_count") or 0
+        if raw_resp and age_hours < cache_ttl_hours and cached_char_count >= 500:
             # Reconstruct enriched dict from cached raw API response
-            logger.info("[IK_CACHE] HIT for doc_id=%s (age=%.1fh) — skipping API calls", doc_id, age_hours)
+            logger.info("[IK_CACHE] HIT for doc_id=%s (age=%.1fh, chars=%d) — skipping API calls", doc_id, age_hours, cached_char_count)
             api_log.append({"endpoint": "CACHE", "status": "HIT", "age_hours": round(age_hours, 1),
                              "doc_id": doc_id, "title": cached.get("title", "")})
             try:
