@@ -20,6 +20,9 @@ import json
 import logging
 import os
 import re
+import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +32,23 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _IK_BASE = "https://api.indiankanoon.org"
+_IK_RETRYABLE_EXC = (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError)
+_IK_MAX_RETRIES = 3
+
+
+def _is_retryable_ik_error(exc: Exception) -> bool:
+    if isinstance(exc, _IK_RETRYABLE_EXC):
+        return True
+    msg = str(exc).lower()
+    return any(token in msg for token in (
+        "unexpected eof while reading",
+        "eof occurred in violation of protocol",
+        "ssl",
+        "timed out",
+        "connection reset",
+        "remote end closed connection",
+        "temporarily unavailable",
+    ))
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -58,24 +78,33 @@ def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str 
         if qs:
             url = url + ("&" if "?" in url else "?") + qs
 
-    try:
-        req = urllib.request.Request(url, method=method)
-        req.add_header("Authorization", f"Token {token}")
-        req.add_header("Accept", "application/json")
-        req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        body = ""
+    for attempt in range(1, _IK_MAX_RETRIES + 1):
         try:
-            body = e.read().decode("utf-8", errors="replace")[:300]
-        except Exception:
-            pass
-        logger.warning("[IK] HTTP %s for %s: %s", getattr(e, "code", "?"), path, body)
-        return None
-    except Exception as exc:
-        logger.warning("[IK] Request failed for %s: %s", path, exc)
-        return None
+            req = urllib.request.Request(url, method=method)
+            req.add_header("Authorization", f"Token {token}")
+            req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+            logger.warning("[IK] HTTP %s for %s: %s", getattr(e, "code", "?"), path, body)
+            return None
+        except Exception as exc:
+            if attempt < _IK_MAX_RETRIES and _is_retryable_ik_error(exc):
+                delay = 0.6 * attempt
+                logger.warning(
+                    "[IK] Request failed for %s on attempt %d/%d: %s — retrying in %.1fs",
+                    path, attempt, _IK_MAX_RETRIES, exc, delay,
+                )
+                time.sleep(delay)
+                continue
+            logger.warning("[IK] Request failed for %s: %s", path, exc)
+            return None
 
 
 def _ik_request_raw(path: str) -> Optional[bytes]:
@@ -84,17 +113,26 @@ def _ik_request_raw(path: str) -> Optional[bytes]:
     if not token:
         return None
     url = _IK_BASE + path
-    try:
-        req = urllib.request.Request(url, method="POST")
-        req.add_header("Authorization", f"Token {token}")
-        req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            content_type = resp.headers.get("Content-Type") or ""
-            raw = resp.read()
-            return raw, content_type
-    except Exception as exc:
-        logger.warning("[IK] Raw request failed for %s: %s", path, exc)
-        return None, ""
+    for attempt in range(1, _IK_MAX_RETRIES + 1):
+        try:
+            req = urllib.request.Request(url, method="POST")
+            req.add_header("Authorization", f"Token {token}")
+            req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content_type = resp.headers.get("Content-Type") or ""
+                raw = resp.read()
+                return raw, content_type
+        except Exception as exc:
+            if attempt < _IK_MAX_RETRIES and _is_retryable_ik_error(exc):
+                delay = 0.8 * attempt
+                logger.warning(
+                    "[IK] Raw request failed for %s on attempt %d/%d: %s — retrying in %.1fs",
+                    path, attempt, _IK_MAX_RETRIES, exc, delay,
+                )
+                time.sleep(delay)
+                continue
+            logger.warning("[IK] Raw request failed for %s: %s", path, exc)
+            return None, ""
 
 
 # ─── 1. Search API ────────────────────────────────────────────────────────────
