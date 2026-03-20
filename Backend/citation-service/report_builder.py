@@ -1258,13 +1258,9 @@ def _detect_argument_party(raw_text: str, query: str = "", explicit_perspective:
     """
     PartyArgumentTagger: detect which party primarily relied on this citation.
 
-    When explicit_perspective is set (user dropdown), perform a content confidence
-    check against the judgment text:
-      - If text has opponent signals dominating 3:1 AND at least 3 hits → return
-        the actual detected party so the caller's filter can drop this citation.
-      - Otherwise → return explicit_perspective (benefit of the doubt).
-
-    When explicit_perspective is NOT set → full auto-detection from query + text.
+    Tag from judgment content first, not from the user's dropdown.
+    explicit_perspective is only a weak tiebreaker when the text is genuinely
+    ambiguous; it must not overwrite a clear content-based signal.
 
     Returns: 'appellant' | 'respondent' | 'court' | 'neutral'
     """
@@ -1294,45 +1290,18 @@ def _detect_argument_party(raw_text: str, query: str = "", explicit_perspective:
     respondent_count = len(_RE_RESPONDENT.findall(text)) if text else 0
     court_count      = len(_RE_COURT.findall(text))      if text else 0
 
-    if _exp:
-        # Only reject if the OPPONENT's signals dominate hard (3:1 AND ≥ 3 hits).
-        # This means the judgment body is clearly from the other side and should
-        # be filtered out by the caller.
-        if _exp == "respondent":
-            if appellant_count >= 3 and appellant_count > respondent_count * 3:
-                logger.debug(
-                    "[PARTY_TAGGER] explicit=respondent but appellant signals dominate "
-                    "(%d vs %d) — tagging as appellant for filter",
-                    appellant_count, respondent_count,
-                )
-                return "appellant"
-            return "respondent"
-
-        if _exp == "appellant":
-            if respondent_count >= 3 and respondent_count > appellant_count * 3:
-                logger.debug(
-                    "[PARTY_TAGGER] explicit=appellant but respondent signals dominate "
-                    "(%d vs %d) — tagging as respondent for filter",
-                    respondent_count, appellant_count,
-                )
-                return "respondent"
-            return "appellant"
-
-        if _exp == "court":
-            # For court perspective require at least some court signals present
-            if court_count == 0 and (appellant_count + respondent_count) > 4:
-                return "respondent" if respondent_count > appellant_count else "appellant"
-            return "court"
-
-    # No explicit perspective — full auto-detection
     if not text:
-        return "neutral"
+        return _exp or "neutral"
     if court_count > (appellant_count + respondent_count) * 2:
         return "court"
     if appellant_count > respondent_count + 2:
         return "appellant"
     if respondent_count > appellant_count + 2:
         return "respondent"
+    if court_count >= 3 and court_count >= max(appellant_count, respondent_count):
+        return "court"
+    if _exp:
+        return _exp
     return "neutral"
 
 
@@ -2205,7 +2174,7 @@ def build_report_from_judgements(
         # Keep citations tagged as the requested perspective OR neutral.
         if _perspective:
             argument_party = cit.get("argumentParty", "neutral")
-            if argument_party not in (_perspective, "neutral"):
+            if argument_party != _perspective:
                 logger.debug(
                     "  [PERSPECTIVE_SKIP] jid=%s tagged=%s wanted=%s — dropping",
                     jid, argument_party, _perspective,
@@ -2244,7 +2213,7 @@ def build_report_from_judgements(
 
     # ── Neutral fallback: if perspective filter left too few results ──────────
     # Pull in neutral-tagged citations rather than padding with blank placeholders.
-    if _perspective and len(citations) < 3:
+    if _perspective and len(citations) < 3 and False:
         logger.warning(
             "[PERSPECTIVE] Only %d '%s' citations found — adding neutral citations as fallback",
             len(citations), _perspective,
@@ -2276,7 +2245,7 @@ def build_report_from_judgements(
     citations.sort(key=lambda c: (not c.get("dataComplete", False), -(c.get("confidence") or 0)))
 
     # ── Pad to TARGET_CITATION_POINTS (10) with perspective-tagged placeholders
-    while len(citations) < TARGET_CITATION_POINTS:
+    while not _perspective and len(citations) < TARGET_CITATION_POINTS:
         n           = len(citations) + 1
         placeholder_party = _perspective or "neutral"
         citations.append({

@@ -38,6 +38,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 # Target number of citation points for the report (CHECK 6 / CHECK 8)
 TARGET_CITATION_POINTS = 10
 # Production-oriented retry threshold: do not spend another full fetch/audit round
@@ -47,6 +54,7 @@ MIN_APPROVED_TO_FINISH = _env_int(
     max(3, (TARGET_CITATION_POINTS * 8 + 9) // 10),
 )
 MAX_AUDIT_RETRIES = _env_int("CITATION_MAX_AUDIT_RETRIES", 2)
+ENABLE_EXPANSION_RETRY = _env_bool("CITATION_ENABLE_EXPANSION_RETRY", False)
 
 _IK_WEB_DOC_RE = re.compile(
     r"https?://(?:www\.)?indiankanoon\.org/(?:doc|docfragment)/(\d+)/?",
@@ -526,6 +534,13 @@ class KeywordExtractorAgent(BaseAgent):
         parts = []
         chunks_used_for_keywords = []
         embeddings_used = []
+        perspective = (context.metadata.get("perspective") or "all").strip().lower()
+        perspective_instruction = ""
+        if perspective in ("appellant", "respondent", "court"):
+            perspective_instruction = (
+                f"\nResearch perspective: prioritize keywords that help find judgments useful for the {perspective} side. "
+                f"Do not invent party tags in the search query itself; prefer statutes, issues, doctrines, remedies, and court/time hints.\n"
+            )
         # Use full case context: larger snippet per file so LLM sees full context for keyword generation
         for idx, f in enumerate(case_context[:20]):
             name = f.get("name") or f.get("filename") or "document"
@@ -579,6 +594,7 @@ class KeywordExtractorAgent(BaseAgent):
             "  Layer 1: Legal section/statute (e.g. 'Section 302 IPC', 'Section 439 CrPC', 'Article 21 Constitution').\n"
             "  Layer 2: Doctrine/fact pattern (e.g. 'last seen theory', 'anticipatory bail NDPS', 'dowry death presumption').\n"
             "  Layer 3: Court + time hint (e.g. 'Supreme Court 2019', 'Punjab and Haryana High Court 2024').\n\n"
+            "{perspective_instruction}"
             "STRICT FORMAT RULES (for Indian Kanoon-compatible keywords):\n"
             "- Do NOT include logical operators like ANDD/ORR/NOTT explicitly; just write natural phrases.\n"
             "- Do NOT include question marks, quotes, bullets, numbering, or extra punctuation.\n"
@@ -608,6 +624,7 @@ class KeywordExtractorAgent(BaseAgent):
                 target=TARGET_CITATION_POINTS,
                 base_query=base_query,
                 case_context=case_context_str,
+                perspective_instruction=perspective_instruction,
             )
             kw_model = pc.model_name
             kw_temp = pc.temperature
@@ -619,6 +636,7 @@ class KeywordExtractorAgent(BaseAgent):
                 target=TARGET_CITATION_POINTS,
                 base_query=base_query,
                 case_context="\n\n".join(parts[:15]),
+                perspective_instruction=perspective_instruction,
             )
             kw_model = None
             kw_temp = 0.2
@@ -968,6 +986,12 @@ class CitationRootAgent(BaseAgent):
                     seen_approved.add(jid)
             approved_count = len(accumulated_approved)  # CHANGE 2A: was audit_data.get("approved_count") which returned None
             if approved_count >= TARGET_CITATION_POINTS:
+                break
+            if approved_count > 0 and not ENABLE_EXPANSION_RETRY:
+                logger.info(
+                    "[ROOT] Expansion retry disabled; proceeding to report build with %d approved citation(s)",
+                    approved_count,
+                )
                 break
             if approved_count >= MIN_APPROVED_TO_FINISH:
                 logger.info(
