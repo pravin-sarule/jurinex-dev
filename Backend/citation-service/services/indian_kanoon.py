@@ -23,6 +23,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed as _ik_as_completed
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -408,7 +409,7 @@ def ik_enrich_candidate_cached(
             enriched["_api_log"] = api_log
             return enriched
 
-    # ── 2. Live fetch from all IK endpoints ────────────────────────────────────
+    # ── 2. Live fetch from all IK endpoints (parallel) ─────────────────────────
     logger.info("[IK_CACHE] MISS for doc_id=%s — calling IK API", doc_id)
     enriched: Dict[str, Any] = {
         "doc_id": doc_id,
@@ -421,9 +422,36 @@ def ik_enrich_candidate_cached(
         "_api_log": api_log,
     }
 
-    # /doc/<id>/ — full document
-    doc_data = ik_fetch_doc(doc_id, maxcites=maxcites, maxcitedby=maxcitedby)
-    enriched["doc_data"] = doc_data
+    # Run /doc/, /docfragment/, /docmeta/ in parallel; /origdoc/ after (optional, slow)
+    def _call_doc():
+        return "doc", ik_fetch_doc(doc_id, maxcites=maxcites, maxcitedby=maxcitedby)
+
+    def _call_fragment():
+        if not query:
+            return "fragment", None
+        return "fragment", ik_fetch_docfragment(doc_id, query)
+
+    def _call_meta():
+        return "meta", ik_fetch_docmeta(doc_id)
+
+    parallel_results: Dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=3) as _pool:
+        _futs = {_pool.submit(fn): fn.__name__ for fn in (_call_doc, _call_fragment, _call_meta)}
+        for _fut in _ik_as_completed(_futs):
+            try:
+                key, val = _fut.result(timeout=30)
+                parallel_results[key] = val
+            except Exception as _exc:
+                logger.warning("[IK] parallel endpoint error for doc_id=%s: %s", doc_id, _exc)
+
+    doc_data      = parallel_results.get("doc")
+    fragment_data = parallel_results.get("fragment")
+    meta_data     = parallel_results.get("meta")
+
+    enriched["doc_data"]      = doc_data
+    enriched["fragment_data"] = fragment_data
+    enriched["meta_data"]     = meta_data
+
     doc_html = (doc_data or {}).get("doc") or ""
     raw_text = _strip_html(doc_html)
     api_log.append({
@@ -434,11 +462,7 @@ def ik_enrich_candidate_cached(
         "citedby_count": len((doc_data or {}).get("citedby") or (doc_data or {}).get("citedbyList") or []),
         "title": (doc_data or {}).get("title", ""),
     })
-
-    # /docfragment/<id>/ — query-relevant fragments
     if query:
-        fragment_data = ik_fetch_docfragment(doc_id, query)
-        enriched["fragment_data"] = fragment_data
         api_log.append({
             "endpoint": f"/docfragment/{doc_id}/",
             "status": "OK" if fragment_data else "FAIL",
@@ -446,10 +470,6 @@ def ik_enrich_candidate_cached(
         })
     else:
         api_log.append({"endpoint": f"/docfragment/{doc_id}/", "status": "SKIPPED", "reason": "no query"})
-
-    # /docmeta/<id>/ — metadata
-    meta_data = ik_fetch_docmeta(doc_id)
-    enriched["meta_data"] = meta_data
     api_log.append({
         "endpoint": f"/docmeta/{doc_id}/",
         "status": "OK" if meta_data else "FAIL",
@@ -457,7 +477,7 @@ def ik_enrich_candidate_cached(
         "numcites": (meta_data or {}).get("numcites"),
     })
 
-    # /origdoc/<id>/ — original court copy
+    # /origdoc/<id>/ — original court copy (sequential after parallel batch; optional & slow)
     if fetch_origdoc:
         orig = ik_fetch_origdoc(doc_id)
         enriched["origdoc_result"] = orig

@@ -285,6 +285,72 @@ def _check_ik_with_timeout(jid: str, j: dict, timeout_secs: int = 8) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-judgement worker (called in parallel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _audit_one(jid: str, flagged_set: set, verify_online: bool) -> tuple:
+    """Audit a single judgement. Returns (jid, detail_dict, is_approved)."""
+    from db.client import judgement_get, judgement_update_validation
+
+    j = judgement_get(jid)
+    if not j:
+        logger.warning("[AUDITOR] ✗ Cannot load %s — quarantined (not in DB)", jid)
+        return jid, {"audit_status": "QUARANTINED", "final_confidence": 0, "reason": "not_found_in_db"}, False
+
+    is_flagged          = jid in flagged_set
+    local_check         = _verify_via_local_db(jid)
+    ik_check            = (_check_ik_with_timeout(jid, j, timeout_secs=8) if verify_online
+                           else {"verified": False, "method": "skipped", "confidence": 0, "notes": "verify_online=False"})
+    title               = (j.get("title") or "")
+    citation            = (j.get("primary_citation") or "")
+    ratio               = (j.get("ratio") or "")
+    hallucination_flags = _hallucination_flags(title, citation, ratio)
+
+    source      = j.get("source", "unknown")
+    source_icon = {"local": "🏛", "indian_kanoon": "📚", "google": "🌐"}.get(source, "❓")
+    label       = "FLAGGED" if is_flagged else "validated"
+    logger.info("[AUDITOR] %s [%-14s | %-9s] %-60s | %s",
+                source_icon, source.upper(), label, title[:60], citation or "—")
+    logger.info("  ├─ [LOCAL_DB]      %s confidence=%d | %s",
+                "✓" if local_check["verified"] else "✗", local_check["confidence"], local_check.get("notes", ""))
+    logger.info("  ├─ [IK]            %s method=%-22s confidence=%d | %s",
+                "✓" if ik_check["verified"] else "✗", ik_check["method"], ik_check["confidence"], ik_check.get("notes", ""))
+    if hallucination_flags:
+        logger.warning("  ├─ [HALLUCINATION] ⚠ %s", hallucination_flags)
+    else:
+        logger.info("  ├─ [HALLUCINATION] ✓ clean")
+
+    verdict      = _compute_final_verdict(jid, j, local_check, ik_check, hallucination_flags, is_flagged)
+    audit_status = verdict["audit_status"]
+    final_conf   = verdict["final_confidence"]
+    multi_route  = verdict["multi_route_confirmed"]
+
+    try:
+        judgement_update_validation(jid, audit_status=audit_status, audit_confidence=final_conf)
+    except Exception as exc:
+        logger.warning("  [AUDITOR] DB persist failed for %s: %s", jid, exc)
+
+    if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS"):
+        logger.info("  └─ [VERDICT] ✅ %-26s confidence=%d  multi_route=%s", audit_status, final_conf, multi_route)
+    elif audit_status == "NEEDS_REVIEW":
+        logger.warning("  └─ [VERDICT] 🔍 %-26s confidence=%d", audit_status, final_conf)
+    else:
+        logger.warning("  └─ [VERDICT] ❌ %-26s confidence=%d  flags=%s", audit_status, final_conf, hallucination_flags)
+
+    detail = {
+        "audit_status":          audit_status,
+        "final_confidence":      final_conf,
+        "local_check":           local_check,
+        "ik_check":              ik_check,
+        "hallucination_flags":   hallucination_flags,
+        "multi_route_confirmed": multi_route,
+        "is_flagged":            is_flagged,
+    }
+    is_approved = audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS", "NEEDS_REVIEW")
+    return jid, detail, is_approved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -294,7 +360,7 @@ def run_auditor(
     verify_online: bool = True,
 ) -> Dict[str, Any]:
     """
-    Cross-validate every citation from the Librarian.
+    Cross-validate every citation from the Librarian — parallel IK checks.
 
     - validated_ids  → standard scrutiny
     - flagged_ids    → stricter: must pass IK cross-check or be quarantined
@@ -305,10 +371,9 @@ def run_auditor(
         quarantined_ids  — removed from user view
         audit_details    — dict[id] -> full audit trail
     """
-    from db.client import judgement_get, judgement_update_validation
-
     flagged_ids  = flagged_ids or []
     all_ids      = list(dict.fromkeys(validated_ids + flagged_ids))  # preserve order, deduplicate
+    flagged_set  = set(flagged_ids)
 
     approved_ids:    List[str]       = []
     quarantined_ids: List[str]       = []
@@ -321,70 +386,25 @@ def run_auditor(
     logger.info("║ Goal: ZERO MISTAKES — only verified citations for user   ║")
     logger.info("╚══════════════════════════════════════════════════════════╝")
 
+    # Process all judgements in parallel (IK API calls dominate; parallel = ~8s not 80s)
+    results: Dict[str, tuple] = {}
+    workers = min(5, len(all_ids) or 1)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_audit_one, jid, flagged_set, verify_online): jid for jid in all_ids}
+        for fut in futs:
+            jid = futs[fut]
+            try:
+                _, detail, approved = fut.result(timeout=30)
+                results[jid] = (detail, approved)
+            except Exception as exc:
+                logger.warning("[AUDITOR] Worker failed for %s: %s", jid, exc)
+                results[jid] = ({"audit_status": "QUARANTINED", "final_confidence": 0, "reason": str(exc)[:100]}, False)
+
+    # Reassemble in original order
     for jid in all_ids:
-        j = judgement_get(jid)
-        if not j:
-            logger.warning("[AUDITOR] ✗ Cannot load %s — quarantined (not in DB)", jid)
-            quarantined_ids.append(jid)
-            audit_details[jid] = {"audit_status": "QUARANTINED", "final_confidence": 0, "reason": "not_found_in_db"}
-            continue
-
-        is_flagged          = jid in flagged_ids
-        local_check         = _verify_via_local_db(jid)
-        ik_check            = _check_ik_with_timeout(jid, j, timeout_secs=8) if verify_online else {"verified": False, "method": "skipped", "confidence": 0, "notes": "verify_online=False"}
-        title               = (j.get("title") or "")
-        citation            = (j.get("primary_citation") or "")
-        ratio               = (j.get("ratio") or "")
-        hallucination_flags = _hallucination_flags(title, citation, ratio)
-
-        source      = j.get("source", "unknown")
-        source_icon = {"local": "🏛", "indian_kanoon": "📚", "google": "🌐"}.get(source, "❓")
-        label       = "FLAGGED" if is_flagged else "validated"
-        logger.info("[AUDITOR] %s [%-14s | %-9s] %-60s | %s",
-                    source_icon, source.upper(), label, title[:60], citation or "—")
-        logger.info("  ├─ [LOCAL_DB]      %s confidence=%d | %s",
-                    "✓" if local_check["verified"] else "✗", local_check["confidence"], local_check.get("notes", ""))
-        logger.info("  ├─ [IK]            %s method=%-22s confidence=%d | %s",
-                    "✓" if ik_check["verified"] else "✗", ik_check["method"], ik_check["confidence"], ik_check.get("notes", ""))
-        if hallucination_flags:
-            logger.warning("  ├─ [HALLUCINATION] ⚠ %s", hallucination_flags)
-        else:
-            logger.info("  ├─ [HALLUCINATION] ✓ clean")
-
-        verdict        = _compute_final_verdict(jid, j, local_check, ik_check, hallucination_flags, is_flagged)
-        audit_status   = verdict["audit_status"]
-        final_conf     = verdict["final_confidence"]
-        multi_route    = verdict["multi_route_confirmed"]
-
-        # ── Persist to DB ─────────────────────────────────────────────────────
-        try:
-            judgement_update_validation(
-                jid,
-                audit_status=audit_status,
-                audit_confidence=final_conf,
-            )
-        except Exception as exc:
-            logger.warning("  [AUDITOR] DB persist failed for %s: %s", jid, exc)
-
-        # ── Log verdict ───────────────────────────────────────────────────────
-        if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS"):
-            logger.info("  └─ [VERDICT] ✅ %-26s confidence=%d  multi_route=%s", audit_status, final_conf, multi_route)
-        elif audit_status == "NEEDS_REVIEW":
-            logger.warning("  └─ [VERDICT] 🔍 %-26s confidence=%d", audit_status, final_conf)
-        else:
-            logger.warning("  └─ [VERDICT] ❌ %-26s confidence=%d  flags=%s", audit_status, final_conf, hallucination_flags)
-
-        audit_details[jid] = {
-            "audit_status":          audit_status,
-            "final_confidence":      final_conf,
-            "local_check":           local_check,
-            "ik_check":              ik_check,
-            "hallucination_flags":   hallucination_flags,
-            "multi_route_confirmed": multi_route,
-            "is_flagged":            is_flagged,
-        }
-
-        if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS", "NEEDS_REVIEW"):
+        detail, approved = results.get(jid, ({"audit_status": "QUARANTINED", "final_confidence": 0, "reason": "worker_missing"}, False))
+        audit_details[jid] = detail
+        if approved:
             approved_ids.append(jid)
         else:
             quarantined_ids.append(jid)

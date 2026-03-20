@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -71,30 +72,23 @@ def fetch_ik_candidates(
     _db_log(run_id, "fetcher", "fetcher", "INFO",
             f"📡 Fetching full text + origdoc + fragments for {len(candidates)} Indian Kanoon document(s)…",
             {"total": len(candidates)})
-    out = []
-    skipped = 0
 
-    for c in candidates:
+    def _fetch_one_ik(c: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Fetch and enrich one IK candidate. Returns result dict or None on skip."""
         tid = c.get("external_id")
         title = (c.get("title") or f"tid:{tid}")[:70]
         if not tid:
-            continue
+            return None
 
-        _db_log(run_id, "fetcher", "fetcher", "INFO",
-                f"  📄 Fetching IK doc #{tid}: {title}")
+        _db_log(run_id, "fetcher", "fetcher", "INFO", f"  📄 Fetching IK doc #{tid}: {title}")
 
         if _use_ik_service:
-            # ── Full enrichment via all 5 IK endpoints (with DB cache) ──────
             enriched = ik_enrich_candidate_cached(
-                doc_id=tid,
-                query=query,
-                fetch_origdoc=fetch_origdoc,
-                maxcites=maxcites,
-                maxcitedby=maxcitedby,
+                doc_id=tid, query=query, fetch_origdoc=fetch_origdoc,
+                maxcites=maxcites, maxcitedby=maxcitedby,
             )
             fields = build_ik_report_fields(enriched)
 
-            # Log each API endpoint result to agent_logs for frontend display
             for entry in (enriched.get("_api_log") or []):
                 ep = entry.get("endpoint", "")
                 st = entry.get("status", "")
@@ -125,37 +119,26 @@ def fetch_ik_candidates(
                 raw_content = _strip_html(doc_html)
 
             if len(raw_content or "") < MIN_JUDGMENT_CHARS:
-                logger.warning(
-                    "[FETCHER] IK doc %s skipped: judgment text length %d < %d chars",
-                    tid, len(raw_content or ""), MIN_JUDGMENT_CHARS,
-                )
+                logger.warning("[FETCHER] IK doc %s skipped: %d chars < %d", tid, len(raw_content or ""), MIN_JUDGMENT_CHARS)
                 _db_log(run_id, "fetcher", "fetcher", "WARNING",
                         f"  ⚠ IK doc #{tid} skipped — only {len(raw_content or '')} chars (min {MIN_JUDGMENT_CHARS})")
-                skipped += 1
-                continue
+                return None
 
             orig_url = fields.get("original_copy_url") or ""
             _db_log(run_id, "fetcher", "fetcher", "INFO",
                     f"  ✓ IK doc #{tid}: {title} — {len(raw_content):,} chars"
                     + (f" | origdoc={orig_url[:60]}" if orig_url else "")
-                    + (f" | cites={len(fields.get('cite_list') or [])}"
-                       f" citedby={len(fields.get('cited_by_list') or [])}"),
-                    {
-                        "tid": tid,
-                        "chars": len(raw_content),
-                        "original_copy_url": orig_url,
-                        "cite_list_count": len(fields.get("cite_list") or []),
-                        "cited_by_list_count": len(fields.get("cited_by_list") or []),
-                    })
-
-            out.append({
+                    + (f" | cites={len(fields.get('cite_list') or [])} citedby={len(fields.get('cited_by_list') or [])}"),
+                    {"tid": tid, "chars": len(raw_content), "original_copy_url": orig_url,
+                     "cite_list_count": len(fields.get("cite_list") or []),
+                     "cited_by_list_count": len(fields.get("cited_by_list") or [])})
+            return {
                 "external_id":            tid,
                 "title":                  c.get("title") or fields.get("title", ""),
                 "doc_html":               doc_html,
                 "raw_content":            raw_content[:500000],
                 "docsource":              c.get("docsource") or fields.get("docsource", ""),
                 "source":                 "indian_kanoon",
-                # IK-enriched fields
                 "cite_list":              fields.get("cite_list") or [],
                 "cited_by_list":          fields.get("cited_by_list") or [],
                 "ik_fragment_headline":   fields.get("ik_fragment_headline") or "",
@@ -166,18 +149,17 @@ def fetch_ik_candidates(
                 "original_copy_gcs_path": fields.get("original_copy_gcs_path") or "",
                 "is_original_copy_pdf":   fields.get("is_original_copy_pdf") or False,
                 "origdoc_html_content":   fields.get("origdoc_html_content") or "",
-            })
+            }
 
         else:
-            # ── Fallback: basic /doc/<id>/ only ─────────────────────────────
+            # ── Fallback: basic /doc/<id>/ only ──────────────────────────────
             token = (
                 os.environ.get("INDIAN_KANOON_TOKEN")
                 or os.environ.get("INDIAN_KANOON_API_TOKEN")
                 or os.environ.get("IK_API_TOKEN")
             )
             if not token:
-                skipped += 1
-                continue
+                return None
             try:
                 url = f"https://api.indiankanoon.org/doc/{tid}/"
                 req = urllib.request.Request(url, method="POST")
@@ -188,15 +170,12 @@ def fetch_ik_candidates(
                     data = json.loads(resp.read().decode())
             except Exception as e:
                 logger.warning("IK doc fetch failed for %s: %s", tid, e)
-                skipped += 1
-                continue
-
+                return None
             doc_html = data.get("doc") or ""
             raw_content = _strip_html(doc_html)
             if len(raw_content or "") < MIN_JUDGMENT_CHARS:
-                skipped += 1
-                continue
-            out.append({
+                return None
+            return {
                 "external_id": tid,
                 "title": c.get("title") or data.get("title", ""),
                 "doc_html": doc_html,
@@ -205,7 +184,23 @@ def fetch_ik_candidates(
                 "source": "indian_kanoon",
                 "cite_list": data.get("citeList") or [],
                 "cited_by_list": data.get("citedbyList") or [],
-            })
+            }
+
+    # Parallel fetch — 4 workers (balances IK rate limits vs latency)
+    out = []
+    skipped = 0
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates) or 1)) as pool:
+        futs = {pool.submit(_fetch_one_ik, c): c for c in candidates}
+        for fut in _as_completed(futs):
+            try:
+                result = fut.result(timeout=90)
+                if result:
+                    out.append(result)
+                else:
+                    skipped += 1
+            except Exception as exc:
+                logger.warning("[FETCHER] IK worker error: %s", exc)
+                skipped += 1
 
     _db_log(run_id, "fetcher", "fetcher", "INFO",
             f"✅ Indian Kanoon fetch complete — {len(out)}/{len(candidates)} docs fetched" +
