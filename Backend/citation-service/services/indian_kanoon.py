@@ -533,6 +533,13 @@ def ik_enrich_candidate_cached(
     try:
         from db.client import ik_asset_upsert
         fields = build_ik_report_fields(enriched)
+        if len(fields.get("raw_content") or "") < 500:
+            logger.warning(
+                "[IK_CACHE] Not caching doc_id=%s because fetched content is too short (%d chars)",
+                doc_id, len(fields.get("raw_content") or ""),
+            )
+            enriched["_api_log"] = api_log
+            return enriched
         # Store the full enriched dict as raw_api_response (strip bytes for JSON safety)
         safe_raw = {
             "doc_id":        doc_id,

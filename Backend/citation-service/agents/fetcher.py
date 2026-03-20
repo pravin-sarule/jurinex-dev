@@ -275,9 +275,11 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
             )
             if ik_result:
                 out.extend(ik_result)
-            else:
-                skipped += 1
-            continue
+                continue
+            _db_log(
+                run_id, "fetcher", "fetcher", "INFO",
+                f"  ↷ IK API fetch unavailable/forbidden for tid={tid} — falling back to direct web fetch"
+            )
 
         _db_log(run_id, "fetcher", "fetcher", "INFO",
                 f"  🌐 Fetching: {title} | {link[:60]}")
