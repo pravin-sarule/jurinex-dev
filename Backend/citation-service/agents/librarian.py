@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
@@ -143,12 +144,52 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
         rejected_ids   — critical issues (missing citation + no content; not worth auditing)
         details        — per-ID result dict
     """
-    from db.client import judgement_get, judgement_update_validation
+    from db.client import judgement_update_validation
+    from db.connections import get_pg_conn
+    from psycopg2.extras import RealDictCursor
 
     validated_ids: List[str] = []
     flagged_ids:   List[str] = []
     rejected_ids:  List[str] = []
     details:       Dict[str, Any] = {}
+
+    judgement_map: Dict[str, Dict[str, Any]] = {}
+    conn = get_pg_conn()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT canonical_id, case_name, court_code, source_type, citation_data
+                      FROM judgments
+                     WHERE canonical_id = ANY(%s)
+                    """,
+                    (judgement_ids,),
+                )
+                rows = cur.fetchall() or []
+                for row in rows:
+                    citation_data = row.get("citation_data") or {}
+                    if isinstance(citation_data, str):
+                        try:
+                            citation_data = json.loads(citation_data)
+                        except Exception:
+                            citation_data = {}
+                    canonical_id = str(row.get("canonical_id") or "").strip()
+                    if not canonical_id:
+                        continue
+                    judgement_map[canonical_id] = {
+                        "source": citation_data.get("source_type") or row.get("source_type") or "unknown",
+                        "title": row.get("case_name") or citation_data.get("case_name") or "",
+                        "primary_citation": citation_data.get("primary_citation") or "",
+                        "court": citation_data.get("court_name") or row.get("court_code") or "",
+                        "ratio": citation_data.get("holding_text") or citation_data.get("summary_text") or "",
+                        "raw_content": citation_data.get("full_text") or "",
+                        "area": citation_data.get("area") or "",
+                    }
+        except Exception as exc:
+            logger.warning("[LIBRARIAN] bulk judgment preload failed: %s", exc)
+        finally:
+            conn.close()
 
     logger.info("╔══ LIBRARIAN AGENT ═══════════════════════════════════════╗")
     logger.info("║ Validating %3d citation(s) — format · year · court ·     ║", len(judgement_ids))
@@ -156,7 +197,7 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
     logger.info("╚══════════════════════════════════════════════════════════╝")
 
     def _validate_one(jid: str) -> tuple[str, Dict[str, Any]]:
-        j = judgement_get(jid)
+        j = judgement_map.get(jid)
         if not j:
             logger.warning("[LIBRARIAN] ✗ ID not found in DB — skipping: %s", jid)
             return jid, {"source": "unknown", "status": "rejected", "issues": ["not_in_db"], "warnings": [], "enrichments": {}}
@@ -280,6 +321,8 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
                 flagged_ids.append(result_jid)
             else:
                 rejected_ids.append(result_jid)
+            if len(details) and (len(details) == len(judgement_ids) or len(details) % 5 == 0):
+                logger.info("[LIBRARIAN] progress %d/%d checked", len(details), len(judgement_ids))
 
     logger.info(
         "╔══ LIBRARIAN SUMMARY ═════════════════════════════════════╗\n"
