@@ -23,7 +23,7 @@ import re
 import urllib.request
 import urllib.parse
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Dict, List, Optional
 
@@ -391,7 +391,7 @@ def run_auditor(
     workers = min(5, len(all_ids) or 1)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(_audit_one, jid, flagged_set, verify_online): jid for jid in all_ids}
-        for fut in futs:
+        for fut in as_completed(futs):
             jid = futs[fut]
             try:
                 _, detail, approved = fut.result(timeout=30)

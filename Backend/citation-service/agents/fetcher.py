@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Minimum judgment text length to consider fetch successful (CHECK 5)
 MIN_JUDGMENT_CHARS = 500
+IK_FETCH_WORKERS = max(1, min(12, int(os.environ.get("CITATION_IK_FETCH_WORKERS", "6"))))
+GOOGLE_FETCH_WORKERS = max(1, min(12, int(os.environ.get("CITATION_GOOGLE_FETCH_WORKERS", "6"))))
 
 
 def _db_log(run_id: Optional[str], agent: str, stage: str, level: str, msg: str, meta: Optional[Dict] = None) -> None:
@@ -206,10 +208,10 @@ def fetch_ik_candidates(
                 "cited_by_list": data.get("citedbyList") or [],
             }
 
-    # Parallel fetch — 4 workers (balances IK rate limits vs latency)
+    # Parallel fetch with bounded workers for production safety.
     out = []
     skipped = 0
-    with ThreadPoolExecutor(max_workers=min(4, len(candidates) or 1)) as pool:
+    with ThreadPoolExecutor(max_workers=min(IK_FETCH_WORKERS, len(candidates) or 1)) as pool:
         futs = {pool.submit(_fetch_one_ik, c): c for c in candidates}
         for fut in _as_completed(futs):
             try:
@@ -246,21 +248,18 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
     _db_log(run_id, "fetcher", "fetcher", "INFO",
             f"📡 Fetching full text for {len(candidates)} Google URL(s)…",
             {"total": len(candidates)})
-    out = []
-    skipped = 0
-    for c in candidates:
+    def _fetch_one_google(c: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         link = c.get("link", "")
         title = (c.get("title") or link)[:70]
         if not link:
-            continue
+            return None
 
         if _IK_SEARCH_URL_RE.match(link):
             _db_log(
                 run_id, "fetcher", "fetcher", "INFO",
                 f"  ↷ Skipping Indian Kanoon search page: {title}"
             )
-            skipped += 1
-            continue
+            return None
 
         # Detect indiankanoon.org web URLs and route them to the IK API instead
         ik_match = _IK_WEB_URL_RE.match(link)
@@ -270,12 +269,12 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
                     f"  🔀 IK web URL detected → routing to IK API (tid={tid}): {title}")
             ik_result = fetch_ik_candidates(
                 [{"external_id": tid, "title": c.get("title", "")}],
+                query=c.get("snippet", "") or c.get("title", ""),
                 run_id=run_id,
                 fetch_origdoc=False,
             )
             if ik_result:
-                out.extend(ik_result)
-                continue
+                return {"batched_results": ik_result}
             _db_log(
                 run_id, "fetcher", "fetcher", "INFO",
                 f"  ↷ IK API fetch unavailable/forbidden for tid={tid} — falling back to direct web fetch"
@@ -302,22 +301,40 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
                 )
                 _db_log(run_id, "fetcher", "fetcher", "WARNING",
                         f"  ⚠ Skipped — only {len(content)} chars at {link[:60]}")
-                skipped += 1
+                return None
             else:
                 _db_log(run_id, "fetcher", "fetcher", "INFO",
                         f"  ✓ Fetched: {title} — {len(content):,} chars")
-                out.append({
+                return {
                     "link": link,
                     "title": c.get("title", ""),
                     "snippet": c.get("snippet", ""),
                     "raw_content": content,
                     "source": "google",
-                })
+                }
         except Exception as e:
             logger.warning("Fetch URL failed %s: %s", link[:80], e)
             _db_log(run_id, "fetcher", "fetcher", "WARNING",
                     f"  ⚠ Fetch failed: {link[:60]} — {e}")
-            skipped += 1
+            return None
+
+    out = []
+    skipped = 0
+    with ThreadPoolExecutor(max_workers=min(GOOGLE_FETCH_WORKERS, len(candidates) or 1)) as pool:
+        futs = {pool.submit(_fetch_one_google, c): c for c in candidates}
+        for fut in _as_completed(futs):
+            try:
+                result = fut.result(timeout=90)
+                if not result:
+                    skipped += 1
+                    continue
+                if "batched_results" in result:
+                    out.extend(result["batched_results"])
+                else:
+                    out.append(result)
+            except Exception as exc:
+                logger.warning("[FETCHER] Google worker error: %s", exc)
+                skipped += 1
     _db_log(run_id, "fetcher", "fetcher", "INFO",
             f"✅ Google fetch complete — {len(out)}/{len(candidates)} URLs fetched" +
             (f", {skipped} skipped" if skipped else ""),

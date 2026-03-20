@@ -1171,8 +1171,24 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 # Target citation points so report has exactly this many sections
 TARGET_CITATION_POINTS = 10
+REPORT_BUILDER_WORKERS = max(1, min(8, _env_int("CITATION_REPORT_BUILDER_WORKERS", 6)))
+ENABLE_REPORT_HEADNOTES = _env_bool("CITATION_ENABLE_HEADNOTES", False)
 
 _SOURCE_LABELS = {
     "local":          "Local DB",
@@ -1854,8 +1870,8 @@ def _judgement_to_citation(
     _treatment_extra: Dict[str, Any] = {}
     if _full_text:
         try:
-            from subsequent_treatment_extractor import extract_subsequent_treatment_combined, merge_treatment
-            _text_extracted    = extract_subsequent_treatment_combined(_full_text, title=_case_title)
+            from subsequent_treatment_extractor import extract_subsequent_treatment, merge_treatment
+            _text_extracted    = extract_subsequent_treatment(_full_text)
             _merged            = merge_treatment(_text_extracted, st)
             followed_list      = _merged.get("followed", followed_list)
             distinguished_list = _merged.get("distinguished", distinguished_list)
@@ -1945,12 +1961,13 @@ def _judgement_to_citation(
     ):
         case_name = primary_cit if primary_cit and primary_cit not in ("—", "Further research needed") else "Unknown Case"
 
-    headnote = ""
-    try:
-        from agents.headnote_agent import generate_headnote_from_judgement
-        headnote = generate_headnote_from_judgement(j)
-    except Exception as _he:
-        logger.warning("[HEADNOTE] Generation failed for %s: %s", case_name[:60], _he)
+    headnote = (j.get("headnote") or j.get("head_note") or "").strip()
+    if not headnote and ENABLE_REPORT_HEADNOTES:
+        try:
+            from agents.headnote_agent import generate_headnote_from_judgement
+            headnote = generate_headnote_from_judgement(j)
+        except Exception as _he:
+            logger.warning("[HEADNOTE] Generation failed for %s: %s", case_name[:60], _he)
 
     party_badge = _PARTY_BADGE.get(argument_party, _PARTY_BADGE["neutral"])
 
@@ -2185,7 +2202,7 @@ def build_report_from_judgements(
 
     # ── Parallel processing ───────────────────────────────────────────────────
     results_map: Dict[str, Dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=min(6, max(len(judgement_ids), 1))) as pool:
+    with ThreadPoolExecutor(max_workers=min(REPORT_BUILDER_WORKERS, max(len(judgement_ids), 1))) as pool:
         futures = {
             pool.submit(_process_one, (i, jid)): jid
             for i, jid in enumerate(judgement_ids)
@@ -2196,6 +2213,12 @@ def build_report_from_judgements(
                 cit = fut.result(timeout=60)
                 if cit:
                     results_map[jid] = cit
+                if len(results_map) and (len(results_map) == len(judgement_ids) or len(results_map) % 3 == 0):
+                    logger.info(
+                        "[REPORT_BUILDER] progress %d/%d citation(s) assembled",
+                        len(results_map),
+                        len(judgement_ids),
+                    )
             except Exception as e:
                 logger.warning("  [ERROR] citation processing failed for %s: %s", jid, e)
 

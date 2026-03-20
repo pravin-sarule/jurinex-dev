@@ -23,6 +23,13 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 # ── Sentence splitter ────────────────────────────────────────────────────────
 
 _SENT_SPLIT = re.compile(
@@ -397,6 +404,10 @@ def extract_subsequent_treatment_combined(
     """
     regex_result = extract_subsequent_treatment(judgment_text, max_chars=max_chars)
     regex_total  = sum(regex_result.get("summary", {}).values())
+
+    if not _env_bool("CITATION_ENABLE_TREATMENT_LLM", False):
+        logger.info("[TREATMENT_COMBINED] LLM extraction disabled; using regex-only result=%d", regex_total)
+        return regex_result
 
     llm_result = extract_subsequent_treatment_llm(judgment_text, title=title, max_chars=max_chars)
     llm_total  = sum(llm_result.get("summary", {}).values())

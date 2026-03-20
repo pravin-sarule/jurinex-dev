@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+SEARCH_WORKERS = max(1, min(10, int(os.environ.get("CITATION_WATCHDOG_WORKERS", "6"))))
 
 
 def _db_log(run_id: Optional[str], agent: str, stage: str, level: str, msg: str, meta: Optional[Dict] = None) -> None:
@@ -237,7 +238,7 @@ def run_watchdog(
         return qi, q, ik_results, google_results
 
     active_queries = [(qi, q) for qi, q in enumerate(queries, 1) if (q or "").strip()]
-    max_workers = min(5, max(1, len(active_queries)))
+    max_workers = min(SEARCH_WORKERS, max(1, len(active_queries)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_run_one_query, item): item for item in active_queries}
         ordered_results: List[tuple[int, str, List[Dict[str, Any]], List[Dict[str, Any]]]] = []

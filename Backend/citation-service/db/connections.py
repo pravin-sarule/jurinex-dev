@@ -7,9 +7,24 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _get_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _get_env(*keys: str) -> Optional[str]:
@@ -35,6 +50,23 @@ def get_pg_dsn() -> Optional[str]:
 
 
 _pg_pool = None
+_es_client = None
+_es_init_attempted = False
+_qdrant_client = None
+_qdrant_init_attempted = False
+_neo4j_driver = None
+_neo4j_init_attempted = False
+_clients_lock = threading.Lock()
+PG_POOL_MINCONN = max(1, _get_env_int("PG_POOL_MINCONN", 1))
+PG_POOL_MAXCONN = max(PG_POOL_MINCONN, _get_env_int("PG_POOL_MAXCONN", 30))
+DRAFT_POOL_MINCONN = max(1, _get_env_int("DRAFT_POOL_MINCONN", 1))
+DRAFT_POOL_MAXCONN = max(DRAFT_POOL_MINCONN, _get_env_int("DRAFT_POOL_MAXCONN", 3))
+DOC_POOL_MINCONN = max(1, _get_env_int("DOC_POOL_MINCONN", 1))
+DOC_POOL_MAXCONN = max(DOC_POOL_MINCONN, _get_env_int("DOC_POOL_MAXCONN", 3))
+ES_REQUEST_TIMEOUT = max(1, _get_env_int("ELASTIC_REQUEST_TIMEOUT", 3))
+ES_MAX_RETRIES = max(0, _get_env_int("ELASTIC_MAX_RETRIES", 0))
+ES_VERIFY_CERTS = _get_env_bool("ELASTIC_VERIFY_CERTS", True)
+NEO4J_MAX_POOL_SIZE = max(1, _get_env_int("NEO4J_MAX_CONNECTION_POOL_SIZE", 20))
 
 class PooledConnWrapper:
     """Wraps a psycopg2 connection to intercept .close() and return it to the pool instead of destroying it."""
@@ -66,13 +98,19 @@ def get_pg_conn():
         logger.warning("[PG] Missing database config. Set CITATION_DB_URL or DATABASE_URL.")
         return None
     if _pg_pool is None:
-        try:
-            from psycopg2.pool import ThreadedConnectionPool
-            # maxconn=30 to handle multiple parallel pipeline requests and agents safely
-            _pg_pool = ThreadedConnectionPool(minconn=1, maxconn=30, dsn=dsn)
-        except Exception as exc:
-            logger.warning("[PG] Pool init failed: %s", exc)
-            return None
+        with _clients_lock:
+            if _pg_pool is None:
+                try:
+                    from psycopg2.pool import ThreadedConnectionPool
+                    _pg_pool = ThreadedConnectionPool(
+                        minconn=PG_POOL_MINCONN,
+                        maxconn=PG_POOL_MAXCONN,
+                        dsn=dsn,
+                    )
+                    logger.info("[PG] Connection pool ready (min=%s max=%s)", PG_POOL_MINCONN, PG_POOL_MAXCONN)
+                except Exception as exc:
+                    logger.warning("[PG] Pool init failed: %s", exc)
+                    return None
     try:
         conn = _pg_pool.getconn()
         return PooledConnWrapper(_pg_pool, conn)
@@ -82,30 +120,45 @@ def get_pg_conn():
 
 
 def get_es_client():
+    global _es_client, _es_init_attempted
     url = _get_env("ELASTICSEARCH_URL", "ELASTIC_URL", "ES_URL")
     if not url:
         logger.warning("[ES] Missing ELASTICSEARCH_URL/ELASTIC_URL/ES_URL; Elasticsearch disabled.")
         return None
+    if _es_client is not None:
+        return _es_client
+    if _es_init_attempted:
+        return None
     try:
-        from elasticsearch import Elasticsearch
-        api_key = _get_env("ELASTICSEARCH_API_KEY")
-        username = _get_env("ELASTICSEARCH_USERNAME", "ELASTIC_USER", "ES_USERNAME")
-        password = _get_env("ELASTICSEARCH_PASSWORD", "ELASTIC_PASSWORD", "ES_PASSWORD")
-        # max_retries=0: fail immediately when ES is down — no 3-retry storm blocking the pipeline.
-        # request_timeout=3: short per-request timeout.
-        kwargs = {"request_timeout": 3, "max_retries": 0, "retry_on_timeout": False}
-        if api_key:
-            kwargs["api_key"] = api_key
-            client = Elasticsearch(url, **kwargs)
-        elif username and password:
-            client = Elasticsearch(url, basic_auth=(username, password), **kwargs)
-        else:
-            client = Elasticsearch(url, **kwargs)
-        # Ping once to confirm ES is reachable — return None immediately if it's down.
-        if not client.ping():
-            logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this session.", url)
-            return None
-        return client
+        with _clients_lock:
+            if _es_client is not None:
+                return _es_client
+            if _es_init_attempted:
+                return None
+            _es_init_attempted = True
+            from elasticsearch import Elasticsearch
+            api_key = _get_env("ELASTICSEARCH_API_KEY")
+            username = _get_env("ELASTICSEARCH_USERNAME", "ELASTIC_USER", "ES_USERNAME")
+            password = _get_env("ELASTICSEARCH_PASSWORD", "ELASTIC_PASSWORD", "ES_PASSWORD")
+            kwargs = {
+                "request_timeout": ES_REQUEST_TIMEOUT,
+                "max_retries": ES_MAX_RETRIES,
+                "retry_on_timeout": False,
+                "verify_certs": ES_VERIFY_CERTS,
+            }
+            if api_key:
+                kwargs["api_key"] = api_key
+                client = Elasticsearch(url, **kwargs)
+            elif username and password:
+                client = Elasticsearch(url, basic_auth=(username, password), **kwargs)
+            else:
+                client = Elasticsearch(url, **kwargs)
+            if not client.ping():
+                logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this process.", url)
+                return None
+            _es_client = client
+            logger.info("[ES] Client ready for %s", url)
+            return _es_client
     except Exception as exc:
         logger.warning("[ES] Client init failed or unreachable: %s", exc)
         return None
@@ -113,14 +166,27 @@ def get_es_client():
 
 def get_qdrant_client():
     """Connect to Qdrant using QDRANT_URL and QDRANT_API_KEY (or Qdrant_API_KEY) from environment."""
+    global _qdrant_client, _qdrant_init_attempted
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY") or os.getenv("Qdrant_API_KEY")
     if not url:
         logger.warning("[QDRANT] Missing QDRANT_URL; Qdrant disabled.")
         return None
+    if _qdrant_client is not None:
+        return _qdrant_client
+    if _qdrant_init_attempted:
+        return None
     try:
-        from qdrant_client import QdrantClient
-        return QdrantClient(url=url, api_key=api_key)
+        with _clients_lock:
+            if _qdrant_client is not None:
+                return _qdrant_client
+            if _qdrant_init_attempted:
+                return None
+            _qdrant_init_attempted = True
+            from qdrant_client import QdrantClient
+            _qdrant_client = QdrantClient(url=url, api_key=api_key)
+            logger.info("[QDRANT] Client ready for %s", url)
+            return _qdrant_client
     except Exception as exc:
         logger.warning("[QDRANT] Client init failed: %s", exc)
         return None
@@ -130,6 +196,7 @@ def get_neo4j_driver():
     """Connect to Neo4j using NEO4J_URI and NEO4J_USERNAME/NEO4J_PASSWORD from environment.
     URI examples: neo4j://localhost, neo4j+s://xxx.databases.neo4j.io
     """
+    global _neo4j_driver, _neo4j_init_attempted
     uri = os.getenv("NEO4J_URI")
     user = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
     password = os.getenv("NEO4J_PASSWORD")
@@ -139,11 +206,26 @@ def get_neo4j_driver():
     if not (user and password):
         logger.warning("[NEO4J] Missing NEO4J_USERNAME/NEO4J_PASSWORD; Neo4j disabled.")
         return None
+    if _neo4j_driver is not None:
+        return _neo4j_driver
+    if _neo4j_init_attempted:
+        return None
     try:
-        from neo4j import GraphDatabase
-        driver = GraphDatabase.driver(uri, auth=(user, password))
-        driver.verify_connectivity()
-        return driver
+        with _clients_lock:
+            if _neo4j_driver is not None:
+                return _neo4j_driver
+            if _neo4j_init_attempted:
+                return None
+            _neo4j_init_attempted = True
+            from neo4j import GraphDatabase
+            _neo4j_driver = GraphDatabase.driver(
+                uri,
+                auth=(user, password),
+                max_connection_pool_size=NEO4J_MAX_POOL_SIZE,
+            )
+            _neo4j_driver.verify_connectivity()
+            logger.info("[NEO4J] Driver ready for %s", uri)
+            return _neo4j_driver
     except Exception as exc:
         logger.warning("[NEO4J] Driver init failed: %s", exc)
         return None
@@ -174,7 +256,11 @@ def get_draft_db_conn():
     if _draft_pool is None:
         try:
             from psycopg2.pool import ThreadedConnectionPool
-            _draft_pool = ThreadedConnectionPool(minconn=1, maxconn=3, dsn=dsn)
+            _draft_pool = ThreadedConnectionPool(
+                minconn=DRAFT_POOL_MINCONN,
+                maxconn=DRAFT_POOL_MAXCONN,
+                dsn=dsn,
+            )
         except Exception as exc:
             logger.warning("[DRAFT_DB] Pool init failed: %s", exc)
             return None
@@ -204,7 +290,11 @@ def get_doc_db_conn():
     if _doc_pool is None:
         try:
             from psycopg2.pool import ThreadedConnectionPool
-            _doc_pool = ThreadedConnectionPool(minconn=1, maxconn=3, dsn=dsn)
+            _doc_pool = ThreadedConnectionPool(
+                minconn=DOC_POOL_MINCONN,
+                maxconn=DOC_POOL_MAXCONN,
+                dsn=dsn,
+            )
         except Exception as exc:
             logger.warning("[DOC_DB] Pool init failed: %s", exc)
             return None

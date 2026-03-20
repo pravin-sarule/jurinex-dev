@@ -18,11 +18,14 @@ to concentrate its deeper cross-checks.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+LIBRARIAN_WORKERS = max(1, min(12, int(os.environ.get("CITATION_LIBRARIAN_WORKERS", "6"))))
 
 # ── Citation format patterns (Indian legal citations) ─────────────────────────
 _CITATION_PATTERNS: List[tuple] = [
@@ -152,13 +155,11 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
     logger.info("║ content quality · area-of-law tagging                    ║")
     logger.info("╚══════════════════════════════════════════════════════════╝")
 
-    for jid in judgement_ids:
+    def _validate_one(jid: str) -> tuple[str, Dict[str, Any]]:
         j = judgement_get(jid)
         if not j:
             logger.warning("[LIBRARIAN] ✗ ID not found in DB — skipping: %s", jid)
-            rejected_ids.append(jid)
-            details[jid] = {"source": "unknown", "status": "rejected", "issues": ["not_in_db"], "warnings": [], "enrichments": {}}
-            continue
+            return jid, {"source": "unknown", "status": "rejected", "issues": ["not_in_db"], "warnings": [], "enrichments": {}}
 
         source       = j.get("source", "unknown")
         title        = (j.get("title") or "")
@@ -227,24 +228,19 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
         # Critical: missing citation AND empty content = reject outright
         if "missing_citation" in issues and "empty_content" in issues:
             status = "rejected"
-            rejected_ids.append(jid)
             logger.warning("  └─ [STATUS]  ✗ REJECTED — %s", issues)
         elif issues:
             # Has some critical issue but not both → flag for Auditor scrutiny
             status = "flagged"
-            flagged_ids.append(jid)
             logger.warning("  └─ [STATUS]  ⚠ FLAGGED  — issues=%s", issues)
         elif len(warnings) >= 3:
             status = "flagged"
-            flagged_ids.append(jid)
             logger.warning("  └─ [STATUS]  ⚠ FLAGGED  — too many warnings: %s", warnings)
         elif warnings:
             status = "validated_with_warnings"
-            validated_ids.append(jid)
             logger.info("  └─ [STATUS]  ~ VALIDATED (warnings: %s)", warnings)
         else:
             status = "validated"
-            validated_ids.append(jid)
             logger.info("  └─ [STATUS]  ✓ VALIDATED")
 
         # ── 7. Persist enrichments ────────────────────────────────────────────
@@ -259,13 +255,31 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
         except Exception as exc:
             logger.warning("  [LIBRARIAN] DB update failed for %s: %s", jid, exc)
 
-        details[jid] = {
+        return jid, {
             "source":      source,
             "status":      status,
             "warnings":    warnings,
             "issues":      issues,
             "enrichments": enrichments,
         }
+
+    with ThreadPoolExecutor(max_workers=min(LIBRARIAN_WORKERS, len(judgement_ids) or 1)) as pool:
+        futs = {pool.submit(_validate_one, jid): jid for jid in judgement_ids}
+        for fut in as_completed(futs):
+            jid = futs[fut]
+            try:
+                result_jid, det = fut.result(timeout=60)
+            except Exception as exc:
+                logger.warning("[LIBRARIAN] Worker failed for %s: %s", jid, exc)
+                result_jid, det = jid, {"source": "unknown", "status": "rejected", "issues": [str(exc)[:80]], "warnings": [], "enrichments": {}}
+            details[result_jid] = det
+            status = det.get("status")
+            if status in ("validated", "validated_with_warnings"):
+                validated_ids.append(result_jid)
+            elif status == "flagged":
+                flagged_ids.append(result_jid)
+            else:
+                rejected_ids.append(result_jid)
 
     logger.info(
         "╔══ LIBRARIAN SUMMARY ═════════════════════════════════════╗\n"

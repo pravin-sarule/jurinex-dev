@@ -55,6 +55,8 @@ MIN_APPROVED_TO_FINISH = _env_int(
 )
 MAX_AUDIT_RETRIES = _env_int("CITATION_MAX_AUDIT_RETRIES", 2)
 ENABLE_EXPANSION_RETRY = _env_bool("CITATION_ENABLE_EXPANSION_RETRY", False)
+FETCHER_SOURCE_WORKERS = max(2, min(4, _env_int("CITATION_FETCHER_SOURCE_WORKERS", 2)))
+CLERK_SOURCE_WORKERS = max(2, min(4, _env_int("CITATION_CLERK_SOURCE_WORKERS", 2)))
 
 _IK_WEB_DOC_RE = re.compile(
     r"https?://(?:www\.)?indiankanoon\.org/(?:doc|docfragment)/(\d+)/?",
@@ -204,7 +206,7 @@ class FetcherAgent(BaseAgent):
         # Fetch IK + Google in parallel
         def _fetch_ik():
             try:
-                return fetch_ik_candidates(ik_cands, run_id=run_id)
+                return fetch_ik_candidates(ik_cands, query=context.metadata.get("search_query") or context.query, run_id=run_id)
             except Exception as e:
                 errors.append(str(e)); return []
 
@@ -214,7 +216,7 @@ class FetcherAgent(BaseAgent):
             except Exception as e:
                 errors.append(str(e)); return []
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=FETCHER_SOURCE_WORKERS) as pool:
             f_ik = pool.submit(_fetch_ik)
             f_go = pool.submit(_fetch_go)
             fetched_ik = f_ik.result()
@@ -275,7 +277,7 @@ class ClerkAgent(BaseAgent):
             except Exception as e:
                 errors.append(f"GO: {e}"); return []
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=CLERK_SOURCE_WORKERS) as pool:
             f_ik = pool.submit(_ingest_ik)
             f_go = pool.submit(_ingest_go)
             ik_ids = f_ik.result()

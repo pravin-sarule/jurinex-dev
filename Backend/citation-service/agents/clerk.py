@@ -13,6 +13,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 from google import genai
 
@@ -20,6 +21,23 @@ logger = logging.getLogger(__name__)
 
 CHUNK_SIZE    = 1200
 CHUNK_OVERLAP = 200
+CLERK_DOC_WORKERS = max(1, min(12, int(os.environ.get("CITATION_CLERK_DOC_WORKERS", "6"))))
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _safe_prompt_format(template: str, **kwargs: Any) -> str:
+    """
+    Format only known placeholders and leave all other braces untouched.
+    This avoids crashes when DB prompts contain example JSON objects.
+    """
+    try:
+        return template.format_map(_SafeFormatDict(kwargs))
+    except Exception:
+        return template
 
 
 # ─── Chunking ────────────────────────────────────────────────────────────────
@@ -94,6 +112,11 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
         return None
 
     # Resolve prompt, model, temperature from DB → fallback to defaults
+    config_kw: Dict[str, Any] = {
+        "temperature": 0.1,
+        "maxOutputTokens": 1536,
+        "responseMimeType": "application/json",
+    }
     try:
         from utils.prompt_resolver import resolve_prompt
         pc = resolve_prompt(
@@ -104,24 +127,22 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
             default_temperature=0.1,
             default_max_tokens=1536,
         )
-        prompt = pc.prompt.format(title=title, query=query, excerpt=excerpt)
+        prompt = _safe_prompt_format(pc.prompt, title=title, query=query, excerpt=excerpt)
         model = pc.model_name
         temperature = pc.temperature
         max_tokens = pc.max_tokens
+        config_kw = pc.gemini_config.copy()
+        config_kw["responseMimeType"] = "application/json"
         logger.info("[CLERK] Prompt source=%s model=%s temp=%.2f", pc.source, model, temperature)
     except Exception as exc:
         logger.warning("[CLERK] Prompt resolver failed (%s), using default", exc)
-        prompt = _DEFAULT_CLERK_PROMPT.format(title=title, query=query, excerpt=excerpt)
+        prompt = _safe_prompt_format(_DEFAULT_CLERK_PROMPT, title=title, query=query, excerpt=excerpt)
         model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
         temperature = 0.1
         max_tokens = 1536
 
     try:
         client = genai.Client(api_key=api_key)
-        # Start with safelist config from PromptConfig, merge explicit settings
-        config_kw: Dict[str, Any] = pc.gemini_config.copy()
-        config_kw["responseMimeType"] = "application/json"
-        
         config = genai.types.GenerateContentConfig(**config_kw)
         
         resp = client.models.generate_content(
@@ -297,11 +318,9 @@ def _court_code(court_name: str) -> str:
 
 def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Optional[str] = None) -> List[str]:
     """Ingest documents from Indian Kanoon API results. case_id = original case for report (for Qdrant payload)."""
-    from agents.legal_citation_agent import LegalCitationAgent
-    new_ids = []
-    agent = LegalCitationAgent()
-
-    for doc in doc_list:
+    def _process_doc(doc: Dict[str, Any]) -> Optional[str]:
+        from agents.legal_citation_agent import LegalCitationAgent
+        agent = LegalCitationAgent()
         # Fetcher returns raw_content and doc_html; support both for compatibility
         raw_text = (
             doc.get("raw_content")
@@ -370,16 +389,16 @@ def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Op
             out = agent.ingest_judgment(raw_data)
         except Exception as e:
             logger.warning("[CLERK] IK ingest failed for %s: %s", title[:60], e)
-            continue
+            return None
         # CHECK 7: only count as ingested if all stores succeeded (or skipped duplicate)
         if out.get("status") == "storage_failed":
             try:
                 out = agent.ingest_judgment(raw_data)  # retry once
             except Exception as e2:
                 logger.warning("[CLERK] IK ingest retry failed for %s: %s", title[:60], e2)
-                continue
+                return None
         if out.get("status") in ("success", "skipped") and out.get("canonical_id"):
-            new_ids.append(out["canonical_id"])
+            canonical_id = out["canonical_id"]
             # Persist IK asset data to ik_document_assets table
             if tid:
                 try:
@@ -401,16 +420,27 @@ def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Op
                     )
                 except Exception as _ae:
                     logger.warning("[CLERK] ik_asset_upsert failed for tid=%s: %s", tid, _ae)
+            return canonical_id
+        return None
+
+    new_ids: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(CLERK_DOC_WORKERS, len(doc_list) or 1)) as pool:
+        futs = [pool.submit(_process_doc, doc) for doc in doc_list]
+        for fut in as_completed(futs):
+            try:
+                result = fut.result(timeout=180)
+                if result:
+                    new_ids.append(result)
+            except Exception as exc:
+                logger.warning("[CLERK] IK worker failed: %s", exc)
     return new_ids
 
 
 def clerk_ingest_google(doc_list: List[Dict[str, Any]], query: str = "", case_id: Optional[str] = None) -> List[str]:
     """Ingest documents from Google / Serper / Web results. case_id = original case for report (for Qdrant payload)."""
-    from agents.legal_citation_agent import LegalCitationAgent
-    new_ids = []
-    agent = LegalCitationAgent()
-
-    for doc in doc_list:
+    def _process_doc(doc: Dict[str, Any]) -> Optional[str]:
+        from agents.legal_citation_agent import LegalCitationAgent
+        agent = LegalCitationAgent()
         # Fetcher returns raw_content; fallback to snippet/legacy keys
         raw_text = (
             doc.get("raw_content")
@@ -467,14 +497,26 @@ def clerk_ingest_google(doc_list: List[Dict[str, Any]], query: str = "", case_id
             out = agent.ingest_judgment(raw_data)
         except Exception as e:
             logger.warning("[CLERK] Google ingest failed for %s: %s", title[:60], e)
-            continue
+            return None
         # CHECK 7: only count as ingested if all stores succeeded (or skipped duplicate)
         if out.get("status") == "storage_failed":
             try:
                 out = agent.ingest_judgment(raw_data)  # retry once
             except Exception as e2:
                 logger.warning("[CLERK] Google ingest retry failed for %s: %s", title[:60], e2)
-                continue
+                return None
         if out.get("status") in ("success", "skipped") and out.get("canonical_id"):
-            new_ids.append(out["canonical_id"])
+            return out["canonical_id"]
+        return None
+
+    new_ids: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(CLERK_DOC_WORKERS, len(doc_list) or 1)) as pool:
+        futs = [pool.submit(_process_doc, doc) for doc in doc_list]
+        for fut in as_completed(futs):
+            try:
+                result = fut.result(timeout=180)
+                if result:
+                    new_ids.append(result)
+            except Exception as exc:
+                logger.warning("[CLERK] Google worker failed: %s", exc)
     return new_ids

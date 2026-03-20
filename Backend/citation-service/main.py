@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+from collections import deque
 import httpx
 from pathlib import Path
 from urllib.parse import quote
@@ -54,6 +55,20 @@ logger = logging.getLogger(__name__)
 
 _project_root = Path(__file__).resolve().parent
 load_dotenv(_project_root / ".env")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+PIPELINE_MAX_CONCURRENT_RUNS = max(1, _env_int("CITATION_MAX_CONCURRENT_RUNS", 2))
+RUN_STATE_MAX_ENTRIES = max(50, _env_int("CITATION_RUN_STATE_MAX_ENTRIES", 500))
+_pipeline_slots = threading.BoundedSemaphore(PIPELINE_MAX_CONCURRENT_RUNS)
+_run_state_lock = threading.Lock()
+_run_state_order: deque[str] = deque()
 
 
 def _decode_jwt(request: Request) -> Dict[str, Any]:
@@ -199,6 +214,30 @@ def _html_to_text(content: str) -> str:
     return "\n".join(out).strip()
 
 
+def _set_run_state(run_id: str, state: Dict[str, Any]) -> None:
+    with _run_state_lock:
+        _run_state[run_id] = state
+        try:
+            _run_state_order.remove(run_id)
+        except ValueError:
+            pass
+        _run_state_order.append(run_id)
+        while len(_run_state_order) > RUN_STATE_MAX_ENTRIES:
+            stale_run_id = _run_state_order.popleft()
+            _run_state.pop(stale_run_id, None)
+
+
+def _try_acquire_pipeline_slot() -> bool:
+    return _pipeline_slots.acquire(blocking=False)
+
+
+def _release_pipeline_slot() -> None:
+    try:
+        _pipeline_slots.release()
+    except ValueError:
+        pass
+
+
 app = FastAPI(
     title="JuriNex Citation Service",
     description="Watchdog (local DB → Indian Kanoon → Google) → Fetcher → Clerk → Verified Citation Report.",
@@ -339,6 +378,11 @@ async def _fetch_case_context(case_id: str, auth_header: Optional[str]):
 @app.on_event("startup")
 def startup():
     init_db()
+    logger.info(
+        "[BOOT] Citation service starting with pipeline concurrency=%s run_state_max=%s",
+        PIPELINE_MAX_CONCURRENT_RUNS,
+        RUN_STATE_MAX_ENTRIES,
+    )
 
     # Neo4j connectivity test (optional)
     driver = get_neo4j_driver()
@@ -350,11 +394,6 @@ def startup():
                 logger.info("[NEO4J] %s", msg)
         except Exception as exc:
             logger.warning("[NEO4J] Test query failed: %s", exc)
-        finally:
-            try:
-                driver.close()
-            except Exception:
-                pass
 
     # Qdrant collection init (optional)
     qdrant = get_qdrant_client()
@@ -816,6 +855,11 @@ async def generate_citation_report(
         raise HTTPException(status_code=400, detail="query is required and must be non-empty")
 
     if use_pipeline:
+        if not _try_acquire_pipeline_slot():
+            raise HTTPException(
+                status_code=429,
+                detail=f"Citation pipeline is busy. Try again shortly. Max concurrent runs: {PIPELINE_MAX_CONCURRENT_RUNS}",
+            )
         try:
             out = run_pipeline(
                 query,
@@ -827,6 +871,8 @@ async def generate_citation_report(
         except Exception as e:
             logger.exception("Pipeline failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e)) from e
+        finally:
+            _release_pipeline_slot()
         if out.get("error"):
             raise HTTPException(status_code=500, detail=out["error"])
 
@@ -1456,9 +1502,15 @@ async def start_citation_report(
         auth_header_pre = request.headers.get("authorization")
         case_file_context, _ = await _fetch_case_context(case_id, auth_header_pre)
 
+    if not _try_acquire_pipeline_slot():
+        raise HTTPException(
+            status_code=429,
+            detail=f"Citation pipeline is busy. Try again shortly. Max concurrent runs: {PIPELINE_MAX_CONCURRENT_RUNS}",
+        )
+
     # Pre-generate run_id so frontend can start polling before pipeline creates it
     run_id = str(_uuid.uuid4())
-    _run_state[run_id] = {"status": "running", "report_id": None, "report_format": None, "error": None}
+    _set_run_state(run_id, {"status": "running", "report_id": None, "report_format": None, "error": None})
 
     # Seed a first log immediately so frontend sees something
     try:
@@ -1489,31 +1541,35 @@ async def start_citation_report(
                 if isinstance(report_format, dict):
                     citations = report_format.get("citations") or []
                     report_format = {**report_format, "perspective": perspective if perspective and perspective != "all" else "all"}
-                _run_state[run_id] = {
+                _set_run_state(run_id, {
                     "status": "completed",
                     "report_id": result.data.get("report_id"),
                     "report_format": report_format,
                     "error": None,
-                }
+                })
             else:
-                _run_state[run_id] = {"status": "failed", "report_id": None, "report_format": None, "error": result.error}
+                _set_run_state(run_id, {"status": "failed", "report_id": None, "report_format": None, "error": result.error})
         except Exception as exc:
             logger.exception("[BG_PIPELINE] crashed: %s", exc)
-            _run_state[run_id] = {"status": "failed", "report_id": None, "report_format": None, "error": str(exc)}
+            _set_run_state(run_id, {"status": "failed", "report_id": None, "report_format": None, "error": str(exc)})
+        finally:
+            _release_pipeline_slot()
 
-    threading.Thread(target=_run_bg, daemon=True).start()
+    threading.Thread(target=_run_bg, daemon=True, name=f"citation-run-{run_id[:8]}").start()
     return {"success": True, "run_id": run_id, "status": "running"}
 
 
 @app.get("/citation/runs/{run_id}/status")
 async def get_run_status(run_id: str) -> Dict[str, Any]:
     """Poll for pipeline run completion. Returns status + report when done."""
-    state = _run_state.get(run_id)
+    with _run_state_lock:
+        state = _run_state.get(run_id)
     if state:
         return {"success": True, "run_id": run_id, **state}
     # Fallback: check DB citation_pipeline_runs table
     from db.connections import get_pg_conn
     from psycopg2.extras import RealDictCursor
+    from db.client import report_get
     conn = get_pg_conn()
     if conn:
         try:
@@ -1521,7 +1577,26 @@ async def get_run_status(run_id: str) -> Dict[str, Any]:
                 cur.execute("SELECT status, report_id FROM citation_pipeline_runs WHERE id=%s", (run_id,))
                 row = cur.fetchone()
             if row:
-                return {"success": True, "run_id": run_id, "status": row["status"], "report_id": row["report_id"], "report_format": None, "error": None}
+                report_id = row.get("report_id")
+                status = row.get("status")
+                report_format = None
+                error = None
+                if report_id and status in ("completed", "pending_hitl"):
+                    try:
+                        report = report_get(report_id)
+                        if report:
+                            report_format = report.get("report_format")
+                            status = report.get("status") or status
+                    except Exception as exc:
+                        logger.warning("[RUN_STATUS] report_get failed for %s: %s", report_id, exc)
+                return {
+                    "success": True,
+                    "run_id": run_id,
+                    "status": status,
+                    "report_id": report_id,
+                    "report_format": report_format,
+                    "error": error,
+                }
         finally:
             conn.close()
     return {"success": False, "run_id": run_id, "status": "unknown"}
