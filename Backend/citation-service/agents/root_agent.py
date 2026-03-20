@@ -867,23 +867,31 @@ class CitationRootAgent(BaseAgent):
 
         # 5. Auditor — gate final list (CHECK 8: retry if < TARGET points)
         max_retries = 2
+        accumulated_approved: List[str] = []
         for audit_round in range(max_retries + 1):
             aud_result = self._delegate(self.auditor, context, "auditor")
             audit_data = aud_result.data or {}
             context.metadata["audit_details"] = context.metadata.get("audit_details") or {}
             context.metadata["audit_details"].update(audit_data.get("audit_details") or {})
-            # Accumulate quarantined_ids across retry rounds (deduplicated)
+            # Accumulate quarantined_ids across retry rounds (derive from audit_details — AuditorAgent returns counts, not arrays)
             existing_quar = context.metadata.get("quarantined_ids") or []
-            new_quar = audit_data.get("quarantined_ids") or []
+            _ad = context.metadata.get("audit_details") or {}
+            new_quar = [j for j, d in _ad.items() if d.get("audit_status") == "QUARANTINED"]
             context.metadata["quarantined_ids"] = list(dict.fromkeys(existing_quar + new_quar))
-            approved_count = audit_data.get("approved_count", len(context.judgement_ids))
+            # Accumulate approved IDs across all rounds (do not lose prior rounds' approved set)
+            new_approved = context.metadata.get("approved_ids") or []
+            seen_approved = set(accumulated_approved)
+            for jid in new_approved:
+                if jid not in seen_approved:
+                    accumulated_approved.append(jid)
+                    seen_approved.add(jid)
+            approved_count = len(accumulated_approved)  # CHANGE 2A: was audit_data.get("approved_count") which returned None
             if approved_count >= TARGET_CITATION_POINTS:
                 break
             if audit_round >= max_retries:
                 logger.warning("[ROOT] After %d rounds still have %d approved (target %d)", audit_round + 1, approved_count, TARGET_CITATION_POINTS)
                 break
             # Retry: fetch more candidates for missing slots
-            saved_approved = list(context.judgement_ids)
             logger.info("[ROOT] Retry %d: approved=%d < %d — re-running Watchdog/Fetcher/Clerk for more candidates", audit_round + 1, approved_count, TARGET_CITATION_POINTS)
             self._delegate(self.watchdog, context, "watchdog")
             ik_cands = context.metadata.get("candidates_ik", [])
@@ -891,9 +899,9 @@ class CitationRootAgent(BaseAgent):
             if ik_cands or go_cands:
                 self._delegate(self.fetcher, context, "fetcher")
                 self._delegate(self.clerk, context, "clerk")
-            # Merge: keep saved approved first, then new IDs from Clerk (dedupe)
-            existing = set(saved_approved)
-            merged = list(saved_approved)
+            # Merge accumulated_approved back so Librarian/Auditor can include them next round
+            existing = set(accumulated_approved)
+            merged = list(accumulated_approved)
             for jid in context.judgement_ids:
                 if jid not in existing:
                     merged.append(jid)
@@ -901,10 +909,13 @@ class CitationRootAgent(BaseAgent):
             context.judgement_ids = merged
             self._delegate(self.librarian, context, "librarian")
 
+        # After all rounds, set judgement_ids to the full accumulated approved set
+        context.judgement_ids = accumulated_approved
+
         # If Auditor rejected all and there are also no quarantined candidates,
         # fall back to legacy behaviour. If there ARE quarantined ids, we will
         # handle them via the HITL queue logic below (pending_hitl report).
-        if not context.judgement_ids and not (context.metadata.get("quarantined_ids") or []):
+        if not accumulated_approved and not (context.metadata.get("quarantined_ids") or []):
             logger.warning("[ROOT] Auditor rejected all — running fallback (no HITL candidates)")
             return self._fallback(context)
 
@@ -1069,34 +1080,96 @@ class CitationRootAgent(BaseAgent):
         })
 
     def _fallback(self, context: AgentContext) -> AgentResult:
-        """Fallback: use citation_agent, but DO NOT surface unverified web/AI citations directly.
+        """Fallback when main pipeline produced zero approved citations.
 
-        When the main pipeline cannot verify citations via Route 1 or 2, we only inform the user that
-        potential web citations are under human review. We never show Route 3 / AI-only citations
-        directly in the report (spec: web-only citations are never shown to users directly).
+        Strategy:
+        - safe_ids  (non-Google source): build a real report and show directly.
+        - google_ids (Google source):    queue to HITL — never shown directly.
+        - If nothing at all: return a pending_hitl placeholder.
         """
-        from citation_agent import run_citation_agent
-        from db.client import report_insert
+        from report_builder import build_report_from_judgements
+        from db.client import report_insert, hitl_queue_insert, report_citation_insert
 
-        case_ctx = context.metadata.get("case_file_context", [])
-        result   = run_citation_agent({"query": context.query, "case_file_context": case_ctx, "search_results": []})
-        found = len(result.get("citations", []) or [])
-        pending_msg = (
-            "We could not auto-verify any citations from local databases or external legal APIs. "
-            "Potential web citations have been identified and are under human review. "
-            "You will see them in your citation report once verification is complete."
-        )
-        if found:
-            pending_msg += f" ({found} web/AI suggestions queued for review.)"
+        run_id      = context.metadata.get("run_id")
+        all_jids    = list(context.judgement_ids or [])
+        audit_details = context.metadata.get("audit_details") or {}
+        search_keywords = context.metadata.get("keyword_sets") or []
+        search_keywords_by_route = context.metadata.get("search_keywords_by_route") or {}
+        _perspective = (context.metadata.get("perspective") or "all").lower().strip()
+        report_id   = str(uuid.uuid4())
+        context.metadata["report_id"] = report_id
 
-        # IMPORTANT: do not surface the raw web/AI citations here; only a pending message.
-        report_format = {
-            "citations": [],
-            "generatedAt": datetime.utcnow().strftime("%d %B %Y"),
-            "status": "pending_hitl",
-            "pendingMessage": pending_msg,
-        }
-        report_id     = str(uuid.uuid4())
+        # Separate safe (local / indian_kanoon) from google-only
+        safe_ids:   List[str] = []
+        google_ids: List[str] = []
+        try:
+            from db.client import judgement_get
+            for jid in all_jids:
+                j = judgement_get(jid)
+                src = ((j or {}).get("source") or "local").lower()
+                if src == "google":
+                    google_ids.append(jid)
+                else:
+                    safe_ids.append(jid)
+        except Exception:
+            safe_ids = all_jids
+
+        if safe_ids:
+            report_format = build_report_from_judgements(
+                safe_ids,
+                context.query,
+                context.user_id,
+                audit_details=audit_details,
+                search_keywords=search_keywords,
+                search_keywords_by_route=search_keywords_by_route,
+                perspective=_perspective,
+            )
+        else:
+            report_format = {
+                "citations": [],
+                "generatedAt": datetime.utcnow().strftime("%d %B %Y"),
+                "status": "pending_hitl",
+            }
+
+        if google_ids:
+            report_format["pendingHITLCount"] = len(google_ids)
+            report_format["status"] = "pending_hitl"
+            report_format["pendingMessage"] = (
+                f"{len(google_ids)} web-sourced citation(s) could not be auto-verified and are under human review."
+            )
+            for jid in google_ids:
+                try:
+                    one_rep = build_report_from_judgements(
+                        [jid], context.query, context.user_id,
+                        audit_details=audit_details,
+                        search_keywords=search_keywords,
+                        search_keywords_by_route=search_keywords_by_route,
+                        perspective=_perspective,
+                    )
+                    snap = (one_rep.get("citations") or [{}])[0]
+                    hitl_queue_insert(
+                        report_id=report_id, run_id=run_id, canonical_id=jid,
+                        user_id=context.user_id, citation_snapshot=snap,
+                        reason_queued="google_fallback", case_id=context.case_id,
+                        citation_string=(snap.get("primaryCitation") or snap.get("caseName") or "")[:512],
+                        query_context=(context.query or "")[:2000],
+                        web_source_url=(snap.get("importSourceLink") or snap.get("sourceUrl") or "")[:2000],
+                        priority_score=float(snap.get("priorityScore") or 0.0),
+                    )
+                    report_citation_insert(report_id, jid, "hitl_pending", snap)
+                except Exception as exc:
+                    logger.warning("[ROOT._fallback] HITL insert failed for %s: %s", jid, exc)
+        elif not safe_ids:
+            report_format["status"] = "pending_hitl"
+            report_format["pendingMessage"] = (
+                "We could not auto-verify any citations from local databases or external legal APIs. "
+                "Potential citations have been identified and are under human review."
+            )
+
+        status = report_format.get("status", "completed")
         report_insert(report_id, context.user_id, context.query,
-                      report_format, "pending_hitl", case_id=context.case_id)
-        return AgentResult(data={"report_id": report_id, "report_format": report_format, "report_status": "pending_hitl"})
+                      report_format, status, case_id=context.case_id, run_id=run_id,
+                      citations_approved_count=len(safe_ids),
+                      citations_quarantined_count=len(google_ids))
+        logger.info("[ROOT._fallback] report_id=%s safe=%d google_hitl=%d", report_id, len(safe_ids), len(google_ids))
+        return AgentResult(data={"report_id": report_id, "report_format": report_format, "report_status": status})

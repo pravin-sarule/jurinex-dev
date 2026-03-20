@@ -23,6 +23,8 @@ import re
 import urllib.request
 import urllib.parse
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -139,7 +141,17 @@ def _verify_via_local_db(jid: str) -> Dict[str, Any]:
 
         has_title   = bool((j.get("title") or "").strip())
         has_cite    = bool(j.get("primary_citation") and j.get("primary_citation") not in ("—", ""))
-        has_content = len(j.get("raw_content") or "") >= 500
+        # Accept ratio/excerpt as proof of content when raw_content is unavailable
+        # (e.g. ES down, PG citation_data missing full_text)
+        raw_len = len(j.get("raw_content") or j.get("full_text") or "")
+        ratio_len = len(j.get("ratio") or "")
+        has_content = raw_len >= 500 or (
+            ratio_len >= 80 and ratio_len > 0
+            and (j.get("ratio") or "").strip().lower() not in (
+                "further research needed", "further research needed.",
+                "ratio not available.", "ratio not available",
+            )
+        )
 
         quality_score = sum([has_title, has_cite, has_content])
         confidence    = {3: 90, 2: 70, 1: 45, 0: 0}[quality_score]
@@ -177,8 +189,14 @@ def _hallucination_flags(title: str, citation: str, ratio: str) -> List[str]:
     if (citation or "").strip().lower() in ("—", "n/a", "none", "null", "unavailable", "not extracted", "pending"):
         flags.append("placeholder_citation")
 
-    # Ratio too short to be real
-    if ratio and len(ratio.strip()) < 40:
+    # Ratio too short to be real (ignore known placeholder values set by the clerk)
+    _ratio_stripped = (ratio or "").strip()
+    _ratio_is_placeholder = _ratio_stripped.lower() in (
+        "further research needed", "further research needed.",
+        "ratio not available.", "ratio not available",
+        "ratio decidendi not available.", "—", "",
+    )
+    if _ratio_stripped and not _ratio_is_placeholder and len(_ratio_stripped) < 40:
         flags.append("ratio_too_short")
 
     # Title looks like a generic web page heading (no legal case name pattern)
@@ -193,6 +211,77 @@ def _hallucination_flags(title: str, citation: str, ratio: str) -> List[str]:
             flags.append("non_case_title")
 
     return flags
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Verdict helpers (CHANGE 1A / 1B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_final_verdict(
+    jid: str,
+    j: dict,
+    local_check: dict,
+    ik_check: dict,
+    hallucination_flags: list,
+    is_flagged: bool,
+) -> dict:
+    local_verified  = local_check.get("verified", False)
+    local_conf      = int(local_check.get("confidence") or 0)
+    ik_verified     = ik_check.get("verified", False)
+    ik_conf         = int(ik_check.get("confidence") or 0)
+    ik_method       = ik_check.get("method", "")
+    ik_unavailable  = ik_method in (
+        "ik_unavailable", "ik_timeout", "ik_error", "no_ik_token", "skipped"
+    )
+    if "future_year_in_citation" in hallucination_flags:
+        return {"audit_status": "QUARANTINED", "final_confidence": 0, "multi_route_confirmed": False}
+    if ik_unavailable:
+        ik_verified = False
+        ik_conf     = local_conf
+    multi_route = local_verified and ik_verified
+    if multi_route:
+        final_confidence = min(99, max(local_conf, ik_conf) + 7)
+    else:
+        final_confidence = max(local_conf, ik_conf)
+    soft_flags = [f for f in hallucination_flags if f != "future_year_in_citation"]
+    if soft_flags:
+        final_confidence = max(40, final_confidence - 10)
+    source = (j.get("source") or "local").lower()
+    trust_baseline = {"local": 80, "indian_kanoon": 75, "google": 50}.get(source, 70)
+    either_verified = local_verified or ik_verified
+    if either_verified and not soft_flags:
+        return {"audit_status": "VERIFIED", "final_confidence": max(trust_baseline, final_confidence), "multi_route_confirmed": multi_route}
+    if either_verified and soft_flags:
+        return {"audit_status": "VERIFIED_WITH_WARNINGS", "final_confidence": max(trust_baseline - 10, final_confidence - 10), "multi_route_confirmed": multi_route}
+    if source == "google" and not ik_verified:
+        return {"audit_status": "QUARANTINED", "final_confidence": final_confidence, "multi_route_confirmed": False}
+    if final_confidence >= 45:
+        return {"audit_status": "NEEDS_REVIEW", "final_confidence": final_confidence, "multi_route_confirmed": False}
+    return {"audit_status": "QUARANTINED", "final_confidence": final_confidence, "multi_route_confirmed": False}
+
+
+def _check_ik_with_timeout(jid: str, j: dict, timeout_secs: int = 8) -> dict:
+    ik_token = (
+        os.environ.get("INDIAN_KANOON_API_TOKEN")
+        or os.environ.get("IK_API_KEY")
+        or os.environ.get("IK_TOKEN")
+        or os.environ.get("INDIAN_KANOON_TOKEN")
+        or os.environ.get("IK_API_TOKEN")
+    )
+    if not ik_token:
+        return {"verified": False, "confidence": 0, "method": "no_ik_token", "notes": "No IK API token configured"}
+    title    = (j.get("title") or "")
+    citation = (j.get("primary_citation") or "")
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_verify_via_indian_kanoon, title, citation, jid)
+            return future.result(timeout=timeout_secs)
+    except FuturesTimeout:
+        logger.warning("[AUDITOR] IK check timed out for %s after %ds", jid, timeout_secs)
+        return {"verified": False, "confidence": 0, "method": "ik_timeout", "notes": f"IK API did not respond within {timeout_secs}s"}
+    except Exception as exc:
+        logger.warning("[AUDITOR] IK check error for %s: %s", jid, exc)
+        return {"verified": False, "confidence": 0, "method": "ik_error", "notes": str(exc)[:120]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,135 +322,72 @@ def run_auditor(
     logger.info("╚══════════════════════════════════════════════════════════╝")
 
     for jid in all_ids:
-        is_flagged = jid in flagged_ids
-
         j = judgement_get(jid)
         if not j:
             logger.warning("[AUDITOR] ✗ Cannot load %s — quarantined (not in DB)", jid)
             quarantined_ids.append(jid)
-            audit_details[jid] = {"audit_status": "QUARANTINED", "reason": "not_in_db", "final_confidence": 0}
+            audit_details[jid] = {"audit_status": "QUARANTINED", "final_confidence": 0, "reason": "not_found_in_db"}
             continue
 
-        source   = j.get("source", "unknown")
-        title    = (j.get("title") or "")
-        citation = (j.get("primary_citation") or "")
-        ratio    = (j.get("ratio") or "")
+        is_flagged          = jid in flagged_ids
+        local_check         = _verify_via_local_db(jid)
+        ik_check            = _check_ik_with_timeout(jid, j, timeout_secs=8) if verify_online else {"verified": False, "method": "skipped", "confidence": 0, "notes": "verify_online=False"}
+        title               = (j.get("title") or "")
+        citation            = (j.get("primary_citation") or "")
+        ratio               = (j.get("ratio") or "")
+        hallucination_flags = _hallucination_flags(title, citation, ratio)
 
+        source      = j.get("source", "unknown")
         source_icon = {"local": "🏛", "indian_kanoon": "📚", "google": "🌐"}.get(source, "❓")
         label       = "FLAGGED" if is_flagged else "validated"
-        logger.info(
-            "[AUDITOR] %s [%-14s | %-9s] %-60s | %s",
-            source_icon, source.upper(), label, title[:60], citation or "—",
-        )
-        logger.info("  ├─ [SOURCE_TRAIL] jid=%s  origin=%s", jid, source)
-
-        # ── Check 1: Local DB integrity ───────────────────────────────────────
-        local_check = _verify_via_local_db(jid)
-        icon = "✓" if local_check["verified"] else "✗"
-        logger.info("  ├─ [LOCAL_DB]       %s confidence=%d | %s", icon, local_check["confidence"], local_check["notes"])
-
-        # ── Check 2: Indian Kanoon cross-check ────────────────────────────────
-        ik_check: Dict[str, Any] = {"verified": False, "method": "skipped", "confidence": 0, "notes": "IK check not requested"}
-        if verify_online:
-            ik_check = _verify_via_indian_kanoon(title, citation, jid)
-            icon = "✓" if ik_check["verified"] else "✗"
-            logger.info("  ├─ [INDIAN_KANOON]  %s method=%-22s confidence=%d | %s",
-                        icon, ik_check["method"], ik_check["confidence"], ik_check["notes"])
+        logger.info("[AUDITOR] %s [%-14s | %-9s] %-60s | %s",
+                    source_icon, source.upper(), label, title[:60], citation or "—")
+        logger.info("  ├─ [LOCAL_DB]      %s confidence=%d | %s",
+                    "✓" if local_check["verified"] else "✗", local_check["confidence"], local_check.get("notes", ""))
+        logger.info("  ├─ [IK]            %s method=%-22s confidence=%d | %s",
+                    "✓" if ik_check["verified"] else "✗", ik_check["method"], ik_check["confidence"], ik_check.get("notes", ""))
+        if hallucination_flags:
+            logger.warning("  ├─ [HALLUCINATION] ⚠ %s", hallucination_flags)
         else:
-            logger.info("  ├─ [INDIAN_KANOON]  — (verify_online=False)")
+            logger.info("  ├─ [HALLUCINATION] ✓ clean")
 
-        # ── Check 3: Hallucination / integrity flags ──────────────────────────
-        hall_flags = _hallucination_flags(title, citation, ratio)
-        if hall_flags:
-            logger.warning("  ├─ [HALLUCINATION]  ⚠ Flags: %s", hall_flags)
-        else:
-            logger.info("  ├─ [HALLUCINATION]  ✓ No anomalies detected")
-
-        # ── Compute final verdict ─────────────────────────────────────────────
-        any_verified = local_check["verified"] or ik_check["verified"]
-        max_conf     = max(local_check["confidence"], ik_check["confidence"])
-
-        # Trust baseline per source (reflects how reliable the originating pipeline step is)
-        trust_base = {"local": 80, "indian_kanoon": 75, "google": 50}.get(source, 40)
-
-        critical_hallucination = any(f in hall_flags for f in (
-            "future_year_in_citation", "placeholder_citation",
-        ))
-
-        if critical_hallucination:
-            audit_status      = "QUARANTINED"
-            final_confidence  = 0
-            reason            = f"Critical hallucination flags: {hall_flags}"
-
-        elif any_verified and not hall_flags:
-            audit_status      = "VERIFIED"
-            final_confidence  = max(trust_base, max_conf)
-            reason            = f"Verified via {local_check['method']} + {ik_check['method']}"
-
-        elif any_verified and hall_flags:
-            audit_status      = "VERIFIED_WITH_WARNINGS"
-            final_confidence  = max(trust_base - 10, max_conf - 10)
-            reason            = f"Verified but warnings present: {hall_flags}"
-
-        elif is_flagged and not any_verified:
-            # For Indian Kanoon source: apply trust baseline — if we have a title and
-            # basic DB record (max_conf ≥ 45), give NEEDS_REVIEW instead of quarantine.
-            # IK citations are often flagged only because citation format is non-standard,
-            # not because the document is fake.
-            if source == "indian_kanoon" and max_conf >= 45:
-                audit_status      = "NEEDS_REVIEW"
-                final_confidence  = max(40, max_conf - 10)
-                reason            = f"Flagged by Librarian but IK source with basic DB record (conf={max_conf}) — needs review"
-            else:
-                audit_status      = "QUARANTINED"
-                final_confidence  = 0
-                reason            = "Flagged by Librarian and failed all verification checks"
-
-        elif max_conf >= 45:
-            audit_status      = "NEEDS_REVIEW"
-            final_confidence  = max(40, max_conf - 15)
-            reason            = f"Partial evidence only — max_confidence={max_conf}"
-
-        else:
-            audit_status      = "QUARANTINED"
-            final_confidence  = 0
-            reason            = "Insufficient evidence from all verification sources"
+        verdict        = _compute_final_verdict(jid, j, local_check, ik_check, hallucination_flags, is_flagged)
+        audit_status   = verdict["audit_status"]
+        final_conf     = verdict["final_confidence"]
+        multi_route    = verdict["multi_route_confirmed"]
 
         # ── Persist to DB ─────────────────────────────────────────────────────
         try:
             judgement_update_validation(
                 jid,
                 audit_status=audit_status,
-                audit_confidence=final_confidence,
+                audit_confidence=final_conf,
             )
         except Exception as exc:
             logger.warning("  [AUDITOR] DB persist failed for %s: %s", jid, exc)
 
         # ── Log verdict ───────────────────────────────────────────────────────
         if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS"):
-            approved_ids.append(jid)
-            logger.info("  └─ [VERDICT] ✅ %-26s confidence=%d | source=%-14s | %s",
-                        audit_status, final_confidence, source.upper(), reason)
-
+            logger.info("  └─ [VERDICT] ✅ %-26s confidence=%d  multi_route=%s", audit_status, final_conf, multi_route)
         elif audit_status == "NEEDS_REVIEW":
-            approved_ids.append(jid)   # included but flagged yellow for user
-            logger.warning("  └─ [VERDICT] 🔍 %-26s confidence=%d | source=%-14s | %s",
-                           audit_status, final_confidence, source.upper(), reason)
-
+            logger.warning("  └─ [VERDICT] 🔍 %-26s confidence=%d", audit_status, final_conf)
         else:
-            quarantined_ids.append(jid)
-            logger.warning("  └─ [VERDICT] ❌ %-26s source=%-14s | %s",
-                           audit_status, source.upper(), reason)
+            logger.warning("  └─ [VERDICT] ❌ %-26s confidence=%d  flags=%s", audit_status, final_conf, hallucination_flags)
 
         audit_details[jid] = {
-            "audit_status":        audit_status,
-            "final_confidence":    final_confidence,
-            "source":              source,
-            "local_check":         local_check,
-            "ik_check":            ik_check,
-            "hallucination_flags": hall_flags,
-            "reason":              reason,
+            "audit_status":          audit_status,
+            "final_confidence":      final_conf,
+            "local_check":           local_check,
+            "ik_check":              ik_check,
+            "hallucination_flags":   hallucination_flags,
+            "multi_route_confirmed": multi_route,
+            "is_flagged":            is_flagged,
         }
+
+        if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS", "NEEDS_REVIEW"):
+            approved_ids.append(jid)
+        else:
+            quarantined_ids.append(jid)
 
     pass_rate = 100.0 * len(approved_ids) / max(1, len(all_ids))
     logger.info(
