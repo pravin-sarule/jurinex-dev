@@ -82,15 +82,15 @@ def get_pg_conn():
 
 
 def get_es_client():
-    url = _get_env("ELASTICSEARCH_URL", "ES_URL")
+    url = _get_env("ELASTICSEARCH_URL", "ELASTIC_URL", "ES_URL")
     if not url:
-        logger.warning("[ES] Missing ELASTICSEARCH_URL/ES_URL; Elasticsearch disabled.")
+        logger.warning("[ES] Missing ELASTICSEARCH_URL/ELASTIC_URL/ES_URL; Elasticsearch disabled.")
         return None
     try:
         from elasticsearch import Elasticsearch
         api_key = _get_env("ELASTICSEARCH_API_KEY")
-        username = _get_env("ELASTICSEARCH_USERNAME", "ES_USERNAME")
-        password = _get_env("ELASTICSEARCH_PASSWORD", "ES_PASSWORD")
+        username = _get_env("ELASTICSEARCH_USERNAME", "ELASTIC_USER", "ES_USERNAME")
+        password = _get_env("ELASTICSEARCH_PASSWORD", "ELASTIC_PASSWORD", "ES_PASSWORD")
         # max_retries=0: fail immediately when ES is down — no 3-retry storm blocking the pipeline.
         # request_timeout=3: short per-request timeout.
         kwargs = {"request_timeout": 3, "max_retries": 0, "retry_on_timeout": False}
