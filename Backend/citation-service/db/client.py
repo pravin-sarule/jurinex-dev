@@ -568,8 +568,6 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                         result["ik_cited_by_list"] = _citedby
             except Exception as _exc:
                 logger.warning("[DB] IK fallback from ik_document_assets failed for %s: %s", canonical_id, _exc)
-
-    return result
             finally:
                 _ik_conn.close()
 
