@@ -66,6 +66,9 @@ DOC_POOL_MAXCONN = max(DOC_POOL_MINCONN, _get_env_int("DOC_POOL_MAXCONN", 3))
 ES_REQUEST_TIMEOUT = max(1, _get_env_int("ELASTIC_REQUEST_TIMEOUT", 3))
 ES_MAX_RETRIES = max(0, _get_env_int("ELASTIC_MAX_RETRIES", 0))
 ES_VERIFY_CERTS = _get_env_bool("ELASTIC_VERIFY_CERTS", True)
+ES_SSL_SHOW_WARN = _get_env_bool("ELASTIC_SSL_SHOW_WARN", ES_VERIFY_CERTS)
+ES_SSL_ASSERT_HOSTNAME = _get_env_bool("ELASTIC_SSL_ASSERT_HOSTNAME", ES_VERIFY_CERTS)
+ES_CA_CERTS = _get_env("ELASTIC_CA_CERTS", "ELASTICSEARCH_CA_CERTS")
 NEO4J_MAX_POOL_SIZE = max(1, _get_env_int("NEO4J_MAX_CONNECTION_POOL_SIZE", 20))
 
 class PooledConnWrapper:
@@ -145,7 +148,11 @@ def get_es_client():
                 "max_retries": ES_MAX_RETRIES,
                 "retry_on_timeout": False,
                 "verify_certs": ES_VERIFY_CERTS,
+                "ssl_show_warn": ES_SSL_SHOW_WARN,
+                "ssl_assert_hostname": ES_SSL_ASSERT_HOSTNAME,
             }
+            if ES_CA_CERTS:
+                kwargs["ca_certs"] = ES_CA_CERTS
             if api_key:
                 kwargs["api_key"] = api_key
                 client = Elasticsearch(url, **kwargs)
@@ -157,7 +164,12 @@ def get_es_client():
                 logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this process.", url)
                 return None
             _es_client = client
-            logger.info("[ES] Client ready for %s", url)
+            logger.info(
+                "[ES] Client ready for %s (verify_certs=%s assert_hostname=%s)",
+                url,
+                ES_VERIFY_CERTS,
+                ES_SSL_ASSERT_HOSTNAME,
+            )
             return _es_client
     except Exception as exc:
         logger.warning("[ES] Client init failed or unreachable: %s", exc)
