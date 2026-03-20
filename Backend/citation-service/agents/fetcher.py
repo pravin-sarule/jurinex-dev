@@ -212,6 +212,9 @@ def fetch_ik_candidates(
 _IK_WEB_URL_RE = re.compile(
     r"https?://(?:www\.)?indiankanoon\.org/(?:doc|docfragment)/(\d+)/?", re.I
 )
+_IK_SEARCH_URL_RE = re.compile(
+    r"https?://(?:www\.)?indiankanoon\.org/search/\?", re.I
+)
 
 
 def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -229,6 +232,14 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
         link = c.get("link", "")
         title = (c.get("title") or link)[:70]
         if not link:
+            continue
+
+        if _IK_SEARCH_URL_RE.match(link):
+            _db_log(
+                run_id, "fetcher", "fetcher", "INFO",
+                f"  ↷ Skipping Indian Kanoon search page: {title}"
+            )
+            skipped += 1
             continue
 
         # Detect indiankanoon.org web URLs and route them to the IK API instead

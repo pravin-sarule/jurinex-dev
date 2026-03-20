@@ -30,8 +30,32 @@ from agents.base_agent import BaseAgent, AgentContext, AgentResult, Tool
 
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # Target number of citation points for the report (CHECK 6 / CHECK 8)
 TARGET_CITATION_POINTS = 10
+# Production-oriented retry threshold: do not spend another full fetch/audit round
+# just to chase the last 1-2 points because report_builder can pad placeholders.
+MIN_APPROVED_TO_FINISH = _env_int(
+    "CITATION_MIN_APPROVED_TO_FINISH",
+    max(3, (TARGET_CITATION_POINTS * 8 + 9) // 10),
+)
+MAX_AUDIT_RETRIES = _env_int("CITATION_MAX_AUDIT_RETRIES", 2)
+
+_IK_WEB_DOC_RE = re.compile(
+    r"https?://(?:www\.)?indiankanoon\.org/(?:doc|docfragment)/(\d+)/?",
+    re.I,
+)
+_IK_WEB_SEARCH_RE = re.compile(
+    r"https?://(?:www\.)?indiankanoon\.org/search/\?",
+    re.I,
+)
 
 
 def _build_manifest(context: AgentContext) -> Dict[str, Any]:
@@ -64,6 +88,58 @@ def _manifest_is_empty(manifest: Dict[str, Any]) -> bool:
     ct = (manifest.get("case_text") or "").strip()
     kws = manifest.get("keyword_sets") or []
     return not sq and not ct and not kws
+
+
+def _candidate_key(candidate: Dict[str, Any]) -> str:
+    """Build a stable run-level candidate key so retries only fetch unseen docs."""
+    tid = str(candidate.get("external_id") or candidate.get("tid") or "").strip()
+    if tid:
+        return f"ik:{tid}"
+
+    link = (candidate.get("link") or candidate.get("url") or "").strip()
+    if not link:
+        return ""
+
+    ik_match = _IK_WEB_DOC_RE.match(link)
+    if ik_match:
+        return f"ik:{ik_match.group(1)}"
+    return f"url:{link.lower()}"
+
+
+def _filter_new_external_candidates(
+    context: AgentContext,
+    ik_candidates: List[Dict[str, Any]],
+    google_candidates: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Keep only unseen external candidates for this run.
+
+    Also drops Indian Kanoon search-result pages because they are not fetchable
+    judgments and only add latency/noise.
+    """
+    seen = set(context.metadata.get("attempted_candidate_keys") or [])
+    new_ik: List[Dict[str, Any]] = []
+    new_google: List[Dict[str, Any]] = []
+
+    for candidate in ik_candidates or []:
+        key = _candidate_key(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        new_ik.append(candidate)
+
+    for candidate in google_candidates or []:
+        link = (candidate.get("link") or candidate.get("url") or "").strip()
+        if link and _IK_WEB_SEARCH_RE.match(link):
+            continue
+        key = _candidate_key(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        new_google.append(candidate)
+
+    context.metadata["attempted_candidate_keys"] = list(seen)
+    return new_ik, new_google
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WATCHDOG AGENT  — searches Local DB → Indian Kanoon → Google Serper
@@ -849,8 +925,13 @@ class CitationRootAgent(BaseAgent):
 
         # 3. Fetcher + Clerk in parallel (fetch external docs & ingest them)
         #    Only run if there are external candidates
-        ik_cands = context.metadata.get("candidates_ik", [])
-        go_cands = context.metadata.get("candidates_google", [])
+        ik_cands, go_cands = _filter_new_external_candidates(
+            context,
+            context.metadata.get("candidates_ik", []),
+            context.metadata.get("candidates_google", []),
+        )
+        context.metadata["candidates_ik"] = ik_cands
+        context.metadata["candidates_google"] = go_cands
 
         if ik_cands or go_cands:
             # Fetcher first, then Clerk (Clerk needs fetched docs)
@@ -867,9 +948,8 @@ class CitationRootAgent(BaseAgent):
         self._delegate(self.librarian, context, "librarian")
 
         # 5. Auditor — gate final list (CHECK 8: retry if < TARGET points)
-        max_retries = 2
         accumulated_approved: List[str] = []
-        for audit_round in range(max_retries + 1):
+        for audit_round in range(MAX_AUDIT_RETRIES + 1):
             aud_result = self._delegate(self.auditor, context, "auditor")
             audit_data = aud_result.data or {}
             context.metadata["audit_details"] = context.metadata.get("audit_details") or {}
@@ -889,17 +969,31 @@ class CitationRootAgent(BaseAgent):
             approved_count = len(accumulated_approved)  # CHANGE 2A: was audit_data.get("approved_count") which returned None
             if approved_count >= TARGET_CITATION_POINTS:
                 break
-            if audit_round >= max_retries:
+            if approved_count >= MIN_APPROVED_TO_FINISH:
+                logger.info(
+                    "[ROOT] Approved=%d reached soft threshold %d/%d; proceeding to report build",
+                    approved_count, MIN_APPROVED_TO_FINISH, TARGET_CITATION_POINTS,
+                )
+                break
+            if audit_round >= MAX_AUDIT_RETRIES:
                 logger.warning("[ROOT] After %d rounds still have %d approved (target %d)", audit_round + 1, approved_count, TARGET_CITATION_POINTS)
                 break
             # Retry: fetch more candidates for missing slots
             logger.info("[ROOT] Retry %d: approved=%d < %d — re-running Watchdog/Fetcher/Clerk for more candidates", audit_round + 1, approved_count, TARGET_CITATION_POINTS)
             self._delegate(self.watchdog, context, "watchdog")
-            ik_cands = context.metadata.get("candidates_ik", [])
-            go_cands = context.metadata.get("candidates_google", [])
+            ik_cands, go_cands = _filter_new_external_candidates(
+                context,
+                context.metadata.get("candidates_ik", []),
+                context.metadata.get("candidates_google", []),
+            )
+            context.metadata["candidates_ik"] = ik_cands
+            context.metadata["candidates_google"] = go_cands
             if ik_cands or go_cands:
                 self._delegate(self.fetcher, context, "fetcher")
                 self._delegate(self.clerk, context, "clerk")
+            else:
+                logger.info("[ROOT] Retry %d produced no new external candidates; stopping retries", audit_round + 1)
+                break
             # Merge accumulated_approved back so Librarian/Auditor can include them next round
             existing = set(accumulated_approved)
             merged = list(accumulated_approved)
