@@ -40,6 +40,63 @@ def _safe_prompt_format(template: str, **kwargs: Any) -> str:
         return template
 
 
+def _extract_balanced_json_object(text: str) -> str:
+    """Return the first balanced JSON object from model output when possible."""
+    start = text.find("{")
+    if start < 0:
+        return text
+
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+
+    return text[start:]
+
+
+def _repair_json_text(text: str) -> str:
+    """Repair a few common LLM JSON issues before parsing."""
+    repaired = (text or "").strip()
+    repaired = re.sub(r"^```(?:json)?\s*", "", repaired, flags=re.I)
+    repaired = re.sub(r"```\s*$", "", repaired)
+    repaired = repaired.replace("\u201c", '"').replace("\u201d", '"')
+    repaired = repaired.replace("\u2018", "'").replace("\u2019", "'")
+    repaired = _extract_balanced_json_object(repaired)
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    return repaired
+
+
+def _parse_model_json(text: str) -> Optional[Dict[str, Any]]:
+    repaired = _repair_json_text(text)
+    if not repaired:
+        return None
+    try:
+        parsed = json.loads(repaired)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError as exc:
+        preview = repaired[:400].replace("\n", " ")
+        logger.warning("[CLERK] Gemini JSON parse failed: %s | preview=%s", exc, preview)
+        return None
+
+
 # ─── Chunking ────────────────────────────────────────────────────────────────
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
@@ -150,10 +207,11 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
             contents=prompt,
             config=config,
         )
-        text = (resp.text or "").strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"```\s*$", "", text)
-        return json.loads(text)
+        parsed = _parse_model_json(resp.text or "")
+        if parsed is not None:
+            return parsed
+        logger.warning("[CLERK] Gemini returned non-parseable JSON; falling back to default merge")
+        return None
     except Exception as e:
         logger.warning("[CLERK] Gemini extraction failed: %s", e)
         return None
