@@ -5,9 +5,11 @@ from ..database import get_db
 from ..models.db_models import UserTemplate, UserTemplateField, UserTemplateAnalysisSection
 from ..services.agent_service import AntigravityAgent
 from ..services.document_ai_service import DocumentAIService
+from ..services.field_extractor import HybridFieldExtractor
 from pydantic import BaseModel
 import uuid
 import logging
+import re
 from typing import List, Optional
 
 # Configure logging
@@ -18,6 +20,11 @@ router = APIRouter(prefix="/analysis", tags=["Analysis"])
 
 agent = AntigravityAgent()
 doc_ai = DocumentAIService()
+field_extractor = HybridFieldExtractor()
+
+
+def _normalize_placeholder_spacing(template_text: str) -> str:
+    return re.sub(r"\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}", r"{{\1}}", template_text)
 
 @router.get("/")
 async def analysis_root():
@@ -145,6 +152,8 @@ async def upload_template(
             template_text = file_content.decode('utf-8', errors='ignore')
             print(f"[Template Analyzer] Text decoded. Length: {len(template_text)}", flush=True)
 
+        template_text = _normalize_placeholder_spacing(template_text)
+
         # --- 2. GCS Uploads ---
         logger.info(f"[STEP 3] Uploading assets to GCS...")
         print(f"[Template Analyzer] [STEP 3] Uploading to GCS...", flush=True)
@@ -189,6 +198,7 @@ async def upload_template(
         print(f"[Template Analyzer] [STEP 5] Gemini structure analysis...", flush=True)
         
         analysis_result = await agent.analyze_template(template_text, template_file_signed_url=signed_file_url)
+        analysis_result["hybrid_fields"] = field_extractor.extract_from_text(template_text)
         num_sections = len(analysis_result.get('sections', []))
         print(f"[Template Analyzer] AI analysis done. Sections: {num_sections}", flush=True)
 
@@ -219,7 +229,7 @@ async def upload_template(
                 section_purpose=section.get("section_purpose", ""),
                 section_intro=prompt_data.get("section_intro", ""),
                 section_prompts=prompt_data.get("field_prompts", []),
-                order_index=index
+                order_index=section.get("order", index)
             )
             db.add(section_entry)
             
@@ -378,18 +388,29 @@ class UpdateFieldsRequest(BaseModel):
 
 @router.put("/template/{template_id}/fields")
 async def update_template_fields(
-    template_id: uuid.UUID, 
-    request: UpdateFieldsRequest, 
+    template_id: uuid.UUID,
+    request: UpdateFieldsRequest,
     db: AsyncSession = Depends(get_db),
     x_user_id: Optional[str] = Header(None)
 ):
     if not x_user_id:
         raise HTTPException(status_code=400, detail="X-User-Id header is required")
-    # Verify ownership logic would typically go here or be implicit by lookup
-    
+
+    try:
+        user_id_int = int(x_user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid X-User-Id format")
+
+    ownership = await db.execute(select(UserTemplate).where(
+        (UserTemplate.template_id == template_id) &
+        (UserTemplate.user_id == user_id_int)
+    ))
+    if not ownership.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Template not found")
+
     result = await db.execute(select(UserTemplateField).where(UserTemplateField.template_id == template_id))
     field_entry = result.scalar_one_or_none()
-    
+
     if not field_entry:
         raise HTTPException(status_code=404, detail="Template fields not found")
         

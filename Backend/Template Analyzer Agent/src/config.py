@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 import os
 
@@ -7,6 +7,9 @@ _agent_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_agent_root, ".env"))
 
 class Settings(BaseSettings):
+    # Ignore unrelated environment variables (e.g., PORT) that may be present in dev shells.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     DATABASE_URL: str = os.getenv("DATABASE_URL")  # Draft_DB
     AUTH_DATABASE_URL: str = os.getenv("AUTH_DATABASE_URL", "")  # Auth_DB for role check (super_admins, admin_roles, users)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY")
@@ -23,8 +26,5 @@ class Settings(BaseSettings):
     @property
     def GCS_IMAGE_BUCKET_NAME(self) -> str:
         return self.GCS_BUCKET_NAME
-
-    class Config:
-        env_file = ".env"
 
 settings = Settings()

@@ -275,6 +275,8 @@ async def get_template(
                 )
             user_tpl = _fetch_user_template_from_analyzer(template_id, analyzer_user_id)
             if user_tpl:
+                db_fields = draft_db.get_template_fields_with_fallback(template_id)
+                db_sections = draft_db.get_template_sections(template_id) if include_sections else []
                 out = {
                     "template_id": user_tpl["template_id"],
                     "name": user_tpl["name"],
@@ -284,10 +286,10 @@ async def get_template(
                     "language": user_tpl.get("language"),
                     "status": user_tpl.get("status"),
                     "is_active": user_tpl.get("is_active", True),
-                    "fields": user_tpl.get("fields", {}),
+                    "fields": db_fields or user_tpl.get("fields", []),
                 }
                 if include_sections:
-                    out["sections"] = user_tpl.get("sections", [])
+                    out["sections"] = db_sections or user_tpl.get("sections", [])
                 if include_preview_url and user_tpl.get("preview_image_url"):
                     out["preview_image_url"] = user_tpl["preview_image_url"]
                 logger.info("[get_template] Served user template from Template Analyzer: %s", template_id)

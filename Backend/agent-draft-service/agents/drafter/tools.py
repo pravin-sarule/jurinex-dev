@@ -324,6 +324,8 @@ OUTPUT RULES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - LANGUAGE: Write ALL output exclusively in {lang}. Every word — headings, body, labels, tables — must be in {lang}. No other language permitted.
 - LEGAL TONE: Write as a senior advocate. Use formal legal language, precise terminology, and the authoritative style expected in court filings. Numbered paragraphs where appropriate.
+- STATELESS REQUEST: Treat this as a fully self-contained request. Use only the Section Prompt, Field Data, template format, and this section's RAG context.
+- Generate only this specific section. Do not assume awareness of previous or next sections unless that fact is explicitly present in the supplied context.
 - STRICT SCOPE: Generate EXACTLY and ONLY what the Section Prompt specifies — nothing more, nothing less.
   If the Section Prompt says "generate an index", output only the index entries.
   If it says "generate a title page", output only the title page content.

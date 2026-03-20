@@ -667,6 +667,7 @@ async def build_citation_report(
     output_format: str = Body("html", embed=True, description="'html' or 'markdown'"),
     case_id: Optional[str] = Body(None, embed=True),
     user_id: Optional[str] = Body("anonymous", embed=True),
+    perspective: Optional[str] = Body(None, embed=True, description="Party perspective filter: 'appellant' | 'respondent' | 'court' | 'all'"),
     request: Request = None,
 ) -> Dict[str, Any]:
     """
@@ -708,17 +709,24 @@ async def build_citation_report(
         auth_header = request.headers.get("authorization") if request else None
         case_file_context, _ = await _fetch_case_context(case_id, auth_header)
 
+    # Inject perspective hint into query context so Stage 1 can tag argument parties correctly
+    _perspective = (perspective or "").lower().strip()
+    _perspective_hint = ""
+    if _perspective and _perspective != "all":
+        _perspective_hint = f" [Research perspective: {_perspective} side arguments]"
+    _query_with_perspective = query + _perspective_hint
+
     try:
         if raw_judgment and raw_judgment.strip():
             result = build_report(
                 case_title=case_title or query[:120],
-                query_context=query,
+                query_context=_query_with_perspective,
                 raw_judgment_text=raw_judgment,
                 output_format=output_format,
             )
         elif case_file_context:
             result = build_report_from_files(
-                query_context=query,
+                query_context=_query_with_perspective,
                 case_file_context=case_file_context,
                 output_format=output_format,
                 case_title=case_title,
@@ -752,6 +760,9 @@ async def build_citation_report(
         "citationJson": result["citationJson"],
         "format": result.get("format", output_format),
         "verificationStatus": result.get("verificationStatus", ""),
+        "argumentParty": result.get("argumentParty", "neutral"),
+        "partyArguments": result.get("partyArguments", {}),
+        "perspective": _perspective or "all",
         "case_id": case_id,
         "user_id": user_id,
     }
@@ -765,6 +776,7 @@ async def generate_citation_report(
     case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     search_results: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     use_pipeline: bool = Body(True, embed=True),
+    perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
     request: Request = None,
 ) -> Dict[str, Any]:
     """
@@ -855,6 +867,10 @@ async def generate_citation_report(
             except Exception as hitl_err:
                 logger.warning("[HITL] Failed to queue citation: %s", hitl_err)
 
+        _perspective = (perspective or "all").lower().strip()
+        if isinstance(fmt, dict):
+            fmt = {**fmt, "perspective": _perspective}
+
         return {
             "success": True,
             "report_id": report_id_out,
@@ -862,6 +878,7 @@ async def generate_citation_report(
             "case_id": case_id,
             "run_id": run_id_out,
             "status": out.get("status", "completed"),
+            "perspective": _perspective or "all",
         }
 
     # Legacy: agent-only
@@ -1422,6 +1439,7 @@ async def start_citation_report(
     case_id: Optional[str] = Body(None, embed=True),
     case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     use_pipeline: bool = Body(True, embed=True),
+    perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
 ) -> Dict[str, Any]:
     """Start citation report pipeline in background. Returns run_id immediately for log polling."""
     import uuid as _uuid
@@ -1430,6 +1448,7 @@ async def start_citation_report(
 
     query = (query or "").strip()
     user_id = (user_id or "anonymous").strip()
+    perspective = (perspective or "all").strip().lower() or "all"
 
     # Fetch case context from document-service when case_id is provided but context is missing.
     # Must be done here (async handler) before spawning the sync background thread.
@@ -1456,15 +1475,24 @@ async def start_citation_report(
             from agents.root_agent import CitationRootAgent, AgentContext
             context = AgentContext(
                 query=query, user_id=user_id, case_id=case_id,
-                metadata={"case_file_context": case_file_context or [], "ingest_external": True, "run_id": run_id},
+                metadata={
+                    "case_file_context": case_file_context or [],
+                    "ingest_external": True,
+                    "run_id": run_id,
+                    "perspective": perspective,
+                },
             )
             root = CitationRootAgent()
             result = root.run(context)
             if result.success:
+                report_format = result.data.get("report_format") or {}
+                if isinstance(report_format, dict):
+                    citations = report_format.get("citations") or []
+                    report_format = {**report_format, "perspective": perspective if perspective and perspective != "all" else "all"}
                 _run_state[run_id] = {
                     "status": "completed",
                     "report_id": result.data.get("report_id"),
-                    "report_format": result.data.get("report_format"),
+                    "report_format": report_format,
                     "error": None,
                 }
             else:

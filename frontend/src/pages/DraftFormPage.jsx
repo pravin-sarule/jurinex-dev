@@ -966,9 +966,15 @@ const DraftFormPage = () => {
                         disabled={casesLoading}
                       >
                         <option value="">Select a case...</option>
-                        {cases.map(c => (
-                          <option key={c.id} value={c.id}>{c.case_title || c.title || `Case #${c.id}`}</option>
-                        ))}
+                        {cases.map((c, index) => {
+                          const caseKey = c.id ?? c.case_id ?? `case-${index}`;
+                          const caseValue = c.id ?? c.case_id ?? '';
+                          return (
+                            <option key={caseKey} value={caseValue}>
+                              {c.case_title || c.title || `Case #${caseValue || index + 1}`}
+                            </option>
+                          );
+                        })}
                       </select>
                       {attachCaseLoading && <p className="text-[10px] text-[#21C1B6] font-bold animate-pulse px-2 uppercase tracking-widest">Processing Context...</p>}
                     </div>
@@ -1022,7 +1028,7 @@ const DraftFormPage = () => {
                       <ul className="max-h-48 overflow-y-auto space-y-2 pr-1">
                         {uploadedDocuments.map((doc, idx) => (
                           <li
-                            key={idx}
+                            key={doc.fileId || `${doc.name}-${doc.status}-${idx}`}
                             className={`flex items-center gap-3 p-3 rounded-xl border ${
                               doc.status === 'success'
                                 ? 'bg-[#21C1B6]/5 border-[#21C1B6]/20'

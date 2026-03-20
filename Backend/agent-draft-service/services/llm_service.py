@@ -6,11 +6,22 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from config.gemini_models import is_claude_model, claude_api_model_id
 
 logger = logging.getLogger(__name__)
+
+_gemini_rate_lock = threading.Lock()
+_last_gemini_call_at = 0.0
+_gemini_min_interval_seconds = max(
+    0.0,
+    1.0 / max(1, int(os.environ.get("GEMINI_REQUESTS_PER_SECOND", "2"))),
+)
+_gemini_max_retry_attempts = max(0, int(os.environ.get("GEMINI_MAX_RETRY_ATTEMPTS", "3")))
+_gemini_retry_backoff_seconds = max(1, int(os.environ.get("GEMINI_RETRY_INITIAL_BACKOFF_SECONDS", "2")))
 
 def call_llm(
     prompt: str,
@@ -109,16 +120,64 @@ def _call_gemini(
     )
 
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=[prompt],
-            config=types.GenerateContentConfig(**config_args),
-        )
-        if not response or not response.text:
-            logger.warning("[LLM] Gemini returned empty response for model=%r", model)
-            return ""
-        return response.text
-    except Exception as e:
-        logger.exception("Gemini call failed: %s", e)
-        # Re-raise with the actual error so callers can surface it to the user
-        raise RuntimeError(f"Gemini API error (model={model!r}): {e}") from e
+        attempt = 0
+        while True:
+            _wait_for_gemini_rate_slot()
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[prompt],
+                    config=types.GenerateContentConfig(**config_args),
+                )
+                if not response or not response.text:
+                    logger.warning("[LLM] Gemini returned empty response for model=%r", model)
+                    return ""
+                return response.text
+            except Exception as e:
+                attempt += 1
+                if _is_retryable_gemini_error(e) and attempt <= _gemini_max_retry_attempts:
+                    sleep_seconds = _gemini_retry_backoff_seconds * (2 ** (attempt - 1))
+                    logger.warning(
+                        "[LLM] Gemini retryable error on attempt %s/%s for model=%r; sleeping %ss: %s",
+                        attempt,
+                        _gemini_max_retry_attempts,
+                        model,
+                        sleep_seconds,
+                        e,
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+
+                logger.exception("Gemini call failed: %s", e)
+                raise RuntimeError(f"Gemini API error (model={model!r}): {e}") from e
+    except Exception:
+        raise
+
+
+def _wait_for_gemini_rate_slot() -> None:
+    global _last_gemini_call_at
+
+    if _gemini_min_interval_seconds <= 0:
+        return
+
+    with _gemini_rate_lock:
+        now = time.monotonic()
+        elapsed = now - _last_gemini_call_at
+        wait_for = _gemini_min_interval_seconds - elapsed
+        if wait_for > 0:
+            time.sleep(wait_for)
+        _last_gemini_call_at = time.monotonic()
+
+
+def _is_retryable_gemini_error(error: Exception) -> bool:
+    message = str(error).lower()
+    retryable_markers = (
+        "429",
+        "too many requests",
+        "rate limit",
+        "503",
+        "service unavailable",
+        "temporarily unavailable",
+        "resource exhausted",
+    )
+    return any(marker in message for marker in retryable_markers)

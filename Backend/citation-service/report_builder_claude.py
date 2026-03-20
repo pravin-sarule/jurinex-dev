@@ -47,6 +47,17 @@ HEADNOTE INSTRUCTIONS (field: headnote):
 - Focus on LEGAL PRINCIPLES only — no facts, no procedural history.
 - Format: "1. ...\n2. ...\n3. ..." (newline-separated numbered points).
 
+PARTY ARGUMENT IDENTIFICATION (fields: argumentParty, partyArguments):
+Use a sliding-window approach — detect the current speaker signal first, then attribute all subsequent arguments to that party until a new signal appears.
+- APPELLANT/PETITIONER signals: "learned counsel for the appellant/petitioner", "appellant submitted/contended/argued/urged/relied", "on behalf of the appellant/petitioner", "it was submitted by the appellant", "petitioner's counsel argued".
+- RESPONDENT signals: "learned counsel for the respondent/state/prosecution", "respondent submitted/contended/argued", "per contra", "on behalf of the respondent/state", "it was submitted by the respondent/state", "state's counsel submitted".
+- COURT signals: "we hold", "we find", "we observe", "this court holds/concludes", "in our opinion/view/considered opinion", "it is well settled", "the ratio decidendi is".
+- For argumentParty: identify which party PRIMARILY benefited from or relied on this judgment's core holding — 'appellant' if it supports appellant's position, 'respondent' if the court accepted respondent's argument, 'court' if it is the court's independent ratio/analysis, 'neutral' if both parties relied on it or it is genuinely indeterminate.
+- CRITICAL: Never conflate "argued by party" with "upheld by court". A case cited by the respondent that the court distinguished must show argumentParty as 'respondent' even if the court rejected it.
+- For partyArguments.appellant: list 2-3 key arguments actually made by the appellant/petitioner in this judgment (10-15 words each).
+- For partyArguments.respondent: list 2-3 key arguments actually made by the respondent/state (10-15 words each).
+- For partyArguments.court: the court's own ratio/conclusion in exactly 1 sentence.
+
 OUTPUT RULE: Return ONLY a valid JSON object. No markdown fences. No preamble. No commentary. The response must be parseable by JSON.parse() without any cleanup."""
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -57,13 +68,24 @@ STAGE_2_SYSTEM = """You are a legal report formatter for Indian courts. You rece
 
 FORMATTING RULES:
 1. Open with a 'Citation Header Block' — case name in ALL CAPS, primary citation bold, court and date on the next line, coram as 'Coram:' label.
-2. Use a clear two-column 'Quick Reference' table: left = label (bold), right = value.
-3. HEADNOTE section: render immediately after the header block. Label it 'HEADNOTE' in uppercase. Display each numbered point on its own line in a teal-left-bordered box. This is the most prominent summary section — make it visually distinct.
-4. Statutes section: numbered list, each entry formatted as 'Section X, [Act Name], [Year]'.
-5. Ratio decidendi: render in a visually distinct blockquote box with a left rule. Prefix with 'RATIO DECIDENDI —'. Must be verbatim from the JSON field — do not paraphrase.
-6. Key Excerpt: show paragraph reference (e.g., '¶ 42') as a superscript/header, then the text in italics within a bordered box.
-7. Subsequent Treatment: only render this section if any of followed/distinguished/overruled arrays are non-empty.
-8. Footer: verification badge (green = Verified, amber = Requires Review, red = Invalid) + source URL if available.
+2. PARTY PERSPECTIVE BADGE: Immediately after the Citation Header Block title line, render a party badge based on the 'argumentParty' field:
+   - "appellant"  → Blue badge: 🔵 RELIED BY APPELLANT
+   - "respondent" → Amber badge: 🟡 RELIED BY RESPONDENT
+   - "court"      → Green badge: 🟢 COURT'S RATIO
+   - "neutral"    → Gray badge: ⚪ CITED BY BOTH PARTIES
+   If subsequentTreatment.distinguished is non-empty AND argumentParty is "respondent", also add: 🟠 DISTINGUISHED BY COURT (show both badges — never conflate "argued by party" with "upheld by court").
+3. Use a clear two-column 'Quick Reference' table: left = label (bold), right = value.
+4. HEADNOTE section: render immediately after the header block. Label it 'HEADNOTE' in uppercase. Display each numbered point on its own line in a teal-left-bordered box. This is the most prominent summary section — make it visually distinct.
+5. PARTY ARGUMENTS section (render only if partyArguments is populated): show two sub-sections side by side or sequentially:
+   - 🔵 Appellant's Arguments: bulleted list of partyArguments.appellant items.
+   - 🟡 Respondent's Arguments: bulleted list of partyArguments.respondent items.
+   - 🟢 Court's Conclusion: partyArguments.court text.
+   Label this section 'PARTY ARGUMENTS' in uppercase.
+6. Statutes section: numbered list, each entry formatted as 'Section X, [Act Name], [Year]'.
+7. Ratio decidendi: render in a visually distinct blockquote box with a left rule. Prefix with 'RATIO DECIDENDI —'. Must be verbatim from the JSON field — do not paraphrase.
+8. Key Excerpt: show paragraph reference (e.g., '¶ 42') as a superscript/header, then the text in italics within a bordered box.
+9. Subsequent Treatment: only render this section if any of followed/distinguished/overruled arrays are non-empty.
+10. Footer: verification badge (green = Verified, amber = Requires Review, red = Invalid) + source URL if available.
 
 TONE & STRUCTURE:
 - Formal. No filler sentences. No AI commentary.
@@ -96,6 +118,12 @@ CITATION_JSON_SCHEMA = {
     "verificationStatus": "Verified and authentic | Requires review | Invalid / not found",
     "officialSourceUrl": "string | null",
     "headnote": "string — 4-5 numbered legal headnote points summarising key issues and holdings (SCC/AIR style). Format: '1. ...\\n2. ...'. Must focus on legal principles only, not facts.",
+    "argumentParty": "appellant | respondent | court | neutral — which party in this case primarily relied on / benefited from this judgment's holding",
+    "partyArguments": {
+        "appellant": "string[] — 2-3 key arguments actually made by the appellant/petitioner/plaintiff (each 10-15 words)",
+        "respondent": "string[] — 2-3 key arguments actually made by the respondent/state/defendant (each 10-15 words)",
+        "court": "string — court's own ratio/conclusion in 1 sentence",
+    },
 }
 
 
@@ -205,7 +233,7 @@ def build_report(
         f"Render the professional Legal Citation Report now:"
     )
 
-    max_tokens_stage2 = 3000 if fmt == "html" else 2000
+    max_tokens_stage2 = 4096 if fmt == "html" else 2500
 
     s2_response = client.messages.create(
         model=MODEL,
@@ -227,6 +255,8 @@ def build_report(
         "report": rendered_report,
         "format": fmt,
         "verificationStatus": verification,
+        "argumentParty": citation_json.get("argumentParty") or "neutral",
+        "partyArguments": citation_json.get("partyArguments") or {},
     }
 
 

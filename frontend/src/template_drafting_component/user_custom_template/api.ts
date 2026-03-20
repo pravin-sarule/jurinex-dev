@@ -55,8 +55,17 @@ function getMessageFromError(error: unknown): string {
     return error instanceof Error ? error.message : 'Request failed';
 }
 
+function normalizeTemplateAnalyzerBaseUrl(baseUrl: string): string {
+    const trimmed = String(baseUrl || '').replace(/\/+$/, '');
+    if (!trimmed) return '/analysis';
+    if (trimmed.endsWith('/analysis') || trimmed.endsWith('/api/template-analysis')) {
+        return trimmed;
+    }
+    return `${trimmed}/analysis`;
+}
+
 const analyzerClient = axios.create({
-    baseURL: TEMPLATE_ANALYZER_API_BASE,
+    baseURL: normalizeTemplateAnalyzerBaseUrl(TEMPLATE_ANALYZER_API_BASE),
     timeout: 300000,
 });
 

@@ -377,7 +377,7 @@ const API_BASE_URL = DOCS_BASE_URL;
 const CASES_BASE_URL = DOCS_BASE_URL;
 
 const getAuthHeader = () => {
-  const token = localStorage.getItem('token');
+  const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 

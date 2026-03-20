@@ -401,6 +401,18 @@ async def get_draft_section_prompts_db(
         draft = draft_db.get_user_draft(draft_id, user_id)
         template_id = str(draft["template_id"]) if draft and draft.get("template_id") else None
         template_sections = draft_db.get_template_sections(template_id) if template_id else []
+        if not rows and template_sections:
+            for index, section in enumerate(template_sections):
+                draft_db.upsert_draft_section_prompt(
+                    draft_id=draft_id,
+                    section_id=str(section.get("section_id") or f"section_{index}"),
+                    custom_prompt=None,
+                    is_deleted=False,
+                    section_name=section.get("section_name") or f"Section {index + 1}",
+                    section_type=section.get("section_purpose") or None,
+                    sort_order=section.get("sort_order", index),
+                )
+            rows = draft_db.get_draft_section_prompts_list(draft_id)
         out = []
         for r in rows:
             row = dict(r)

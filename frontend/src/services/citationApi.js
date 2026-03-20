@@ -12,13 +12,17 @@ function getAuthHeader() {
 export const citationApi = {
   /**
    * Generate a new citation report (runs full pipeline).
-   * Body: { query, user_id?, case_id?, use_pipeline?: true, case_file_context?: [...] }
-   * Returns: { success, report_id, report_format: { citations, generatedAt }, case_id }
+   * Body: { query, user_id?, case_id?, use_pipeline?: true, case_file_context?: [...], perspective?: string }
+   * Returns: { success, report_id, report_format: { citations, generatedAt, perspective }, case_id }
+   *
+   * perspective: 'all' | 'appellant' | 'respondent' | 'court'
+   *   When set to a specific party, citations are filtered to show only that party's arguments.
    */
-  async generateReport(query, userId = 'anonymous', usePipeline = true, caseFileContext = null, caseId = null) {
+  async generateReport(query, userId = 'anonymous', usePipeline = true, caseFileContext = null, caseId = null, perspective = 'all') {
     const body = { query, user_id: userId, use_pipeline: usePipeline };
     if (caseFileContext && caseFileContext.length > 0) body.case_file_context = caseFileContext;
     if (caseId) body.case_id = caseId;
+    if (perspective && perspective !== 'all') body.perspective = perspective;
     const res = await fetch(`${CITATION_SERVICE_URL}/citation/report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
@@ -96,11 +100,13 @@ export const citationApi = {
 
   /**
    * Start citation report pipeline in background. Returns run_id immediately.
+   * perspective: 'all' | 'appellant' | 'respondent' | 'court'
    */
-  async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null) {
+  async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null, perspective = 'all') {
     const body = { query, user_id: userId, use_pipeline: true };
     if (caseId) body.case_id = caseId;
     if (caseFileContext?.length) body.case_file_context = caseFileContext;
+    if (perspective && perspective !== 'all') body.perspective = perspective;
     const res = await fetch(`${CITATION_SERVICE_URL}/citation/report/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },

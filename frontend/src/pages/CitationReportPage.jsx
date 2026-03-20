@@ -34,6 +34,60 @@ function _slaLabel(score) {
 function Dot({ c, s = 7 }) { return <span style={{ width: s, height: s, borderRadius: '50%', background: c, display: 'inline-block', flexShrink: 0 }} />; }
 function Spin() { return (<span style={{ display: 'inline-flex', gap: 4 }}>{[0, .18, .36].map((d, i) => <span key={i} style={{ width: 7, height: 7, borderRadius: '50%', background: T, animation: `sp 1.2s ${d}s ease-in-out infinite` }} />)}<style>{`@keyframes sp{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}`}</style></span>); }
 
+const PERSPECTIVE_OPTIONS = [
+  { key: 'all', label: 'All', emoji: '⚖️' },
+  { key: 'appellant', label: 'Appellant', emoji: '🔵' },
+  { key: 'respondent', label: 'Respondent', emoji: '🟡' },
+  { key: 'court', label: "Court's Ratio", emoji: '🟢' },
+  { key: 'neutral', label: 'Both Sides', emoji: '⚪' },
+];
+
+function normalizePerspectiveKey(value, fallback = 'neutral') {
+  const raw = String(value || '').toLowerCase().trim();
+  if (!raw) return fallback;
+  if (raw === 'all') return 'all';
+  if (/(appellant|petitioner|plaintiff|accused)/.test(raw)) return 'appellant';
+  if (/(respondent|defendant|state|prosecution)/.test(raw)) return 'respondent';
+  if (/(court|ratio|analysis|conclusion|judge|bench)/.test(raw)) return 'court';
+  if (/(neutral|both|common|either|shared|all parties|both parties)/.test(raw)) return fallback === 'all' ? 'all' : 'neutral';
+  return fallback;
+}
+
+function normalizeSearchText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function normalizeCourtKey(value) {
+  const raw = normalizeSearchText(value);
+  if (!raw || raw === 'court not specified' || raw === '—') return 'unknown';
+  return raw;
+}
+
+function analyzeQueryIntent(query) {
+  const raw = normalizeSearchText(query);
+  if (!raw) return { perspective: 'all', intent: 'general_research' };
+
+  let perspective = 'all';
+  if (/(respondent|defendant|state|prosecution)(?:'s)?\s+(side|arguments?|citations?|case|cases|position)?/.test(raw)) {
+    perspective = 'respondent';
+  } else if (/(appellant|petitioner|plaintiff|accused)(?:'s)?\s+(side|arguments?|citations?|case|cases|position)?/.test(raw)) {
+    perspective = 'appellant';
+  } else if (/(court|judge|bench|ratio|analysis|reasoning|holding|conclusion)/.test(raw)) {
+    perspective = 'court';
+  }
+
+  let intent = 'general_research';
+  if (/(citation|citations|case law|precedent|precedents|authorities)/.test(raw)) {
+    intent = 'citation_research';
+  } else if (/(argument|arguments|grounds|contention|submission|submissions)/.test(raw)) {
+    intent = 'argument_research';
+  } else if (/(ratio|analysis|reasoning|holding|conclusion)/.test(raw)) {
+    intent = 'judicial_analysis';
+  }
+
+  return { perspective, intent };
+}
+
 /* ─── Inline Citation Network (Manupatra-style SVG radial graph) ─── */
 let _icnCounter = 0;
 function InlineCitationNetwork({ c }) {
@@ -939,6 +993,102 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
 }
 
 
+/* ─── Build a plain-SVG citation network string for print HTML ─── */
+function buildPrintNetworkSvg(c) {
+  const cites     = (c.ikCiteList    || []).slice(0, 7);
+  const citedBy   = (c.ikCitedByList || []).slice(0, 7);
+  const citeExtra = Math.max(0, (c.ikCiteList    || []).length - 7);
+  const cbyExtra  = Math.max(0, (c.ikCitedByList || []).length - 7);
+  if (!cites.length && !citedBy.length) return '';
+
+  const VW = 860, VH = 420, CX = VW / 2, CY = VH / 2;
+  const ORBIT = 210, CR = 36, NR = 20;
+  const CITE_LX = 14, CBY_LX = VW - 14;
+  const toRad = d => (d * Math.PI) / 180;
+  const svgEsc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const trim = (s, n = 30) => !s ? '—' : s.length > n ? s.slice(0, n - 1) + '…' : s;
+
+  const placeArc = (items, s0, e0) => {
+    if (!items.length) return [];
+    const s = toRad(s0), e = toRad(e0);
+    return items.map((item, i) => {
+      const t = items.length === 1 ? 0.5 : i / (items.length - 1);
+      const a = s + t * (e - s);
+      return {
+        ...item,
+        x: CX + ORBIT * Math.cos(a),
+        y: CY + ORBIT * Math.sin(a),
+        label: item.title || `Doc #${item.tid}`,
+        url: item.url || (item.tid ? `https://indiankanoon.org/doc/${item.tid}/` : null),
+      };
+    });
+  };
+
+  const cnodes  = placeArc(cites,   135, 225);
+  const cbnodes = placeArc(citedBy, -45,  45);
+
+  const ep = (x1, y1, x2, y2, r1, r2) => {
+    const dx = x2 - x1, dy = y2 - y1, d = Math.sqrt(dx * dx + dy * dy) || 1;
+    return { x1: x1 + (dx / d) * r1, y1: y1 + (dy / d) * r1, x2: x2 - (dx / d) * r2, y2: y2 - (dy / d) * r2 };
+  };
+
+  const centerWords = (c.caseName || '').split(/\s+/).filter(Boolean);
+  let cl1 = '', cl2 = '';
+  for (const w of centerWords) {
+    if (!cl1 && w.length <= 12) { cl1 = w; continue; }
+    if (cl1 && !cl2 && (cl1 + ' ' + w).length <= 12) { cl1 += ' ' + w; continue; }
+    if (!cl2 && w.length <= 12) { cl2 = w; continue; }
+    if (cl2 && (cl2 + ' ' + w).length <= 12) { cl2 += ' ' + w; continue; }
+    break;
+  }
+  if (!cl1) cl1 = (c.caseName || '').slice(0, 12);
+
+  const parts = [];
+  parts.push(`<svg viewBox="0 0 ${VW} ${VH}" xmlns="http://www.w3.org/2000/svg" style="display:block;width:100%">`);
+  parts.push(`<defs>
+    <marker id="pnarrc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2563EB" opacity="0.85"/></marker>
+    <marker id="pnarrcb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#0D9488" opacity="0.85"/></marker>
+    <radialGradient id="pncgrad" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#2C4066"/><stop offset="100%" stop-color="#1B2A4A"/></radialGradient>
+  </defs>`);
+  parts.push(`<circle cx="${CX}" cy="${CY}" r="${ORBIT}" fill="none" stroke="#D4E8EE" stroke-width="0.8" stroke-dasharray="4 6"/>`);
+  parts.push(`<circle cx="${CX}" cy="${CY}" r="${ORBIT * 0.52}" fill="none" stroke="#D4E8EE" stroke-width="0.6" stroke-dasharray="3 8"/>`);
+
+  cnodes.forEach(n => parts.push(`<polyline points="${n.x - NR - 2},${n.y} ${CITE_LX + 160},${n.y}" fill="none" stroke="#93C5FD" stroke-width="0.9" stroke-dasharray="3 3" opacity="0.7"/>`));
+  cbnodes.forEach(n => parts.push(`<polyline points="${n.x + NR + 2},${n.y} ${CBY_LX - 160},${n.y}" fill="none" stroke="#6EE7B7" stroke-width="0.9" stroke-dasharray="3 3" opacity="0.7"/>`));
+
+  cnodes.forEach(n => { const p = ep(CX, CY, n.x, n.y, CR + 2, NR + 2); parts.push(`<line x1="${p.x1}" y1="${p.y1}" x2="${p.x2}" y2="${p.y2}" stroke="#2563EB" stroke-width="1.5" stroke-opacity="0.45" stroke-dasharray="5 3" marker-end="url(#pnarrc)"/>`); });
+  cbnodes.forEach(n => { const p = ep(n.x, n.y, CX, CY, NR + 2, CR + 2); parts.push(`<line x1="${p.x1}" y1="${p.y1}" x2="${p.x2}" y2="${p.y2}" stroke="#0D9488" stroke-width="1.5" stroke-opacity="0.45" marker-end="url(#pnarrcb)"/>`); });
+
+  parts.push(`<circle cx="${CX}" cy="${CY}" r="${CR + 16}" fill="#21C1B6" fill-opacity="0.06"/>`);
+  parts.push(`<circle cx="${CX}" cy="${CY}" r="${CR + 8}" fill="#21C1B6" fill-opacity="0.11"/>`);
+  parts.push(`<circle cx="${CX}" cy="${CY}" r="${CR}" fill="url(#pncgrad)" stroke="#21C1B6" stroke-width="2.5"/>`);
+  parts.push(`<text x="${CX}" y="${CY + (cl2 ? -6 : 3)}" text-anchor="middle" font-size="9" font-weight="700" fill="#FFFFFF" font-family="'Source Sans 3',sans-serif">${svgEsc(cl1)}</text>`);
+  if (cl2) parts.push(`<text x="${CX}" y="${CY + 8}" text-anchor="middle" font-size="8.5" font-weight="600" fill="#CBD5E1" font-family="'Source Sans 3',sans-serif">${svgEsc(cl2)}</text>`);
+
+  cnodes.forEach(n => {
+    const abbr = (n.label || '').split(/\s+/).slice(0, 2).join(' ').slice(0, 10);
+    const inner = `<circle cx="${n.x}" cy="${n.y}" r="${NR + 4}" fill="transparent"/>
+      <circle cx="${n.x}" cy="${n.y}" r="${NR}" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.8"/>
+      <text x="${n.x}" y="${n.y + 3.5}" text-anchor="middle" font-size="7" fill="#1E40AF" font-family="'Source Sans 3',sans-serif" font-weight="700">${svgEsc(abbr)}</text>
+      <text x="${CITE_LX + 158}" y="${n.y + 4}" text-anchor="end" font-size="9" fill="#1E3A8A" font-family="'Source Sans 3',sans-serif" font-weight="600">${svgEsc(trim(n.label, 30))}</text>`;
+    parts.push(n.url ? `<a href="${svgEsc(n.url)}" target="_blank">${inner}</a>` : `<g>${inner}</g>`);
+  });
+
+  cbnodes.forEach(n => {
+    const abbr = (n.label || '').split(/\s+/).slice(0, 2).join(' ').slice(0, 10);
+    const inner = `<circle cx="${n.x}" cy="${n.y}" r="${NR + 4}" fill="transparent"/>
+      <circle cx="${n.x}" cy="${n.y}" r="${NR}" fill="#F0FDFA" stroke="#0D9488" stroke-width="1.8"/>
+      <text x="${n.x}" y="${n.y + 3.5}" text-anchor="middle" font-size="7" fill="#0F766E" font-family="'Source Sans 3',sans-serif" font-weight="700">${svgEsc(abbr)}</text>
+      <text x="${CBY_LX - 158}" y="${n.y + 4}" text-anchor="start" font-size="9" fill="#0F766E" font-family="'Source Sans 3',sans-serif" font-weight="600">${svgEsc(trim(n.label, 30))}</text>`;
+    parts.push(n.url ? `<a href="${svgEsc(n.url)}" target="_blank">${inner}</a>` : `<g>${inner}</g>`);
+  });
+
+  if (citeExtra > 0) parts.push(`<text x="${CITE_LX + 80}" y="${VH - 14}" text-anchor="middle" font-size="10" fill="#2563EB" font-family="'Source Sans 3',sans-serif" font-weight="700">+${citeExtra} more</text>`);
+  if (cbyExtra > 0) parts.push(`<text x="${CBY_LX - 80}" y="${VH - 14}" text-anchor="middle" font-size="10" fill="#0D9488" font-family="'Source Sans 3',sans-serif" font-weight="700">+${cbyExtra} more</text>`);
+  parts.push('</svg>');
+  return parts.join('\n');
+}
+
 /* ─── Generate print window with only this citation ─── */
 function downloadCitationPDF(c, query, generatedAt) {
   const judges = (c.coram || '').split(/[,;]/).map(j => j.trim()).filter(Boolean);
@@ -952,12 +1102,37 @@ function downloadCitationPDF(c, query, generatedAt) {
     ? 'IN THE SUPREME COURT OF INDIA' : `IN THE ${(c.court || '').toUpperCase()}`;
   const showJuris = /supreme/i.test(c.court || '') || !c.court || c.court === '—' || c.court === 'Court not specified';
 
+  // Source URL and label for footer "Open document" link
+  const srcUrl = c.importSourceLink || c.sourceUrl || c.officialSourceLink || null;
+  const srcLabel = c.source === 'local' ? 'Local DB'
+    : c.source === 'indian_kanoon' ? 'Indian Kanoon'
+    : c.source === 'google' ? 'Google Search'
+    : (c.sourceApplication || c.sourceLabel || 'Source');
+  const caseNameHtml = srcUrl
+    ? `<a href="${srcUrl}" target="_blank" style="color:inherit;text-decoration:none;border-bottom:2px solid #21C1B6">${c.caseName}</a>`
+    : c.caseName;
+
+  // SVG citation network (empty string if no data)
+  const graphSvg = buildPrintNetworkSvg(c);
+  const graphSection = graphSvg
+    ? `<div class="sec-h">III. Citation Network</div>
+<div style="border:1px solid #C5E4EE;border-radius:6px;overflow:hidden;margin-bottom:14px">
+  <div style="display:flex;justify-content:space-between;padding:7px 14px;background:#EEF6FA;border-bottom:1px solid #C5E4EE">
+    <span style="font-size:10px;font-weight:700;color:#1E40AF;font-family:'Source Sans 3',sans-serif">← CASES CITED (${(c.ikCiteList || []).length})</span>
+    <span style="font-size:9px;color:#64748B;font-style:italic;font-family:'Source Serif 4',serif">${(c.caseName || '').slice(0, 60)}</span>
+    <span style="font-size:10px;font-weight:700;color:#0F766E;font-family:'Source Sans 3',sans-serif">CITED BY (${(c.ikCitedByList || []).length}) →</span>
+  </div>
+  <div style="background:#F8FBFD">${graphSvg}</div>
+</div>`
+    : '';
+
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>${c.caseName} — Jurinex Citation Report</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&family=Source+Sans+3:wght@400;600;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Source Sans 3',sans-serif;background:#fff;padding:36px 48px;color:#0F172A;font-size:12px}
+a{color:inherit;text-decoration:underline;text-decoration-color:#21C1B6}
 .court{text-align:center;font-family:'Source Serif 4',serif;font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:#0C4A6E;margin-bottom:4px}
 .juris{text-align:center;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#94A3B8;margin-bottom:12px}
 h1{font-family:'Source Serif 4',serif;font-size:20px;font-weight:700;text-align:center;margin:0 0 16px;color:#0F172A;line-height:1.3}
@@ -981,7 +1156,7 @@ h1{font-family:'Source Serif 4',serif;font-size:20px;font-weight:700;text-align:
 </style></head><body>
 <div class="court">${courtLine}</div>
 ${showJuris ? '<div class="juris">CRIMINAL APPELLATE JURISDICTION</div>' : ''}
-<h1>${c.caseName}</h1>
+<h1>${caseNameHtml}</h1>
 <div class="grid3">
   <div class="cell"><div class="lbl">Primary Citation</div><div class="val" style="font-size:13px">${c.primaryCitation || '—'}</div></div>
   <div class="cell"><div class="lbl">Equivalent Citations</div><div class="val" style="font-size:11px;font-weight:400">${(c.alternateCitations || []).join('; ') || '—'}</div></div>
@@ -1009,9 +1184,11 @@ ${c.headnote && c.headnote.trim() ? `<div class="sec-h">Judgment Headnote</div><
   <div class="tstat" style="background:#FFFBEB;border-right:1px solid #FDE68A"><div class="tcount" style="color:#92400E">${treat.distinguished ?? 0}</div><div style="font-size:8px;font-weight:700;color:#92400E;margin-top:3px;letter-spacing:.08em;text-transform:uppercase">Distinguished In</div><div style="font-size:9px;color:#92400E">Cases</div></div>
   <div class="tstat" style="background:#F8FAFC"><div class="tcount" style="color:#475569">${treat.overruled ?? 0}</div><div style="font-size:8px;font-weight:700;color:#475569;margin-top:3px;letter-spacing:.08em;text-transform:uppercase">Overruled By</div><div style="font-size:9px;color:#475569">Cases</div></div>
 </div>
+${graphSection}
 <div class="footer">
   <div style="font-size:8px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:#1B2A4A;margin-bottom:3px">Jurinex Legal Intelligence Report</div>
-  <div style="font-size:8px;color:#94A3B8">Generated on ${generatedAt || '—'}</div>
+  <div style="font-size:8px;color:#94A3B8;margin-bottom:2px">Generated on ${generatedAt || '—'}</div>
+  ${srcUrl ? `<div style="font-size:8px;color:#94A3B8;margin-bottom:4px">Source: ${srcLabel} &middot; <a href="${srcUrl}" target="_blank" style="color:#1D4ED8;text-decoration:none">Open document</a></div>` : ''}
   <div class="auth">● AUTHENTICATED RESEARCH DOCUMENT</div>
 </div>
 </body></html>`;
@@ -1020,7 +1197,7 @@ ${c.headnote && c.headnote.trim() ? `<div class="sec-h">Judgment Headnote</div><
 }
 
 /* ─── Full citation report doc view ─── */
-function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
+function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPerspective = 'all', onPerspectiveChange }) {
   const [sel, setSel] = useState(new Set());
   const [atcCitId, setAtcCitId] = useState(null);
   const [atcCase, setAtcCase] = useState('');
@@ -1030,7 +1207,41 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
   const [notifyStatus, setNotifyStatus] = useState({}); // ticketId → 'done'|'sending'
   const [exportWarnId, setExportWarnId] = useState(null); // citation id awaiting export confirm
   const [origDocModal, setOrigDocModal] = useState(null); // { url, caseName, isPdf }
-  const allCitations = report?.report_format?.citations || [];
+  const [perspectiveFilter, setPerspectiveFilter] = useState(initialPerspective || 'all');
+  const [selectedCourt, setSelectedCourt] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
+  const rawCitations = report?.report_format?.citations || [];
+  const allCitations = rawCitations.map((c, idx) => {
+    const partyArguments = c.partyArguments || c.party_arguments || {};
+    const badgeText = `${c.partyBadge || ''} ${c.party_badge || ''}`;
+    const inferredFromArguments = (() => {
+      const hasAppellant = Array.isArray(partyArguments.appellant) && partyArguments.appellant.length > 0;
+      const hasRespondent = Array.isArray(partyArguments.respondent) && partyArguments.respondent.length > 0;
+      const hasCourt = Boolean(partyArguments.court);
+      if (hasAppellant && !hasRespondent && !hasCourt) return 'appellant';
+      if (hasRespondent && !hasAppellant && !hasCourt) return 'respondent';
+      if (hasCourt && !hasAppellant && !hasRespondent) return 'court';
+      if (hasAppellant && hasRespondent) return 'neutral';
+      return '';
+    })();
+    const inferredParty = c.argumentParty
+      || c.argument_party
+      || inferredFromArguments
+      || c.partyBadge
+      || c.party_badge
+      || badgeText
+      || c.perspective
+      || 'neutral';
+    const normalizedParty = normalizePerspectiveKey(inferredParty, 'neutral');
+    const normalizedPerspective = normalizePerspectiveKey(c.perspective || report?.report_format?.perspective || 'all', 'all');
+    return {
+      ...c,
+      id: c.id || c.canonicalId || c.canonical_id || `citation_${idx}`,
+      argumentParty: ['appellant', 'respondent', 'court', 'neutral'].includes(normalizedParty) ? normalizedParty : 'neutral',
+      perspective: ['all', 'appellant', 'respondent', 'court', 'neutral'].includes(normalizedPerspective) ? normalizedPerspective : 'all',
+      partyArguments,
+    };
+  });
   const generatedAt = report?.report_format?.generatedAt || '';
   const kwByRoute = report?.report_format?.searchKeywordsByRoute || {};
   const normKeywords = v => Array.isArray(v) ? v.filter(Boolean) : (v ? [String(v)] : []);
@@ -1042,13 +1253,75 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
   const citations = allCitations.filter(c => ['GREEN', 'YELLOW', 'STALE'].includes(c.verificationStatus));
   const pendingCits = allCitations.filter(c => c.verificationStatus === 'PENDING');
   const redCits = allCitations.filter(c => c.verificationStatus === 'RED');
+  const searchableCitations = citations.map(c => {
+    const normalizedCourt = normalizeCourtKey(c.court);
+    const searchableText = normalizeSearchText([
+      c.caseName,
+      c.primaryCitation,
+      c.court,
+      c.argumentParty,
+      c.partyBadge,
+      c.sourceApplication,
+      c.sourceLabel,
+      c.ratio,
+      c.excerpt?.text,
+      ...(c.alternateCitations || []),
+    ].filter(Boolean).join(' '));
+
+    return {
+      ...c,
+      normalizedParty: normalizePerspectiveKey(c.argumentParty, 'neutral'),
+      normalizedCourt,
+      searchableText,
+    };
+  });
+
+  const PARTY_BADGE_CFG = {
+    appellant: { emoji: '🔵', label: 'RELIED ON BY APPELLANT', groupLabel: 'Appellant Citations', bg: '#EFF6FF', border: '#BFDBFE', color: '#1D4ED8' },
+    respondent: { emoji: '🟡', label: 'RELIED ON BY RESPONDENT', groupLabel: 'Respondent Citations', bg: '#FFFBEB', border: '#FDE68A', color: '#D97706' },
+    court: { emoji: '🟢', label: "COURT'S RATIO", groupLabel: "Court's Analysis", bg: '#F0FDF4', border: '#BBF7D0', color: '#166534' },
+    neutral: { emoji: '⚪', label: 'USED BY BOTH SIDES', groupLabel: 'Both Sides Citations', bg: '#F8FAFC', border: '#E2E8F0', color: '#64748B' },
+  };
+  const _PARTY_ORDER = ['appellant', 'respondent', 'court', 'neutral'];
+  const availableCourts = Array.from(
+    new Map(
+      searchableCitations
+        .filter(c => c.normalizedCourt !== 'unknown')
+        .map(c => [c.normalizedCourt, c.court])
+    ).entries()
+  ).map(([value, label]) => ({ value, label }));
+  const normalizedSearchTerm = normalizeSearchText(searchTerm);
+  const filteredCitations = searchableCitations.filter(c => {
+    const matchesParty = perspectiveFilter === 'all' || c.normalizedParty === perspectiveFilter;
+    const matchesCourt = selectedCourt === 'all' || c.normalizedCourt === selectedCourt;
+    const matchesSearch = !normalizedSearchTerm || c.searchableText.includes(normalizedSearchTerm);
+    return matchesParty && matchesCourt && matchesSearch;
+  });
+  const displayCitations = filteredCitations;
 
   useEffect(() => {
-    if (citations.length) setSel(new Set([citations[0]?.id].filter(Boolean)));
+    const next = normalizePerspectiveKey(initialPerspective || report?.report_format?.perspective || 'all', 'all');
+    setPerspectiveFilter(['all', 'appellant', 'respondent', 'court', 'neutral'].includes(next) ? next : 'all');
+  }, [initialPerspective, report]);
+
+  useEffect(() => {
+    setSel(new Set());
   }, [report]);
 
+  useEffect(() => {
+    setSel(prev => {
+      const visibleIds = new Set(displayCitations.map(c => c.id).filter(Boolean));
+      return new Set([...prev].filter(id => visibleIds.has(id)));
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayCitations]);
+
+  useEffect(() => {
+    if (typeof onPerspectiveChange === 'function') onPerspectiveChange(perspectiveFilter);
+  }, [onPerspectiveChange, perspectiveFilter]);
+
   const toggle = id => setSel(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const selCites = citations.filter(c => sel.has(c.id));
+  const selCites = displayCitations.filter(c => sel.has(c.id));
 
   const handleNotifyMe = async (ticketId) => {
     if (!ticketId) return;
@@ -1156,53 +1429,107 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
             <div style={{ background: N, padding: '9px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="doc-sans" style={{ fontSize: 10, letterSpacing: '0.14em', color: '#99E6E3', textTransform: 'uppercase', fontWeight: 700 }}>Citation Points</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="doc-sans" style={{ fontSize: 10, color: '#A5F3F0' }}>{sel.size} of {citations.length} selected</span>
+                <span className="doc-sans" style={{ fontSize: 10, color: '#A5F3F0' }}>{sel.size} of {displayCitations.length} selected</span>
                 {pendingCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#7C3AED', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>⏳ {pendingCits.length} pending</span>}
                 {redCits.length > 0 && <span className="doc-sans" style={{ fontSize: 8, background: '#DC2626', color: W, borderRadius: 10, padding: '1px 6px', fontWeight: 700 }}>❌ {redCits.length} unverified</span>}
               </div>
             </div>
-            {citations.map((c, idx) => {
-              const s = SCFG[c.verificationStatus] || SCFG.YELLOW;
-              const isSel = sel.has(c.id);
-              const srcKey = c.source || 'unknown';
-              let srcIcon = '🤖';
-              let srcLabel = c.sourceApplication || c.sourceLabel || 'Unknown Source';
-              if (srcKey === 'local') {
-                srcIcon = '🏛';
-                srcLabel = 'Local DB';
-              } else if (srcKey === 'indian_kanoon') {
-                srcIcon = '📚';
-                srcLabel = 'Indian Kanoon';
-              } else if (srcKey === 'google') {
-                srcIcon = '🌐';
-                srcLabel = 'Google Search (Gemini)';
-              }
-              return (
-                <div key={c.id} className="doc-selR" onClick={() => toggle(c.id)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px', background: isSel ? '#EEF2FF' : W, borderBottom: idx < citations.length - 1 ? '1px solid #F1F4F8' : 'none' }}>
-                  <div style={{ width: 14, height: 14, flexShrink: 0, border: `2px solid ${isSel ? T : '#C5CAD3'}`, background: isSel ? T : W, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {isSel && <span style={{ color: W, fontSize: 9, lineHeight: 1, marginTop: -1 }}>✓</span>}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="doc-serif" style={{ fontSize: 13.5, fontWeight: 600, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.caseName}</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                        <span className="doc-sans" style={{ fontSize: 11, fontWeight: 700, color: T }}>{c.primaryCitation}</span>
-                        {c.court && c.court !== 'Court not specified' && <><span style={{ color: '#CBD5E1' }}>·</span><span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>{c.court}</span></>}
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 220px', gap: 10, padding: '10px 14px', background: '#F8FAFC', borderBottom: '1px solid #E5E7EB' }}>
+              <input
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                placeholder="Search case name, citation, ratio, source..."
+                className="doc-sans"
+                style={{ width: '100%', minWidth: 0, border: '1px solid #D4D9E2', borderRadius: 6, padding: '8px 10px', fontSize: 11, color: '#334155', outline: 'none' }}
+              />
+              <select
+                value={selectedCourt}
+                onChange={e => setSelectedCourt(e.target.value)}
+                className="doc-sans"
+                style={{ width: '100%', border: '1px solid #D4D9E2', borderRadius: 6, padding: '8px 10px', fontSize: 11, color: '#334155', background: W, outline: 'none' }}
+              >
+                <option value="all">All Courts</option>
+                {availableCourts.map(court => (
+                  <option key={court.value} value={court.value}>{court.label}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Grouped / filtered citation rows */}
+            {displayCitations.length === 0 ? (
+              <div style={{ padding: '26px 18px', textAlign: 'center', background: W, borderBottom: '1px solid #F1F4F8' }}>
+                <div className="doc-sans" style={{ fontSize: 12, fontWeight: 700, color: '#334155', marginBottom: 4 }}>
+                  No citations found for this filter
+                </div>
+                <div className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>
+                  Switch to All to review every verified citation in this report.
+                </div>
+              </div>
+            ) : (() => {
+              const sorted = perspectiveFilter === 'all'
+                ? [...displayCitations].sort((a, b) => _PARTY_ORDER.indexOf(a.argumentParty || 'neutral') - _PARTY_ORDER.indexOf(b.argumentParty || 'neutral'))
+                : displayCitations;
+              return sorted.map((c, idx) => {
+                const prevParty = idx > 0 ? (sorted[idx - 1].argumentParty || 'neutral') : null;
+                const curParty = c.argumentParty || 'neutral';
+                const showGroupHeader = perspectiveFilter === 'all' && (idx === 0 || prevParty !== curParty);
+                const pbCfg = PARTY_BADGE_CFG[curParty] || PARTY_BADGE_CFG.neutral;
+                const s = SCFG[c.verificationStatus] || SCFG.YELLOW;
+                const isSel = sel.has(c.id);
+                const srcKey = c.source || 'unknown';
+                let srcIcon = '🤖';
+                let srcLabel = c.sourceApplication || c.sourceLabel || 'Unknown Source';
+                if (srcKey === 'local') { srcIcon = '🏛'; srcLabel = 'Local DB'; }
+                else if (srcKey === 'indian_kanoon') { srcIcon = '📚'; srcLabel = 'Indian Kanoon'; }
+                else if (srcKey === 'google') { srcIcon = '🌐'; srcLabel = 'Google Search (Gemini)'; }
+                return (
+                  <React.Fragment key={c.id}>
+                    {showGroupHeader && (
+                      <div style={{ padding: '5px 14px', background: pbCfg.bg, borderTop: idx > 0 ? '2px solid #E5E7EB' : 'none', borderBottom: `1px solid ${pbCfg.border}` }}>
+                        <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: pbCfg.color, letterSpacing: '.08em', textTransform: 'uppercase' }}>
+                          {pbCfg.emoji} {pbCfg.groupLabel} ({sorted.filter(x => (x.argumentParty || 'neutral') === curParty).length})
+                        </span>
                       </div>
-                      <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <span>{srcIcon}</span>
-                        <span>{srcLabel}</span>
+                    )}
+                    <div className="doc-selR" onClick={() => toggle(c.id)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px', background: isSel ? '#EEF2FF' : W, borderBottom: idx < sorted.length - 1 ? '1px solid #F1F4F8' : 'none' }}>
+                      <div style={{ width: 14, height: 14, flexShrink: 0, border: `2px solid ${isSel ? T : '#C5CAD3'}`, background: isSel ? T : W, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        {isSel && <span style={{ color: W, fontSize: 9, lineHeight: 1, marginTop: -1 }}>✓</span>}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="doc-serif" style={{ fontSize: 13.5, fontWeight: 600, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.caseName}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span className="doc-sans" style={{ fontSize: 11, fontWeight: 700, color: T }}>{c.primaryCitation}</span>
+                            {c.court && c.court !== 'Court not specified' && <><span style={{ color: '#CBD5E1' }}>·</span><span className="doc-sans" style={{ fontSize: 10, color: '#64748B' }}>{c.court}</span></>}
+                            {/* Party badge chip */}
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: pbCfg.bg, border: `1px solid ${pbCfg.border}`, color: pbCfg.color, fontSize: 8, fontWeight: 700, padding: '1px 6px', borderRadius: 3, letterSpacing: '.04em', whiteSpace: 'nowrap' }}>
+                              {pbCfg.emoji} {pbCfg.label}
+                            </span>
+                          </div>
+                          <div className="doc-sans" style={{ fontSize: 9, color: '#94A3B8', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span>{srcIcon}</span>
+                            <span>{srcLabel}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: s.bg, border: `1px solid ${s.border}`, padding: '2px 7px', borderRadius: 2, flexShrink: 0 }}>
+                        <Dot c={s.dot} s={5} />
+                        <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: s.text }}>{s.label}</span>
                       </div>
                     </div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: s.bg, border: `1px solid ${s.border}`, padding: '2px 7px', borderRadius: 2, flexShrink: 0 }}>
-                    <Dot c={s.dot} s={5} />
-                    <span className="doc-sans" style={{ fontSize: 8, fontWeight: 700, color: s.text }}>{s.label}</span>
-                  </div>
-                </div>
-              );
-            })}
+                  </React.Fragment>
+                );
+              });
+            })()}
+
+            {/* Badge legend */}
+            <div style={{ display: 'flex', gap: 10, padding: '7px 14px', background: '#F8FAFC', borderTop: '1px solid #E5E7EB', flexWrap: 'wrap' }}>
+              {Object.values(PARTY_BADGE_CFG).map(cfg => (
+                <span key={cfg.label} className="doc-sans" style={{ fontSize: 8, color: cfg.color, fontWeight: 600 }}>{cfg.emoji} {cfg.label}</span>
+              ))}
+            </div>
           </div>
 
           {selCites.length === 0 && (
@@ -1320,9 +1647,28 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                   <CourtHeading court={c.court} />
 
                   {/* Case name */}
-                  <h1 className="doc-serif" style={{ textAlign: 'center', fontSize: 21, fontWeight: 700, color: '#0F172A', lineHeight: 1.3, marginBottom: 18 }}>
+                  <h1 className="doc-serif" style={{ textAlign: 'center', fontSize: 21, fontWeight: 700, color: '#0F172A', lineHeight: 1.3, marginBottom: 10 }}>
                     {c.caseName}
                   </h1>
+
+                  {/* Party perspective badge */}
+                  {(() => {
+                    const _party = c.argumentParty || 'neutral';
+                    const _pbCfg = { appellant: { emoji: '🔵', label: 'RELIED BY APPELLANT', bg: '#EFF6FF', border: '#BFDBFE', color: '#1D4ED8' }, respondent: { emoji: '🟡', label: 'RELIED BY RESPONDENT', bg: '#FFFBEB', border: '#FDE68A', color: '#D97706' }, court: { emoji: '🟢', label: "COURT'S RATIO", bg: '#F0FDF4', border: '#BBF7D0', color: '#166534' }, neutral: { emoji: '⚪', label: 'CITED BY BOTH PARTIES', bg: '#F8FAFC', border: '#E2E8F0', color: '#64748B' } }[_party] || { emoji: '⚪', label: 'CITED BY BOTH PARTIES', bg: '#F8FAFC', border: '#E2E8F0', color: '#64748B' };
+                    const _dist = (c.subsequentTreatment?.distinguished || []).length > 0;
+                    return (
+                      <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: _pbCfg.bg, border: `1px solid ${_pbCfg.border}`, color: _pbCfg.color, fontSize: 10, fontWeight: 700, padding: '4px 12px', borderRadius: 4, letterSpacing: '.05em' }}>
+                          {_pbCfg.emoji} {_pbCfg.label}
+                        </span>
+                        {_dist && _party === 'respondent' && (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#FFF7ED', border: '1px solid #FED7AA', color: '#C2410C', fontSize: 10, fontWeight: 700, padding: '4px 12px', borderRadius: 4, letterSpacing: '.05em' }}>
+                            🟠 DISTINGUISHED BY COURT
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Citation strip — 3 columns with dividers */}
                   <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 155px', border: '1px solid #E2E8F0', borderRadius: 4, marginBottom: 16, overflow: 'hidden' }}>
@@ -1379,6 +1725,43 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment }) {
                           <div key={i} className="doc-headnote-line">{line}</div>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Party Arguments */}
+                  {c.partyArguments && (c.partyArguments.appellant?.length || c.partyArguments.respondent?.length || c.partyArguments.court) && (
+                    <div style={{ marginTop: 22, marginBottom: 4 }}>
+                      <div className="doc-sec-h">Party Arguments</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                        {c.partyArguments.appellant?.length > 0 && (
+                          <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 4, padding: '11px 14px' }}>
+                            <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 7 }}>🔵 Appellant's Arguments</div>
+                            {c.partyArguments.appellant.map((arg, i) => (
+                              <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 5 }}>
+                                <span className="doc-sans" style={{ fontSize: 10, color: '#1E40AF', fontWeight: 700, flexShrink: 0 }}>•</span>
+                                <span className="doc-serif" style={{ fontSize: 11.5, color: '#1E293B', lineHeight: 1.55 }}>{arg}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {c.partyArguments.respondent?.length > 0 && (
+                          <div style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 4, padding: '11px 14px' }}>
+                            <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#D97706', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 7 }}>🟡 Respondent's Arguments</div>
+                            {c.partyArguments.respondent.map((arg, i) => (
+                              <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 5 }}>
+                                <span className="doc-sans" style={{ fontSize: 10, color: '#B45309', fontWeight: 700, flexShrink: 0 }}>•</span>
+                                <span className="doc-serif" style={{ fontSize: 11.5, color: '#1E293B', lineHeight: 1.55 }}>{arg}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      {c.partyArguments.court && (
+                        <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderLeft: '3px solid #16A34A', borderRadius: 4, padding: '11px 14px' }}>
+                          <div className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: '#166534', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>🟢 Court's Conclusion</div>
+                          <div className="doc-serif" style={{ fontSize: 12.5, color: '#1E293B', lineHeight: 1.65, fontStyle: 'italic' }}>{c.partyArguments.court}</div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -2257,6 +2640,7 @@ export default function CitationReportPage({ embedded = false }) {
   const [vaultCount, setVaultCount] = useState(0);
   const [queryCount, setQueryCount] = useState(0);
   const [refDocs, setRefDocs] = useState([]);
+  const [selectedPerspective, setSelectedPerspective] = useState('all');
   const fileRef = useRef(null);
   // case-specific report history
   const [caseReports, setCaseReports] = useState([]);
@@ -2266,6 +2650,7 @@ export default function CitationReportPage({ embedded = false }) {
   const [reportSaveToCaseProgress, setReportSaveToCaseProgress] = useState(0);
 
   const SUGS = ['What are the grounds for anticipatory bail in India?', 'Explain right to privacy under Indian Constitution', 'Legal position on internet shutdowns in India', 'Is triple talaq constitutional?', 'Key IBC cases on resolution plan approval', 'Environmental liability principles in Indian law'];
+  const queryAnalysis = analyzeQueryIntent(input);
 
   const loadCases = useCallback(() => {
     setCasesLoading(true);
@@ -2276,7 +2661,12 @@ export default function CitationReportPage({ embedded = false }) {
 
   useEffect(() => {
     if (!reportId) return;
-    citationApi.getReport(reportId).then(d => { setReport(d); setQuery(d?.query || ''); setShowReport(true); }).catch(() => { });
+    citationApi.getReport(reportId).then(d => {
+      setReport(d);
+      setQuery(d?.query || '');
+      setSelectedPerspective(prev => normalizePerspectiveKey(d?.report_format?.perspective || prev || 'all', 'all'));
+      setShowReport(true);
+    }).catch(() => { });
   }, [reportId]);
 
   // Load case-specific reports when case selection changes
@@ -2286,7 +2676,7 @@ export default function CitationReportPage({ embedded = false }) {
     const uid = String(_cu.id || _cu.user_id || localStorage.getItem('userId') || 'anonymous');
     setCaseReportsLoading(true);
     citationApi.listReportsByCase(selCase, uid)
-      .then(r => setCaseReports(r?.reports || []))
+      .then(r => setCaseReports((r?.reports || []).filter(r => r.status !== 'pending_hitl')))
       .catch(() => setCaseReports([]))
       .finally(() => setCaseReportsLoading(false));
   }, [selCase]);
@@ -2456,7 +2846,10 @@ export default function CitationReportPage({ embedded = false }) {
       if ((!ctx || ctx.length === 0) && selCaseName) ctx = [{ name: 'case', snippet: selCaseName }];
 
       // Start async pipeline — get run_id immediately
-      const startData = await citationApi.startReport(q, uid, selCase || null, ctx);
+      const generationPerspective = ['all', 'appellant', 'respondent', 'court'].includes(selectedPerspective)
+        ? selectedPerspective
+        : 'all';
+      const startData = await citationApi.startReport(q, uid, selCase || null, ctx, generationPerspective);
       const rid = startData.run_id;
       setRunId(rid);
 
@@ -2492,84 +2885,12 @@ export default function CitationReportPage({ embedded = false }) {
               }
               if (rpt) {
                 setReport(rpt); setQuery(q);
+                setSelectedPerspective(normalizePerspectiveKey(rpt?.report_format?.perspective || selectedPerspective || 'all', 'all'));
                 setVaultCount(p => p + (rpt?.report_format?.citations?.length || 0));
-                addMsg('assistant', `✅ Generated **${rpt?.report_format?.citations?.length || 0} verified citations** for your query.${selCase ? ` Tagged to case.` : ''}`, { reportId: st.report_id });
+                addMsg('assistant', `✅ Generated **${rpt?.report_format?.citations?.length || 0} verified citations** for your query.${selCase ? ' Case context was used for research.' : ''}`, { reportId: st.report_id });
                 if (st.report_id) navigate(`/citation/reports/${st.report_id}`, { replace: true });
                 if (selCase) {
-                  citationApi.listReportsByCase(selCase, uid).then(r => setCaseReports(r?.reports || [])).catch(() => { });
-                  // Auto-upload report as PDF to the selected case folder; show uploading/processing until done
-                  (async () => {
-                    setReportSaveToCaseStatus('uploading');
-                    setReportSaveToCaseProgress(0);
-                    try {
-                      const cr = await documentApi.getCaseById(selCase);
-                      const cd = cr?.case ?? cr;
-                      const folderName = cd?.folders?.[0]?.name ?? cd?.folders?.[0]?.originalname;
-                      if (!folderName) {
-                        setReportSaveToCaseStatus({ error: 'No folder found for this case.' });
-                        return;
-                      }
-                      const fullHtml = buildFullReportHtml(rpt.report_format, q);
-                      const reportIframe = document.createElement('iframe');
-                      reportIframe.style.cssText = 'position:absolute;left:-9999px;width:210mm;height:297mm;border:none;visibility:hidden';
-                      document.body.appendChild(reportIframe);
-                      reportIframe.contentDocument.open();
-                      reportIframe.contentDocument.write(fullHtml);
-                      reportIframe.contentDocument.close();
-                      await new Promise(resolve => setTimeout(resolve, 900));
-                      const blob = await html2pdf()
-                        .set({ margin: 10, filename: '', enableLinks: false, html2canvas: { scale: 1.5, useCORS: true, logging: false }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' } })
-                        .from(reportIframe.contentDocument.body)
-                        .outputPdf('blob');
-                      document.body.removeChild(reportIframe);
-                      const pdfName = `Citation_Report_${Date.now()}.pdf`;
-                      const file = new File([blob], pdfName, { type: 'application/pdf' });
-                      const uploadRes = await documentApi.uploadDocuments(folderName, [file]);
-                      const doc = uploadRes.documents && uploadRes.documents[0];
-                      const fileId = doc && (doc.id ?? doc.fileId ?? doc._id);
-                      if (!fileId) {
-                        setReportSaveToCaseStatus('done');
-                        addMsg('assistant', '📁 Report PDF uploaded to case folder. Processing may still be in progress.', {});
-                        return;
-                      }
-                      setReportSaveToCaseStatus('processing');
-                      setReportSaveToCaseProgress(10);
-                      const pollInterval = 2500;
-                      const maxPolls = 120; // 5 min
-                      let polls = 0;
-                      const poll = async () => {
-                        if (polls >= maxPolls) {
-                          setReportSaveToCaseStatus('done');
-                          setReportSaveToCaseProgress(100);
-                          addMsg('assistant', '📁 Report PDF uploaded to case folder. Processing is taking longer than usual.', {});
-                          return;
-                        }
-                        try {
-                          const status = await documentApi.getFileProcessingStatus(fileId);
-                          const st = (status && status.status) ? String(status.status).toLowerCase() : '';
-                          const progress = status && (status.processing_progress != null) ? Number(status.processing_progress) : 10 + (polls * 2);
-                          setReportSaveToCaseProgress(Math.min(progress, 99));
-                          if (st === 'processed' || st === 'completed') {
-                            setReportSaveToCaseStatus('done');
-                            setReportSaveToCaseProgress(100);
-                            addMsg('assistant', '📁 Report PDF saved to case folder and ready for search (chunking & embeddings complete).', {});
-                            return;
-                          }
-                          if (st === 'error' || st === 'failed') {
-                            setReportSaveToCaseStatus({ error: status?.message || 'Processing failed.' });
-                            return;
-                          }
-                        } catch (_) { /* ignore poll errors */ }
-                        polls += 1;
-                        setTimeout(poll, pollInterval);
-                      };
-                      setTimeout(poll, pollInterval);
-                    } catch (err) {
-                      console.warn('[Citation] Auto-save report PDF to case folder failed:', err);
-                      setReportSaveToCaseStatus({ error: err?.message || 'Upload failed.' });
-                      addMsg('assistant', `Report generated. Saving PDF to case folder failed: ${err?.message || 'Unknown error'}. You can add citations to case manually.`, {});
-                    }
-                  })();
+                  citationApi.listReportsByCase(selCase, uid).then(r => setCaseReports((r?.reports || []).filter(r => r.status !== 'pending_hitl'))).catch(() => { });
                 }
               }
             } else {
@@ -2654,7 +2975,7 @@ export default function CitationReportPage({ embedded = false }) {
       }
       if (selCase) {
         const list = await citationApi.listReportsByCase(selCase, uid).catch(() => []);
-        setCaseReports(list?.reports || list || []);
+        setCaseReports((list?.reports || list || []).filter(r => r.status !== 'pending_hitl'));
       }
     } catch (err) {
       window.alert(err.message || 'Failed to delete report');
@@ -2682,13 +3003,15 @@ export default function CitationReportPage({ embedded = false }) {
   /* ── If showing full report page ── */
   if (showReport && report) {
     const currentReportId = report?.report_id || report?.id || reportId;
+    const reportPerspective = normalizePerspectiveKey(report?.report_format?.perspective || selectedPerspective || 'all', 'all');
     return (
       <div style={{ fontFamily: "'DM Sans',sans-serif", display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-        <div style={{ background: g50, borderBottom: `1px solid ${g200}`, padding: '8px 24px', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-          <button onClick={() => setShowReport(false)} style={{ padding: '8px 0', border: 'none', background: 'transparent', fontSize: 13, color: N, fontWeight: 700, cursor: 'pointer' }}>← Back to Research</button>
-          <span style={{ color: g300 }}>|</span>
-          <span style={{ fontSize: 12, color: g400 }}>Verified Citation Report · {report?.report_format?.citations?.length || 0} citations</span>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ background: g50, borderBottom: `1px solid ${g200}`, padding: '10px 24px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <button onClick={() => setShowReport(false)} style={{ padding: '8px 0', border: 'none', background: 'transparent', fontSize: 13, color: N, fontWeight: 700, cursor: 'pointer' }}>← Back to Research</button>
+            <span style={{ color: g300 }}>|</span>
+            <span style={{ fontSize: 12, color: g400 }}>Verified Citation Report · {report?.report_format?.citations?.length || 0} citations</span>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             {(report?.run_id || runId) && (
               <button
                 onClick={handleToggleFetchLog}
@@ -2719,6 +3042,32 @@ export default function CitationReportPage({ embedded = false }) {
             >
               Delete report
             </button>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, color: g500, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em' }}>
+              Party Filter
+            </span>
+            {PERSPECTIVE_OPTIONS.map(btn => (
+              <button
+                key={btn.key}
+                onClick={() => setSelectedPerspective(btn.key)}
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  padding: '5px 12px',
+                  borderRadius: 999,
+                  cursor: 'pointer',
+                  border: `1px solid ${selectedPerspective === btn.key ? T : g200}`,
+                  background: selectedPerspective === btn.key ? '#E6FFFB' : W,
+                  color: selectedPerspective === btn.key ? '#0F766E' : '#475569',
+                  letterSpacing: '.02em',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {btn.emoji} {btn.label}
+              </button>
+            ))}
           </div>
         </div>
         {/* ── Report save to case folder: uploading / processing until complete ── */}
@@ -2794,7 +3143,14 @@ export default function CitationReportPage({ embedded = false }) {
         )}
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-          <ReportDoc report={report} query={query} cases={cases} onViewFullJudgment={handleViewFullJudgment} />
+          <ReportDoc
+            report={report}
+            query={query}
+            cases={cases}
+            onViewFullJudgment={handleViewFullJudgment}
+            initialPerspective={selectedPerspective}
+            onPerspectiveChange={setSelectedPerspective}
+          />
         </div>
 
         {/* ── Share Report Modal ── */}
@@ -3166,11 +3522,34 @@ export default function CitationReportPage({ embedded = false }) {
                 📎
                 <input ref={fileRef} type="file" accept=".txt,.md,.json,.csv,.html" multiple style={{ display: 'none' }} onChange={e => handleFile(e.target.files)} />
               </label>
+              <select
+                value={selectedPerspective}
+                onChange={e => setSelectedPerspective(e.target.value)}
+                disabled={sending}
+                title="Choose which side's citations to prioritize"
+                style={{ width: 168, padding: '0 12px', height: 42, borderRadius: 10, border: `1px solid ${g200}`, fontSize: 12, color: N, background: W, flexShrink: 0, outline: 'none', cursor: sending ? 'default' : 'pointer' }}
+              >
+                <option value="all">All Perspectives</option>
+                <option value="appellant">Appellant</option>
+                <option value="respondent">Respondent</option>
+                <option value="court">Court&apos;s Ratio</option>
+                <option value="neutral">Both Sides</option>
+              </select>
               <input className="chat-in" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} placeholder="Ask a legal research question…" disabled={sending} />
               <button className="send-b" onClick={handleSend} disabled={sending || (!input.trim() && !selCase && refDocs.length === 0)}>
                 {sending ? <Spin /> : 'Send'}
               </button>
             </div>
+            {input.trim() && (
+              <div style={{ padding: '0 14px 10px', background: W, borderTop: `1px solid ${g100}` }}>
+                <div style={{ fontSize: 10, color: g500, lineHeight: 1.5 }}>
+                  Query analysis: {queryAnalysis.intent.replace(/_/g, ' ')}.
+                  {selectedPerspective === 'all'
+                    ? ` All Perspectives is selected, so the report will include all results${queryAnalysis.perspective !== 'all' ? ` while still detecting ${queryAnalysis.perspective} cues from the query` : ''}.`
+                    : ` Report perspective is locked to ${selectedPerspective}${queryAnalysis.perspective !== 'all' ? `, and the query also suggests ${queryAnalysis.perspective}` : ''}.`}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Sidebar */}
@@ -3228,7 +3607,13 @@ export default function CitationReportPage({ embedded = false }) {
                       <div key={r.id}
                         onClick={async () => {
                           const data = await citationApi.getReport(r.id).catch(() => null);
-                          if (data) { setReport(data); setQuery(data.query || ''); setShowReport(true); navigate(`/citation/reports/${r.id}`, { replace: true }); }
+                          if (data) {
+                            setReport(data);
+                            setQuery(data.query || '');
+                            setSelectedPerspective(prev => normalizePerspectiveKey(data?.report_format?.perspective || prev || 'all', 'all'));
+                            setShowReport(true);
+                            navigate(`/citation/reports/${r.id}`, { replace: true });
+                          }
                         }}
                         style={{ padding: '7px 10px', background: g50, border: `1px solid ${g200}`, borderRadius: 7, cursor: 'pointer', transition: 'background .12s', display: 'flex', flexDirection: 'column', gap: 4 }}
                         onMouseEnter={e => e.currentTarget.style.background = '#EEF0F4'}
@@ -3691,7 +4076,7 @@ export default function CitationReportPage({ embedded = false }) {
                   </div>
                 ) : (
                   <div>
-                    {teamReports.slice(0, 20).map((r, idx) => {
+                    {teamReports.filter(r => r.status !== 'pending_hitl').slice(0, 20).map((r, idx) => {
                       const authorName = getAuthorName(r.user_id);
                       const authorInitials = getInitials(authorName);
                       const isSharedWithMe = String(r.user_id) !== myId;

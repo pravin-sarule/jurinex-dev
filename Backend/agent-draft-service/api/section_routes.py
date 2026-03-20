@@ -13,13 +13,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
+import time
 import uuid
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 
 from api.deps import require_user_id, optional_user_id
 from services import draft_db
+from services.job_queue import enqueue_job, get_job_status as get_background_job_status, get_latest_job_for_scope, wait_for_job
 from agents.drafter.agent import run_drafter_agent
 from agents.critic.agent import run_critic_agent
 from agents.librarian.agent import run_librarian_agent
@@ -77,16 +82,59 @@ def _build_rewrite_feedback(critic_result: Optional[Dict[str, Any]]) -> str:
     )
 
 
-@router.post("/drafts/{draft_id}/sections/{section_key}/generate")
-async def generate_section(
+def _section_job_scope_key(draft_id: str, section_key: str, user_id: int) -> str:
+    return f"section-generation:{user_id}:{draft_id}:{section_key.strip().lower()}"
+
+
+def _build_section_generation_fingerprint(payload: Dict[str, Any]) -> str:
+    normalized = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _build_job_response(
+    *,
     draft_id: str,
     section_key: str,
-    user_id: int = Depends(require_user_id),
-    section_prompt: Optional[str] = Body(None, embed=True),
-    rag_query: Optional[str] = Body(None, embed=True),
-    template_url: Optional[str] = Body(None, embed=True),
-    auto_validate: bool = Body(False, embed=True),
-    language: Optional[str] = Body(None, embed=True),
+    job_state: Dict[str, Any],
+    wait_for_completion: bool,
+) -> Dict[str, Any]:
+    status_value = job_state.get("status", "unknown")
+    result = job_state.get("result")
+    if status_value == "finished" and isinstance(result, dict):
+        return result
+
+    return {
+        "success": status_value in {"queued", "started", "finished"},
+        "queued": status_value == "queued",
+        "processing": status_value == "started",
+        "completed": status_value == "finished",
+        "failed": status_value == "failed",
+        "job_id": job_state.get("job_id"),
+        "draft_id": draft_id,
+        "section_key": section_key,
+        "status": status_value,
+        "message": (
+            f"Section '{section_key}' generation queued"
+            if status_value == "queued"
+            else f"Section '{section_key}' generation in progress"
+            if status_value == "started"
+            else f"Section '{section_key}' generation failed"
+        ),
+        "show_retry_button": status_value == "failed",
+        "error": job_state.get("error"),
+        "wait_for_completion": wait_for_completion,
+    }
+
+
+def _generate_section_sync_impl(
+    draft_id: str,
+    section_key: str,
+    user_id: int,
+    section_prompt: Optional[str] = None,
+    rag_query: Optional[str] = None,
+    template_url: Optional[str] = None,
+    auto_validate: bool = False,
+    language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate initial section content using Drafter agent.
@@ -498,11 +546,161 @@ async def generate_section(
             "message": f"Section '{section_key}' generated successfully",
         }
     
+    except HTTPException as e:
+        logger.exception("queued generate_section failed")
+        raise RuntimeError(str(e.detail)) from e
+    except Exception:
+        logger.exception("queued generate_section failed")
+        raise
+
+
+@router.post("/drafts/{draft_id}/sections/{section_key}/generate")
+async def generate_section(
+    draft_id: str,
+    section_key: str,
+    user_id: int = Depends(require_user_id),
+    section_prompt: Optional[str] = Body(None, embed=True),
+    rag_query: Optional[str] = Body(None, embed=True),
+    template_url: Optional[str] = Body(None, embed=True),
+    auto_validate: bool = Body(False, embed=True),
+    language: Optional[str] = Body(None, embed=True),
+    wait_for_completion: bool = Body(True, embed=True),
+) -> Dict[str, Any]:
+    logger.info(
+        "API: POST /api/drafts/%s/sections/%s/generate (queue-backed section generation)",
+        draft_id,
+        section_key,
+    )
+
+    try:
+        draft = draft_db.get_user_draft(draft_id, user_id)
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        fingerprint_payload = {
+            "draft_id": draft_id,
+            "section_key": section_key,
+            "section_prompt": section_prompt,
+            "rag_query": rag_query,
+            "template_url": template_url,
+            "auto_validate": auto_validate,
+            "language": language,
+            "field_values": draft_db.get_merged_field_values_for_draft(draft_id, user_id),
+        }
+        fingerprint = _build_section_generation_fingerprint(fingerprint_payload)
+        scope_key = _section_job_scope_key(draft_id, section_key, user_id)
+        job_info = enqueue_job(
+            job_type="section_generation",
+            scope_key=scope_key,
+            fingerprint=fingerprint,
+            payload={
+                "draft_id": draft_id,
+                "section_key": section_key,
+                "user_id": user_id,
+            },
+            handler=partial(
+                _generate_section_sync_impl,
+                draft_id=draft_id,
+                section_key=section_key,
+                user_id=user_id,
+                section_prompt=section_prompt,
+                rag_query=rag_query,
+                template_url=template_url,
+                auto_validate=auto_validate,
+                language=language,
+            ),
+            dedupe_active=True,
+        )
+
+        if wait_for_completion:
+            job_state = wait_for_job(job_info["job_id"], timeout_seconds=600.0)
+            if job_state.get("status") == "failed":
+                raise HTTPException(
+                    status_code=500,
+                    detail=job_state.get("error") or "Section generation failed",
+                )
+            if job_state.get("status") != "finished":
+                return JSONResponse(
+                    status_code=202,
+                    content=_build_job_response(
+                        draft_id=draft_id,
+                        section_key=section_key,
+                        job_state=job_state,
+                        wait_for_completion=wait_for_completion,
+                    ),
+                )
+            return _build_job_response(
+                draft_id=draft_id,
+                section_key=section_key,
+                job_state=job_state,
+                wait_for_completion=wait_for_completion,
+            )
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                **job_info,
+                "success": True,
+                "message": f"Section '{section_key}' generation queued successfully",
+                "draft_id": draft_id,
+                "section_key": section_key,
+                "wait_for_completion": wait_for_completion,
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("generate_section failed")
+        logger.exception("generate_section enqueue failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/drafts/{draft_id}/sections/{section_key}/jobs/{job_id}")
+async def get_section_generation_job(
+    draft_id: str,
+    section_key: str,
+    job_id: str,
+    user_id: int = Depends(require_user_id),
+) -> Dict[str, Any]:
+    draft = draft_db.get_user_draft(draft_id, user_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    job_state = get_background_job_status(job_id)
+    expected_scope = _section_job_scope_key(draft_id, section_key, user_id)
+    if job_state.get("scope_key") != expected_scope:
+        raise HTTPException(status_code=404, detail="Job not found for this section")
+
+    return _build_job_response(
+        draft_id=draft_id,
+        section_key=section_key,
+        job_state=job_state,
+        wait_for_completion=False,
+    )
+
+
+@router.post("/drafts/{draft_id}/sections/{section_key}/retry")
+async def retry_section_generation(
+    draft_id: str,
+    section_key: str,
+    user_id: int = Depends(require_user_id),
+    section_prompt: Optional[str] = Body(None, embed=True),
+    rag_query: Optional[str] = Body(None, embed=True),
+    template_url: Optional[str] = Body(None, embed=True),
+    auto_validate: bool = Body(False, embed=True),
+    language: Optional[str] = Body(None, embed=True),
+    wait_for_completion: bool = Body(False, embed=True),
+) -> Dict[str, Any]:
+    return await generate_section(
+        draft_id=draft_id,
+        section_key=section_key,
+        user_id=user_id,
+        section_prompt=section_prompt,
+        rag_query=rag_query,
+        template_url=template_url,
+        auto_validate=auto_validate,
+        language=language,
+        wait_for_completion=wait_for_completion,
+    )
 
 
 @router.post("/drafts/{draft_id}/sections/{section_key}/generate-html")
@@ -878,10 +1076,15 @@ async def get_all_sections(
     
     try:
         sections = draft_db.get_all_active_sections(draft_id, user_id)
+        section_jobs = {
+            s.get("section_key"): get_latest_job_for_scope(_section_job_scope_key(draft_id, s.get("section_key", ""), user_id))
+            for s in sections
+        }
         return {
             "success": True,
             "sections": sections,
             "count": len(sections),
+            "section_jobs": section_jobs,
         }
     except Exception as e:
         logger.exception("get_all_sections failed")
@@ -900,10 +1103,12 @@ async def get_section(
     try:
         version = draft_db.get_section_latest_version(draft_id, section_key, user_id)
         if not version:
+            latest_job = get_latest_job_for_scope(_section_job_scope_key(draft_id, section_key, user_id))
             return {
                 "success": True,
                 "version": None,
                 "message": f"No version exists for section '{section_key}'",
+                "latest_job": latest_job,
             }
         
         # Get reviews for this version
@@ -913,6 +1118,7 @@ async def get_section(
             "success": True,
             "version": version,
             "reviews": reviews,
+            "latest_job": get_latest_job_for_scope(_section_job_scope_key(draft_id, section_key, user_id)),
         }
     except Exception as e:
         logger.exception("get_section failed")

@@ -37,6 +37,16 @@ _CITATION_PATTERNS: List[tuple] = [
     (re.compile(r"C\.?A\.?\s*(?:No\.?)?\s*\d+\s*(?:of|/)\s*\d{4}",  re.I),     "CIVIL_APPEAL"),
     (re.compile(r"\d{4}\s*\d+\s*AWC\s*\d+",              re.I),        "AWC"),
     (re.compile(r"SLP\s*(?:No\.?)?\s*\d+\s*(?:of|/)\s*\d{4}",       re.I),     "SLP"),
+    # SCC OnLine / SCC Online (Indian Kanoon commonly returns these)
+    (re.compile(r"\d{4}\s*SCC\s*On\s*[Ll]ine\s+(?:SC|HC|[A-Z]+)\s*\d+", re.I), "SCC_ONLINE"),
+    (re.compile(r"SCC\s*OnLine\s+(?:SC|HC|[A-Z]+)\s*\d+",              re.I),   "SCC_ONLINE"),
+    # eCourts / neutral citation formats
+    (re.compile(r"\d{4}:(?:SC|[A-Z]{2,6}):\d+",                         re.I),  "NEUTRAL_CITE"),
+    # ILR / All LJ / other reporters
+    (re.compile(r"ILR\s*\(?\d{4}\)?\s*(?:SC|[A-Z]+)\s*\d+",            re.I),  "ILR"),
+    (re.compile(r"\d{4}\s*All\s*LJ\s*\d+",                              re.I),  "ALL_LJ"),
+    # Unreported / case number only (e.g., "Civil Appeal No. 1234 of 2020")
+    (re.compile(r"(?:Civil|Criminal|Writ|Special)\s+(?:Appeal|Petition|Application)\s+No\.?\s*\d+\s+of\s+\d{4}", re.I), "CASE_NO"),
 ]
 
 _VALID_COURTS = {
@@ -46,6 +56,14 @@ _VALID_COURTS = {
     "chhattisgarh", "uttarakhand", "himachal pradesh", "jammu", "sikkim",
     "tripura", "meghalaya", "manipur", "assam", "gauhati", "patna", "mp",
     "madhya pradesh", "nclat", "nclt", "ncdrc", "itat", "cestat",
+    # Additional tribunals / courts commonly in IK results
+    "national", "tribunal", "consumer", "motor accident", "armed forces",
+    "central administrative", "income tax appellate", "customs excise",
+    "debt recovery", "telecom disputes", "securities appellate", "sat",
+    "competition commission", "cci", "railway claims", "drt", "drat",
+    "appellate tribunal", "authority", "commission", "board",
+    "district court", "sessions court", "family court",
+    "india", "of india",   # "Supreme Court of India" — "of india" present
     "web",   # Google-sourced results get court="Web"
 }
 

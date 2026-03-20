@@ -487,13 +487,21 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                                 logger.warning("[ES] subsequent_treatment cache failed for %s: %s", canonical_id, exc)
             except Exception as exc:
                 logger.warning("[NEO4J] subsequent_treatment fetch failed for %s: %s", canonical_id, exc)
-    return {
+    # Build coram from ES coram field, falling back to judges list
+    _coram = _es_or_pg("coram") or ""
+    if not _coram:
+        _judges = _es_or_pg("judges")
+        if isinstance(_judges, list) and _judges:
+            _coram = ", ".join(str(j) for j in _judges if j)
+
+    result = {
         "id": canonical_id,
         "canonical_id": canonical_id,
         "title": _es_or_pg("case_name") or row.get("case_name"),
         "primary_citation": _es_or_pg("primary_citation"),
         "alternate_citations": _es_or_pg("alternate_citations") or [],
         "court": _es_or_pg("court_name") or _es_or_pg("court_code") or row.get("court_code"),
+        "coram": _coram,
         "bench_type": _es_or_pg("bench_type"),
         "date_judgment": _fmt_date(row.get("judgment_date")),
         "statutes": _es_or_pg("statutes") or [],
@@ -560,6 +568,8 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                         result["ik_cited_by_list"] = _citedby
             except Exception as _exc:
                 logger.warning("[DB] IK fallback from ik_document_assets failed for %s: %s", canonical_id, _exc)
+
+    return result
             finally:
                 _ik_conn.close()
 

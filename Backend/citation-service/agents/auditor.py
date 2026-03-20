@@ -182,8 +182,14 @@ def _hallucination_flags(title: str, citation: str, ratio: str) -> List[str]:
         flags.append("ratio_too_short")
 
     # Title looks like a generic web page heading (no legal case name pattern)
-    if title and not re.search(r"\bv(?:s|\.)\b|\bversus\b", title, re.I):
-        if not re.search(r"(petition|appeal|writ|suit|case|state|union|company|ltd|inc)", title, re.I):
+    if title and not re.search(r"\bv(?:s?|\.)\b|\bversus\b|\bv/s\b", title, re.I):
+        if not re.search(
+            r"(petition|appeal|writ|suit|case|state|union|company|ltd|inc|"
+            r"in\s+re|ex\s+parte|commissioner|tribunal|authority|board|"
+            r"corporation|municipal|government|department|ministry|secretary|"
+            r"director|president|chairman|collector|officer|inspector)",
+            title, re.I,
+        ):
             flags.append("non_case_title")
 
     return flags
@@ -298,9 +304,18 @@ def run_auditor(
             reason            = f"Verified but warnings present: {hall_flags}"
 
         elif is_flagged and not any_verified:
-            audit_status      = "QUARANTINED"
-            final_confidence  = 0
-            reason            = "Flagged by Librarian and failed all verification checks"
+            # For Indian Kanoon source: apply trust baseline — if we have a title and
+            # basic DB record (max_conf ≥ 45), give NEEDS_REVIEW instead of quarantine.
+            # IK citations are often flagged only because citation format is non-standard,
+            # not because the document is fake.
+            if source == "indian_kanoon" and max_conf >= 45:
+                audit_status      = "NEEDS_REVIEW"
+                final_confidence  = max(40, max_conf - 10)
+                reason            = f"Flagged by Librarian but IK source with basic DB record (conf={max_conf}) — needs review"
+            else:
+                audit_status      = "QUARANTINED"
+                final_confidence  = 0
+                reason            = "Flagged by Librarian and failed all verification checks"
 
         elif max_conf >= 45:
             audit_status      = "NEEDS_REVIEW"

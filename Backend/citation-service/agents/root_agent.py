@@ -377,6 +377,7 @@ class ReportBuilderAgent(BaseAgent):
         except Exception:
             pass
 
+        perspective = (context.metadata.get("perspective") or "all").lower().strip()
         report_format = build_report_from_judgements(
             context.judgement_ids,
             context.query,
@@ -384,6 +385,7 @@ class ReportBuilderAgent(BaseAgent):
             audit_details=audit_details,
             search_keywords=search_keywords,
             search_keywords_by_route=search_keywords_by_route,
+            perspective=perspective,
         )
         report_id = str(uuid.uuid4())
         run_id = context.metadata.get("run_id")
@@ -926,6 +928,7 @@ class CitationRootAgent(BaseAgent):
             context.metadata["report_id"] = report_id
             approved_ids = list(context.judgement_ids)
             # Build report from approved only
+            _perspective = (context.metadata.get("perspective") or "all").lower().strip()
             report_format = build_report_from_judgements(
                 approved_ids,
                 context.query,
@@ -933,6 +936,7 @@ class CitationRootAgent(BaseAgent):
                 audit_details=audit_details,
                 search_keywords=search_keywords,
                 search_keywords_by_route=search_keywords_by_route,
+                perspective=_perspective,
             )
             report_format["pendingHITLCount"] = len(quarantined_ids)
             report_format["status"] = "pending_hitl"
@@ -949,6 +953,7 @@ class CitationRootAgent(BaseAgent):
                     audit_details=audit_details,
                     search_keywords=search_keywords,
                     search_keywords_by_route=search_keywords_by_route,
+                    perspective=_perspective,
                 )
                 citation_snapshot = (one_report.get("citations") or [{}])[0]
                 if citation_snapshot:
@@ -1004,6 +1009,7 @@ class CitationRootAgent(BaseAgent):
                     audit_details=audit_details,
                     search_keywords=search_keywords,
                     search_keywords_by_route=search_keywords_by_route,
+                    perspective=_perspective,
                 )
                 snap = (j_report.get("citations") or [{}])[0]
                 report_citation_insert(report_id, jid, "approved", snap)

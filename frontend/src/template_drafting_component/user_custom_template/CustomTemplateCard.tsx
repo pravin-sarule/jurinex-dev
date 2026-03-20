@@ -242,7 +242,7 @@ export const CustomTemplateCard: React.FC<CustomTemplateCardProps> = ({
                             </div>
                             {[...Array(6)].map((_, i) => (
                                 <div
-                                    key={i}
+                                    key={`preview-line-${template.id || template.name}-${i}`}
                                     style={{
                                         marginTop: '6px',
                                         height: '4px',

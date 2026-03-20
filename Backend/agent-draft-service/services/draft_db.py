@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 
 def get_draft_connection_string() -> str:
@@ -546,6 +546,35 @@ def create_user_draft(
                 """,
                 (draft_id,),
             )
+            template_sections = get_template_sections(str(template_id))
+            if template_sections:
+                section_rows = []
+                for index, section in enumerate(template_sections):
+                    section_rows.append(
+                        (
+                            draft_id,
+                            str(section.get("section_id") or f"section_{index}"),
+                            section.get("section_name") or f"Section {index + 1}",
+                            section.get("section_purpose") or None,
+                            section.get("sort_order", index),
+                        )
+                    )
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO dt_draft_section_prompts (
+                        draft_id, section_id, section_name, section_type, sort_order, updated_at
+                    )
+                    VALUES %s
+                    ON CONFLICT (draft_id, section_id)
+                    DO UPDATE SET
+                        section_name = COALESCE(EXCLUDED.section_name, dt_draft_section_prompts.section_name),
+                        section_type = COALESCE(EXCLUDED.section_type, dt_draft_section_prompts.section_type),
+                        sort_order = EXCLUDED.sort_order,
+                        updated_at = NOW()
+                    """,
+                    section_rows,
+                )
     return draft
 
 

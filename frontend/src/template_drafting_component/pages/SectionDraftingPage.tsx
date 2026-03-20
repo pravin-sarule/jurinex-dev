@@ -352,6 +352,12 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
         }
     };
 
+    const getPromptForSection = (sectionId: string): string | undefined => {
+        const section = allSections.find(s => s.id === sectionId);
+        const prompt = section?.defaultPrompt?.trim();
+        return prompt || undefined;
+    };
+
 
     const POLL_INTERVAL_MS = 15000;
     const POLL_MAX_ATTEMPTS = 20;
@@ -403,15 +409,21 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
         }
     };
 
-    const handleGenerateSection = async (sectionId: string) => {
+    const handleGenerateSection = async (sectionId: string, options?: { regenerate?: boolean }) => {
         if (!draftId) return;
 
         const section = allSections.find(s => s.id === sectionId);
         const sectionTitle = section?.title || 'section';
+        const sectionPrompt = getPromptForSection(sectionId);
+        const isRegenerate = !!options?.regenerate;
 
         setSectionStates(prev => ({
             ...prev,
-            [sectionId]: { ...prev[sectionId], isGenerating: true }
+            [sectionId]: {
+                ...prev[sectionId],
+                isGenerating: true,
+                criticReview: isRegenerate ? null : prev[sectionId]?.criticReview ?? null
+            }
         }));
 
         const timeouts: ReturnType<typeof setTimeout>[] = [];
@@ -435,6 +447,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             }
 
             const response = await draftApi.generateSection(draftId, sectionId, {
+                ...(sectionPrompt ? { section_prompt: sectionPrompt } : {}),
                 auto_validate: false,
                 ...(draftLanguage ? { language: draftLanguage } : {}),
             });
@@ -468,7 +481,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                     }
                 }));
 
-                toast.success(`Section "${section?.title}" generated successfully!`);
+                toast.success(`Section "${section?.title}" ${isRegenerate ? 'regenerated' : 'generated'} successfully!`);
             }
         } catch (error) {
             timeouts.forEach(t => clearTimeout(t));
@@ -825,6 +838,16 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                                                     >
                                                         <SparklesIcon className="w-3.5 h-3.5 shrink-0" />
                                                         Update with Instruction
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleGenerateSection(activeTab, { regenerate: true })}
+                                                        disabled={currentSection.isGenerating}
+                                                        className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-[#0F766E] bg-[#ECFDF5] border border-[#99F6E4] rounded-md hover:bg-[#D1FAE5] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        title="Generate this section again using the same section prompt"
+                                                    >
+                                                        <SparklesIcon className="w-3.5 h-3.5 shrink-0" />
+                                                        {currentSection.isGenerating ? 'Regenerating...' : 'Regenerate'}
                                                     </button>
                                                     <button
                                                         onClick={handleEditSection}
