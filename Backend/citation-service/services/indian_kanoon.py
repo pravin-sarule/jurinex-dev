@@ -359,6 +359,7 @@ def ik_enrich_candidate_cached(
     maxcites: int = 10,
     maxcitedby: int = 10,
     cache_ttl_hours: int = 24,
+    force_refresh: bool = False,
 ) -> Dict[str, Any]:
     """
     Like ik_enrich_candidate() but checks ik_document_assets DB cache first.
@@ -382,7 +383,7 @@ def ik_enrich_candidate_cached(
     except Exception:
         cached = None
 
-    if cached:
+    if cached and not force_refresh:
         updated_at = cached.get("updated_at")
         if updated_at:
             if updated_at.tzinfo is None:
@@ -497,7 +498,9 @@ def ik_enrich_candidate_cached(
         # Store the full enriched dict as raw_api_response (strip bytes for JSON safety)
         safe_raw = {
             "doc_id":        doc_id,
-            "doc_data":      {k: v for k, v in (doc_data or {}).items() if k != "doc"},  # strip huge HTML
+            "doc_data":      dict(doc_data or {}),
+            "doc_html":      fields.get("doc_html") or "",
+            "raw_content":   fields.get("raw_content") or "",
             "fragment_data": enriched.get("fragment_data"),
             "meta_data":     enriched.get("meta_data"),
             "origdoc_result": {
@@ -549,8 +552,8 @@ def build_ik_report_fields(enriched: Dict[str, Any]) -> Dict[str, Any]:
     meta_data     = enriched.get("meta_data") or {}
     origdoc       = enriched.get("origdoc_result") or {}
 
-    doc_html = doc_data.get("doc") or ""
-    raw_content = _strip_html(doc_html)
+    doc_html = doc_data.get("doc") or enriched.get("doc_html") or ""
+    raw_content = enriched.get("raw_content") or _strip_html(doc_html)
 
     # IK API returns "cites"/"citedby"; older docs may use "citeList"/"citedbyList"
     cite_list: List[Dict] = doc_data.get("cites") or doc_data.get("citeList") or []

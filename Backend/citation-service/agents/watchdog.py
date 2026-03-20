@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -219,29 +220,38 @@ def run_watchdog(
     per_ik = max(1, max_ik // len(queries)) if len(queries) > 1 else max_ik
     per_google = max(1, max_google // len(queries)) if len(queries) > 1 else max_google
 
-    for qi, q in enumerate(queries, 1):
+    def _run_one_query(args: tuple[int, str]) -> tuple[int, str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+        qi, q = args
         q = (q or "").strip()
         if not q:
-            continue
-        _db_log(run_id, "watchdog", "watchdog", "INFO",
-                f"🔎 Keyword set {qi}/{len(queries)}: {q[:80]!r}")
+            return qi, q, [], []
+        _db_log(run_id, "watchdog", "watchdog", "INFO", f"🔎 Keyword set {qi}/{len(queries)}: {q[:80]!r}")
         ik_results = _search_indian_kanoon(q, limit=per_ik, run_id=run_id)
-        # CHECK 4: if IK returns 0 for this query, run Google fallback for same query
         if not ik_results:
             logger.info("[WATCHDOG] IK returned 0 for query %r → Google fallback", q[:60])
             _db_log(run_id, "watchdog", "watchdog", "INFO",
                     f"📚 Indian Kanoon returned 0 for this query → falling back to Google")
             google_results = _search_google(q, num_results=per_google, run_id=run_id)
-            for g in google_results:
-                link = g.get("link") or ""
-                if link and link not in seen_google:
-                    seen_google[link] = g
-        else:
+            return qi, q, [], google_results
+        google_results = _search_google(q, num_results=per_google, run_id=run_id)
+        return qi, q, ik_results, google_results
+
+    active_queries = [(qi, q) for qi, q in enumerate(queries, 1) if (q or "").strip()]
+    max_workers = min(5, max(1, len(active_queries)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_run_one_query, item): item for item in active_queries}
+        ordered_results: List[tuple[int, str, List[Dict[str, Any]], List[Dict[str, Any]]]] = []
+        for fut in as_completed(futures):
+            try:
+                ordered_results.append(fut.result())
+            except Exception as exc:
+                qi, q = futures[fut]
+                logger.warning("[WATCHDOG] Query worker failed for keyword set %d (%r): %s", qi, q[:60], exc)
+        for _, _, ik_results, google_results in sorted(ordered_results, key=lambda row: row[0]):
             for c in ik_results:
                 eid = c.get("external_id") or c.get("tid") or ""
                 if eid and eid not in seen_ik:
                     seen_ik[eid] = c
-            google_results = _search_google(q, num_results=per_google, run_id=run_id)
             for g in google_results:
                 link = g.get("link") or ""
                 if link and link not in seen_google:

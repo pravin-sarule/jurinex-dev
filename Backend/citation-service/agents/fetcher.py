@@ -118,6 +118,26 @@ def fetch_ik_candidates(
             if not raw_content and doc_html:
                 raw_content = _strip_html(doc_html)
 
+            if len(raw_content or "") < MIN_JUDGMENT_CHARS and enriched.get("_cache_hit"):
+                _db_log(
+                    run_id, "fetcher", "fetcher", "INFO",
+                    f"  🔄 Cache payload for IK doc #{tid} was incomplete — forcing live refetch"
+                )
+                enriched = ik_enrich_candidate_cached(
+                    doc_id=tid,
+                    query=query,
+                    fetch_origdoc=fetch_origdoc,
+                    maxcites=maxcites,
+                    maxcitedby=maxcitedby,
+                    cache_ttl_hours=0,
+                    force_refresh=True,
+                )
+                fields = build_ik_report_fields(enriched)
+                raw_content = fields.get("raw_content") or ""
+                doc_html = fields.get("doc_html") or ""
+                if not raw_content and doc_html:
+                    raw_content = _strip_html(doc_html)
+
             if len(raw_content or "") < MIN_JUDGMENT_CHARS:
                 logger.warning("[FETCHER] IK doc %s skipped: %d chars < %d", tid, len(raw_content or ""), MIN_JUDGMENT_CHARS)
                 _db_log(run_id, "fetcher", "fetcher", "WARNING",
