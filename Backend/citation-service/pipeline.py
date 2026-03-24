@@ -65,6 +65,7 @@ def run_pipeline(
             "case_file_context": case_file_context or [],
             "ingest_external":   ingest_external,
             "run_id":            run_id,
+            "user_id":           user_id,
         },
     )
 

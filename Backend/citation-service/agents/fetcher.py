@@ -51,6 +51,7 @@ def fetch_ik_candidates(
     candidates: List[Dict[str, Any]],
     query: str = "",
     run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
     fetch_origdoc: bool = True,
     maxcites: int = 10,
     maxcitedby: int = 10,
@@ -88,6 +89,7 @@ def fetch_ik_candidates(
             enriched = ik_enrich_candidate_cached(
                 doc_id=tid, query=query, fetch_origdoc=fetch_origdoc,
                 maxcites=maxcites, maxcitedby=maxcitedby,
+                run_id=run_id, user_id=user_id,
             )
             fields = build_ik_report_fields(enriched)
 
@@ -133,6 +135,8 @@ def fetch_ik_candidates(
                     maxcitedby=maxcitedby,
                     cache_ttl_hours=0,
                     force_refresh=True,
+                    run_id=run_id,
+                    user_id=user_id,
                 )
                 fields = build_ik_report_fields(enriched)
                 raw_content = fields.get("raw_content") or ""
@@ -239,7 +243,11 @@ _IK_SEARCH_URL_RE = re.compile(
 )
 
 
-def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def fetch_google_candidates(
+    candidates: List[Dict[str, Any]],
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     For each Google candidate (with link), fetch URL content. Simple GET; for PDFs we store URL.
     IK web URLs (indiankanoon.org/doc/{tid}/) are redirected to the IK API automatically.
@@ -271,6 +279,7 @@ def fetch_google_candidates(candidates: List[Dict[str, Any]], run_id: Optional[s
                 [{"external_id": tid, "title": c.get("title", "")}],
                 query=c.get("snippet", "") or c.get("title", ""),
                 run_id=run_id,
+                user_id=user_id,
                 fetch_origdoc=False,
             )
             if ik_result:

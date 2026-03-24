@@ -574,6 +574,7 @@ def create_user_draft(
                         updated_at = NOW()
                     """,
                     section_rows,
+                    template="(%s, %s, %s, %s, %s, NOW())",
                 )
     return draft
 

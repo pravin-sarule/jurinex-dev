@@ -105,7 +105,13 @@ def _ik_verify_by_search(query: str, title: str, token: str) -> Dict[str, Any]:
         return {"verified": False, "method": "ik_search_error", "confidence": 0, "notes": str(exc)[:120]}
 
 
-def _verify_via_indian_kanoon(title: str, citation: str, jid: str) -> Dict[str, Any]:
+def _verify_via_indian_kanoon(
+    title: str,
+    citation: str,
+    jid: str,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Cross-check a citation against the Indian Kanoon API.
     Tries direct doc fetch (if IK tid available from jid prefix) then falls back to search.
@@ -118,17 +124,30 @@ def _verify_via_indian_kanoon(title: str, citation: str, jid: str) -> Dict[str, 
     if not token:
         return {"verified": False, "method": "ik_unavailable", "confidence": 0, "notes": "No IK API token configured"}
 
+    uid = user_id or "anonymous"
+
     # If jid starts with "ik_", we have the actual IK tid
     if jid.startswith("ik_"):
         tid = jid[3:]
         result = _ik_verify_by_tid(tid, title, token)
+        try:
+            from utils.usage_tracker import record_ik
+            record_ik(run_id, uid, "document", count=1)
+        except Exception:
+            pass
         if result["verified"]:
             return result
         # Fall through to search as backup
 
     # Search by citation string or title
     search_q = citation if (citation and citation not in ("—", "")) else title[:100]
-    return _ik_verify_by_search(search_q, title, token)
+    result = _ik_verify_by_search(search_q, title, token)
+    try:
+        from utils.usage_tracker import record_ik
+        record_ik(run_id, uid, "search", count=1)
+    except Exception:
+        pass
+    return result
 
 
 def _verify_via_local_db(jid: str) -> Dict[str, Any]:
@@ -260,7 +279,13 @@ def _compute_final_verdict(
     return {"audit_status": "QUARANTINED", "final_confidence": final_confidence, "multi_route_confirmed": False}
 
 
-def _check_ik_with_timeout(jid: str, j: dict, timeout_secs: int = 8) -> dict:
+def _check_ik_with_timeout(
+    jid: str,
+    j: dict,
+    timeout_secs: int = 8,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> dict:
     ik_token = (
         os.environ.get("INDIAN_KANOON_API_TOKEN")
         or os.environ.get("IK_API_KEY")
@@ -274,7 +299,7 @@ def _check_ik_with_timeout(jid: str, j: dict, timeout_secs: int = 8) -> dict:
     citation = (j.get("primary_citation") or "")
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_verify_via_indian_kanoon, title, citation, jid)
+            future = pool.submit(_verify_via_indian_kanoon, title, citation, jid, run_id, user_id)
             return future.result(timeout=timeout_secs)
     except FuturesTimeout:
         logger.warning("[AUDITOR] IK check timed out for %s after %ds", jid, timeout_secs)
@@ -288,7 +313,13 @@ def _check_ik_with_timeout(jid: str, j: dict, timeout_secs: int = 8) -> dict:
 # Per-judgement worker (called in parallel)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _audit_one(jid: str, flagged_set: set, verify_online: bool) -> tuple:
+def _audit_one(
+    jid: str,
+    flagged_set: set,
+    verify_online: bool,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> tuple:
     """Audit a single judgement. Returns (jid, detail_dict, is_approved)."""
     from db.client import judgement_get, judgement_update_validation
 
@@ -299,7 +330,7 @@ def _audit_one(jid: str, flagged_set: set, verify_online: bool) -> tuple:
 
     is_flagged          = jid in flagged_set
     local_check         = _verify_via_local_db(jid)
-    ik_check            = (_check_ik_with_timeout(jid, j, timeout_secs=8) if verify_online
+    ik_check            = (_check_ik_with_timeout(jid, j, timeout_secs=8, run_id=run_id, user_id=user_id) if verify_online
                            else {"verified": False, "method": "skipped", "confidence": 0, "notes": "verify_online=False"})
     title               = (j.get("title") or "")
     citation            = (j.get("primary_citation") or "")
@@ -358,6 +389,8 @@ def run_auditor(
     validated_ids: List[str],
     flagged_ids:   Optional[List[str]] = None,
     verify_online: bool = True,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Cross-validate every citation from the Librarian — parallel IK checks.
@@ -389,8 +422,9 @@ def run_auditor(
     # Process all judgements in parallel (IK API calls dominate; parallel = ~8s not 80s)
     results: Dict[str, tuple] = {}
     workers = min(5, len(all_ids) or 1)
+    uid = user_id or "anonymous"
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_audit_one, jid, flagged_set, verify_online): jid for jid in all_ids}
+        futs = {pool.submit(_audit_one, jid, flagged_set, verify_online, run_id, uid): jid for jid in all_ids}
         for fut in as_completed(futs):
             jid = futs[fut]
             try:

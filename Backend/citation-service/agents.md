@@ -651,7 +651,7 @@ config = GenerateContentConfig(temperature=pc.temperature, max_output_tokens=pc.
 | `DRAFT_DB_URL` | Draft_DB | Dynamic prompt loading from `agent_prompts` |
 | `DOC_DB_URL` | Document_DB | LLM model resolution from `llm_models` |
 | `CITATION_DB_URL` | citation_db | Citation pipeline data (runs, reports, logs) |
-| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | Gemini API access |
+| `GEMINI_API_KEY` | — | Gemini API access |
 | `GEMINI_MODEL` | — | Default Gemini model (fallback: `gemini-2.0-flash`) |
 | `CLAUDE_MODEL` | — | Default Claude model |
 | `JWT_SECRET` | — | JWT token verification |

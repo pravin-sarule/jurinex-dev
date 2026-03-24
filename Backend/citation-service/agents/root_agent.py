@@ -157,7 +157,7 @@ def _filter_new_external_candidates(
 
 class WatchdogAgent(BaseAgent):
     name        = "watchdog"
-    description = "Searches Local DB, Indian Kanoon API and Google/Serper for relevant judgments."
+    description = "Searches Local DB, Indian Kanoon API and Google (Gemini Grounding by default; Serper when configured) for relevant judgments."
 
     def run(self, context: AgentContext) -> AgentResult:
         from agents.watchdog import run_watchdog
@@ -165,7 +165,8 @@ class WatchdogAgent(BaseAgent):
         query = context.metadata.get("search_query") or context.query
         keyword_sets = context.metadata.get("keyword_sets")
         logger.info("[WATCHDOG] Searching: %s (keyword_sets=%d)", query[:80], len(keyword_sets) if keyword_sets else 0)
-        result = run_watchdog(query, max_local=10, max_ik=8, max_google=5, keyword_sets=keyword_sets, run_id=run_id)
+        user_id = context.metadata.get("user_id") or context.user_id or "anonymous"
+        result = run_watchdog(query, max_local=10, max_ik=8, max_google=5, keyword_sets=keyword_sets, run_id=run_id, user_id=user_id)
         if result.get("error"):
             return AgentResult(success=False, error=result["error"])
         context.judgement_ids = result.get("all_judgement_ids", [])
@@ -204,15 +205,16 @@ class FetcherAgent(BaseAgent):
             pass
 
         # Fetch IK + Google in parallel
+        user_id = context.metadata.get("user_id") or context.user_id or "anonymous"
         def _fetch_ik():
             try:
-                return fetch_ik_candidates(ik_cands, query=context.metadata.get("search_query") or context.query, run_id=run_id)
+                return fetch_ik_candidates(ik_cands, query=context.metadata.get("search_query") or context.query, run_id=run_id, user_id=user_id)
             except Exception as e:
                 errors.append(str(e)); return []
 
         def _fetch_go():
             try:
-                return fetch_google_candidates(go_cands, run_id=run_id)
+                return fetch_google_candidates(go_cands, run_id=run_id, user_id=user_id)
             except Exception as e:
                 errors.append(str(e)); return []
 
@@ -264,16 +266,17 @@ class ClerkAgent(BaseAgent):
             pass
 
         case_id = context.case_id
+        user_id = context.metadata.get("user_id") or context.user_id or "anonymous"
         # Run IK + Google ingestion in parallel (pass case_id for Qdrant payload)
         def _ingest_ik():
             try:
-                return clerk_ingest_ik(fetched_ik, query=query, case_id=case_id)
+                return clerk_ingest_ik(fetched_ik, query=query, case_id=case_id, run_id=run_id, user_id=user_id)
             except Exception as e:
                 errors.append(f"IK: {e}"); return []
 
         def _ingest_go():
             try:
-                return clerk_ingest_google(fetched_go, query=query, case_id=case_id)
+                return clerk_ingest_google(fetched_go, query=query, case_id=case_id, run_id=run_id, user_id=user_id)
             except Exception as e:
                 errors.append(f"GO: {e}"); return []
 
@@ -398,7 +401,8 @@ class AuditorAgent(BaseAgent):
         except Exception:
             pass
 
-        result = run_auditor(validated, flagged, verify_online=True)
+        user_id = context.metadata.get("user_id") or context.user_id or "anonymous"
+        result = run_auditor(validated, flagged, verify_online=True, run_id=run_id, user_id=user_id)
         context.metadata["audit_details"]  = result.get("audit_details", {})
         context.metadata["approved_ids"]   = result.get("approved_ids", [])
         context.judgement_ids              = result.get("approved_ids", [])
@@ -473,6 +477,7 @@ class ReportBuilderAgent(BaseAgent):
             search_keywords=search_keywords,
             search_keywords_by_route=search_keywords_by_route,
             perspective=perspective,
+            run_id=run_id,
         )
         report_id = str(uuid.uuid4())
         run_id = context.metadata.get("run_id")
@@ -646,7 +651,8 @@ class KeywordExtractorAgent(BaseAgent):
 
         # Use Claude Sonnet for richer keyword generation
         claude_kw = pc.claude_config if pc else {}
-        keywords_text = self._claude(prompt, **claude_kw)
+        user_id = context.metadata.get("user_id") or context.user_id or "anonymous"
+        keywords_text = self._claude(prompt, run_id=run_id, user_id=user_id, operation="keyword_extract", **claude_kw)
         keyword_sets = []
         if keywords_text and keywords_text.strip():
             for line in keywords_text.strip().split("\n"):
@@ -678,7 +684,7 @@ class KeywordExtractorAgent(BaseAgent):
                 prompt_flat = _default_fallback.format(base_query=base_query, case_context="\n\n".join(parts))
             
             fb_kw = pc_fb.claude_config if pc_fb else {}
-            flat = self._claude(prompt_flat, **fb_kw)
+            flat = self._claude(prompt_flat, run_id=run_id, user_id=user_id, operation="keyword_extract_fallback", **fb_kw)
             single = f"{base_query} {flat.strip()}"[:500] if flat and flat.strip() else base_query
             keyword_sets = [single]
             
@@ -1118,6 +1124,7 @@ class CitationRootAgent(BaseAgent):
                             **citation_snapshot,
                             "priorityScore": ps,
                             "queryContext": (context.query or "")[:300],
+                            "requestUserId": context.user_id or "anonymous",
                         },
                         reason_queued="quarantined",
                         case_id=context.case_id,
@@ -1145,6 +1152,14 @@ class CitationRootAgent(BaseAgent):
                 )
                 snap = (j_report.get("citations") or [{}])[0]
                 report_citation_insert(report_id, jid, "approved", snap)
+            try:
+                from db.client import hitl_enqueue_citations_from_report
+                hitl_enqueue_citations_from_report(
+                    report_id, run_id, context.user_id, report_format,
+                    context.query or "", context.case_id,
+                )
+            except Exception as e:
+                logger.warning("[ROOT] HITL enqueue (pending_hitl report) failed: %s", e)
             report_insert(
                 report_id, context.user_id, context.query, report_format,
                 status="pending_hitl", case_id=context.case_id, run_id=run_id,
@@ -1178,6 +1193,16 @@ class CitationRootAgent(BaseAgent):
         report_id = rb_result.data.get("report_id")
         report_format = rb_result.data.get("report_format") or {}
         if run_id:
+            try:
+                from db.client import hitl_enqueue_citations_from_report, report_update
+                n_hitl = hitl_enqueue_citations_from_report(
+                    report_id, run_id, context.user_id, report_format,
+                    context.query or "", context.case_id,
+                )
+                if n_hitl and report_id:
+                    report_update(report_id, report_format=report_format)
+            except Exception as e:
+                logger.warning("[ROOT] HITL enqueue from report failed: %s", e)
             try:
                 from db.client import pipeline_run_update, report_citation_insert
                 pipeline_run_update(
@@ -1268,7 +1293,7 @@ class CitationRootAgent(BaseAgent):
                         perspective=_perspective,
                     )
                     snap = (one_rep.get("citations") or [{}])[0]
-                    hitl_queue_insert(
+                    hitl_id = hitl_queue_insert(
                         report_id=report_id, run_id=run_id, canonical_id=jid,
                         user_id=context.user_id, citation_snapshot=snap,
                         reason_queued="google_fallback", case_id=context.case_id,
@@ -1277,7 +1302,7 @@ class CitationRootAgent(BaseAgent):
                         web_source_url=(snap.get("importSourceLink") or snap.get("sourceUrl") or "")[:2000],
                         priority_score=float(snap.get("priorityScore") or 0.0),
                     )
-                    report_citation_insert(report_id, jid, "hitl_pending", snap)
+                    report_citation_insert(report_id, jid, "hitl_pending", snap, hitl_queue_id=hitl_id)
                 except Exception as exc:
                     logger.warning("[ROOT._fallback] HITL insert failed for %s: %s", jid, exc)
         elif not safe_ids:
@@ -1286,6 +1311,15 @@ class CitationRootAgent(BaseAgent):
                 "We could not auto-verify any citations from local databases or external legal APIs. "
                 "Potential citations have been identified and are under human review."
             )
+
+        try:
+            from db.client import hitl_enqueue_citations_from_report
+            hitl_enqueue_citations_from_report(
+                report_id, run_id, context.user_id, report_format,
+                context.query or "", context.case_id,
+            )
+        except Exception as e:
+            logger.warning("[ROOT._fallback] HITL enqueue from report failed: %s", e)
 
         status = report_format.get("status", "completed")
         report_insert(report_id, context.user_id, context.query,

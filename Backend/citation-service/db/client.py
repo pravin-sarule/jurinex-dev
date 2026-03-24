@@ -303,6 +303,39 @@ def init_db() -> None:
                 "CREATE INDEX IF NOT EXISTS idx_ik_assets_canonical ON ik_document_assets(canonical_id)"
             )
 
+            # ── citation_service_usage: third-party API usage and cost tracking ──
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS citation_service_usage (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    run_id UUID,
+                    user_id VARCHAR NOT NULL,
+                    user_display_name VARCHAR(256),
+                    username VARCHAR(256),
+                    service VARCHAR(32) NOT NULL,
+                    operation VARCHAR(64),
+                    quantity INTEGER NOT NULL DEFAULT 0,
+                    unit VARCHAR(16) DEFAULT 'calls',
+                    cost_inr NUMERIC(12,4) DEFAULT 0,
+                    cost_usd NUMERIC(12,6) DEFAULT 0,
+                    metadata JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            try:
+                cur.execute(
+                    "ALTER TABLE citation_service_usage ADD COLUMN IF NOT EXISTS user_display_name VARCHAR(256)"
+                )
+                cur.execute("ALTER TABLE citation_service_usage ADD COLUMN IF NOT EXISTS username VARCHAR(256)")
+            except Exception:
+                pass
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_citation_usage_run ON citation_service_usage(run_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_citation_usage_user ON citation_service_usage(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_citation_usage_service ON citation_service_usage(service)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_citation_usage_created ON citation_service_usage(created_at DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_citation_usage_user_created ON citation_service_usage(user_id, created_at DESC)")
+
         conn.commit()
     finally:
         conn.close()
@@ -662,10 +695,12 @@ def report_insert(
     hitl_approved_count: int = 0,
     citations_approved_count: int = 0,
     citations_quarantined_count: int = 0,
-) -> str:
+) -> Optional[str]:
+    """Persist report snapshot. Returns report_id on success, None if PostgreSQL is unavailable."""
     conn = get_pg_conn()
     if not conn:
-        raise RuntimeError("PostgreSQL unavailable for report_insert")
+        logger.warning("[report_insert] PostgreSQL unavailable — skipping persist (report_id=%s)", report_id)
+        return None
     cit_count = len(report_format.get("citations", [])) if isinstance(report_format, dict) else 0
     try:
         with conn.cursor() as cur:
@@ -710,6 +745,9 @@ def report_insert(
 
         conn.commit()
         return report_id
+    except Exception as exc:
+        logger.warning("[report_insert] failed: %s", exc)
+        return None
     finally:
         conn.close()
 
@@ -1202,6 +1240,244 @@ def pipeline_run_update(
         conn.close()
 
 
+def pipeline_run_get_user_id(run_id: str) -> Optional[str]:
+    """Return user_id for a pipeline run (for admin access checks)."""
+    conn = get_pg_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id FROM citation_pipeline_runs WHERE id = %s LIMIT 1",
+                (run_id,),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return str(row[0])
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return None
+
+
+# --- Citation service usage tracking ---
+
+def usage_record_insert(
+    run_id: Optional[str],
+    user_id: str,
+    service: str,
+    operation: str,
+    quantity: int,
+    unit: str = "calls",
+    cost_inr: float = 0,
+    cost_usd: float = 0,
+    metadata: Optional[Dict[str, Any]] = None,
+    user_display_name: Optional[str] = None,
+    username: Optional[str] = None,
+) -> None:
+    conn = get_pg_conn()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO citation_service_usage
+                  (run_id, user_id, user_display_name, username, service, operation, quantity, unit, cost_inr, cost_usd, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    user_id or "anonymous",
+                    user_display_name if (user_display_name and str(user_display_name).strip()) else None,
+                    username if (username and str(username).strip()) else None,
+                    service,
+                    operation or "",
+                    quantity,
+                    unit,
+                    cost_inr,
+                    cost_usd,
+                    Json(metadata) if metadata else None,
+                ),
+            )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("[USAGE] usage_record_insert failed: %s", exc)
+    finally:
+        conn.close()
+
+
+def usage_get_by_run(run_id: str) -> List[Dict[str, Any]]:
+    conn = get_pg_conn()
+    if not conn:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, run_id, user_id, user_display_name, username, service, operation, quantity, unit, cost_inr, cost_usd, metadata, created_at
+                  FROM citation_service_usage
+                 WHERE run_id = %s
+                 ORDER BY created_at ASC
+                """,
+                (run_id,),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def usage_get_aggregate(
+    days: int = 30,
+    user_ids: Optional[List[str]] = None,
+    service_filter: Optional[str] = None,
+) -> Dict[str, Any]:
+    conn = get_pg_conn()
+    _empty = {
+        "total_cost_inr": 0,
+        "total_cost_usd": 0,
+        "total_queries": 0,
+        "by_service": {},
+    }
+    if not conn:
+        return _empty
+    days = max(1, min(int(days or 30), 365))
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            mf = ""
+            mp = [days]
+            if user_ids:
+                placeholders = ",".join(["%s"] * len(user_ids))
+                mf = f" AND user_id = ANY(ARRAY[{placeholders}]::text[])"
+                mp.extend(user_ids)
+            if service_filter:
+                mf += " AND service = %s"
+                mp.append(service_filter)
+
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(cost_inr), 0) AS total_cost_inr,
+                    COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+                    COUNT(DISTINCT run_id) FILTER (WHERE run_id IS NOT NULL) AS total_runs
+                  FROM citation_service_usage
+                 WHERE created_at >= NOW() - (%s::int * INTERVAL '1 day')
+                 {mf}
+                """,
+                mp,
+            )
+            row = cur.fetchone() or {}
+            total_cost_inr = float(row.get("total_cost_inr") or 0)
+            total_cost_usd = float(row.get("total_cost_usd") or 0)
+            total_runs = int(row.get("total_runs") or 0)
+
+            cur.execute(
+                f"""
+                SELECT service,
+                       COALESCE(SUM(quantity), 0) AS total_quantity,
+                       COALESCE(SUM(cost_inr), 0) AS cost_inr,
+                       COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                       COUNT(*) AS record_count
+                  FROM citation_service_usage
+                 WHERE created_at >= NOW() - (%s::int * INTERVAL '1 day')
+                 {mf}
+                 GROUP BY service
+                """,
+                mp,
+            )
+            by_service = {}
+            for r in cur.fetchall() or []:
+                svc = r.get("service") or "unknown"
+                by_service[svc] = {
+                    "total_quantity": int(r.get("total_quantity") or 0),
+                    "cost_inr": float(r.get("cost_inr") or 0),
+                    "cost_usd": float(r.get("cost_usd") or 0),
+                    "record_count": int(r.get("record_count") or 0),
+                }
+
+            return {
+                "total_cost_inr": total_cost_inr,
+                "total_cost_usd": total_cost_usd,
+                "total_queries": total_runs,
+                "by_service": by_service,
+            }
+    finally:
+        conn.close()
+
+
+def usage_get_user_breakdown(
+    days: int = 30,
+    user_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    conn = get_pg_conn()
+    if not conn:
+        return []
+    days = max(1, min(int(days or 30), 365))
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            mf = ""
+            mp = [days]
+            if user_ids:
+                placeholders = ",".join(["%s"] * len(user_ids))
+                mf = f" AND user_id = ANY(ARRAY[{placeholders}]::text[])"
+                mp.extend(user_ids)
+
+            cur.execute(
+                f"""
+                SELECT user_id,
+                       MAX(NULLIF(TRIM(user_display_name), '')) AS user_display_name,
+                       MAX(NULLIF(TRIM(username), '')) AS username,
+                       COALESCE(SUM(cost_inr), 0) AS total_cost_inr,
+                       COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+                       COUNT(DISTINCT run_id) FILTER (WHERE run_id IS NOT NULL) AS runs
+                  FROM citation_service_usage
+                 WHERE created_at >= NOW() - (%s::int * INTERVAL '1 day')
+                 {mf}
+                 GROUP BY user_id
+                 ORDER BY SUM(cost_inr) DESC
+                 LIMIT 200
+                """,
+                mp,
+            )
+            rows = cur.fetchall() or []
+
+            result = []
+            for r in rows:
+                uid = r.get("user_id") or "unknown"
+                by_svc_sql = """
+                    SELECT service,
+                           COALESCE(SUM(cost_inr), 0) AS cost_inr,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                           COALESCE(SUM(quantity), 0) AS quantity
+                      FROM citation_service_usage
+                     WHERE created_at >= NOW() - (%s::int * INTERVAL '1 day') AND user_id = %s
+                     GROUP BY service
+                """
+                cur.execute(by_svc_sql, (days, uid))
+                by_service = {
+                    (srow.get("service") or "unknown"): {
+                        "cost_inr": float(srow.get("cost_inr") or 0),
+                        "cost_usd": float(srow.get("cost_usd") or 0),
+                        "quantity": int(srow.get("quantity") or 0),
+                    }
+                    for srow in (cur.fetchall() or [])
+                }
+                result.append({
+                    "user_id": uid,
+                    "user_display_name": r.get("user_display_name") or "",
+                    "username": r.get("username") or "",
+                    "total_cost_inr": float(r.get("total_cost_inr") or 0),
+                    "total_cost_usd": float(r.get("total_cost_usd") or 0),
+                    "runs": int(r.get("runs") or 0),
+                    "by_service": by_service,
+                })
+            return result
+    finally:
+        conn.close()
+
+
 # --- Agent logs ---
 
 def agent_log_insert(
@@ -1265,10 +1541,12 @@ def hitl_queue_insert(
     query_context: Optional[str] = None,
     web_source_url: Optional[str] = None,
     priority_score: float = 0.0,
-) -> str:
+) -> Optional[str]:
+    """Insert one HITL row. Returns new row id, or None if PostgreSQL is unavailable or insert failed."""
     conn = get_pg_conn()
     if not conn:
-        raise RuntimeError("PostgreSQL unavailable for hitl_queue_insert")
+        logger.warning("[hitl_queue_insert] PostgreSQL unavailable — skipping (canonical_id=%s)", canonical_id)
+        return None
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1289,9 +1567,83 @@ def hitl_queue_insert(
             )
             row = cur.fetchone()
         conn.commit()
-        return str(row[0])
+        return str(row[0]) if row else None
+    except Exception as exc:
+        logger.warning("[hitl_queue_insert] failed (canonical_id=%s): %s", canonical_id, exc)
+        return None
     finally:
         conn.close()
+
+
+def hitl_enqueue_citations_from_report(
+    report_id: Optional[str],
+    run_id: Optional[str],
+    user_id: str,
+    report_format: Dict[str, Any],
+    query: str,
+    case_id: Optional[str] = None,
+) -> int:
+    """
+    For each citation in report_format that is not fully auto-validated, insert hitl_queue.
+    Mutates citation dicts in-place with hitlTicketId when a row is created.
+    Returns number of rows inserted.
+    """
+    if not isinstance(report_format, dict):
+        return 0
+    cits = report_format.get("citations") or []
+    if not cits:
+        return 0
+    inserted = 0
+    UNVERIFIED = frozenset({"RED", "YELLOW", "PENDING", "STALE"})
+    for cit in cits:
+        if not isinstance(cit, dict):
+            continue
+        vs = (cit.get("verificationStatus") or "").strip()
+        if vs not in UNVERIFIED:
+            continue
+        if cit.get("hitlTicketId"):
+            continue
+        ps = float(cit.get("priorityScore") or 0)
+        if vs == "PENDING":
+            reason = "web_unverified"
+        elif vs == "YELLOW":
+            reason = "needs_review"
+        elif vs == "STALE":
+            reason = "stale_or_outdated"
+        else:
+            reason = "verification_failed"
+        cit_string = cit.get("primaryCitation") or cit.get("caseName") or ""
+        web_url = (
+            cit.get("importSourceLink")
+            or cit.get("sourceUrl")
+            or cit.get("officialSourceLink")
+            or ""
+        )
+        try:
+            tid = hitl_queue_insert(
+                report_id=report_id or None,
+                run_id=run_id,
+                canonical_id=str(cit.get("canonicalId") or cit.get("id") or "unknown"),
+                user_id=user_id or "anonymous",
+                citation_snapshot={
+                    **cit,
+                    "priorityScore": ps,
+                    "queryContext": (query or "")[:300],
+                    "requestUserId": user_id or "anonymous",
+                },
+                reason_queued=reason,
+                case_id=case_id,
+                citation_string=cit_string[:512] if cit_string else None,
+                query_context=(query or "")[:2000] if query else None,
+                web_source_url=web_url[:2000] if web_url else None,
+                priority_score=ps,
+            )
+            if tid:
+                cit["hitlTicketId"] = tid
+                inserted += 1
+        except Exception as exc:
+            logger.warning("[hitl_enqueue_citations_from_report] row failed: %s", exc)
+    return inserted
 
 
 def hitl_queue_list_by_report(report_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:

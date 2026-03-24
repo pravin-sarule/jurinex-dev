@@ -77,10 +77,10 @@ def run_citation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not search_results:
         search_results = _search_judgements_serper(query, num_results=5)
 
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         return {
-            "error": "GOOGLE_API_KEY or GEMINI_API_KEY not set",
+            "error": "GEMINI_API_KEY not set",
             "report": "",
             "citations": [],
             "confidence": "low",

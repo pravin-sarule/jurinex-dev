@@ -254,9 +254,9 @@ def extract_subsequent_treatment_llm(
     Returns same dict format as extract_subsequent_treatment().
     Falls back gracefully to _empty_result() on any error.
     """
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        logger.warning("[TREATMENT_LLM] GOOGLE_API_KEY not set — skipping LLM extraction")
+        logger.warning("[TREATMENT_LLM] GEMINI_API_KEY not set — skipping LLM extraction")
         return _empty_result()
 
     text = (judgment_text or "")[:max_chars].strip()

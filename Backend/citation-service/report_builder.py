@@ -369,7 +369,7 @@
 #     if not needs_enrich or not raw:
 #         return j
 
-#     api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+#     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 #     if not api_key:
 #         return j
 
@@ -1237,28 +1237,6 @@ _RE_COURT = re.compile(
     r"|the\s+ratio\s+decidendi\s+(?:of\s+this\s+case\s+)?is",
     re.I,
 )
-_RE_QUERY_RESPONDENT = re.compile(
-    r"\b(?:respondent|defendant|state|prosecution)(?:\'s)?\s+(?:side|perspective|citations?|arguments?|position)\b"
-    r"|\bfrom\s+the\s+(?:respondent|defendant|state)(?:\'s)?\s+(?:side|perspective)\b"
-    r"|\bas\s+the\s+(?:respondent|defendant)\b"
-    r"|\bfor\s+(?:the\s+)?(?:respondent|state|prosecution)\b"
-    r"|\b(?:respondent|state|defence)\s+side\b",
-    re.I,
-)
-_RE_QUERY_APPELLANT = re.compile(
-    r"\b(?:appellant|petitioner|plaintiff|accused)(?:\'s)?\s+(?:side|perspective|citations?|arguments?|position)\b"
-    r"|\bfrom\s+the\s+(?:appellant|petitioner|plaintiff)(?:\'s)?\s+(?:side|perspective)\b"
-    r"|\bas\s+the\s+(?:appellant|petitioner)\b"
-    r"|\bfor\s+(?:the\s+)?(?:appellant|petitioner|plaintiff)\b",
-    re.I,
-)
-_RE_QUERY_COURT = re.compile(
-    r"\bcourt(?:\'s)?\s+(?:view|ratio|analysis|opinion|reasoning|holding)\b"
-    r"|\bjudicial\s+(?:view|reasoning|analysis)\b"
-    r"|\bratio\s+decidendi\b"
-    r"|\bcourt(?:\'s)?\s+own\s+(?:reasoning|analysis)\b",
-    re.I,
-)
 
 _PARTY_BADGE = {
     "appellant":  "🔵 RELIED BY APPELLANT",
@@ -1291,14 +1269,10 @@ def _detect_argument_party(raw_text: str, query: str = "", explicit_perspective:
     else:
         _exp = ""
 
-    # Query-level perspective detection (only when no explicit override)
-    if not _exp and query:
-        if _RE_QUERY_RESPONDENT.search(query):
-            return "respondent"
-        if _RE_QUERY_APPELLANT.search(query):
-            return "appellant"
-        if _RE_QUERY_COURT.search(query):
-            return "court"
+    # Do not infer party from the user's search query when perspective is "all"
+    # (no explicit side). Query text often contains words like "respondent" from
+    # case names and would incorrectly skew tags; client-side tabs filter by
+    # argumentParty from judgment content only.
 
     # Sliding-window text analysis (first 10 000 chars of judgment body)
     text = (raw_text or "")[:10000]
@@ -1310,12 +1284,26 @@ def _detect_argument_party(raw_text: str, query: str = "", explicit_perspective:
         return _exp or "neutral"
     if court_count > (appellant_count + respondent_count) * 2:
         return "court"
+    if court_count >= 3 and court_count >= max(appellant_count, respondent_count):
+        return "court"
+    # When no explicit user perspective ("all"), use a soft majority so Appellant/Respondent
+    # tabs are not empty — most judgments mention both sides within ±2 signals.
+    if not _exp:
+        if appellant_count > respondent_count:
+            return "appellant"
+        if respondent_count > appellant_count:
+            return "respondent"
+        if appellant_count > 0 and appellant_count == respondent_count:
+            return "neutral"
+        return "neutral"
+
+    # Narrowed perspective from user (not "all")
+    if _exp == "court":
+        return "court"
     if appellant_count > respondent_count + 2:
         return "appellant"
     if respondent_count > appellant_count + 2:
         return "respondent"
-    if court_count >= 3 and court_count >= max(appellant_count, respondent_count):
-        return "court"
     if _exp:
         return _exp
     return "neutral"
@@ -1496,7 +1484,12 @@ Full judgment text (extract all 10 points from this):
 JSON:"""
 
 
-def _enrich_with_gemini(j: Dict[str, Any], query: str) -> Dict[str, Any]:
+def _enrich_with_gemini(
+    j: Dict[str, Any],
+    query: str,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     If any of the 10 citation points are blank or placeholders, call Gemini to
     extract from full judgment text.
@@ -1522,7 +1515,7 @@ def _enrich_with_gemini(j: Dict[str, Any], query: str) -> Dict[str, Any]:
     if not needs_enrich or not raw:
         return j
 
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         return j
 
@@ -1583,6 +1576,15 @@ def _enrich_with_gemini(j: Dict[str, Any], query: str) -> Dict[str, Any]:
             contents=prompt,
             config=_genai.types.GenerateContentConfig(**config_kw),
         )
+        try:
+            um = getattr(resp, "usage_metadata", None)
+            if um:
+                ti = int(getattr(um, "prompt_token_count", 0) or 0)
+                to = int(getattr(um, "response_token_count", 0) or 0)
+                from utils.usage_tracker import record_gemini
+                record_gemini(run_id, user_id or "anonymous", "report_enrich", tokens_in=ti, tokens_out=to, model=model)
+        except Exception:
+            pass
         text = (resp.text or "").strip()
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"```\s*$", "", text)
@@ -2129,6 +2131,7 @@ def build_report_from_judgements(
     search_keywords: Optional[List[str]] = None,
     search_keywords_by_route: Optional[Dict[str, List[str]]] = None,
     perspective: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Load judgements from DB, enrich with Gemini when fields are blank,
@@ -2176,7 +2179,7 @@ def build_report_from_judgements(
         j["_perspective"] = _perspective
 
         # Enrich missing fields via Gemini (perspective-aware prompt)
-        j = _enrich_with_gemini(j, query)
+        j = _enrich_with_gemini(j, query, run_id=run_id, user_id=user_id)
 
         audit_info = audit_details.get(jid)
         cit = _judgement_to_citation(
@@ -2251,7 +2254,7 @@ def build_report_from_judgements(
             if not j:
                 continue
             j["_perspective"] = _perspective
-            j = _enrich_with_gemini(j, query)
+            j = _enrich_with_gemini(j, query, run_id=run_id, user_id=user_id)
             audit_info = audit_details.get(jid)
             cit = _judgement_to_citation(
                 j, len(citations) + 1, query,

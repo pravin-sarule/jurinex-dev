@@ -54,7 +54,7 @@ def _search_local(query: str, limit: int = 10, run_id: Optional[str] = None) -> 
         return []
 
 
-def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Call Indian Kanoon API search. Requires INDIAN_KANOON_API_TOKEN (or INDIAN_KANOON_TOKEN / IK_API_TOKEN). Returns list of { tid, title, headline, docsource }."""
     token = (
         os.environ.get("INDIAN_KANOON_TOKEN")
@@ -113,6 +113,11 @@ def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = N
         _db_log(run_id, "watchdog", "watchdog", "INFO",
                 f"📚 Indian Kanoon → {len(out)} candidate(s)" + (f" for: {query[:60]!r}" if len(out) == 0 else ""),
                 {"source": "indian_kanoon", "count": len(out), "titles": titles})
+        try:
+            from utils.usage_tracker import record_ik
+            record_ik(run_id, user_id or "anonymous", "search", count=1)
+        except Exception:
+            pass
         return out
     except Exception as e:
         logger.warning("Indian Kanoon search failed: %s", e)
@@ -120,16 +125,107 @@ def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = N
         return []
 
 
-def _search_google(query: str, num_results: int = 5, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Serper API for Indian law judgements."""
-    api_key = os.environ.get("SERPER_API_KEY")
+def _use_serper_for_google_search() -> bool:
+    """
+    Use Serper API only when explicitly configured (e.g. WATCHDOG_USE_CLAUDE_SEARCH or
+    WATCHDOG_GOOGLE_SEARCH_PROVIDER=serper). Default is Google Grounding via Gemini.
+    """
+    provider = (os.environ.get("WATCHDOG_GOOGLE_SEARCH_PROVIDER") or "google_grounding").strip().lower()
+    use_claude = (os.environ.get("WATCHDOG_USE_CLAUDE_SEARCH") or "").strip().lower() in ("1", "true", "yes", "on")
+    return use_claude or provider == "serper"
+
+
+def _search_google_grounding(query: str, num_results: int = 5, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Google Search via Gemini's Grounding with Google Search (default for all models)."""
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        logger.warning("SERPER_API_KEY not set; skipping Google search.")
-        _db_log(run_id, "watchdog", "watchdog", "WARNING", "🌐 Google Search skipped — SERPER_API_KEY not configured")
+        logger.warning("GEMINI_API_KEY not set; skipping Google Search grounding.")
+        _db_log(run_id, "watchdog", "watchdog", "WARNING",
+                "🌐 Google Search skipped — GEMINI_API_KEY not configured")
         return []
 
     try:
-        _db_log(run_id, "watchdog", "watchdog", "INFO", f"🌐 Querying Google Search (Serper): {query[:80]!r}")
+        from google import genai
+        from google.genai import types
+
+        _db_log(run_id, "watchdog", "watchdog", "INFO",
+                f"🌐 Querying Google Search (Gemini Grounding): {query[:80]!r}")
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        search_query = (
+            f"Search for relevant Indian law judgments about: {query}. "
+            "Focus on site:indiankanoon.org OR site:supremecourtofindia.nic.in OR site:judgments.ecourts.gov.in. "
+            f"Return up to {num_results} most relevant judgment URLs with titles."
+        )
+        grounding_tool = types.Tool(google_search=types.GoogleSearch())
+        config = types.GenerateContentConfig(
+            tools=[grounding_tool],
+            max_output_tokens=2048,
+        )
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model,
+            contents=search_query,
+            config=config,
+        )
+
+        results: List[Dict[str, Any]] = []
+        if response.candidates:
+            cand = response.candidates[0]
+            gm = getattr(cand, "grounding_metadata", None) or getattr(cand, "groundingMetadata", None)
+            if gm:
+                chunks = getattr(gm, "grounding_chunks", None) or getattr(gm, "groundingChunks", None) or []
+                for i, ch in enumerate(chunks[:num_results]):
+                    web = getattr(ch, "web", None) if hasattr(ch, "web") else (ch.get("web") if isinstance(ch, dict) else None)
+                    if not web:
+                        continue
+                    uri = getattr(web, "uri", None) or (web.get("uri") if isinstance(web, dict) else None)
+                    title = getattr(web, "title", None) or (web.get("title") if isinstance(web, dict) else None) or ""
+                    uri_str = str(uri).strip()
+                    if uri_str and (uri_str.startswith("http://") or uri_str.startswith("https://")):
+                        results.append({
+                            "title": str(title) if title else f"Result {i+1}",
+                            "link": uri_str,
+                            "snippet": (response.text or "")[:200] if response.text else "",
+                            "_source": "google",
+                        })
+
+        logger.info("[WATCHDOG] 🌐  SOURCE=google_search (Grounding) → %d result(s) for query: %r",
+                    len(results), query[:80])
+        for g in results:
+            logger.info(
+                "  ├─ [GOOGLE_SEARCH]   title=%-55s | url=%s",
+                (g.get("title") or "?")[:55],
+                (g.get("link") or "?")[:80],
+            )
+            _db_log(run_id, "watchdog", "watchdog", "INFO",
+                    f"  🌐 Google (Grounding): {(g.get('title') or '?')[:70]} | {(g.get('link') or '')[:60]}",
+                    {"source": "google", "title": g.get("title"), "url": g.get("link")})
+        _db_log(run_id, "watchdog", "watchdog", "INFO",
+                f"🌐 Google Search (Grounding) → {len(results)} result(s)",
+                {"source": "google_search", "count": len(results)})
+        try:
+            from utils.usage_tracker import record_gemini
+            record_gemini(run_id, user_id or "anonymous", "grounding", is_grounding=True)
+        except Exception:
+            pass
+        return results
+    except Exception as e:
+        logger.warning("Google Search (Grounding) failed: %s", e)
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Google Search (Grounding) failed: {e}")
+        return []
+
+
+def _search_google_serper(query: str, num_results: int = 5, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Serper API for Indian law judgements. Used only when WATCHDOG_USE_CLAUDE_SEARCH or WATCHDOG_GOOGLE_SEARCH_PROVIDER=serper."""
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key:
+        logger.warning("SERPER_API_KEY not set; skipping Serper search.")
+        _db_log(run_id, "watchdog", "watchdog", "WARNING",
+                "🌐 Serper skipped — SERPER_API_KEY not configured")
+        return []
+
+    try:
+        _db_log(run_id, "watchdog", "watchdog", "INFO", f"🌐 Querying Serper API: {query[:80]!r}")
         search_query = f"{query} Indian law judgement Supreme Court High Court site:indiankanoon.org OR site:supremecourtofindia.nic.in OR site:judgments.ecourts.gov.in"
         payload = {"q": search_query, "num": num_results}
         body = json.dumps(payload).encode("utf-8")
@@ -151,7 +247,8 @@ def _search_google(query: str, num_results: int = 5, run_id: Optional[str] = Non
             }
             for item in organic[:num_results]
         ]
-        logger.info("[WATCHDOG] 🌐  SOURCE=google_search  → %d result(s) for query: %r", len(results), query[:80])
+        logger.info("[WATCHDOG] 🌐  SOURCE=google_search (Serper) → %d result(s) for query: %r",
+                    len(results), query[:80])
         for g in results:
             logger.info(
                 "  ├─ [GOOGLE_SEARCH]   title=%-55s | url=%s",
@@ -159,16 +256,35 @@ def _search_google(query: str, num_results: int = 5, run_id: Optional[str] = Non
                 (g.get("link") or "?")[:80],
             )
             _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"  🌐 Google: {(g.get('title') or '?')[:70]} | {(g.get('link') or '')[:60]}",
+                    f"  🌐 Serper: {(g.get('title') or '?')[:70]} | {(g.get('link') or '')[:60]}",
                     {"source": "google", "title": g.get("title"), "url": g.get("link")})
         _db_log(run_id, "watchdog", "watchdog", "INFO",
-                f"🌐 Google Search → {len(results)} result(s)",
+                f"🌐 Serper → {len(results)} result(s)",
                 {"source": "google_search", "count": len(results)})
+        try:
+            from utils.usage_tracker import record_serper
+            record_serper(run_id, user_id or "anonymous", searches=1)
+        except Exception:
+            pass
         return results
     except Exception as e:
-        logger.warning("Google/Serper search failed: %s", e)
-        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Google Search failed: {e}")
+        logger.warning("Serper search failed: %s", e)
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Serper failed: {e}")
         return []
+
+
+def _search_google(query: str, num_results: int = 5, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Google search: uses Gemini Google Grounding by default.
+    Falls back to Serper only when WATCHDOG_USE_CLAUDE_SEARCH or WATCHDOG_GOOGLE_SEARCH_PROVIDER=serper.
+    """
+    if _use_serper_for_google_search():
+        return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
+    result = _search_google_grounding(query, num_results=num_results, run_id=run_id, user_id=user_id)
+    if not result and os.environ.get("SERPER_API_KEY"):
+        logger.info("[WATCHDOG] Google Grounding returned no results; falling back to Serper")
+        return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
+    return result
 
 
 def run_watchdog(
@@ -178,6 +294,7 @@ def run_watchdog(
     max_google: int = 5,
     keyword_sets: Optional[List[str]] = None,
     run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run Watchdog: search local DB first, then Indian Kanoon API, then Google.
@@ -227,14 +344,14 @@ def run_watchdog(
         if not q:
             return qi, q, [], []
         _db_log(run_id, "watchdog", "watchdog", "INFO", f"🔎 Keyword set {qi}/{len(queries)}: {q[:80]!r}")
-        ik_results = _search_indian_kanoon(q, limit=per_ik, run_id=run_id)
+        ik_results = _search_indian_kanoon(q, limit=per_ik, run_id=run_id, user_id=user_id)
         if not ik_results:
             logger.info("[WATCHDOG] IK returned 0 for query %r → Google fallback", q[:60])
             _db_log(run_id, "watchdog", "watchdog", "INFO",
                     f"📚 Indian Kanoon returned 0 for this query → falling back to Google")
-            google_results = _search_google(q, num_results=per_google, run_id=run_id)
+            google_results = _search_google(q, num_results=per_google, run_id=run_id, user_id=user_id)
             return qi, q, [], google_results
-        google_results = _search_google(q, num_results=per_google, run_id=run_id)
+        google_results = _search_google(q, num_results=per_google, run_id=run_id, user_id=user_id)
         return qi, q, ik_results, google_results
 
     active_queries = [(qi, q) for qi, q in enumerate(queries, 1) if (q or "").strip()]
@@ -277,7 +394,11 @@ def run_watchdog(
         or os.environ.get("INDIAN_KANOON_API_TOKEN")
         or os.environ.get("IK_API_TOKEN")
     )
-    google_enabled = bool(os.environ.get("SERPER_API_KEY"))
+    google_enabled = (
+        bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+        if not _use_serper_for_google_search()
+        else bool(os.environ.get("SERPER_API_KEY"))
+    )
     search_keywords_by_route = {
         "local": _unique_nonempty([primary_query]) if primary_query else [],
         "indian_kanoon": _unique_nonempty(queries) if ik_enabled else [],

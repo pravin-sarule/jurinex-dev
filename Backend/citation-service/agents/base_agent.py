@@ -69,9 +69,9 @@ class BaseAgent:
     # ── Gemini helper ────────────────────────────────────────────────────────
     def _gemini(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.1) -> Optional[str]:
         """Call Gemini via google-genai SDK."""
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            logger.warning("[%s] GOOGLE_API_KEY not set", self.name)
+            logger.warning("[%s] GEMINI_API_KEY not set", self.name)
             return None
         try:
             from google import genai as _genai
@@ -111,7 +111,16 @@ class BaseAgent:
         return None
 
     # ── Claude helper (Sonnet) ──────────────────────────────────────────────
-    def _claude(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.1, **kwargs) -> Optional[str]:
+    def _claude(
+        self,
+        prompt: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.1,
+        run_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        operation: str = "generate",
+        **kwargs,
+    ) -> Optional[str]:
         """
         Call Claude Sonnet via Anthropic Messages API using claude_proxy.forward_to_claude.
         Accepts extra **kwargs (from llm_parameters) and merges them into the request body.
@@ -119,12 +128,12 @@ class BaseAgent:
         """
         from claude_proxy import forward_to_claude
 
-        model = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+        model = kwargs.pop("model", None) or os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+        _run_id = kwargs.pop("_run_id", run_id)
+        _user_id = kwargs.pop("_user_id", user_id)
+        _operation = kwargs.pop("_operation", operation)
         
-        # Start with any additional kwargs from llm_parameters
         body = dict(kwargs)
-        
-        # Override with explicit required fields
         body["model"] = model
         body["max_tokens"] = max_tokens
         body["temperature"] = temperature
@@ -139,7 +148,19 @@ class BaseAgent:
             return None
 
         try:
-            # Anthropic Messages API: content is a list of blocks; we join all text blocks
+            usage = resp.get("usage") or {}
+            ti = int(usage.get("input_tokens") or 0)
+            to = int(usage.get("output_tokens") or 0)
+            if _run_id is not None or _user_id:
+                try:
+                    from utils.usage_tracker import record_claude
+                    record_claude(_run_id, _user_id or "anonymous", _operation, tokens_in=ti, tokens_out=to, model=model)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
             blocks = resp.get("content") or []
             parts: List[str] = []
             for b in blocks:

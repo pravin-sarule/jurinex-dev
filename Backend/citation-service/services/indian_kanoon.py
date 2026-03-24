@@ -398,6 +398,8 @@ def ik_enrich_candidate_cached(
     maxcitedby: int = 10,
     cache_ttl_hours: int = 24,
     force_refresh: bool = False,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Like ik_enrich_candidate() but checks ik_document_assets DB cache first.
@@ -528,6 +530,24 @@ def ik_enrich_candidate_cached(
         })
     else:
         api_log.append({"endpoint": f"/origdoc/{doc_id}/", "status": "SKIPPED", "reason": "fetch_origdoc=False"})
+
+    # ── 2b. Record usage for live API calls (skip cache hits) ───────────────────
+    try:
+        from utils.usage_tracker import record_ik
+        uid = user_id or "anonymous"
+        for entry in api_log:
+            ep = entry.get("endpoint", "")
+            st = entry.get("status", "")
+            if st in ("OK", "FAIL") and "/doc/" in ep and "fragment" not in ep and "meta" not in ep:
+                record_ik(run_id, uid, "document", count=1)
+            elif st in ("OK", "FAIL") and "/docfragment/" in ep:
+                record_ik(run_id, uid, "fragment", count=1)
+            elif st in ("OK", "FAIL") and "/docmeta/" in ep:
+                record_ik(run_id, uid, "meta", count=1)
+            elif st in ("OK",) and "/origdoc/" in ep:
+                record_ik(run_id, uid, "orig_doc", count=1)
+    except Exception:
+        pass
 
     # ── 3. Persist to DB cache ─────────────────────────────────────────────────
     try:

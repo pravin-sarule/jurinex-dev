@@ -178,12 +178,18 @@ Complete judgment text (read thoroughly for all 10 points):
 JSON:"""
 
 
-def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional[Dict[str, Any]]:
+def _gemini_extract(
+    raw_text: str,
+    title: str = "",
+    query: str = "",
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Use Gemini to extract ALL 10 mandatory citation points from the COMPLETE judgment text.
     Prompt and model are resolved dynamically from Draft_DB, with in-code fallback.
     """
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         logger.error("[CLERK] API key missing for Gemini extraction.")
         return None
@@ -235,6 +241,15 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
             config=config,
         )
         parsed = _parse_model_json(resp.text or "")
+        try:
+            um = getattr(resp, "usage_metadata", None)
+            if um:
+                ti = int(getattr(um, "prompt_token_count", 0) or 0)
+                to = int(getattr(um, "response_token_count", 0) or 0)
+                from utils.usage_tracker import record_gemini
+                record_gemini(run_id, user_id or "anonymous", "clerk_extract", tokens_in=ti, tokens_out=to, model=model)
+        except Exception:
+            pass
         if _is_expected_clerk_payload(parsed):
             return parsed
         logger.warning("[CLERK] Gemini returned unexpected JSON shape; retrying with default Clerk prompt")
@@ -245,6 +260,15 @@ def _gemini_extract(raw_text: str, title: str = "", query: str = "") -> Optional
             config=genai.types.GenerateContentConfig(**default_config_kw),
         )
         fallback_parsed = _parse_model_json(fallback_resp.text or "")
+        try:
+            um = getattr(fallback_resp, "usage_metadata", None)
+            if um:
+                ti = int(getattr(um, "prompt_token_count", 0) or 0)
+                to = int(getattr(um, "response_token_count", 0) or 0)
+                from utils.usage_tracker import record_gemini
+                record_gemini(run_id, user_id or "anonymous", "clerk_extract", tokens_in=ti, tokens_out=to, model=default_model)
+        except Exception:
+            pass
         if _is_expected_clerk_payload(fallback_parsed):
             return fallback_parsed
 
@@ -412,7 +436,13 @@ def _court_code(court_name: str) -> str:
     return name[:50]
 
 
-def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Optional[str] = None) -> List[str]:
+def clerk_ingest_ik(
+    doc_list: List[Dict[str, Any]],
+    query: str = "",
+    case_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> List[str]:
     """Ingest documents from Indian Kanoon API results. case_id = original case for report (for Qdrant payload)."""
     def _process_doc(doc: Dict[str, Any]) -> Optional[str]:
         from agents.legal_citation_agent import LegalCitationAgent
@@ -431,9 +461,9 @@ def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Op
         source_url = f"https://indiankanoon.org/doc/{tid}/" if tid else ""
 
         # 1. Gemini Extraction (OCR + Structure). CHECK 6: re-extract once if ratio/citation empty.
-        extracted = _gemini_extract(raw_text, title=title, query=query)
+        extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         if extracted and not (extracted.get("ratio") or "").strip() and not (extracted.get("primaryCitation") or "").strip():
-            extracted = _gemini_extract(raw_text, title=title, query=query)
+            extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         info = _merge_extraction(extracted, title)
 
         # 2. Chunking for ES/Qdrant
@@ -532,7 +562,13 @@ def clerk_ingest_ik(doc_list: List[Dict[str, Any]], query: str = "", case_id: Op
     return new_ids
 
 
-def clerk_ingest_google(doc_list: List[Dict[str, Any]], query: str = "", case_id: Optional[str] = None) -> List[str]:
+def clerk_ingest_google(
+    doc_list: List[Dict[str, Any]],
+    query: str = "",
+    case_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> List[str]:
     """Ingest documents from Google / Serper / Web results. case_id = original case for report (for Qdrant payload)."""
     def _process_doc(doc: Dict[str, Any]) -> Optional[str]:
         from agents.legal_citation_agent import LegalCitationAgent
@@ -549,9 +585,9 @@ def clerk_ingest_google(doc_list: List[Dict[str, Any]], query: str = "", case_id
         url = doc.get("link") or doc.get("url") or ""
 
         # 1. Gemini Extraction. CHECK 6: re-extract once if ratio/citation empty.
-        extracted = _gemini_extract(raw_text, title=title, query=query)
+        extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         if extracted and not (extracted.get("ratio") or "").strip() and not (extracted.get("primaryCitation") or "").strip():
-            extracted = _gemini_extract(raw_text, title=title, query=query)
+            extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         info = _merge_extraction(extracted, title)
 
         # 2. Chunking for ES/Qdrant

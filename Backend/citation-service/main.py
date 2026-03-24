@@ -37,11 +37,14 @@ from db.client import (
     hitl_queue_list_by_report,
     hitl_queue_update_status,
     hitl_queue_pending_count,
-    hitl_queue_insert,
     agent_logs_by_run,
     judgement_get,
     judgement_search_local,
     analytics_get_enterprise_dashboard,
+    usage_get_aggregate,
+    usage_get_user_breakdown,
+    usage_get_by_run,
+    pipeline_run_get_user_id,
     report_share,
     report_get_shares,
     report_list_firm_shared,
@@ -49,6 +52,7 @@ from db.client import (
 )
 from db.connections import get_qdrant_client, get_neo4j_driver
 from pipeline import run_pipeline
+from utils.usage_analytics import normalize_aggregate_by_service, normalize_user_by_service
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -87,6 +91,24 @@ def _decode_jwt(request: Request) -> Dict[str, Any]:
         return {}
 
 
+def _resolve_citation_user_id(request: Optional[Request], body_user_id: Optional[str]) -> str:
+    """
+    Prefer user_id from the request body when it is a real id (not anonymous).
+    Otherwise derive from JWT so usage/citation rows match the logged-in user when the client
+    sends Bearer token but body still says anonymous.
+    """
+    raw = (body_user_id or "").strip()
+    if raw and raw.lower() not in ("anonymous", "unknown", "null", "undefined"):
+        return raw
+    if request is None:
+        return raw or "anonymous"
+    payload = _decode_jwt(request)
+    uid = payload.get("id") or payload.get("userId") or payload.get("sub")
+    if uid is not None and str(uid).strip():
+        return str(uid).strip()
+    return raw or "anonymous"
+
+
 def _get_token_account_type(request: Request) -> Optional[str]:
     """Return account_type claim from JWT (uppercased), or None."""
     payload = _decode_jwt(request)
@@ -108,6 +130,50 @@ async def _fetch_firm_members(user_id: int) -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("[AUTH] firm-members fetch failed for user %s: %s", user_id, exc)
     return [{"user_id": user_id, "email": str(user_id), "username": str(user_id), "auth_type": "—", "role": "—"}]
+
+
+async def _usage_analytics_resolve_user_ids(
+    account_type: str,
+    scope: str,
+    caller_id: Any,
+) -> tuple[Optional[List[str]], Dict[str, Dict[str, Any]]]:
+    """
+    Firm admins: always restrict to firm members (never platform-wide).
+    Super admins: scope=platform → all users (None); scope=firm → caller's firm members.
+    Returns (user_ids or None for entire platform, display map).
+    """
+    user_info_map: Dict[str, Dict[str, Any]] = {}
+    user_ids: Optional[List[str]] = None
+
+    if account_type == "SUPER_ADMIN" and scope == "platform":
+        return None, {}
+
+    # FIRM_ADMIN always firm-scoped; SUPER_ADMIN + firm uses same firm list
+    if not caller_id:
+        return [], {}
+    try:
+        cid = int(caller_id)
+        members = await _fetch_firm_members(cid)
+        if members:
+            bulk_users = await _fetch_users_bulk([int(m.get("user_id")) for m in members if m.get("user_id")])
+            if bulk_users:
+                members = bulk_users
+        else:
+            members = [{"user_id": cid, "username": str(cid), "email": str(cid)}]
+        for m in members:
+            uid_str = str(m.get("user_id", ""))
+            if uid_str:
+                user_ids = user_ids or []
+                user_ids.append(uid_str)
+                user_info_map[uid_str] = {
+                    "display_name": m.get("username") or m.get("email") or uid_str,
+                    "username": m.get("username") or m.get("email") or uid_str,
+                }
+    except Exception as exc:
+        logger.warning("[USAGE_ANALYTICS] resolve user scope failed: %s", exc)
+        user_ids = [str(caller_id)] if caller_id else []
+
+    return user_ids, user_info_map
 
 
 async def _fetch_users_bulk(user_ids: List[int]) -> List[Dict[str, Any]]:
@@ -832,6 +898,7 @@ async def generate_citation_report(
     **Returns (agent only):** success, report, citations, confidence.
     """
     query = (query or "").strip()
+    user_id = _resolve_citation_user_id(request, user_id)
     # If case_id provided, fetch case context from document-service when missing
     if case_id and not case_file_context:
         auth_header = request.headers.get("authorization") if request else None
@@ -842,7 +909,7 @@ async def generate_citation_report(
             from agents.root_agent import KeywordExtractorAgent, AgentContext
             ctx = AgentContext(
                 query="",
-                user_id=user_id or "anonymous",
+                user_id=user_id,
                 case_id=case_id,
                 metadata={"case_file_context": case_file_context or []},
             )
@@ -863,7 +930,7 @@ async def generate_citation_report(
         try:
             out = run_pipeline(
                 query,
-                user_id or "anonymous",
+                user_id,
                 ingest_external=True,
                 case_file_context=case_file_context or [],
                 case_id=case_id,
@@ -876,46 +943,34 @@ async def generate_citation_report(
         if out.get("error"):
             raise HTTPException(status_code=500, detail=out["error"])
 
-        # Auto-queue RED / PENDING citations to HITL table
+        # HITL rows for RED/YELLOW/PENDING/STALE citations are created in CitationRootAgent
+        # (hitl_enqueue_citations_from_report) so async /citation/report/start and this path stay consistent.
         report_id_out = out.get("report_id")
         run_id_out = out.get("run_id")
         fmt = out.get("report_format") or {}
-        cits = (fmt.get("citations") or []) if isinstance(fmt, dict) else []
-        for cit in cits:
-            vs = cit.get("verificationStatus", "")
-            if vs not in ("RED", "PENDING"):
-                continue
-            try:
-                ps = float(cit.get("priorityScore") or 0)
-                reason = "web_unverified" if vs == "PENDING" else "verification_failed"
-                cit_string = cit.get("primaryCitation") or cit.get("caseName") or ""
-                web_url = (
-                    cit.get("importSourceLink")
-                    or cit.get("sourceUrl")
-                    or cit.get("officialSourceLink")
-                    or ""
-                )
-                ticket_id = hitl_queue_insert(
-                    report_id=report_id_out or None,    # nullable — queues even without report_id
-                    run_id=run_id_out or None,
-                    canonical_id=cit.get("canonicalId") or cit.get("id") or "unknown",
-                    user_id=user_id or "anonymous",
-                    citation_snapshot={**cit, "priorityScore": ps, "queryContext": query[:300]},
-                    reason_queued=reason,
-                    case_id=case_id,
-                    citation_string=cit_string[:512] if cit_string else None,
-                    query_context=query[:2000] if query else None,
-                    web_source_url=web_url[:2000] if web_url else None,
-                    priority_score=ps,
-                )
-                cit["hitlTicketId"] = ticket_id
-                logger.info("[HITL] Queued %s citation '%s' → ticket %s (priority=%.2f)", vs, cit_string[:40], ticket_id, ps)
-            except Exception as hitl_err:
-                logger.warning("[HITL] Failed to queue citation: %s", hitl_err)
 
         _perspective = (perspective or "all").lower().strip()
         if isinstance(fmt, dict):
             fmt = {**fmt, "perspective": _perspective}
+            if run_id_out:
+                try:
+                    from utils.pricing import inr_to_usd
+
+                    usage_rows = usage_get_by_run(run_id_out)
+                    total_inr = sum(float(r.get("cost_inr") or 0) for r in usage_rows)
+                    total_usd = sum(float(r.get("cost_usd") or 0) for r in usage_rows)
+                    if total_inr and not total_usd:
+                        total_usd = inr_to_usd(total_inr)
+                    fmt = {
+                        **fmt,
+                        "runCostInr": round(total_inr, 4),
+                        "runCostUsd": round(total_usd, 6),
+                        "runUsageRecordCount": len(usage_rows),
+                    }
+                    if report_id_out:
+                        report_update(report_id_out, report_format=fmt)
+                except Exception as exc:
+                    logger.warning("[citation/report] attach run usage costs failed: %s", exc)
 
         return {
             "success": True,
@@ -1406,8 +1461,8 @@ async def get_enterprise_analytics(
     """
     payload = _decode_jwt(request)
     account_type = str(payload.get("account_type") or "").upper() or None
-    if account_type and account_type != "FIRM_ADMIN":
-        raise HTTPException(status_code=403, detail="Access restricted to firm administrators.")
+    if account_type and account_type not in ("FIRM_ADMIN", "SUPER_ADMIN"):
+        raise HTTPException(status_code=403, detail="Access restricted to firm administrators or super admins.")
 
     # Fetch all firm members (id + email + username + auth_type + role) for the calling user
     caller_id = payload.get("id") or payload.get("userId")
@@ -1474,6 +1529,118 @@ async def get_enterprise_analytics(
     return {"success": True, **data}
 
 
+@app.get("/citation/analytics/usage")
+async def get_citation_usage_analytics(
+    request: Request,
+    days: int = Query(30, ge=1, le=365, description="Number of days for usage summary"),
+    scope: str = Query("firm", description="Scope: 'firm' (firm members) or 'platform' (all users, SUPER_ADMIN only)"),
+) -> Dict[str, Any]:
+    """
+    Admin-only third-party cost analytics (stored in DB; not shown to end users in product).
+    Costs are tracked per provider: gemini, claude, document_ai, indian_kanoon, serper.
+    - FIRM_ADMIN: always firm-scoped (own firm members only).
+    - SUPER_ADMIN + scope=platform: all users / all firms.
+    - SUPER_ADMIN + scope=firm: same as firm admin (caller's firm members).
+    """
+    payload = _decode_jwt(request)
+    account_type = str(payload.get("account_type") or "").upper() or None
+    caller_id = payload.get("id") or payload.get("userId")
+
+    if account_type not in ("FIRM_ADMIN", "SUPER_ADMIN"):
+        raise HTTPException(status_code=403, detail="Access restricted to firm administrators or super admins.")
+
+    scope = (scope or "firm").strip().lower()
+    if scope not in ("firm", "platform"):
+        scope = "firm"
+    if scope == "platform" and account_type != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Platform-wide scope requires SUPER_ADMIN.")
+
+    # FIRM_ADMIN ignores scope=platform — always firm-only
+    effective_scope = "firm" if account_type == "FIRM_ADMIN" else scope
+    user_ids, user_info_map = await _usage_analytics_resolve_user_ids(account_type, effective_scope, caller_id)
+
+    agg = usage_get_aggregate(days=days, user_ids=user_ids)
+    by_user_raw = usage_get_user_breakdown(days=days, user_ids=user_ids)
+
+    by_user: List[Dict[str, Any]] = []
+    for row in by_user_raw:
+        uid = row.get("user_id") or "unknown"
+        info = user_info_map.get(uid) or {}
+        raw_svc = row.get("by_service") or {}
+        stored_name = (row.get("user_display_name") or "").strip()
+        stored_un = (row.get("username") or "").strip()
+        display = (
+            info.get("display_name")
+            or stored_name
+            or stored_un
+            or info.get("username")
+            or uid
+        )
+        by_user.append({
+            "user_id": uid,
+            "display_name": display,
+            "username": info.get("username") or stored_un or display,
+            "total_cost_inr": row.get("total_cost_inr", 0),
+            "total_cost_usd": row.get("total_cost_usd", 0),
+            "runs": row.get("runs", 0),
+            "cost_stores": normalize_user_by_service(raw_svc),
+            "by_service": raw_svc,
+        })
+
+    return {
+        "success": True,
+        "effective_scope": effective_scope,
+        "summary": {
+            "total_cost_inr": agg.get("total_cost_inr", 0),
+            "total_cost_usd": agg.get("total_cost_usd", 0),
+            "cost_stores": normalize_aggregate_by_service(agg.get("by_service")),
+            "by_service": agg.get("by_service", {}),
+            "total_queries": agg.get("total_queries", 0),
+            "active_users": len(by_user),
+        },
+        "by_user": by_user,
+    }
+
+
+@app.get("/citation/analytics/usage/by-run/{run_id}")
+async def get_citation_usage_by_run(
+    request: Request,
+    run_id: str,
+) -> Dict[str, Any]:
+    """Per-run usage breakdown. Owner or super admin; firm admin only if run belongs to a firm member."""
+    payload = _decode_jwt(request)
+    caller_id = str(payload.get("id") or payload.get("userId") or "")
+    account_type = str(payload.get("account_type") or "").upper()
+
+    if not caller_id and not payload:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    records = usage_get_by_run(run_id)
+    run_user_id = pipeline_run_get_user_id(run_id)
+    if not run_user_id and records:
+        run_user_id = str(records[0].get("user_id") or "")
+
+    if account_type == "FIRM_ADMIN" and caller_id:
+        try:
+            cid = int(caller_id)
+            members = await _fetch_firm_members(cid)
+            mids = {str(m.get("user_id")) for m in members if m.get("user_id")}
+            if run_user_id and str(run_user_id) not in mids:
+                raise HTTPException(status_code=403, detail="This run is not part of your firm.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("[USAGE_BY_RUN] firm check failed: %s", exc)
+
+    if account_type not in ("FIRM_ADMIN", "SUPER_ADMIN") and str(run_user_id or "") != str(caller_id):
+        raise HTTPException(status_code=403, detail="Access restricted to run owner or admin.")
+
+    if not records:
+        return {"success": True, "run_id": run_id, "records": [], "user_id": run_user_id}
+
+    return {"success": True, "run_id": run_id, "user_id": run_user_id, "records": records}
+
+
 # In-memory run state: run_id → {status, report_id, report_format, error}
 _run_state: Dict[str, Dict[str, Any]] = {}
 
@@ -1493,7 +1660,7 @@ async def start_citation_report(
     from db.connections import get_pg_conn
 
     query = (query or "").strip()
-    user_id = (user_id or "anonymous").strip()
+    user_id = _resolve_citation_user_id(request, user_id)
     perspective = (perspective or "all").strip().lower() or "all"
 
     # Fetch case context from document-service when case_id is provided but context is missing.
@@ -1531,6 +1698,7 @@ async def start_citation_report(
                     "case_file_context": case_file_context or [],
                     "ingest_external": True,
                     "run_id": run_id,
+                    "user_id": user_id,
                     "perspective": perspective,
                 },
             )
@@ -1539,8 +1707,29 @@ async def start_citation_report(
             if result.success:
                 report_format = result.data.get("report_format") or {}
                 if isinstance(report_format, dict):
-                    citations = report_format.get("citations") or []
                     report_format = {**report_format, "perspective": perspective if perspective and perspective != "all" else "all"}
+                    try:
+                        from utils.pricing import inr_to_usd
+
+                        usage_rows = usage_get_by_run(run_id)
+                        total_inr = sum(float(r.get("cost_inr") or 0) for r in usage_rows)
+                        total_usd = sum(float(r.get("cost_usd") or 0) for r in usage_rows)
+                        if total_inr and not total_usd:
+                            total_usd = inr_to_usd(total_inr)
+                        report_format = {
+                            **report_format,
+                            "runCostInr": round(total_inr, 4),
+                            "runCostUsd": round(total_usd, 6),
+                            "runUsageRecordCount": len(usage_rows),
+                        }
+                    except Exception as exc:
+                        logger.warning("[START] attach run usage costs failed: %s", exc)
+                    rid_out = result.data.get("report_id")
+                    if rid_out:
+                        try:
+                            report_update(rid_out, report_format=report_format)
+                        except Exception as exc:
+                            logger.warning("[START] report_update after cost attach failed: %s", exc)
                 _set_run_state(run_id, {
                     "status": "completed",
                     "report_id": result.data.get("report_id"),
