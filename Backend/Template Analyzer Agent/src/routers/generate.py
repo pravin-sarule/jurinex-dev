@@ -314,7 +314,8 @@ DOCUMENT STRUCTURE RULES:
 9. ALL section headings must be in ALL CAPS
 10. Include all standard sections: Title, Parties, Recitals/Background, Definitions, Operative Clauses, Representations & Warranties, Term & Termination, Governing Law, Dispute Resolution, Miscellaneous, Signature Block
 11. Minimum 1500 words — be thorough, comprehensive and professionally worded
-12. The document must be ready to use in Indian courts and for official registration"""
+12. The document must be ready to use in Indian courts and for official registration
+13. LANGUAGE: Strictly follow the language instruction given in the user message. If a non-English language is specified, write the ENTIRE document — every section, clause, heading, and paragraph — in that language. Do NOT default to English. Only __placeholder__ field names may remain in English."""
 
 
 async def _call_claude_json(system: str, user_msg: str) -> str:
@@ -416,14 +417,39 @@ async def generate_template(
         answer = body.answers.get(qid, "Not provided")
         qa_lines.append(f"  • {question_text}\n    Answer: {answer}")
 
+    # Build language directive — make it prominent when non-English is selected
+    selected_language = body.language or "English"
+    if selected_language.lower() == "english":
+        lang_directive = "Language: English (formal legal English)"
+    elif "+" in selected_language or "bilingual" in selected_language.lower():
+        parts = selected_language.split("+")
+        lang1 = parts[0].strip()
+        lang2 = parts[1].strip() if len(parts) > 1 else "Hindi"
+        lang_directive = (
+            f"BILINGUAL DOCUMENT REQUIRED: Draft every section TWICE — "
+            f"first in {lang1}, then immediately the {lang2} translation of the same section. "
+            f"Label each: '{lang1} Version:' and '{lang2} Version:'. "
+            f"Both versions must be complete and legally accurate."
+        )
+    else:
+        lang_directive = (
+            f"CRITICAL LANGUAGE REQUIREMENT: The ENTIRE document MUST be written ONLY in {selected_language}. "
+            f"Do NOT use English anywhere in the document body. "
+            f"All section headings, clauses, recitals, definitions, obligations, and the signature block "
+            f"must be in {selected_language}. "
+            f"Only __placeholder__ field names may remain in English (e.g. __party1_name__)."
+        )
+
     user_msg = f"""Draft a complete "{body.document_type}" legal template for Indian jurisdiction.
+
+*** {lang_directive} ***
 
 User has provided the following information:
 {chr(10).join(qa_lines)}
 
 Additional details:
   • Jurisdiction: {body.jurisdiction}
-  • Language: {body.language}
+  • Language: {selected_language}
 
 Create a comprehensive, production-ready template with all standard legal sections.
 Use __placeholder__ syntax for all variable fields throughout the document."""

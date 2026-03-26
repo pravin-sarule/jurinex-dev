@@ -52,10 +52,14 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestLogMiddleware)
 
-# Tables are created by migrations / Backend; we do not run create_all to avoid schema conflicts.
 @app.on_event("startup")
 async def startup():
-    logger.info("Database connection ready (User Templates Service).")
+    # Create tables for AI-generated template models if they don't exist yet.
+    # These tables (user_templates, user_template_fields, user_template_analysis_sections)
+    # are owned by this service and not managed by external migrations.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables ensured (User Templates Service).")
 
 app.include_router(analysis.router)
 app.include_router(generate_router.router)
