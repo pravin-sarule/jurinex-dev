@@ -380,13 +380,16 @@ Return ONLY a valid JSON object with exactly these keys:
 {{
   "persons": [
     {{
-      "role": "petitioner|respondent|witness|other",
+      "role": "petitioner|respondent|testator|executor|licensor|licensee|landlord|tenant|lessor|lessee|vendor|vendee|borrower|lender|trustee|beneficiary|nominee|witness|signatory|other",
       "name": "Full Name",
       "address": "Full Address",
       "occupation": "Occupation or null",
       "contact": "Phone/Email or null",
       "age": "Age or null",
-      "designation": "Designation/title or null"
+      "designation": "Designation/title or null",
+      "pan": "PAN number or null",
+      "aadhaar": "Aadhaar number or null",
+      "relation": "Relation to main party or null"
     }}
   ],
   "property": {{
@@ -535,8 +538,23 @@ def _group_fields(
             "name", "address", "age", "occupation", "father", "husband", "son",
             "daughter", "spouse", "guardian", "petitioner", "applicant",
             "plaintiff", "claimant", "appellant", "party", "client",
+            # Will / agreement / property / corporate templates
+            "testator", "executor", "licensor", "licensee", "landlord", "tenant",
+            "lessor", "lessee", "vendor", "vendee", "borrower", "lender",
+            "settlor", "trustee", "beneficiary", "nominee", "witness",
+            "signatory", "authorized", "contact", "relation", "designation",
+            "pan", "aadhaar", "cin", "gst", "nationality", "religion",
         )):
             buckets["identity"].append(field)
+        elif any(kw in combined for kw in (
+            "property", "premises", "asset", "immovable", "movable", "land",
+            "plot", "survey", "cts", "flat", "floor", "building", "locality",
+            "pincode", "district", "ward", "village", "market_value",
+            "registration", "deed", "bank", "account", "ifsc", "investment",
+            "insurance", "deposit", "security", "fee", "amount", "rent",
+            "salary", "payment", "consideration", "currency", "financial",
+        )):
+            buckets["annexures"].append(field)
         else:
             buckets["others"].append(field)
 
@@ -598,16 +616,22 @@ def _build_canonical_summary(canonical_data: Dict[str, Any]) -> str:
     lines: List[str] = []
     persons = canonical_data.get("persons") or []
     for p in persons:
-        role = (p.get("role") or "party").upper()
-        name = p.get("name") or "N/A"
-        addr = p.get("address") or ""
-        occ  = p.get("occupation") or ""
-        age  = p.get("age") or ""
-        desig= p.get("designation") or ""
-        line = f"{role}: {name}"
+        role  = (p.get("role") or "party").upper()
+        name  = p.get("name") or "N/A"
+        addr  = p.get("address") or ""
+        occ   = p.get("occupation") or ""
+        age   = p.get("age") or ""
+        desig = p.get("designation") or ""
+        pan   = p.get("pan") or ""
+        aadh  = p.get("aadhaar") or ""
+        rel   = p.get("relation") or ""
+        line  = f"{role}: {name}"
         if age:   line += f", Age: {age}"
         if occ:   line += f", Occupation: {occ}"
         if desig: line += f", Designation: {desig}"
+        if rel:   line += f", Relation: {rel}"
+        if pan:   line += f", PAN: {pan}"
+        if aadh:  line += f", Aadhaar: {aadh}"
         if addr:  line += f"\n  Address: {addr}"
         lines.append(line)
 

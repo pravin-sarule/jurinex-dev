@@ -3,7 +3,13 @@
     "allow": [
       "Bash(find c:/Users/ADMIN/jurinex-dev/frontend/src -type f -name *citation* -o -name *report*)",
       "Bash(ls c:/Users/ADMIN/jurinex-dev/Backend/agent-draft-service/ --ignore=venv* --ignore=__pycache__)",
-      "Bash(xargs grep:*)"
+      "Bash(xargs grep:*)",
+      "Bash(python -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(python -c \"from src.routers.generate import router; print\\(''OK''\\)\")",
+      "Bash(venvScriptspip install:*)",
+      "Bash(\"venv/Scripts/pip.exe\" install:*)",
+      "Bash(\"c:\\\\Users\\\\ADMIN\\\\jurinex-dev\\\\Backend\\\\Template Analyzer Agent\\\\venv\\\\Scripts\\\\python.exe\" -c \"import anthropic; print\\(''anthropic'', anthropic.__version__\\)\")",
+      "Bash(\"venv/Scripts/python.exe\" -c \"from src.app import app; print\\(''full app OK''\\)\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\ADMIN\\jurinex-dev\\Backend\\agent-draft-service\\src"

@@ -9,6 +9,44 @@ function getAuthHeader() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** Best-effort logged-in user id for citation usage (matches backend JWT subject). */
+export function resolveCitationUserId() {
+  try {
+    const u = JSON.parse(localStorage.getItem('user') || '{}');
+    const id = u.id ?? u.user_id ?? u.userId;
+    if (id != null && String(id).trim() && String(id).toLowerCase() !== 'anonymous') {
+      return String(id).trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  const token =
+    localStorage.getItem('token') ||
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('access_token') ||
+    localStorage.getItem('jwt') ||
+    localStorage.getItem('auth_token');
+  if (token && typeof token === 'string' && token.split('.').length === 3) {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      const id = payload.id ?? payload.userId ?? payload.sub;
+      if (id != null && String(id).trim()) return String(id).trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  const legacy = localStorage.getItem('userId') || localStorage.getItem('user_id');
+  if (legacy) return String(legacy).trim();
+  return 'anonymous';
+}
+
+function coalesceUserId(explicit) {
+  if (explicit != null && explicit !== '' && String(explicit).toLowerCase() !== 'anonymous') {
+    return String(explicit).trim();
+  }
+  return resolveCitationUserId();
+}
+
 export const citationApi = {
   /**
    * Generate a new citation report (runs full pipeline).
@@ -19,7 +57,7 @@ export const citationApi = {
    *   When set to a specific party, citations are filtered to show only that party's arguments.
    */
   async generateReport(query, userId = 'anonymous', usePipeline = true, caseFileContext = null, caseId = null, perspective = 'all') {
-    const body = { query, user_id: userId, use_pipeline: usePipeline };
+    const body = { query, user_id: coalesceUserId(userId), use_pipeline: usePipeline };
     if (caseFileContext && caseFileContext.length > 0) body.case_file_context = caseFileContext;
     if (caseId) body.case_id = caseId;
     if (perspective && perspective !== 'all') body.perspective = perspective;
@@ -109,7 +147,7 @@ export const citationApi = {
    * perspective: 'all' | 'appellant' | 'respondent' | 'court'
    */
   async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null, perspective = 'all') {
-    const body = { query, user_id: userId, use_pipeline: true };
+    const body = { query, user_id: coalesceUserId(userId), use_pipeline: true };
     if (caseId) body.case_id = caseId;
     if (caseFileContext?.length) body.case_file_context = caseFileContext;
     if (perspective && perspective !== 'all') body.perspective = perspective;
@@ -159,6 +197,22 @@ export const citationApi = {
       headers: getAuthHeader(),
     });
     if (!res.ok) throw new Error('Failed to load analytics');
+    return res.json();
+  },
+
+  /**
+   * Get citation service usage and cost analytics (third-party API costs).
+   * FIRM_ADMIN: firm-scoped. SUPER_ADMIN + scope=platform: platform-wide.
+   * Query params: days, scope (firm|platform)
+   */
+  async getUsageAnalytics(days = 30, scope = 'firm') {
+    const params = new URLSearchParams();
+    if (days) params.set('days', String(days));
+    if (scope) params.set('scope', scope);
+    const res = await fetch(`${CITATION_SERVICE_URL}/citation/analytics/usage?${params}`, {
+      headers: getAuthHeader(),
+    });
+    if (!res.ok) throw new Error('Failed to load usage analytics');
     return res.json();
   },
 

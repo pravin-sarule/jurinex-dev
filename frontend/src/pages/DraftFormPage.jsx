@@ -1150,7 +1150,7 @@ const DraftFormPage = () => {
 
                           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-6">
                             {secFields.map((field) => (
-                              <div key={field.id} className="space-y-1.5 group">
+                              <div key={field.field_id || field.field_name} className="space-y-1.5 group">
                                 <label className="block text-[11px] font-bold text-slate-500 tracking-tight ml-1">
                                   {field.field_label || field.field_name}
                                 </label>

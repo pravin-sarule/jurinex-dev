@@ -13,7 +13,13 @@
       "Bash(node --input-type=module --eval \":*)",
       "Bash(python -c \":*)",
       "Bash(grep -r Configure --include=*.jsx --include=*.js frontend/src)",
-      "Bash(grep -r \"language\\\\|Language\\\\|DRAFT LANGUAGE\" --include=*.jsx --include=*.js frontend/src/pages frontend/src/components)"
+      "Bash(grep -r \"language\\\\|Language\\\\|DRAFT LANGUAGE\" --include=*.jsx --include=*.js frontend/src/pages frontend/src/components)",
+      "Bash(ls -d /c/Users/ADMIN/jurinex-dev/Backend/*/)",
+      "Bash(find c:/Users/ADMIN/jurinex-dev/frontend/src -name CustomTemplate* -o -name custom_template*)",
+      "Read(//c/Users/ADMIN/.claude/projects/c--Users-ADMIN-jurinex-dev/**)",
+      "Bash(python -c \"from src.routers.generate import router; print\\(''generate router OK''\\)\")",
+      "Bash(python -c \"from src.app import app; print\\(''app OK''\\)\")",
+      "Bash(pip install:*)"
     ]
   }
 }

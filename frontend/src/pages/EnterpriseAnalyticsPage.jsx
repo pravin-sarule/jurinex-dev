@@ -1,11 +1,21 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { BarChart3, Users, FileSearch, Clock, TrendingUp, RefreshCw, AlertCircle } from 'lucide-react';
+import { BarChart3, Users, FileSearch, Clock, TrendingUp, RefreshCw, AlertCircle, DollarSign } from 'lucide-react';
 import citationApi from '../services/citationApi';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
 const TEAL = '#21C1B6';
 const NAVY = '#1B2A4A';
+
+/** Matches backend utils/usage_analytics.COST_STORE_KEYS — admin cost breakdown only */
+const COST_STORE_KEYS = ['gemini', 'claude', 'document_ai', 'indian_kanoon', 'serper'];
+const COST_STORE_SHORT = {
+  gemini: 'Gemini',
+  claude: 'Claude',
+  document_ai: 'Doc AI',
+  indian_kanoon: 'IK',
+  serper: 'Serper',
+};
 
 function StatCard({ icon: Icon, label, value, sub, color = TEAL }) {
   return (
@@ -147,18 +157,28 @@ export default function EnterpriseAnalyticsPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [data, setData] = useState(null);
+  const [usageData, setUsageData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [usageLoading, setUsageLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [usageError, setUsageError] = useState(null);
   const [days, setDays] = useState(30);
   const [months, setMonths] = useState(6);
+  const [scope, setScope] = useState('firm');
 
-  // Redirect non-FIRM_ADMIN users
+  // Redirect non-admin users (FIRM_ADMIN or SUPER_ADMIN)
   const accountType = (user?.account_type || '').toUpperCase();
   useEffect(() => {
-    if (user && accountType !== 'FIRM_ADMIN') {
+    if (user && accountType !== 'FIRM_ADMIN' && accountType !== 'SUPER_ADMIN') {
       navigate('/dashboard', { replace: true });
     }
   }, [user, accountType, navigate]);
+
+  // Usage & Costs section: FIRM_ADMIN only (super admins do not see it here)
+  const showUsageCosts = accountType === 'FIRM_ADMIN';
+  useEffect(() => {
+    if (accountType === 'FIRM_ADMIN') setScope('firm');
+  }, [accountType]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -173,7 +193,23 @@ export default function EnterpriseAnalyticsPage() {
     }
   }, [days, months]);
 
+  const loadUsage = useCallback(async () => {
+    setUsageLoading(true);
+    setUsageError(null);
+    try {
+      const res = await citationApi.getUsageAnalytics(days, scope);
+      setUsageData(res);
+    } catch (e) {
+      setUsageError(e.message || 'Failed to load usage analytics');
+    } finally {
+      setUsageLoading(false);
+    }
+  }, [days, scope]);
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (showUsageCosts) loadUsage();
+  }, [loadUsage, showUsageCosts]);
 
   const summary = data?.summary || {};
   const volumeTrend = data?.volume_trend || [];
@@ -181,7 +217,7 @@ export default function EnterpriseAnalyticsPage() {
 
   const timeSavedHrs = Math.round((summary.total_time_saved_minutes || 0) / 60);
 
-  if (accountType && accountType !== 'FIRM_ADMIN') return null;
+  if (accountType && accountType !== 'FIRM_ADMIN' && accountType !== 'SUPER_ADMIN') return null;
 
   return (
     <div style={{ padding: '28px 32px', maxWidth: 1100, margin: '0 auto', fontFamily: 'inherit' }}>
@@ -195,11 +231,14 @@ export default function EnterpriseAnalyticsPage() {
           <p style={{ color: '#556275', fontSize: 13, margin: '4px 0 0 34px' }}>Citation usage across your firm</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {showUsageCosts && (
+            <span style={{ fontSize: 11, color: '#556275' }}>API costs: firm users only</span>
+          )}
           <select value={days} onChange={e => setDays(Number(e.target.value))}
             style={{ border: '1px solid #DDE1E8', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: '#3D4A5C' }}>
             {[7, 14, 30, 60, 90].map(d => <option key={d} value={d}>Last {d} days</option>)}
           </select>
-          <button onClick={load} disabled={loading}
+          <button onClick={() => { load(); if (showUsageCosts) loadUsage(); }} disabled={loading || (showUsageCosts && usageLoading)}
             style={{ background: TEAL, color: '#fff', border: 'none', borderRadius: 8, padding: '7px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
             <RefreshCw size={14} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
             Refresh
@@ -247,7 +286,7 @@ export default function EnterpriseAnalyticsPage() {
       </div>
 
       {/* Team Activity Table */}
-      <div style={{ background: '#fff', borderRadius: 12, padding: 24, border: '1px solid #EEF0F4', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+      <div style={{ background: '#fff', borderRadius: 12, padding: 24, border: '1px solid #EEF0F4', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', marginBottom: 28 }}>
         <div style={{ fontWeight: 600, color: '#1B2A4A', fontSize: 14, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
           <Users size={16} color={TEAL} />
           Team Activity
@@ -258,6 +297,102 @@ export default function EnterpriseAnalyticsPage() {
           <TeamTable rows={teamActivity} />
         )}
       </div>
+
+      {/* Usage & Costs — FIRM_ADMIN only; complete data stored per user in DB (not shown to regular users) */}
+      {showUsageCosts && (
+      <div style={{ background: '#fff', borderRadius: 12, padding: 24, border: '1px solid #EEF0F4', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+        <div style={{ fontWeight: 600, color: '#1B2A4A', fontSize: 14, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <DollarSign size={16} color="#1B5E20" />
+          API costs by provider (firm admin only)
+          <span style={{ fontSize: 11, fontWeight: 600, background: '#E8F5E9', color: '#2E7D32', padding: '2px 8px', borderRadius: 6 }}>Your firm users only</span>
+        </div>
+        <p style={{ fontSize: 11, color: '#8690A2', margin: '0 0 16px 28px', maxWidth: 720 }}>
+          Complete usage data is stored per user in the database. Gemini, Claude, Document AI, Indian Kanoon, and Serper costs are tracked separately for each firm user.
+        </p>
+        {usageError && (
+          <div style={{ color: '#DC2626', fontSize: 13, marginBottom: 12 }}>{usageError}</div>
+        )}
+        {usageLoading ? (
+          <div style={{ color: '#8690A2', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>Loading usage...</div>
+        ) : (
+          <>
+            {usageData?.summary && (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+                  <div style={{ background: '#F8F9FB', borderRadius: 8, padding: 14 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#1B5E20' }}>
+                      ₹{Number(usageData.summary.total_cost_inr || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#556275' }}>Total (INR)</div>
+                  </div>
+                  <div style={{ background: '#F8F9FB', borderRadius: 8, padding: 14 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#1B5E20' }}>
+                      ${Number(usageData.summary.total_cost_usd || 0).toFixed(2)}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#556275' }}>Total (USD)</div>
+                  </div>
+                  <div style={{ background: '#F8F9FB', borderRadius: 8, padding: 14 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#1B2A4A' }}>{usageData.summary.total_queries ?? 0}</div>
+                    <div style={{ fontSize: 12, color: '#556275' }}>Pipeline runs</div>
+                  </div>
+                  <div style={{ background: '#F8F9FB', borderRadius: 8, padding: 14 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#E65100' }}>{usageData.summary.active_users ?? 0}</div>
+                    <div style={{ fontSize: 12, color: '#556275' }}>Users with usage</div>
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#556275', marginBottom: 8 }}>Cost by provider (separate)</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 20 }}>
+                  {COST_STORE_KEYS.map((key) => {
+                    const cs = usageData.summary.cost_stores?.[key];
+                    const label = cs?.label || COST_STORE_SHORT[key];
+                    const inr = Number(cs?.cost_inr ?? usageData.summary.by_service?.[key]?.cost_inr ?? 0);
+                    return (
+                      <div key={key} style={{ background: '#FAFBFC', border: '1px solid #EEF0F4', borderRadius: 8, padding: 12 }}>
+                        <div style={{ fontSize: 11, color: '#556275', marginBottom: 4 }}>{label}</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: '#0F1A30' }}>₹{inr.toFixed(2)}</div>
+                        <div style={{ fontSize: 10, color: '#8690A2' }}>${Number(cs?.cost_usd ?? 0).toFixed(4)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            {usageData?.by_user?.length > 0 && (
+              <div style={{ overflowX: 'auto' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#556275', marginBottom: 8 }}>Per-user cost by provider (INR)</div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 720 }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #EEF0F4' }}>
+                      <th style={{ textAlign: 'left', padding: '8px 10px', color: '#556275', fontWeight: 600 }}>User</th>
+                      {COST_STORE_KEYS.map((k) => (
+                        <th key={k} style={{ textAlign: 'right', padding: '8px 6px', color: '#556275', fontWeight: 600, whiteSpace: 'nowrap' }}>{COST_STORE_SHORT[k]}</th>
+                      ))}
+                      <th style={{ textAlign: 'right', padding: '8px 10px', color: '#556275', fontWeight: 600 }}>Total</th>
+                      <th style={{ textAlign: 'right', padding: '8px 10px', color: '#556275', fontWeight: 600 }}>Runs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usageData.by_user.map((u, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid #F8F9FB' }}>
+                        <td style={{ padding: '10px 10px', color: '#263040', fontWeight: 500 }}>{u.display_name || u.user_id}</td>
+                        {COST_STORE_KEYS.map((k) => {
+                          const v = Number(u.cost_stores?.[k]?.cost_inr ?? u.by_service?.[k]?.cost_inr ?? 0);
+                          return (
+                            <td key={k} style={{ padding: '10px 6px', textAlign: 'right', color: '#3D4A5C' }}>₹{v.toFixed(2)}</td>
+                          );
+                        })}
+                        <td style={{ padding: '10px 10px', textAlign: 'right', color: '#1B5E20', fontWeight: 600 }}>₹{Number(u.total_cost_inr || 0).toFixed(2)}</td>
+                        <td style={{ padding: '10px 10px', textAlign: 'right', color: '#3D4A5C' }}>{u.runs ?? 0}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      )}
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>

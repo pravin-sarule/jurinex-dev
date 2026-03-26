@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { DocumentTextIcon } from '@heroicons/react/24/solid';
 import { toast } from 'react-toastify';
@@ -16,6 +17,7 @@ import './TemplateWizardGallery.css';
  * Each card has a preview icon; clicking the card uses the template (opens draft).
  */
 const TemplateWizardGallery = ({ onTemplateClick }) => {
+  const navigate = useNavigate();
   const [templates, setTemplates] = useState([]);
   const [customTemplates, setCustomTemplates] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -178,6 +180,26 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
             <div className="p-2.5 flex-shrink-0 bg-white border-t border-gray-100 text-center">
               <h3 className="text-sm font-medium text-gray-800 truncate tracking-tight block w-full">
                 Custom Template
+              </h3>
+            </div>
+          </button>
+
+          {/* Generate with AI card */}
+          <button
+            type="button"
+            onClick={() => navigate('/build-template')}
+            className="template-wizard-card template-wizard-card--blank group flex-shrink-0 w-full h-full min-h-0 rounded-lg border border-blue-200 shadow-[0_2px_8px_rgba(66,99,235,0.10)] hover:shadow-[0_6px_20px_rgba(66,99,235,0.18)] hover:border-blue-400 transition-all duration-300 cursor-pointer overflow-hidden flex flex-col text-left focus:outline-none"
+            style={{ background: 'linear-gradient(145deg, #EBF4FF 0%, #EDE9FE 100%)' }}
+          >
+            <div className="relative flex-1 min-h-0 w-full overflow-hidden flex items-center justify-center">
+              <div className="flex flex-col items-center gap-1">
+                <span className="text-3xl group-hover:scale-110 transition-transform duration-300 leading-none">✨</span>
+                <span className="text-xs font-semibold text-indigo-600 opacity-80">AI</span>
+              </div>
+            </div>
+            <div className="p-2.5 flex-shrink-0 border-t border-blue-100 text-center" style={{ background: 'rgba(255,255,255,0.7)' }}>
+              <h3 className="text-sm font-semibold text-indigo-700 truncate tracking-tight block w-full">
+                Generate Template
               </h3>
             </div>
           </button>

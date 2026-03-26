@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = os.getenv("DATABASE_URL")  # Draft_DB
     AUTH_DATABASE_URL: str = os.getenv("AUTH_DATABASE_URL", "")  # Auth_DB for role check (super_admins, admin_roles, users)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY")
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     GCS_KEY_BASE64: str = os.getenv("GCS_KEY_BASE64")
     DOCUMENT_AI_LOCATION: str = os.getenv("DOCUMENT_AI_LOCATION")
     DOCUMENT_AI_PROCESSOR_ID: str = os.getenv("DOCUMENT_AI_PROCESSOR_ID")

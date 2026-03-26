@@ -282,26 +282,33 @@ def _parse_template_fields_json(raw: Any, template_id: str) -> List[Dict[str, An
             return []
 
     fields_list = []
-    
+
     # Logic to extract fields from various JSON structures (list, dict with "fields", dict with "sections")
     if isinstance(raw, list):
         # Case 1: Raw list of fields
         fields_list = raw
     elif isinstance(raw, dict):
-        if "fields" in raw and isinstance(raw["fields"], list):
-            # Case 2: Dict with "fields" key
+        if "all_fields" in raw and isinstance(raw["all_fields"], list) and raw["all_fields"]:
+            # Case 2a: Analyzer output — top-level "all_fields" (preferred, sections may have empty fields arrays)
+            fields_list = raw["all_fields"]
+        elif "fields" in raw and isinstance(raw["fields"], list):
+            # Case 2b: Dict with top-level "fields" key
             fields_list = raw["fields"]
         elif "sections" in raw:
-            # Case 3: Dict with "sections" key
+            # Case 3: Dict with "sections" key — collect from each section's fields array
             sections = raw["sections"]
             if isinstance(sections, list):
-                # Sections is a list of section objects
                 for section in sections:
                     if isinstance(section, dict) and "fields" in section and isinstance(section["fields"], list):
                         fields_list.extend(section["fields"])
             elif isinstance(sections, dict) and "fields" in sections and isinstance(sections["fields"], list):
-                 # Edge case: "sections": {"fields": [...]} (user screenshot looked possibly like this?)
-                 fields_list.extend(sections["fields"])
+                fields_list.extend(sections["fields"])
+
+        # Case 4: Fallback — if fields_list still empty, try hybrid_fields (double-underscore extractor output)
+        if not fields_list and "hybrid_fields" in raw and isinstance(raw.get("hybrid_fields"), dict):
+            hybrid = raw["hybrid_fields"]
+            if isinstance(hybrid.get("fields"), list):
+                fields_list = hybrid["fields"]
 
     result = []
     for idx, f in enumerate(fields_list):
@@ -317,7 +324,7 @@ def _parse_template_fields_json(raw: Any, template_id: str) -> List[Dict[str, An
             "validation_rules": f.get("validation_rules") or None,
             "options": f.get("options") or None,
             "help_text": f.get("help_text") or f.get("description") or "",
-            "field_group": f.get("group") or f.get("field_group") or "Details",
+            "field_group": f.get("group") or f.get("field_group") or f.get("section_id") or "Details",
             "sort_order": f.get("sort_order") if f.get("sort_order") is not None else idx,
         })
     return result

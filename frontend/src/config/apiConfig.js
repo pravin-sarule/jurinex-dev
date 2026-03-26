@@ -18,7 +18,7 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'https://authservice-120280829617.asia-south1.run.app';
+  'http://localhost:5001';
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
   'https://chat-model-120280829617.asia-south1.run.app';
@@ -51,12 +51,12 @@ export const DRAFTING_SERVICE_URL =
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'https://all-drafting-agent-120280829617.asia-south1.run.app';
+  'https://agent-draft-service-120280829617.asia-south1.run.app';
 
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE =
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-  'https://drafting-agents-120280829617.asia-south1.run.app';
+  'https://template-analyzer-service-120280829617.asia-south1.run.app';
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).

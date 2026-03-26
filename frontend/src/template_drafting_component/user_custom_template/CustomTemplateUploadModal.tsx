@@ -3,6 +3,8 @@ import { Logger } from '../utils/logger';
 import { customTemplateApi } from './api';
 import type { CustomTemplateUploadModalProps } from './types';
 
+type ModalMode = 'upload' | 'generate';
+
 const styles = {
     overlay: {
         position: 'fixed' as const,
@@ -230,6 +232,7 @@ export const CustomTemplateUploadModal: React.FC<CustomTemplateUploadModalProps>
     onClose,
     onUploadSuccess,
 }) => {
+    const [mode, setMode] = useState<ModalMode>('upload');
     const [name, setName] = useState('');
     const [category, setCategory] = useState('Contracts');
     const [description, setDescription] = useState('');
@@ -351,7 +354,9 @@ export const CustomTemplateUploadModal: React.FC<CustomTemplateUploadModalProps>
         <div style={styles.overlay}>
             <div style={styles.modal}>
                 <div style={styles.header}>
-                    <h2 style={styles.title}>Upload Custom Template</h2>
+                    <h2 style={styles.title}>
+                        {mode === 'generate' ? 'Generate Template with AI' : 'Upload Custom Template'}
+                    </h2>
                     <button
                         style={styles.closeButton}
                         onClick={onClose}
@@ -368,6 +373,127 @@ export const CustomTemplateUploadModal: React.FC<CustomTemplateUploadModalProps>
                     </button>
                 </div>
 
+                {/* Mode Tab Switcher */}
+                <div style={{ display: 'flex', borderBottom: '1px solid #E2E8F0', backgroundColor: '#F7FAFC' }}>
+                    <button
+                        type="button"
+                        onClick={() => setMode('upload')}
+                        style={{
+                            flex: 1,
+                            padding: '0.75rem 1rem',
+                            fontSize: '0.875rem',
+                            fontWeight: 600,
+                            border: 'none',
+                            borderBottom: mode === 'upload' ? '2px solid #3182CE' : '2px solid transparent',
+                            backgroundColor: 'transparent',
+                            color: mode === 'upload' ? '#3182CE' : '#718096',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s',
+                        }}
+                    >
+                        📄 Upload File
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setMode('generate')}
+                        style={{
+                            flex: 1,
+                            padding: '0.75rem 1rem',
+                            fontSize: '0.875rem',
+                            fontWeight: 600,
+                            border: 'none',
+                            borderBottom: mode === 'generate' ? '2px solid #5A67D8' : '2px solid transparent',
+                            backgroundColor: 'transparent',
+                            color: mode === 'generate' ? '#5A67D8' : '#718096',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s',
+                        }}
+                    >
+                        ✨ Generate with AI
+                    </button>
+                </div>
+
+                {/* Generate with AI Panel */}
+                {mode === 'generate' && (
+                    <div style={{ padding: '2rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                        {/* Hero */}
+                        <div style={{
+                            background: 'linear-gradient(135deg, #EBF4FF 0%, #E8E8FF 100%)',
+                            borderRadius: '12px',
+                            padding: '1.5rem',
+                            textAlign: 'center',
+                            border: '1px solid #C3DAFE',
+                        }}>
+                            <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>⚖️</div>
+                            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#2D3748', margin: '0 0 0.5rem' }}>
+                                AI Legal Template Generator
+                            </h3>
+                            <p style={{ fontSize: '0.875rem', color: '#4A5568', margin: 0, lineHeight: 1.6 }}>
+                                Answer 6 quick questions and let Gemini AI draft a complete,
+                                professionally structured legal template — with numbered clauses,
+                                all standard sections, and auto-detected form fields.
+                            </p>
+                        </div>
+
+                        {/* Feature list */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
+                            {[
+                                ['📋', 'Numbered clauses & standard sections (PARTIES, RECITALS, TERMS…)'],
+                                ['🏷️', 'Auto-extracted form fields with __placeholder__ syntax'],
+                                ['⚖️', 'Jurisdiction-aware — Indian statutes, state-specific law'],
+                                ['🌐', 'Bilingual support (English + Hindi / Marathi / Gujarati…)'],
+                                ['📄', 'Brief to Ultra-Detailed — you control the length'],
+                            ].map(([icon, text]) => (
+                                <div key={String(text)} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.625rem' }}>
+                                    <span style={{ fontSize: '1rem', flexShrink: 0, marginTop: '0.1rem' }}>{icon}</span>
+                                    <span style={{ fontSize: '0.8125rem', color: '#4A5568', lineHeight: 1.5 }}>{text}</span>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* CTA */}
+                        <button
+                            type="button"
+                            onClick={() => {
+                                onClose();
+                                window.location.href = '/build-template';
+                            }}
+                            style={{
+                                padding: '0.875rem 1.5rem',
+                                borderRadius: '10px',
+                                border: 'none',
+                                background: 'linear-gradient(135deg, #4299E1, #5A67D8)',
+                                color: '#FFFFFF',
+                                fontSize: '1rem',
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                                boxShadow: '0 4px 14px rgba(66, 99, 235, 0.35)',
+                                transition: 'all 0.2s',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '0.5rem',
+                            }}
+                            onMouseEnter={(e) => {
+                                e.currentTarget.style.transform = 'translateY(-1px)';
+                                e.currentTarget.style.boxShadow = '0 6px 20px rgba(66, 99, 235, 0.45)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.currentTarget.style.transform = 'translateY(0)';
+                                e.currentTarget.style.boxShadow = '0 4px 14px rgba(66, 99, 235, 0.35)';
+                            }}
+                        >
+                            <span>✨</span> Start AI Template Builder
+                        </button>
+
+                        <p style={{ textAlign: 'center', fontSize: '0.75rem', color: '#A0AEC0', margin: 0 }}>
+                            Takes 30–90 seconds · Saved directly to your template library
+                        </p>
+                    </div>
+                )}
+
+                {/* Upload Form (only shown in upload mode) */}
+                {mode === 'upload' && (
                 <div style={styles.content}>
                     <form id="upload-form" onSubmit={handleSubmit}>
                         <div style={styles.formGroup}>
@@ -599,7 +725,9 @@ export const CustomTemplateUploadModal: React.FC<CustomTemplateUploadModalProps>
                         )}
                     </form>
                 </div>
+                )}
 
+                {mode === 'upload' && (
                 <div style={styles.footer}>
                     <button
                         type="button"
@@ -688,6 +816,7 @@ export const CustomTemplateUploadModal: React.FC<CustomTemplateUploadModalProps>
                         )}
                     </button>
                 </div>
+                )}
 
                 <style>{`
                     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }

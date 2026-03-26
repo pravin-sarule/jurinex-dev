@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from .routers import analysis
+from .routers import generate as generate_router
 from .database import engine, Base
 # Import all models to register them with Base.metadata
 from .models.db_models import UserTemplate, UserTemplateField, UserTemplateAnalysisSection
@@ -57,6 +58,7 @@ async def startup():
     logger.info("Database connection ready (User Templates Service).")
 
 app.include_router(analysis.router)
+app.include_router(generate_router.router)
 
 @app.get("/")
 async def root():

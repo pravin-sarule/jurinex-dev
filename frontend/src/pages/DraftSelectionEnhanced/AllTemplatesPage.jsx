@@ -130,15 +130,25 @@ const AllTemplatesPage = () => {
           <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
             <div>
               <h2 className="text-xl font-bold text-gray-900">My templates</h2>
-              <p className="text-sm text-gray-600 mt-0.5">Templates you created. Upload a document to create a new one.</p>
+              <p className="text-sm text-gray-600 mt-0.5">Templates you created. Upload a document or generate one with AI.</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setUploadModalOpen(true)}
-              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-[#21C1B6]"
-            >
-              Upload custom template
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => navigate('/build-template')}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500 shadow-sm"
+              >
+                <span>✨</span>
+                Generate with AI
+              </button>
+              <button
+                type="button"
+                onClick={() => setUploadModalOpen(true)}
+                className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-[#21C1B6]"
+              >
+                Upload custom template
+              </button>
+            </div>
           </div>
           {customLoading ? (
             <div className="flex gap-4">
@@ -147,7 +157,26 @@ const AllTemplatesPage = () => {
               ))}
             </div>
           ) : customTemplates.length === 0 ? (
-            <p className="text-sm text-gray-500 py-4">No custom templates yet. Click &quot;Upload custom template&quot; to add one.</p>
+            <div className="py-6 flex flex-col items-center gap-4 text-center">
+              <p className="text-sm text-gray-500">No custom templates yet.</p>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => navigate('/build-template')}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm"
+                >
+                  <span>✨</span> Generate with AI
+                </button>
+                <span className="text-xs text-gray-400">or</span>
+                <button
+                  type="button"
+                  onClick={() => setUploadModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-[#21C1B6] border border-[#21C1B6] hover:bg-teal-50"
+                >
+                  Upload a file
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="template-wizard-gallery__uniform-grid">
               {customTemplates.map((t) => (

@@ -63,6 +63,35 @@ function normalizeCourtKey(value) {
   return raw;
 }
 
+/** Party bucket for Appellant / Respondent / Court / Both — uses backend argumentParty plus partyArguments when present. */
+function effectivePartyForSort(c) {
+  const pa = c.partyArguments || c.party_arguments || {};
+  const hasApp = Array.isArray(pa.appellant) && pa.appellant.length > 0;
+  const hasResp = Array.isArray(pa.respondent) && pa.respondent.length > 0;
+  const np = normalizePerspectiveKey(c.argumentParty || c.argument_party || '', 'neutral');
+  if (hasApp && hasResp) return 'neutral';
+  if (hasApp && !hasResp) return 'appellant';
+  if (hasResp && !hasApp) return 'respondent';
+  return np;
+}
+
+/** Whether a citation belongs in the selected party tab (All = no extra filter). */
+function citationMatchesPerspectiveFilter(c, perspectiveFilter) {
+  if (perspectiveFilter === 'all') return true;
+  const pa = c.partyArguments || c.party_arguments || {};
+  const hasApp = Array.isArray(pa.appellant) && pa.appellant.length > 0;
+  const hasResp = Array.isArray(pa.respondent) && pa.respondent.length > 0;
+  const hasCourtArg = Boolean(pa.court) || (typeof pa.court === 'string' && pa.court.trim().length > 0);
+  const np = normalizePerspectiveKey(c.argumentParty || c.argument_party || '', 'neutral');
+  if (perspectiveFilter === 'appellant') return np === 'appellant' || hasApp;
+  if (perspectiveFilter === 'respondent') return np === 'respondent' || hasResp;
+  if (perspectiveFilter === 'court') return np === 'court' || hasCourtArg;
+  if (perspectiveFilter === 'neutral') {
+    return np === 'neutral' || (hasApp && hasResp);
+  }
+  return true;
+}
+
 function analyzeQueryIntent(query) {
   const raw = normalizeSearchText(query);
   if (!raw) return { perspective: 'all', intent: 'general_research' };
@@ -1293,7 +1322,13 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
   ).map(([value, label]) => ({ value, label }));
   const normalizedSearchTerm = normalizeSearchText(searchTerm);
   const filteredCitations = searchableCitations.filter(c => {
-    const matchesParty = perspectiveFilter === 'all' || c.normalizedParty === perspectiveFilter;
+    if (
+      perspectiveFilter !== 'all'
+      && (c.verificationStatus === 'RED' || c.verificationStatus === 'PENDING')
+    ) {
+      return false;
+    }
+    const matchesParty = citationMatchesPerspectiveFilter(c, perspectiveFilter);
     const matchesCourt = selectedCourt === 'all' || c.normalizedCourt === selectedCourt;
     const matchesSearch = !normalizedSearchTerm || c.searchableText.includes(normalizedSearchTerm);
     return matchesParty && matchesCourt && matchesSearch;
@@ -1301,7 +1336,12 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
   const displayCitations = filteredCitations;
 
   useEffect(() => {
-    const next = normalizePerspectiveKey(initialPerspective || report?.report_format?.perspective || 'all', 'all');
+    // Prefer the header Party Filter (initialPerspective) over report_format.perspective so
+    // "All" shows every tagged citation; per-party views only narrow the list client-side.
+    const next = normalizePerspectiveKey(
+      initialPerspective ?? report?.report_format?.perspective ?? 'all',
+      'all',
+    );
     setPerspectiveFilter(['all', 'appellant', 'respondent', 'court', 'neutral'].includes(next) ? next : 'all');
   }, [initialPerspective, report]);
 
@@ -1471,11 +1511,11 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
               </div>
             ) : (() => {
               const sorted = perspectiveFilter === 'all'
-                ? [...displayCitations].sort((a, b) => _PARTY_ORDER.indexOf(a.argumentParty || 'neutral') - _PARTY_ORDER.indexOf(b.argumentParty || 'neutral'))
+                ? [...displayCitations].sort((a, b) => _PARTY_ORDER.indexOf(effectivePartyForSort(a)) - _PARTY_ORDER.indexOf(effectivePartyForSort(b)))
                 : displayCitations;
               return sorted.map((c, idx) => {
-                const prevParty = idx > 0 ? (sorted[idx - 1].argumentParty || 'neutral') : null;
-                const curParty = c.argumentParty || 'neutral';
+                const curParty = effectivePartyForSort(c);
+                const prevParty = idx > 0 ? effectivePartyForSort(sorted[idx - 1]) : null;
                 const showGroupHeader = perspectiveFilter === 'all' && (idx === 0 || prevParty !== curParty);
                 const pbCfg = PARTY_BADGE_CFG[curParty] || PARTY_BADGE_CFG.neutral;
                 const s = SCFG[c.verificationStatus] || SCFG.YELLOW;
@@ -1491,7 +1531,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
                     {showGroupHeader && (
                       <div style={{ padding: '5px 14px', background: pbCfg.bg, borderTop: idx > 0 ? '2px solid #E5E7EB' : 'none', borderBottom: `1px solid ${pbCfg.border}` }}>
                         <span className="doc-sans" style={{ fontSize: 9, fontWeight: 700, color: pbCfg.color, letterSpacing: '.08em', textTransform: 'uppercase' }}>
-                          {pbCfg.emoji} {pbCfg.groupLabel} ({sorted.filter(x => (x.argumentParty || 'neutral') === curParty).length})
+                          {pbCfg.emoji} {pbCfg.groupLabel} ({sorted.filter(x => effectivePartyForSort(x) === curParty).length})
                         </span>
                       </div>
                     )}
@@ -1658,7 +1698,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
 
                   {/* Party perspective badge */}
                   {(() => {
-                    const _party = c.argumentParty || 'neutral';
+                    const _party = effectivePartyForSort(c);
                     const _pbCfg = { appellant: { emoji: '🔵', label: 'RELIED BY APPELLANT', bg: '#EFF6FF', border: '#BFDBFE', color: '#1D4ED8' }, respondent: { emoji: '🟡', label: 'RELIED BY RESPONDENT', bg: '#FFFBEB', border: '#FDE68A', color: '#D97706' }, court: { emoji: '🟢', label: "COURT'S RATIO", bg: '#F0FDF4', border: '#BBF7D0', color: '#166534' }, neutral: { emoji: '⚪', label: 'CITED BY BOTH PARTIES', bg: '#F8FAFC', border: '#E2E8F0', color: '#64748B' } }[_party] || { emoji: '⚪', label: 'CITED BY BOTH PARTIES', bg: '#F8FAFC', border: '#E2E8F0', color: '#64748B' };
                     const _dist = (c.subsequentTreatment?.distinguished || []).length > 0;
                     return (
@@ -2574,14 +2614,15 @@ export default function CitationReportPage({ embedded = false }) {
   const _storedUser = (() => { try { return JSON.parse(localStorage.getItem('user') || '{}'); } catch { return {}; } })();
   const _accountType = (_storedUser?.account_type || '').toUpperCase();
   const isFirmAdmin = _accountType === 'FIRM_ADMIN';
+  const isSuperAdmin = _accountType === 'SUPER_ADMIN';
   const isFirmUser = _accountType === 'FIRM_ADMIN' || _accountType === 'FIRM_USER';
 
-  // tabs — analytics only for firm admins; team for all firm users (admins see full firm, members see shared-with-me)
+  // tabs — analytics for firm admins and super admins; team for all firm users
   const TABS = [
     { id: 'research', label: '⚖️ AI Research' },
     { id: 'search', label: '🔍 Case Search' },
     { id: 'map', label: '🕸️ Citations Map' },
-    ...(isFirmAdmin ? [{ id: 'analytics', label: '📊 Analytics' }] : []),
+    ...(isFirmAdmin || isSuperAdmin ? [{ id: 'analytics', label: '📊 Analytics' }] : []),
     ...(isFirmUser ? [{ id: 'team', label: '👥 Team' }] : []),
   ];
   const [activeTab, setActiveTab] = useState('research');
@@ -2899,7 +2940,7 @@ export default function CitationReportPage({ embedded = false }) {
             if (st.status === 'completed') {
               let rpt = null;
               if (st.report_format) {
-                rpt = { report_id: st.report_id, report_format: st.report_format };
+                rpt = { report_id: st.report_id, report_format: st.report_format, run_id: rid };
               } else if (st.report_id) {
                 rpt = await citationApi.getReport(st.report_id);
               }
@@ -3031,7 +3072,12 @@ export default function CitationReportPage({ embedded = false }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <button onClick={() => setShowReport(false)} style={{ padding: '8px 0', border: 'none', background: 'transparent', fontSize: 13, color: N, fontWeight: 700, cursor: 'pointer' }}>← Back to Research</button>
             <span style={{ color: g300 }}>|</span>
-            <span style={{ fontSize: 12, color: g400 }}>Verified Citation Report · {report?.report_format?.citations?.length || 0} citations</span>
+            <span style={{ fontSize: 12, color: g400 }}>
+              Verified Citation Report · {report?.report_format?.citations?.length || 0} citations
+              {report?.report_format?.runCostInr != null && Number(report.report_format.runCostInr) > 0 && (
+                <span style={{ color: g500 }}> · Est. run cost ₹{Number(report.report_format.runCostInr).toFixed(2)}</span>
+              )}
+            </span>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             {(report?.run_id || runId) && (
               <button

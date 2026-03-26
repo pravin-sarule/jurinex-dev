@@ -468,6 +468,7 @@ import DraftsPage from './pages/DraftsPage';
 import DraftEditorPage from './pages/DraftEditorPage';
 import DraftSelectionPage from './pages/DraftSelectionEnhanced/DraftSelectionPageEnhanced';
 import AllTemplatesPage from './pages/DraftSelectionEnhanced/AllTemplatesPage';
+import { ConversationalBuilder } from './template_builder';
 import DraftFormPage from './pages/DraftFormPage';
 import GoogleDocsPage from './pages/GoogleDocsPage';
 import MicrosoftWordPage from './pages/MicrosoftWordPage';
@@ -716,6 +717,16 @@ function App() {
                 <AuthChecker>
                   <MainLayout>
                     <AllTemplatesPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/build-template"
+              element={
+                <AuthChecker>
+                  <MainLayout useNoPadding={true}>
+                    <ConversationalBuilder />
                   </MainLayout>
                 </AuthChecker>
               }
