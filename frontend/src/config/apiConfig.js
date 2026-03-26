@@ -18,7 +18,7 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'http://localhost:5001';
+  'https://auth-service-120280829617.asia-south1.run.app';
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
   'https://chat-model-120280829617.asia-south1.run.app';
