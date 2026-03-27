@@ -13,6 +13,7 @@ import type {
   ParsedSection,
   GenerationMetadata,
   TemplateRequirements,
+  StructureQuestion,
 } from './templateBuilderStore';
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -62,6 +63,29 @@ function extractError(error: unknown): string {
   return error instanceof Error ? error.message : 'Request failed';
 }
 
+function getPageControl(detailLevel: string): { targetRange: string; hardRule: string; sectionGuidance: string } {
+  const value = (detailLevel || '').toLowerCase();
+  if (value.includes('concise') || value.includes('5-8')) {
+    return {
+      targetRange: '5-8 pages',
+      hardRule: 'Hard rule: keep the generated template within 5-8 pages. Do not exceed 8 pages.',
+      sectionGuidance: 'Use only essential clauses, compact drafting, and minimal schedules.',
+    };
+  }
+  if (value.includes('detailed') || value.includes('15-25')) {
+    return {
+      targetRange: '15-25 pages',
+      hardRule: 'Hard rule: generate a detailed template within 15-25 pages. Do not exceed 25 pages unless explicitly required by law.',
+      sectionGuidance: 'Use exhaustive clauses, fuller definitions, and comprehensive schedules.',
+    };
+  }
+  return {
+    targetRange: '8-15 pages',
+    hardRule: 'Hard rule: keep the generated template within 8-15 pages. Do not exceed 15 pages.',
+    sectionGuidance: 'Use balanced detail, standard clause depth, and standard schedules.',
+  };
+}
+
 // ── Axios client ──────────────────────────────────────────────────────────────
 
 const client = axios.create({
@@ -99,9 +123,35 @@ export interface SaveGeneratedResponse {
   message: string;
 }
 
+export interface GetStructureQuestionsResponse {
+  success: boolean;
+  description: string;
+  questions: StructureQuestion[];
+}
+
 // ── API methods ───────────────────────────────────────────────────────────────
 
 export const templateBuilderApi = {
+  /**
+   * Fetch AI-generated structure questions for a custom description.
+   * Returns 8-12 questions about clause presence, party types, value ranges —
+   * NOT data questions (names, dates, amounts).
+   */
+  getStructureQuestions: async (
+    description: string,
+    jurisdiction?: string,
+  ): Promise<GetStructureQuestionsResponse> => {
+    try {
+      const res = await client.post<GetStructureQuestionsResponse>('/get-structure-questions', {
+        description,
+        jurisdiction: jurisdiction || 'India',
+      });
+      return res.data;
+    } catch (error) {
+      throw new Error(extractError(error));
+    }
+  },
+
   /**
    * Legacy dynamic-question endpoint. Kept for backward compatibility.
    */
@@ -118,12 +168,41 @@ export const templateBuilderApi = {
 
   /**
    * Send structured template requirements → AI drafts the complete legal template.
+   * In dynamic mode, pass dynamicQuestions + dynamicAnswers to use AI-generated Q&A
+   * instead of the static requirements fields.
    */
   generateTemplate: async (payload: {
     requirements: TemplateRequirements;
+    dynamicQuestions?: StructureQuestion[];
+    dynamicAnswers?: Record<string, string>;
   }): Promise<GenerateTemplateResponse> => {
     try {
-      const { requirements } = payload;
+      const { requirements, dynamicQuestions, dynamicAnswers } = payload;
+
+      // ── Dynamic mode: use AI-generated structure Q&A ─────────────────────
+      if (dynamicQuestions && dynamicQuestions.length > 0 && dynamicAnswers) {
+        const questions = dynamicQuestions.map((q) => ({
+          id: q.id,
+          question: q.question,
+          type: q.type,
+        }));
+        const answers: Record<string, string> = {};
+        for (const q of dynamicQuestions) {
+          answers[q.id] = (dynamicAnswers[q.id] || '').replace(/\|\|/g, ', ');
+        }
+
+        const res = await client.post<GenerateTemplateResponse>('/generate-template', {
+          document_type: requirements.subjectLabel || requirements.subject || 'Legal Template',
+          answers,
+          questions,
+          jurisdiction: requirements.jurisdiction || 'India',
+          language: requirements.language || 'English',
+        });
+        return res.data;
+      }
+
+      // ── Standard mode: use static requirements fields ─────────────────────
+      const pageControl = getPageControl(requirements.detailLevel);
       const entries = [
         ['Document Type', requirements.subjectLabel || requirements.subject],
         ['Category', requirements.category],
@@ -141,6 +220,9 @@ export const templateBuilderApi = {
         ['Personal Law', requirements.personalLaw],
         ['Urgency', requirements.urgency],
         ['Detail Level', requirements.detailLevel],
+        ['Target Page Range', pageControl.targetRange],
+        ['Page Limit Rule', pageControl.hardRule],
+        ['Page Planning Guidance', pageControl.sectionGuidance],
         ['Emphasis', requirements.emphasis],
         ['Schedule Preference', requirements.schedulePreference],
         ['Special Clauses', requirements.specialClauses.join(', ')],

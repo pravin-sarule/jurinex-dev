@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTemplateBuilderStore } from './templateBuilderStore';
 import { templateBuilderApi } from './api';
 
@@ -73,11 +73,11 @@ const CATEGORY_KEYWORDS: Array<{ category: CategoryKey; regex: RegExp }> = [
 const CONTEXT_BY_CATEGORY: Record<CategoryKey, ContextQuestion[]> = {
   Property: [
     { key: 'propertyType', label: 'Type of property involved?', options: ['Residential Flat', 'Independent House', 'Commercial Office', 'Shop', 'Industrial', 'Agricultural Land', 'Plot', 'Mixed Use'] },
-    { key: 'partyType', label: 'Who are the typical parties?', options: ['Individual to Individual', 'Individual to Company', 'Company to Company', 'NRI Involved', 'Government / Authority', 'Housing Society'] },
+    { key: 'partyType', label: 'Who are the typical parties?', options: ['Individual to Individual', 'Individual to Company', 'Company to Individual', 'Company to Company', 'NRI Involved', 'Government / Authority', 'Housing Society', 'Keep generic placeholders'] },
     { key: 'valueRange', label: 'Typical transaction value range?', options: ['Below Rs. 10 Lakhs', 'Rs. 10-50 Lakhs', 'Rs. 50 Lakhs-2 Cr', 'Rs. 2-10 Cr', 'Above Rs. 10 Cr', 'Varies - keep flexible'] },
   ],
   Agreement: [
-    { key: 'partyType', label: 'Who are the parties?', options: ['Individual to Individual', 'Individual to Company', 'Company to Company', 'Freelancer to Company', 'Startup to Investor', 'Employer to Employee'] },
+    { key: 'partyType', label: 'Who are the parties?', options: ['Individual to Individual', 'Individual to Company', 'Company to Individual', 'Company to Company', 'Freelancer to Company', 'Startup to Investor', 'Employer to Employee', 'Company to Consultant'] },
     { key: 'valueRange', label: 'Expected annual value?', options: ['Below Rs. 5 Lakhs', 'Rs. 5-25 Lakhs', 'Rs. 25 Lakhs-1 Cr', 'Above Rs. 1 Cr', 'Varies - keep flexible'] },
     { key: 'emphasis', label: 'Relationship posture?', options: ['Protection-heavy', 'Balanced risk allocation', 'Relationship-first', 'Compliance-heavy'] },
   ],
@@ -107,12 +107,12 @@ const CONTEXT_BY_CATEGORY: Record<CategoryKey, ContextQuestion[]> = {
     { key: 'urgency', label: 'Is this urgent or planned?', options: ['Planned - no rush', 'Moderate - within weeks', 'Urgent - immediately', 'Post-event / dispute driven'] },
   ],
   Employment: [
-    { key: 'partyType', label: 'Employment structure?', options: ['Employer to Employee', 'Company to Consultant', 'Startup to Advisor', 'Freelancer to Company'] },
+    { key: 'partyType', label: 'Employment structure?', options: ['Employer to Employee', 'Company to Individual', 'Company to Consultant', 'Startup to Advisor', 'Freelancer to Company', 'Keep generic placeholders'] },
     { key: 'valueRange', label: 'Compensation band?', options: ['Below Rs. 5 Lakhs', 'Rs. 5-15 Lakhs', 'Rs. 15-40 Lakhs', 'Above Rs. 40 Lakhs', 'Flexible'] },
     { key: 'emphasis', label: 'What should the template emphasize?', options: ['Protection-heavy', 'Balanced risk allocation', 'Relationship-first', 'Compliance-heavy'] },
   ],
   General: [
-    { key: 'partyType', label: 'Who are the expected parties?', options: ['Individual to Individual', 'Individual to Company', 'Company to Company', 'Keep generic placeholders'] },
+    { key: 'partyType', label: 'Who are the expected parties?', options: ['Individual to Individual', 'Individual to Company', 'Company to Individual', 'Company to Company', 'Freelancer to Company', 'Keep generic placeholders'] },
     { key: 'valueRange', label: 'Commercial value / exposure?', options: ['Low', 'Medium', 'High', 'Varies - keep flexible'] },
     { key: 'emphasis', label: 'What should the template emphasize?', options: ['Protection-heavy', 'Balanced risk allocation', 'Relationship-first', 'Compliance-heavy'] },
   ],
@@ -157,6 +157,72 @@ function getCategoryLabel(category: string, subjectLabel: string): string {
   return category || detectCategory(subjectLabel || '');
 }
 
+const JURISDICTION_OPTIONS = [
+  'India - Andhra Pradesh',
+  'India - Arunachal Pradesh',
+  'India - Assam',
+  'India - Bihar',
+  'India - Chhattisgarh',
+  'India - Goa',
+  'India - Haryana',
+  'India - Himachal Pradesh',
+  'India - Jharkhand',
+  'India - Kerala',
+  'India - Madhya Pradesh',
+  'India - Manipur',
+  'India - Meghalaya',
+  'India - Mizoram',
+  'India - Nagaland',
+  'India - Odisha',
+  'India - Punjab',
+  'India - Sikkim',
+  'India - Telangana',
+  'India - Tripura',
+  'India - Uttarakhand',
+  'India - West Bengal',
+  'India - Maharashtra',
+  'India - Karnataka',
+  'India - Tamil Nadu',
+  'India - Gujarat',
+  'India - Uttar Pradesh',
+  'India - Rajasthan',
+  'India - Delhi NCR',
+  'India - General (All States)',
+];
+
+const LANGUAGE_OPTIONS_BY_JURISDICTION: Record<string, string[]> = {
+  'India - Andhra Pradesh': ['English', 'Telugu', 'Hindi', 'Bilingual (English + Telugu)'],
+  'India - Arunachal Pradesh': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Assam': ['English', 'Assamese', 'Hindi', 'Bilingual (English + Assamese)'],
+  'India - Bihar': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Chhattisgarh': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Goa': ['English', 'Konkani', 'Hindi', 'Bilingual (English + Konkani)'],
+  'India - Haryana': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Himachal Pradesh': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Jharkhand': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Kerala': ['English', 'Malayalam', 'Bilingual (English + Malayalam)'],
+  'India - Madhya Pradesh': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Manipur': ['English', 'Manipuri', 'Hindi', 'Bilingual (English + Manipuri)'],
+  'India - Meghalaya': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Mizoram': ['English', 'Mizo', 'Hindi', 'Bilingual (English + Mizo)'],
+  'India - Nagaland': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Odisha': ['English', 'Odia', 'Hindi', 'Bilingual (English + Odia)'],
+  'India - Punjab': ['English', 'Punjabi', 'Hindi', 'Bilingual (English + Punjabi)'],
+  'India - Sikkim': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Telangana': ['English', 'Telugu', 'Hindi', 'Bilingual (English + Telugu)'],
+  'India - Tripura': ['English', 'Bengali', 'Hindi', 'Bilingual (English + Bengali)'],
+  'India - Uttarakhand': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - West Bengal': ['English', 'Bengali', 'Hindi', 'Bilingual (English + Bengali)'],
+  'India - Maharashtra': ['English', 'Marathi', 'Hindi', 'Bilingual (English + Marathi)', 'Bilingual (English + Hindi)'],
+  'India - Delhi NCR': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Karnataka': ['English', 'Kannada', 'Bilingual (English + Kannada)'],
+  'India - Tamil Nadu': ['English', 'Tamil', 'Bilingual (English + Tamil)'],
+  'India - Gujarat': ['English', 'Gujarati', 'Hindi', 'Bilingual (English + Gujarati)'],
+  'India - Uttar Pradesh': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - Rajasthan': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+  'India - General (All States)': ['English', 'Hindi', 'Bilingual (English + Hindi)'],
+};
+
 const SectionCard: React.FC<{
   title: string;
   children: React.ReactNode;
@@ -199,7 +265,7 @@ const OptionGrid: React.FC<{
 };
 
 const DocumentSelector: React.FC = () => {
-  const { updateRequirements, setCurrentStep } = useTemplateBuilderStore();
+  const { updateRequirements, setCurrentStep, setDynamicMode, clearDynamicState } = useTemplateBuilderStore();
   const [search, setSearch] = useState('');
   const [customDescription, setCustomDescription] = useState('');
 
@@ -212,6 +278,7 @@ const DocumentSelector: React.FC = () => {
   }, [search]);
 
   const handleSelect = (doc: string, category: CategoryKey) => {
+    clearDynamicState();
     updateRequirements({
       subject: doc.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
       subjectLabel: doc,
@@ -225,13 +292,16 @@ const DocumentSelector: React.FC = () => {
     const value = customDescription.trim();
     if (!value) return;
     const category = detectCategory(value);
+    clearDynamicState();
+    setDynamicMode(true);
     updateRequirements({
       subject: 'custom',
       subjectLabel: value,
       category,
       customDescription: value,
     });
-    setCurrentStep(2);
+    // Step 3 (jurisdiction) runs first so AI knows the jurisdiction when generating questions
+    setCurrentStep(3);
   };
 
   return (
@@ -353,11 +423,200 @@ const Step2Context: React.FC = () => {
   );
 };
 
+// ── Dynamic Questionnaire (custom description mode) ──────────────────────────
+
+const DynamicQuestionnaire: React.FC = () => {
+  const {
+    requirements,
+    dynamicQuestions,
+    dynamicAnswers,
+    dynamicQuestionsLoading,
+    dynamicQuestionsError,
+    setDynamicQuestions,
+    setDynamicAnswer,
+    setDynamicQuestionsLoading,
+    setDynamicQuestionsError,
+    setCurrentStep,
+  } = useTemplateBuilderStore();
+
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const fetchedRef = useRef(false);
+
+  useEffect(() => {
+    if (fetchedRef.current || dynamicQuestions.length > 0) return;
+    fetchedRef.current = true;
+    setDynamicQuestionsLoading(true);
+    templateBuilderApi
+      .getStructureQuestions(requirements.customDescription, requirements.jurisdiction)
+      .then((res) => setDynamicQuestions(res.questions))
+      .catch((err) => setDynamicQuestionsError(err instanceof Error ? err.message : 'Failed to generate questions'));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleRetry = () => {
+    fetchedRef.current = false;
+    setDynamicQuestionsLoading(true);
+    templateBuilderApi
+      .getStructureQuestions(requirements.customDescription, requirements.jurisdiction)
+      .then((res) => {
+        setCurrentIndex(0);
+        setDynamicQuestions(res.questions);
+      })
+      .catch((err) => setDynamicQuestionsError(err instanceof Error ? err.message : 'Failed to generate questions'));
+  };
+
+  if (dynamicQuestionsLoading) {
+    return (
+      <div className="min-h-[calc(100vh-72px)] px-6 py-6 flex items-center justify-center">
+        <SectionCard title="Analysing your description...">
+          <div className="flex flex-col items-center gap-4 py-6">
+            <div className="flex gap-2">
+              {[0, 150, 300].map((delay) => (
+                <div key={delay} className="w-3 h-3 rounded-full animate-bounce" style={{ backgroundColor: BRAND, animationDelay: `${delay}ms` }} />
+              ))}
+            </div>
+            <p className="text-sm text-gray-500">Generating structure questions tailored to your document...</p>
+          </div>
+        </SectionCard>
+      </div>
+    );
+  }
+
+  if (dynamicQuestionsError) {
+    return (
+      <div className="min-h-[calc(100vh-72px)] px-6 py-6 flex items-center justify-center">
+        <SectionCard title="Couldn't generate questions">
+          <div className="space-y-4">
+            <p className="text-sm text-red-600">{dynamicQuestionsError}</p>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setCurrentStep(3)} className="px-4 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700">← Back</button>
+              <button type="button" onClick={handleRetry} className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white" style={{ backgroundColor: BRAND }}>Retry</button>
+            </div>
+          </div>
+        </SectionCard>
+      </div>
+    );
+  }
+
+  if (dynamicQuestions.length === 0) return null;
+
+  const activeQ = dynamicQuestions[currentIndex];
+  const activeValue = dynamicAnswers[activeQ.id] || '';
+  const isMulti = activeQ.type === 'multi_select';
+  const isLast = currentIndex === dynamicQuestions.length - 1;
+  const canAdvance = activeValue.length > 0;
+  const progressPct = ((currentIndex + 1) / dynamicQuestions.length) * 100;
+
+  const handleSelect = (value: string) => {
+    if (isMulti) {
+      const current = activeValue ? activeValue.split('||') : [];
+      const idx = current.indexOf(value);
+      if (idx === -1) current.push(value);
+      else current.splice(idx, 1);
+      setDynamicAnswer(activeQ.id, current.join('||'));
+    } else {
+      setDynamicAnswer(activeQ.id, value);
+      if (!isLast) {
+        setTimeout(() => setCurrentIndex((i) => i + 1), 220);
+      }
+    }
+  };
+
+  const handleNext = () => {
+    if (isLast) {
+      setCurrentStep(6);
+    } else {
+      setCurrentIndex((i) => i + 1);
+    }
+  };
+
+  const handleBack = () => {
+    if (currentIndex === 0) {
+      setCurrentStep(3);
+    } else {
+      setCurrentIndex((i) => i - 1);
+    }
+  };
+
+  const options = activeQ.options ?? [];
+
+  return (
+    <div className="min-h-[calc(100vh-72px)] px-6 py-6 flex items-center justify-center">
+      <SectionCard title="A few questions to structure your template perfectly">
+        <div className="space-y-5">
+          {/* Progress bar */}
+          <div className="space-y-1">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+              Question {currentIndex + 1} of {dynamicQuestions.length}
+            </p>
+            <div className="w-full h-1 bg-gray-100 rounded-full">
+              <div className="h-1 rounded-full transition-all duration-300" style={{ width: `${progressPct}%`, backgroundColor: BRAND }} />
+            </div>
+          </div>
+
+          {/* Active question */}
+          <div className="space-y-2">
+            <p className="text-base font-semibold text-gray-800">{activeQ.question}</p>
+            {activeQ.hint && <p className="text-xs text-gray-400">{activeQ.hint}</p>}
+            <OptionGrid
+              idPrefix={`dq-${currentIndex}`}
+              value={activeValue}
+              options={options}
+              onSelect={handleSelect}
+              multi={isMulti}
+            />
+          </div>
+
+          {/* Answered summary */}
+          {currentIndex > 0 && (
+            <div className="border-t border-gray-100 pt-3 space-y-1">
+              {dynamicQuestions.slice(0, currentIndex).map((q) => (
+                <div key={q.id} className="flex items-start gap-2 text-sm">
+                  <span className="mt-0.5" style={{ color: BRAND }}>✓</span>
+                  <span className="text-gray-500 flex-1 truncate">{q.question}</span>
+                  <span className="text-gray-700 font-medium text-right max-w-[150px] truncate">
+                    {(dynamicAnswers[q.id] || '').replace(/\|\|/g, ', ')}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Navigation */}
+          <div className="flex items-center justify-between pt-2">
+            <button type="button" onClick={handleBack} className="px-4 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700">
+              ← Back
+            </button>
+            {(isMulti || isLast) ? (
+              <button
+                type="button"
+                onClick={handleNext}
+                disabled={!canAdvance}
+                className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }}
+              >
+                {isLast ? 'Review →' : 'Next →'}
+              </button>
+            ) : (
+              <span className="text-sm text-gray-400">Select an answer to continue</span>
+            )}
+          </div>
+        </div>
+      </SectionCard>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const Step3Jurisdiction: React.FC = () => {
-  const { requirements, updateRequirements, setCurrentStep } = useTemplateBuilderStore();
+  const { requirements, updateRequirements, setCurrentStep, dynamicMode } = useTemplateBuilderStore();
+  const languageOptions = requirements.jurisdiction
+    ? (LANGUAGE_OPTIONS_BY_JURISDICTION[requirements.jurisdiction] ?? LANGUAGE_OPTIONS_BY_JURISDICTION['India - General (All States)'])
+    : [];
+
   const questions = [
-    { key: 'jurisdiction', label: 'State / Jurisdiction?', options: ['India - Maharashtra', 'India - Delhi NCR', 'India - Karnataka', 'India - Tamil Nadu', 'India - Gujarat', 'India - Uttar Pradesh', 'India - Rajasthan', 'India - General (All States)'] },
-    { key: 'language', label: 'Template language?', options: ['English', 'Hindi', 'Marathi', 'Bilingual (English + Hindi)', 'Bilingual (English + Marathi)'] },
+    { key: 'jurisdiction', label: 'State / Jurisdiction?', options: JURISDICTION_OPTIONS },
+    { key: 'language', label: 'Template language?', options: languageOptions },
   ];
   const firstIncompleteIndex = questions.findIndex((q) => !requirements[q.key as 'jurisdiction' | 'language']);
   const activeIndex = firstIncompleteIndex === -1 ? questions.length - 1 : firstIncompleteIndex;
@@ -376,7 +635,18 @@ const Step3Jurisdiction: React.FC = () => {
               idPrefix={`cq-opts-3-q${activeIndex + 1}`}
               value={activeValue}
               options={activeQuestion.options}
-              onSelect={(value) => updateRequirements({ [activeQuestion.key]: value } as Record<string, string>)}
+              onSelect={(value) => {
+                if (activeQuestion.key === 'jurisdiction') {
+                  const nextLanguageOptions = LANGUAGE_OPTIONS_BY_JURISDICTION[value] ?? LANGUAGE_OPTIONS_BY_JURISDICTION['India - General (All States)'];
+                  updateRequirements({
+                    jurisdiction: value,
+                    language: nextLanguageOptions.includes(requirements.language) ? requirements.language : '',
+                  });
+                  return;
+                }
+
+                updateRequirements({ [activeQuestion.key]: value } as Record<string, string>);
+              }}
             />
           </div>
           <div className="flex items-center justify-between pt-2">
@@ -395,11 +665,11 @@ const Step3Jurisdiction: React.FC = () => {
               <button
                 id="context-done-3"
                 type="button"
-                onClick={() => setCurrentStep(4)}
+                onClick={() => setCurrentStep(dynamicMode ? 2 : 4)}
                 className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white"
                 style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }}
               >
-                Continue →
+                {dynamicMode ? 'Set Up Template →' : 'Continue →'}
               </button>
             ) : (
               <span className="text-sm text-gray-400">Select an answer to move forward</span>
@@ -476,7 +746,7 @@ const Step5Clauses: React.FC = () => {
   const { requirements, updateRequirements, setCurrentStep } = useTemplateBuilderStore();
   const category = getCategoryLabel(requirements.category, requirements.subjectLabel) as CategoryKey;
   const clauseOptions = CLAUSES_BY_CATEGORY[category] ?? CLAUSES_BY_CATEGORY.General;
-  const isNotesStage = requirements.specialClauses.length > 0 || requirements.specialClauses.includes('No special clauses needed');
+  const [isNotesStage, setIsNotesStage] = useState(false);
 
   const toggleClause = (clause: string) => {
     const current = new Set(requirements.specialClauses);
@@ -501,7 +771,7 @@ const Step5Clauses: React.FC = () => {
             <>
               <div>
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Question 1 of 2</p>
-                <p className="text-base font-semibold text-gray-800 mb-2">Select special clauses for this template</p>
+                <p className="text-base font-semibold text-gray-800 mb-2">Select one or more special clauses for this template</p>
                 <div className="flex flex-wrap gap-2">
                   {clauseOptions.map((clause) => {
                     const selected = requirements.specialClauses.includes(clause);
@@ -527,11 +797,21 @@ const Step5Clauses: React.FC = () => {
                   </button>
                 </div>
               </div>
-              <div className="flex items-center justify-end pt-2">
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsNotesStage(true);
+                    updateRequirements({ specialClauses: [] });
+                  }}
+                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700"
+                >
+                  Skip This Section
+                </button>
                 <button
                   type="button"
                   disabled={requirements.specialClauses.length === 0}
-                  onClick={() => updateRequirements({ specialClauses: [...requirements.specialClauses] })}
+                  onClick={() => setIsNotesStage(true)}
                   className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-50"
                   style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }}
                 >
@@ -556,7 +836,9 @@ const Step5Clauses: React.FC = () => {
               <div className="flex items-center justify-between pt-2">
                 <button
                   type="button"
-                  onClick={() => updateRequirements({ specialClauses: [] })}
+                  onClick={() => {
+                    setIsNotesStage(false);
+                  }}
                   className="px-4 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700"
                 >
                   ← Back
@@ -579,36 +861,60 @@ const Step5Clauses: React.FC = () => {
 };
 
 const Step6Review: React.FC = () => {
-  const { requirements, setCurrentStep, setPhase, setGenerationResult, setError } = useTemplateBuilderStore();
+  const {
+    requirements,
+    dynamicMode,
+    dynamicQuestions,
+    dynamicAnswers,
+    setCurrentStep,
+    setPhase,
+    setGenerationResult,
+    setError,
+  } = useTemplateBuilderStore();
   const [loading, setLoading] = useState(false);
 
-  const summaryRows = [
-    ['Subject', requirements.subjectLabel || requirements.subject],
-    ['Category', requirements.category],
-    ['Property Type', requirements.propertyType],
-    ['Party Type', requirements.partyType],
-    ['Value Range', requirements.valueRange],
-    ['Court', requirements.court],
-    ['Dispute Nature', requirements.disputeNature],
-    ['Opposing Party', requirements.opposingParty],
-    ['Trust / Org Type', requirements.orgType],
-    ['Trust Purpose', requirements.trustPurpose],
-    ['Corpus Size', requirements.corpusSize],
-    ['Jurisdiction', requirements.jurisdiction],
-    ['Language', requirements.language],
-    ['Detail Level', requirements.detailLevel],
-    ['Emphasis', requirements.emphasis],
-    ['Urgency', requirements.urgency],
-    ['Schedules', requirements.schedulePreference],
-    ['Special Clauses', requirements.specialClauses.join(', ')],
-    ['Custom Notes', requirements.freeText],
-  ].filter(([, value]) => Boolean(value));
+  // Build summary rows based on mode
+  const summaryRows: [string, string][] = dynamicMode
+    ? ([
+        ['Template Description', requirements.subjectLabel],
+        ['Jurisdiction', requirements.jurisdiction],
+        ['Language', requirements.language],
+        ...dynamicQuestions.map((q) => [
+          q.question,
+          (dynamicAnswers[q.id] || '').replace(/\|\|/g, ', '),
+        ] as [string, string]),
+      ] as [string, string][]).filter(([, v]) => Boolean(v))
+    : ([
+        ['Subject', requirements.subjectLabel || requirements.subject],
+        ['Category', requirements.category],
+        ['Property Type', requirements.propertyType],
+        ['Party Type', requirements.partyType],
+        ['Value Range', requirements.valueRange],
+        ['Court', requirements.court],
+        ['Dispute Nature', requirements.disputeNature],
+        ['Opposing Party', requirements.opposingParty],
+        ['Trust / Org Type', requirements.orgType],
+        ['Trust Purpose', requirements.trustPurpose],
+        ['Corpus Size', requirements.corpusSize],
+        ['Jurisdiction', requirements.jurisdiction],
+        ['Language', requirements.language],
+        ['Detail Level', requirements.detailLevel],
+        ['Emphasis', requirements.emphasis],
+        ['Urgency', requirements.urgency],
+        ['Schedules', requirements.schedulePreference],
+        ['Special Clauses', requirements.specialClauses.join(', ')],
+        ['Custom Notes', requirements.freeText],
+      ] as [string, string][]).filter(([, v]) => Boolean(v));
 
   const handleGenerate = async () => {
     setLoading(true);
     setPhase('generating');
     try {
-      const response = await templateBuilderApi.generateTemplate({ requirements });
+      const response = await templateBuilderApi.generateTemplate(
+        dynamicMode
+          ? { requirements, dynamicQuestions, dynamicAnswers }
+          : { requirements },
+      );
       setGenerationResult(response.templateText, response.fields, response.sections, response.metadata);
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Template generation failed');
@@ -617,13 +923,15 @@ const Step6Review: React.FC = () => {
     }
   };
 
+  const handleChange = () => setCurrentStep(dynamicMode ? 2 : 1);
+
   return (
     <div className="min-h-[calc(100vh-72px)] px-6 py-6 flex items-center justify-center">
       <SectionCard title="Here's everything I've collected. Review and confirm to generate your template.">
         <div className="space-y-5">
           <div className="rounded-2xl border border-gray-200 overflow-hidden">
             {summaryRows.map(([label, value]) => (
-              <div key={label} className="grid grid-cols-[180px_1fr] gap-4 px-4 py-3 border-b border-gray-100 last:border-b-0">
+              <div key={label} className="grid grid-cols-[200px_1fr] gap-4 px-4 py-3 border-b border-gray-100 last:border-b-0">
                 <span className="text-sm text-gray-500">{label}</span>
                 <span className="text-sm font-medium text-gray-800">{value}</span>
               </div>
@@ -632,7 +940,7 @@ const Step6Review: React.FC = () => {
           <div className="flex gap-3">
             <button
               type="button"
-              onClick={() => setCurrentStep(1)}
+              onClick={handleChange}
               className="px-4 py-2.5 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700 bg-white hover:bg-gray-50"
             >
               ← Change something
@@ -694,14 +1002,14 @@ const ErrorState: React.FC = () => {
 };
 
 export const BuilderChat: React.FC = () => {
-  const { phase, currentStep } = useTemplateBuilderStore();
+  const { phase, currentStep, dynamicMode } = useTemplateBuilderStore();
 
   if (phase === 'generating') return <GeneratingState />;
   if (phase === 'error') return <ErrorState />;
   if (phase !== 'selecting' && phase !== 'answering') return null;
 
   if (currentStep === 1) return <DocumentSelector />;
-  if (currentStep === 2) return <Step2Context />;
+  if (currentStep === 2) return dynamicMode ? <DynamicQuestionnaire /> : <Step2Context />;
   if (currentStep === 3) return <Step3Jurisdiction />;
   if (currentStep === 4) return <Step4Structure />;
   if (currentStep === 5) return <Step5Clauses />;

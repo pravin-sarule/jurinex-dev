@@ -9,7 +9,21 @@
 const GATEWAY_URL =
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  'h';
+  'https://gateway-service-120280829617.asia-south1.run.app'
+function ensureLocalhostPort(url, fallbackPort) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const isLocal =
+      parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    if (isLocal && !parsed.port) {
+      parsed.port = String(fallbackPort);
+      return parsed.toString().replace(/\/$/, '');
+    }
+    return String(url || '').replace(/\/$/, '');
+  } catch {
+    return String(url || '').replace(/\/$/, '');
+  }
+}
 
 // API Base URLs for different services
 export const API_BASE_URL = GATEWAY_URL;
@@ -51,12 +65,15 @@ export const DRAFTING_SERVICE_URL =
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'https://agent-draft-service-120280829617.asia-south1.run.app';
+  'https://all-drafting-agent-120280829617.asia-south1.run.app';
 
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE =
-  import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-  'https://template-analyzer-service-120280829617.asia-south1.run.app';
+  ensureLocalhostPort(
+    import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
+      'https://drafting-agents-120280829617.asia-south1.run.app',
+    
+  );
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).

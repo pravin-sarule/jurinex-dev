@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["assemble"])
 
 
+def _has_valid_google_doc(metadata: Dict[str, Any]) -> bool:
+    google_file_id = metadata.get("google_file_id") or metadata.get("googleFileId")
+    iframe_url = metadata.get("iframe_url") or metadata.get("iframeUrl")
+    google_docs = metadata.get("google_docs") or {}
+    has_error = "error" in str(google_docs).lower()
+    return (bool(google_file_id) or bool(iframe_url)) and not has_error
+
+
 @router.post("/drafts/{draft_id}/assemble")
 async def assemble_document(
     draft_id: str,
@@ -97,11 +105,9 @@ async def assemble_document(
         # 5. If hash matches and we have a valid Google Doc (if template used), return cached version
         # force_reassemble: bypass cache (e.g. user just connected Google Drive and needs new Google Doc)
         is_google_doc_valid = True
-        if template_id and cached_metadata:
-            # If we expect a Google Doc but don't have an iframe_url or have an error, cache is invalid
-            if not cached_metadata.get("iframe_url") or (cached_metadata.get("google_docs") and "error" in str(cached_metadata.get("google_docs"))):
-                is_google_doc_valid = False
-                logger.info(f"[CACHE INVALID] Cached Google Doc for draft {draft_id} is missing or has error. Reassembling.")
+        if template_id and cached_metadata and not _has_valid_google_doc(cached_metadata):
+            is_google_doc_valid = False
+            logger.info(f"[CACHE INVALID] Cached Google Doc for draft {draft_id} is missing or has error. Reassembling.")
 
         if not force_reassemble and cached_hash == current_hash and cached_document and is_google_doc_valid:
             logger.info(f"[CACHE HIT] Returning cached assembled document for draft {draft_id}")
@@ -242,7 +248,7 @@ async def export_to_docx(
     try:
         from services.docx_export import assembled_html_to_docx_bytes
     except ImportError:
-        raise HTTPException(status_code=500, detail="html2docx or python-docx not installed on server.")
+        raise HTTPException(status_code=500, detail="DOCX export dependencies are not installed on the server.")
 
     html_content = body.get("html_content")
     if not html_content:

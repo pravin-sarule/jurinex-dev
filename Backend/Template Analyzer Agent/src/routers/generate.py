@@ -50,7 +50,7 @@ class DynamicQuestion(BaseModel):
     id: str
     question: str
     placeholder: Optional[str] = ""
-    type: str = "text"          # text | textarea | date | number | select
+    type: str = "text"          # text | textarea | date | number | select | single_select | multi_select | yes_no | range
     required: bool = True
     hint: Optional[str] = None
     options: Optional[List[str]] = None
@@ -94,6 +94,17 @@ class SaveGeneratedResponse(BaseModel):
     success: bool
     templateId: str
     message: str
+
+
+class GetStructureQuestionsRequest(BaseModel):
+    description: str = Field(..., description="User's free-text description of the document they want")
+    jurisdiction: Optional[str] = "India"
+
+
+class GetStructureQuestionsResponse(BaseModel):
+    success: bool
+    description: str
+    questions: List[DynamicQuestion]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -294,6 +305,113 @@ Rules:
 - Make questions specific enough that answers give Claude everything needed to draft the document"""
 
 
+_STRUCTURE_QUESTIONS_SYSTEM = """You are a legal template architect specializing in Indian law.
+Generate questions that determine TEMPLATE STRUCTURE and CLAUSE COMPOSITION.
+
+CRITICAL: Ask about TYPES, RANGES, and CLAUSE PRESENCE — NOT specific data values.
+
+CORRECT structure questions (determine what the template contains):
+✓ "What type of property?" → Residential/Commercial → different clause sets
+✓ "Who are the typical parties?" → Individual/Company/NRI → different legal sections
+✓ "Transaction value range?" → triggers stamp duty calculations, court jurisdiction
+✓ "Which clauses to include?" → multi-select → which sections appear in template
+✓ "Payment structure type?" → Lumpsum/Installments → triggers payment schedule annexure
+✓ "Witness and notarization requirements?" → adds witness/notary blocks
+
+WRONG data questions (NEVER ask these):
+✗ "What is the party's name?" → data, collected when filling the template
+✗ "What is the rent amount?" → data, collected when filling the template
+✗ "What is the property address?" → data, collected when filling the template
+
+Generate 8-12 questions. Jurisdiction is already known, so do NOT ask about it.
+
+MANDATORY questions to always include:
+1. Party types (select) — Individual/Company/NRI/Trust/Government etc.
+2. Clause selection (select) — which sections/clauses to include
+3. Detail level (select) — Concise (5-8 pages)/Standard (8-15 pages)/Detailed (15-25 pages)
+
+Return ONLY a valid JSON array. Each question object:
+{
+  "id": "snake_case_id",
+  "question": "Question text?",
+  "placeholder": "",
+  "type": "select",
+  "required": true,
+  "hint": "Brief tip or null",
+  "options": ["Option 1", "Option 2", "Option 3"]
+}
+
+Rules:
+- type must always be "select" (renders as a chip selector in the UI)
+- EVERY question MUST have options array with 3-8 practical choices
+- Options must be relevant to Indian legal context
+- No markdown, no explanation — return ONLY the JSON array"""
+
+
+_STRUCTURE_QUESTIONS_SYSTEM_V2 = """You are a legal template architecture expert. Generate questions that determine TEMPLATE STRUCTURE, not data to fill later.
+
+CRITICAL:
+- Ask about WHAT GOES IN THE TEMPLATE, not actual values.
+- Ask about TYPES, RANGES, CLAUSE PRESENCE, SECTION PRESENCE, COMPLEXITY, and FORMAT.
+- Do NOT ask for names, exact dates, addresses, exact amounts, document numbers, or party-specific facts.
+
+CORRECT QUESTION EXAMPLES:
+- "What type of property is involved?"
+- "Who are the typical parties?"
+- "Which clauses should be included?"
+- "What payment structure should the template support?"
+- "What duration range should the template accommodate?"
+- "How detailed should the template be?"
+
+WRONG QUESTION EXAMPLES:
+- "What is the landlord's name?"
+- "What is the rent amount?"
+- "What is the property address?"
+- "What is the agreement date?"
+
+QUESTION CATEGORIES TO COVER:
+1. Structural questions
+2. Clause inclusion questions
+3. Legal framework questions
+4. Format and complexity questions
+5. Value or duration range questions
+
+RESPONSE FORMAT:
+Return ONLY a valid JSON array with 8-12 questions.
+Each object must contain exactly:
+{
+  "id": "snake_case_id",
+  "question": "Question text?",
+  "placeholder": "",
+  "type": "single_select" | "multi_select" | "yes_no" | "range",
+  "required": true,
+  "hint": "Why this changes the template structure" | null,
+  "options": ["Option 1", "Option 2", "Option 3"]
+}
+
+RULES:
+- Jurisdiction is already known, so do NOT ask about jurisdiction.
+- Every question must be structure-focused.
+- Every question must be answerable via chips/options only.
+- Every question must have 3-8 practical Indian-law-relevant options.
+- Include at least: party types, clause or section inclusion, and detail level.
+- No markdown, no prose, no explanation outside the JSON array."""
+
+
+_DATA_INDICATORS = (
+    "what is the name",
+    "party name",
+    "enter the amount",
+    "exact amount",
+    "provide the address",
+    "property address",
+    "specify the date",
+    "agreement date",
+    "landlord name",
+    "tenant name",
+)
+
+
 _GENERATION_SYSTEM = """You are an expert Indian legal document drafter with 25 years of experience across all areas of Indian law: Contract Act 1872, Transfer of Property Act 1882, Companies Act 2013, Family Law, CrPC, CPC, and all other relevant statutes.
 
 Your task: Draft a complete, professional, legally enforceable template.
@@ -347,6 +465,266 @@ async def _call_claude_template(system: str, user_msg: str) -> str:
         raise HTTPException(status_code=502, detail=f"Claude API error: {e}")
 
 
+def _make_question(
+    qid: str,
+    question: str,
+    qtype: str,
+    options: List[str],
+    hint: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "id": qid,
+        "question": question,
+        "placeholder": "",
+        "type": qtype,
+        "required": True,
+        "hint": hint,
+        "options": options,
+    }
+
+
+def _category_mandatory_questions(category: str) -> List[Dict[str, Any]]:
+    common = [
+        _make_question(
+            "party_types",
+            "Who are the typical parties involved?",
+            "single_select",
+            [
+                "Individual to Individual",
+                "Individual to Company",
+                "Company to Company",
+                "NRI Party Involved",
+                "Government / Authority",
+                "Keep generic placeholders",
+            ],
+            "Determines party-capacity clauses and compliance sections.",
+        ),
+        _make_question(
+            "detail_level",
+            "How detailed should the template be?",
+            "single_select",
+            [
+                "Concise (5-8 pages)",
+                "Standard (8-15 pages)",
+                "Detailed (15-25 pages)",
+            ],
+            "Controls clause depth, structure, and annexure detail.",
+        ),
+    ]
+
+    category_specific = {
+        "Property": [
+            _make_question(
+                "property_type",
+                "What type of property is involved?",
+                "single_select",
+                [
+                    "Residential Flat / Apartment",
+                    "Independent House / Bungalow",
+                    "Commercial Office",
+                    "Shop / Showroom",
+                    "Agricultural Land",
+                    "Industrial / Warehouse",
+                    "Plot / Open Land",
+                ],
+                "Determines property-specific clauses and schedules.",
+            ),
+            _make_question(
+                "transaction_value_range",
+                "Typical transaction value range?",
+                "range",
+                [
+                    "Below Rs. 10 Lakhs",
+                    "Rs. 10-50 Lakhs",
+                    "Rs. 50 Lakhs-2 Cr",
+                    "Rs. 2-10 Cr",
+                    "Above Rs. 10 Cr",
+                    "Varies - keep flexible",
+                ],
+                "Guides value-linked clauses and stamp-duty-related drafting.",
+            ),
+            _make_question(
+                "clauses_to_include",
+                "Which clauses should be included?",
+                "multi_select",
+                [
+                    "Payment terms section",
+                    "Termination conditions",
+                    "Penalty / Liquidated damages",
+                    "Force majeure",
+                    "Arbitration clause",
+                    "Inventory / Furnishing schedule",
+                    "Registration / compliance note",
+                ],
+                "Determines which sections and annexures appear in the template.",
+            ),
+        ],
+        "Agreement": [
+            _make_question(
+                "agreement_party_types",
+                "Who are the parties to this agreement?",
+                "single_select",
+                [
+                    "Individual to Individual",
+                    "Individual to Company",
+                    "Company to Company",
+                    "Freelancer / Consultant to Company",
+                    "Startup to Investor",
+                    "Employer to Employee",
+                ],
+                "Determines party definitions and company-specific clauses.",
+            ),
+            _make_question(
+                "duration_type",
+                "Duration / tenure of the agreement?",
+                "single_select",
+                [
+                    "One-time / project-based",
+                    "Short-term (up to 12 months)",
+                    "Long-term (1-3 years)",
+                    "Evergreen / auto-renewal",
+                    "Flexible / keep generic",
+                ],
+                "Determines renewal and termination structure.",
+            ),
+            _make_question(
+                "consideration_range",
+                "Expected annual value / consideration?",
+                "range",
+                [
+                    "Below Rs. 5 Lakhs",
+                    "Rs. 5-25 Lakhs",
+                    "Rs. 25 Lakhs-1 Cr",
+                    "Above Rs. 1 Cr",
+                    "Varies - keep flexible",
+                ],
+                "Guides indemnity, security, and performance-protection drafting.",
+            ),
+        ],
+        "Court": [
+            _make_question(
+                "filing_court",
+                "Which court will this be filed in?",
+                "single_select",
+                [
+                    "Supreme Court",
+                    "High Court",
+                    "District Court",
+                    "Sessions Court",
+                    "Tribunal / NCLT",
+                    "Keep forum generic",
+                ],
+                "Determines court-format structure and filing-specific sections.",
+            ),
+            _make_question(
+                "dispute_nature",
+                "Nature of dispute?",
+                "single_select",
+                [
+                    "Constitutional / Writ",
+                    "Property dispute",
+                    "Contract / Commercial",
+                    "Employment / Service",
+                    "Consumer",
+                    "Regulatory / Public law",
+                ],
+                "Drives prayer structure and issue-specific sections.",
+            ),
+            _make_question(
+                "opposing_party_type",
+                "Who is the opposing party?",
+                "single_select",
+                [
+                    "Central Government",
+                    "State Government",
+                    "Authority / Corporation",
+                    "Private Individual",
+                    "Private Company",
+                    "Multiple Respondents",
+                ],
+                "Determines party-capacity language and pleading clauses.",
+            ),
+        ],
+    }
+
+    return common + category_specific.get(category, [
+        _make_question(
+            "template_structure_focus",
+            "Which structural focus should the template have?",
+            "single_select",
+            [
+                "Protection-heavy",
+                "Balanced and standard",
+                "Compliance-heavy",
+                "Relationship-first",
+                "Keep flexible",
+            ],
+            "Adjusts clause density and drafting posture.",
+        ),
+        _make_question(
+            "clauses_to_include",
+            "Which clauses should be included?",
+            "multi_select",
+            [
+                "Confidentiality",
+                "Termination",
+                "Arbitration",
+                "Penalty / damages",
+                "Force majeure",
+                "Compliance section",
+                "Schedules / annexures",
+            ],
+            "Determines the main section list for the template.",
+        ),
+    ])
+
+
+def _sanitize_structure_questions(raw_questions: List[Dict[str, Any]], category: str) -> List[DynamicQuestion]:
+    sanitized: List[Dict[str, Any]] = []
+
+    for q in raw_questions:
+        question_text = str(q.get("question") or "").strip()
+        if not question_text:
+            continue
+
+        lowered = question_text.lower()
+        if any(indicator in lowered for indicator in _DATA_INDICATORS):
+            continue
+
+        qtype = str(q.get("type") or "single_select").strip().lower()
+        if qtype not in {"single_select", "multi_select", "yes_no", "range"}:
+            qtype = "single_select"
+
+        options = q.get("options") or []
+        if not isinstance(options, list):
+            options = []
+        options = [str(opt).strip() for opt in options if str(opt).strip()]
+        if len(options) < 2:
+            continue
+
+        sanitized.append({
+            "id": str(q.get("id") or f"q_{len(sanitized) + 1}").strip().lower(),
+            "question": question_text,
+            "placeholder": "",
+            "type": qtype,
+            "required": bool(q.get("required", True)),
+            "hint": q.get("hint"),
+            "options": options[:8],
+        })
+
+    existing_ids = {q["id"] for q in sanitized}
+    existing_questions = {q["question"].strip().lower() for q in sanitized}
+
+    for mandatory in _category_mandatory_questions(category):
+        if mandatory["id"] in existing_ids or mandatory["question"].strip().lower() in existing_questions:
+            continue
+        sanitized.append(mandatory)
+        existing_ids.add(mandatory["id"])
+        existing_questions.add(mandatory["question"].strip().lower())
+
+    return [DynamicQuestion(**q) for q in sanitized[:12]]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Endpoint 1: Get dynamic questions
 # ──────────────────────────────────────────────────────────────────────────────
@@ -389,6 +767,54 @@ async def get_questions(
     questions = [DynamicQuestion(**q) for q in data]
     logger.info(f"[GetQuestions] Generated {len(questions)} questions for {body.document_type!r}")
     return GetQuestionsResponse(success=True, document_type=body.document_type, questions=questions)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Endpoint 1b: Get structure questions (for custom-description dynamic mode)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post("/get-structure-questions", response_model=GetStructureQuestionsResponse)
+async def get_structure_questions(
+    body: GetStructureQuestionsRequest,
+    x_user_id: Optional[str] = Header(None),
+):
+    """
+    AI generates 8-12 structure-focused questions from the user's free-text description.
+    These determine TEMPLATE STRUCTURE (clause presence, party types, value ranges),
+    NOT the actual data to fill into the template later.
+    Jurisdiction is already known, so the AI skips it and focuses on document specifics.
+    """
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail="X-User-Id header is required")
+
+    logger.info(f"[GetStructureQuestions] user={x_user_id} desc={body.description[:80]!r} jurisdiction={body.jurisdiction!r}")
+
+    category = _infer_category(body.description)
+    user_msg = (
+        f'User wants: "{body.description}"\n\n'
+        f'Detected category: {category}\n'
+        f'Jurisdiction is already set to: {body.jurisdiction or "India"}\n\n'
+        f'Generate 8-12 structure questions for this template.\n'
+        f'Remember: ask about TYPES, RANGES, and CLAUSE PRESENCE — not specific data values.'
+        f'\nFocus on: party types, section or clause inclusion, schedules or annexures, '
+        f'value or duration ranges, relief or forum structure where relevant, and detail level.\n'
+        f'Remember: ask about structure only, never about data to fill later.'
+    )
+
+    raw = await _call_claude_json(_STRUCTURE_QUESTIONS_SYSTEM_V2, user_msg)
+
+    raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'\s*```$', '', raw, flags=re.MULTILINE)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error(f"[GetStructureQuestions] JSON parse error: {e}\nRaw: {raw[:500]}")
+        raise HTTPException(status_code=502, detail=f"Failed to parse structure questions from AI: {e}")
+
+    questions = _sanitize_structure_questions(data, category)
+    logger.info(f"[GetStructureQuestions] Generated {len(questions)} questions")
+    return GetStructureQuestionsResponse(success=True, description=body.description, questions=questions)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

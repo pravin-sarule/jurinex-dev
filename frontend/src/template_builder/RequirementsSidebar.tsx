@@ -44,14 +44,6 @@ export const RequirementsSidebar: React.FC = () => {
 
   return (
     <div className="flex flex-col" style={{ minHeight: '100vh' }}>
-      <div
-        className="px-4 py-4 text-white"
-        style={{ background: `linear-gradient(135deg, ${BRAND} 0%, #1aa49b 100%)` }}
-      >
-        <p className="text-sm font-bold">Template Builder</p>
-        <p className="text-xs text-white/75">Reusable template requirements only</p>
-      </div>
-
       <div className="px-3 py-4 space-y-1">
         {STEP_ITEMS.map((item) => {
           const done = item.step < progressStep;

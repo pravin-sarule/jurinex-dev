@@ -5,6 +5,30 @@ import draftingApi, { getGoogleDocsUrl } from '../services/draftingApi';
 import googleDriveApi from '../services/googleDriveApi';
 import TemplatePicker from '../components/TemplatePicker';
 
+const normalizeDraft = (rawDraft) => {
+  if (!rawDraft) return null;
+
+  const googleFileId = rawDraft.googleFileId || rawDraft.google_file_id || rawDraft.fileId || null;
+  const baseUrl =
+    rawDraft.iframeUrl ||
+    rawDraft.webViewLink ||
+    (googleFileId ? getGoogleDocsUrl(googleFileId, { embedded: true }) : null);
+
+  const iframeUrl = baseUrl
+    ? baseUrl.includes('embedded=true')
+      ? baseUrl
+      : `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}embedded=true`
+    : null;
+
+  return {
+    ...rawDraft,
+    id: rawDraft.id || rawDraft.draftId || rawDraft.draft_id,
+    googleFileId,
+    iframeUrl,
+    webViewLink: rawDraft.webViewLink || (googleFileId ? getGoogleDocsUrl(googleFileId) : null),
+  };
+};
+
 /**
  * DraftEditorPage
  * 
@@ -61,16 +85,17 @@ const DraftEditorPage = () => {
       setError(null);
 
       const response = await draftingApi.getDraft(draftId);
-      setDraft(response.draft);
+      const normalizedDraft = normalizeDraft(response.draft);
+      setDraft(normalizedDraft);
 
       // Store placeholders from metadata if available
-      if (response.draft.metadata?.placeholders) {
-        setPlaceholders(response.draft.metadata.placeholders);
+      if (normalizedDraft?.metadata?.placeholders) {
+        setPlaceholders(normalizedDraft.metadata.placeholders);
       }
 
       // Initialize variables from metadata
-      if (response.draft.metadata?.variables) {
-        setVariables(response.draft.metadata.variables);
+      if (normalizedDraft?.metadata?.variables) {
+        setVariables(normalizedDraft.metadata.variables);
       }
     } catch (error) {
       console.error('[DraftEditor] Failed to fetch draft:', error);
@@ -102,9 +127,10 @@ const DraftEditorPage = () => {
       toast.success('Draft created successfully!');
 
       // Navigate to the new draft
-      navigate(`/draft/${response.draft.id}`, { replace: true });
-      setDraft(response.draft);
-      setPlaceholders(response.draft.placeholders || []);
+      const normalizedDraft = normalizeDraft(response.draft);
+      navigate(`/draft/${normalizedDraft.id}`, { replace: true });
+      setDraft(normalizedDraft);
+      setPlaceholders(normalizedDraft.placeholders || []);
       setShowCreateModal(false);
     } catch (error) {
       console.error('[DraftEditor] Failed to create draft:', error);
@@ -232,18 +258,21 @@ const DraftEditorPage = () => {
 
 
   // Download document using Google Docs native export
+  const googleFileId = draft?.googleFileId || draft?.google_file_id || null;
+  const embedUrl = draft?.iframeUrl || draft?.webViewLink || (googleFileId ? getGoogleDocsUrl(googleFileId, { embedded: true }) : null);
+
   const handleDownload = useCallback((format = 'pdf') => {
-    if (!draft?.googleFileId) {
+    if (!googleFileId) {
       toast.error('Document not available');
       return;
     }
 
     // Google Docs export URLs
     const exportUrls = {
-      pdf: `https://docs.google.com/document/d/${draft.googleFileId}/export?format=pdf`,
-      docx: `https://docs.google.com/document/d/${draft.googleFileId}/export?format=docx`,
-      txt: `https://docs.google.com/document/d/${draft.googleFileId}/export?format=txt`,
-      html: `https://docs.google.com/document/d/${draft.googleFileId}/export?format=html`
+      pdf: `https://docs.google.com/document/d/${googleFileId}/export?format=pdf`,
+      docx: `https://docs.google.com/document/d/${googleFileId}/export?format=docx`,
+      txt: `https://docs.google.com/document/d/${googleFileId}/export?format=txt`,
+      html: `https://docs.google.com/document/d/${googleFileId}/export?format=html`
     };
 
     const url = exportUrls[format] || exportUrls.pdf;
@@ -251,7 +280,7 @@ const DraftEditorPage = () => {
     // Open in new tab to trigger download
     window.open(url, '_blank');
     toast.success(`Downloading as ${format.toUpperCase()}...`);
-  }, [draft]);
+  }, [googleFileId]);
 
   // Create a new blank document
   const handleNewDocument = useCallback(async () => {
@@ -290,10 +319,6 @@ const DraftEditorPage = () => {
     setIsOpening(true);
     // The TemplatePicker will handle the selection and callback
   }, []);
-
-  // Get embed URL with full Google Docs UI (no minimal parameter)
-  // Define this early so it can be used in useEffect hooks
-  const embedUrl = draft ? getGoogleDocsUrl(draft.googleFileId) : null;
 
   // Add keyboard shortcuts for File menu actions (matching Google Docs)
   // Ctrl+N for New, Ctrl+O for Open
@@ -649,18 +674,7 @@ const DraftEditorPage = () => {
                 setIframeError(true);
               }}
               onLoad={(e) => {
-                // Check if iframe loaded successfully
-                try {
-                  const iframe = e.target;
-                  // Try to access iframe content (will fail if CSP blocks it)
-                  if (iframe.contentWindow) {
-                    setIframeError(false);
-                  }
-                } catch (error) {
-                  // CSP error - can't access iframe content
-                  console.warn('[DraftEditor] CSP restriction detected:', error);
-                  setIframeError(true);
-                }
+                setIframeError(false);
               }}
             />
           )}

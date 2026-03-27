@@ -18,6 +18,37 @@ ASSEMBLY_ONLY_CHAR_THRESHOLD = 150_000  # ~40-50 pages
 ASSEMBLY_ONLY_SECTION_THRESHOLD = 8
 
 
+def _normalize_google_docs_result(raw_result: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Normalize Google Docs upload response keys so frontend/cache always get usable values."""
+    result = dict(raw_result or {})
+    google_file_id = (
+        result.get("googleFileId")
+        or result.get("google_file_id")
+        or result.get("fileId")
+        or result.get("file_id")
+    )
+    web_view_link = result.get("webViewLink") or result.get("web_view_link")
+    iframe_url = result.get("iframeUrl") or result.get("iframe_url")
+
+    if not iframe_url and google_file_id:
+        iframe_url = f"https://docs.google.com/document/d/{google_file_id}/edit?embedded=true"
+
+    if not web_view_link and google_file_id:
+        web_view_link = f"https://docs.google.com/document/d/{google_file_id}/edit"
+
+    if google_file_id:
+        result["googleFileId"] = google_file_id
+        result["google_file_id"] = google_file_id
+    if iframe_url:
+        result["iframeUrl"] = iframe_url
+        result["iframe_url"] = iframe_url
+    if web_view_link:
+        result["webViewLink"] = web_view_link
+        result["web_view_link"] = web_view_link
+
+    return result
+
+
 # Structural-only styles: do not set font/size/alignment so section content keeps exact template format
 A4_PAGE_STYLE = """<style type="text/css">
 @page { size: A4; margin: 2.54cm; }
@@ -121,12 +152,34 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     upload_result = {}
     try:
         import io
-        from services.docx_export import assembled_html_to_docx_bytes
+        from services.docx_export import assembled_html_to_docx_bytes, assembled_html_to_google_import_html
 
         template_css = template_css_raw
-        logger.info("Assembler: Converting final HTML to DOCX (%d parts, template_css=%s, template_url=%s)", len(final_document.split("<!-- SECTION_BREAK -->")), "yes" if template_css else "no", "yes" if template_url else "no")
-        docx_bytes = assembled_html_to_docx_bytes(final_document, template_css=template_css, template_url=template_url)
-        doc_io = io.BytesIO(docx_bytes)
+        try:
+            google_import_html = assembled_html_to_google_import_html(final_document, template_css=template_css, template_url=template_url)
+        except Exception as _html_err:
+            logger.warning("Assembler: assembled_html_to_google_import_html failed (%s), falling back to plain wrapper", _html_err, exc_info=True)
+            google_import_html = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"/></head><body>{final_document}</body></html>"
+
+        logger.info(
+            "Assembler: Preparing Google import HTML and DOCX (%d parts, template_css=%s, template_url=%s)",
+            len(final_document.split("<!-- SECTION_BREAK -->")),
+            "yes" if template_css else "no",
+            "yes" if template_url else "no",
+        )
+
+        upload_filename = f"Assembled_{draft_id}.docx"
+        upload_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        try:
+            docx_bytes = assembled_html_to_docx_bytes(final_document, template_css=template_css, template_url=template_url)
+            upload_bytes = docx_bytes
+        except Exception as docx_error:
+            logger.warning("Assembler: DOCX conversion failed, falling back to HTML upload for Google Docs: %s", docx_error)
+            upload_bytes = google_import_html.encode("utf-8")
+            upload_filename = f"Assembled_{draft_id}.html"
+            upload_mime = "text/html"
+
+        doc_io = io.BytesIO(upload_bytes)
         doc_io.seek(0)
 
         # In Cloud Run, use production drafting-service if not set (K_SERVICE is set by Cloud Run)
@@ -136,9 +189,9 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
         existing_google_file_id = payload.get("existing_google_file_id")
         files = {
             "file": (
-                f"Assembled_{draft_id}.docx",
+                upload_filename,
                 doc_io,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                upload_mime,
             )
         }
         data = {
@@ -146,6 +199,9 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
             "title": f"Assembled_{draft_id}",
             "user_id": payload.get("user_id", ""),
             "existing_google_file_id": existing_google_file_id or "",
+            "google_import_html": google_import_html,
+            "google_import_filename": f"Assembled_{draft_id}.html",
+            "google_import_mime": "text/html",
         }
         headers = {"x-user-id": str(payload.get("user_id", ""))}
 
@@ -157,27 +213,28 @@ def run_assembler_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
             timeout=180,
         )
         if resp.status_code == 200:
-            upload_result = resp.json()
+            upload_result = _normalize_google_docs_result(resp.json())
             logger.info("Assembler: Uploaded to Drafting Service: %s", upload_result.get("googleFileId"))
         else:
             logger.warning("Assembler: Upload failed %d (assembly succeeded, HTML returned)", resp.status_code)
             upload_result = {"error": resp.text or f"Status {resp.status_code}"}
     except Exception as e:
-        logger.warning("Assembler: DOCX/upload failed (assembly succeeded): %s", e)
+        logger.warning("Assembler: DOCX/upload failed (assembly succeeded): %s", e, exc_info=True)
         upload_result = {"error": str(e)}
 
     return {
         "final_document": final_document,
         "format": "html",
         "sections_assembled": len(prepared_sections),
-        "google_docs": upload_result,
+        "google_docs": _normalize_google_docs_result(upload_result),
         "metadata": {
             "draft_id": draft_id,
             "template_url": template_url,
             "ai_polished": False,
             "assembly_only": True,
-            "google_file_id": upload_result.get("googleFileId"),
-            "iframe_url": upload_result.get("iframeUrl"),
+            "google_file_id": upload_result.get("googleFileId") or upload_result.get("google_file_id"),
+            "iframe_url": upload_result.get("iframeUrl") or upload_result.get("iframe_url"),
+            "web_view_link": upload_result.get("webViewLink") or upload_result.get("web_view_link"),
             "existing_file_id": payload.get("existing_google_file_id"),
         },
     }

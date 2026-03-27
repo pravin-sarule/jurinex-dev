@@ -1745,7 +1745,14 @@ const checkWebhookConfig = async (req, res) => {
 const saveAssembledDraft = async (req, res) => {
   try {
     const userId = parseInt(req.headers['x-user-id'] || req.user?.id);
-    const { title, draft_id: agentDraftId, existing_google_file_id } = req.body;
+    const {
+      title,
+      draft_id: agentDraftId,
+      existing_google_file_id,
+      google_import_html,
+      google_import_filename,
+      google_import_mime
+    } = req.body;
     const file = req.file;
 
     if (!file) {
@@ -1769,15 +1776,23 @@ const saveAssembledDraft = async (req, res) => {
     let result;
 
     const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const htmlMime = 'text/html';
+    const hasGoogleImportHtml = typeof google_import_html === 'string' && google_import_html.trim() !== '';
+    const driveUploadBuffer = hasGoogleImportHtml ? Buffer.from(google_import_html, 'utf8') : file.buffer;
+    const driveUploadMime = hasGoogleImportHtml ? (google_import_mime || htmlMime) : docxMime;
+    const driveUploadFilename = hasGoogleImportHtml
+      ? (google_import_filename || `${title || 'Assembled_Draft'}.html`)
+      : `${title || 'Assembled_Draft'}.docx`;
+    console.log(`[Draft] Drive import source: ${hasGoogleImportHtml ? 'HTML' : 'DOCX'} (${driveUploadMime})`);
 
     if (existing_google_file_id && String(existing_google_file_id).trim() !== '') {
       console.log(`[Draft] 🔄 UPDATING existing Google Doc: ${existing_google_file_id}`);
       try {
-        const fileStream = Readable.from(file.buffer);
+        const fileStream = Readable.from(driveUploadBuffer);
         await drive.files.update({
           fileId: String(existing_google_file_id).trim(),
           media: {
-            mimeType: docxMime,
+            mimeType: driveUploadMime,
             body: fileStream
           },
           fields: 'id, name, mimeType, webViewLink'
@@ -1807,10 +1822,10 @@ const saveAssembledDraft = async (req, res) => {
         console.error(`[Draft] ❌ Failed to update existing file ${existing_google_file_id}:`, updateError.message);
         console.log(`[Draft] 🔄 Falling back to creating new file`);
         result = await uploadToUserDriveAsGoogleDoc(
-          file.buffer,
+          driveUploadBuffer,
           userId,
-          `${title || 'Assembled_Draft'}.docx`,
-          docxMime,
+          driveUploadFilename,
+          driveUploadMime,
           title,
           userOAuthClient
         );
@@ -1819,10 +1834,10 @@ const saveAssembledDraft = async (req, res) => {
     } else {
       console.log(`[Draft] ✨ CREATING new Google Doc`);
       result = await uploadToUserDriveAsGoogleDoc(
-        file.buffer,
+        driveUploadBuffer,
         userId,
-        `${title || 'Assembled_Draft'}.docx`,
-        docxMime,
+        driveUploadFilename,
+        driveUploadMime,
         title,
         userOAuthClient
       );

@@ -9,6 +9,16 @@ export type BuilderPhase =
   | 'saved'
   | 'error';
 
+export interface StructureQuestion {
+  id: string;
+  question: string;
+  placeholder: string;
+  type: 'single_select' | 'multi_select' | 'yes_no' | 'range' | string;
+  required: boolean;
+  hint: string | null;
+  options: string[] | null;
+}
+
 export interface ExtractedField {
   fieldId: string;
   label: string;
@@ -75,6 +85,11 @@ interface BuilderState {
   savedTemplateId: string | null;
   savedTemplateName: string | null;
   errorMessage: string;
+  dynamicMode: boolean;
+  dynamicQuestions: StructureQuestion[];
+  dynamicAnswers: Record<string, string>;
+  dynamicQuestionsLoading: boolean;
+  dynamicQuestionsError: string;
 }
 
 interface BuilderActions {
@@ -91,6 +106,12 @@ interface BuilderActions {
   setSaveResult: (templateId: string, templateName: string) => void;
   setError: (message: string) => void;
   reset: () => void;
+  setDynamicMode: (enabled: boolean) => void;
+  setDynamicQuestions: (questions: StructureQuestion[]) => void;
+  setDynamicAnswer: (questionId: string, answer: string) => void;
+  setDynamicQuestionsLoading: (loading: boolean) => void;
+  setDynamicQuestionsError: (error: string) => void;
+  clearDynamicState: () => void;
 }
 
 const initialRequirements: TemplateRequirements = {
@@ -130,6 +151,11 @@ const initialState: BuilderState = {
   savedTemplateId: null,
   savedTemplateName: null,
   errorMessage: '',
+  dynamicMode: false,
+  dynamicQuestions: [],
+  dynamicAnswers: {},
+  dynamicQuestionsLoading: false,
+  dynamicQuestionsError: '',
 };
 
 export const useTemplateBuilderStore = create<BuilderState & BuilderActions>((set, get) => ({
@@ -147,7 +173,7 @@ export const useTemplateBuilderStore = create<BuilderState & BuilderActions>((se
       },
     })),
 
-  resetRequirements: () => set({ requirements: { ...initialRequirements }, currentStep: 1, phase: 'selecting' }),
+  resetRequirements: () => set({ requirements: { ...initialRequirements }, currentStep: 1, phase: 'selecting', dynamicMode: false, dynamicQuestions: [], dynamicAnswers: {}, dynamicQuestionsLoading: false, dynamicQuestionsError: '' }),
 
   setGenerationResult: (text, fields, sections, metadata) =>
     set({
@@ -162,6 +188,22 @@ export const useTemplateBuilderStore = create<BuilderState & BuilderActions>((se
     set({ savedTemplateId, savedTemplateName, phase: 'saved' }),
 
   setError: (errorMessage) => set({ errorMessage, phase: 'error' }),
+
+  setDynamicMode: (dynamicMode) => set({ dynamicMode }),
+
+  setDynamicQuestions: (dynamicQuestions) =>
+    set({ dynamicQuestions, dynamicQuestionsLoading: false, dynamicQuestionsError: '' }),
+
+  setDynamicAnswer: (questionId, answer) =>
+    set((state) => ({ dynamicAnswers: { ...state.dynamicAnswers, [questionId]: answer } })),
+
+  setDynamicQuestionsLoading: (dynamicQuestionsLoading) => set({ dynamicQuestionsLoading }),
+
+  setDynamicQuestionsError: (dynamicQuestionsError) =>
+    set({ dynamicQuestionsError, dynamicQuestionsLoading: false }),
+
+  clearDynamicState: () =>
+    set({ dynamicMode: false, dynamicQuestions: [], dynamicAnswers: {}, dynamicQuestionsLoading: false, dynamicQuestionsError: '' }),
 
   reset: () => set({ ...initialState, requirements: { ...initialRequirements } }),
 }));

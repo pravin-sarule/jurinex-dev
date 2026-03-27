@@ -1,7 +1,17 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTemplateBuilderStore } from './templateBuilderStore';
 import { customTemplateApi } from '../template_drafting_component/user_custom_template/api';
+import { DRAFTING_SERVICE_URL } from '../config/apiConfig.js';
+import draftingApi from '../services/draftingApi';
+
+interface GoogleDocsSession {
+  draftId?: string;
+  googleFileId?: string;
+  editUrl?: string;
+  iframeUrl?: string;
+  iframeKey?: number;
+}
 
 async function createDraftFromTemplate(templateId: string, title: string): Promise<string> {
   const { AGENT_DRAFT_TEMPLATE_API } = await import('../config/apiConfig.js');
@@ -82,8 +92,111 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function normalizeGoogleDocsSession(raw: Record<string, any> | null | undefined): GoogleDocsSession {
+  const info = { ...(raw || {}) };
+  const draftId = info?.draft?.id || info?.draft?.draftId || info?.draftId || info?.draft_id;
+  const googleFileId = info?.google_file_id || info?.googleFileId || info?.draft?.googleFileId || info?.draft?.google_file_id;
+  const baseUrl =
+    info?.iframeUrl ||
+    info?.iframe_url ||
+    info?.draft?.iframeUrl ||
+    info?.draft?.iframe_url ||
+    info?.webViewLink ||
+    info?.web_view_link ||
+    (googleFileId ? `https://docs.google.com/document/d/${googleFileId}/edit` : undefined);
+
+  let iframeUrl = baseUrl;
+  if (iframeUrl) {
+    iframeUrl = iframeUrl.includes('embedded=true')
+      ? iframeUrl
+      : `${iframeUrl}${iframeUrl.includes('?') ? '&' : '?'}embedded=true`;
+    iframeUrl = `${iframeUrl}${iframeUrl.includes('?') ? '&' : '?'}cb=${Date.now()}`;
+  }
+
+  return {
+    draftId: draftId ? String(draftId) : undefined,
+    googleFileId: googleFileId ? String(googleFileId) : undefined,
+    editUrl: googleFileId ? `https://docs.google.com/document/d/${googleFileId}/edit` : undefined,
+    iframeUrl,
+    iframeKey: Date.now(),
+  };
+}
+
+async function openGeneratedTemplateInGoogleDocs(fileName: string, html: string): Promise<GoogleDocsSession> {
+  const token =
+    localStorage.getItem('token') ||
+    localStorage.getItem('access_token') ||
+    localStorage.getItem('auth_token') ||
+    '';
+
+  const formData = new FormData();
+  const htmlBlob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  formData.append('file', htmlBlob, `${fileName}.html`);
+  formData.append('title', fileName);
+
+  const res = await fetch(`${DRAFTING_SERVICE_URL}/api/drafts/upload`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: formData,
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.message || data?.error || `Failed to open in Google Docs (${res.status})`);
+  }
+
+  const session = normalizeGoogleDocsSession(data);
+
+  if (!session.draftId && !session.googleFileId) {
+    throw new Error('Google Docs file was created but no draft or file ID was returned.');
+  }
+
+  return session;
+}
+
 function renderInlineHtml(raw: string): string {
   return escapeHtml(raw).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+async function buildLibraryUploadFromGoogleDocs(
+  session: GoogleDocsSession,
+  templateName: string,
+  category: string,
+  description: string,
+): Promise<FormData> {
+  if (!session.draftId) {
+    throw new Error('Edited Google Docs draft is missing a draft ID.');
+  }
+
+  await draftingApi.syncToGCS(session.draftId, 'docx');
+  const gcsUrlResponse = await draftingApi.getGCSUrl(session.draftId, 2);
+  const signedUrl = gcsUrlResponse?.signedUrl;
+
+  if (!signedUrl) {
+    throw new Error('Failed to get the latest edited Google Docs file.');
+  }
+
+  const fileResponse = await fetch(signedUrl);
+  if (!fileResponse.ok) {
+    throw new Error(`Failed to download edited Google Docs file (${fileResponse.status}).`);
+  }
+
+  const fileBlob = await fileResponse.blob();
+  const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.docx`;
+  const formData = new FormData();
+  formData.append('name', templateName);
+  formData.append('category', category || 'General');
+  formData.append('subcategory', 'AI Generated');
+  formData.append('description', description);
+  formData.append(
+    'file',
+    new File([fileBlob], safeFileName, {
+      type: fileBlob.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+    safeFileName,
+  );
+
+  return formData;
 }
 
 function estimateLineCost(line: RenderedLine): number {
@@ -194,15 +307,17 @@ export const GeneratedTemplateView: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [isOpeningGoogleDocs, setIsOpeningGoogleDocs] = useState(false);
+  const [googleDocsOpenError, setGoogleDocsOpenError] = useState<string | null>(null);
+  const [googleDocsSession, setGoogleDocsSession] = useState<GoogleDocsSession | null>(null);
+  const [iframeFailed, setIframeFailed] = useState(false);
 
-  const pageHeaderLeft = generationMetadata?.templateName || 'Generated Template';
-  const pageHeaderRight = generationMetadata?.jurisdiction || 'India';
-  const pageFooterLeft = generationMetadata?.language || 'English';
+  const autoOpenedRef = useRef(false);
 
   const lines = useMemo(() => parseLinesForRender(generatedTemplateText), [generatedTemplateText]);
   const pages = useMemo(() => {
     const result: RenderedLine[][] = [];
-    const pageBudget = 28;
+    const pageBudget = 24; // Fewer lines per page after court margins increase
     let currentPage: RenderedLine[] = [];
     let currentBudget = 0;
 
@@ -221,6 +336,59 @@ export const GeneratedTemplateView: React.FC = () => {
     return result;
   }, [lines]);
 
+  // Export as a single flowing document — Google Docs handles its own pagination.
+  // Never inject "Page X of Y" as body text; never use CSS page-break hacks with flex containers.
+  const exportHtml = useMemo(() => {
+    const name = generationMetadata?.templateName || 'template';
+    const bodyHtml = lines.map((line) => renderedLineToHtml(line)).join('\n');
+
+    return `
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(name)}</title>
+  <!--[if gte mso 9]><xml>
+    <w:WordDocument>
+      <w:View>Print</w:View>
+      <w:Zoom>100</w:Zoom>
+      <w:DoNotOptimizeForBrowser/>
+    </w:WordDocument>
+  </xml><![endif]-->
+  <style>
+    @page { margin: 1in 1in 1in 1.5in; size: A4; }
+    body {
+      font-family: "Times New Roman", Times, serif;
+      font-size: 12pt;
+      color: #000000;
+      line-height: 1.6;
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+    }
+  </style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`.trim();
+  }, [generationMetadata, lines]);
+
+  // Auto-open in Google Docs as soon as the template is ready
+  useEffect(() => {
+    if (autoOpenedRef.current || !exportHtml || googleDocsSession) return;
+    autoOpenedRef.current = true;
+    const name = generationMetadata?.templateName || 'Generated Template';
+    setIsOpeningGoogleDocs(true);
+    setGoogleDocsOpenError(null);
+    setIframeFailed(false);
+    openGeneratedTemplateInGoogleDocs(name, exportHtml)
+      .then((result) => setGoogleDocsSession(result))
+      .catch((err) => setGoogleDocsOpenError(err instanceof Error ? err.message : 'Failed to open in Google Docs'))
+      .finally(() => setIsOpeningGoogleDocs(false));
+  }, [exportHtml]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSaveToLibrary = useCallback(async () => {
     if (!generatedTemplateText || isSaving) return;
     setIsSaving(true);
@@ -228,15 +396,23 @@ export const GeneratedTemplateView: React.FC = () => {
 
     try {
       const templateName = generationMetadata?.templateName || generationMetadata?.documentType || 'Generated Template';
-      const formData = new FormData();
-      const textBlob = new Blob([generatedTemplateText], { type: 'text/plain;charset=utf-8' });
-      const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.txt`;
+      const category = generationMetadata?.category || 'General';
+      const description = `AI-generated template. Jurisdiction: ${generationMetadata?.jurisdiction || 'India'}. Language: ${generationMetadata?.language || 'English'}.`;
+      let formData: FormData;
 
-      formData.append('name', templateName);
-      formData.append('category', generationMetadata?.category || 'General');
-      formData.append('subcategory', 'AI Generated');
-      formData.append('description', `AI-generated template. Jurisdiction: ${generationMetadata?.jurisdiction || 'India'}. Language: ${generationMetadata?.language || 'English'}.`);
-      formData.append('file', textBlob, safeFileName);
+      if (googleDocsSession?.draftId) {
+        formData = await buildLibraryUploadFromGoogleDocs(googleDocsSession, templateName, category, description);
+      } else {
+        formData = new FormData();
+        const textBlob = new Blob([generatedTemplateText], { type: 'text/plain;charset=utf-8' });
+        const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.txt`;
+
+        formData.append('name', templateName);
+        formData.append('category', category);
+        formData.append('subcategory', 'AI Generated');
+        formData.append('description', description);
+        formData.append('file', textBlob, safeFileName);
+      }
 
       const result = await customTemplateApi.uploadTemplate(formData);
       setSaveResult(result.template_id, templateName);
@@ -244,7 +420,7 @@ export const GeneratedTemplateView: React.FC = () => {
       setSaveError(err instanceof Error ? err.message : 'Save failed');
       setIsSaving(false);
     }
-  }, [generatedTemplateText, generationMetadata, isSaving, setSaveResult]);
+  }, [generatedTemplateText, generationMetadata, googleDocsSession, isSaving, setSaveResult]);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -258,84 +434,30 @@ export const GeneratedTemplateView: React.FC = () => {
 
   const handleDownload = useCallback(() => {
     const name = generationMetadata?.templateName || 'template';
-    const bodyHtml = pages
-      .map((pageLines, index) => {
-        const contentHtml = pageLines.map((line) => renderedLineToHtml(line)).join('\n');
-        return `
-<div class="doc-page">
-  <div class="doc-header">
-    <div>${escapeHtml(pageHeaderLeft)}</div>
-    <div>${escapeHtml(pageHeaderRight)}</div>
-  </div>
-  <div class="doc-body">${contentHtml}</div>
-  <div class="doc-footer">
-    <div>${escapeHtml(pageFooterLeft)}</div>
-    <div>Page ${index + 1} of ${pages.length}</div>
-  </div>
-</div>`;
-      })
-      .join('\n');
-
-    const html = `
-<html xmlns:o="urn:schemas-microsoft-com:office:office"
-      xmlns:w="urn:schemas-microsoft-com:office:word"
-      xmlns="http://www.w3.org/TR/REC-html40">
-<head>
-  <meta charset="utf-8">
-  <title>${name}</title>
-  <style>
-    @page { margin: 1in; size: A4; }
-    body {
-      font-family: "Times New Roman", Times, serif;
-      font-size: 12pt;
-      color: #000000;
-      line-height: 1.6;
-      margin: 0;
-      padding: 0;
-      background: #ffffff;
-    }
-    .doc-page {
-      min-height: 1000px;
-      page-break-after: always;
-      box-sizing: border-box;
-      display: flex;
-      flex-direction: column;
-    }
-    .doc-page:last-child { page-break-after: auto; }
-    .doc-header, .doc-footer {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 9pt;
-      color: #444;
-    }
-    .doc-header {
-      border-bottom: 1px solid #cfcfcf;
-      padding-bottom: 8pt;
-      margin-bottom: 14pt;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      font-weight: bold;
-    }
-    .doc-footer {
-      border-top: 1px solid #cfcfcf;
-      padding-top: 8pt;
-      margin-top: 14pt;
-    }
-    .doc-body { flex: 1; }
-  </style>
-</head>
-<body>${bodyHtml}</body>
-</html>`.trim();
-
-    const blob = new Blob(['\uFEFF' + html], { type: 'application/msword;charset=utf-8' });
+    const blob = new Blob(['\uFEFF' + exportHtml], { type: 'application/msword;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `${name}.doc`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [generationMetadata, pageFooterLeft, pageHeaderLeft, pageHeaderRight, pages]);
+  }, [exportHtml, generationMetadata]);
+
+  const handleOpenInGoogleDocs = useCallback(async () => {
+    const name = generationMetadata?.templateName || 'Generated Template';
+    if (isOpeningGoogleDocs) return;
+    setIsOpeningGoogleDocs(true);
+    setGoogleDocsOpenError(null);
+    setIframeFailed(false);
+    try {
+      const result = await openGeneratedTemplateInGoogleDocs(name, exportHtml);
+      setGoogleDocsSession(result);
+    } catch (err) {
+      setGoogleDocsOpenError(err instanceof Error ? err.message : 'Failed to open in Google Docs');
+    } finally {
+      setIsOpeningGoogleDocs(false);
+    }
+  }, [exportHtml, generationMetadata, isOpeningGoogleDocs]);
 
   if (phase === 'saved' && savedTemplateId) {
     return (
@@ -364,6 +486,12 @@ export const GeneratedTemplateView: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {isOpeningGoogleDocs && (
+            <span className="text-xs text-gray-400 flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: '#21C1B6' }} />
+              Opening in Google Docs...
+            </span>
+          )}
           <button onClick={handleCopy} className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all">
             {copied ? '✓ Copied!' : 'Copy'}
           </button>
@@ -379,7 +507,7 @@ export const GeneratedTemplateView: React.FC = () => {
             className={`px-4 py-1.5 text-sm font-bold rounded-lg transition-all shadow-sm ${isSaving ? 'bg-gray-200 text-gray-400 cursor-wait' : 'text-white'}`}
             style={isSaving ? {} : { backgroundColor: '#21C1B6' }}
           >
-            {isSaving ? 'Saving...' : 'Save to My Library'}
+            {isSaving ? 'Saving...' : 'Add to Library'}
           </button>
         </div>
       </div>
@@ -389,105 +517,144 @@ export const GeneratedTemplateView: React.FC = () => {
           {saveError}
         </div>
       )}
+      {googleDocsOpenError && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 text-xs text-amber-700 flex items-center justify-between">
+          <span>{googleDocsOpenError}</span>
+          <button
+            onClick={handleOpenInGoogleDocs}
+            disabled={isOpeningGoogleDocs}
+            className="ml-4 px-3 py-1 text-xs font-medium bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg transition-all disabled:opacity-50"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="bg-white border-b border-gray-200 px-6 py-2.5 shrink-0">
-        <span className="text-sm font-medium text-[#21C1B6]">Document Preview</span>
+        <span className="text-sm font-medium text-[#21C1B6]">
+          {googleDocsSession?.iframeUrl && !iframeFailed ? 'Google Docs Editor' : 'Document Preview'}
+        </span>
       </div>
 
       <div className="flex-1 overflow-auto" style={{ background: '#525659', padding: '32px 0' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
-          {pages.map((pageLines, pageIdx) => (
-            <div key={pageIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-              <div style={{ color: '#ccc', fontSize: '11px', marginBottom: '6px', userSelect: 'none' }}>
-                Page {pageIdx + 1} of {pages.length}
-              </div>
-              <div
-                style={{
-                  width: '794px',
-                  height: '1123px',
-                  minHeight: '1123px',
-                  maxHeight: '1123px',
-                  overflow: 'hidden',
-                  background: '#ffffff',
-                  boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-                  boxSizing: 'border-box',
-                  fontFamily: '"Times New Roman", Times, serif',
-                  fontSize: '12pt',
-                  lineHeight: '1.6',
-                  color: '#000',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  padding: '64px 96px 48px',
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    fontSize: '9pt',
-                    color: '#444',
-                    borderBottom: '1px solid #cfcfcf',
-                    paddingBottom: '8pt',
-                    marginBottom: '14pt',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    fontWeight: 'bold',
-                  }}
-                >
-                  <div>{pageHeaderLeft}</div>
-                  <div>{pageHeaderRight}</div>
+        {googleDocsSession?.iframeUrl && !iframeFailed ? (
+          <div className="h-full px-6 pb-6">
+            <div className="bg-white rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.2)] overflow-hidden h-full min-h-[720px] flex flex-col">
+              <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gray-50">
+                <div>
+                  <div className="text-sm font-semibold text-gray-800">Editing In Google Docs</div>
+                  <div className="text-xs text-gray-500">This editor is opened inside the same template generation screen.</div>
                 </div>
-
-                <div style={{ flex: 1 }}>
-                  {pageLines.map((line, i) => {
-                    if (line.type === 'blank') return <div key={i} style={{ height: '8px' }} />;
-                    if (line.type === 'heading' && line.level === 1) {
-                      return (
-                        <div key={i} style={{ fontWeight: 'bold', textAlign: 'center', textTransform: 'uppercase', fontSize: '12pt', marginTop: '14pt', marginBottom: '4pt', letterSpacing: '0.02em' }}>
-                          <HighlightedLine text={line.content} />
-                        </div>
-                      );
-                    }
-                    if (line.type === 'heading' && line.level === 2) {
-                      return (
-                        <div key={i} style={{ fontWeight: 'bold', fontSize: '12pt', marginTop: '8pt', marginBottom: '2pt' }}>
-                          <HighlightedLine text={line.content} />
-                        </div>
-                      );
-                    }
-                    return (
-                      <div key={i} style={{ fontSize: '12pt', lineHeight: '1.6', marginBottom: '3pt', textAlign: 'justify' }}>
-                        <HighlightedLine text={line.content} />
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    fontSize: '9pt',
-                    color: '#444',
-                    borderTop: '1px solid #cfcfcf',
-                    paddingTop: '8pt',
-                    marginTop: '14pt',
-                  }}
-                >
-                  <div>{pageFooterLeft}</div>
-                  <div>Page {pageIdx + 1} of {pages.length}</div>
+                <div className="flex items-center gap-2">
+                  {googleDocsSession.editUrl && (
+                    <button
+                      onClick={() => window.open(googleDocsSession.editUrl, '_blank', 'noopener,noreferrer')}
+                      className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all"
+                    >
+                      Open in New Tab
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setGoogleDocsSession(null);
+                      setIframeFailed(false);
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all"
+                  >
+                    Back to Preview
+                  </button>
                 </div>
               </div>
+              <iframe
+                key={googleDocsSession.iframeKey ?? googleDocsSession.googleFileId}
+                src={googleDocsSession.iframeUrl}
+                className="flex-1 w-full border-0 bg-white"
+                title="Google Docs Editor"
+                allow="clipboard-read; clipboard-write; autoplay; popups; popups-to-escape-sandbox"
+                sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-top-navigation-by-user-activation"
+                onError={() => setIframeFailed(true)}
+                onLoad={() => setIframeFailed(false)}
+              />
             </div>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
+            {pages.map((pageLines, pageIdx) => (
+              <div key={pageIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <div style={{ color: '#ccc', fontSize: '11px', marginBottom: '6px', userSelect: 'none' }}>
+                  Page {pageIdx + 1} of {pages.length}
+                </div>
+                <div
+                  style={{
+                    width: '794px',
+                    height: '1123px',
+                    minHeight: '1123px',
+                    maxHeight: '1123px',
+                    overflow: 'hidden',
+                    background: '#ffffff',
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+                    boxSizing: 'border-box',
+                    fontFamily: '"Times New Roman", Times, serif',
+                    fontSize: '12pt',
+                    lineHeight: '1.6',
+                    color: '#000',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    // Court-standard: 1.5in left (binding), 1in top/right/bottom
+                    padding: '96px 96px 96px 144px',
+                  }}
+                >
+                  <div style={{ flex: 1 }}>
+                    {pageLines.map((line, i) => {
+                      if (line.type === 'blank') return <div key={i} style={{ height: '8px' }} />;
+                      if (line.type === 'heading' && line.level === 1) {
+                        return (
+                          <div key={i} style={{ fontWeight: 'bold', textAlign: 'center', textTransform: 'uppercase', fontSize: '12pt', marginTop: '14pt', marginBottom: '4pt', letterSpacing: '0.02em' }}>
+                            <HighlightedLine text={line.content} />
+                          </div>
+                        );
+                      }
+                      if (line.type === 'heading' && line.level === 2) {
+                        return (
+                          <div key={i} style={{ fontWeight: 'bold', fontSize: '12pt', marginTop: '8pt', marginBottom: '2pt' }}>
+                            <HighlightedLine text={line.content} />
+                          </div>
+                        );
+                      }
+                      return (
+                        <div key={i} style={{ fontSize: '12pt', lineHeight: '1.6', marginBottom: '3pt', textAlign: 'justify' }}>
+                          <HighlightedLine text={line.content} />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      fontSize: '9pt',
+                      color: '#444',
+                      borderTop: '1px solid #cfcfcf',
+                      paddingTop: '8pt',
+                      marginTop: '14pt',
+                    }}
+                  >
+                    <div>Page {pageIdx + 1} of {pages.length}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="bg-white border-t border-gray-200 px-6 py-4 flex items-center justify-between sticky bottom-0 z-10 shadow-[0_-2px_8px_rgba(0,0,0,0.05)]">
         <p className="text-xs text-gray-500">
-          Preview is document-only. When you save, the generated template is sent to the Template Analyzer Agent for section and field extraction.
+           {googleDocsSession?.draftId
+             ? 'Library save will use your latest Google Docs edits and send that edited file to the Template Analyzer Agent.'
+             : 'Preview is document-only. When you save, the generated template is sent to the Template Analyzer Agent for section and field extraction.'}
         </p>
         <button
           onClick={handleSaveToLibrary}
@@ -495,7 +662,7 @@ export const GeneratedTemplateView: React.FC = () => {
           className={`px-5 py-2 text-sm font-bold rounded-lg transition-all ${isSaving ? 'bg-gray-200 text-gray-400 cursor-wait' : 'text-white shadow-sm'}`}
           style={isSaving ? {} : { backgroundColor: '#21C1B6' }}
         >
-          {isSaving ? 'Saving...' : 'Save to My Library'}
+          {isSaving ? 'Saving...' : 'Add to Library'}
         </button>
       </div>
     </div>

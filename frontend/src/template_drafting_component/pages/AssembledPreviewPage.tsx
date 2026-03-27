@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { ArrowLeftIcon, ArrowDownTrayIcon, EyeIcon, ShareIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ArrowDownTrayIcon, EyeIcon } from '@heroicons/react/24/outline';
 import { draftApi } from '../services';
 import { toast } from 'react-toastify';
 import { LoadingSpinner } from '../components/common';
@@ -25,6 +25,42 @@ interface AssembledPreviewPageProps {
     initialAssembleResult?: AssembleResponse | null;
 }
 
+const getGoogleEditUrl = (googleFileId?: string | null) =>
+    googleFileId ? `https://docs.google.com/document/d/${googleFileId}/edit` : '';
+
+const normalizeGoogleDocsInfo = (rawInfo: Record<string, any> | null | undefined) => {
+    const info = { ...(rawInfo || {}) };
+    const googleFileId =
+        info.google_file_id ||
+        info.googleFileId ||
+        info.file_id ||
+        info.fileId ||
+        '';
+    const webViewLink = info.web_view_link || info.webViewLink || getGoogleEditUrl(googleFileId);
+    let iframeUrl =
+        info.iframe_url ||
+        info.iframeUrl ||
+        (googleFileId ? `${getGoogleEditUrl(googleFileId)}?embedded=true` : '');
+
+    if (iframeUrl) {
+        iframeUrl = iframeUrl.includes('embedded=true')
+            ? iframeUrl
+            : `${iframeUrl}${iframeUrl.includes('?') ? '&' : '?'}embedded=true`;
+        iframeUrl = `${iframeUrl}${iframeUrl.includes('?') ? '&' : '?'}cb=${Date.now()}`;
+    }
+
+    return {
+        ...info,
+        google_file_id: googleFileId || undefined,
+        googleFileId: googleFileId || undefined,
+        webViewLink: webViewLink || undefined,
+        web_view_link: webViewLink || undefined,
+        iframe_url: iframeUrl || undefined,
+        iframeUrl: iframeUrl || undefined,
+        iframeKey: info.updated ? Date.now() : (info.iframeKey ?? Date.now())
+    };
+};
+
 export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draftIdProp, onBack, onToggleEditor, addActivity, initialAssembleResult }) => {
     const params = useParams<{ draftId: string }>();
     const [searchParams] = useSearchParams();
@@ -37,9 +73,15 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
     const [templateCss, setTemplateCss] = useState<string>('');
     const [googleDocsInfo, setGoogleDocsInfo] = useState<any>(null);
     const [showGoogleDocs, setShowGoogleDocs] = useState(false);
+    const [iframeFailed, setIframeFailed] = useState(false);
+    const [isGoogleDriveConnected, setIsGoogleDriveConnected] = useState<boolean | null>(null);
+    const [googleDocsError, setGoogleDocsError] = useState<string>('');
+    const [isRetryingGoogleDocs, setIsRetryingGoogleDocs] = useState(false);
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
     const hasOpenedGoogleDocsRef = useRef(false);
+    const iframeTimeoutRef = useRef<number | null>(null);
+    const hasRetriedGoogleDocsRef = useRef(false);
 
     const sections = documentHtml
         ? documentHtml.split(/<!--\s*SECTION_BREAK\s*-->/).filter((h: string) => h.trim().length > 0)
@@ -59,8 +101,21 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
         setTemplateCss('');
         setGoogleDocsInfo(null);
         setShowGoogleDocs(false);
+        setIframeFailed(false);
+        setGoogleDocsError('');
+        setIsGoogleDriveConnected(null);
+        setIsRetryingGoogleDocs(false);
+        hasRetriedGoogleDocsRef.current = false;
         setLoading(true);
     }, [draftId]);
+
+    useEffect(() => {
+        return () => {
+            if (iframeTimeoutRef.current) {
+                window.clearTimeout(iframeTimeoutRef.current);
+            }
+        };
+    }, []);
 
     // Open in new tab only when we have a synced file but no iframe (so we show iframe by default when available)
     useEffect(() => {
@@ -72,28 +127,62 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
     }, [googleDocsInfo?.google_file_id, googleDocsInfo?.iframe_url, loading]);
 
     useEffect(() => {
+        let active = true;
+        googleDriveApi.getConnectionStatus().then((status) => {
+            if (active) {
+                setIsGoogleDriveConnected(Boolean(status?.connected));
+            }
+        }).catch(() => {
+            if (active) {
+                setIsGoogleDriveConnected(false);
+            }
+        });
+        return () => {
+            active = false;
+        };
+    }, [draftId]);
+
+    useEffect(() => {
+        if (iframeTimeoutRef.current) {
+            window.clearTimeout(iframeTimeoutRef.current);
+            iframeTimeoutRef.current = null;
+        }
+        if (!showGoogleDocs || !googleDocsInfo?.iframe_url || iframeFailed) {
+            return;
+        }
+        iframeTimeoutRef.current = window.setTimeout(() => {
+            setIframeFailed(true);
+            setShowGoogleDocs(false);
+            toast.info('Google Docs embed did not load. Opening static preview instead.');
+        }, 12000);
+        return () => {
+            if (iframeTimeoutRef.current) {
+                window.clearTimeout(iframeTimeoutRef.current);
+                iframeTimeoutRef.current = null;
+            }
+        };
+    }, [showGoogleDocs, googleDocsInfo?.iframe_url, iframeFailed]);
+
+    useEffect(() => {
         // Use the exact result from Assemble click so preview and Google Docs iframe match what was just assembled (no second API call)
         if (initialAssembleResult?.success && initialAssembleResult.final_document) {
             setDocumentHtml(initialAssembleResult.final_document);
             setTemplateCss(initialAssembleResult.template_css || '');
-            const rawInfo = {
+            const rawGoogleInfo = {
                 ...(initialAssembleResult.metadata || {}),
                 ...(initialAssembleResult.google_docs || {})
             };
-            const fid = rawInfo.google_file_id ?? rawInfo.googleFileId;
-            if (fid || rawInfo.iframe_url || rawInfo.iframeUrl) {
-                let baseUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit` : '');
-                if (baseUrl && !baseUrl.includes('embedded=true')) {
-                    baseUrl += baseUrl.includes('?') ? '&embedded=true' : '?embedded=true';
-                }
-                const iframeUrl = baseUrl ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}cb=${Date.now()}` : undefined;
-                setGoogleDocsInfo({
-                    ...rawInfo,
-                    iframe_url: iframeUrl,
-                    google_file_id: fid,
-                    iframeKey: Date.now()
-                });
-                setShowGoogleDocs(true);
+            const normalizedInfo = normalizeGoogleDocsInfo({
+                ...rawGoogleInfo
+            });
+            const errorMessage = rawGoogleInfo?.error || rawGoogleInfo?.message || '';
+            if (normalizedInfo.google_file_id || normalizedInfo.iframe_url) {
+                setGoogleDocsInfo(normalizedInfo);
+                setIframeFailed(false);
+                setShowGoogleDocs(Boolean(normalizedInfo.iframe_url));
+                setGoogleDocsError('');
+            } else {
+                setGoogleDocsError(typeof errorMessage === 'string' ? errorMessage : '');
             }
             setLoading(false);
             return;
@@ -122,40 +211,64 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                     addActivity('Assembler Agent', 'Compiling individual sections into final document format...', 'in-progress');
                 }
 
-                const forceReassemble = searchParams.get('googleConnected') === '1';
-                const response: any = await draftApi.assemble(draftId, activeSectionIds, forceReassemble);
-
-                if (response.success) {
-                    if (addActivity) {
-                        addActivity('Assembler Agent', 'Final document successfully assembled and prepared for preview.', 'completed');
+                const assembleOnce = async (forceReassemble: boolean) => {
+                    const response: any = await draftApi.assemble(draftId, activeSectionIds, forceReassemble);
+                    if (!response.success) {
+                        return response;
                     }
+
                     setDocumentHtml(response.final_document);
                     if (response.template_css) {
                         setTemplateCss(response.template_css);
                     }
 
-                    const rawInfo = {
+                    const rawGoogleInfo = {
                         ...(response.metadata || {}),
                         ...(response.google_docs || {})
                     };
+                    const normalizedInfo = normalizeGoogleDocsInfo(rawGoogleInfo);
+                    const rawError = rawGoogleInfo?.error || rawGoogleInfo?.message || '';
+                    const hasGoogleDoc = Boolean(normalizedInfo.iframe_url || normalizedInfo.google_file_id);
 
-                    if (rawInfo.iframeUrl || rawInfo.iframe_url || rawInfo.googleFileId || rawInfo.google_file_id) {
-                        const fid = rawInfo.google_file_id ?? rawInfo.googleFileId;
-                        let baseUrl = rawInfo.iframe_url || rawInfo.iframeUrl || (fid ? `https://docs.google.com/document/d/${fid}/edit` : '');
-                        if (baseUrl && !baseUrl.includes('embedded=true')) {
-                            baseUrl += baseUrl.includes('?') ? '&embedded=true' : '?embedded=true';
-                        }
-                        const iframeUrl = baseUrl ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}cb=${Date.now()}` : undefined;
-                        const normalizedInfo = {
-                            ...rawInfo,
-                            iframe_url: iframeUrl,
-                            google_file_id: fid,
-                            draft_id: rawInfo.draft?.id || rawInfo.draft_id || rawInfo.draftId,
-                            iframeKey: rawInfo.updated ? Date.now() : (rawInfo.iframeKey ?? Date.now())
-                        };
+                    if (hasGoogleDoc) {
                         setGoogleDocsInfo(normalizedInfo);
-                        if (normalizedInfo.iframe_url) {
-                            setShowGoogleDocs(true);
+                        setIframeFailed(false);
+                        setGoogleDocsError('');
+                        setShowGoogleDocs(Boolean(normalizedInfo.iframe_url));
+                        return response;
+                    }
+
+                    setGoogleDocsInfo(null);
+                    setShowGoogleDocs(false);
+                    setGoogleDocsError(typeof rawError === 'string' ? rawError : '');
+                    return response;
+                };
+
+                const forceReassemble = searchParams.get('googleConnected') === '1';
+                let response: any = await assembleOnce(forceReassemble);
+
+                if (response.success) {
+                    if (addActivity) {
+                        addActivity('Assembler Agent', 'Final document successfully assembled and prepared for preview.', 'completed');
+                    }
+
+                    const missingGoogleDoc = !response?.google_docs?.googleFileId
+                        && !response?.google_docs?.google_file_id
+                        && !response?.google_docs?.iframeUrl
+                        && !response?.google_docs?.iframe_url
+                        && !response?.metadata?.google_file_id
+                        && !response?.metadata?.iframe_url;
+
+                    if (isGoogleDriveConnected && missingGoogleDoc && !hasRetriedGoogleDocsRef.current) {
+                        hasRetriedGoogleDocsRef.current = true;
+                        setIsRetryingGoogleDocs(true);
+                        try {
+                            response = await assembleOnce(true);
+                            if (response?.success && (response?.google_docs || response?.metadata?.google_file_id || response?.metadata?.iframe_url)) {
+                                toast.success('Google Docs creation retried successfully.');
+                            }
+                        } finally {
+                            setIsRetryingGoogleDocs(false);
                         }
                     }
                 }
@@ -168,7 +281,7 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
         };
 
         loadAssembledDoc();
-    }, [draftId, navigate, draftIdProp, initialAssembleResult, searchParams]);
+    }, [draftId, navigate, draftIdProp, initialAssembleResult, searchParams, isGoogleDriveConnected]);
 
 
     const handleDownloadDocx = async () => {
@@ -228,6 +341,45 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
         } catch (error) {
             console.error('Error opening share modal:', error);
             toast.error('Could not open sharing settings.');
+        }
+    };
+
+    const handleRetryGoogleDocs = async () => {
+        if (!draftId || isRetryingGoogleDocs) return;
+        try {
+            setIsRetryingGoogleDocs(true);
+            const prompts = await draftApi.getSectionPrompts(draftId);
+            const activeSectionIds = prompts
+                .filter((p: any) => !p.is_deleted)
+                .map((p: any) => p.section_id);
+            const response: any = await draftApi.assemble(draftId, activeSectionIds, true);
+            const rawGoogleInfo = {
+                ...(response.metadata || {}),
+                ...(response.google_docs || {})
+            };
+            const normalizedInfo = normalizeGoogleDocsInfo(rawGoogleInfo);
+            const rawError = rawGoogleInfo?.error || rawGoogleInfo?.message || '';
+
+            if (response.success && (normalizedInfo.google_file_id || normalizedInfo.iframe_url)) {
+                setDocumentHtml(response.final_document || documentHtml);
+                if (response.template_css) {
+                    setTemplateCss(response.template_css);
+                }
+                setGoogleDocsInfo(normalizedInfo);
+                setGoogleDocsError('');
+                setIframeFailed(false);
+                setShowGoogleDocs(Boolean(normalizedInfo.iframe_url));
+                toast.success('Google Docs opened successfully.');
+                return;
+            }
+
+            setGoogleDocsError(typeof rawError === 'string' && rawError ? rawError : 'Google Docs document could not be created for this draft.');
+            toast.error('Google Docs document is still not available.');
+        } catch (error) {
+            console.error('Retry Google Docs failed:', error);
+            toast.error('Failed to retry Google Docs creation.');
+        } finally {
+            setIsRetryingGoogleDocs(false);
         }
     };
 
@@ -364,7 +516,10 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                         )}
                         {!showGoogleDocs && (googleDocsInfo?.iframe_url || googleDocsInfo?.google_file_id) && (
                             <button
-                                onClick={() => setShowGoogleDocs(true)}
+                                onClick={() => {
+                                    setIframeFailed(false);
+                                    setShowGoogleDocs(true);
+                                }}
                                 className="px-3 py-2 text-xs font-semibold text-gray-600 hover:text-blue-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
                                 title="Open embedded Google Docs editor"
                             >
@@ -393,6 +548,12 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                             className="flex-1 w-full min-h-[400px] border-none shadow-inner"
                             title="Google Docs Editor"
                             allow="autoplay; clipboard-write; encrypted-media"
+                            onLoad={() => {
+                                if (iframeTimeoutRef.current) {
+                                    window.clearTimeout(iframeTimeoutRef.current);
+                                    iframeTimeoutRef.current = null;
+                                }
+                            }}
                         />
                     </div>
                 ) : (
@@ -435,38 +596,57 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
             {/* Hint when Google Docs sync failed - only static preview available */}
             {documentHtml && !googleDocsInfo?.iframe_url && !googleDocsInfo?.google_file_id && (
                 <div className="fixed bottom-8 right-8 bg-amber-50 border border-amber-200 shadow-lg px-5 py-4 rounded-xl max-w-sm z-50">
-                    <p className="text-amber-800 text-sm font-medium">Showing static preview. Live Google Docs editor unavailable.</p>
-                    <p className="text-amber-600 text-xs mt-1 mb-3">Connect Google Drive to embed the document, or use Download DOCX below.</p>
-                    <button
-                        type="button"
-                        onClick={async () => {
-                            try {
-                                const returnTo = window.location.pathname + (window.location.search || '');
-                                const authRes = await googleDriveApi.initiateAuth(returnTo);
-                                if (authRes?.authUrl) {
-                                    window.location.href = authRes.authUrl;
-                                } else {
-                                    toast.error('Could not start Google Drive connection');
+                    <p className="text-amber-800 text-sm font-medium">Showing static preview. Live Google Docs editor unavailable for this draft.</p>
+                    <p className="text-amber-600 text-xs mt-1 mb-3">
+                        {isGoogleDriveConnected
+                            ? (googleDocsError || 'Google Drive is connected, but this draft did not open in Google Docs. Retry generation below.')
+                            : 'Connect Google Drive to open this assembled draft in Google Docs.'}
+                    </p>
+                    {isGoogleDriveConnected ? (
+                        <button
+                            type="button"
+                            onClick={handleRetryGoogleDocs}
+                            disabled={isRetryingGoogleDocs}
+                            className="w-full px-4 py-2 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:opacity-60 text-white text-sm font-semibold rounded-lg transition-colors"
+                        >
+                            {isRetryingGoogleDocs ? 'Retrying Google Docs...' : 'Retry Google Docs'}
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                try {
+                                    const returnTo = window.location.pathname + (window.location.search || '');
+                                    const authRes = await googleDriveApi.initiateAuth(returnTo);
+                                    if (authRes?.authUrl) {
+                                        window.location.href = authRes.authUrl;
+                                    } else {
+                                        toast.error('Could not start Google Drive connection');
+                                    }
+                                } catch (e) {
+                                    toast.error('Failed to connect Google Drive');
                                 }
-                            } catch (e) {
-                                toast.error('Failed to connect Google Drive');
-                            }
-                        }}
-                        className="w-full px-4 py-2 bg-[#4285F4] hover:bg-[#3367D6] text-white text-sm font-semibold rounded-lg transition-colors"
-                    >
-                        Connect Google Drive
-                    </button>
+                            }}
+                            className="w-full px-4 py-2 bg-[#4285F4] hover:bg-[#3367D6] text-white text-sm font-semibold rounded-lg transition-colors"
+                        >
+                            Connect Google Drive
+                        </button>
+                    )}
                 </div>
             )}
             {/* Floating Hint when in static view and we have Google Docs */}
             {(googleDocsInfo?.iframe_url || googleDocsInfo?.google_file_id) && !showGoogleDocs && (
                 <div className="fixed bottom-8 right-8 bg-white border border-blue-100 shadow-2xl px-5 py-3 rounded-2xl flex flex-wrap items-center gap-3 z-50">
-                    <div className="text-blue-600 font-bold text-xs">Open in Google Docs</div>
+                    <div className="text-blue-600 font-bold text-xs">
+                        {iframeFailed ? 'Google Docs embed unavailable' : 'Open in Google Docs'}
+                    </div>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={() => {
                                 const fid = googleDocsInfo?.google_file_id;
-                                if (fid) window.open(`https://docs.google.com/document/d/${fid}/edit`, '_blank', 'noopener,noreferrer');
+                                if (fid) {
+                                    window.open(getGoogleEditUrl(fid), '_blank', 'noopener,noreferrer');
+                                }
                             }}
                             className="bg-blue-600 text-white px-4 py-1.5 rounded-full text-xs font-bold hover:bg-blue-700 transition-all shadow-md"
                         >
@@ -474,7 +654,10 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                         </button>
                         {googleDocsInfo?.iframe_url && (
                             <button
-                                onClick={() => setShowGoogleDocs(true)}
+                                onClick={() => {
+                                    setIframeFailed(false);
+                                    setShowGoogleDocs(true);
+                                }}
                                 className="bg-gray-100 text-gray-700 px-4 py-1.5 rounded-full text-xs font-bold hover:bg-gray-200 transition-all"
                             >
                                 Embed here

@@ -9,10 +9,12 @@
       "Bash(venvScriptspip install:*)",
       "Bash(\"venv/Scripts/pip.exe\" install:*)",
       "Bash(\"c:\\\\Users\\\\ADMIN\\\\jurinex-dev\\\\Backend\\\\Template Analyzer Agent\\\\venv\\\\Scripts\\\\python.exe\" -c \"import anthropic; print\\(''anthropic'', anthropic.__version__\\)\")",
-      "Bash(\"venv/Scripts/python.exe\" -c \"from src.app import app; print\\(''full app OK''\\)\")"
+      "Bash(\"venv/Scripts/python.exe\" -c \"from src.app import app; print\\(''full app OK''\\)\")",
+      "Bash(python -c \":*)"
     ],
     "additionalDirectories": [
-      "c:\\Users\\ADMIN\\jurinex-dev\\Backend\\agent-draft-service\\src"
+      "c:\\Users\\ADMIN\\jurinex-dev\\Backend\\agent-draft-service\\src",
+      "c:\\Users\\ADMIN\\jurinex-dev\\Backend\\agent-draft-service\\services\\__pycache__"
     ]
   }
 }
