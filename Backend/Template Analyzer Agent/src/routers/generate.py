@@ -23,6 +23,7 @@ from datetime import datetime
 
 import anthropic
 from fastapi import APIRouter, HTTPException, Header, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -412,7 +413,7 @@ _DATA_INDICATORS = (
 )
 
 
-_GENERATION_SYSTEM = """You are an expert Indian legal document drafter with 25 years of experience across all areas of Indian law: Contract Act 1872, Transfer of Property Act 1882, Companies Act 2013, Family Law, CrPC, CPC, and all other relevant statutes.
+_GENERATION_SYSTEM = """You are an expert Indian legal document drafter with 25 years of experience across all areas of Indian law: Contract Act 1872, Transfer of Property Act 1882, Companies Act 2013, Family Law, BNSS/CrPC, CPC, and all other relevant statutes.
 
 Your task: Draft a complete, professional, legally enforceable template.
 
@@ -426,15 +427,18 @@ CRITICAL PLACEHOLDER RULES — follow EXACTLY:
 5. Signature block must have: __party1_signature__, __party1_name__, __party1_date__, __witness1_name__, etc.
 
 DOCUMENT STRUCTURE RULES:
-6. Start with document TITLE in ALL CAPS on its own line (no # symbols, no **)
-7. Use numbered main sections: 1. DEFINITIONS  2. PARTIES  3. RECITALS  4. OBLIGATIONS  etc.
-8. Use numbered sub-clauses: 1.1  1.2  2.1  2.2  etc.
-9. ALL section headings must be in ALL CAPS
-10. Include all standard sections: Title, Parties, Recitals/Background, Definitions, Operative Clauses, Representations & Warranties, Term & Termination, Governing Law, Dispute Resolution, Miscellaneous, Signature Block
-11. LENGTH: Strictly follow the page/word/length instruction given in the user message. If the user says "5 pages", produce exactly ~5 pages. If the user says "8-10 pages", stay within that range. Do NOT add extra sections or padding beyond what the user asked for. If no length is specified, default to 3-5 pages.
-12. The document must be ready to use in Indian courts and for official registration
+6. Output clean final document text only. Do NOT use markdown syntax, code fences, bullets for narration, or separator lines like ---.
+7. Start with the document title in uppercase, centered-style plain text on its own line.
+8. Use properly ordered main headings and sub-clauses only where appropriate for the document type.
+9. ALL formal section headings must be in uppercase or standard Indian court/registration style.
+10. Preserve formal Indian legal drafting tone, alignment logic, and document flow suitable for filing, review, stamping, notarization, or registration.
+11. LENGTH: Strictly follow the length instruction given in the user message. Do NOT add extra sections or padding beyond what the user asked for. If no length is specified, default to 3-5 pages.
+12. The document must be ready to use in Indian courts and for official registration.
 13. LANGUAGE: Strictly follow the language instruction given in the user message. If a non-English language is specified, write the ENTIRE document — every section, clause, heading, and paragraph — in that language. Do NOT default to English. Only __placeholder__ field names may remain in English.
-14. USER ANSWERS ARE BINDING: Every answer the user provided must be reflected exactly in the document. Do not invent, substitute, or ignore any user-provided detail. If the user named the parties, use those names as __placeholder__ labels. If the user specified a duration, use that exact term."""
+14. USER ANSWERS ARE BINDING: Every answer the user provided must be reflected exactly in the document. Do not invent, substitute, or ignore any user-provided detail.
+15. For court pleadings, applications, petitions, plaints, written statements, and family-court filings, use authentic Indian court-document structure: court heading, cause title, party description blocks, jurisdiction, facts, grounds, prayers, interim relief if applicable, verification, place, date, advocate block, and signature block.
+16. For deeds and agreements, use recital-driven Indian drafting style with proper operative clauses, schedules, witness blocks, and execution language.
+17. Keep numbering consistent. Never jump clause numbers, never repeat heading numbers, and never mix markdown headings with legal clause numbering."""
 
 
 async def _call_claude_json(system: str, user_msg: str) -> str:
@@ -463,6 +467,130 @@ async def _call_claude_template(system: str, user_msg: str) -> str:
         return resp.content[0].text.strip()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Claude API error: {e}")
+
+
+def _call_claude_template_stream(system: str, user_msg: str):
+    """Stream long template generation as text chunks."""
+    try:
+        with _claude.messages.stream(
+            model=CLAUDE_MODEL,
+            max_tokens=8192,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        ) as stream:
+            for text in stream.text_stream:
+                if text:
+                    yield text
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude API error: {e}")
+
+
+def _category_generation_guidance(doc_type: str) -> str:
+    category = _infer_category(doc_type)
+    if category in {"Court", "Criminal"}:
+        return (
+            "COURT FORMAT REQUIREMENTS:\n"
+            "- Use formal Indian court pleading structure, not generic prose.\n"
+            "- Begin with court title and jurisdiction line, then cause title with petitioner/applicant and respondent blocks.\n"
+            "- Include properly labeled sections such as facts, grounds, jurisdiction, limitation if relevant, prayers, interim relief if relevant, and verification.\n"
+            "- Use respectful Indian court phrasing such as 'MOST RESPECTFULLY SHOWETH' only where contextually suitable.\n"
+            "- Do not output essay-style paragraphs without pleading structure."
+        )
+    if category == "Family":
+        return (
+            "FAMILY COURT FORMAT REQUIREMENTS:\n"
+            "- Use Indian family-court petition structure with court heading, marriage facts, jurisdiction, cause of action, statutory basis, grounds, prayer, verification, and signature blocks.\n"
+            "- Do not produce a general article or advisory note.\n"
+            "- Ensure the petition reads like a file-ready Indian family-law pleading."
+        )
+    if category in {"Property", "Agreement", "Trust", "Employment"}:
+        return (
+            "TRANSACTIONAL FORMAT REQUIREMENTS:\n"
+            "- Use formal Indian deed/agreement formatting with title, parties, recitals, definitions if needed, operative clauses, boilerplate, schedules, execution block, and witnesses.\n"
+            "- Preserve alignment logic for signature and witness blocks.\n"
+            "- Use schedule headings only when the user requirements call for them."
+        )
+    return (
+        "GENERAL LEGAL FORMAT REQUIREMENTS:\n"
+        "- Produce a file-ready Indian legal template, not explanatory prose.\n"
+        "- Maintain professional heading hierarchy, clause numbering, and execution-ready closing sections."
+    )
+
+
+def _build_generation_user_message(body: GenerateTemplateRequest) -> str:
+    qa_lines = []
+    for q in body.questions:
+        qid = q.get("id", "")
+        question_text = q.get("question", qid)
+        answer = body.answers.get(qid, "Not provided")
+        qa_lines.append(f"  • {question_text}\n    Answer: {answer}")
+
+    _page_re = re.compile(
+        r'(\d+)\s*(?:to|-)\s*(\d+)\s*pages?'
+        r'|(\d+)\s*\+?\s*pages?'
+        r'|(\d+)\s*(?:to|-)\s*(\d+)\s*pg'
+        r'|(\d+)\s*pg\b',
+        re.IGNORECASE
+    )
+    page_directive = ""
+    for ans in body.answers.values():
+        m = _page_re.search(ans)
+        if m:
+            if m.group(1) and m.group(2):
+                page_directive = f"DOCUMENT LENGTH: {m.group(1)}-{m.group(2)} pages (~{int(m.group(1))*350}-{int(m.group(2))*350} words). Do NOT exceed this range."
+            elif m.group(3):
+                approx = int(m.group(3)) * 350
+                page_directive = f"DOCUMENT LENGTH: Approximately {m.group(3)} pages (~{approx} words). Do NOT produce more or fewer pages."
+            elif m.group(4) and m.group(5):
+                page_directive = f"DOCUMENT LENGTH: {m.group(4)}-{m.group(5)} pages (~{int(m.group(4))*350}-{int(m.group(5))*350} words). Do NOT exceed this range."
+            elif m.group(6):
+                approx = int(m.group(6)) * 350
+                page_directive = f"DOCUMENT LENGTH: Approximately {m.group(6)} pages (~{approx} words). Do NOT produce more or fewer pages."
+            break
+
+    selected_language = body.language or "English"
+    if selected_language.lower() == "english":
+        lang_directive = "Language: English (formal legal English)"
+    elif "+" in selected_language or "bilingual" in selected_language.lower():
+        parts = selected_language.split("+")
+        lang1 = parts[0].strip()
+        lang2 = parts[1].strip() if len(parts) > 1 else "Hindi"
+        lang_directive = (
+            f"BILINGUAL DOCUMENT REQUIRED: Draft every section TWICE — "
+            f"first in {lang1}, then immediately the {lang2} translation of the same section. "
+            f"Label each: '{lang1} Version:' and '{lang2} Version:'. "
+            f"Both versions must be complete and legally accurate."
+        )
+    else:
+        lang_directive = (
+            f"CRITICAL LANGUAGE REQUIREMENT: The ENTIRE document MUST be written ONLY in {selected_language}. "
+            f"Do NOT use English anywhere in the document body. "
+            f"All section headings, clauses, recitals, definitions, obligations, and the signature block "
+            f"must be in {selected_language}. "
+            f"Only __placeholder__ field names may remain in English."
+        )
+
+    category_guidance = _category_generation_guidance(body.document_type)
+    return f"""Draft a complete "{body.document_type}" legal template for Indian jurisdiction.
+
+*** {lang_directive} ***
+{f"*** {page_directive} ***" if page_directive else ""}
+
+{category_guidance}
+
+BINDING USER REQUIREMENTS — YOU MUST FOLLOW EVERY ANSWER EXACTLY:
+{chr(10).join(qa_lines)}
+
+IMPORTANT INSTRUCTIONS:
+1. Every answer above is a strict requirement — reflect each one exactly in the document.
+2. Do not add clauses, sections, or content that contradicts what the user specified.
+3. Do not output markdown headings, separator lines, commentary, notes to the user, or drafting explanations.
+4. Use authentic Indian legal format for the relevant document category.
+5. Respect the page count and level of detail exactly.
+  • Jurisdiction: {body.jurisdiction}
+  • Language: {selected_language}
+
+Use __placeholder__ syntax for all variable fields throughout the document."""
 
 
 def _make_question(
@@ -835,6 +963,26 @@ async def generate_template(
         raise HTTPException(status_code=400, detail="X-User-Id header is required")
 
     logger.info(f"[Generate] user={x_user_id} doc={body.document_type!r} answers={len(body.answers)}")
+    user_msg = _build_generation_user_message(body)
+    template_text = await _call_claude_template(_GENERATION_SYSTEM, user_msg)
+    logger.info(f"[Generate] Claude returned {len(template_text)} chars")
+
+    fields = extract_fields(template_text)
+    sections = parse_sections(template_text)
+
+    metadata = {
+        "generatedAt": datetime.utcnow().isoformat(),
+        "documentType": body.document_type,
+        "templateName": body.document_type,
+        "category": _infer_category(body.document_type),
+        "jurisdiction": body.jurisdiction,
+        "language": body.language,
+        "totalFields": len(fields),
+        "totalSections": len(sections),
+        "model": CLAUDE_MODEL,
+    }
+
+    return GenerateResponse(success=True, templateText=template_text, fields=fields, sections=sections, metadata=metadata)
 
     # Build the user message with all collected answers
     qa_lines = []
@@ -927,9 +1075,6 @@ Use __placeholder__ syntax for all variable fields throughout the document."""
         "model": CLAUDE_MODEL,
     }
 
-    return GenerateResponse(success=True, templateText=template_text, fields=fields, sections=sections, metadata=metadata)
-
-
 def _infer_category(doc_type: str) -> str:
     t = doc_type.lower()
     if any(k in t for k in ("lease", "rent", "sale deed", "gift deed", "property", "mortgage", "licence")): return "Property"
@@ -939,6 +1084,69 @@ def _infer_category(doc_type: str) -> str:
     if any(k in t for k in ("trust", "charity", "society", "foundation")): return "Trust"
     if any(k in t for k in ("nda", "non-disclosure", "service", "mou", "joint venture", "partnership", "shareholders", "agreement", "contract")): return "Agreement"
     return "General"
+
+
+@router.post("/generate-template-stream")
+async def generate_template_stream(
+    body: GenerateTemplateRequest,
+    x_user_id: Optional[str] = Header(None),
+):
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail="X-User-Id header is required")
+
+    logger.info(f"[GenerateStream] user={x_user_id} doc={body.document_type!r} answers={len(body.answers)}")
+    user_msg = _build_generation_user_message(body)
+
+    def event_stream():
+        try:
+            yield json.dumps({
+                "type": "start",
+                "message": f"Drafting {body.document_type} in {body.language or 'English'}...",
+            }) + "\n"
+
+            collected_parts: List[str] = []
+            for chunk in _call_claude_template_stream(_GENERATION_SYSTEM, user_msg):
+                collected_parts.append(chunk)
+                yield json.dumps({
+                    "type": "chunk",
+                    "text": chunk,
+                }) + "\n"
+
+            template_text = "".join(collected_parts).strip()
+            fields = extract_fields(template_text)
+            sections = parse_sections(template_text)
+            metadata = {
+                "generatedAt": datetime.utcnow().isoformat(),
+                "documentType": body.document_type,
+                "templateName": body.document_type,
+                "category": _infer_category(body.document_type),
+                "jurisdiction": body.jurisdiction,
+                "language": body.language,
+                "totalFields": len(fields),
+                "totalSections": len(sections),
+                "model": CLAUDE_MODEL,
+            }
+
+            yield json.dumps({
+                "type": "complete",
+                "templateText": template_text,
+                "fields": fields,
+                "sections": sections,
+                "metadata": metadata,
+            }) + "\n"
+        except HTTPException as e:
+            yield json.dumps({
+                "type": "error",
+                "message": str(e.detail),
+            }) + "\n"
+        except Exception as e:
+            logger.exception("[GenerateStream] Unexpected error")
+            yield json.dumps({
+                "type": "error",
+                "message": str(e),
+            }) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -867,6 +867,9 @@ const Step6Review: React.FC = () => {
     dynamicQuestions,
     dynamicAnswers,
     updateRequirements,
+    setGenerationStreamText,
+    appendGenerationStreamText,
+    clearGenerationStreamText,
     setCurrentStep,
     setPhase,
     setGenerationResult,
@@ -914,13 +917,25 @@ const Step6Review: React.FC = () => {
     if (!requirements.detailLevel) {
       return;
     }
+    clearGenerationStreamText();
+    setGenerationStreamText(`Preparing ${requirements.subjectLabel || 'template'}...\n\n`);
     setLoading(true);
     setPhase('generating');
     try {
-      const response = await templateBuilderApi.generateTemplate(
+      const response = await templateBuilderApi.streamGenerateTemplate(
         dynamicMode
           ? { requirements, dynamicQuestions, dynamicAnswers }
           : { requirements },
+        {
+          onEvent: (event) => {
+            if (event.type === 'start' && event.message) {
+              setGenerationStreamText(`${event.message}\n\n`);
+            }
+            if (event.type === 'chunk' && event.text) {
+              appendGenerationStreamText(event.text);
+            }
+          },
+        },
       );
       setGenerationResult(response.templateText, response.fields, response.sections, response.metadata);
     } catch (error) {
@@ -986,24 +1001,39 @@ const Step6Review: React.FC = () => {
   );
 };
 
-const GeneratingState: React.FC = () => (
-  <div className="px-6 py-10 max-w-2xl">
-    <SectionCard title="Generating your custom template...">
-      <div className="flex flex-col items-center gap-4 py-6">
-        <div className="flex gap-2">
-          {[0, 150, 300].map((delay) => (
-            <div
-              key={delay}
-              className="w-3 h-3 rounded-full animate-bounce"
-              style={{ backgroundColor: BRAND, animationDelay: `${delay}ms` }}
-            />
-          ))}
+const GeneratingState: React.FC = () => {
+  const { generationStreamText, requirements } = useTemplateBuilderStore();
+  return (
+    <div className="px-6 py-10 max-w-5xl">
+      <SectionCard title="Generating your custom template...">
+        <div className="space-y-5">
+          <div className="flex items-center gap-3">
+            <div className="flex gap-2">
+              {[0, 150, 300].map((delay) => (
+                <div
+                  key={delay}
+                  className="w-3 h-3 rounded-full animate-bounce"
+                  style={{ backgroundColor: BRAND, animationDelay: `${delay}ms` }}
+                />
+              ))}
+            </div>
+            <p className="text-sm text-gray-600">
+              Live drafting in progress for <span className="font-semibold text-gray-800">{requirements.subjectLabel || 'your template'}</span>.
+            </p>
+          </div>
+          <div className="rounded-2xl border border-gray-200 bg-[#fcfcfb] p-5">
+            <div className="max-h-[65vh] overflow-y-auto whitespace-pre-wrap font-serif text-[15px] leading-7 text-gray-800">
+              {generationStreamText || 'Waiting for draft output...'}
+            </div>
+          </div>
+          <p className="text-xs text-gray-500">
+            Streaming shows the draft as it is being written. Final formatting, fields, and section parsing are applied when generation completes.
+          </p>
         </div>
-        <p className="text-sm text-gray-600">Phase: Building prompt, generating placeholders, and preparing the reusable template.</p>
-      </div>
-    </SectionCard>
-  </div>
-);
+      </SectionCard>
+    </div>
+  );
+};
 
 const ErrorState: React.FC = () => {
   const { errorMessage, reset } = useTemplateBuilderStore();

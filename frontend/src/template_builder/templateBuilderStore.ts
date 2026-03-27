@@ -79,6 +79,7 @@ interface BuilderState {
   currentStep: number;
   requirements: TemplateRequirements;
   generatedTemplateText: string;
+  generationStreamText: string;
   extractedFields: ExtractedField[];
   parsedSections: ParsedSection[];
   generationMetadata: GenerationMetadata | null;
@@ -103,6 +104,9 @@ interface BuilderActions {
     sections: ParsedSection[],
     metadata: GenerationMetadata
   ) => void;
+  setGenerationStreamText: (text: string) => void;
+  appendGenerationStreamText: (text: string) => void;
+  clearGenerationStreamText: () => void;
   setSaveResult: (templateId: string, templateName: string) => void;
   setError: (message: string) => void;
   reset: () => void;
@@ -145,6 +149,7 @@ const initialState: BuilderState = {
   currentStep: 1,
   requirements: initialRequirements,
   generatedTemplateText: '',
+  generationStreamText: '',
   extractedFields: [],
   parsedSections: [],
   generationMetadata: null,
@@ -178,11 +183,19 @@ export const useTemplateBuilderStore = create<BuilderState & BuilderActions>((se
   setGenerationResult: (text, fields, sections, metadata) =>
     set({
       generatedTemplateText: text,
+      generationStreamText: '',
       extractedFields: fields,
       parsedSections: sections,
       generationMetadata: metadata,
       phase: 'preview',
     }),
+
+  setGenerationStreamText: (generationStreamText) => set({ generationStreamText }),
+
+  appendGenerationStreamText: (text) =>
+    set((state) => ({ generationStreamText: `${state.generationStreamText}${text}` })),
+
+  clearGenerationStreamText: () => set({ generationStreamText: '' }),
 
   setSaveResult: (savedTemplateId, savedTemplateName) =>
     set({ savedTemplateId, savedTemplateName, phase: 'saved' }),

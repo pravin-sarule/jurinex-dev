@@ -117,6 +117,16 @@ export interface GenerateTemplateResponse {
   metadata: GenerationMetadata;
 }
 
+export interface GenerateTemplateStreamEvent {
+  type: 'start' | 'chunk' | 'complete' | 'error';
+  message?: string;
+  text?: string;
+  templateText?: string;
+  fields?: ExtractedField[];
+  sections?: ParsedSection[];
+  metadata?: GenerationMetadata;
+}
+
 export interface SaveGeneratedResponse {
   success: boolean;
   templateId: string;
@@ -260,6 +270,160 @@ export const templateBuilderApi = {
     } catch (error) {
       throw new Error(extractError(error));
     }
+  },
+
+  streamGenerateTemplate: async (
+    payload: {
+      requirements: TemplateRequirements;
+      dynamicQuestions?: StructureQuestion[];
+      dynamicAnswers?: Record<string, string>;
+    },
+    handlers: {
+      onEvent?: (event: GenerateTemplateStreamEvent) => void;
+    } = {},
+  ): Promise<GenerateTemplateResponse> => {
+    const { requirements, dynamicQuestions, dynamicAnswers } = payload;
+    const pageControl = getPageControl(requirements.detailLevel);
+    let questions: Array<{ id: string; question: string; type: string }> = [];
+    let answers: Record<string, string> = {};
+
+    if (dynamicQuestions && dynamicQuestions.length > 0 && dynamicAnswers) {
+      questions = [
+        ...dynamicQuestions.map((q) => ({
+          id: q.id,
+          question: q.question,
+          type: q.type,
+        })),
+        { id: 'req_detail_level', question: 'Detail Level', type: 'text' },
+        { id: 'req_target_page_range', question: 'Target Page Range', type: 'text' },
+        { id: 'req_page_limit_rule', question: 'Page Limit Rule', type: 'text' },
+        { id: 'req_page_planning_guidance', question: 'Page Planning Guidance', type: 'text' },
+      ];
+      for (const q of dynamicQuestions) {
+        answers[q.id] = (dynamicAnswers[q.id] || '').replace(/\|\|/g, ', ');
+      }
+      answers.req_detail_level = requirements.detailLevel || 'Balanced (8-15 pages)';
+      answers.req_target_page_range = pageControl.targetRange;
+      answers.req_page_limit_rule = pageControl.hardRule;
+      answers.req_page_planning_guidance = pageControl.sectionGuidance;
+    } else {
+      const entries = [
+        ['Document Type', requirements.subjectLabel || requirements.subject],
+        ['Category', requirements.category],
+        ['Custom Description', requirements.customDescription],
+        ['Property Type', requirements.propertyType],
+        ['Party Type', requirements.partyType],
+        ['Value Range', requirements.valueRange],
+        ['Court', requirements.court],
+        ['Dispute Nature', requirements.disputeNature],
+        ['Opposing Party', requirements.opposingParty],
+        ['Organization Type', requirements.orgType],
+        ['Trust Purpose', requirements.trustPurpose],
+        ['Corpus Size', requirements.corpusSize],
+        ['Audience Type', requirements.audienceType],
+        ['Personal Law', requirements.personalLaw],
+        ['Urgency', requirements.urgency],
+        ['Detail Level', requirements.detailLevel],
+        ['Target Page Range', pageControl.targetRange],
+        ['Page Limit Rule', pageControl.hardRule],
+        ['Page Planning Guidance', pageControl.sectionGuidance],
+        ['Emphasis', requirements.emphasis],
+        ['Schedule Preference', requirements.schedulePreference],
+        ['Special Clauses', requirements.specialClauses.join(', ')],
+        ['Additional Notes', requirements.freeText],
+      ].filter(([, value]) => Boolean(value));
+
+      questions = entries.map(([label], index) => ({
+        id: `req_${index + 1}`,
+        question: label,
+        type: 'text',
+      }));
+      answers = Object.fromEntries(entries.map(([_, value], index) => [`req_${index + 1}`, String(value)]));
+    }
+
+    const token = getAuthToken();
+    const userId = getUserId();
+    const response = await fetch(`${normalizeBase(TEMPLATE_ANALYZER_API_BASE)}/generate-template-stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(userId ? { 'X-User-Id': userId } : {}),
+      },
+      body: JSON.stringify({
+        document_type: requirements.subjectLabel || requirements.subject || 'Legal Template',
+        answers,
+        questions,
+        jurisdiction: requirements.jurisdiction || 'India',
+        language: requirements.language || 'English',
+      }),
+    });
+
+    if (!response.ok || !response.body) {
+      let message = `Request failed (${response.status})`;
+      try {
+        const data = await response.json();
+        message = data?.detail || message;
+      } catch {
+        // ignore
+      }
+      throw new Error(message);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let completed: GenerateTemplateResponse | null = null;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const event = JSON.parse(trimmed) as GenerateTemplateStreamEvent;
+        handlers.onEvent?.(event);
+        if (event.type === 'error') {
+          throw new Error(event.message || 'Streaming generation failed');
+        }
+        if (event.type === 'complete') {
+          completed = {
+            success: true,
+            templateText: event.templateText || '',
+            fields: event.fields || [],
+            sections: event.sections || [],
+            metadata: event.metadata as GenerationMetadata,
+          };
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer.trim()) as GenerateTemplateStreamEvent;
+      handlers.onEvent?.(event);
+      if (event.type === 'error') {
+        throw new Error(event.message || 'Streaming generation failed');
+      }
+      if (event.type === 'complete') {
+        completed = {
+          success: true,
+          templateText: event.templateText || '',
+          fields: event.fields || [],
+          sections: event.sections || [],
+          metadata: event.metadata as GenerationMetadata,
+        };
+      }
+    }
+
+    if (!completed) {
+      throw new Error('Template generation stream ended without a final result');
+    }
+
+    return completed;
   },
 
   /**
