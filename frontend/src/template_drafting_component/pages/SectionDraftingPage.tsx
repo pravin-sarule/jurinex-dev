@@ -757,6 +757,45 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 .section-preview-a4 p, .section-preview-a4-content p { margin: 0 0 0.5em 0; }
                 .section-preview-a4 h1, .section-preview-a4 h2, .section-preview-a4 h3,
                 .section-preview-a4-content h1, .section-preview-a4-content h2, .section-preview-a4-content h3 { margin: 0.75em 0 0.25em 0; }
+                .section-preview-a4, .section-preview-a4-content {
+                    font-family: "Times New Roman", Times, serif;
+                    font-size: 12pt;
+                    line-height: 1.6;
+                    color: #111827;
+                }
+                .section-preview-a4-content,
+                .section-preview-a4-content p,
+                .section-preview-a4-content li {
+                    text-align: justify;
+                }
+                .section-preview-a4-content h1,
+                .section-preview-a4-content h2,
+                .section-preview-a4-content h3,
+                .section-preview-a4-content h4 {
+                    text-align: center;
+                    font-weight: 700;
+                    line-height: 1.35;
+                    letter-spacing: 0.02em;
+                }
+                .section-preview-a4-content table {
+                    width: 100% !important;
+                    border-collapse: collapse !important;
+                    table-layout: fixed;
+                    margin: 0.75em 0 1em;
+                }
+                .section-preview-a4-content th,
+                .section-preview-a4-content td {
+                    border: 1px solid #111827;
+                    padding: 8px 10px;
+                    vertical-align: top;
+                    text-align: left;
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                }
+                .section-preview-a4-content th {
+                    font-weight: 700;
+                    text-align: center;
+                }
                 /* Inner scrollbar in generated content - right edge, slim */
                 .section-preview-a4-content::-webkit-scrollbar { width: 5px; }
                 .section-preview-a4-content::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }

@@ -340,7 +340,14 @@ OUTPUT RULES:
 - Match the HTML template structure above exactly (same tags, classes, inline styles, order).
 - Output raw HTML only. No markdown, no code fences, no prose outside HTML tags.
 - Use inline styles: font-family: 'Times New Roman', serif; font-size: 16px; line-height: 1.5; text-align: justify; margin-bottom: 1em.
-- Tables: use proper <table><tr><td> with border style. Headings: center-aligned.
+- INDIAN LEGAL FORMAT: Maintain the visual style expected in Indian court and deed drafting.
+  • Main headings should be centered, bold, uppercase where appropriate, and clearly separated with consistent spacing.
+  • Body text should be formally aligned, with justified paragraphs unless the template clearly requires center or left alignment.
+  • Signature blocks, witness blocks, schedules, and annexures must remain properly aligned and printable on A4.
+  • Preserve numbering, indentation, recital style, and schedule headings exactly when the template implies them.
+- Tables: use proper <table><thead><tbody><tr><td>/<th> with visible borders, fixed cell alignment, and printable spacing.
+- Never flatten tabular data into plain paragraphs. If the template uses a table, keep it as a table.
+- Headings: center-aligned unless the template explicitly requires another alignment.
 - Do NOT include [cite: ...], [Source: ...], or any citation markers in output.
 """
         parts.append(prompt)

@@ -866,12 +866,15 @@ const Step6Review: React.FC = () => {
     dynamicMode,
     dynamicQuestions,
     dynamicAnswers,
+    updateRequirements,
     setCurrentStep,
     setPhase,
     setGenerationResult,
     setError,
   } = useTemplateBuilderStore();
   const [loading, setLoading] = useState(false);
+  const detailOptions = ['Concise (5-8 pages)', 'Balanced (8-15 pages)', 'Detailed (15-25 pages)'];
+  const canGenerate = Boolean(requirements.detailLevel) && !loading;
 
   // Build summary rows based on mode
   const summaryRows: [string, string][] = dynamicMode
@@ -879,6 +882,7 @@ const Step6Review: React.FC = () => {
         ['Template Description', requirements.subjectLabel],
         ['Jurisdiction', requirements.jurisdiction],
         ['Language', requirements.language],
+        ['Template Length', requirements.detailLevel],
         ...dynamicQuestions.map((q) => [
           q.question,
           (dynamicAnswers[q.id] || '').replace(/\|\|/g, ', '),
@@ -907,6 +911,9 @@ const Step6Review: React.FC = () => {
       ] as [string, string][]).filter(([, v]) => Boolean(v));
 
   const handleGenerate = async () => {
+    if (!requirements.detailLevel) {
+      return;
+    }
     setLoading(true);
     setPhase('generating');
     try {
@@ -929,6 +936,21 @@ const Step6Review: React.FC = () => {
     <div className="min-h-[calc(100vh-72px)] px-6 py-6 flex items-center justify-center">
       <SectionCard title="Here's everything I've collected. Review and confirm to generate your template.">
         <div className="space-y-5">
+          <div className="rounded-2xl border border-gray-200 p-4 bg-gray-50/70">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Length Control</p>
+              <p className="text-base font-semibold text-gray-800">How long should the template be?</p>
+              <p className="text-sm text-gray-500">Choose the target page range here. The generated template will follow this page limit.</p>
+            </div>
+            <div className="mt-4">
+              <OptionGrid
+                idPrefix="review-detail-level"
+                value={requirements.detailLevel}
+                options={detailOptions}
+                onSelect={(value) => updateRequirements({ detailLevel: value })}
+              />
+            </div>
+          </div>
           <div className="rounded-2xl border border-gray-200 overflow-hidden">
             {summaryRows.map(([label, value]) => (
               <div key={label} className="grid grid-cols-[200px_1fr] gap-4 px-4 py-3 border-b border-gray-100 last:border-b-0">
@@ -948,13 +970,16 @@ const Step6Review: React.FC = () => {
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={loading}
+              disabled={!canGenerate}
               className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-50"
               style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }}
             >
               {loading ? 'Generating...' : 'Generate Template →'}
             </button>
           </div>
+          {!requirements.detailLevel ? (
+            <p className="text-sm text-amber-700">Select the template length first so the draft stays within the page range you want.</p>
+          ) : null}
         </div>
       </SectionCard>
     </div>

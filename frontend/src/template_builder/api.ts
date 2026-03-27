@@ -178,18 +178,29 @@ export const templateBuilderApi = {
   }): Promise<GenerateTemplateResponse> => {
     try {
       const { requirements, dynamicQuestions, dynamicAnswers } = payload;
+      const pageControl = getPageControl(requirements.detailLevel);
 
       // ── Dynamic mode: use AI-generated structure Q&A ─────────────────────
       if (dynamicQuestions && dynamicQuestions.length > 0 && dynamicAnswers) {
-        const questions = dynamicQuestions.map((q) => ({
-          id: q.id,
-          question: q.question,
-          type: q.type,
-        }));
+        const questions = [
+          ...dynamicQuestions.map((q) => ({
+            id: q.id,
+            question: q.question,
+            type: q.type,
+          })),
+          { id: 'req_detail_level', question: 'Detail Level', type: 'text' },
+          { id: 'req_target_page_range', question: 'Target Page Range', type: 'text' },
+          { id: 'req_page_limit_rule', question: 'Page Limit Rule', type: 'text' },
+          { id: 'req_page_planning_guidance', question: 'Page Planning Guidance', type: 'text' },
+        ];
         const answers: Record<string, string> = {};
         for (const q of dynamicQuestions) {
           answers[q.id] = (dynamicAnswers[q.id] || '').replace(/\|\|/g, ', ');
         }
+        answers.req_detail_level = requirements.detailLevel || 'Balanced (8-15 pages)';
+        answers.req_target_page_range = pageControl.targetRange;
+        answers.req_page_limit_rule = pageControl.hardRule;
+        answers.req_page_planning_guidance = pageControl.sectionGuidance;
 
         const res = await client.post<GenerateTemplateResponse>('/generate-template', {
           document_type: requirements.subjectLabel || requirements.subject || 'Legal Template',
@@ -202,7 +213,6 @@ export const templateBuilderApi = {
       }
 
       // ── Standard mode: use static requirements fields ─────────────────────
-      const pageControl = getPageControl(requirements.detailLevel);
       const entries = [
         ['Document Type', requirements.subjectLabel || requirements.subject],
         ['Category', requirements.category],

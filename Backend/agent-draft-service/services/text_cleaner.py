@@ -64,7 +64,9 @@ def clean_section_html(html: str, final_address: Optional[str] = None) -> str:
     normalized_address = _normalize_sentence(final_address or "")
     address_seen = False
 
-    for node in list(soup.find_all(["p", "li", "td", "div"])):
+    # Deduplicate only paragraph-style blocks. Deduping table cells or generic divs
+    # can destroy legal layout by removing repeated cells, labels, or signature blocks.
+    for node in list(soup.find_all(["p", "li"])):
         text = node.get_text(" ", strip=True)
         signature = _node_text_signature(node)
         if not signature:

@@ -459,6 +459,60 @@ export const AssembledPreviewPage: React.FC<AssembledPreviewPageProps> = ({ draf
                 .assembled-doc-container td, .assembled-doc-container th { position: relative !important; vertical-align: top !important; }
                 .assembled-doc-container .document-section { margin-bottom: 30px; page-break-inside: auto; }
                 .document-section { margin-bottom: 30px; }
+                .assembled-doc-container .assembled-doc-content,
+                .assembled-doc-container .assembled-doc-content * {
+                    box-sizing: border-box;
+                }
+                .assembled-doc-container .assembled-doc-content {
+                    color: #111827;
+                    font-family: "Times New Roman", Times, serif;
+                    font-size: 12pt;
+                    line-height: 1.6;
+                    text-align: justify;
+                    word-break: break-word;
+                    overflow-wrap: anywhere;
+                }
+                .assembled-doc-container .assembled-doc-content p,
+                .assembled-doc-container .assembled-doc-content li {
+                    margin: 0 0 0.75em 0;
+                    text-align: justify;
+                }
+                .assembled-doc-container .assembled-doc-content h1,
+                .assembled-doc-container .assembled-doc-content h2,
+                .assembled-doc-container .assembled-doc-content h3,
+                .assembled-doc-container .assembled-doc-content h4 {
+                    margin: 1.1em 0 0.45em;
+                    text-align: center;
+                    font-family: "Times New Roman", Times, serif;
+                    font-weight: 700;
+                    line-height: 1.35;
+                    letter-spacing: 0.02em;
+                    page-break-after: avoid;
+                }
+                .assembled-doc-container .assembled-doc-content table {
+                    width: 100% !important;
+                    border-collapse: collapse !important;
+                    table-layout: fixed;
+                    margin: 0.75em 0 1em;
+                    font-size: inherit;
+                }
+                .assembled-doc-container .assembled-doc-content th,
+                .assembled-doc-container .assembled-doc-content td {
+                    border: 1px solid #111827;
+                    padding: 8px 10px;
+                    vertical-align: top !important;
+                    text-align: left;
+                    white-space: pre-wrap;
+                }
+                .assembled-doc-container .assembled-doc-content th {
+                    font-weight: 700;
+                    text-align: center;
+                }
+                .assembled-doc-container .assembled-doc-content .signature-block,
+                .assembled-doc-container .assembled-doc-content .witness-block,
+                .assembled-doc-container .assembled-doc-content .schedule-block {
+                    page-break-inside: avoid;
+                }
                 .assembled-doc-container .page-break,
                 .assembled-doc-container [class*="page-break"] {
                     display: block !important;
