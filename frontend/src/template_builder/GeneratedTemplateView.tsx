@@ -1,9 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTemplateBuilderStore } from './templateBuilderStore';
 import { customTemplateApi } from '../template_drafting_component/user_custom_template/api';
 import { DRAFTING_SERVICE_URL } from '../config/apiConfig.js';
-import draftingApi from '../services/draftingApi';
 
 interface GoogleDocsSession {
   draftId?: string;
@@ -158,47 +157,6 @@ function renderInlineHtml(raw: string): string {
   return escapeHtml(raw).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 }
 
-async function buildLibraryUploadFromGoogleDocs(
-  session: GoogleDocsSession,
-  templateName: string,
-  category: string,
-  description: string,
-): Promise<FormData> {
-  if (!session.draftId) {
-    throw new Error('Edited Google Docs draft is missing a draft ID.');
-  }
-
-  await draftingApi.syncToGCS(session.draftId, 'docx');
-  const gcsUrlResponse = await draftingApi.getGCSUrl(session.draftId, 2);
-  const signedUrl = gcsUrlResponse?.signedUrl;
-
-  if (!signedUrl) {
-    throw new Error('Failed to get the latest edited Google Docs file.');
-  }
-
-  const fileResponse = await fetch(signedUrl);
-  if (!fileResponse.ok) {
-    throw new Error(`Failed to download edited Google Docs file (${fileResponse.status}).`);
-  }
-
-  const fileBlob = await fileResponse.blob();
-  const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.docx`;
-  const formData = new FormData();
-  formData.append('name', templateName);
-  formData.append('category', category || 'General');
-  formData.append('subcategory', 'AI Generated');
-  formData.append('description', description);
-  formData.append(
-    'file',
-    new File([fileBlob], safeFileName, {
-      type: fileBlob.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    }),
-    safeFileName,
-  );
-
-  return formData;
-}
-
 function estimateLineCost(line: RenderedLine): number {
   if (line.type === 'blank') return 0.5;
   if (line.type === 'heading' && line.level === 1) return 3;
@@ -310,9 +268,6 @@ export const GeneratedTemplateView: React.FC = () => {
   const [isOpeningGoogleDocs, setIsOpeningGoogleDocs] = useState(false);
   const [googleDocsOpenError, setGoogleDocsOpenError] = useState<string | null>(null);
   const [googleDocsSession, setGoogleDocsSession] = useState<GoogleDocsSession | null>(null);
-  const [iframeFailed, setIframeFailed] = useState(false);
-
-  const autoOpenedRef = useRef(false);
 
   const lines = useMemo(() => parseLinesForRender(generatedTemplateText), [generatedTemplateText]);
   const pages = useMemo(() => {
@@ -375,20 +330,6 @@ ${bodyHtml}
 </html>`.trim();
   }, [generationMetadata, lines]);
 
-  // Auto-open in Google Docs as soon as the template is ready
-  useEffect(() => {
-    if (autoOpenedRef.current || !exportHtml || googleDocsSession) return;
-    autoOpenedRef.current = true;
-    const name = generationMetadata?.templateName || 'Generated Template';
-    setIsOpeningGoogleDocs(true);
-    setGoogleDocsOpenError(null);
-    setIframeFailed(false);
-    openGeneratedTemplateInGoogleDocs(name, exportHtml)
-      .then((result) => setGoogleDocsSession(result))
-      .catch((err) => setGoogleDocsOpenError(err instanceof Error ? err.message : 'Failed to open in Google Docs'))
-      .finally(() => setIsOpeningGoogleDocs(false));
-  }, [exportHtml]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const handleSaveToLibrary = useCallback(async () => {
     if (!generatedTemplateText || isSaving) return;
     setIsSaving(true);
@@ -398,21 +339,15 @@ ${bodyHtml}
       const templateName = generationMetadata?.templateName || generationMetadata?.documentType || 'Generated Template';
       const category = generationMetadata?.category || 'General';
       const description = `AI-generated template. Jurisdiction: ${generationMetadata?.jurisdiction || 'India'}. Language: ${generationMetadata?.language || 'English'}.`;
-      let formData: FormData;
+      const formData = new FormData();
+      const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.doc`;
+      const docBlob = new Blob(['\uFEFF' + exportHtml], { type: 'application/msword;charset=utf-8' });
 
-      if (googleDocsSession?.draftId) {
-        formData = await buildLibraryUploadFromGoogleDocs(googleDocsSession, templateName, category, description);
-      } else {
-        formData = new FormData();
-        const textBlob = new Blob([generatedTemplateText], { type: 'text/plain;charset=utf-8' });
-        const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.txt`;
-
-        formData.append('name', templateName);
-        formData.append('category', category);
-        formData.append('subcategory', 'AI Generated');
-        formData.append('description', description);
-        formData.append('file', textBlob, safeFileName);
-      }
+      formData.append('name', templateName);
+      formData.append('category', category);
+      formData.append('subcategory', 'AI Generated');
+      formData.append('description', description);
+      formData.append('file', docBlob, safeFileName);
 
       const result = await customTemplateApi.uploadTemplate(formData);
       setSaveResult(result.template_id, templateName);
@@ -420,7 +355,7 @@ ${bodyHtml}
       setSaveError(err instanceof Error ? err.message : 'Save failed');
       setIsSaving(false);
     }
-  }, [generatedTemplateText, generationMetadata, googleDocsSession, isSaving, setSaveResult]);
+  }, [exportHtml, generatedTemplateText, generationMetadata, isSaving, setSaveResult]);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -448,10 +383,12 @@ ${bodyHtml}
     if (isOpeningGoogleDocs) return;
     setIsOpeningGoogleDocs(true);
     setGoogleDocsOpenError(null);
-    setIframeFailed(false);
     try {
       const result = await openGeneratedTemplateInGoogleDocs(name, exportHtml);
       setGoogleDocsSession(result);
+      if (result.editUrl) {
+        window.open(result.editUrl, '_blank', 'noopener,noreferrer');
+      }
     } catch (err) {
       setGoogleDocsOpenError(err instanceof Error ? err.message : 'Failed to open in Google Docs');
     } finally {
@@ -489,9 +426,16 @@ ${bodyHtml}
           {isOpeningGoogleDocs && (
             <span className="text-xs text-gray-400 flex items-center gap-1">
               <span className="inline-block w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: '#21C1B6' }} />
-              Opening in Google Docs...
+              Preparing Google Docs...
             </span>
           )}
+          <button
+            onClick={handleOpenInGoogleDocs}
+            disabled={isOpeningGoogleDocs}
+            className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all disabled:opacity-50"
+          >
+            {googleDocsSession?.editUrl ? 'Open Google Docs Again' : 'Open in Google Docs'}
+          </button>
           <button onClick={handleCopy} className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all">
             {copied ? '✓ Copied!' : 'Copy'}
           </button>
@@ -531,53 +475,10 @@ ${bodyHtml}
       )}
 
       <div className="bg-white border-b border-gray-200 px-6 py-2.5 shrink-0">
-        <span className="text-sm font-medium text-[#21C1B6]">
-          {googleDocsSession?.iframeUrl && !iframeFailed ? 'Google Docs Editor' : 'Document Preview'}
-        </span>
+        <span className="text-sm font-medium text-[#21C1B6]">Document Preview</span>
       </div>
 
       <div className="flex-1 overflow-auto" style={{ background: '#525659', padding: '32px 0' }}>
-        {googleDocsSession?.iframeUrl && !iframeFailed ? (
-          <div className="h-full px-6 pb-6">
-            <div className="bg-white rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.2)] overflow-hidden h-full min-h-[720px] flex flex-col">
-              <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gray-50">
-                <div>
-                  <div className="text-sm font-semibold text-gray-800">Editing In Google Docs</div>
-                  <div className="text-xs text-gray-500">This editor is opened inside the same template generation screen.</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {googleDocsSession.editUrl && (
-                    <button
-                      onClick={() => window.open(googleDocsSession.editUrl, '_blank', 'noopener,noreferrer')}
-                      className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all"
-                    >
-                      Open in New Tab
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      setGoogleDocsSession(null);
-                      setIframeFailed(false);
-                    }}
-                    className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all"
-                  >
-                    Back to Preview
-                  </button>
-                </div>
-              </div>
-              <iframe
-                key={googleDocsSession.iframeKey ?? googleDocsSession.googleFileId}
-                src={googleDocsSession.iframeUrl}
-                className="flex-1 w-full border-0 bg-white"
-                title="Google Docs Editor"
-                allow="clipboard-read; clipboard-write; autoplay; popups; popups-to-escape-sandbox"
-                sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-top-navigation-by-user-activation"
-                onError={() => setIframeFailed(true)}
-                onLoad={() => setIframeFailed(false)}
-              />
-            </div>
-          </div>
-        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
             {pages.map((pageLines, pageIdx) => (
               <div key={pageIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -647,14 +548,11 @@ ${bodyHtml}
               </div>
             ))}
           </div>
-        )}
       </div>
 
       <div className="bg-white border-t border-gray-200 px-6 py-4 flex items-center justify-between sticky bottom-0 z-10 shadow-[0_-2px_8px_rgba(0,0,0,0.05)]">
         <p className="text-xs text-gray-500">
-           {googleDocsSession?.draftId
-             ? 'Library save will use your latest Google Docs edits and send that edited file to the Template Analyzer Agent.'
-             : 'Preview is document-only. When you save, the generated template is sent to the Template Analyzer Agent for section and field extraction.'}
+           {'Preview is document-only here. When you save, the generated template is uploaded directly to the Template Analyzer Agent from this page.'}
         </p>
         <button
           onClick={handleSaveToLibrary}
