@@ -5,6 +5,7 @@ import {
   refineSection,
   getAllSections,
   getSectionPrompts,
+  getSectionGenerationJob,
 } from '../../services/sectionApi';
 import { getTemplateUrl } from '../../services/draftFormApi';
 import { SparklesIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
@@ -73,6 +74,42 @@ const GenerateSectionsTab = ({ draftId, draft, onNext, onBack }) => {
     }
   };
 
+  const pollSectionGenerationJob = async (sectionKey, jobId) => {
+    const maxAttempts = 120;
+    const pollIntervalMs = 5000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      try {
+        const data = await getSectionGenerationJob(draftId, sectionKey, jobId);
+        if (data?.version) {
+          setGeneratedSections((prev) => ({
+            ...prev,
+            [sectionKey]: data.version,
+          }));
+
+          if (data.critic_review) {
+            setCriticReviews((prev) => ({
+              ...prev,
+              [sectionKey]: data.critic_review,
+            }));
+          }
+          return true;
+        }
+
+        if (data?.failed || data?.status === 'failed') {
+          throw new Error(data?.error || 'Section generation failed');
+        }
+      } catch (error) {
+        if (attempt === maxAttempts) {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error('Section generation is still in progress. Please refresh and check again.');
+  };
+
   const handleGenerate = async (sectionKey) => {
     setGeneratingSection(sectionKey);
     try {
@@ -90,7 +127,7 @@ const GenerateSectionsTab = ({ draftId, draft, onNext, onBack }) => {
         templateUrl
       );
 
-      if (data.success) {
+      if (data.success && data.version) {
         setGeneratedSections((prev) => ({
           ...prev,
           [sectionKey]: data.version,
@@ -106,6 +143,8 @@ const GenerateSectionsTab = ({ draftId, draft, onNext, onBack }) => {
         console.log(
           `[GenerateSectionsTab] Section generated: ${sectionKey}, status: ${data.critic_review?.status}`
         );
+      } else if (data.success && data.job_id) {
+        await pollSectionGenerationJob(sectionKey, data.job_id);
       }
     } catch (error) {
       console.error(`Failed to generate section ${sectionKey}:`, error);

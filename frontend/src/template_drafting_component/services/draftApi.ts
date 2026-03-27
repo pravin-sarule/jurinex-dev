@@ -161,13 +161,53 @@ export const draftApi = {
     generateSection: async (
         draftId: string,
         sectionKey: string,
-        body: { section_prompt?: string; auto_validate?: boolean; language?: string }
-    ): Promise<{ success: boolean; version: any; critic_review?: any }> => {
+        body: {
+            section_prompt?: string;
+            auto_validate?: boolean;
+            language?: string;
+            wait_for_completion?: boolean;
+        }
+    ): Promise<{
+        success: boolean;
+        version?: any;
+        critic_review?: any;
+        job_id?: string;
+        queued?: boolean;
+        processing?: boolean;
+        completed?: boolean;
+        failed?: boolean;
+        status?: string;
+        message?: string;
+        error?: string;
+    }> => {
         const response = await api.post(
             `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/generate`,
             body,
-            { timeout: 600000 }
-        ); // 10 min for RAG + generation + critic
+            { timeout: 30000 }
+        );
+        return response.data;
+    },
+
+    getSectionGenerationJob: async (
+        draftId: string,
+        sectionKey: string,
+        jobId: string
+    ): Promise<{
+        success: boolean;
+        version?: any;
+        critic_review?: any;
+        job_id?: string;
+        queued?: boolean;
+        processing?: boolean;
+        completed?: boolean;
+        failed?: boolean;
+        status?: string;
+        message?: string;
+        error?: string;
+    }> => {
+        const response = await api.get(
+            `/drafts/${draftId}/sections/${encodeURIComponent(sectionKey)}/jobs/${encodeURIComponent(jobId)}`
+        );
         return response.data;
     },
 

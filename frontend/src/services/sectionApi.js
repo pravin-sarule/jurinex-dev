@@ -41,6 +41,7 @@ export const generateSection = async (
         rag_query: ragQuery,
         template_url: templateUrl,
         auto_validate: false,
+        wait_for_completion: false,
         ...(language ? { language } : {}),
       }),
     }
@@ -49,6 +50,24 @@ export const generateSection = async (
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to generate section');
+  }
+
+  return response.json();
+};
+
+export const getSectionGenerationJob = async (draftId, sectionKey, jobId) => {
+  console.log(`[API] GET /api/drafts/${draftId}/sections/${sectionKey}/jobs/${jobId}`);
+
+  const response = await fetch(
+    `${API_URL}/api/drafts/${draftId}/sections/${sectionKey}/jobs/${jobId}`,
+    {
+      headers: getAuthHeaders(),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to fetch section generation job');
   }
 
   return response.json();

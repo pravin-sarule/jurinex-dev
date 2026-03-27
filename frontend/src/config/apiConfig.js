@@ -9,7 +9,8 @@
 const GATEWAY_URL =
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  'https://gateway-service-120280829617.asia-south1.run.app'
+  'https://gateway-service-120280829617.asia-south1.run.app';
+
 function ensureLocalhostPort(url, fallbackPort) {
   try {
     const parsed = new URL(String(url || ''));
@@ -72,7 +73,7 @@ export const TEMPLATE_ANALYZER_API_BASE =
   ensureLocalhostPort(
     import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
       'https://drafting-agents-120280829617.asia-south1.run.app',
-    
+    8002
   );
 
 /**

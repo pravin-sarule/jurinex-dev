@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import SectionCard from './SectionCard';
-import { generateSection, refineSection, getAllSections } from '../../services/sectionApi';
+import { generateSection, refineSection, getAllSections, getSectionGenerationJob } from '../../services/sectionApi';
 import { draftApi } from '../../template_drafting_component/services';
 
 /**
@@ -99,13 +99,49 @@ const SectionsPage = () => {
     }
   };
 
+  const pollSectionGenerationJob = async (sectionKey, jobId) => {
+    const maxAttempts = 120;
+    const pollIntervalMs = 5000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      try {
+        const data = await getSectionGenerationJob(draftId, sectionKey, jobId);
+        if (data?.version) {
+          setGeneratedSections((prev) => ({
+            ...prev,
+            [sectionKey]: data.version,
+          }));
+
+          if (data.critic_review) {
+            setCriticReviews((prev) => ({
+              ...prev,
+              [sectionKey]: data.critic_review,
+            }));
+          }
+          return true;
+        }
+
+        if (data?.failed || data?.status === 'failed') {
+          throw new Error(data?.error || 'Section generation failed');
+        }
+      } catch (error) {
+        if (attempt === maxAttempts) {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error('Section generation is still in progress. Please refresh and check again.');
+  };
+
   const handleGenerate = async (sectionKey, prompt, ragQuery) => {
     setGeneratingSection(sectionKey);
     try {
       console.log(`[SectionsPage] Generating section: ${sectionKey}`);
       const data = await generateSection(draftId, sectionKey, prompt, ragQuery);
 
-      if (data.success) {
+      if (data.success && data.version) {
         setGeneratedSections((prev) => ({
           ...prev,
           [sectionKey]: data.version,
@@ -119,6 +155,8 @@ const SectionsPage = () => {
         }
 
         console.log(`[SectionsPage] Section generated: ${sectionKey}, status: ${data.critic_review?.status}`);
+      } else if (data.success && data.job_id) {
+        await pollSectionGenerationJob(sectionKey, data.job_id);
       }
     } catch (error) {
       console.error(`Failed to generate section ${sectionKey}:`, error);

@@ -564,7 +564,7 @@ async def generate_section(
     template_url: Optional[str] = Body(None, embed=True),
     auto_validate: bool = Body(False, embed=True),
     language: Optional[str] = Body(None, embed=True),
-    wait_for_completion: bool = Body(True, embed=True),
+    wait_for_completion: bool = Body(False, embed=True),
 ) -> Dict[str, Any]:
     logger.info(
         "API: POST /api/drafts/%s/sections/%s/generate (queue-backed section generation)",

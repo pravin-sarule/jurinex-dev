@@ -225,8 +225,16 @@ const DraftFormPage = () => {
               if (templateRes?.success && templateRes?.template) {
                 const t = templateRes.template;
                 dbSections = Array.isArray(t.sections) ? t.sections : [];
-                // Use template fields from API when draft.fields is empty (e.g. custom templates)
-                if (Array.isArray(t.fields) && t.fields.length > 0 && (!Array.isArray(d.fields) || d.fields.length === 0)) {
+                // Prefer the richer field schema when template API returns more fields than the draft payload.
+                if (
+                  Array.isArray(t.fields) &&
+                  t.fields.length > 0 &&
+                  (
+                    !Array.isArray(d.fields) ||
+                    d.fields.length === 0 ||
+                    t.fields.length > d.fields.length
+                  )
+                ) {
                   templateFields = t.fields;
                 } else if (Array.isArray(d.fields) && d.fields.length > 0) {
                   templateFields = d.fields;

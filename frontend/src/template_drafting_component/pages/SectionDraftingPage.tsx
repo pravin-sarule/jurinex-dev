@@ -359,42 +359,79 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
     };
 
 
-    const POLL_INTERVAL_MS = 15000;
-    const POLL_MAX_ATTEMPTS = 20;
+    const POLL_INTERVAL_MS = 5000;
+    const POLL_MAX_ATTEMPTS = 120;
 
-    const pollForSectionResult = async (
+    const applyGeneratedSectionResult = (
+        sectionId: string,
+        response: { version?: any; critic_review?: any },
+        sectionTitle: string,
+        isRegenerate: boolean
+    ) => {
+        const { version, critic_review } = response;
+        if (!version?.content_html) {
+            throw new Error(`Section "${sectionTitle}" finished without generated content.`);
+        }
+
+        setSectionStates(prev => ({
+            ...prev,
+            [sectionId]: {
+                ...prev[sectionId],
+                content: version.content_html,
+                isGenerated: true,
+                isGenerating: false,
+                versionId: version.version_id,
+                criticReview: critic_review ? {
+                    status: critic_review.status,
+                    score: critic_review.score,
+                    feedback: critic_review.feedback,
+                    issues: critic_review.issues || [],
+                    suggestions: critic_review.suggestions || [],
+                    sources: critic_review.sources || []
+                } : null
+            }
+        }));
+
+        toast.success(`Section "${sectionTitle}" ${isRegenerate ? 'regenerated' : 'generated'} successfully!`);
+    };
+
+    const pollForSectionJob = async (
         draftId: string,
         sectionId: string,
+        jobId: string,
         sectionTitle: string,
+        isRegenerate: boolean,
         addActivity?: (agent: string, message: string, status: 'in-progress' | 'completed') => void,
         setSectionStates?: React.Dispatch<React.SetStateAction<Record<string, SectionState>>>
     ) => {
         for (let attempt = 1; attempt <= POLL_MAX_ATTEMPTS; attempt++) {
             await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
             try {
-                const res = await draftApi.getSection(draftId, sectionId);
-                const html = res?.version?.content_html;
-                if (html != null && String(html).trim().length > 0) {
+                const res = await draftApi.getSectionGenerationJob(draftId, sectionId, jobId);
+                if (res?.version?.content_html) {
+                    applyGeneratedSectionResult(sectionId, res, sectionTitle, isRegenerate);
+                    if (addActivity) {
+                        addActivity('Critic', 'Validation complete', 'completed');
+                        addActivity('Drafter', `${sectionTitle} drafted and verified.`, 'completed');
+                    }
+                    return;
+                }
+                if (res?.failed || res?.status === 'failed') {
+                    const message = res?.error || `Section "${sectionTitle}" generation failed.`;
                     if (setSectionStates) {
                         setSectionStates(prev => ({
                             ...prev,
-                            [sectionId]: {
-                                ...prev[sectionId],
-                                content: html,
-                                isGenerated: true,
-                                isGenerating: false,
-                                versionId: res?.version?.version_id ?? null
-                            }
+                            [sectionId]: { ...prev[sectionId], isGenerating: false }
                         }));
                     }
-                    toast.success(`Section "${sectionTitle}" is ready (completed in backend).`);
+                    toast.error(message);
                     if (addActivity) {
-                        addActivity('System', `Section "${sectionTitle}" result found.`, 'completed');
+                        addActivity('System', message.length > 60 ? `Failed: ${message.slice(0, 57)}...` : `Failed: ${message}`, 'completed');
                     }
                     return;
                 }
             } catch (_) {
-                // ignore fetch errors during poll
+                // ignore transient fetch errors during poll
             }
         }
         if (setSectionStates) {
@@ -450,39 +487,40 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 ...(sectionPrompt ? { section_prompt: sectionPrompt } : {}),
                 auto_validate: false,
                 ...(draftLanguage ? { language: draftLanguage } : {}),
+                wait_for_completion: false,
             });
 
             timeouts.forEach(t => clearTimeout(t));
 
-            if (response.success) {
-                const { version, critic_review } = response;
+            if (response.success && response.version?.content_html) {
 
                 if (addActivity) {
                     addActivity('Critic', 'Validation complete', 'completed');
                     addActivity('Drafter', `${sectionTitle} drafted and verified.`, 'completed');
                 }
 
-                setSectionStates(prev => ({
-                    ...prev,
-                    [sectionId]: {
-                        ...prev[sectionId],
-                        content: version.content_html,
-                        isGenerated: true,
-                        isGenerating: false,
-                        versionId: version.version_id,
-                        criticReview: critic_review ? {
-                            status: critic_review.status,
-                            score: critic_review.score,
-                            feedback: critic_review.feedback,
-                            issues: critic_review.issues || [],
-                            suggestions: critic_review.suggestions || [],
-                            sources: critic_review.sources || []
-                        } : null
-                    }
-                }));
-
-                toast.success(`Section "${section?.title}" ${isRegenerate ? 'regenerated' : 'generated'} successfully!`);
+                applyGeneratedSectionResult(sectionId, response, sectionTitle, isRegenerate);
+                return;
             }
+
+            if (response.success && response.job_id) {
+                toast.info(`Section "${sectionTitle}" queued. You can keep working while it generates.`);
+                if (addActivity) {
+                    addActivity('System', `Queued "${sectionTitle}" for background drafting.`, 'completed');
+                }
+                void pollForSectionJob(
+                    draftId,
+                    sectionId,
+                    response.job_id,
+                    sectionTitle,
+                    isRegenerate,
+                    addActivity,
+                    setSectionStates
+                );
+                return;
+            }
+
+            throw new Error(response.error || response.message || 'Failed to queue section generation');
         } catch (error) {
             timeouts.forEach(t => clearTimeout(t));
             if (isTimeoutError(error)) {
@@ -490,7 +528,12 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
                 if (addActivity) {
                     addActivity('System', 'Request timed out. Checking for completed section…', 'in-progress');
                 }
-                pollForSectionResult(draftId, sectionId, sectionTitle, addActivity, setSectionStates);
+                void refetchSectionContent(sectionId).finally(() => {
+                    setSectionStates(prev => ({
+                        ...prev,
+                        [sectionId]: { ...prev[sectionId], isGenerating: false }
+                    }));
+                });
                 return;
             }
             const message = getErrorMessage(error) || 'Failed to generate section';

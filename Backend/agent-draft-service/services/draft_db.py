@@ -311,11 +311,18 @@ def _parse_template_fields_json(raw: Any, template_id: str) -> List[Dict[str, An
                 fields_list = hybrid["fields"]
 
     result = []
+    seen_field_names = set()
     for idx, f in enumerate(fields_list):
+        field_name = f.get("key") or f.get("field_name") or f"field_{idx}"
+        normalized_field_name = str(field_name).strip().lower()
+        if normalized_field_name in seen_field_names:
+            continue
+        seen_field_names.add(normalized_field_name)
+
         result.append({
             "field_id": f.get("field_id") or f.get("id") or None,
             "template_id": template_id,
-            "field_name": f.get("key") or f.get("field_name") or f"field_{idx}",
+            "field_name": field_name,
             "field_label": f.get("label") or f.get("field_label") or f.get("key") or f"Field {idx}",
             "field_type": f.get("type") or f.get("field_type") or "text",
             "is_required": f.get("required", False) if "required" in f else f.get("is_required", False),

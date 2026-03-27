@@ -90,7 +90,19 @@ def _fetch_user_template_from_analyzer(
             "sort_order": sec.get("order_index", idx),
             "is_required": True,
         })
-    fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
+    # Template Analyzer may return the complete schema at the top level as
+    # `all_fields` / `hybrid_fields`, while `sections[*].fields` can be partial
+    # or repetitive. Feed the whole payload into the normalizer so it can pick
+    # the richest field source.
+    raw_fields = payload
+    fields = (
+        draft_db._parse_template_fields_json(
+            raw_fields,
+            str(template_obj.get("template_id", template_id)),
+        )
+        if raw_fields is not None
+        else []
+    )
     return {
         "template_id": str(template_obj.get("template_id", template_id)),
         "name": template_obj.get("template_name") or template_obj.get("name") or "Untitled",
@@ -276,6 +288,7 @@ async def get_template(
             user_tpl = _fetch_user_template_from_analyzer(template_id, analyzer_user_id)
             if user_tpl:
                 db_fields = draft_db.get_template_fields_with_fallback(template_id)
+                analyzer_fields = user_tpl.get("fields", [])
                 db_sections = draft_db.get_template_sections(template_id) if include_sections else []
                 out = {
                     "template_id": user_tpl["template_id"],
@@ -286,7 +299,7 @@ async def get_template(
                     "language": user_tpl.get("language"),
                     "status": user_tpl.get("status"),
                     "is_active": user_tpl.get("is_active", True),
-                    "fields": db_fields or user_tpl.get("fields", []),
+                    "fields": analyzer_fields if len(analyzer_fields) > len(db_fields) else db_fields,
                 }
                 if include_sections:
                     out["sections"] = db_sections or user_tpl.get("sections", [])
