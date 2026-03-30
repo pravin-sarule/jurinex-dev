@@ -803,7 +803,6 @@ const Sidebar = () => {
     { name: 'ICOM', path: '/analysis', icon: MagnifyingGlassCircleIcon },
     { name: 'Citation', path: '/citation', icon: BookOpenIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
-    { name: 'Chat Draft', path: '/chat-draft', icon: PencilSquareIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
     { name: 'Tools', path: '/tools', icon: Cog6ToothIcon },
     { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
