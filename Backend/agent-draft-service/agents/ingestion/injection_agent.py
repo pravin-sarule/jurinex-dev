@@ -630,6 +630,23 @@ def run_autopopulation_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         from services.draft_db import get_template_fields_with_fallback
         fields_schema = get_template_fields_with_fallback(str(template_id))
+        if not fields_schema:
+            try:
+                from api.template_routes import _fetch_user_template_from_analyzer, _is_uuid
+                if _is_uuid(str(template_id)):
+                    analyzer_template = _fetch_user_template_from_analyzer(str(template_id), int(user_id))
+                    if analyzer_template and analyzer_template.get("fields"):
+                        fields_schema = analyzer_template.get("fields", [])
+                        logger.info(
+                            "[InjectionAgent][SCHEMA_FETCH] Hydrated %d analyzer fields for user template_id=%s",
+                            len(fields_schema), template_id,
+                        )
+            except Exception as analyzer_error:
+                logger.warning(
+                    "[InjectionAgent][SCHEMA_FETCH] Analyzer fallback failed for template_id=%s: %s",
+                    template_id,
+                    analyzer_error,
+                )
         logger.info(
             "[InjectionAgent][SCHEMA_FETCH] Fetched %d template fields for template_id=%s",
             len(fields_schema), template_id,

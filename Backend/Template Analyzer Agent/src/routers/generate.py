@@ -18,18 +18,24 @@ import uuid
 import re
 import json
 import logging
+import io
+import zipfile
+import textwrap
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from xml.etree import ElementTree
 
 import anthropic
-from fastapi import APIRouter, HTTPException, Header, Depends
+from fastapi import APIRouter, HTTPException, Header, Depends, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models.db_models import UserTemplate, UserTemplateField, UserTemplateAnalysisSection
+from ..models.db_models import UserTemplate, UserTemplateField
 from ..config import settings
+from ..services.document_ai_service import DocumentAIService
+from .analysis import enqueue_template_analysis, _normalize_placeholder_spacing
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analysis", tags=["Template Generation"])
@@ -37,6 +43,7 @@ router = APIRouter(prefix="/analysis", tags=["Template Generation"])
 # ── Claude client ──────────────────────────────────────────────────────────────
 _claude = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 CLAUDE_MODEL = "claude-sonnet-4-5"
+doc_ai = DocumentAIService()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -73,6 +80,8 @@ class GenerateTemplateRequest(BaseModel):
     questions: List[Dict[str, Any]]       # original questions for context
     jurisdiction: Optional[str] = "India"
     language: Optional[str] = "English"
+    reference_document_text: Optional[str] = None
+    reference_document_name: Optional[str] = None
 
 
 class GenerateResponse(BaseModel):
@@ -100,6 +109,8 @@ class SaveGeneratedResponse(BaseModel):
 class GetStructureQuestionsRequest(BaseModel):
     description: str = Field(..., description="User's free-text description of the document they want")
     jurisdiction: Optional[str] = "India"
+    reference_document_text: Optional[str] = None
+    reference_document_name: Optional[str] = None
 
 
 class GetStructureQuestionsResponse(BaseModel):
@@ -109,6 +120,203 @@ class GetStructureQuestionsResponse(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+def _extract_docx_text(file_content: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(file_content)) as archive:
+        document_xml = archive.read("word/document.xml")
+
+    root = ElementTree.fromstring(document_xml)
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs: List[str] = []
+
+    for paragraph in root.findall(".//w:p", namespace):
+        runs = [node.text for node in paragraph.findall(".//w:t", namespace) if node.text]
+        text = "".join(runs).strip()
+        if text:
+            paragraphs.append(text)
+
+    return "\n".join(paragraphs)
+
+
+async def _extract_reference_document_text(reference_document: UploadFile) -> str:
+    file_content = await reference_document.read()
+    filename = (reference_document.filename or "").lower()
+    content_type = (reference_document.content_type or "").lower()
+
+    if not file_content:
+        raise HTTPException(status_code=400, detail="Uploaded reference document is empty")
+
+    if filename.endswith(".pdf") or content_type == "application/pdf":
+        return await doc_ai.parallel_process_pdf(file_content)
+
+    if filename.endswith(".docx") or content_type in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }:
+        try:
+            return _extract_docx_text(file_content)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read DOCX reference document: {exc}") from exc
+
+    if filename.endswith(".txt") or content_type.startswith("text/") or not content_type:
+        return file_content.decode("utf-8", errors="ignore")
+
+    raise HTTPException(status_code=400, detail="Unsupported reference document type. Use PDF, DOCX, or TXT.")
+
+
+async def _extract_reference_documents_text(reference_documents: List[UploadFile]) -> tuple[str, List[str]]:
+    texts: List[str] = []
+    names: List[str] = []
+
+    for document in reference_documents:
+        text = await _extract_reference_document_text(document)
+        if text.strip():
+            names.append(document.filename or "uploaded reference document")
+            texts.append(f'DOCUMENT: {document.filename or "uploaded reference document"}\n{text.strip()}')
+
+    if not texts:
+        raise HTTPException(status_code=400, detail="Uploaded reference documents did not contain readable text")
+
+    return "\n\n".join(texts), names
+
+
+def _truncate_reference_text(reference_document_text: Optional[str], limit: int = 12000) -> str:
+    text = (reference_document_text or "").strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n[TRUNCATED: reference document shortened for prompt safety]"
+
+
+def _reference_document_block(reference_document_text: Optional[str], reference_document_name: Optional[str]) -> str:
+    excerpt = _truncate_reference_text(reference_document_text)
+    if not excerpt:
+        return ""
+
+    name = reference_document_name or "uploaded reference document"
+    return (
+        f'REFERENCE DOCUMENT PROVIDED: "{name}"\n'
+        "Treat this as the factual ceiling for what data and sections the eventual template should expect.\n"
+        "Do not introduce extra tables, schedules, party blocks, or data-heavy fields unless the document clearly supports them.\n"
+        "If the document reflects only a smaller set of facts, keep the template lean and aligned to that scope.\n\n"
+        f"REFERENCE DOCUMENT EXCERPT:\n{excerpt}\n"
+    )
+
+
+def _reference_scope_rules(reference_document_text: Optional[str]) -> str:
+    text = (reference_document_text or "").strip()
+    if not text:
+        return ""
+
+    lower = text.lower()
+    party_indices = set()
+    for m in re.finditer(r'\b(?:petitioner|respondent|party)\s*(?:no\.?\s*)?(\d+)\b', lower):
+        try:
+            party_indices.add(int(m.group(1)))
+        except Exception:
+            continue
+
+    max_party_index = max(party_indices) if party_indices else 0
+    has_annexure = bool(re.search(r'\bannexure\b', lower))
+    has_schedule = bool(re.search(r'\bschedule\b', lower))
+
+    rules = [
+        "BINDING REFERENCE SCOPE LIMITS:",
+        "- Only include sections and placeholders that are clearly supported by the uploaded reference document(s).",
+        "- Do not invent extra party blocks, extra factual tracks, or speculative compliance sections.",
+        "- Keep the fill-up field set minimal and proportional to the reference document scope.",
+    ]
+    if max_party_index > 0:
+        rules.append(f"- Maximum numbered party/person profile blocks: {max_party_index}. Do not exceed this count.")
+    if not has_annexure:
+        rules.append("- Do not create Annexure lists unless expressly required by user answers or statute.")
+    if not has_schedule:
+        rules.append("- Do not create additional Schedules unless expressly required by user answers.")
+
+    return "\n".join(rules)
+
+
+def _escape_pdf_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _build_text_pdf_bytes(text: str) -> bytes:
+    """
+    Create a simple, dependency-free PDF from plain text.
+    This preserves line structure and placeholder tokens for archival/GCS storage.
+    """
+    safe_text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines: List[str] = []
+    for raw in safe_text.split("\n"):
+        wrapped = textwrap.wrap(raw, width=95, break_long_words=False, break_on_hyphens=False)
+        lines.extend(wrapped if wrapped else [""])
+
+    lines_per_page = 50
+    pages = [lines[i:i + lines_per_page] for i in range(0, len(lines), lines_per_page)] or [[""]]
+    objects: Dict[int, bytes] = {
+        1: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",  # Font
+    }
+
+    next_id = 3  # 2 is reserved for /Pages
+    page_ids: List[int] = []
+
+    for page_lines in pages:
+        text_commands = ["BT", "/F1 11 Tf", "50 800 Td", "14 TL"]
+        first_line = True
+        for line in page_lines:
+            try:
+                line_latin = line.encode("latin-1", errors="replace").decode("latin-1")
+            except Exception:
+                line_latin = line
+            escaped = _escape_pdf_text(line_latin)
+            if first_line:
+                text_commands.append(f"({escaped}) Tj")
+                first_line = False
+            else:
+                text_commands.append("T*")
+                text_commands.append(f"({escaped}) Tj")
+        text_commands.append("ET")
+        stream_data = "\n".join(text_commands).encode("latin-1", errors="replace")
+        stream_obj = b"<< /Length " + str(len(stream_data)).encode("ascii") + b" >>\nstream\n" + stream_data + b"\nendstream"
+        content_id = next_id
+        next_id += 1
+        objects[content_id] = stream_obj
+
+        page_id = next_id
+        next_id += 1
+        page_obj = f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents {content_id} 0 R /Resources << /Font << /F1 1 0 R >> >> >>".encode("ascii")
+        objects[page_id] = page_obj
+        page_ids.append(page_id)
+
+    kids = " ".join(f"{pid} 0 R" for pid in page_ids)
+    objects[2] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode("ascii")
+
+    catalog_id = next_id
+    objects[catalog_id] = b"<< /Type /Catalog /Pages 2 0 R >>"
+
+    output = io.BytesIO()
+    output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+
+    offsets = [0]
+    total_objects = catalog_id
+    for idx in range(1, total_objects + 1):
+        obj = objects[idx]
+        offsets.append(output.tell())
+        output.write(f"{idx} 0 obj\n".encode("ascii"))
+        output.write(obj)
+        output.write(b"\nendobj\n")
+
+    xref_start = output.tell()
+    output.write(f"xref\n0 {total_objects + 1}\n".encode("ascii"))
+    output.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        output.write(f"{off:010d} 00000 n \n".encode("ascii"))
+    output.write(
+        f"trailer\n<< /Size {total_objects + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("ascii")
+    )
+    return output.getvalue()
+
+
 # Field Extraction
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -282,6 +490,35 @@ def parse_sections(text: str) -> List[Dict[str, Any]]:
     return sections
 
 
+def _normalize_generated_template_text(text: str) -> str:
+    """
+    Normalize common markdown-like artifacts into professional legal text.
+    Keeps __placeholder__ tokens intact.
+    """
+    if not text:
+        return ""
+
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
+    t = re.sub(r"\n```$", "", t)
+    t = t.replace("**", "")
+    t = t.replace("`", "")
+
+    normalized_lines: List[str] = []
+    for raw_line in t.split("\n"):
+        line = raw_line
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)  # markdown headings
+        if re.match(r"^\s*[-*]\s+(?!\|)", line):       # markdown bullets (not tables)
+            line = re.sub(r"^\s*[-*]\s+", "", line)
+        if re.match(r"^\s*[-_]{3,}\s*$", line):        # markdown horizontal rules
+            line = ""
+        normalized_lines.append(line.rstrip())
+
+    t = "\n".join(normalized_lines)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Claude helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -438,7 +675,9 @@ DOCUMENT STRUCTURE RULES:
 14. USER ANSWERS ARE BINDING: Every answer the user provided must be reflected exactly in the document. Do not invent, substitute, or ignore any user-provided detail.
 15. For court pleadings, applications, petitions, plaints, written statements, and family-court filings, use authentic Indian court-document structure: court heading, cause title, party description blocks, jurisdiction, facts, grounds, prayers, interim relief if applicable, verification, place, date, advocate block, and signature block.
 16. For deeds and agreements, use recital-driven Indian drafting style with proper operative clauses, schedules, witness blocks, and execution language.
-17. Keep numbering consistent. Never jump clause numbers, never repeat heading numbers, and never mix markdown headings with legal clause numbering."""
+17. Keep numbering consistent. Never jump clause numbers, never repeat heading numbers, and never mix markdown headings with legal clause numbering.
+18. INDIAN COURTS ONLY: For any court/family filing, use only Indian court nomenclature and procedural structure. Do not use foreign styles (e.g., "Plaintiff v. Defendant" US style, "County Court", "Circuit Court", "Claimant", "Statement of Claim"). Use "Petitioner/Applicant" and "Respondent(s)" unless user explicitly requires another Indian label.
+19. WHEN REFERENCE DOCUMENTS ARE PROVIDED: treat them as strict scope boundaries. Do not introduce extra sections or extra fill-up placeholders beyond what those documents and user answers justify."""
 
 
 async def _call_claude_json(system: str, user_msg: str) -> str:
@@ -490,6 +729,7 @@ def _category_generation_guidance(doc_type: str) -> str:
     if category in {"Court", "Criminal"}:
         return (
             "COURT FORMAT REQUIREMENTS:\n"
+            "- Use INDIAN COURT FORMAT ONLY.\n"
             "- Use formal Indian court pleading structure, not generic prose.\n"
             "- Begin with court title and jurisdiction line, then cause title with petitioner/applicant and respondent blocks.\n"
             "- Include properly labeled sections such as facts, grounds, jurisdiction, limitation if relevant, prayers, interim relief if relevant, and verification.\n"
@@ -499,6 +739,7 @@ def _category_generation_guidance(doc_type: str) -> str:
     if category == "Family":
         return (
             "FAMILY COURT FORMAT REQUIREMENTS:\n"
+            "- Use INDIAN FAMILY COURT FORMAT ONLY.\n"
             "- Use Indian family-court petition structure with court heading, marriage facts, jurisdiction, cause of action, statutory basis, grounds, prayer, verification, and signature blocks.\n"
             "- Do not produce a general article or advisory note.\n"
             "- Ensure the petition reads like a file-ready Indian family-law pleading."
@@ -514,6 +755,29 @@ def _category_generation_guidance(doc_type: str) -> str:
         "GENERAL LEGAL FORMAT REQUIREMENTS:\n"
         "- Produce a file-ready Indian legal template, not explanatory prose.\n"
         "- Maintain professional heading hierarchy, clause numbering, and execution-ready closing sections."
+    )
+
+
+def _court_pleading_skeleton(doc_type: str) -> str:
+    category = _infer_category(doc_type)
+    if category not in {"Court", "Family", "Criminal"}:
+        return ""
+    return (
+        "MANDATORY INDIAN COURT PLEADING SKELETON (DO NOT SKIP/REORDER WITHOUT LEGAL REASON):\n"
+        "1. COURT HEADING (e.g., IN THE FAMILY COURT AT __district_name__, __state_name__)\n"
+        "2. CASE TYPE / PETITION TITLE WITH STATUTORY BASIS\n"
+        "3. CASE NUMBER LINE (if applicable)\n"
+        "4. IN THE MATTER OF / BETWEEN (Petitioner/Applicant block)\n"
+        "5. VERSUS (Respondent block)\n"
+        "6. JURISDICTION PARAGRAPH\n"
+        "7. BRIEF FACTS / CHRONOLOGY\n"
+        "8. GROUNDS / LEGAL SUBMISSIONS\n"
+        "9. PRAYER CLAUSE(S)\n"
+        "10. INTERIM RELIEF (if applicable)\n"
+        "11. LIST OF ANNEXURES (numbered, filing-ready)\n"
+        "12. VERIFICATION\n"
+        "13. PLACE, DATE, ADVOCATE DETAILS, SIGNATURE BLOCKS\n"
+        "Use Indian pleading labels and language conventions only."
     )
 
 
@@ -571,12 +835,19 @@ def _build_generation_user_message(body: GenerateTemplateRequest) -> str:
         )
 
     category_guidance = _category_generation_guidance(body.document_type)
+    court_skeleton = _court_pleading_skeleton(body.document_type)
+    reference_block = _reference_document_block(body.reference_document_text, body.reference_document_name)
+    reference_scope_limits = _reference_scope_rules(body.reference_document_text)
     return f"""Draft a complete "{body.document_type}" legal template for Indian jurisdiction.
 
 *** {lang_directive} ***
 {f"*** {page_directive} ***" if page_directive else ""}
 
 {category_guidance}
+{court_skeleton if court_skeleton else ""}
+
+{reference_block}
+{reference_scope_limits if reference_scope_limits else ""}
 
 BINDING USER REQUIREMENTS — YOU MUST FOLLOW EVERY ANSWER EXACTLY:
 {chr(10).join(qa_lines)}
@@ -584,9 +855,10 @@ BINDING USER REQUIREMENTS — YOU MUST FOLLOW EVERY ANSWER EXACTLY:
 IMPORTANT INSTRUCTIONS:
 1. Every answer above is a strict requirement — reflect each one exactly in the document.
 2. Do not add clauses, sections, or content that contradicts what the user specified.
-3. Do not output markdown headings, separator lines, commentary, notes to the user, or drafting explanations.
+3. Do not output markdown headings, markdown bullets, separator lines, bold markers (**), commentary, notes to the user, or drafting explanations.
 4. Use authentic Indian legal format for the relevant document category.
 5. Respect the page count and level of detail exactly.
+6. If a reference document is provided, keep the template limited to the scope and data density supported by that document.
   • Jurisdiction: {body.jurisdiction}
   • Language: {selected_language}
 
@@ -915,18 +1187,21 @@ async def get_structure_questions(
     if not x_user_id:
         raise HTTPException(status_code=400, detail="X-User-Id header is required")
 
-    logger.info(f"[GetStructureQuestions] user={x_user_id} desc={body.description[:80]!r} jurisdiction={body.jurisdiction!r}")
+    logger.info(f"[GetStructureQuestions] user={x_user_id} desc={body.description[:80]!r} jurisdiction={body.jurisdiction!r} reference_doc={bool(body.reference_document_text)}")
 
     category = _infer_category(body.description)
+    reference_block = _reference_document_block(body.reference_document_text, body.reference_document_name)
     user_msg = (
         f'User wants: "{body.description}"\n\n'
         f'Detected category: {category}\n'
         f'Jurisdiction is already set to: {body.jurisdiction or "India"}\n\n'
+        f'{reference_block}\n'
         f'Generate 8-12 structure questions for this template.\n'
         f'Remember: ask about TYPES, RANGES, and CLAUSE PRESENCE — not specific data values.'
         f'\nFocus on: party types, section or clause inclusion, schedules or annexures, '
         f'value or duration ranges, relief or forum structure where relevant, and detail level.\n'
-        f'Remember: ask about structure only, never about data to fill later.'
+        f'Remember: ask about structure only, never about data to fill later.\n'
+        f'If a reference document is provided, keep the template scope aligned to that document and avoid suggesting extra sections that the document does not support.'
     )
 
     raw = await _call_claude_json(_STRUCTURE_QUESTIONS_SYSTEM_V2, user_msg)
@@ -943,6 +1218,23 @@ async def get_structure_questions(
     questions = _sanitize_structure_questions(data, category)
     logger.info(f"[GetStructureQuestions] Generated {len(questions)} questions")
     return GetStructureQuestionsResponse(success=True, description=body.description, questions=questions)
+
+
+@router.post("/get-structure-questions-with-document", response_model=GetStructureQuestionsResponse)
+async def get_structure_questions_with_document(
+    description: str = Form(...),
+    jurisdiction: str = Form("India"),
+    reference_documents: List[UploadFile] = File(...),
+    x_user_id: Optional[str] = Header(None),
+):
+    reference_document_text, reference_document_names = await _extract_reference_documents_text(reference_documents)
+    body = GetStructureQuestionsRequest(
+        description=description,
+        jurisdiction=jurisdiction,
+        reference_document_text=reference_document_text,
+        reference_document_name=", ".join(reference_document_names),
+    )
+    return await get_structure_questions(body=body, x_user_id=x_user_id)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -965,6 +1257,7 @@ async def generate_template(
     logger.info(f"[Generate] user={x_user_id} doc={body.document_type!r} answers={len(body.answers)}")
     user_msg = _build_generation_user_message(body)
     template_text = await _call_claude_template(_GENERATION_SYSTEM, user_msg)
+    template_text = _normalize_generated_template_text(template_text)
     logger.info(f"[Generate] Claude returned {len(template_text)} chars")
 
     fields = extract_fields(template_text)
@@ -980,6 +1273,9 @@ async def generate_template(
         "totalFields": len(fields),
         "totalSections": len(sections),
         "model": CLAUDE_MODEL,
+        "referenceDocumentUsed": bool(body.reference_document_text),
+        "referenceDocumentName": body.reference_document_name,
+        "referenceDocumentNames": [name.strip() for name in (body.reference_document_name or "").split(",") if name.strip()],
     }
 
     return GenerateResponse(success=True, templateText=template_text, fields=fields, sections=sections, metadata=metadata)
@@ -1086,6 +1382,20 @@ def _infer_category(doc_type: str) -> str:
     return "General"
 
 
+def _split_gs_uri(gs_uri: str) -> tuple[str, str]:
+    """
+    Split gs://bucket/path into (bucket, path).
+    If parsing fails, returns ("", "").
+    """
+    if not gs_uri or not gs_uri.startswith("gs://"):
+        return "", ""
+    rest = gs_uri[5:].strip()
+    if "/" not in rest:
+        return "", ""
+    bucket, _, path = rest.partition("/")
+    return bucket, path
+
+
 @router.post("/generate-template-stream")
 async def generate_template_stream(
     body: GenerateTemplateRequest,
@@ -1113,6 +1423,7 @@ async def generate_template_stream(
                 }) + "\n"
 
             template_text = "".join(collected_parts).strip()
+            template_text = _normalize_generated_template_text(template_text)
             fields = extract_fields(template_text)
             sections = parse_sections(template_text)
             metadata = {
@@ -1125,6 +1436,9 @@ async def generate_template_stream(
                 "totalFields": len(fields),
                 "totalSections": len(sections),
                 "model": CLAUDE_MODEL,
+                "referenceDocumentUsed": bool(body.reference_document_text),
+                "referenceDocumentName": body.reference_document_name,
+                "referenceDocumentNames": [name.strip() for name in (body.reference_document_name or "").split(",") if name.strip()],
             }
 
             yield json.dumps({
@@ -1149,12 +1463,42 @@ async def generate_template_stream(
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
+@router.post("/generate-template-stream-with-document")
+async def generate_template_stream_with_document(
+    document_type: str = Form(...),
+    answers: str = Form(...),
+    questions: str = Form(...),
+    jurisdiction: str = Form("India"),
+    language: str = Form("English"),
+    reference_documents: List[UploadFile] = File(...),
+    x_user_id: Optional[str] = Header(None),
+):
+    try:
+        parsed_answers = json.loads(answers)
+        parsed_questions = json.loads(questions)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload in multipart request: {exc}") from exc
+
+    reference_document_text, reference_document_names = await _extract_reference_documents_text(reference_documents)
+    body = GenerateTemplateRequest(
+        document_type=document_type,
+        answers=parsed_answers,
+        questions=parsed_questions,
+        jurisdiction=jurisdiction,
+        language=language,
+        reference_document_text=reference_document_text,
+        reference_document_name=", ".join(reference_document_names),
+    )
+    return await generate_template_stream(body=body, x_user_id=x_user_id)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Endpoint 3: Save generated template
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/save-generated", response_model=SaveGeneratedResponse)
 async def save_generated_template(
+    background_tasks: BackgroundTasks,
     body: SaveGeneratedRequest,
     x_user_id: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
@@ -1172,45 +1516,58 @@ async def save_generated_template(
     language = meta.get("language") or "en"
     lang_code = "en" if "english" in language.lower() else language[:5].lower()
 
+    normalized_template_text = _normalize_placeholder_spacing(body.templateText or "")
+    if not normalized_template_text.strip():
+        raise HTTPException(status_code=400, detail="templateText is required to save generated template")
+
+    template_uuid = uuid.uuid4()
+    generated_pdf_bytes = _build_text_pdf_bytes(normalized_template_text)
+    file_url = await doc_ai.upload_to_gcs(
+        generated_pdf_bytes,
+        f"user_uploads/{user_id_int}/{template_uuid}/generated_template.pdf",
+        "application/pdf",
+    )
+    generated_txt_url = await doc_ai.upload_to_gcs(
+        normalized_template_text.encode("utf-8"),
+        f"user_uploads/{user_id_int}/{template_uuid}/generated_template.txt",
+        "text/plain",
+    )
+
     new_template = UserTemplate(
-        template_id=uuid.uuid4(),
+        template_id=template_uuid,
         template_name=name,
         category=category,
         sub_category="AI Generated",
         language=lang_code,
-        status="active",
+        status="processing",
         description=f"AI-generated {name} template. Jurisdiction: {meta.get('jurisdiction', 'India')}. Model: {meta.get('model', CLAUDE_MODEL)}.",
         user_id=user_id_int,
         image_url=None,
-        file_url=None,
+        file_url=file_url or generated_txt_url,
     )
     db.add(new_template)
     await db.flush()
     tid = new_template.template_id
 
-    if body.fields:
-        db.add(UserTemplateField(template_id=tid, template_fields=body.fields, is_active=True))
-
-    for sec in body.sections:
-        db.add(UserTemplateAnalysisSection(
-            template_id=tid,
-            section_name=sec.get("section_name", "Section"),
-            section_purpose=sec.get("section_purpose", ""),
-            section_intro=sec.get("section_intro", ""),
-            section_prompts=sec.get("section_prompts", []),
-            order_index=sec.get("order_index", 0),
-            is_active=True,
-        ))
-
-    if not body.sections:
-        db.add(UserTemplateAnalysisSection(
-            template_id=tid, section_name="FULL DOCUMENT",
-            section_purpose="Complete AI-generated template",
-            section_intro=body.templateText[:500] if body.templateText else "",
-            section_prompts=[{"type": "text", "content": body.templateText}],
-            order_index=0, is_active=True,
-        ))
+    # Persist "initial" fields immediately so downstream services (chat-draft)
+    # can load template text even while background analysis is still running.
+    # This also stores the generated PDF's GCS URI/path for later use.
+    pdf_bucket, pdf_path = _split_gs_uri(file_url or "")
+    txt_bucket, txt_path = _split_gs_uri(generated_txt_url or "")
+    initial_fields: Dict[str, Any] = {
+        "original_template_text": normalized_template_text,
+        "template_text": normalized_template_text,
+        "generated_template_pdf_gcs_uri": file_url,
+        "generated_template_pdf_gcs_bucket": pdf_bucket,
+        "generated_template_pdf_gcs_path": pdf_path,
+        "generated_template_txt_gcs_uri": generated_txt_url,
+        "generated_template_txt_gcs_bucket": txt_bucket,
+        "generated_template_txt_gcs_path": txt_path,
+    }
+    db.add(UserTemplateField(template_id=tid, template_fields=initial_fields, is_active=True))
 
     await db.commit()
+    signed_file_url = doc_ai.generate_signed_url(new_template.file_url) if new_template.file_url else None
+    enqueue_template_analysis(background_tasks, tid, normalized_template_text, signed_file_url)
     logger.info(f"[Save] Saved template {tid} for user {user_id_int} ({name})")
     return SaveGeneratedResponse(success=True, templateId=str(tid), message=f'Template "{name}" saved to your library.')

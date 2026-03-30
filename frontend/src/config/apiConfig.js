@@ -9,7 +9,7 @@
 const GATEWAY_URL =
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  'https://gateway-service-120280829617.asia-south1.run.app';
+  'http://localhost:5000';
 
 function ensureLocalhostPort(url, fallbackPort) {
   try {
@@ -68,12 +68,16 @@ export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
   'https://all-drafting-agent-120280829617.asia-south1.run.app';
 
+export const CHAT_DRAFT_BACKEND_URL =
+  import.meta.env.VITE_APP_CHAT_DRAFT_BACKEND_URL ||
+  'https://chat-draft-backend-120280829617.asia-south1.run.app';
+
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE =
   ensureLocalhostPort(
     import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-      'https://drafting-agents-120280829617.asia-south1.run.app',
-    8002
+      'https://template-analyzer-agent-120280829617.asia-south1.run.app',
+    5017
   );
 
 /**
@@ -118,6 +122,7 @@ const apiConfig = {
   GATEWAY_BASE_URL,
   CHAT_MODEL_BASE_URL,
   AGENT_DRAFT_TEMPLATE_API,
+  CHAT_DRAFT_BACKEND_URL,
   TEMPLATE_ANALYZER_API_BASE,
   getUserIdForDrafting,
   DOCUMENT_SERVICE_URL,
@@ -138,8 +143,6 @@ const apiConfig = {
 };
 
 export default apiConfig;
-
-
 
 
 

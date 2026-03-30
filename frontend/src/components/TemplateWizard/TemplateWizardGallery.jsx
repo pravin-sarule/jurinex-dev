@@ -10,6 +10,10 @@ import { createDraft } from '../../services/draftFormApi';
 import { customTemplateApi, CustomTemplateUploadModal } from '../../template_drafting_component';
 import './TemplateWizardGallery.css';
 
+// Module-level caches — persist across navigation until page refresh
+let _templatesCache = null;
+let _customTemplatesCache = null;
+
 /**
  * Template Gallery: horizontal cards (uniform size, name below, no category).
  * First card: "Custom Template" – opens upload modal to create a user template.
@@ -18,10 +22,10 @@ import './TemplateWizardGallery.css';
  */
 const TemplateWizardGallery = ({ onTemplateClick }) => {
   const navigate = useNavigate();
-  const [templates, setTemplates] = useState([]);
-  const [customTemplates, setCustomTemplates] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [customLoading, setCustomLoading] = useState(true);
+  const [templates, setTemplates] = useState(_templatesCache ?? []);
+  const [customTemplates, setCustomTemplates] = useState(_customTemplatesCache ?? []);
+  const [isLoading, setIsLoading] = useState(_templatesCache === null);
+  const [customLoading, setCustomLoading] = useState(_customTemplatesCache === null);
   const [error, setError] = useState(null);
   const [previewTemplate, setPreviewTemplate] = useState(null);
   const scrollContainerRef = useRef(null);
@@ -29,20 +33,29 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
   const [showLeftArrow, setShowLeftArrow] = useState(false);
   const [showRightArrow, setShowRightArrow] = useState(true);
 
-  const loadCustomTemplates = useCallback(async () => {
+  const loadCustomTemplates = useCallback(async (force = false) => {
+    if (!force && _customTemplatesCache !== null) {
+      setCustomTemplates(_customTemplatesCache);
+      setCustomLoading(false);
+      return;
+    }
     setCustomLoading(true);
     try {
       const list = await customTemplateApi.getUserTemplates(true);
-      setCustomTemplates(Array.isArray(list) ? list : []);
+      const result = Array.isArray(list) ? list : [];
+      _customTemplatesCache = result;
+      setCustomTemplates(result);
     } catch (err) {
       console.warn('Failed to load custom templates:', err);
-      setCustomTemplates([]);
+      setCustomTemplates(_customTemplatesCache ?? []);
     } finally {
       setCustomLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    // Skip fetch if cache is already populated
+    if (_templatesCache !== null) return;
     let cancelled = false;
     const load = async () => {
       setIsLoading(true);
@@ -57,14 +70,16 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
           finalized_only: true,
         });
         if (!cancelled && res?.success && Array.isArray(res.templates)) {
+          _templatesCache = res.templates;
           setTemplates(res.templates);
         } else if (!cancelled) {
+          _templatesCache = [];
           setTemplates([]);
         }
       } catch (err) {
         if (!cancelled) {
           setError(err.message || 'Failed to load templates');
-          setTemplates([]);
+          setTemplates(_templatesCache ?? []);
         }
       } finally {
         if (!cancelled) setIsLoading(false);
@@ -75,7 +90,7 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
   }, []);
 
   useEffect(() => {
-    loadCustomTemplates();
+    loadCustomTemplates(false);
   }, [loadCustomTemplates]);
 
   const checkScrollButtons = () => {
@@ -122,7 +137,8 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
 
   const handleCustomTemplateUploadSuccess = () => {
     toast.success('Custom template created. It will appear in the gallery.');
-    loadCustomTemplates();
+    _customTemplatesCache = null; // invalidate cache so fresh list is fetched
+    loadCustomTemplates(true);
   };
 
   /** Normalize custom template for TemplateWizardCard (expects preview_image_url / name / title) */

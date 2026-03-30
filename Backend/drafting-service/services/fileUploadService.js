@@ -3,6 +3,8 @@ const { Storage } = require('@google-cloud/storage');
 const { Readable } = require('stream');
 const Draft = require('../models/Draft');
 
+const normalizeMimeType = (value = '') => String(value || '').split(';')[0].trim().toLowerCase();
+
 /**
  * File Upload Service
  * Handles initial upload flow: Local -> GCS -> Google Drive -> Database
@@ -86,6 +88,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
   let gcsPath = null; // Declare outside try block for cleanup
 
   try {
+    const normalizedMimeType = normalizeMimeType(mimetype);
     // Ensure clients are initialized
     const { storage: storageClient, driveClient: drive } = initializeServiceAccount();
 
@@ -108,7 +111,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
 
     await gcsFile.save(fileBuffer, {
       metadata: {
-        contentType: mimetype,
+        contentType: normalizedMimeType || mimetype,
         metadata: {
           userId: userId.toString(),
           originalFilename: filename,
@@ -143,7 +146,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
     let drivePath = `/${baseName}`;
 
     // If file can be converted to Google Docs, use import feature
-    if (supportedFormats.includes(mimetype) || mimetype === 'application/vnd.google-apps.document') {
+    if (supportedFormats.includes(normalizedMimeType) || normalizedMimeType === 'application/vnd.google-apps.document') {
       console.log(`[FileUpload] Step 4: Converting file to Google Docs format`);
 
       try {
@@ -154,7 +157,7 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
             mimeType: 'application/vnd.google-apps.document' // Target format: Google Docs
           },
           media: {
-            mimeType: mimetype === 'application/vnd.google-apps.document' ? mimetype : mimetype, // Source format
+            mimeType: normalizedMimeType || mimetype, // Source format
             body: fileStream
           },
           fields: 'id, name, mimeType, webViewLink'
@@ -194,10 +197,10 @@ const handleInitialUpload = async (fileBuffer, userId, filename, mimetype, title
         const driveFile = await drive.files.create({
           requestBody: {
             name: baseName,
-            mimeType: mimetype
+            mimeType: normalizedMimeType || mimetype
           },
           media: {
-            mimeType: mimetype,
+            mimeType: normalizedMimeType || mimetype,
             body: fileStream
           },
           fields: 'id, name, mimeType, webViewLink'
@@ -697,6 +700,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
   let gcsPath = null; // Declare outside try block for cleanup
 
   try {
+    const normalizedMimeType = normalizeMimeType(mimetype);
     // Use Service Account ONLY for GCS operations
     const { storage: storageClient } = initializeServiceAccount();
 
@@ -722,7 +726,7 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
 
     await gcsFile.save(fileBuffer, {
       metadata: {
-        contentType: mimetype,
+        contentType: normalizedMimeType || mimetype,
         metadata: {
           userId: userId.toString(),
           originalFilename: filename,
@@ -757,23 +761,23 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
     let webViewLink;
 
     // Determine source MIME type for conversion
-    let sourceMimeType = mimetype;
-    if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    let sourceMimeType = normalizedMimeType || mimetype;
+    if (sourceMimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       sourceMimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    } else if (mimetype === 'application/pdf') {
+    } else if (sourceMimeType === 'application/pdf') {
       sourceMimeType = 'application/pdf';
-    } else if (mimetype === 'application/msword') {
+    } else if (sourceMimeType === 'application/msword') {
       sourceMimeType = 'application/msword';
-    } else if (mimetype === 'text/plain') {
+    } else if (sourceMimeType === 'text/plain') {
       sourceMimeType = 'text/plain';
-    } else if (mimetype === 'text/html') {
+    } else if (sourceMimeType === 'text/html') {
       sourceMimeType = 'text/html';
-    } else if (mimetype === 'application/rtf') {
+    } else if (sourceMimeType === 'application/rtf') {
       sourceMimeType = 'application/rtf';
     }
 
     // Upload and convert to Google Docs
-    if (supportedFormats.includes(mimetype)) {
+    if (supportedFormats.includes(sourceMimeType)) {
       try {
         const driveFile = await drive.files.create({
           requestBody: {
@@ -827,10 +831,10 @@ const uploadToUserDriveAsGoogleDoc = async (fileBuffer, userId, filename, mimety
       const driveFile = await drive.files.create({
         requestBody: {
           name: baseName,
-          mimeType: mimetype
+          mimeType: sourceMimeType
         },
         media: {
-          mimeType: mimetype,
+          mimeType: sourceMimeType,
           body: fileStream
         },
         fields: 'id, name, mimeType, webViewLink'

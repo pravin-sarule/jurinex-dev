@@ -822,6 +822,58 @@ def update_draft_field_data(
     return True
 
 
+def save_draft_ui_state(
+    draft_id: str,
+    user_id: int,
+    ui_state: Dict[str, Any],
+) -> bool:
+    """
+    Persist lightweight frontend workflow state in draft_field_data.metadata.ui_state
+    so reopening from "Recent documents" resumes the same step/mode.
+    """
+    import json
+
+    uid = int(user_id)
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 1 FROM user_drafts WHERE draft_id = %s AND user_id = %s",
+                (draft_id, uid),
+            )
+            if not cur.fetchone():
+                return False
+
+            cur.execute(
+                "SELECT metadata FROM draft_field_data WHERE draft_id = %s",
+                (draft_id,),
+            )
+            row = cur.fetchone()
+            meta = dict(row["metadata"]) if row and row.get("metadata") else {}
+
+            existing_state = meta.get("ui_state")
+            if not isinstance(existing_state, dict):
+                existing_state = {}
+
+            merged_state = {**existing_state, **(ui_state or {})}
+            meta["ui_state"] = merged_state
+
+            cur.execute(
+                """
+                INSERT INTO draft_field_data (draft_id, field_values, filled_fields, metadata, updated_at)
+                VALUES (%s, '{}'::jsonb, '[]'::jsonb, %s::jsonb, now())
+                ON CONFLICT (draft_id) DO UPDATE SET
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                """,
+                (draft_id, json.dumps(meta)),
+            )
+            cur.execute(
+                "UPDATE user_drafts SET updated_at = now() WHERE draft_id = %s",
+                (draft_id,),
+            )
+    return True
+
+
 def rename_draft(draft_id: str, user_id: int, new_title: str) -> bool:
     """
     Rename a draft. Updates the draft_title in user_drafts table.

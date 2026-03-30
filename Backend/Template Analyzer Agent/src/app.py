@@ -7,7 +7,7 @@ from .routers import analysis
 from .routers import generate as generate_router
 from .database import engine, Base
 # Import all models to register them with Base.metadata
-from .models.db_models import UserTemplate, UserTemplateField, UserTemplateAnalysisSection
+from .models.db_models import UserTemplate, UserTemplateField, UserTemplateAnalysisSection, UserTemplateReferenceDocument
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

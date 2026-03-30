@@ -38,28 +38,17 @@ export const TemplatePreviewPage: React.FC = () => {
 
     const handleStartDraft = async () => {
         if (!templateId || isCreatingDraft) return;
-
         setIsCreatingDraft(true);
-
         try {
             Logger.info('CREATE_DRAFT_START', { templateId });
-
             const response = await draftApi.create({
                 templateId,
                 title: `Draft - ${selectedTemplate?.name || 'New Document'}`
             });
-
-            Logger.info('CREATE_DRAFT_SUCCESS', {
-                templateId,
-                draftId: response.draft.id
-            });
-
+            Logger.info('CREATE_DRAFT_SUCCESS', { templateId, draftId: response.draft.id });
             navigate(`/template-drafting/edit/${response.draft.id}`);
         } catch (error) {
-            Logger.error('CREATE_DRAFT_FAILED', {
-                templateId,
-                error: (error as Error).message
-            });
+            Logger.error('CREATE_DRAFT_FAILED', { templateId, error: (error as Error).message });
             alert('Failed to create draft. Please try again.');
             setIsCreatingDraft(false);
         }

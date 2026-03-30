@@ -1754,9 +1754,9 @@ const saveAssembledDraft = async (req, res) => {
       google_import_mime
     } = req.body;
     const file = req.file;
-
-    if (!file) {
-      return res.status(400).json({ success: false, error: 'No DOCX file provided' });
+    const hasGoogleImportHtml = typeof google_import_html === 'string' && google_import_html.trim() !== '';
+    if (!file && !hasGoogleImportHtml) {
+      return res.status(400).json({ success: false, error: 'No document content provided (file or google_import_html required)' });
     }
     if (!userId) {
       return res.status(401).json({ success: false, error: 'User ID is required' });
@@ -1777,12 +1777,12 @@ const saveAssembledDraft = async (req, res) => {
 
     const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
     const htmlMime = 'text/html';
-    const hasGoogleImportHtml = typeof google_import_html === 'string' && google_import_html.trim() !== '';
     const driveUploadBuffer = hasGoogleImportHtml ? Buffer.from(google_import_html, 'utf8') : file.buffer;
-    const driveUploadMime = hasGoogleImportHtml ? (google_import_mime || htmlMime) : docxMime;
+    const driveUploadMimeRaw = hasGoogleImportHtml ? (google_import_mime || htmlMime) : (file?.mimetype || docxMime);
+    const driveUploadMime = String(driveUploadMimeRaw || docxMime).split(';')[0].trim().toLowerCase();
     const driveUploadFilename = hasGoogleImportHtml
       ? (google_import_filename || `${title || 'Assembled_Draft'}.html`)
-      : `${title || 'Assembled_Draft'}.docx`;
+      : (file?.originalname || `${title || 'Assembled_Draft'}.docx`);
     console.log(`[Draft] Drive import source: ${hasGoogleImportHtml ? 'HTML' : 'DOCX'} (${driveUploadMime})`);
 
     if (existing_google_file_id && String(existing_google_file_id).trim() !== '') {
@@ -1859,10 +1859,10 @@ const saveAssembledDraft = async (req, res) => {
           agentDraftId,
           nextVersion,
           true,
-          file.size,
-          `${title || 'Assembled_Draft'}.docx`,
+          driveUploadBuffer.length,
+          driveUploadFilename,
           result.draft.gcs_path || '',
-          'docx'
+          driveUploadMime.includes('html') ? 'html' : 'docx'
         ];
         await pool.query(genDocQuery, genDocValues);
         console.log(`[Draft] ✅ Saved to generated_documents. Version: ${nextVersion}`);

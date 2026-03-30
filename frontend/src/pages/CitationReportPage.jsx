@@ -1023,6 +1023,88 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
 
 
 /* ─── Build a plain-SVG citation network string for print HTML ─── */
+async function renderHtmlToPdfBlob(html, options = {}) {
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = [
+    'position:fixed',
+    'left:-10000px',
+    'top:0',
+    'width:210mm',
+    'min-height:297mm',
+    'border:none',
+    'opacity:0.01',
+    'pointer-events:none',
+    'background:#fff',
+    'z-index:-1',
+  ].join(';');
+  document.body.appendChild(iframe);
+
+  try {
+    const frameDoc = iframe.contentDocument;
+    if (!frameDoc) throw new Error('Unable to initialize PDF render frame.');
+
+    frameDoc.open();
+    frameDoc.write(html);
+    frameDoc.close();
+
+    await new Promise((resolve) => {
+      if (iframe.contentWindow?.document?.readyState === 'complete') {
+        resolve();
+        return;
+      }
+      iframe.onload = () => resolve();
+      setTimeout(resolve, 800);
+    });
+
+    if (frameDoc.fonts?.ready) {
+      try { await frameDoc.fonts.ready; } catch { /* no-op */ }
+    }
+
+    const images = Array.from(frameDoc.images || []);
+    await Promise.all(images.map((img) => (
+      img.complete
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+          })
+    )));
+
+    const sourceNode = frameDoc.body;
+    if (!sourceNode || !sourceNode.childNodes.length) {
+      throw new Error('Generated PDF content is empty.');
+    }
+
+    return await html2pdf()
+      .set({
+        margin: options.margin ?? 10,
+        filename: options.filename || '',
+        enableLinks: options.enableLinks ?? false,
+        pagebreak: { mode: ['css', 'legacy'] },
+        html2canvas: {
+          scale: options.scale ?? 2,
+          useCORS: true,
+          logging: false,
+          backgroundColor: '#ffffff',
+          scrollX: 0,
+          scrollY: 0,
+          windowWidth: Math.max(sourceNode.scrollWidth, 1024),
+        },
+        jsPDF: {
+          unit: 'mm',
+          format: 'a4',
+          orientation: 'portrait',
+          compress: true,
+        },
+      })
+      .from(sourceNode)
+      .outputPdf('blob');
+  } finally {
+    iframe.remove();
+  }
+}
+
 function buildPrintNetworkSvg(c) {
   const cites     = (c.ikCiteList    || []).slice(0, 7);
   const citedBy   = (c.ikCitedByList || []).slice(0, 7);
@@ -1119,7 +1201,7 @@ function buildPrintNetworkSvg(c) {
 }
 
 /* ─── Generate print window with only this citation ─── */
-function downloadCitationPDF(c, query, generatedAt) {
+async function downloadCitationPDF(c, query, generatedAt) {
   const judges = (c.coram || '').split(/[,;]/).map(j => j.trim()).filter(Boolean);
   const exc = c.excerpt || {};
   const treat = c.treatment || {};
@@ -1155,7 +1237,7 @@ function downloadCitationPDF(c, query, generatedAt) {
 </div>`
     : '';
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+  let html = `<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>${c.caseName} — Jurinex Citation Report</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&family=Source+Sans+3:wght@400;600;700&display=swap');
@@ -1221,8 +1303,25 @@ ${graphSection}
   <div class="auth">● AUTHENTICATED RESEARCH DOCUMENT</div>
 </div>
 </body></html>`;
-  const win = window.open('', '_blank', 'width=950,height=760');
-  if (win) { win.document.write(html); win.document.close(); win.focus(); setTimeout(() => win.print(), 700); }
+  html = buildFullReportHtml({ citations: [c], generatedAt }, query);
+  const safeName = (c.caseName || 'citation')
+    .slice(0, 60)
+    .replace(/[^a-zA-Z0-9\s_-]/g, '')
+    .trim()
+    .replace(/\s+/g, '_') || 'citation';
+  const blob = await renderHtmlToPdfBlob(html, {
+    filename: `${safeName}.pdf`,
+    scale: 2,
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `citation_${safeName}_${Date.now()}.pdf`;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /* ─── Full citation report doc view ─── */
@@ -1389,31 +1488,10 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
       // Build PDF-ready HTML for this single citation (reuse existing builder)
       const singleHtml = buildFullReportHtml({ citations: [citation], generatedAt }, query);
 
-      // Render inside a hidden iframe so the full HTML document (including <head>/<style>)
-      // is parsed correctly. Injecting via innerHTML into a div strips html/head/body tags
-      // and loses the embedded <style> rules, producing a blank PDF.
-      const iframe = document.createElement('iframe');
-      iframe.style.cssText = 'position:absolute;left:-9999px;width:210mm;height:297mm;border:none;visibility:hidden';
-      document.body.appendChild(iframe);
-      iframe.contentDocument.open();
-      iframe.contentDocument.write(singleHtml);
-      iframe.contentDocument.close();
-
-      // Allow fonts and layout to settle before capture
-      await new Promise(resolve => setTimeout(resolve, 900));
-
-      const blob = await html2pdf()
-        .set({
-          margin: 10,
-          filename: '',
-          enableLinks: false,
-          html2canvas: { scale: 1.5, useCORS: true, logging: false },
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        })
-        .from(iframe.contentDocument.body)
-        .outputPdf('blob');
-
-      document.body.removeChild(iframe);
+      const blob = await renderHtmlToPdfBlob(singleHtml, {
+        margin: 10,
+        scale: 2,
+      });
 
       const safeName = (citation.caseName || 'citation').slice(0, 40).replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '_');
       const pdfName = `citation_${safeName}_${Date.now()}.pdf`;

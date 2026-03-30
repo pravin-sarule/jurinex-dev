@@ -20,10 +20,15 @@ BODY_SECTIONS_HINT = {
 
 class HybridFieldExtractor:
     def __init__(self) -> None:
-        self._curly_pattern = re.compile(r"\{\{([a-zA-Z][a-zA-Z0-9_]*)\}\}")
+        self._double_curly_pattern = re.compile(r"\{\{\s*([^{}\n]{1,80})\s*\}\}")
+        self._double_underscore_pattern = re.compile(r"__\s*([^_\n]{1,80}?)\s*__")
+        self._single_curly_pattern = re.compile(r"\{\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\}")
+        self._square_pattern = re.compile(r"\[\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\]")
+        self._round_pattern = re.compile(r"\(\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\)")
         self._underscore_pattern = re.compile(r"([A-Z][A-Z\s]{2,})_{3,}([A-Z][A-Z\s]{2,})")
         self._dots_pattern = re.compile(r"\.{3,}\s*([A-Za-z][A-Za-z\s]+)")
         self._blank_pattern = re.compile(r"([A-Z][A-Za-z\s]+?)\s+_{3,}\s+([A-Z][A-Za-z\s]+)")
+        self._dash_blank_pattern = re.compile(r"([A-Za-z][A-Za-z\s]{1,60})\s*[:\-]?\s*[-_]{3,}")
         self._date_label_pattern = re.compile(r"(FILED ON|DATED|DATE)\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
         self._section_heading_pattern = re.compile(r"^(\d+)\.\s+([A-Za-z][A-Za-z\s]+)$", re.MULTILINE)
 
@@ -41,12 +46,29 @@ class HybridFieldExtractor:
         fields: List[Dict[str, Any]] = []
         seen_keys = set()
 
-        for match in self._curly_pattern.finditer(template_text):
-            key = self._normalize_key(match.group(1))
-            if key in seen_keys:
-                continue
+        def _add_field(raw_key: str, method: str, confidence: float) -> None:
+            key = self._normalize_key(raw_key)
+            if not key or key in seen_keys:
+                return
             seen_keys.add(key)
-            fields.append(self._make_field(key, self._infer_type_from_key(key), self._humanize_label(key), ["curly_placeholder"], 0.98))
+            fields.append(self._make_field(key, self._infer_type_from_key(key), self._humanize_label(key), [method], confidence))
+
+        for match in self._double_curly_pattern.finditer(template_text):
+            _add_field(match.group(1), "double_curly_placeholder", 0.98)
+
+        for match in self._double_underscore_pattern.finditer(template_text):
+            _add_field(match.group(1), "double_underscore_placeholder", 0.96)
+
+        for pattern, method, confidence in [
+            (self._single_curly_pattern, "single_curly_placeholder", 0.9),
+            (self._square_pattern, "square_placeholder", 0.88),
+            (self._round_pattern, "round_placeholder", 0.84),
+        ]:
+            for match in pattern.finditer(template_text):
+                raw = match.group(1)
+                if not self._looks_like_placeholder(raw):
+                    continue
+                _add_field(raw, method, confidence)
 
         for pattern in self._underscore_pattern.finditer(template_text):
             left = self._normalize_key(pattern.group(1))
@@ -73,6 +95,13 @@ class HybridFieldExtractor:
                 continue
             seen_keys.add(key)
             fields.append(self._make_field(key, self._infer_type_from_key(key), self._humanize_label(key), ["labeled_blank"], 0.82))
+
+        for pattern in self._dash_blank_pattern.finditer(template_text):
+            key = self._normalize_key(pattern.group(1))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            fields.append(self._make_field(key, self._infer_type_from_key(key), self._humanize_label(key), ["dash_blank"], 0.79))
 
         if self._date_label_pattern.search(template_text) and "date" not in seen_keys:
             seen_keys.add("date")
@@ -191,6 +220,21 @@ class HybridFieldExtractor:
 
     def _humanize_label(self, key: str) -> str:
         return key.replace("_", " ").strip().title()
+
+    def _looks_like_placeholder(self, raw_value: str) -> bool:
+        token = str(raw_value or "").strip()
+        if not token:
+            return False
+        if len(token) > 60:
+            return False
+        if "_" in token or "-" in token:
+            return True
+        words = token.split()
+        if len(words) <= 4 and token.upper() == token:
+            return True
+        hints = ("name", "date", "address", "amount", "number", "no", "signature", "details", "email", "phone", "id")
+        lowered = token.lower()
+        return any(h in lowered for h in hints)
 
     def _infer_type_from_key(self, key: str) -> str:
         if any(token in key for token in ("date", "filed_on", "filing_date")):

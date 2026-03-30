@@ -1,5 +1,39 @@
 /* Enhanced Draft Selection Page Styles */
 
+/* Recent Documents Grid — 5 equal columns, full width, no empty space */
+.recent-draft-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1.25rem;
+}
+
+/* Recent draft card — fills column width, fixed portrait height */
+.recent-draft-grid .template-wizard-card {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  height: 260px;
+  min-height: 260px;
+}
+
+@media (max-width: 1024px) {
+  .recent-draft-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .recent-draft-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .recent-draft-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 /* Smooth transitions for all interactive elements */
 .draft-selection-enhanced * {
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);

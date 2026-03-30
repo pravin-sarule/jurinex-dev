@@ -150,12 +150,24 @@ export const templateBuilderApi = {
   getStructureQuestions: async (
     description: string,
     jurisdiction?: string,
+    referenceDocuments?: File[],
   ): Promise<GetStructureQuestionsResponse> => {
     try {
-      const res = await client.post<GetStructureQuestionsResponse>('/get-structure-questions', {
-        description,
-        jurisdiction: jurisdiction || 'India',
-      });
+      let res;
+      if (referenceDocuments && referenceDocuments.length > 0) {
+        const form = new FormData();
+        form.append('description', description);
+        form.append('jurisdiction', jurisdiction || 'India');
+        referenceDocuments.forEach((file) => form.append('reference_documents', file));
+        // Backward compatibility for older analyzer instances that still expect singular key.
+        form.append('reference_document', referenceDocuments[0]);
+        res = await client.post<GetStructureQuestionsResponse>('/get-structure-questions-with-document', form);
+      } else {
+        res = await client.post<GetStructureQuestionsResponse>('/get-structure-questions', {
+          description,
+          jurisdiction: jurisdiction || 'India',
+        });
+      }
       return res.data;
     } catch (error) {
       throw new Error(extractError(error));
@@ -343,20 +355,41 @@ export const templateBuilderApi = {
 
     const token = getAuthToken();
     const userId = getUserId();
-    const response = await fetch(`${normalizeBase(TEMPLATE_ANALYZER_API_BASE)}/generate-template-stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(userId ? { 'X-User-Id': userId } : {}),
-      },
-      body: JSON.stringify({
+    const headers: HeadersInit = {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(userId ? { 'X-User-Id': userId } : {}),
+    };
+    const hasReferenceDocument = requirements.referenceDocuments.length > 0;
+    let body: BodyInit;
+    let endpoint = '/generate-template-stream';
+
+    if (hasReferenceDocument) {
+      endpoint = '/generate-template-stream-with-document';
+      const form = new FormData();
+      form.append('document_type', requirements.subjectLabel || requirements.subject || 'Legal Template');
+      form.append('answers', JSON.stringify(answers));
+      form.append('questions', JSON.stringify(questions));
+      form.append('jurisdiction', requirements.jurisdiction || 'India');
+      form.append('language', requirements.language || 'English');
+      requirements.referenceDocuments.forEach((file) => form.append('reference_documents', file));
+      // Backward compatibility for older analyzer instances that still expect singular key.
+      form.append('reference_document', requirements.referenceDocuments[0]);
+      body = form;
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify({
         document_type: requirements.subjectLabel || requirements.subject || 'Legal Template',
         answers,
         questions,
         jurisdiction: requirements.jurisdiction || 'India',
         language: requirements.language || 'English',
-      }),
+      });
+    }
+
+    const response = await fetch(`${normalizeBase(TEMPLATE_ANALYZER_API_BASE)}${endpoint}`, {
+      method: 'POST',
+      headers,
+      body,
     });
 
     if (!response.ok || !response.body) {

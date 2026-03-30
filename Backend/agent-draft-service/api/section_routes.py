@@ -1274,21 +1274,28 @@ def _fetch_sections_from_template_analyzer(
     Calls GET /analysis/template/{template_id}/sections (requires X-User-Id).
     Returns list in same shape as draft_db.get_template_sections: section_id, section_key, section_name, default_prompt, sort_order, ...
     """
-    base_url = (os.environ.get("TEMPLATE_ANALYZER_URL") or "").rstrip("/")
-    if not base_url or user_id is None:
+    configured = (os.environ.get("TEMPLATE_ANALYZER_URL") or "").rstrip("/")
+    base_urls = []
+    for candidate in [configured, "http://localhost:5017", "http://localhost:8002"]:
+        if candidate and candidate not in base_urls:
+            base_urls.append(candidate)
+    if not base_urls or user_id is None:
         return []
-    # Template Analyzer endpoint: GET /analysis/template/{template_id}/sections
-    url = f"{base_url}/analysis/template/{template_id}/sections"
     headers = {"X-User-Id": str(user_id)}
-    try:
-        import json as _json
-        import urllib.request
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = resp.read().decode()
-        payload = _json.loads(data)
-    except Exception as e:
-        logger.warning("Template Analyzer API failed for %s: %s", template_id, e)
+    payload = None
+    for base_url in base_urls:
+        url = f"{base_url}/analysis/template/{template_id}/sections"
+        try:
+            import json as _json
+            import urllib.request
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read().decode()
+            payload = _json.loads(data)
+            break
+        except Exception as e:
+            logger.warning("Template Analyzer API failed for %s via %s: %s", template_id, base_url, e)
+    if payload is None:
         return []
     sections_raw = payload.get("sections") if isinstance(payload, dict) else []
     if not sections_raw:
@@ -1346,10 +1353,8 @@ async def get_template_sections_endpoint(
                 pass
 
         is_user_template = _is_uuid(template_id)
-        base_url = (os.environ.get("TEMPLATE_ANALYZER_URL") or "").rstrip("/")
-
         # User-uploaded (UUID) template: prefer Template Analyzer API when configured and we have user
-        if is_user_template and base_url and analyzer_user_id is not None:
+        if is_user_template and analyzer_user_id is not None:
             sections = _fetch_sections_from_template_analyzer(template_id, analyzer_user_id)
             if sections:
                 logger.info("Template sections from Template Analyzer API: %s (%d sections)", template_id, len(sections))
@@ -1357,7 +1362,7 @@ async def get_template_sections_endpoint(
 
         # Admin template or shared DB: get from draft DB (template_analysis_sections, user_template_analysis_sections)
         sections = draft_db.get_template_sections(template_id)
-        if not sections and is_user_template and base_url and analyzer_user_id is not None:
+        if not sections and is_user_template and analyzer_user_id is not None:
             sections = _fetch_sections_from_template_analyzer(template_id, analyzer_user_id)
             if sections:
                 logger.info("Template sections from Template Analyzer fallback: %s", template_id)

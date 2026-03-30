@@ -125,6 +125,43 @@ export const customTemplateApi = {
         }
     },
 
+    getTemplateStatus: async (templateId: string): Promise<{ template_id: string; status: string; sections_ready: number }> => {
+        try {
+            const response = await analyzerClient.get(`/template/${templateId}/status`);
+            return response.data;
+        } catch (error) {
+            Logger.error('CUSTOM_TEMPLATE_STATUS_ERROR', { error, templateId });
+            throw new Error(getMessageFromError(error));
+        }
+    },
+
+    waitForTemplateReady: async (
+        templateId: string,
+        intervalMs = 8000,
+        maxAttempts = 45
+    ): Promise<{ template_id: string; status: string; sections_ready: number }> => {
+        let latest = await customTemplateApi.getTemplateStatus(templateId);
+        let attempt = 1;
+        while (attempt < maxAttempts && latest.status === 'processing') {
+            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+            latest = await customTemplateApi.getTemplateStatus(templateId);
+            attempt += 1;
+        }
+        return latest;
+    },
+
+    uploadReferenceDocuments: async (templateId: string, files: File[]): Promise<void> => {
+        if (!files.length) return;
+        const formData = new FormData();
+        files.forEach((file) => formData.append('reference_documents', file));
+        try {
+            await analyzerClient.post(`/template/${templateId}/reference-documents`, formData);
+        } catch (error) {
+            Logger.error('CUSTOM_TEMPLATE_REFERENCE_DOCUMENT_UPLOAD_ERROR', { error, templateId, fileCount: files.length });
+            throw new Error(getMessageFromError(error));
+        }
+    },
+
     /**
      * GET /templates → array of user templates (Template Analyzer GET /analysis/templates).
      * Gateway: GET /api/template-analysis/templates. Requires Authorization so Gateway can send x-user-id.

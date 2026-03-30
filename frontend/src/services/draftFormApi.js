@@ -247,6 +247,23 @@ export const updateDraftFields = async (draftId, fieldValues, filledFields = nul
 };
 
 /**
+ * Persist lightweight UI state (current step/method/chat mode) for resume.
+ */
+export const saveDraftUiState = async (draftId, uiState = {}) => {
+  logApi('POST', `${BASE}/drafts/${draftId}/ui-state`, 'saveDraftUiState');
+  const res = await fetch(`${BASE}/drafts/${draftId}/ui-state`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ ui_state: uiState }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
+
+/**
  * Rename a draft. Updates the draft title. Requires JWT (owner only).
  */
 export const renameDraft = async (draftId, newTitle) => {

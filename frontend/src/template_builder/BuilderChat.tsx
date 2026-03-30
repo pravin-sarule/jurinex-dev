@@ -1,9 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { useNavigate } from 'react-router-dom';
 import { useTemplateBuilderStore } from './templateBuilderStore';
 import { templateBuilderApi } from './api';
 
 const BRAND = '#21C1B6';
 const BRAND_DARK = '#1AA49B';
+const REFERENCE_DOCUMENT_ACCEPT = '.pdf,.docx,.txt';
+
+function preservePlaceholderTokens(markdown: string): string {
+  // Keep placeholders literal in markdown without rendering them as bold/code.
+  return markdown.replace(/__([a-zA-Z][a-zA-Z0-9_]*)__/g, '\\_\\_$1\\_\\_');
+}
 
 type CategoryKey = 'Property' | 'Agreement' | 'Court' | 'Criminal' | 'Arbitration' | 'Trust' | 'Family' | 'Employment' | 'General';
 
@@ -264,10 +273,14 @@ const OptionGrid: React.FC<{
   );
 };
 
+
 const DocumentSelector: React.FC = () => {
   const { updateRequirements, setCurrentStep, setDynamicMode, clearDynamicState } = useTemplateBuilderStore();
+  const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [customDescription, setCustomDescription] = useState('');
+  const [referenceMode, setReferenceMode] = useState<'without-document' | 'with-document'>('without-document');
+  const [referenceDocuments, setReferenceDocuments] = useState<File[]>([]);
 
   const filteredGroups = useMemo(() => {
     if (!search.trim()) return SUBJECT_GROUPS;
@@ -284,6 +297,9 @@ const DocumentSelector: React.FC = () => {
       subjectLabel: doc,
       category,
       customDescription: '',
+      referenceMode: 'without-document',
+      referenceDocuments: [],
+      referenceDocumentNames: [],
     });
     setCurrentStep(2);
   };
@@ -299,70 +315,181 @@ const DocumentSelector: React.FC = () => {
       subjectLabel: value,
       category,
       customDescription: value,
+      referenceMode,
+      referenceDocuments: referenceMode === 'with-document' ? referenceDocuments : [],
+      referenceDocumentNames: referenceMode === 'with-document' ? referenceDocuments.map((file) => file.name) : [],
     });
     // Step 3 (jurisdiction) runs first so AI knows the jurisdiction when generating questions
     setCurrentStep(3);
   };
 
   return (
-    <div className="min-h-[calc(100vh-72px)] px-6 py-6 flex items-center justify-center">
-      <SectionCard title="What kind of template do you need?">
-        <div className="space-y-5">
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search template types like NDA, sale deed, bail application..."
-            className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2"
-            style={{ ['--tw-ring-color' as string]: BRAND }}
-          />
+    <div className="min-h-[calc(100vh-72px)] flex flex-col bg-gray-50">
+      {/* Back button */}
+      <div className="px-8 pt-5 pb-3">
+        <button
+          type="button"
+          onClick={() => navigate(-1)}
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500 hover:text-gray-800 transition-colors group"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+      </div>
 
-          <div className="space-y-4">
-            {filteredGroups.map((group) => (
-              <div key={group.label} className="border border-gray-100 rounded-2xl p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-gray-800">{group.label}</h3>
-                  <span className="text-xs text-gray-400">{group.docs.length} options</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {group.docs.map((doc) => (
-                    <button
-                      key={doc}
-                      type="button"
-                      onClick={() => handleSelect(doc, group.category)}
-                      className="px-3 py-2 text-sm rounded-xl border border-gray-200 bg-gray-50 text-gray-700 hover:border-teal-400 hover:bg-teal-50 hover:text-teal-700 transition-all"
-                    >
-                      {doc}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
+      {/* Full-width card */}
+      <div className="flex-1 flex flex-col px-8 pb-8">
+        <div className="w-full flex-1 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden flex flex-col">
+
+          {/* Header */}
+          <div style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }} className="px-6 py-4 text-white flex-shrink-0">
+            <p className="text-base font-semibold">What kind of template do you need?</p>
+            <p className="text-xs text-white/75 mt-0.5">Select a document type or describe your requirement below</p>
           </div>
 
-          <div className="border-t border-gray-100 pt-4">
-            <p className="text-sm font-semibold text-gray-800 mb-2">Can&apos;t find what you need?</p>
-            <div className="flex flex-col gap-3">
-              <textarea
-                value={customDescription}
-                onChange={(e) => setCustomDescription(e.target.value)}
-                placeholder='Example: "Commercial rent for mall shop with revenue sharing clause"'
-                rows={3}
-                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 resize-none"
+          <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+
+            {/* Search */}
+            <div className="relative">
+              <svg xmlns="http://www.w3.org/2000/svg" className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+              </svg>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search template types like NDA, sale deed, bail application..."
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 text-sm bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 transition-colors"
                 style={{ ['--tw-ring-color' as string]: BRAND }}
               />
-              <button
-                type="button"
-                onClick={handleCustomSubmit}
-                disabled={!customDescription.trim()}
-                className="self-start px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-50"
-                style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }}
-              >
-                Continue
-              </button>
             </div>
+
+            {/* Category grid — 2 columns */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              {filteredGroups.map((group) => (
+                <div key={group.label} className="rounded-xl border border-gray-200 overflow-hidden bg-white hover:border-gray-300 transition-colors">
+                  {/* Category header */}
+                  <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: BRAND }} />
+                      <span className="text-xs font-semibold text-gray-700">{group.label}</span>
+                    </div>
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: BRAND }}>
+                      {group.docs.length}
+                    </span>
+                  </div>
+                  {/* Doc type chips */}
+                  <div className="px-4 py-3 flex flex-wrap gap-2">
+                    {group.docs.map((doc) => (
+                      <button
+                        key={doc}
+                        type="button"
+                        onClick={() => handleSelect(doc, group.category)}
+                        className="px-3 py-1 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-600 transition-all hover:text-white hover:border-transparent hover:shadow-sm"
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = BRAND; }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = ''; }}
+                      >
+                        {doc}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Custom description */}
+            <div className="border-t border-gray-100 pt-5">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="h-px flex-1 bg-gray-100" />
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Can&apos;t find what you need?</span>
+                <div className="h-px flex-1 bg-gray-100" />
+              </div>
+
+              <div className="flex flex-col gap-4">
+                <textarea
+                  value={customDescription}
+                  onChange={(e) => setCustomDescription(e.target.value)}
+                  placeholder='Describe your document — e.g. "Commercial rent for mall shop with revenue sharing clause"'
+                  rows={3}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 resize-none transition-colors"
+                  style={{ ['--tw-ring-color' as string]: BRAND }}
+                />
+
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-800">Build from description only or use a related document?</p>
+                    <p className="text-xs text-gray-500 mt-1">With document mode keeps the generated template closer to the structure of your uploaded file.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { value: 'without-document' as const, label: 'Without document' },
+                      { value: 'with-document' as const, label: 'With document' },
+                    ].map((option) => {
+                      const selected = referenceMode === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => {
+                            setReferenceMode(option.value);
+                            if (option.value === 'without-document') setReferenceDocuments([]);
+                          }}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-semibold border transition-all ${selected ? 'text-white border-transparent shadow-sm' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}
+                          style={selected ? { backgroundColor: BRAND } : undefined}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {referenceMode === 'with-document' && (
+                    <div className="space-y-2 pt-1">
+                      <label className="block text-xs font-semibold text-gray-700" htmlFor="custom-reference-document">
+                        Upload related document
+                      </label>
+                      <input
+                        id="custom-reference-document"
+                        type="file"
+                        multiple
+                        accept={REFERENCE_DOCUMENT_ACCEPT}
+                        onChange={(e) => setReferenceDocuments(Array.from(e.target.files || []))}
+                        className="block w-full text-xs text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-teal-500 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-white hover:file:opacity-90"
+                      />
+                      <p className="text-xs text-gray-400">Supported formats: PDF, DOCX, TXT</p>
+                      {referenceDocuments.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {referenceDocuments.map((file) => (
+                            <span key={`${file.name}-${file.size}`} className="rounded-full px-3 py-0.5 text-xs font-medium text-white border" style={{ backgroundColor: BRAND + '22', color: BRAND, borderColor: BRAND + '44' }}>
+                              {file.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-amber-600 font-medium">Upload one or more related documents to continue.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleCustomSubmit}
+                    disabled={!customDescription.trim() || (referenceMode === 'with-document' && referenceDocuments.length === 0)}
+                    className="px-6 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-opacity shadow-sm"
+                    style={{ background: `linear-gradient(135deg, ${BRAND} 0%, ${BRAND_DARK} 100%)` }}
+                  >
+                    Continue →
+                  </button>
+                </div>
+              </div>
+            </div>
+
           </div>
         </div>
-      </SectionCard>
+      </div>
     </div>
   );
 };
@@ -447,7 +574,7 @@ const DynamicQuestionnaire: React.FC = () => {
     fetchedRef.current = true;
     setDynamicQuestionsLoading(true);
     templateBuilderApi
-      .getStructureQuestions(requirements.customDescription, requirements.jurisdiction)
+      .getStructureQuestions(requirements.customDescription, requirements.jurisdiction, requirements.referenceDocuments)
       .then((res) => setDynamicQuestions(res.questions))
       .catch((err) => setDynamicQuestionsError(err instanceof Error ? err.message : 'Failed to generate questions'));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -456,7 +583,7 @@ const DynamicQuestionnaire: React.FC = () => {
     fetchedRef.current = false;
     setDynamicQuestionsLoading(true);
     templateBuilderApi
-      .getStructureQuestions(requirements.customDescription, requirements.jurisdiction)
+      .getStructureQuestions(requirements.customDescription, requirements.jurisdiction, requirements.referenceDocuments)
       .then((res) => {
         setCurrentIndex(0);
         setDynamicQuestions(res.questions);
@@ -475,6 +602,9 @@ const DynamicQuestionnaire: React.FC = () => {
               ))}
             </div>
             <p className="text-sm text-gray-500">Generating structure questions tailored to your document...</p>
+            {requirements.referenceDocumentNames.length > 0 ? (
+              <p className="text-xs text-gray-400">Using reference documents: {requirements.referenceDocumentNames.join(', ')}</p>
+            ) : null}
           </div>
         </SectionCard>
       </div>
@@ -883,6 +1013,8 @@ const Step6Review: React.FC = () => {
   const summaryRows: [string, string][] = dynamicMode
     ? ([
         ['Template Description', requirements.subjectLabel],
+        ['Generation Mode', requirements.referenceMode === 'with-document' ? 'With document' : 'Without document'],
+        ['Reference Documents', requirements.referenceDocumentNames.join(', ')],
         ['Jurisdiction', requirements.jurisdiction],
         ['Language', requirements.language],
         ['Template Length', requirements.detailLevel],
@@ -1003,6 +1135,23 @@ const Step6Review: React.FC = () => {
 
 const GeneratingState: React.FC = () => {
   const { generationStreamText, requirements } = useTemplateBuilderStore();
+  const renderedStreamText = useMemo(
+    () => preservePlaceholderTokens(generationStreamText || 'Waiting for draft output...'),
+    [generationStreamText],
+  );
+  const streamingMarkdownComponents: any = {
+    h1: ({ children }: any) => <h1 style={{ textAlign: 'center', textTransform: 'uppercase', fontSize: '1.25em', fontWeight: 700, margin: '0 0 0.9em', letterSpacing: '.05em', lineHeight: 1.4 }}>{children}</h1>,
+    h2: ({ children }: any) => <h2 style={{ fontSize: '1.05em', fontWeight: 700, margin: '1.3em 0 .45em', textTransform: 'uppercase', letterSpacing: '.03em' }}>{children}</h2>,
+    h3: ({ children }: any) => <h3 style={{ fontSize: '.98em', fontWeight: 700, margin: '1em 0 .35em' }}>{children}</h3>,
+    p: ({ children }: any) => {
+      const text = Array.isArray(children) ? children.map((c) => (typeof c === 'string' ? c : '')).join('') : (typeof children === 'string' ? children : '');
+      const hasPlaceholder = /__[\w]+__/.test(text);
+      return <p style={{ margin: '.55em 0', lineHeight: 1.85, textAlign: hasPlaceholder ? 'left' : 'justify' }}>{children}</p>;
+    },
+    table: ({ children }: any) => <table style={{ width: '100%', borderCollapse: 'collapse', margin: '1em 0', fontSize: '.92em' }}>{children}</table>,
+    th: ({ children }: any) => <th style={{ background: '#f9fafb', fontWeight: 700, padding: '.5em .7em', border: '1px solid #e5e7eb', textAlign: 'left' }}>{children}</th>,
+    td: ({ children }: any) => <td style={{ padding: '.45em .7em', border: '1px solid #e5e7eb', verticalAlign: 'top' }}>{children}</td>,
+  };
   return (
     <div className="px-6 py-10 max-w-5xl">
       <SectionCard title="Generating your custom template...">
@@ -1018,16 +1167,22 @@ const GeneratingState: React.FC = () => {
               ))}
             </div>
             <p className="text-sm text-gray-600">
-              Live drafting in progress for <span className="font-semibold text-gray-800">{requirements.subjectLabel || 'your template'}</span>.
+              Template generation in progress for <span className="font-semibold text-gray-800">{requirements.subjectLabel || 'your template'}</span>.
             </p>
           </div>
-          <div className="rounded-2xl border border-gray-200 bg-[#fcfcfb] p-5">
-            <div className="max-h-[65vh] overflow-y-auto whitespace-pre-wrap font-serif text-[15px] leading-7 text-gray-800">
-              {generationStreamText || 'Waiting for draft output...'}
+          <div className="rounded-2xl border border-gray-200 bg-[#f5f5f5] p-5">
+            <div className="max-h-[65vh] overflow-y-auto rounded-xl border border-gray-200 bg-[#f5f5f5] p-6">
+              <div className="mx-auto max-w-[820px] bg-white rounded-lg shadow-md overflow-hidden">
+                <div className="doc-paper px-[72px] py-[56px] font-serif text-[14px] leading-[1.85] text-gray-900">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={streamingMarkdownComponents}>
+                  {renderedStreamText}
+                  </ReactMarkdown>
+                </div>
+              </div>
             </div>
           </div>
           <p className="text-xs text-gray-500">
-            Streaming shows the draft as it is being written. Final formatting, fields, and section parsing are applied when generation completes.
+            Generating template content. Final field and section parsing is applied when generation completes.
           </p>
         </div>
       </SectionCard>

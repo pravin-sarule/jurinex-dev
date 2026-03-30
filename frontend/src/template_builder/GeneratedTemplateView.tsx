@@ -1,8 +1,11 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useTemplateBuilderStore } from './templateBuilderStore';
+import { templateBuilderApi } from './api';
 import { customTemplateApi } from '../template_drafting_component/user_custom_template/api';
-import { DRAFTING_SERVICE_URL } from '../config/apiConfig.js';
+import { AGENT_DRAFT_TEMPLATE_API, DRAFTING_SERVICE_URL } from '../config/apiConfig.js';
 
 interface GoogleDocsSession {
   draftId?: string;
@@ -10,6 +13,20 @@ interface GoogleDocsSession {
   editUrl?: string;
   iframeUrl?: string;
   iframeKey?: number;
+}
+
+function normalizeToGoogleEditUrl(rawUrl: string | undefined): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    url.searchParams.delete('embedded');
+    url.searchParams.delete('cb');
+    return url.toString();
+  } catch {
+    return rawUrl
+      .replace(/[?&]embedded=true/g, '')
+      .replace(/[?&]cb=\d+/g, '');
+  }
 }
 
 async function createDraftFromTemplate(templateId: string, title: string): Promise<string> {
@@ -91,6 +108,61 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function preservePlaceholderTokens(markdown: string): string {
+  // Keep placeholders literal in markdown without rendering them as bold/code.
+  return markdown.replace(/__([a-zA-Z][a-zA-Z0-9_]*)__/g, '\\_\\_$1\\_\\_');
+}
+
+function paginateMarkdownForPreview(markdown: string): string[] {
+  const text = (markdown || '').trim();
+  if (!text) return [''];
+
+  const blocks = text
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  const estimateBlockCost = (block: string): number => {
+    const lines = block.split('\n').filter(Boolean);
+    const isTable = lines.some((l) => /^\s*\|.*\|\s*$/.test(l));
+    if (isTable) return Math.max(4, Math.ceil(lines.length * 1.6));
+    const chars = block.length;
+    const softLines = Math.ceil(chars / 90);
+    return Math.max(2, softLines);
+  };
+
+  const pageBudget = 34;
+  const pages: string[] = [];
+  let currentBlocks: string[] = [];
+  let currentCost = 0;
+
+  for (const block of blocks) {
+    const cost = estimateBlockCost(block);
+    if (currentBlocks.length > 0 && currentCost + cost > pageBudget) {
+      pages.push(currentBlocks.join('\n\n'));
+      currentBlocks = [];
+      currentCost = 0;
+    }
+    currentBlocks.push(block);
+    currentCost += cost;
+  }
+
+  if (currentBlocks.length > 0) {
+    pages.push(currentBlocks.join('\n\n'));
+  }
+
+  return pages.length > 0 ? pages : [text];
+}
+
+function extractTextFromNode(node: any): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(extractTextFromNode).join('');
+  if (node && typeof node === 'object' && 'props' in node) {
+    return extractTextFromNode((node as any).props?.children);
+  }
+  return '';
+}
+
 function normalizeGoogleDocsSession(raw: Record<string, any> | null | undefined): GoogleDocsSession {
   const info = { ...(raw || {}) };
   const draftId = info?.draft?.id || info?.draft?.draftId || info?.draftId || info?.draft_id;
@@ -112,10 +184,15 @@ function normalizeGoogleDocsSession(raw: Record<string, any> | null | undefined)
     iframeUrl = `${iframeUrl}${iframeUrl.includes('?') ? '&' : '?'}cb=${Date.now()}`;
   }
 
+  const editUrlFromBase = normalizeToGoogleEditUrl(baseUrl);
+  const resolvedEditUrl = googleFileId
+    ? `https://docs.google.com/document/d/${googleFileId}/edit`
+    : editUrlFromBase;
+
   return {
     draftId: draftId ? String(draftId) : undefined,
     googleFileId: googleFileId ? String(googleFileId) : undefined,
-    editUrl: googleFileId ? `https://docs.google.com/document/d/${googleFileId}/edit` : undefined,
+    editUrl: resolvedEditUrl,
     iframeUrl,
     iframeKey: Date.now(),
   };
@@ -129,7 +206,7 @@ async function openGeneratedTemplateInGoogleDocs(fileName: string, html: string)
     '';
 
   const formData = new FormData();
-  const htmlBlob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const htmlBlob = new Blob([html], { type: 'text/html' });
   formData.append('file', htmlBlob, `${fileName}.html`);
   formData.append('title', fileName);
 
@@ -255,7 +332,10 @@ export const GeneratedTemplateView: React.FC = () => {
   const {
     generatedTemplateText,
     generationMetadata,
+    requirements,
     phase,
+    extractedFields,
+    parsedSections,
     savedTemplateId,
     savedTemplateName,
     setSaveResult,
@@ -270,6 +350,14 @@ export const GeneratedTemplateView: React.FC = () => {
   const [googleDocsSession, setGoogleDocsSession] = useState<GoogleDocsSession | null>(null);
 
   const lines = useMemo(() => parseLinesForRender(generatedTemplateText), [generatedTemplateText]);
+  const renderedMarkdown = useMemo(
+    () => preservePlaceholderTokens(generatedTemplateText || ''),
+    [generatedTemplateText],
+  );
+  const markdownPages = useMemo(
+    () => paginateMarkdownForPreview(renderedMarkdown),
+    [renderedMarkdown],
+  );
   const pages = useMemo(() => {
     const result: RenderedLine[][] = [];
     const pageBudget = 24; // Fewer lines per page after court margins increase
@@ -290,6 +378,50 @@ export const GeneratedTemplateView: React.FC = () => {
     if (currentPage.length > 0) result.push(currentPage);
     return result;
   }, [lines]);
+
+  const markdownComponents: any = {
+    h1: ({ children }: any) => <h1 style={{ textAlign: 'center', textTransform: 'uppercase', fontSize: '18pt', margin: '10pt 0 12pt', fontWeight: 700 }}>{children}</h1>,
+    h2: ({ children }: any) => <h2 style={{ fontSize: '14pt', margin: '14pt 0 8pt', fontWeight: 700 }}>{children}</h2>,
+    h3: ({ children }: any) => <h3 style={{ fontSize: '12pt', margin: '10pt 0 6pt', fontWeight: 700 }}>{children}</h3>,
+    p: ({ children }: any) => {
+      const text = extractTextFromNode(children);
+      const hasPlaceholder = /__[\w]+__/.test(text);
+      return (
+        <p
+          style={{
+            margin: '0 0 8pt',
+            textAlign: hasPlaceholder ? 'left' : 'justify',
+            lineHeight: 1.78,
+            wordSpacing: 'normal',
+          }}
+        >
+          {children}
+        </p>
+      );
+    },
+    hr: () => <hr style={{ border: 0, borderTop: '1px solid #d1d5db', margin: '12pt 0' }} />,
+    table: ({ children }: any) => (
+      <div style={{ overflowX: 'auto', margin: '10pt 0 14pt' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11pt' }}>{children}</table>
+      </div>
+    ),
+    thead: ({ children }: any) => <thead style={{ background: '#f3f4f6' }}>{children}</thead>,
+    th: ({ children, style }: any) => <th style={{ border: '1px solid #9ca3af', padding: '8px 10px', textAlign: style?.textAlign || 'left', verticalAlign: 'top', fontWeight: 700 }}>{children}</th>,
+    td: ({ children, style }: any) => <td style={{ border: '1px solid #9ca3af', padding: '8px 10px', textAlign: style?.textAlign || 'left', verticalAlign: 'top' }}>{children}</td>,
+    ul: ({ children }: any) => <ul style={{ listStyle: 'disc', paddingLeft: '1.6em', margin: '0.45em 0' }}>{children}</ul>,
+    ol: ({ children }: any) => <ol style={{ listStyle: 'decimal', paddingLeft: '1.6em', margin: '0.45em 0' }}>{children}</ol>,
+    li: ({ children }: any) => <li style={{ margin: '0.25em 0', lineHeight: 1.72 }}>{children}</li>,
+    code: ({ inline, children }: any) =>
+      inline ? (
+        <code style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: '4px', padding: '1px 4px', color: '#111827' }}>
+          {children}
+        </code>
+      ) : (
+        <pre style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '6px', padding: '10px 12px', overflowX: 'auto' }}>
+          <code>{children}</code>
+        </pre>
+      ),
+  };
 
   // Export as a single flowing document — Google Docs handles its own pagination.
   // Never inject "Page X of Y" as body text; never use CSS page-break hacks with flex containers.
@@ -337,25 +469,43 @@ ${bodyHtml}
 
     try {
       const templateName = generationMetadata?.templateName || generationMetadata?.documentType || 'Generated Template';
-      const category = generationMetadata?.category || 'General';
-      const description = `AI-generated template. Jurisdiction: ${generationMetadata?.jurisdiction || 'India'}. Language: ${generationMetadata?.language || 'English'}.`;
-      const formData = new FormData();
-      const safeFileName = `${templateName.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'generated_template'}.doc`;
-      const docBlob = new Blob(['\uFEFF' + exportHtml], { type: 'application/msword;charset=utf-8' });
-
-      formData.append('name', templateName);
-      formData.append('category', category);
-      formData.append('subcategory', 'AI Generated');
-      formData.append('description', description);
-      formData.append('file', docBlob, safeFileName);
-
-      const result = await customTemplateApi.uploadTemplate(formData);
-      setSaveResult(result.template_id, templateName);
+      const result = await templateBuilderApi.saveGeneratedTemplate({
+        templateText: generatedTemplateText,
+        fields: extractedFields,
+        sections: parsedSections,
+        metadata: generationMetadata || {
+          generatedAt: new Date().toISOString(),
+          documentType: templateName,
+          templateName,
+          category: 'General',
+          jurisdiction: 'India',
+          language: 'English',
+          totalFields: extractedFields.length,
+          totalSections: parsedSections.length,
+          model: 'unknown',
+        },
+        requirements: {
+          ...requirements,
+          exportHtml,
+        },
+      });
+      const templateId = result.templateId;
+      if (!templateId) {
+        throw new Error('Template was saved but no template ID was returned.');
+      }
+      if (requirements.referenceDocuments.length > 0) {
+        await customTemplateApi.uploadReferenceDocuments(templateId, requirements.referenceDocuments);
+      }
+      const ready = await customTemplateApi.waitForTemplateReady(templateId, 8000, 45);
+      if (ready.status === 'error') {
+        throw new Error('Template analysis failed while saving to library. Please retry.');
+      }
+      setSaveResult(templateId, templateName);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Save failed');
       setIsSaving(false);
     }
-  }, [exportHtml, generatedTemplateText, generationMetadata, isSaving, setSaveResult]);
+  }, [exportHtml, extractedFields, generatedTemplateText, generationMetadata, isSaving, parsedSections, requirements, setSaveResult]);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -367,16 +517,51 @@ ${bodyHtml}
     }
   }, [generatedTemplateText]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownload = useCallback(async () => {
     const name = generationMetadata?.templateName || 'template';
-    const blob = new Blob(['\uFEFF' + exportHtml], { type: 'application/msword;charset=utf-8' });
+    const token =
+      localStorage.getItem('token') ||
+      localStorage.getItem('access_token') ||
+      localStorage.getItem('auth_token') ||
+      '';
+
+    try {
+      // Prefer backend DOCX export for a real Word-compatible .docx file.
+      const exportDraftId = savedTemplateId || 'generated_template_preview';
+      const res = await fetch(`${AGENT_DRAFT_TEMPLATE_API}/api/drafts/${encodeURIComponent(exportDraftId)}/export/docx`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ html_content: exportHtml }),
+      });
+
+      if (res.ok) {
+        const blob = await res.blob();
+        if (blob.size > 0) {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${name}.docx`;
+          a.click();
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+    } catch {
+      // fall through to HTML fallback
+    }
+
+    // Fallback: download as .html (safer than fake .doc for Word)
+    const blob = new Blob([exportHtml], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${name}.doc`;
+    a.download = `${name}.html`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [exportHtml, generationMetadata]);
+  }, [exportHtml, generationMetadata, savedTemplateId]);
 
   const handleOpenInGoogleDocs = useCallback(async () => {
     const name = generationMetadata?.templateName || 'Generated Template';
@@ -386,8 +571,8 @@ ${bodyHtml}
     try {
       const result = await openGeneratedTemplateInGoogleDocs(name, exportHtml);
       setGoogleDocsSession(result);
-      if (result.editUrl) {
-        window.open(result.editUrl, '_blank', 'noopener,noreferrer');
+      if (!result.iframeUrl) {
+        throw new Error('Google Docs URL not returned by server');
       }
     } catch (err) {
       setGoogleDocsOpenError(err instanceof Error ? err.message : 'Failed to open in Google Docs');
@@ -434,13 +619,13 @@ ${bodyHtml}
             disabled={isOpeningGoogleDocs}
             className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all disabled:opacity-50"
           >
-            {googleDocsSession?.editUrl ? 'Open Google Docs Again' : 'Open in Google Docs'}
+            {googleDocsSession?.iframeUrl ? 'Open Google Docs Again' : 'Open in Google Docs'}
           </button>
           <button onClick={handleCopy} className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all">
             {copied ? '✓ Copied!' : 'Copy'}
           </button>
           <button onClick={handleDownload} className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all">
-            Download .doc
+            Download .docx
           </button>
           <button onClick={reset} className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all">
             Start Over
@@ -479,19 +664,30 @@ ${bodyHtml}
       </div>
 
       <div className="flex-1 overflow-auto" style={{ background: '#525659', padding: '32px 0' }}>
+        {googleDocsSession?.iframeUrl ? (
+          <div className="w-full px-6">
+            <div className="bg-white rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.35)] overflow-hidden border border-gray-200">
+              <iframe
+                key={googleDocsSession.iframeKey || googleDocsSession.iframeUrl}
+                src={googleDocsSession.iframeUrl}
+                title="Google Docs Editor"
+                className="w-full"
+                style={{ height: 'calc(100vh - 240px)', minHeight: '640px', border: 0 }}
+                allow="clipboard-read; clipboard-write"
+              />
+            </div>
+          </div>
+        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
-            {pages.map((pageLines, pageIdx) => (
+            {markdownPages.map((pageContent, pageIdx) => (
               <div key={pageIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <div style={{ color: '#ccc', fontSize: '11px', marginBottom: '6px', userSelect: 'none' }}>
-                  Page {pageIdx + 1} of {pages.length}
+                  Page {pageIdx + 1} of {markdownPages.length}
                 </div>
                 <div
                   style={{
                     width: '794px',
-                    height: '1123px',
                     minHeight: '1123px',
-                    maxHeight: '1123px',
-                    overflow: 'hidden',
                     background: '#ffffff',
                     boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
                     boxSizing: 'border-box',
@@ -499,37 +695,17 @@ ${bodyHtml}
                     fontSize: '12pt',
                     lineHeight: '1.6',
                     color: '#000',
-                    display: 'flex',
-                    flexDirection: 'column',
                     // Court-standard: 1.5in left (binding), 1in top/right/bottom
                     padding: '96px 96px 96px 144px',
+                    display: 'flex',
+                    flexDirection: 'column',
                   }}
                 >
-                  <div style={{ flex: 1 }}>
-                    {pageLines.map((line, i) => {
-                      if (line.type === 'blank') return <div key={i} style={{ height: '8px' }} />;
-                      if (line.type === 'heading' && line.level === 1) {
-                        return (
-                          <div key={i} style={{ fontWeight: 'bold', textAlign: 'center', textTransform: 'uppercase', fontSize: '12pt', marginTop: '14pt', marginBottom: '4pt', letterSpacing: '0.02em' }}>
-                            <HighlightedLine text={line.content} />
-                          </div>
-                        );
-                      }
-                      if (line.type === 'heading' && line.level === 2) {
-                        return (
-                          <div key={i} style={{ fontWeight: 'bold', fontSize: '12pt', marginTop: '8pt', marginBottom: '2pt' }}>
-                            <HighlightedLine text={line.content} />
-                          </div>
-                        );
-                      }
-                      return (
-                        <div key={i} style={{ fontSize: '12pt', lineHeight: '1.6', marginBottom: '3pt', textAlign: 'justify' }}>
-                          <HighlightedLine text={line.content} />
-                        </div>
-                      );
-                    })}
+                  <div style={{ flex: 1 }} className="doc-paper">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {pageContent}
+                    </ReactMarkdown>
                   </div>
-
                   <div
                     style={{
                       display: 'flex',
@@ -542,12 +718,13 @@ ${bodyHtml}
                       marginTop: '14pt',
                     }}
                   >
-                    <div>Page {pageIdx + 1} of {pages.length}</div>
+                    <div>Page {pageIdx + 1} of {markdownPages.length}</div>
                   </div>
                 </div>
               </div>
             ))}
           </div>
+        )}
       </div>
 
       <div className="bg-white border-t border-gray-200 px-6 py-4 flex items-center justify-between sticky bottom-0 z-10 shadow-[0_-2px_8px_rgba(0,0,0,0.05)]">

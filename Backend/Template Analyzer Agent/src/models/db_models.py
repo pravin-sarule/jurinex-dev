@@ -58,3 +58,23 @@ class UserTemplateAnalysisSection(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
+
+class UserTemplateReferenceDocument(Base):
+    """
+    Stores source/reference documents used while generating an AI template.
+    Maps to table 'user_template_reference_documents'.
+    """
+    __tablename__ = "user_template_reference_documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    template_id = Column(UUID(as_uuid=True), ForeignKey('user_templates.template_id', ondelete="CASCADE"), nullable=False, index=True)
+    original_file_name = Column(String(255), nullable=False)
+    content_type = Column(String(150), nullable=True)
+    gcs_bucket = Column(String(255), nullable=False)
+    gcs_path = Column(Text, nullable=False)
+    gs_uri = Column(Text, nullable=False)
+    extracted_text = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

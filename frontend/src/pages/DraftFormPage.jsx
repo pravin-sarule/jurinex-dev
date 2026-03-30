@@ -31,7 +31,9 @@ import {
   renameDraft,
   getTemplate,
   getTemplateSections,
-  getTemplateFields
+  getTemplateFields,
+  getUniversalSections,
+  saveDraftUiState
 } from '../services/draftFormApi';
 import documentApi from '../services/documentApi';
 import { toast } from 'react-toastify';
@@ -41,7 +43,80 @@ import { SectionDraftingPage } from '../template_drafting_component/pages/Sectio
 import { AssembledPreviewPage } from '../template_drafting_component/pages/AssembledPreviewPage';
 import { TemplateWizardGallery } from '../components/TemplateWizard';
 import DraftingLayout from '../components/DraftingRedesign/DraftingLayout';
-import { useSidebar } from '../context/SidebarContext';
+import { createChatDraftSession, exportChatDraftDocx } from '../services/chatDraftApi';
+import googleDriveApi from '../services/googleDriveApi';
+import { AGENT_DRAFT_TEMPLATE_API, CHAT_DRAFT_BACKEND_URL, getUserIdForDrafting } from '../config/apiConfig';
+import html2pdf from 'html2pdf.js';
+
+/* ─── Chat-draft streaming helper ───────────────────────────────────── */
+async function streamChatDraftMessage(sessionId, message, onChunk, signal) {
+  const headers = { 'Content-Type': 'application/json' };
+  const token = localStorage.getItem('token') || localStorage.getItem('authToken') ||
+    localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const userId = getUserIdForDrafting();
+  if (userId) headers['X-User-Id'] = userId;
+
+  const res = await fetch(`${CHAT_DRAFT_BACKEND_URL}/api/chat-draft/session/${sessionId}/message-stream`, {
+    method: 'POST', headers, body: JSON.stringify({ message }), signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') return;
+        try {
+          const json = JSON.parse(data);
+          if (json.html_chunk) onChunk(json.html_chunk, false);
+          if (json.html) onChunk(json.html, true);
+        } catch (_) {}
+      }
+    }
+  }
+}
+
+/* ─── Extract HTML from template API response ────────────────────────── */
+function extractTemplateHtmlFromResponse(template) {
+  const c = template?.content;
+  if (!c) return '';
+  if (c.fallback_html?.pages?.length) return c.fallback_html.pages.map(p => p.html || '').join('\n\n');
+  if (c.structured?.pages?.length) return c.structured.pages.flatMap(p => (p.blocks || []).map(b => b.content?.value || b.content?.label || '')).join('\n');
+  if (c.blocks?.length) return c.blocks.map(b => b.content?.value || b.content?.label || '').join('\n');
+  return '';
+}
+
+/* ─── Inline CSS for embedded chat UI ───────────────────────────────── */
+const CHAT_CSS = `
+  @keyframes _spin { to { transform:rotate(360deg) } }
+  @keyframes _dot { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-5px)} }
+  @keyframes _blink { 0%,100%{opacity:1} 50%{opacity:0} }
+  .cd-cursor::after { content:'▋'; display:inline-block; animation:_blink .7s infinite; color:#21C1B6; margin-left:2px; font-size:.85em; }
+  .cd-paper { font-family:'Georgia','Times New Roman',serif; color:#111; }
+  .cd-paper h1 { font-size:1.25em;font-weight:700;text-align:center;margin:0 0 .9em;text-transform:uppercase;letter-spacing:.05em;line-height:1.4 }
+  .cd-paper h2 { font-size:1.05em;font-weight:700;margin:1.3em 0 .45em;text-transform:uppercase;letter-spacing:.03em }
+  .cd-paper h3 { font-size:.98em;font-weight:700;margin:1em 0 .35em }
+  .cd-paper p  { margin:.55em 0;line-height:1.88;text-align:justify }
+  .cd-paper ul,ol { padding-left:1.6em;margin:.45em 0 }
+  .cd-paper li { margin:.25em 0;line-height:1.78 }
+  .cd-paper table { width:100%;border-collapse:collapse;margin:1em 0;font-size:.92em }
+  .cd-paper th { background:#f9fafb;font-weight:700;padding:.5em .7em;border:1px solid #e5e7eb }
+  .cd-paper td { padding:.45em .7em;border:1px solid #e5e7eb;vertical-align:top }
+  .cd-paper strong { font-weight:700 }
+  .cd-paper em { font-style:italic }
+  .cd-paper hr { border:none;border-top:1.5px solid #e5e7eb;margin:1.4em 0 }
+  .cd-scroll::-webkit-scrollbar { width:4px }
+  .cd-scroll::-webkit-scrollbar-thumb { background:#e5e7eb;border-radius:2px }
+`;
 
 const DRAFT_STEPS = [
   { id: 'initialization', label: 'Initialization' },
@@ -78,6 +153,95 @@ const DETAIL_LEVELS = [
   { value: 'concise', label: 'Concise', description: 'Balanced and clear' },
   { value: 'short', label: 'Short', description: 'Brief and to the point' }
 ];
+
+const normalizeTemplateField = (field, index = 0) => {
+  if (!field || typeof field !== 'object') return null;
+
+  const fieldName = String(
+    field.field_name ||
+    field.key ||
+    field.field_id ||
+    field.id ||
+    ''
+  ).trim();
+
+  if (!fieldName) return null;
+
+  const fieldLabel = String(
+    field.field_label ||
+    field.label ||
+    field.field_name ||
+    field.field_id ||
+    field.key ||
+    `Field ${index + 1}`
+  ).trim();
+
+  const fieldType = String(
+    field.field_type ||
+    field.type ||
+    'text'
+  ).trim().toLowerCase();
+
+  const fieldGroup = String(
+    field.field_group ||
+    field.section_name ||
+    field.section_id ||
+    field.group ||
+    'Details'
+  ).trim();
+
+  return {
+    ...field,
+    field_id: String(field.field_id || field.id || fieldName),
+    field_name: fieldName,
+    field_label: fieldLabel,
+    field_type: fieldType === 'string' ? 'text' : fieldType,
+    field_group: fieldGroup || 'Details',
+    required: Boolean(
+      field.required ??
+      field.is_required ??
+      false
+    ),
+    placeholder: field.placeholder || field.description || '',
+  };
+};
+
+const normalizeTemplateFields = (fields) => {
+  if (!Array.isArray(fields)) return [];
+  return fields
+    .map((field, index) => normalizeTemplateField(field, index))
+    .filter(Boolean);
+};
+
+const normalizeTemplateSectionsForConfig = (sections) => {
+  if (!Array.isArray(sections)) return [];
+  return sections
+    .map((section, index) => {
+      if (!section || typeof section !== 'object') return null;
+      const id = String(
+        section.section_id ||
+        section.id ||
+        section.section_key ||
+        `section_${index}`
+      );
+      const title = String(
+        section.section_name ||
+        section.title ||
+        section.name ||
+        section.section_key ||
+        `Section ${index + 1}`
+      );
+      return {
+        id,
+        title,
+        description: section.section_purpose || section.description || '',
+        defaultPrompt: section.default_prompt || section.section_intro || '',
+        subItems: [],
+        isFromTemplate: true,
+      };
+    })
+    .filter(Boolean);
+};
 
 const buildAssembledResumePayload = (draftMetadata) => {
   const assembledCache = draftMetadata?.assembled_cache;
@@ -145,6 +309,77 @@ const DraftFormPage = () => {
   const [selectedLanguage, setSelectedLanguage] = useState('en');
   const [sectionDetailLevels, setSectionDetailLevels] = useState({});
 
+  // Method selection modal (shown once on first load of step 1)
+  const [showMethodModal, setShowMethodModal] = useState(() => {
+    // Don't show modal if method was already chosen (restored from localStorage)
+    if (!draftId) return true;
+    try { const saved = JSON.parse(localStorage.getItem(`chat_draft_${draftId}`) || 'null'); return !saved?.draftMethod; } catch { return true; }
+  });
+  const [draftMethod, setDraftMethod] = useState(() => {
+    if (!draftId) return null;
+    try { return JSON.parse(localStorage.getItem(`chat_draft_${draftId}`) || 'null')?.draftMethod ?? null; } catch { return null; }
+  }); // null | 'automatic' | 'custom'
+
+  // Automatic mode — local file collection (not uploaded to server)
+  const [autoLocalFiles, setAutoLocalFiles] = useState([]);
+  const autoFileInputRef = useRef(null);
+
+  // Automatic mode — embedded chat state (restored from localStorage per draftId)
+  const _chatStorageKey = draftId ? `chat_draft_${draftId}` : null;
+  const _chatSaved = useMemo(() => {
+    if (!_chatStorageKey) return null;
+    try { return JSON.parse(localStorage.getItem(_chatStorageKey) || 'null'); } catch { return null; }
+  }, [_chatStorageKey]);
+
+  const [chatPhase, setChatPhase] = useState(() => _chatSaved?.chatPhase ?? false);
+  const [chatTemplateText, setChatTemplateText] = useState(() => _chatSaved?.chatTemplateText ?? '');
+  const [chatTemplateLoading, setChatTemplateLoading] = useState(false);
+  const [chatSessionId, setChatSessionId] = useState(() => _chatSaved?.chatSessionId ?? '');
+  const [chatMessages, setChatMessages] = useState(() => _chatSaved?.chatMessages ?? []);
+  const [chatInput, setChatInput] = useState('');
+  const [chatStreamingHtml, setChatStreamingHtml] = useState('');
+  const [chatLatestHtml, setChatLatestHtml] = useState(() => _chatSaved?.chatLatestHtml ?? '');
+  const [chatIsSending, setChatIsSending] = useState(false);
+  const [chatIsCreating, setChatIsCreating] = useState(false);
+  const [chatDocPanelOpen, setChatDocPanelOpen] = useState(() => !!(_chatSaved?.chatLatestHtml));
+  const [chatError, setChatError] = useState('');
+  const [chatWarnings, setChatWarnings] = useState([]);
+  const [chatCopied, setChatCopied] = useState(false);
+  const [chatGoogleDocsOpen, setChatGoogleDocsOpen] = useState(false);
+  const [chatRealGoogleDocsUrl, setChatRealGoogleDocsUrl] = useState(() => _chatSaved?.chatRealGoogleDocsUrl ?? '');
+  const [chatGoogleDocsFileId, setChatGoogleDocsFileId] = useState(() => _chatSaved?.chatGoogleDocsFileId ?? '');
+  const [chatGoogleDocsUploading, setChatGoogleDocsUploading] = useState(false);
+  const [chatDocSidebarOffset, setChatDocSidebarOffset] = useState(0);
+  const chatAbortRef = useRef(null);
+  const chatTaRef = useRef(null);
+  const chatEndRef = useRef(null);
+  const chatIframeRef = useRef(null);
+
+  // Persist chat state to localStorage whenever key values change
+  useEffect(() => {
+    if (!_chatStorageKey) return;
+    const snapshot = { chatPhase, chatTemplateText, chatSessionId, chatMessages, chatLatestHtml, draftMethod, chatGoogleDocsFileId, chatRealGoogleDocsUrl };
+    try { localStorage.setItem(_chatStorageKey, JSON.stringify(snapshot)); } catch (_) {}
+  }, [_chatStorageKey, chatPhase, chatTemplateText, chatSessionId, chatMessages, chatLatestHtml, draftMethod, chatGoogleDocsFileId, chatRealGoogleDocsUrl]);
+
+  // Persist resume state in backend so "Recent documents" opens at the same workflow state.
+  useEffect(() => {
+    if (!draftId) return;
+    const timer = setTimeout(() => {
+      saveDraftUiState(draftId, {
+        current_step: currentStep,
+        sub_step_id: subStepId,
+        draft_method: draftMethod || null,
+        chat_phase: Boolean(chatPhase),
+        chat_session_id: chatSessionId || null,
+        chat_has_output: Boolean(chatLatestHtml || chatStreamingHtml),
+      }).catch((err) => {
+        console.warn('[DraftFormPage] Failed to persist UI state:', err?.message || err);
+      });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [draftId, currentStep, subStepId, draftMethod, chatPhase, chatSessionId, chatLatestHtml, chatStreamingHtml]);
+
   // Rename modal
   const [showRenameModal, setShowRenameModal] = useState(false);
   const [newDraftTitle, setNewDraftTitle] = useState('');
@@ -174,18 +409,6 @@ const DraftFormPage = () => {
       status: 'completed'
     }
   ]);
-
-  const { setForceSidebarCollapsed } = useSidebar();
-
-  useEffect(() => {
-    // Force main app sidebar to collapse when drafting
-    setForceSidebarCollapsed(true);
-    return () => {
-      // Restore previous state when leaving the page if needed
-      // Actually, Sidebar.jsx handles restoration based on user preference if force is false
-      setForceSidebarCollapsed(false);
-    };
-  }, [setForceSidebarCollapsed]);
 
   // -- EFFECTS --
 
@@ -218,30 +441,40 @@ const DraftFormPage = () => {
           const d = res.draft;
           // Fetch full template (fields, sections, preview) so we have all form fields from DB
           let dbSections = [];
-          let templateFields = d.fields;
+          let templateFields = normalizeTemplateFields(d.fields);
           if (d.template_id) {
             try {
               const templateRes = await getTemplate(d.template_id);
               if (templateRes?.success && templateRes?.template) {
                 const t = templateRes.template;
                 dbSections = Array.isArray(t.sections) ? t.sections : [];
+                const normalizedTemplateFields = normalizeTemplateFields(t.fields);
                 // Prefer the richer field schema when template API returns more fields than the draft payload.
                 if (
-                  Array.isArray(t.fields) &&
-                  t.fields.length > 0 &&
+                  normalizedTemplateFields.length > 0 &&
                   (
                     !Array.isArray(d.fields) ||
                     d.fields.length === 0 ||
-                    t.fields.length > d.fields.length
+                    normalizedTemplateFields.length > templateFields.length
                   )
                 ) {
-                  templateFields = t.fields;
-                } else if (Array.isArray(d.fields) && d.fields.length > 0) {
-                  templateFields = d.fields;
+                  templateFields = normalizedTemplateFields;
                 }
               }
             } catch (err) {
               console.warn('Failed to fetch template (sections/fields)', err);
+            }
+
+            if (templateFields.length === 0) {
+              try {
+                const fieldsRes = await getTemplateFields(d.template_id);
+                const fallbackFields = normalizeTemplateFields(fieldsRes?.fields);
+                if (fallbackFields.length > 0) {
+                  templateFields = fallbackFields;
+                }
+              } catch (err) {
+                console.warn('Failed to fetch fallback template fields', err);
+              }
             }
           }
           setDraft({ ...d, fields: templateFields ?? d.fields });
@@ -249,14 +482,36 @@ const DraftFormPage = () => {
 
           // Convert DB sections to the format expected by the UI.
           // Use section_prompts (default_prompt) for AI instructions, NOT section_intro (short description).
-          const baseSections = dbSections.map((section, index) => ({
-            id: section.section_id || section.id || `section_${index}`,
-            title: section.section_name || section.title || `Section ${index + 1}`,
-            description: section.section_purpose || section.description || '',
-            defaultPrompt: section.default_prompt || section.section_intro || '',
-            subItems: [], // Can be populated if available in the section data
-            isFromTemplate: true
-          }));
+          let baseSections = normalizeTemplateSectionsForConfig(dbSections);
+
+          // Fallback 1: fetch dedicated template sections endpoint (more consistent shape)
+          if (baseSections.length === 0 && d.template_id) {
+            try {
+              const templateSectionsRes = await getTemplateSections(d.template_id);
+              const fetchedSections = Array.isArray(templateSectionsRes?.sections)
+                ? templateSectionsRes.sections
+                : [];
+              if (fetchedSections.length > 0) {
+                baseSections = normalizeTemplateSectionsForConfig(fetchedSections);
+                setTemplateSections(fetchedSections);
+              }
+            } catch (err) {
+              console.warn('Failed to fetch template sections fallback', err);
+            }
+          }
+
+          // Fallback 2: use universal sections if template-level sections are unavailable
+          if (baseSections.length === 0) {
+            try {
+              const universalRes = await getUniversalSections();
+              const universalSections = Array.isArray(universalRes?.sections)
+                ? universalRes.sections
+                : [];
+              baseSections = normalizeTemplateSectionsForConfig(universalSections);
+            } catch (err) {
+              console.warn('Failed to fetch universal sections fallback', err);
+            }
+          }
 
           // Populate sections
           const deletedSet = new Set();
@@ -264,8 +519,12 @@ const DraftFormPage = () => {
           const orderMap = {};
           let lang = d.metadata?.draft_language || 'en';
 
-          if (Array.isArray(sectionsData)) {
-            sectionsData.forEach(p => {
+          const promptsRows = Array.isArray(sectionsData)
+            ? sectionsData
+            : (Array.isArray(sectionsData?.prompts) ? sectionsData.prompts : []);
+
+          if (Array.isArray(promptsRows)) {
+            promptsRows.forEach(p => {
               if (p.is_deleted) deletedSet.add(p.section_id);
               if (p.detail_level) detailMap[p.section_id] = p.detail_level;
               if (p.language) lang = p.language;
@@ -280,11 +539,41 @@ const DraftFormPage = () => {
 
           const assembledResumePayload = buildAssembledResumePayload(d.metadata);
           const hasExplicitStep = searchParams.has('step');
+          const uiState = (d.metadata?.ui_state && typeof d.metadata.ui_state === 'object')
+            ? d.metadata.ui_state
+            : {};
+
+          if (uiState.sub_step_id === 'inputs' || uiState.sub_step_id === 'sections') {
+            setSubStepId(uiState.sub_step_id);
+          }
+
+          if (!draftMethod && (uiState.draft_method === 'automatic' || uiState.draft_method === 'custom')) {
+            setDraftMethod(uiState.draft_method);
+            setShowMethodModal(false);
+          }
+
+          if (!_chatSaved?.chatPhase && uiState.chat_phase === true) {
+            setChatPhase(true);
+            setShowMethodModal(false);
+            if (!chatSessionId && uiState.chat_session_id) {
+              setChatSessionId(String(uiState.chat_session_id));
+            }
+            if (uiState.chat_has_output) {
+              setChatDocPanelOpen(true);
+            }
+          }
+
           if (assembledResumePayload) {
             setLastAssembleResult(assembledResumePayload);
             if (!hasExplicitStep) {
               setCurrentStep(6);
               console.log('[DraftFormPage] Resuming completed draft in assembled editor view');
+            }
+          } else if (!hasExplicitStep) {
+            const resumedStep = Number(uiState.current_step);
+            if (Number.isFinite(resumedStep) && resumedStep >= 1 && resumedStep <= 6) {
+              setCurrentStep(resumedStep);
+              console.log(`[DraftFormPage] Resuming draft at step ${resumedStep} from metadata.ui_state`);
             }
           }
 
@@ -292,8 +581,8 @@ const DraftFormPage = () => {
           const templateSectionIds = new Set(baseSections.map(s => s.id));
           const customSections = [];
 
-          if (Array.isArray(sectionsData)) {
-            sectionsData.forEach(p => {
+          if (Array.isArray(promptsRows)) {
+            promptsRows.forEach(p => {
               if (!templateSectionIds.has(p.section_id) && !p.is_deleted) {
                 customSections.push({
                   id: p.section_id,
@@ -401,21 +690,27 @@ const DraftFormPage = () => {
     };
     load();
     return () => { cancelled = true; };
-  }, [draftId, navigate, searchParams]);
+  }, [draftId, navigate, searchParams, draftMethod, chatSessionId, _chatSaved?.chatPhase]);
 
 
   // Initialize Section Prompts map when fields change (if needed)
-  const fields = draft?.fields ?? [];
+  const fields = useMemo(() => normalizeTemplateFields(draft?.fields), [draft?.fields]);
   const sections = useMemo(() => {
     const order = [];
     const map = {};
     fields.forEach((f) => {
-      const key = (f.field_group && String(f.field_group).trim()) ? String(f.field_group).trim() : 'Details';
-      if (!map[key]) {
-        map[key] = [];
-        order.push(key);
+      const key = (
+        f.field_group ||
+        f.section_name ||
+        f.section_id ||
+        'Details'
+      );
+      const normalizedKey = String(key).trim() || 'Details';
+      if (!map[normalizedKey]) {
+        map[normalizedKey] = [];
+        order.push(normalizedKey);
       }
-      map[key].push(f);
+      map[normalizedKey].push(f);
     });
     return order.map((sectionName) => ({ sectionName, fields: map[sectionName] }));
   }, [fields]);
@@ -524,25 +819,32 @@ const DraftFormPage = () => {
         // Update live counter on every tick so the UI reflects progress
         setAutopopulationFilledCount(filledFromTemplate.length);
 
-        // Stop polling when: agent reports done (completed/partial) AND has filled values
-        const agentDone = extractionStatus === 'completed' || extractionStatus === 'partial';
+        // Stop polling once the backend reaches a terminal state.
+        const terminalStatuses = ['completed', 'partial', 'failed', 'terminated'];
+        const agentDone = terminalStatuses.includes(String(extractionStatus || '').toLowerCase());
         const hasFilled = filledFromTemplate.length > 0;
 
-        if (agentDone && hasFilled) {
+        if (agentDone) {
           clearInterval(intervalId);
           autopopulatePollRef.current = null;
           setIsAutopopulatingFields(false);
 
-          // Merge: keep user-edited values on top, overlay agent values beneath
-          const merged = { ...fromTemplate, ...fieldValuesRef.current };
-          setFieldValues(merged);
-          await updateDraftFields(draftIdParam, merged, Object.keys(merged));
-          if (templateIdParam) {
-            try {
-              await saveTemplateUserFieldValues(templateIdParam, merged, Object.keys(merged), draftIdParam);
-            } catch (e) { /* non-blocking */ }
+          if (hasFilled) {
+            // Merge: keep user-edited values on top, overlay agent values beneath
+            const merged = { ...fromTemplate, ...fieldValuesRef.current };
+            setFieldValues(merged);
+            await updateDraftFields(draftIdParam, merged, Object.keys(merged));
+            if (templateIdParam) {
+              try {
+                await saveTemplateUserFieldValues(templateIdParam, merged, Object.keys(merged), draftIdParam);
+              } catch (e) { /* non-blocking */ }
+            }
+            toast.success(`Form auto-filled: ${filledFromTemplate.length} field(s) populated.`);
+          } else if (String(extractionStatus || '').toLowerCase() === 'failed') {
+            toast.error('Field extraction failed. You can still continue and fill fields manually.');
+          } else {
+            toast.info('Field extraction finished. You can continue and complete any remaining fields manually.');
           }
-          toast.success(`Form auto-filled: ${filledFromTemplate.length} field(s) populated.`);
           if (onApplied) onApplied();
         }
       } catch (_) {}
@@ -550,6 +852,7 @@ const DraftFormPage = () => {
         clearInterval(intervalId);
         autopopulatePollRef.current = null;
         setIsAutopopulatingFields(false);
+        toast.info('Field fetching timed out. You can continue manually.');
       }
     }, POLL_INTERVAL_MS);
     autopopulatePollRef.current = intervalId;
@@ -681,6 +984,166 @@ const DraftFormPage = () => {
       setUploadFileLoading(false);
     }
   };
+
+  /* ── Chat-phase helpers ───────────────────────────────────────────── */
+  const chatSend = async (text) => {
+    const msg = (text ?? chatInput).trim();
+    if (!msg || chatIsSending || chatIsCreating) return;
+    setChatInput('');
+    setChatError('');
+    setChatMessages(prev => [...prev, { role: 'user', content: msg }]);
+    setChatDocPanelOpen(true);
+    setChatStreamingHtml('');
+    setChatIsSending(true);
+    chatAbortRef.current = new AbortController();
+
+    let sid = chatSessionId;
+    if (!sid) {
+      if (!autoLocalFiles.length) {
+        setChatError('Please go back and upload at least one reference document.');
+        setChatIsSending(false);
+        return;
+      }
+      setChatIsCreating(true);
+      try {
+        const res = await createChatDraftSession({
+          templateText: chatTemplateText,
+          documents: autoLocalFiles,
+          templateId: draft?.template_id || undefined,
+        });
+        sid = res.sessionId;
+        setChatSessionId(sid);
+        const warns = (res.documents || []).filter(d => d.warning).map(d => `"${d.name}": ${d.warning}`);
+        if (warns.length) setChatWarnings(warns);
+      } catch (err) {
+        setChatError(err.message || 'Failed to start session.');
+        setChatIsSending(false);
+        setChatIsCreating(false);
+        setChatMessages(prev => prev.slice(0, -1));
+        return;
+      } finally { setChatIsCreating(false); }
+    }
+
+    let accumulated = '';
+    let gotFinal = false;
+    try {
+      await streamChatDraftMessage(sid, msg, (chunk, isFinal) => {
+        if (isFinal) {
+          accumulated = chunk; gotFinal = true;
+          setChatStreamingHtml('');
+          setChatLatestHtml(chunk);
+          setChatMessages(prev => [...prev, { role: 'assistant', content: chunk }]);
+        } else {
+          accumulated += chunk;
+          setChatStreamingHtml(accumulated);
+        }
+      }, chatAbortRef.current.signal);
+      if (!gotFinal && accumulated) {
+        setChatStreamingHtml('');
+        setChatLatestHtml(accumulated);
+        setChatMessages(prev => [...prev, { role: 'assistant', content: accumulated }]);
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') { setChatIsSending(false); return; }
+      // fallback to regular POST
+      try {
+        const { sendChatDraftMessage } = await import('../services/chatDraftApi');
+        const res = await sendChatDraftMessage(sid, msg);
+        setChatLatestHtml(res.html);
+        setChatStreamingHtml('');
+        setChatMessages(prev => [...prev, { role: 'assistant', content: res.html }]);
+      } catch (fb) {
+        setChatError(fb.message || 'Something went wrong.');
+        setChatMessages(prev => prev.slice(0, -1));
+      }
+    } finally {
+      setChatIsSending(false);
+      setChatStreamingHtml('');
+    }
+  };
+
+  const chatOnKeyDown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); } };
+
+  const handleAutoFileAdd = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    e.target.value = '';
+    setAutoLocalFiles(prev => {
+      const names = new Set(prev.map(f => f.name));
+      return [...prev, ...files.filter(f => !names.has(f.name))];
+    });
+  };
+
+  const handleContinueAutomatic = async () => {
+    if (!draft?.template_id) { toast.error('Template ID missing.'); return; }
+    setChatTemplateLoading(true);
+    const headers = {};
+    const token = localStorage.getItem('token') || localStorage.getItem('authToken') ||
+      localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const userId = getUserIdForDrafting();
+    if (userId) headers['X-User-Id'] = userId;
+    try {
+      // Fetch template HTML directly from the /content endpoint (reads template_html table + GCS assets)
+      const r = await fetch(`${AGENT_DRAFT_TEMPLATE_API}/api/templates/${draft.template_id}/content`, { headers });
+      if (r.ok) {
+        const data = await r.json();
+        if (data.html) {
+          setChatTemplateText(data.html);
+        } else {
+          // No HTML in DB — try the regular template endpoint for content fallback
+          const r2 = await fetch(`${AGENT_DRAFT_TEMPLATE_API}/api/templates/${draft.template_id}?include_sections=true`, { headers });
+          if (r2.ok) {
+            const data2 = await r2.json();
+            const html2 = extractTemplateHtmlFromResponse(data2.template || data2);
+            setChatTemplateText(html2 || `Template: ${draft.template_name || draft.draft_title || ''}`);
+          }
+        }
+      }
+    } catch (_) {
+      // Fallback: use template name as minimal context so the session can still proceed
+      setChatTemplateText(`Template: ${draft.template_name || draft.draft_title || 'Legal Document'}`);
+    } finally {
+      setChatTemplateLoading(false);
+    }
+    setChatPhase(true);
+    addActivity('AI Chat Draft', 'Chat drafting session started.', 'in-progress');
+  };
+
+  // Auto-scroll chat to bottom
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages, chatIsSending, chatStreamingHtml]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return () => undefined;
+
+    const updateSidebarOffset = () => {
+      const sidebarEl = document.querySelector('[data-sidebar-root]');
+      if (!sidebarEl) {
+        setChatDocSidebarOffset(0);
+        return;
+      }
+
+      const rect = sidebarEl.getBoundingClientRect();
+      const style = window.getComputedStyle(sidebarEl);
+      const hidden = style.display === 'none' || style.visibility === 'hidden' || rect.width === 0;
+      setChatDocSidebarOffset(hidden ? 0 : rect.width);
+    };
+
+    updateSidebarOffset();
+    window.addEventListener('resize', updateSidebarOffset);
+
+    let resizeObserver;
+    const sidebarEl = document.querySelector('[data-sidebar-root]');
+    if (sidebarEl && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(updateSidebarOffset);
+      resizeObserver.observe(sidebarEl);
+    }
+
+    return () => {
+      window.removeEventListener('resize', updateSidebarOffset);
+      if (resizeObserver) resizeObserver.disconnect();
+    };
+  }, []);
 
   const openFilePicker = () => {
     if (uploadFileLoading) return;
@@ -885,10 +1348,91 @@ const DraftFormPage = () => {
 
   return (
     <>
+      {/* ── Drafting Method Selection Modal (shown once on first load) ── */}
+      {showMethodModal && !loading && draft && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '24px', fontFamily: 'inherit',
+        }}>
+          <div style={{
+            background: '#fff', borderRadius: 20, padding: '40px 36px',
+            maxWidth: 580, width: '100%',
+            boxShadow: '0 24px 64px rgba(0,0,0,.22)',
+            position: 'relative',
+          }}>
+            <button
+              onClick={() => setShowMethodModal(false)}
+              style={{ position:'absolute', top:16, right:16, width:32, height:32, borderRadius:8, border:'1px solid #e2e8f0', background:'#f8fafc', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'#94a3b8', fontSize:16, lineHeight:1, fontFamily:'inherit' }}
+              aria-label="Close"
+            >✕</button>
+            <h2 style={{ margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#0f172a' }}>
+              Choose your drafting method
+            </h2>
+            <p style={{ margin: '0 0 28px', fontSize: 13.5, color: '#64748b' }}>
+              How would you like to generate your draft for{' '}
+              <strong style={{ color: '#0f172a' }}>
+                {draft.draft_title || draft.template_name || 'this document'}
+              </strong>?
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Option A: Automatic Chat Draft */}
+              <button
+                onClick={() => { setDraftMethod('automatic'); setShowMethodModal(false); }}
+                style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 16,
+                  padding: '20px 22px', borderRadius: 14,
+                  border: '2px solid #0d9488', background: '#f0fdfa',
+                  cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#ccfbf1'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = '#f0fdfa'; }}
+              >
+                <span style={{ fontSize: 30, flexShrink: 0, lineHeight: 1 }}>⚡</span>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: '#0d9488', marginBottom: 4 }}>
+                    Automatic — AI Chat Draft
+                  </div>
+                  <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.65 }}>
+                    Template is loaded automatically. Upload your case documents and chat with AI to generate a complete, formatted draft in real-time. No fields to fill in.
+                  </div>
+                </div>
+              </button>
+
+              {/* Option B: Custom Section by Section */}
+              <button
+                onClick={() => { setDraftMethod('custom'); setShowMethodModal(false); }}
+                style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 16,
+                  padding: '20px 22px', borderRadius: 14,
+                  border: '2px solid #e2e8f0', background: '#f8fafc',
+                  cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = '#94a3b8'; e.currentTarget.style.background = '#f1f5f9'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = '#e2e8f0'; e.currentTarget.style.background = '#f8fafc'; }}
+              >
+                <span style={{ fontSize: 30, flexShrink: 0, lineHeight: 1 }}>🔧</span>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>
+                    Custom — Section by Section
+                  </div>
+                  <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.65 }}>
+                    Fill in structured fields and attach case context. The AI generates each section individually with full control over the content and structure.
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <DraftingLayout
         currentStepId={currentStepId}
         completedSteps={completedSteps}
         activities={activities}
+        hideChrome={chatPhase}
         headerContent={
           <div className="flex items-center justify-between w-full">
             <div className="flex items-center gap-4">
@@ -929,14 +1473,754 @@ const DraftFormPage = () => {
         }
       >
         <div className="h-full">
+          <style>{CHAT_CSS}</style>
+
+          {/* ── CHAT PHASE (Automatic method) ── */}
+          {chatPhase && (
+            <div style={{ display:'flex', height:'100%', minHeight:0, fontFamily:'inherit' }}>
+              {/* Left: chat */}
+              <div style={{ width: chatDocPanelOpen ? '40%' : '100%', minWidth: chatDocPanelOpen ? 260 : 'unset', display:'flex', flexDirection:'column', borderRight: chatDocPanelOpen ? '1px solid #e5e7eb' : 'none', transition:'width .25s', background:'#fff' }}>
+                <div style={{ padding:'12px 16px 10px', borderBottom:'1px solid #f1f5f9', background:'linear-gradient(90deg,#f0fdfa,#fff)', flexShrink:0 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                    <span style={{ fontSize:18 }}>⚡</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:'#0f172a' }}>AI Chat Draft</div>
+                      <div style={{ fontSize:11, color:'#64748b' }}>
+                      {draft?.template_name || draft?.draft_title}
+                      {chatSessionId
+                        ? <span style={{ color:'#21C1B6', fontWeight:600 }}> · {autoLocalFiles.length} doc{autoLocalFiles.length!==1?'s':''} processed ✓</span>
+                        : <span> · {autoLocalFiles.length} doc{autoLocalFiles.length!==1?'s':''} ready to upload</span>
+                      }
+                    </div>
+                    </div>
+                    <div style={{ display:'flex', alignItems:'center', gap:6, flexShrink:0 }}>
+                      {(chatLatestHtml || chatStreamingHtml) && (
+                        <button onClick={()=>setChatGoogleDocsOpen(true)} style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'4px 11px', borderRadius:6, border:'1.5px solid #4285f4', background:'#f0f4ff', fontSize:11.5, color:'#4285f4', cursor:'pointer', fontFamily:'inherit', fontWeight:700 }}>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="#4285f4"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-9 11H7v-2h4v2zm6-4H7V9h10v2z"/></svg>
+                          {chatRealGoogleDocsUrl ? 'Google Docs Editor' : 'Open in Docs'}
+                        </button>
+                      )}
+                      {(chatLatestHtml || chatStreamingHtml) && !chatDocPanelOpen && (
+                        <button onClick={()=>setChatDocPanelOpen(true)} style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'4px 11px', borderRadius:6, border:'1px solid #21C1B6', background:'#f0fdfa', fontSize:11.5, color:'#0d9488', cursor:'pointer', fontFamily:'inherit', fontWeight:600 }}>
+                          📄 View Draft
+                        </button>
+                      )}
+                      <button onClick={() => { chatAbortRef.current?.abort(); setChatPhase(false); }} style={{ fontSize:12, color:'#94a3b8', border:'1px solid #e2e8f0', background:'transparent', borderRadius:6, padding:'3px 9px', cursor:'pointer', fontFamily:'inherit' }}>← Back</button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* messages */}
+                <div className="cd-scroll" style={{ flex:1, overflowY:'auto', padding:'16px 14px 8px' }}>
+                  <div style={{ display:'flex', flexDirection:'column', gap:14, maxWidth:700, margin:'0 auto' }}>
+                    {chatTemplateLoading && <div style={{ fontSize:12.5, color:'#21C1B6', textAlign:'center', padding:12 }}>Loading template…</div>}
+                    {chatWarnings.length > 0 && <div style={{ fontSize:12, color:'#0d9488', background:'#f0fdfa', border:'1px solid #99f6e4', borderRadius:8, padding:'8px 12px' }}><strong>Note:</strong> {chatWarnings.join('; ')}</div>}
+
+                    {chatMessages.length === 0 && !chatIsSending && (
+                      <div style={{ textAlign:'center', padding:'32px 16px', color:'#94a3b8' }}>
+                        <div style={{ fontSize:32, marginBottom:8 }}>⚡</div>
+                        <div style={{ fontSize:14, fontWeight:600, color:'#475569', marginBottom:4 }}>Ready to draft</div>
+                        <div style={{ fontSize:12.5 }}>Type your request below — e.g. "Generate the complete draft" or "Draft using all uploaded documents"</div>
+                        <div style={{ display:'flex', flexWrap:'wrap', gap:7, marginTop:16, justifyContent:'center' }}>
+                          {['Generate the complete draft document', 'Draft a formal legal document following the template exactly', 'Create a well-structured draft with all document content'].map(p => (
+                            <button key={p} onClick={() => { setChatInput(p); setTimeout(()=>chatTaRef.current?.focus(),0); }} style={{ padding:'5px 12px', borderRadius:20, border:'1px solid #e2e8f0', background:'#f8fafc', fontSize:12, color:'#334155', cursor:'pointer', fontFamily:'inherit' }}>{p.length > 40 ? p.slice(0,40)+'…' : p}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {chatMessages.map((msg, idx) => msg.role === 'user' ? (
+                      <div key={idx} style={{ display:'flex', justifyContent:'flex-end' }}>
+                        <div style={{ maxWidth:'80%', background:'#f0fdfa', border:'1px solid #99f6e4', borderRadius:'16px 16px 4px 16px', padding:'9px 14px', fontSize:13.5, color:'#0f172a', lineHeight:1.6, whiteSpace:'pre-wrap' }}>{msg.content}</div>
+                      </div>
+                    ) : (
+                      <div key={idx} style={{ display:'flex', gap:9, alignItems:'flex-start' }}>
+                        <div style={{ flexShrink:0, width:26, height:26, borderRadius:'50%', background:'#f0fdfa', border:'1px solid #99f6e4', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>⚡</div>
+                        <div style={{ flex:1, background:'#fff', border:'1px solid #e5e7eb', borderRadius:'4px 14px 14px 14px', padding:'9px 13px', fontSize:13, color:'#0f172a', lineHeight:1.65 }}>
+                          {chatDocPanelOpen ? <span style={{ color:'#21C1B6', fontSize:12 }}>✓ Draft generated — see panel →</span> : <div className="cd-paper" dangerouslySetInnerHTML={{ __html: msg.content }}/>}
+                        </div>
+                      </div>
+                    ))}
+
+                    {chatIsCreating && (
+                      <div style={{ display:'flex', gap:9, alignItems:'flex-start' }}>
+                        <div style={{ flexShrink:0, width:26, height:26, borderRadius:'50%', background:'#f0fdfa', border:'1px solid #99f6e4', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>⚡</div>
+                        <div style={{ background:'#f0fdfa', border:'1px solid #99f6e4', borderRadius:'4px 14px 14px 14px', padding:'10px 14px' }}>
+                          <div style={{ fontSize:12.5, color:'#0d9488', fontWeight:600, marginBottom:3 }}>Processing {autoLocalFiles.length} document{autoLocalFiles.length!==1?'s':''}…</div>
+                          <div style={{ fontSize:11.5, color:'#5eead4' }}>Extracting text and building session. This may take a moment.</div>
+                        </div>
+                      </div>
+                    )}
+                    {chatIsSending && !chatIsCreating && !chatStreamingHtml && (
+                      <div style={{ display:'flex', gap:9, alignItems:'flex-start' }}>
+                        <div style={{ flexShrink:0, width:26, height:26, borderRadius:'50%', background:'#f0fdfa', border:'1px solid #99f6e4', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>⚡</div>
+                        <div style={{ background:'#fff', border:'1px solid #e5e7eb', borderRadius:'4px 14px 14px 14px', padding:'10px 14px' }}>
+                          {chatDocPanelOpen ? <span style={{ fontSize:12, color:'#21C1B6' }}>Generating draft…</span> : <span style={{ display:'inline-flex', gap:4 }}>{[0,1,2].map(i=><span key={i} style={{ width:6,height:6,borderRadius:'50%',background:'#99f6e4',display:'inline-block',animation:`_dot 1.1s ease-in-out ${i*.18}s infinite` }}/>)}</span>}
+                        </div>
+                      </div>
+                    )}
+                    {chatIsSending && chatStreamingHtml && chatDocPanelOpen && (
+                      <div style={{ display:'flex', gap:9, alignItems:'flex-start' }}>
+                        <div style={{ flexShrink:0, width:26, height:26, borderRadius:'50%', background:'#f0fdfa', border:'1px solid #99f6e4', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>⚡</div>
+                        <div style={{ background:'#fff', border:'1px solid #e5e7eb', borderRadius:'4px 14px 14px 14px', padding:'9px 13px', fontSize:12, color:'#21C1B6' }}>Streaming draft… see panel →</div>
+                      </div>
+                    )}
+                    {chatError && <div style={{ fontSize:12.5, color:'#dc2626', background:'#fef2f2', border:'1px solid #fecaca', borderRadius:8, padding:'9px 14px' }}>{chatError}</div>}
+                    <div ref={chatEndRef}/>
+                  </div>
+                </div>
+
+                {/* input */}
+                <div style={{ flexShrink:0, padding:'10px 14px 14px', borderTop:'1px solid #f1f5f9', background:'#fff' }}>
+                  <div style={{ border:`1.5px solid ${chatIsSending?'#21C1B6':'#e2e8f0'}`, borderRadius:12, padding:'10px 12px 8px', background:'#fff', boxShadow:'0 2px 8px rgba(0,0,0,.06)', transition:'border-color .2s' }}>
+                    <textarea ref={chatTaRef} rows={1} value={chatInput} onChange={e => { setChatInput(e.target.value); const ta=chatTaRef.current; if(ta){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,140)+'px';} }} onKeyDown={chatOnKeyDown} disabled={chatIsSending||chatIsCreating||chatTemplateLoading}
+                      placeholder={chatTemplateLoading ? 'Loading template…' : 'Describe what to draft, or ask to generate the full document…'}
+                      style={{ border:'none', outline:'none', resize:'none', background:'transparent', fontSize:13.5, color:'#0f172a', lineHeight:1.6, fontFamily:'inherit', width:'100%', minHeight:22, caretColor:'#21C1B6' }}
+                    />
+                    <div style={{ display:'flex', justifyContent:'flex-end', marginTop:6 }}>
+                      <button onClick={()=>chatSend()} disabled={!chatInput.trim()||chatIsSending||chatIsCreating||chatTemplateLoading}
+                        style={{ width:30, height:30, borderRadius:'50%', background:chatInput.trim()&&!chatIsSending&&!chatIsCreating?'#21C1B6':'#e2e8f0', border:'none', cursor:chatInput.trim()&&!chatIsSending&&!chatIsCreating?'pointer':'default', display:'flex', alignItems:'center', justifyContent:'center', transition:'background .2s', flexShrink:0 }}>
+                        {chatIsSending||chatIsCreating
+                          ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" style={{animation:'_spin .7s linear infinite'}}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                          : <svg width="13" height="13" viewBox="0 0 24 24" fill="white"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                        }
+                      </button>
+                    </div>
+                  </div>
+                  <p style={{ textAlign:'center', fontSize:10, color:'#94a3b8', marginTop:5 }}>Enter ↵ to send · Shift+Enter for new line</p>
+                </div>
+              </div>
+
+              {/* Right: document panel */}
+              {chatDocPanelOpen && (
+                <div style={{ flex:1, display:'flex', flexDirection:'column', background:'#fff', minWidth:0 }}>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'10px 16px', borderBottom:'1px solid #e5e7eb', flexShrink:0 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <span style={{ fontSize:16 }}>📄</span>
+                      <span style={{ fontSize:13, fontWeight:600, color:'#0f172a' }}>Draft Document</span>
+                      {chatIsSending && chatStreamingHtml && <span style={{ fontSize:10.5, color:'#fff', background:'#21C1B6', borderRadius:4, padding:'1px 7px', fontWeight:600 }}>● LIVE</span>}
+                    </div>
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button onClick={() => { const h=chatLatestHtml||chatStreamingHtml; if(!h)return; const tmp=document.createElement('div');tmp.innerHTML=h; navigator.clipboard.writeText(tmp.innerText||'').then(()=>{setChatCopied(true);setTimeout(()=>setChatCopied(false),2000)}); }} style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'3px 9px', borderRadius:6, border:'1px solid #e2e8f0', background:'#fff', fontSize:11.5, color:'#334155', cursor:'pointer', fontFamily:'inherit' }}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        {chatCopied ? 'Copied!' : 'Copy'}
+                      </button>
+                      {(chatLatestHtml || chatStreamingHtml) && (
+                        <button onClick={()=>setChatGoogleDocsOpen(true)} style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'3px 9px', borderRadius:6, border:'1px solid #4285f4', background:'#fff', fontSize:11.5, color:'#4285f4', cursor:'pointer', fontFamily:'inherit', fontWeight:600 }}>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#4285f4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                          Google Docs View
+                        </button>
+                      )}
+                      <button onClick={()=>setChatDocPanelOpen(false)} style={{ width:26, height:26, borderRadius:6, border:'1px solid #e2e8f0', background:'#fff', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'#94a3b8' }}>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="cd-scroll" style={{ flex:1, overflowY:'auto', background:'#f5f5f5', padding:'24px 28px' }}>
+                    {(chatStreamingHtml || chatLatestHtml) ? (
+                      <div style={{ maxWidth:800, margin:'0 auto', background:'#fff', borderRadius:8, boxShadow:'0 4px 24px rgba(0,0,0,.10)', overflow:'hidden' }}>
+                        <div className={`cd-paper${chatIsSending&&chatStreamingHtml?' cd-cursor':''}`} style={{ padding:'52px 68px', fontSize:14, lineHeight:1.85 }} dangerouslySetInnerHTML={{ __html: chatStreamingHtml || chatLatestHtml }}/>
+                      </div>
+                    ) : (
+                      <div style={{ maxWidth:800, margin:'0 auto', background:'#fff', borderRadius:8, boxShadow:'0 4px 24px rgba(0,0,0,.10)', padding:'52px 68px' }}>
+                        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, minHeight:280, color:'#94a3b8' }}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#21C1B6" strokeWidth="2.5" strokeLinecap="round" style={{animation:'_spin .7s linear infinite'}}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                          <p style={{ fontSize:13, margin:0 }}>Generating your draft…</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Google Docs iframe overlay */}
+                  {chatGoogleDocsOpen && (() => {
+                    const docHtml = chatLatestHtml || chatStreamingHtml || '';
+                    const docTitle = draft?.draft_title || draft?.template_name || 'Draft Document';
+                    const buildGoogleDocsImportHtml = (title, rawHtml) => {
+                      const wrapper = document.createElement('div');
+                      wrapper.innerHTML = rawHtml || '';
+
+                      const applyStyles = (selector, styles) => {
+                        wrapper.querySelectorAll(selector).forEach((el) => Object.assign(el.style, styles));
+                      };
+
+                      applyStyles('h1', {
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '24px',
+                        fontWeight: '700',
+                        textAlign: 'center',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        lineHeight: '1.4',
+                        margin: '0 0 0.9em',
+                      });
+                      applyStyles('h2', {
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '20px',
+                        fontWeight: '700',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.03em',
+                        lineHeight: '1.45',
+                        margin: '1.3em 0 0.45em',
+                      });
+                      applyStyles('h3', {
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '18px',
+                        fontWeight: '700',
+                        lineHeight: '1.45',
+                        margin: '1em 0 0.35em',
+                      });
+                      applyStyles('p', {
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '13.5px',
+                        lineHeight: '1.88',
+                        textAlign: 'justify',
+                        color: '#111',
+                        margin: '0.55em 0',
+                      });
+                      applyStyles('ul, ol', {
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '13.5px',
+                        lineHeight: '1.88',
+                        margin: '0.45em 0',
+                        paddingLeft: '1.6em',
+                      });
+                      applyStyles('li', {
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '13.5px',
+                        lineHeight: '1.78',
+                        margin: '0.25em 0',
+                      });
+                      applyStyles('table', {
+                        width: '100%',
+                        borderCollapse: 'collapse',
+                        margin: '1em 0',
+                        fontFamily: 'Georgia, "Times New Roman", serif',
+                        fontSize: '12.42px',
+                      });
+                      applyStyles('th', {
+                        background: '#f9fafb',
+                        fontWeight: '700',
+                        padding: '0.5em 0.7em',
+                        border: '1px solid #e5e7eb',
+                        textAlign: 'left',
+                      });
+                      applyStyles('td', {
+                        padding: '0.45em 0.7em',
+                        border: '1px solid #e5e7eb',
+                        verticalAlign: 'top',
+                      });
+                      applyStyles('hr', {
+                        border: 'none',
+                        borderTop: '1.5px solid #e5e7eb',
+                        margin: '1.4em 0',
+                      });
+                      applyStyles('strong', { fontWeight: '700' });
+                      applyStyles('em', { fontStyle: 'italic' });
+
+                      return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>${GOOGLE_IMPORT_CSS}</style></head><body><div class="gdoc-import">${wrapper.innerHTML}</div></body></html>`;
+                    };
+                    const DOCUMENT_CONTENT_CSS = `
+                      body, .doc-content, .gdoc-import {
+                        font-family: 'Georgia', 'Times New Roman', serif;
+                        font-size: 13.5px;
+                        color: #111;
+                        line-height: 1.88;
+                      }
+                      .doc-content, .gdoc-import {
+                        position: relative;
+                        z-index: 1;
+                      }
+                      .doc-content > :first-child, .gdoc-import > :first-child { margin-top: 0 !important; }
+                      .doc-content > :last-child, .gdoc-import > :last-child { margin-bottom: 0 !important; }
+                      .doc-content h1, .gdoc-import h1 { font-size:1.25em; font-weight:700; text-align:center; margin:0 0 .9em; text-transform:uppercase; letter-spacing:.05em; line-height:1.4; page-break-after:avoid; }
+                      .doc-content h2, .gdoc-import h2 { font-size:1.05em; font-weight:700; margin:1.3em 0 .45em; text-transform:uppercase; letter-spacing:.03em; page-break-after:avoid; }
+                      .doc-content h3, .gdoc-import h3 { font-size:.98em; font-weight:700; margin:1em 0 .35em; page-break-after:avoid; }
+                      .doc-content p, .gdoc-import p { margin:.55em 0; line-height:1.88; text-align:justify; page-break-inside:avoid; }
+                      .doc-content ul, .doc-content ol, .gdoc-import ul, .gdoc-import ol { padding-left:1.6em; margin:.45em 0; }
+                      .doc-content li, .gdoc-import li { margin:.25em 0; line-height:1.78; }
+                      .doc-content table, .gdoc-import table { width:100%; border-collapse:collapse; margin:1em 0; font-size:.92em; page-break-inside:avoid; }
+                      .doc-content th, .gdoc-import th { background:#f9fafb; font-weight:700; padding:.5em .7em; border:1px solid #e5e7eb; text-align:left; }
+                      .doc-content td, .gdoc-import td { padding:.45em .7em; border:1px solid #e5e7eb; vertical-align:top; }
+                      .doc-content tr, .gdoc-import tr { page-break-inside:avoid; }
+                      .doc-content strong, .gdoc-import strong { font-weight:700; }
+                      .doc-content em, .gdoc-import em { font-style:italic; }
+                      .doc-content hr, .gdoc-import hr { border:none; border-top:1.5px solid #e5e7eb; margin:1.4em 0; }
+                    `;
+                    const GOOGLE_IMPORT_CSS = `
+                      body { margin:0; padding:0; background:#fff; }
+                      .gdoc-import {
+                        max-width: 794px;
+                        margin: 0 auto;
+                      }
+                    `;
+
+                    /* ── Shared typography that exactly matches the cd-paper panel ── */
+                    const SHARED_FONT_CSS = `
+                      *, *::before, *::after { box-sizing: border-box; }
+                      body {
+                        font-family: 'Georgia', 'Times New Roman', serif;
+                        font-size: 13.5px;
+                        color: #111;
+                        line-height: 1.88;
+                        margin: 0;
+                        padding: 0;
+                        background: #f1f3f4;
+                      }
+                      /* ── Page wrapper ── */
+                      .doc-page {
+                        width: 794px;
+                        min-height: 1123px;
+                        margin: 28px auto;
+                        padding: 96px 96px 80px;
+                        background: #fff;
+                        box-shadow: 0 1px 4px rgba(0,0,0,.18), 0 4px 16px rgba(0,0,0,.08);
+                        position: relative;
+                      }
+                      /* ── Page header (visible on screen) ── */
+                      .doc-hdr {
+                        position: absolute;
+                        top: 32px; left: 96px; right: 96px;
+                        font-size: 9px;
+                        color: #888;
+                        border-bottom: 1px solid #e5e7eb;
+                        padding-bottom: 5px;
+                        letter-spacing: .04em;
+                        text-transform: uppercase;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                      }
+                      /* ── Page footer ── */
+                      .doc-ftr {
+                        position: absolute;
+                        bottom: 28px; left: 96px; right: 96px;
+                        font-size: 9px;
+                        color: #888;
+                        border-top: 1px solid #e5e7eb;
+                        padding-top: 5px;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                      }
+                      .doc-content {
+                        position: relative;
+                        z-index: 1;
+                      }
+                      ${DOCUMENT_CONTENT_CSS}
+                      a { color:#1a73e8; }
+
+                      /* ── Print ── */
+                      @media print {
+                        body { background: white; }
+                        .doc-page {
+                          width: 100%;
+                          margin: 0;
+                          padding: 0;
+                          box-shadow: none;
+                          min-height: unset;
+                        }
+                        .doc-hdr, .doc-ftr { position: fixed; }
+                        .doc-hdr { top: 0; left: 0; right: 0; padding: 6mm 25mm 4mm; border: none; border-bottom: 0.5pt solid #ccc; }
+                        .doc-ftr { bottom: 0; left: 0; right: 0; padding: 4mm 25mm 6mm; border: none; border-top: 0.5pt solid #ccc; }
+                        .doc-content { margin-top: 12mm; margin-bottom: 12mm; }
+                        @page {
+                          size: A4 portrait;
+                          margin: 25mm 25mm 25mm 25mm;
+                        }
+                        h1, h2, h3 { page-break-after: avoid; }
+                        p, li { page-break-inside: avoid; }
+                        table, tr, td, th { page-break-inside: avoid; }
+                        thead { display: table-header-group; }
+                        tfoot { display: table-footer-group; }
+                      }
+                    `;
+
+                    const srcDoc = `<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <title>${docTitle}</title>
+  <style>${SHARED_FONT_CSS}</style>
+</head>
+<body>
+  <div class="doc-page">
+    <div class="doc-hdr">
+      <span>${docTitle}</span>
+      <span>Confidential Draft</span>
+    </div>
+    <div class="doc-content">${docHtml}</div>
+    <div class="doc-ftr">
+      <span>Generated by JuriNex AI</span>
+      <span id="pgn"></span>
+    </div>
+  </div>
+  <script>
+    // Simple page numbering (approximation for screen)
+    var el = document.getElementById('pgn');
+    if (el) el.textContent = 'Page 1';
+  </script>
+</body></html>`;
+
+                    const openPrintableWindow = () => {
+                      if (!docHtml || !docHtml.trim()) {
+                        toast.error('No generated draft content available to print.');
+                        return;
+                      }
+                      const printWindow = window.open('', '_blank', 'width=1100,height=800');
+                      if (!printWindow) {
+                        toast.error('Pop-up blocked. Please allow pop-ups to print.');
+                        return;
+                      }
+                      printWindow.document.open();
+                      printWindow.document.write(srcDoc);
+                      printWindow.document.close();
+                      const tryPrint = () => {
+                        try {
+                          printWindow.focus();
+                          printWindow.print();
+                        } catch (_) {
+                          // no-op
+                        }
+                      };
+                      printWindow.onload = () => setTimeout(tryPrint, 350);
+                      setTimeout(tryPrint, 1200);
+                    };
+
+                    const handlePrint = () => {
+                      if (chatRealGoogleDocsUrl) {
+                        const editUrl = chatGoogleDocsFileId
+                          ? `https://docs.google.com/document/d/${chatGoogleDocsFileId}/edit`
+                          : chatRealGoogleDocsUrl.replace('?embedded=true', '');
+                        window.open(editUrl, '_blank', 'noopener,noreferrer');
+                        toast.info('Opened Google Docs in a new tab. Use Ctrl+P there for accurate print.');
+                        return;
+                      }
+                      openPrintableWindow();
+                    };
+
+                    const handleOpenInRealGoogleDocs = async () => {
+                      if (chatGoogleDocsUploading) return;
+                      // Already have URL — iframe is already showing
+                      if (chatRealGoogleDocsUrl) return;
+                      setChatGoogleDocsUploading(true);
+                      try {
+                        const returnTo = window.location.pathname + window.location.search;
+                        const redirectToGoogleDriveAuth = async () => {
+                          const authData = await googleDriveApi.initiateAuth(returnTo);
+                          const authUrl = authData?.authUrl || authData?.url;
+                          if (authUrl) {
+                            window.location.href = authUrl;
+                            return true;
+                          }
+                          return false;
+                        };
+
+                        // Step 1: Check Google Drive connected and get access token
+                        const status = await googleDriveApi.getConnectionStatus();
+                        if (!status?.connected) {
+                          // Redirect to connect Google Drive, return to this page after
+                          if (await redirectToGoogleDriveAuth()) {
+                            return;
+                          }
+                          throw new Error('Google Drive is not connected. Please connect from Settings.');
+                        }
+                        let tokenData;
+                        try {
+                          tokenData = await googleDriveApi.getAccessToken();
+                        } catch (tokenError) {
+                          const statusCode = tokenError?.response?.status;
+                          if ((statusCode === 401 || statusCode === 403) && await redirectToGoogleDriveAuth()) {
+                            return;
+                          }
+                          throw tokenError;
+                        }
+                        const accessToken = tokenData?.access_token || tokenData?.accessToken || tokenData?.token;
+                        if (!accessToken) throw new Error('Could not get Google Drive access token.');
+
+                        // Step 2: Build multipart upload to Google Drive (HTML → Google Doc)
+                        const fileTitle = docTitle;
+
+                        const metadata = JSON.stringify({
+                          name: fileTitle,
+                          mimeType: 'application/vnd.google-apps.document',
+                        });
+                        const boundary = '-------314159265358979323846';
+                        let importBlob = null;
+                        let importMimeType = 'text/html; charset=UTF-8';
+
+                        if (chatSessionId) {
+                          try {
+                            const docxBlob = await exportChatDraftDocx(chatSessionId);
+                            if (docxBlob instanceof Blob && docxBlob.size > 0) {
+                              importBlob = docxBlob;
+                              importMimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+                            }
+                          } catch (docxError) {
+                            console.warn('[Google Docs upload] DOCX export failed, falling back to HTML import.', docxError);
+                          }
+                        }
+
+                        if (!importBlob) {
+                          importBlob = new Blob(
+                            [buildGoogleDocsImportHtml(fileTitle, docHtml)],
+                            { type: 'text/html;charset=UTF-8' }
+                          );
+                        }
+
+                        const metadataPrefix = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${importMimeType}\r\n\r\n`;
+                        const metadataBlob = new Blob([metadataPrefix], { type: 'text/plain' });
+                        const closingBlob = new Blob([`\r\n--${boundary}--`], { type: 'text/plain' });
+                        const body = new Blob([metadataBlob, importBlob, closingBlob], {
+                          type: `multipart/related; boundary="${boundary}"`,
+                        });
+
+                        let uploadUrl = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink';
+                        // If updating existing file, use PATCH
+                        const isUpdate = Boolean(chatGoogleDocsFileId);
+                        const uploadResp = await fetch(
+                          isUpdate
+                            ? `https://www.googleapis.com/upload/drive/v3/files/${chatGoogleDocsFileId}?uploadType=multipart&fields=id,webViewLink`
+                            : uploadUrl,
+                          {
+                            method: isUpdate ? 'PATCH' : 'POST',
+                            headers: {
+                              Authorization: `Bearer ${accessToken}`,
+                              'Content-Type': `multipart/related; boundary="${boundary}"`,
+                            },
+                            body,
+                          }
+                        );
+                        if (!uploadResp.ok) {
+                          const errText = await uploadResp.text().catch(() => '');
+                          throw new Error(`Google Drive upload failed (${uploadResp.status}): ${errText.slice(0, 200)}`);
+                        }
+                        const uploadResult = await uploadResp.json();
+                        const googleFileId = uploadResult.id;
+                        if (!googleFileId) throw new Error('No file ID returned from Google Drive.');
+
+                        const iframeUrl = `https://docs.google.com/document/d/${googleFileId}/edit?embedded=true`;
+                        setChatRealGoogleDocsUrl(iframeUrl);
+                        setChatGoogleDocsFileId(googleFileId);
+                        toast.success('Opened in Google Docs editor!');
+                      } catch (err) {
+                        console.error('[Google Docs upload]', err);
+                        toast.error('Google Docs: ' + (err.message || 'Unknown error'));
+                      } finally {
+                        setChatGoogleDocsUploading(false);
+                      }
+                    };
+
+                    const handleDownloadPdf = async () => {
+                      if (!docHtml || !docHtml.trim()) {
+                        toast.error('No generated draft content available for PDF export.');
+                        return;
+                      }
+
+                      // Prefer native Google Docs PDF export when we have a Google file id.
+                      if (chatGoogleDocsFileId) {
+                        try {
+                          const status = await googleDriveApi.getConnectionStatus();
+                          if (status?.connected) {
+                            const tokenData = await googleDriveApi.getAccessToken();
+                            const accessToken = tokenData?.access_token || tokenData?.accessToken || tokenData?.token;
+                            if (accessToken) {
+                              const pdfResp = await fetch(
+                                `https://www.googleapis.com/drive/v3/files/${chatGoogleDocsFileId}/export?mimeType=application/pdf`,
+                                {
+                                  method: 'GET',
+                                  headers: { Authorization: `Bearer ${accessToken}` },
+                                }
+                              );
+                              if (pdfResp.ok) {
+                                const pdfBlob = await pdfResp.blob();
+                                if (pdfBlob.size > 0) {
+                                  const url = URL.createObjectURL(pdfBlob);
+                                  const a = document.createElement('a');
+                                  a.href = url;
+                                  a.download = `${docTitle}.pdf`;
+                                  a.click();
+                                  setTimeout(() => URL.revokeObjectURL(url), 8000);
+                                  return;
+                                }
+                              }
+                            }
+                          }
+                        } catch (pdfExportError) {
+                          console.warn('[PDF Export] Google Docs export failed, falling back to local renderer.', pdfExportError);
+                        }
+                      }
+
+                      // Build a hidden printable div with all inline styles applied
+                      const wrapper = document.createElement('div');
+                      wrapper.style.cssText = [
+                        'font-family:Georgia,"Times New Roman",serif',
+                        'font-size:13.5px', 'color:#111', 'line-height:1.88',
+                        'background:#fff', 'padding:0', 'margin:0',
+                        'width:794px',
+                      ].join(';');
+
+                      // Apply inline styles to every element before handing to html2pdf
+                      const tmp = document.createElement('div');
+                      tmp.innerHTML = docHtml;
+                      tmp.querySelectorAll('h1').forEach(el => Object.assign(el.style, { fontSize:'1.22em', fontWeight:'700', textAlign:'center', textTransform:'uppercase', letterSpacing:'.05em', lineHeight:'1.4', margin:'0 0 .9em', pageBreakAfter:'avoid' }));
+                      tmp.querySelectorAll('h2').forEach(el => Object.assign(el.style, { fontSize:'1.04em', fontWeight:'700', textTransform:'uppercase', letterSpacing:'.03em', margin:'1.3em 0 .45em', pageBreakAfter:'avoid' }));
+                      tmp.querySelectorAll('h3').forEach(el => Object.assign(el.style, { fontSize:'.97em', fontWeight:'700', margin:'1em 0 .35em', pageBreakAfter:'avoid' }));
+                      tmp.querySelectorAll('p').forEach(el => Object.assign(el.style, { margin:'.55em 0', lineHeight:'1.88', textAlign:'justify', pageBreakInside:'avoid' }));
+                      tmp.querySelectorAll('ul,ol').forEach(el => Object.assign(el.style, { paddingLeft:'1.6em', margin:'.45em 0' }));
+                      tmp.querySelectorAll('li').forEach(el => Object.assign(el.style, { margin:'.22em 0', lineHeight:'1.78' }));
+                      tmp.querySelectorAll('table').forEach(el => Object.assign(el.style, { width:'100%', borderCollapse:'collapse', margin:'1em 0', fontSize:'.91em', pageBreakInside:'avoid' }));
+                      tmp.querySelectorAll('th').forEach(el => Object.assign(el.style, { background:'#f9fafb', fontWeight:'700', padding:'.48em .7em', border:'1px solid #d1d5db', textAlign:'left' }));
+                      tmp.querySelectorAll('td').forEach(el => Object.assign(el.style, { padding:'.42em .7em', border:'1px solid #d1d5db', verticalAlign:'top' }));
+                      tmp.querySelectorAll('tr').forEach(el => Object.assign(el.style, { pageBreakInside:'avoid' }));
+                      tmp.querySelectorAll('strong').forEach(el => Object.assign(el.style, { fontWeight:'700' }));
+                      tmp.querySelectorAll('hr').forEach(el => Object.assign(el.style, { border:'none', borderTop:'1.5px solid #e5e7eb', margin:'1.4em 0' }));
+                      wrapper.appendChild(tmp);
+
+                      // Hidden container off-screen
+                      wrapper.style.position = 'absolute';
+                      wrapper.style.left = '-9999px';
+                      wrapper.style.top = '0';
+                      document.body.appendChild(wrapper);
+                      try {
+                        await html2pdf().set({
+                          margin:        [20, 22, 22, 22],
+                          filename:      `${docTitle}.pdf`,
+                          image:         { type: 'jpeg', quality: 0.99 },
+                          html2canvas:   { scale: 2.5, useCORS: true, logging: false, letterRendering: true },
+                          jsPDF:         { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+                          pagebreak:     { mode: ['avoid-all', 'css', 'legacy'], avoid: ['p', 'h1', 'h2', 'h3', 'tr', 'li', 'table'] },
+                        }).from(wrapper).save();
+                      } catch (pdfLocalError) {
+                        console.warn('[PDF Export] Local html2pdf failed, opening print fallback.', pdfLocalError);
+                        toast.info('Direct PDF export failed. Opening print dialog so you can Save as PDF.');
+                        openPrintableWindow();
+                      } finally {
+                        document.body.removeChild(wrapper);
+                      }
+                    };
+
+                    const handleDownloadDocx = async () => {
+                      if (!docHtml || !docHtml.trim()) {
+                        toast.error('No generated draft content available for Word export.');
+                        return;
+                      }
+                      // Try backend DOCX export first (proper .docx via python-docx)
+                      if (chatSessionId) {
+                        try {
+                          const blob = await exportChatDraftDocx(chatSessionId);
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url; a.download = `${docTitle}.docx`; a.click();
+                          setTimeout(() => URL.revokeObjectURL(url), 8000);
+                          return;
+                        } catch (_) { /* fall through to HTML fallback */ }
+                      }
+                      // Fallback: download as HTML (safe) rather than fake .doc that can break in Word.
+                      const htmlDoc = buildGoogleDocsImportHtml(docTitle, docHtml);
+                      const blob = new Blob([htmlDoc], { type: 'text/html' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url; a.download = `${docTitle}.html`; a.click();
+                      setTimeout(() => URL.revokeObjectURL(url), 8000);
+                      toast.info('Downloaded as HTML fallback. Use Google Docs import or DOCX export for Word compatibility.');
+                    };
+
+                    const btnStyle = { display:'inline-flex', alignItems:'center', gap:5, padding:'5px 14px', borderRadius:5, border:'1px solid #dadce0', background:'#fff', fontSize:12.5, color:'#202124', cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap', fontWeight:500, lineHeight:1.4 };
+
+                    return (
+                      <div style={{ position:'fixed', top:0, right:0, bottom:0, left:chatDocSidebarOffset, zIndex:9999, background:'#f1f3f4', display:'flex', flexDirection:'column' }}>
+                        {/* Google Docs-style menu bar */}
+                        <div style={{ background:'#fff', borderBottom:'1px solid #e0e0e0', flexShrink:0, boxShadow:'0 1px 3px rgba(0,0,0,.08)' }}>
+                          {/* Top row: icon + title + close */}
+                          <div style={{ height:52, display:'flex', alignItems:'center', padding:'0 16px', gap:10 }}>
+                            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#4285f4"/>
+                              <path d="M14 2v6h6" fill="#a8c7fa"/>
+                              <line x1="8" y1="13" x2="16" y2="13" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/>
+                              <line x1="8" y1="16.5" x2="13" y2="16.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/>
+                            </svg>
+                            <span style={{ fontSize:17, fontWeight:400, color:'#202124', flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{docTitle}</span>
+                            <button onClick={() => setChatGoogleDocsOpen(false)} style={{ width:34, height:34, borderRadius:17, border:'none', background:'transparent', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'#5f6368', fontSize:18 }}>✕</button>
+                          </div>
+                          {/* Toolbar row */}
+                          <div style={{ height:40, display:'flex', alignItems:'center', padding:'0 12px', gap:4, borderTop:'1px solid #f1f3f4' }}>
+                            <button onClick={handlePrint} style={btnStyle} title="Print document">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                              Print
+                            </button>
+                            <div style={{ width:1, height:20, background:'#e0e0e0', margin:'0 2px' }}/>
+                            <button onClick={handleDownloadPdf} style={btnStyle} title="Download as PDF">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#e53935" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg>
+                              <span style={{ color:'#c62828' }}>Download PDF</span>
+                            </button>
+                            <button onClick={handleDownloadDocx} style={btnStyle} title="Download as Word document">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#1565c0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg>
+                              <span style={{ color:'#1565c0' }}>Download Word</span>
+                            </button>
+                            <div style={{ width:1, height:20, background:'#e0e0e0', margin:'0 2px' }}/>
+                            <button
+                              onClick={handleOpenInRealGoogleDocs}
+                              disabled={chatGoogleDocsUploading}
+                              style={{ ...btnStyle, background: chatRealGoogleDocsUrl ? '#e8f0fe' : '#fff', border:'1px solid #4285f4' }}
+                              title="Open in Google Docs editor"
+                            >
+                              {chatGoogleDocsUploading
+                                ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4285f4" strokeWidth="2.5" strokeLinecap="round" style={{animation:'_spin .7s linear infinite'}}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                                : <svg width="13" height="13" viewBox="0 0 24 24" fill="#4285f4"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-9 11H7v-2h4v2zm6-4H7V9h10v2z"/></svg>
+                              }
+                              <span style={{ color:'#4285f4', fontWeight:600 }}>
+                                {chatGoogleDocsUploading ? 'Opening…' : chatRealGoogleDocsUrl ? 'Google Docs Editor' : 'Open in Google Docs'}
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Document viewer — real Google Docs editor if available, else local preview */}
+                        <div style={{ flex:1, overflow:'hidden', background:'#f1f3f4', position:'relative' }}>
+                          {chatRealGoogleDocsUrl ? (
+                            /* Real Google Docs iframe — full-size editable */
+                            <iframe
+                              key={chatRealGoogleDocsUrl}
+                              src={chatRealGoogleDocsUrl}
+                              title="Google Docs Editor"
+                              style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }}
+                              allow="clipboard-read; clipboard-write"
+                            />
+                          ) : (
+                            /* Local HTML preview (before uploading to Google Docs) */
+                            <iframe
+                              ref={chatIframeRef}
+                              title="Document Preview"
+                              style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none', background:'#f1f3f4' }}
+                              srcDoc={srcDoc}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* STEP 1: INITIALIZATION */}
-          {currentStep === 1 && (
+          {!chatPhase && currentStep === 1 && (
             <div className="p-2 space-y-8 animate-slideIn h-full">
               <div className="space-y-2 pb-4 border-b border-slate-100">
                 <h2 className="text-2xl font-bold text-slate-900">Initialization</h2>
                 <p className="text-slate-500 text-sm">Setting the context for your legal document.</p>
               </div>
+              {/* Method badge */}
+              {draftMethod && (
+                <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 16px', borderRadius:12, border:`1.5px solid ${draftMethod==='automatic'?'#21C1B6':'#e2e8f0'}`, background:draftMethod==='automatic'?'#f0fdfa':'#f8fafc' }}>
+                  <span style={{ fontSize:18 }}>{draftMethod==='automatic'?'⚡':'🔧'}</span>
+                  <div>
+                    <div style={{ fontSize:13, fontWeight:700, color: draftMethod==='automatic'?'#0d9488':'#334155' }}>{draftMethod==='automatic'?'Automatic — AI Chat Draft':'Custom — Section by Section'}</div>
+                    <div style={{ fontSize:11.5, color:'#64748b' }}>{draftMethod==='automatic'?'Upload your case/reference documents below (required). Template loads from database automatically.':'Attach case or upload documents to auto-fill form fields.'}</div>
+                  </div>
+                  <button onClick={()=>setShowMethodModal(true)} style={{ marginLeft:'auto', fontSize:11.5, color:'#64748b', border:'1px solid #e2e8f0', background:'transparent', borderRadius:6, padding:'3px 9px', cursor:'pointer', fontFamily:'inherit' }}>Change</button>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 {/* Option A: Attach Case */}
@@ -989,7 +2273,7 @@ const DraftFormPage = () => {
                   )}
                 </div>
 
-                {/* Option B: Upload File */}
+                {/* Option B: Upload Documents */}
                 <div className="space-y-5 p-7 bg-white rounded-3xl border border-slate-200 hover:border-[#21C1B6] transition-all duration-300 shadow-sm hover:shadow-xl group">
                   <div className="flex items-center gap-4 mb-2">
                     <div className="w-12 h-12 bg-slate-100 group-hover:bg-[#21C1B6] group-hover:text-white text-[#21C1B6] rounded-2xl flex items-center justify-center transition-all shadow-inner">
@@ -997,108 +2281,88 @@ const DraftFormPage = () => {
                     </div>
                     <div>
                       <h3 className="font-bold text-lg text-slate-900">Upload Data</h3>
-                      <p className="text-xs text-slate-500">Extract facts from files</p>
+                      <p className="text-xs text-slate-500">{draftMethod === 'automatic' ? 'Reference documents for AI draft' : 'Extract facts from files'}</p>
                     </div>
                   </div>
 
-                  {/* File input always in DOM so change event is never lost */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    className="hidden"
-                    onChange={handleFileUpload}
-                    accept=".pdf,.docx,.doc,.txt"
-                    aria-label="Select documents"
-                  />
-                  {uploadedDocuments.length > 0 ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <p className="text-xs text-[#19a096] font-bold uppercase">Uploaded documents</p>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={openFilePicker}
-                            disabled={uploadFileLoading}
-                            className="text-xs font-medium text-[#21C1B6] hover:text-[#19a096] disabled:opacity-50"
-                          >
-                            Add more
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => { setUploadedDocuments([]); setUploadedFileName(null); }}
-                            className="text-slate-400 hover:text-red-500 transition-colors text-xs font-medium"
-                          >
-                            Clear all
-                          </button>
+                  {/* Hidden file inputs */}
+                  <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileUpload} accept=".pdf,.docx,.doc,.txt" aria-label="Select documents"/>
+                  <input ref={autoFileInputRef} type="file" multiple className="hidden" onChange={handleAutoFileAdd} accept=".pdf,.docx,.doc,.txt" aria-label="Select documents for AI draft"/>
+
+                  {/* AUTOMATIC MODE: local file list */}
+                  {draftMethod === 'automatic' && (
+                    autoLocalFiles.length > 0 ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs text-[#19a096] font-bold uppercase">Documents ready ({autoLocalFiles.length})</p>
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={() => autoFileInputRef.current?.click()} className="text-xs font-medium text-[#21C1B6] hover:text-[#19a096]">Add more</button>
+                            <button type="button" onClick={() => setAutoLocalFiles([])} className="text-slate-400 hover:text-red-500 text-xs font-medium">Clear all</button>
+                          </div>
                         </div>
+                        <ul className="max-h-48 overflow-y-auto space-y-2 pr-1">
+                          {autoLocalFiles.map((f, idx) => (
+                            <li key={`${f.name}-${idx}`} className="flex items-center gap-3 p-3 rounded-xl border bg-[#21C1B6]/5 border-[#21C1B6]/20">
+                              <CheckCircleIcon className="w-5 h-5 text-[#21C1B6] flex-shrink-0"/>
+                              <span className="text-sm text-slate-900 truncate flex-1 min-w-0">{f.name}</span>
+                              <button type="button" onClick={() => setAutoLocalFiles(prev => prev.filter((_,i)=>i!==idx))} className="text-slate-300 hover:text-red-500 transition-colors"><XMarkIcon className="w-4 h-4"/></button>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
-                      <ul className="max-h-48 overflow-y-auto space-y-2 pr-1">
-                        {uploadedDocuments.map((doc, idx) => (
-                          <li
-                            key={doc.fileId || `${doc.name}-${doc.status}-${idx}`}
-                            className={`flex items-center gap-3 p-3 rounded-xl border ${
-                              doc.status === 'success'
-                                ? 'bg-[#21C1B6]/5 border-[#21C1B6]/20'
-                                : doc.status === 'failed'
-                                ? 'bg-red-50/50 border-red-200/50'
-                                : 'bg-slate-50 border-slate-200'
-                            }`}
-                          >
-                            {doc.status === 'uploading' && (
-                              <ArrowPathIcon className="w-5 h-5 text-[#21C1B6] animate-spin flex-shrink-0" />
-                            )}
-                            {doc.status === 'success' && (
-                              <CheckCircleIcon className="w-5 h-5 text-[#21C1B6] flex-shrink-0" />
-                            )}
-                            {doc.status === 'failed' && (
-                              <XMarkIcon className="w-5 h-5 text-red-500 flex-shrink-0" />
-                            )}
-                            <span className="text-sm text-slate-900 truncate flex-1 min-w-0" title={doc.name}>
-                              {doc.name}
-                            </span>
-                            <span className={`text-xs font-medium flex-shrink-0 ${doc.status === 'success' ? 'text-[#19a096]' : doc.status === 'failed' ? 'text-red-600' : 'text-slate-500'}`}>
-                              {doc.status === 'uploading' ? 'Uploading...' : doc.status === 'success' ? 'Uploaded' : 'Failed'}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={openFilePicker}
-                      disabled={uploadFileLoading}
-                      className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl transition-all ${uploadFileLoading ? 'bg-slate-50 opacity-50 cursor-wait' : 'border-slate-200 bg-slate-50/50 hover:bg-white hover:border-[#21C1B6] cursor-pointer'}`}
-                    >
-                      {uploadFileLoading ? (
-                        <ArrowPathIcon className="w-8 h-8 text-[#21C1B6] animate-spin" />
-                      ) : (
-                        <>
-                          <PlusIcon className="w-6 h-6 text-slate-400 mb-1" />
-                          <p className="text-[11px] font-bold text-slate-500 uppercase tracking-tighter">Add File</p>
-                          <p className="text-[10px] text-slate-400 mt-0.5">PDF, DOCX, DOC, TXT</p>
-                        </>
-                      )}
-                    </button>
+                    ) : (
+                      <button type="button" onClick={() => autoFileInputRef.current?.click()}
+                        className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl transition-all border-[#21C1B6]/40 bg-[#f0fdfa] hover:bg-[#ccfbf1] hover:border-[#21C1B6] cursor-pointer">
+                        <PlusIcon className="w-6 h-6 text-[#21C1B6] mb-1"/>
+                        <p className="text-[11px] font-bold text-[#0d9488] uppercase tracking-tighter">Add Reference Documents</p>
+                        <p className="text-[10px] text-[#5eead4] mt-0.5">PDF, DOCX, DOC, TXT · Required to continue</p>
+                      </button>
+                    )
+                  )}
+
+                  {/* CUSTOM MODE: existing server-upload flow */}
+                  {draftMethod !== 'automatic' && (
+                    uploadedDocuments.length > 0 ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs text-[#19a096] font-bold uppercase">Uploaded documents</p>
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={openFilePicker} disabled={uploadFileLoading} className="text-xs font-medium text-[#21C1B6] hover:text-[#19a096] disabled:opacity-50">Add more</button>
+                            <button type="button" onClick={() => { setUploadedDocuments([]); setUploadedFileName(null); }} className="text-slate-400 hover:text-red-500 transition-colors text-xs font-medium">Clear all</button>
+                          </div>
+                        </div>
+                        <ul className="max-h-48 overflow-y-auto space-y-2 pr-1">
+                          {uploadedDocuments.map((doc, idx) => (
+                            <li key={doc.fileId || `${doc.name}-${doc.status}-${idx}`} className={`flex items-center gap-3 p-3 rounded-xl border ${doc.status==='success'?'bg-[#21C1B6]/5 border-[#21C1B6]/20':doc.status==='failed'?'bg-red-50/50 border-red-200/50':'bg-slate-50 border-slate-200'}`}>
+                              {doc.status==='uploading'&&<ArrowPathIcon className="w-5 h-5 text-[#21C1B6] animate-spin flex-shrink-0"/>}
+                              {doc.status==='success'&&<CheckCircleIcon className="w-5 h-5 text-[#21C1B6] flex-shrink-0"/>}
+                              {doc.status==='failed'&&<XMarkIcon className="w-5 h-5 text-red-500 flex-shrink-0"/>}
+                              <span className="text-sm text-slate-900 truncate flex-1 min-w-0">{doc.name}</span>
+                              <span className={`text-xs font-medium flex-shrink-0 ${doc.status==='success'?'text-[#19a096]':doc.status==='failed'?'text-red-600':'text-slate-500'}`}>{doc.status==='uploading'?'Uploading...':doc.status==='success'?'Uploaded':'Failed'}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : (
+                      <button type="button" onClick={openFilePicker} disabled={uploadFileLoading}
+                        className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl transition-all ${uploadFileLoading?'bg-slate-50 opacity-50 cursor-wait':'border-slate-200 bg-slate-50/50 hover:bg-white hover:border-[#21C1B6] cursor-pointer'}`}>
+                        {uploadFileLoading ? <ArrowPathIcon className="w-8 h-8 text-[#21C1B6] animate-spin"/> : <><PlusIcon className="w-6 h-6 text-slate-400 mb-1"/><p className="text-[11px] font-bold text-slate-500 uppercase tracking-tighter">Add File</p><p className="text-[10px] text-slate-400 mt-0.5">PDF, DOCX, DOC, TXT</p></>}
+                      </button>
+                    )
                   )}
                 </div>
               </div>
 
-              {/* Spinner and message while autopopulating form fields */}
-              {isAutopopulatingFields && (
+              {/* Autopopulation spinner (custom mode only) */}
+              {draftMethod !== 'automatic' && isAutopopulatingFields && (
                 <div className="flex items-center gap-3 p-4 bg-[#21C1B6]/10 border border-[#21C1B6]/20 rounded-2xl">
                   <ArrowPathIcon className="w-6 h-6 text-[#21C1B6] animate-spin flex-shrink-0" />
                   <div className="flex-1">
                     <p className="text-sm font-semibold text-slate-800">
                       AI is reading your documents and filling form fields...
-                      {autopopulationFilledCount > 0 && (
-                        <span className="ml-2 text-[#21C1B6]">{autopopulationFilledCount} field{autopopulationFilledCount !== 1 ? 's' : ''} filled so far</span>
-                      )}
+                      {autopopulationFilledCount > 0 && <span className="ml-2 text-[#21C1B6]">{autopopulationFilledCount} field{autopopulationFilledCount !== 1 ? 's' : ''} filled so far</span>}
                     </p>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      "Continue to Drafting" will unlock once all fields are ready.
-                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">"Continue to Drafting" will unlock once all fields are ready.</p>
                   </div>
                 </div>
               )}
@@ -1106,17 +2370,18 @@ const DraftFormPage = () => {
               <div className="flex justify-end pt-8 border-t border-slate-100">
                 <button
                   onClick={() => {
+                    if (draftMethod === 'automatic') { handleContinueAutomatic(); return; }
                     setCurrentStep(2);
                     addActivity('Drafter Agent', 'Case analysis complete. Ready to generate content.', 'in-progress');
                   }}
-                  disabled={isAutopopulatingFields}
+                  disabled={draftMethod === 'automatic' ? autoLocalFiles.length === 0 || chatTemplateLoading : isAutopopulatingFields}
                   className={`h-11 flex items-center gap-3 px-8 rounded-2xl font-bold shadow-xl transition-all active:scale-95 ${
-                    isAutopopulatingFields
+                    (draftMethod === 'automatic' ? autoLocalFiles.length === 0 || chatTemplateLoading : isAutopopulatingFields)
                       ? 'bg-slate-300 text-slate-500 cursor-not-allowed shadow-none'
                       : 'bg-[#21C1B6] hover:bg-[#19a096] text-white hover:scale-105 shadow-[#21C1B6]/20'
                   }`}
                 >
-                  Continue to Drafting
+                  {chatTemplateLoading ? 'Loading template…' : draftMethod === 'automatic' ? 'Start AI Chat Draft' : 'Continue to Drafting'}
                   <ChevronRightIcon className="w-5 h-5" />
                 </button>
               </div>
@@ -1124,7 +2389,7 @@ const DraftFormPage = () => {
           )}
 
           {/* STEP 2: FORM INPUTS */}
-          {currentStep === 2 && (
+          {!chatPhase && currentStep === 2 && (
             <div className="animate-slideIn h-full flex flex-col space-y-6">
               <div className="space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -1140,7 +2405,12 @@ const DraftFormPage = () => {
                   {sections.length === 0 ? (
                     <div className="text-center py-20 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200">
                       <DocumentTextIcon className="w-16 h-16 mx-auto mb-4 text-slate-200" />
-                      <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">No inputs required</p>
+                      <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">
+                        {isAutopopulatingFields ? 'Preparing inputs...' : 'No inputs required'}
+                      </p>
+                      {isAutopopulatingFields && (
+                        <p className="mt-2 text-sm text-slate-400">Template fields are being prepared from the selected library template.</p>
+                      )}
                     </div>
                   ) : (
                     <div className="space-y-10">
@@ -1233,7 +2503,7 @@ const DraftFormPage = () => {
           )}
 
           {/* STEP 3: SECTION CONFIG */}
-          {currentStep === 3 && (
+          {!chatPhase && currentStep === 3 && (
             <div className="animate-slideIn h-full flex flex-col space-y-6">
               <div className="space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -1363,7 +2633,7 @@ const DraftFormPage = () => {
           )}
 
           {/* STEP 4: VALIDATION */}
-          {currentStep === 4 && (
+          {!chatPhase && currentStep === 4 && (
             <div className="p-10 flex flex-col items-center justify-center h-full text-center space-y-6 animate-pulse">
               <div className="w-24 h-24 bg-[#21C1B6]/10 rounded-full flex items-center justify-center">
                 <ShieldCheckIcon className="w-12 h-12 text-[#21C1B6]" />
@@ -1397,7 +2667,7 @@ const DraftFormPage = () => {
           )}
 
           {/* STEP 5: REVIEW - no outer scrollbar; only inner section preview scrolls */}
-          {currentStep === 5 && (
+          {!chatPhase && currentStep === 5 && (
             <div className="animate-slideIn h-full overflow-hidden flex flex-col">
               <SectionDraftingPage
                 key={`section-draft-${draftId}-${sectionsFinalizedAt}`}
@@ -1414,7 +2684,7 @@ const DraftFormPage = () => {
           )}
 
           {/* STEP 6: ASSEMBLY - h-full ensures iframe gets proper height when Google Docs shown */}
-          {currentStep === 6 && (
+          {!chatPhase && currentStep === 6 && (
             <div className={`animate-slideIn h-full flex flex-col min-h-0 ${isGoogleDocsActive ? 'overflow-hidden' : 'overflow-y-auto custom-scrollbar'}`}>
               <AssembledPreviewPage
                 draftIdProp={draftId}

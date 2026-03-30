@@ -46,6 +46,9 @@ export interface GenerationMetadata {
   totalFields: number;
   totalSections: number;
   model: string;
+  referenceDocumentUsed?: boolean;
+  referenceDocumentName?: string;
+  referenceDocumentNames?: string[];
 }
 
 export interface TemplateRequirements {
@@ -53,6 +56,9 @@ export interface TemplateRequirements {
   subjectLabel: string;
   category: string;
   customDescription: string;
+  referenceMode: 'without-document' | 'with-document';
+  referenceDocuments: File[];
+  referenceDocumentNames: string[];
   propertyType: string;
   partyType: string;
   valueRange: string;
@@ -123,6 +129,9 @@ const initialRequirements: TemplateRequirements = {
   subjectLabel: '',
   category: '',
   customDescription: '',
+  referenceMode: 'without-document',
+  referenceDocuments: [],
+  referenceDocumentNames: [],
   propertyType: '',
   partyType: '',
   valueRange: '',

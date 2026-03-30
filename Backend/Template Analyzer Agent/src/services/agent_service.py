@@ -209,7 +209,106 @@ class AntigravityAgent:
             "section_id": section_id,
         }
 
-    def _post_process_analysis(self, result: Dict[str, Any], metrics: Dict[str, int]) -> Dict[str, Any]:
+    def _clean_heading_text(self, text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" \t:-.")
+        cleaned = re.sub(r"^[\(\[]+", "", cleaned).strip()
+        cleaned = re.sub(r"[\)\]]+$", "", cleaned).strip()
+        return cleaned
+
+    def _looks_like_heading(self, line: str) -> bool:
+        text = self._clean_heading_text(line)
+        if not text or len(text) < 4 or len(text) > 120:
+            return False
+        if "{{" in text or "}}" in text or "__" in text:
+            return False
+        if text.count(":") > 1:
+            return False
+
+        numbered = re.match(r"^(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s+[A-Z]", text)
+        uppercase = bool(re.match(r"^[A-Z][A-Z0-9\s,&/\-\(\)]{3,}$", text)) and not re.search(r"[a-z]", text)
+        titled_legal = bool(
+            re.match(
+                r"^(agreement|parties|party details|definitions|interpretation|recitals|background|facts|grounds|prayer|consideration|term|termination|confidentiality|indemnity|governing law|jurisdiction|dispute resolution|notices|signature|execution|schedule|annexure|witness|property|payment|obligations|rights)\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        title_case = bool(re.match(r"^[A-Z][A-Za-z0-9/&,\-\(\)\s]{3,70}$", text)) and text == text.title()
+        return bool(numbered or uppercase or titled_legal or title_case)
+
+    def _extract_heading_candidates(self, template_text: str, max_candidates: int = 18) -> List[str]:
+        candidates: List[str] = []
+        seen = set()
+        for raw_line in str(template_text or "").splitlines():
+            line = self._clean_heading_text(raw_line)
+            if not self._looks_like_heading(line):
+                continue
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", line.lower()).strip("_")
+            if not normalized_key or normalized_key in seen:
+                continue
+            seen.add(normalized_key)
+            candidates.append(line)
+            if len(candidates) >= max_candidates:
+                break
+        return candidates
+
+    def _infer_section_category(self, section_name: str) -> str:
+        name = str(section_name or "").lower()
+        if any(k in name for k in ("party", "parties", "vendor", "purchaser", "lessor", "lessee")):
+            return "parties"
+        if any(k in name for k in ("recital", "background", "whereas")):
+            return "recitals"
+        if any(k in name for k in ("fact", "synopsis", "brief facts")):
+            return "facts"
+        if any(k in name for k in ("ground", "basis")):
+            return "grounds"
+        if any(k in name for k in ("prayer", "relief")):
+            return "prayer"
+        if any(k in name for k in ("signature", "execution", "witness")):
+            return "signatures"
+        if any(k in name for k in ("term", "obligation", "consideration", "payment", "confidentiality", "indemnity", "liability")):
+            return "terms"
+        return "other"
+
+    def _build_missing_sections_from_headings(self, sections: List[Dict[str, Any]], template_text: str) -> List[Dict[str, Any]]:
+        heading_candidates = self._extract_heading_candidates(template_text)
+        if not heading_candidates:
+            return sections
+
+        existing_names = {
+            re.sub(r"[^a-z0-9]+", "_", str(section.get("section_name") or "").lower()).strip("_")
+            for section in sections
+        }
+        next_order = len(sections)
+
+        for heading in heading_candidates:
+            normalized_name = re.sub(r"[^a-z0-9]+", "_", heading.lower()).strip("_")
+            if not normalized_name or normalized_name in existing_names:
+                continue
+            existing_names.add(normalized_name)
+            sections.append(
+                {
+                    "section_id": f"section_{next_order + 1:03d}",
+                    "section_name": heading,
+                    "section_purpose": f"Draft the {heading} section using the structure and placeholders visible in the source template.",
+                    "section_category": self._infer_section_category(heading),
+                    "order": next_order,
+                    "page_break_before": False,
+                    "estimated_words": 150,
+                    "depends_on": [],
+                    "drafting_prompt": f"Preserve the source heading '{heading}' and reproduce the corresponding clause block in the final draft with the same legal role and formatting intent.",
+                    "format_blueprint": {"alignment": "LEFT", "notes": "Derived from source template heading detection."},
+                    "is_subsection": False,
+                    "parent_section_id": None,
+                    "fields": [],
+                }
+            )
+            next_order += 1
+
+        sections.sort(key=lambda item: item.get("order", 0))
+        return sections
+
+    def _post_process_analysis(self, result: Dict[str, Any], metrics: Dict[str, int], template_text: str = "") -> Dict[str, Any]:
         sections = result.get("sections") or []
         normalized_sections: List[Dict[str, Any]] = []
         all_fields: List[Dict[str, Any]] = []
@@ -252,6 +351,7 @@ class AntigravityAgent:
                     all_fields.append(normalized)
 
         normalized_sections.sort(key=lambda item: item.get("order", 0))
+        normalized_sections = self._build_missing_sections_from_headings(normalized_sections, template_text)
         result["sections"] = normalized_sections
         result["all_fields"] = all_fields
         result["total_sections"] = len(normalized_sections)
@@ -355,7 +455,7 @@ JSON CONTRACT:
 """
 
         result = await self._call_gemini(prompt)
-        result = self._post_process_analysis(result, metrics)
+        result = self._post_process_analysis(result, metrics, template_text)
         print(f"DEBUG: Extracted {len(result.get('sections', []))} logical sections from {word_count} word document")
         return result
 

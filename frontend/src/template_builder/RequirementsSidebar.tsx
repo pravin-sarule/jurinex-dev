@@ -27,6 +27,8 @@ export const RequirementsSidebar: React.FC = () => {
 
   const requirementRows = [
     ['Document Type', requirements.subjectLabel || requirements.subject],
+    ['Generation Mode', requirements.referenceMode === 'with-document' ? 'With document' : 'Without document'],
+    ['Reference Documents', requirements.referenceDocumentNames.join(', ')],
     ['Property Type', requirements.propertyType],
     ['Party Type', requirements.partyType],
     ['Value Range', requirements.valueRange],

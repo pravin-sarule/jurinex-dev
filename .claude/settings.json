@@ -10,7 +10,8 @@
       "Bash(\"venv/Scripts/pip.exe\" install:*)",
       "Bash(\"c:\\\\Users\\\\ADMIN\\\\jurinex-dev\\\\Backend\\\\Template Analyzer Agent\\\\venv\\\\Scripts\\\\python.exe\" -c \"import anthropic; print\\(''anthropic'', anthropic.__version__\\)\")",
       "Bash(\"venv/Scripts/python.exe\" -c \"from src.app import app; print\\(''full app OK''\\)\")",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(grep -r ANTHROPIC_API_KEY c:/Users/ADMIN/jurinex-dev/Backend/ --include=*.env --include=.env -l)"
     ],
     "additionalDirectories": [
       "c:\\Users\\ADMIN\\jurinex-dev\\Backend\\agent-draft-service\\src",

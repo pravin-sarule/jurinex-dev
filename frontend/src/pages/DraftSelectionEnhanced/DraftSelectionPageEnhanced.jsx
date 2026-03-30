@@ -28,9 +28,13 @@ import { toast } from 'react-toastify';
 import { TemplateWizardGallery } from '../../components/TemplateWizard';
 import { createDraft, listDrafts, deleteDraft } from '../../services/draftFormApi';
 import './styles/enhanced-draft-selection.css';
+import '../../components/TemplateWizard/TemplateWizardGallery.css';
 
 const DRAFTS_PER_PAGE = 5;
 const LIST_DRAFTS_TIMEOUT_MS = 8000; // Stop waiting so user isn't stuck when backend is busy (e.g. section generation)
+
+// Module-level cache — persists across navigation, cleared only on page refresh
+let _draftsCache = null;
 
 const DraftSelectionPageEnhanced = () => {
   const navigate = useNavigate();
@@ -44,6 +48,11 @@ const DraftSelectionPageEnhanced = () => {
   const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'list'
 
   const loadDrafts = React.useCallback(async (showRefreshSpinner = false) => {
+    // Use cache on navigation back — skip fetch unless user explicitly refreshes
+    if (!showRefreshSpinner && _draftsCache !== null) {
+      setRecentDrafts(_draftsCache);
+      return;
+    }
     if (showRefreshSpinner) setLoadingDrafts(true);
     try {
       const timeoutPromise = new Promise((_, reject) =>
@@ -51,12 +60,14 @@ const DraftSelectionPageEnhanced = () => {
       );
       const res = await Promise.race([listDrafts(null, 20, 0), timeoutPromise]);
       if (res?.success && Array.isArray(res.drafts)) {
+        _draftsCache = res.drafts;
         setRecentDrafts(res.drafts);
       } else {
+        _draftsCache = [];
         setRecentDrafts([]);
       }
     } catch (err) {
-      setRecentDrafts([]);
+      setRecentDrafts(_draftsCache ?? []);
       if (err?.message === 'timeout') {
         toast.info('Documents are loading in the background. Click refresh to try again.');
       }
@@ -135,7 +146,11 @@ const DraftSelectionPageEnhanced = () => {
     try {
       setDeletingDraftId(draftId);
       await deleteDraft(draftId);
-      setRecentDrafts((prev) => prev.filter((d) => d.draft_id !== draftId));
+      setRecentDrafts((prev) => {
+        const updated = prev.filter((d) => d.draft_id !== draftId);
+        _draftsCache = updated;
+        return updated;
+      });
       setDraftsPage((p) => {
         const nextCount = recentDrafts.length - 1;
         const totalPages = Math.max(1, Math.ceil(nextCount / DRAFTS_PER_PAGE));
@@ -169,6 +184,7 @@ const DraftSelectionPageEnhanced = () => {
       const res = await createDraft(templateId, templateName ? `${templateName} - Draft` : '');
       const draftId = res?.draft?.draft_id;
       if (draftId) {
+        _draftsCache = null; // invalidate so next visit re-fetches the new draft
         navigate(`/draft-form/${draftId}`);
       } else {
         toast.error('Draft created but no draft ID returned.');
@@ -287,75 +303,60 @@ const DraftSelectionPageEnhanced = () => {
           ) : (
             <>
               {viewMode === 'grid' ? (
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
+                <div className="recent-draft-grid">
                   {draftsPagination.paginatedDrafts.map((d) => (
                     <div
                       key={d.draft_id}
-                      className="group flex flex-col bg-white rounded-2xl border border-gray-200 overflow-hidden hover:shadow-xl transition-all duration-300 cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      className="template-wizard-card group flex flex-col bg-white overflow-hidden cursor-pointer"
                       onClick={() => navigate(`/draft-form/${d.draft_id}`)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate(`/draft-form/${d.draft_id}`); }}
                     >
-                      {/* Card Preview Area */}
-                      <div className="relative aspect-[3.5/4] bg-gray-50/50 p-4 flex flex-col items-center justify-center">
-                        {/* Top Tags */}
-                        <div className="absolute top-3 left-3 right-3 flex justify-between items-center z-10">
-                          <div className="flex items-center gap-1.5 bg-white px-2 py-0.5 rounded-full border border-gray-100 shadow-sm">
-                            <TagIcon className="w-3 h-3 text-blue-500" />
-                            <span className="text-[10px] font-bold text-gray-700 uppercase tracking-tight">
+                      {/* Preview area — fills exactly like template card image area */}
+                      <div className="relative flex-1 min-h-0 w-full overflow-hidden bg-gradient-to-br from-gray-50 to-gray-100">
+                        {/* Tags */}
+                        <div className="absolute top-2 left-2 right-2 flex justify-between items-center z-10">
+                          <div className="flex items-center gap-1 bg-white/90 px-1.5 py-0.5 rounded-full border border-gray-100 shadow-sm">
+                            <TagIcon className="w-2.5 h-2.5 text-blue-500" />
+                            <span className="text-[9px] font-bold text-gray-700 uppercase tracking-tight">
                               {d.template_category || d.category || (d.template_name || 'Legal').split(' ')[0]}
                             </span>
                           </div>
-                          <div className="flex items-center gap-1 bg-green-50 px-2 py-0.5 rounded-full border border-green-100">
+                          <div className="flex items-center gap-1 bg-green-50/90 px-1.5 py-0.5 rounded-full border border-green-100">
                             <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                            <span className="text-[10px] font-bold text-green-700 uppercase tracking-tight">Active</span>
+                            <span className="text-[9px] font-bold text-green-700 uppercase tracking-tight">Active</span>
                           </div>
                         </div>
 
-                        {/* Document Graphic */}
-                        <div className="w-4/5 h-4/5 bg-white rounded-lg shadow-sm border border-gray-100 p-4 flex flex-col gap-2 relative mt-4 overflow-hidden">
-                          <div className="h-1.5 w-1/2 bg-gray-100 rounded" />
-                          <div className="space-y-1.5 mt-2">
-                            <div className="h-0.5 w-full bg-gray-50 rounded" />
-                            <div className="h-0.5 w-full bg-gray-50 rounded" />
-                            <div className="h-0.5 w-3/4 bg-gray-50 rounded" />
-                            <div className="h-0.5 w-full bg-gray-50 rounded" />
-                          </div>
-
-                          {/* Big Word/Doc Icon in center */}
-                          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                            <div className="w-12 h-12 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg transform group-hover:scale-110 transition-transform duration-300">
-                              <span className="text-white text-2xl font-bold font-serif">W</span>
-                            </div>
+                        {/* W icon */}
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                          <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform duration-300">
+                            <span className="text-white text-2xl font-bold font-serif">W</span>
                           </div>
                         </div>
+
+                        {/* Delete */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteDraft(e, d.draft_id); }}
+                          className="absolute bottom-2 right-2 p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-all opacity-0 group-hover:opacity-100 z-10 bg-white/80 border border-gray-100"
+                          title="Delete"
+                        >
+                          <TrashIcon className="w-3 h-3" />
+                        </button>
                       </div>
 
-                      {/* Card Info Area */}
-                      <div className="p-5 flex flex-col gap-2">
-                        <div className="space-y-1">
-                          <h3 className="text-lg font-bold text-gray-900 leading-tight truncate">
-                            {d.draft_title || d.template_name || 'Untitled draft'}
-                          </h3>
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 text-gray-400">
-                              <CalendarIcon className="w-4 h-4" />
-                              <span className="text-[13px] font-medium text-gray-500">
-                                {d.updated_at ? new Date(d.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Jan 30, 2026'}
-                              </span>
-                            </div>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteDraft(e, d.draft_id);
-                              }}
-                              className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                              title="Delete"
-                            >
-                              <TrashIcon className="w-4 h-4" />
-                            </button>
-                          </div>
+                      {/* Footer — same structure as template card footer */}
+                      <div className="p-2.5 flex-shrink-0 bg-white border-t border-gray-100">
+                        <h3 className="text-sm font-medium text-gray-800 truncate tracking-tight block w-full">
+                          {d.draft_title || d.template_name || 'Untitled draft'}
+                        </h3>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <CalendarIcon className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                          <span className="text-[10px] text-gray-400 truncate">
+                            {d.updated_at ? new Date(d.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                          </span>
                         </div>
-
-                        <div className="border-t border-gray-50 mt-1" />
                       </div>
                     </div>
                   ))}

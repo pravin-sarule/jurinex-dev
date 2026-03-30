@@ -13,6 +13,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, BackgroundTasks
 from api.deps import require_user_id
 from services import draft_db, db as doc_db
 from agents.ingestion.autopopulation_agent import run_autopopulation_agent
+from api.template_routes import _fetch_user_template_from_analyzer, _is_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,19 @@ async def get_draft(
         draft = draft_db.get_user_draft(draft_id=draft_id, user_id=user_id)
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
+
+        template_id = str(draft.get("template_id") or "")
+        if template_id and (not draft.get("fields")) and _is_uuid(template_id):
+            try:
+                analyzer_template = _fetch_user_template_from_analyzer(template_id, user_id)
+                if analyzer_template and analyzer_template.get("fields"):
+                    draft["fields"] = analyzer_template.get("fields", [])
+            except Exception as analyzer_error:
+                logger.warning(
+                    "[get_draft] Failed to hydrate analyzer fields for template_id=%s: %s",
+                    template_id,
+                    analyzer_error,
+                )
         
         # Merged field values (autopopulated + draft) so form and Drafter get complete data
         field_data = draft_db.get_draft_field_data_for_retrieve(draft_id, user_id)
@@ -250,6 +264,30 @@ async def update_draft(
         }
     except Exception as e:
         logger.exception(f"[update_draft] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/drafts/{draft_id}/ui-state")
+async def save_draft_ui_state_endpoint(
+    draft_id: str,
+    user_id: int = Depends(require_user_id),
+    ui_state: Dict[str, Any] = Body(..., embed=True),
+) -> Dict[str, Any]:
+    """Persist lightweight frontend workflow state for draft resume."""
+    try:
+        logger.info(f"[save_draft_ui_state] draft_id={draft_id}, user_id={user_id}")
+        ok = draft_db.save_draft_ui_state(
+            draft_id=draft_id,
+            user_id=user_id,
+            ui_state=ui_state or {},
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        return {"success": True, "message": "UI state saved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[save_draft_ui_state] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -651,6 +689,7 @@ async def get_template_user_field_values(
             "user_edited_fields": row.get("user_edited_fields", []),
             "filled_by": row.get("filled_by"),
             "extraction_status": row.get("extraction_status"),
+            "extraction_error": row.get("extraction_error"),
         }
     except Exception as e:
         logger.exception("[get_template_user_field_values] Error: %s", e)
@@ -748,4 +787,82 @@ async def save_template_user_field_values(
         }
     except Exception as e:
         logger.exception("[save_template_user_field_values] Error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/drafts/{draft_id}/upload-to-google-docs")
+async def upload_chat_draft_to_google_docs(
+    draft_id: str,
+    user_id: int = Depends(require_user_id),
+    html: str = Body(..., embed=True),
+    title: Optional[str] = Body(None, embed=True),
+    existing_google_file_id: Optional[str] = Body(None, embed=True),
+) -> Dict[str, Any]:
+    """
+    Upload chat-draft generated HTML to Google Drive as a Google Doc.
+    Uses the same drafting-service finish-assembled endpoint as the assembler agent.
+    Returns iframe_url and google_file_id so the frontend can embed a real Google Docs editor.
+    """
+    import os, io, requests as _requests
+
+    DRAFTING_SERVICE_URL = os.environ.get("DRAFTING_SERVICE_URL") or (
+        "https://drafting-service-120280829617.asia-south1.run.app"
+        if os.environ.get("K_SERVICE")
+        else "http://localhost:5005"
+    )
+
+    doc_title = (title or f"ChatDraft_{draft_id}").strip()
+
+    try:
+        html_bytes = html.encode("utf-8")
+        files = {
+            "file": (f"{doc_title}.html", io.BytesIO(html_bytes), "text/html"),
+        }
+        data = {
+            "draft_id": draft_id,
+            "title": doc_title,
+            "user_id": str(user_id),
+            "existing_google_file_id": existing_google_file_id or "",
+            "google_import_html": html,
+            "google_import_filename": f"{doc_title}.html",
+            "google_import_mime": "text/html",
+        }
+        headers = {"x-user-id": str(user_id)}
+
+        resp = _requests.post(
+            f"{DRAFTING_SERVICE_URL}/api/drafts/finish-assembled",
+            files=files,
+            data=data,
+            headers=headers,
+            timeout=120,
+        )
+
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Drafting service returned {resp.status_code}: {resp.text[:200]}"
+            )
+
+        result = resp.json()
+        google_file_id = (
+            result.get("google_file_id") or result.get("googleFileId") or
+            result.get("file_id") or result.get("fileId") or ""
+        )
+        iframe_url = result.get("iframe_url") or result.get("iframeUrl") or ""
+        if not iframe_url and google_file_id:
+            iframe_url = f"https://docs.google.com/document/d/{google_file_id}/edit?embedded=true"
+        web_view_link = result.get("webViewLink") or result.get("web_view_link") or (
+            f"https://docs.google.com/document/d/{google_file_id}/edit" if google_file_id else ""
+        )
+
+        return {
+            "success": True,
+            "google_file_id": google_file_id,
+            "iframe_url": iframe_url,
+            "web_view_link": web_view_link,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[upload_chat_draft_to_google_docs] Error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

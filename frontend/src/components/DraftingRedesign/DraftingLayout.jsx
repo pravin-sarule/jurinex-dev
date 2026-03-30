@@ -89,27 +89,34 @@ const DraftingLayout = ({
     currentStepId,
     completedSteps = [],
     activities = [],
-    headerContent
+    headerContent,
+    hideChrome = false
 }) => {
     const [isWorkflowOpen, setIsWorkflowOpen] = useState(true);
     const [isActivityOpen, setIsActivityOpen] = useState(true);
 
+    // When hideChrome is active (e.g. AI chat mode), force both panels closed
+    const effectiveWorkflowOpen = hideChrome ? false : isWorkflowOpen;
+    const effectiveActivityOpen = hideChrome ? false : isActivityOpen;
+
     return (
         <div className="flex h-screen w-full bg-gray-50 overflow-hidden font-sans text-gray-900">
             {/* Left Sidebar */}
-            <WorkflowSidebar
-                currentStepId={currentStepId}
-                completedSteps={completedSteps}
-                isOpen={isWorkflowOpen}
-                onToggle={() => setIsWorkflowOpen(!isWorkflowOpen)}
-            />
+            {!hideChrome && (
+                <WorkflowSidebar
+                    currentStepId={currentStepId}
+                    completedSteps={completedSteps}
+                    isOpen={effectiveWorkflowOpen}
+                    onToggle={() => setIsWorkflowOpen(!isWorkflowOpen)}
+                />
+            )}
 
             {/* Center Content Area */}
             <main className="flex-1 flex flex-col min-w-0 bg-gray-50 overflow-hidden">
                 {/* Header */}
                 <header className="h-24 flex-shrink-0 bg-white border-b border-gray-200 px-8 flex items-center shadow-sm z-10 gap-6">
                     {/* Toggle Workflow Button */}
-                    {!isWorkflowOpen && (
+                    {!hideChrome && !effectiveWorkflowOpen && (
                         <button
                             onClick={() => setIsWorkflowOpen(true)}
                             className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 hover:text-gray-900 transition-all font-bold shrink-0"
@@ -132,7 +139,7 @@ const DraftingLayout = ({
                     {/* Right Side Actions */}
                     <div className="flex items-center gap-3 shrink-0">
                         {/* Toggle Activity Button */}
-                        {!isActivityOpen && (
+                        {!hideChrome && !effectiveActivityOpen && (
                             <button
                                 onClick={() => setIsActivityOpen(true)}
                                 className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 hover:text-gray-900 transition-all font-bold"
@@ -145,19 +152,21 @@ const DraftingLayout = ({
                 </header>
 
                 {/* Scrollable Content - wider when agent activity is closed so section shows at A4 paper width */}
-                <div className="flex-1 overflow-y-auto custom-scrollbar relative">
-                    <div className={`mx-auto p-8 h-full ${isActivityOpen ? 'max-w-6xl' : 'max-w-[min(100%,1200px)]'}`}>
+                <div className="flex-1 overflow-hidden custom-scrollbar relative">
+                    <div className={`h-full ${hideChrome ? 'w-full' : `mx-auto p-8 ${effectiveActivityOpen ? 'max-w-6xl' : 'max-w-[min(100%,1200px)]'}`}`}>
                         {children}
                     </div>
                 </div>
             </main>
 
             {/* Right Sidebar */}
-            <AgentActivityFeed
-                activities={activities}
-                isOpen={isActivityOpen}
-                onToggle={() => setIsActivityOpen(!isActivityOpen)}
-            />
+            {!hideChrome && (
+                <AgentActivityFeed
+                    activities={activities}
+                    isOpen={effectiveActivityOpen}
+                    onToggle={() => setIsActivityOpen(!isActivityOpen)}
+                />
+            )}
 
             <style>{`
                 .custom-scrollbar::-webkit-scrollbar {

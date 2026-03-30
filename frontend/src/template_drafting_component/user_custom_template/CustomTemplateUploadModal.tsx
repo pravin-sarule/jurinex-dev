@@ -215,12 +215,25 @@ function validateAndSetFile(
     setFile: (f: File | null) => void,
     setError: (s: string | null) => void
 ) {
-    const valid =
-        VALID_FILE_TYPES.includes(file.type) ||
-        file.name.endsWith('.hdaf') ||
-        file.name.endsWith('.hnd');
+    const name = (file.name || '').toLowerCase();
+    const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : '';
+
+    // Frontend protection: legacy ".doc" often causes backend DOCX extractor crashes.
+    if (ext === '.doc') {
+        setError('Legacy DOC (.doc) is not supported. Please upload a PDF or DOCX file instead.');
+        return;
+    }
+
+    const isPdf = ext === '.pdf' || (file.type || '').toLowerCase().includes('application/pdf');
+    const isDocx =
+        ext === '.docx' ||
+        (file.type || '').toLowerCase() ===
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const isTxt = ext === '.txt' || (file.type || '').toLowerCase().startsWith('text/');
+
+    const valid = isPdf || isDocx || isTxt || file.name.endsWith('.hdaf') || file.name.endsWith('.hnd');
     if (!valid) {
-        setError('Please upload a valid PDF, DOCX, or text file.');
+        setError('Please upload a template file in PDF, DOCX, or TXT format.');
         return;
     }
     setFile(file);
@@ -307,8 +320,16 @@ export const CustomTemplateUploadModal: React.FC<CustomTemplateUploadModalProps>
             formData.append('subcategory', 'Custom');
 
             console.log('[Custom Template Upload] Calling API uploadTemplate...');
-            await customTemplateApi.uploadTemplate(formData);
-            console.log('[Custom Template Upload] API returned success.');
+            const uploadResult = await customTemplateApi.uploadTemplate(formData);
+            console.log('[Custom Template Upload] API returned success.', uploadResult);
+
+            if (uploadResult?.template_id && uploadResult.status === 'processing') {
+                setProgressStage('Template uploaded. Waiting for analysis...');
+                const ready = await customTemplateApi.waitForTemplateReady(uploadResult.template_id, 8000, 45);
+                if (ready.status === 'error') {
+                    throw new Error('Template analysis failed. Please try another file or retry.');
+                }
+            }
 
             clearInterval(timer);
             setProgress(100);

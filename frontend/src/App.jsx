@@ -470,6 +470,7 @@ import DraftSelectionPage from './pages/DraftSelectionEnhanced/DraftSelectionPag
 import AllTemplatesPage from './pages/DraftSelectionEnhanced/AllTemplatesPage';
 import { ConversationalBuilder } from './template_builder';
 import DraftFormPage from './pages/DraftFormPage';
+import ChatDraftPage from './pages/ChatDraftPage';
 import GoogleDocsPage from './pages/GoogleDocsPage';
 import MicrosoftWordPage from './pages/MicrosoftWordPage';
 import ChatHistoryPage from './pages/ChatHistoryPage';
@@ -737,6 +738,16 @@ function App() {
                 <AuthChecker>
                   <MainLayout>
                     <DraftFormPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/chat-draft"
+              element={
+                <AuthChecker>
+                  <MainLayout useNoPadding={true}>
+                    <ChatDraftPage />
                   </MainLayout>
                 </AuthChecker>
               }
