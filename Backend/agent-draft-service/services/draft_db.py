@@ -291,6 +291,16 @@ def _parse_template_fields_json(raw: Any, template_id: str) -> List[Dict[str, An
         if "all_fields" in raw and isinstance(raw["all_fields"], list) and raw["all_fields"]:
             # Case 2a: Analyzer output — top-level "all_fields" (preferred, sections may have empty fields arrays)
             fields_list = raw["all_fields"]
+        elif "fields" in raw and isinstance(raw["fields"], dict):
+            nested_fields = raw["fields"]
+            if isinstance(nested_fields.get("all_fields"), list) and nested_fields.get("all_fields"):
+                fields_list = nested_fields["all_fields"]
+            elif isinstance(nested_fields.get("fields"), list) and nested_fields.get("fields"):
+                fields_list = nested_fields["fields"]
+            elif isinstance(nested_fields.get("hybrid_fields"), dict):
+                nested_hybrid = nested_fields["hybrid_fields"]
+                if isinstance(nested_hybrid.get("fields"), list):
+                    fields_list = nested_hybrid["fields"]
         elif "fields" in raw and isinstance(raw["fields"], list):
             # Case 2b: Dict with top-level "fields" key
             fields_list = raw["fields"]

@@ -179,7 +179,7 @@ async def get_draft(
         template_id = str(draft.get("template_id") or "")
         if template_id and (not draft.get("fields")) and _is_uuid(template_id):
             try:
-                analyzer_template = _fetch_user_template_from_analyzer(template_id, user_id)
+                analyzer_template, _, _ = _fetch_user_template_from_analyzer(template_id, user_id)
                 if analyzer_template and analyzer_template.get("fields"):
                     draft["fields"] = analyzer_template.get("fields", [])
             except Exception as analyzer_error:
