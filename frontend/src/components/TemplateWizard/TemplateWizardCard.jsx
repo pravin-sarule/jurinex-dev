@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { DocumentTextIcon, EyeIcon } from '@heroicons/react/24/outline';
+import { DocumentTextIcon, EyeIcon, TrashIcon } from '@heroicons/react/24/outline';
 
 /** True if URL is suitable for <img> (not HTML content or data:text/html). */
 const isImageUrl = (url) => {
@@ -16,7 +16,7 @@ const isImageUrl = (url) => {
  * Optional preview icon on the right; clicking it opens preview popup (does not use template).
  * Clicking the card uses the template.
  */
-const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
+const TemplateWizardCard = ({ template, onClick, onPreviewClick, onDelete }) => {
   const { name, preview_image_url, image_url } = template;
   const imageUrl = preview_image_url || image_url;
   const [imageError, setImageError] = useState(false);
@@ -27,6 +27,12 @@ const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
     e.preventDefault();
     e.stopPropagation();
     onPreviewClick?.(template);
+  };
+
+  const handleDeleteClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onDelete?.(template);
   };
 
   return (
@@ -65,6 +71,17 @@ const TemplateWizardCard = ({ template, onClick, onPreviewClick }) => {
             aria-label="Preview template"
           >
             <EyeIcon className="w-5 h-5" />
+          </button>
+        )}
+        {onDelete && (
+          <button
+            type="button"
+            onClick={handleDeleteClick}
+            className="absolute bottom-2 left-2 p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-all opacity-0 group-hover:opacity-100 z-10 bg-white/80 border border-gray-100"
+            title="Delete template"
+            aria-label="Delete template"
+          >
+            <TrashIcon className="w-3.5 h-3.5" />
           </button>
         )}
       </div>

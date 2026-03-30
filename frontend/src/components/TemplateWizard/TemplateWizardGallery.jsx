@@ -135,6 +135,20 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
     setPreviewTemplate(template);
   };
 
+  const handleDeleteCustomTemplate = async (template) => {
+    const name = template.name || template.title || 'this template';
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    try {
+      await customTemplateApi.deleteTemplate(template.id);
+      _customTemplatesCache = null;
+      toast.success('Template deleted.');
+      loadCustomTemplates(true);
+    } catch (err) {
+      toast.error('Failed to delete template. Please try again.');
+      console.error('Delete custom template failed:', err);
+    }
+  };
+
   const handleCustomTemplateUploadSuccess = () => {
     toast.success('Custom template created. It will appear in the gallery.');
     _customTemplatesCache = null; // invalidate cache so fresh list is fetched
@@ -232,6 +246,7 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
                 template={toGalleryItem(t)}
                 onClick={handleCardClick}
                 onPreviewClick={handlePreviewClick}
+                onDelete={handleDeleteCustomTemplate}
               />
             ))
           )}
