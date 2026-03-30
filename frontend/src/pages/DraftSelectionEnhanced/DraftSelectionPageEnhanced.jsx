@@ -309,7 +309,7 @@ const DraftSelectionPageEnhanced = () => {
                       key={d.draft_id}
                       role="button"
                       tabIndex={0}
-                      className="template-wizard-card group flex flex-col bg-white overflow-hidden cursor-pointer"
+                      className="template-wizard-card group flex flex-col bg-white overflow-hidden cursor-pointer border border-gray-200 rounded-lg"
                       onClick={() => navigate(`/draft-form/${d.draft_id}`)}
                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate(`/draft-form/${d.draft_id}`); }}
                     >
