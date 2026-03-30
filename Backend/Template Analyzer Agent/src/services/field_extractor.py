@@ -207,7 +207,7 @@ class HybridFieldExtractor:
             "key": key,
             "type": field_type,
             "label": label,
-            "required": False,
+            "required": True,
             "description": f"Extracted from template analysis for {label.lower()}",
             "confidence": confidence,
             "extraction_methods": extraction_methods,

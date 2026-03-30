@@ -142,6 +142,9 @@ def _fetch_user_template_from_analyzer(
         if raw_fields is not None
         else []
     )
+    # All custom template fields are required — placeholders extracted from uploaded PDFs must be filled
+    for f in fields:
+        f["is_required"] = True
     return {
         "template_id": str(template_obj.get("template_id", template_id)),
         "name": template_obj.get("template_name") or template_obj.get("name") or "Untitled",

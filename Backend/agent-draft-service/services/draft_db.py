@@ -388,7 +388,11 @@ def get_user_template_fields(template_id: str) -> List[Dict[str, Any]]:
     if not row:
         return []
 
-    return _parse_template_fields_json(row.get("template_fields"), template_id)
+    fields = _parse_template_fields_json(row.get("template_fields"), template_id)
+    # Custom template fields are always required — extracted placeholders must be filled
+    for f in fields:
+        f["is_required"] = True
+    return fields
 
 
 def _resolve_template_fields(template_name: str, category: str) -> List[Dict[str, Any]]:
