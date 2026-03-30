@@ -8,10 +8,24 @@ const toInt = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const isCloudRun = Boolean(process.env.K_SERVICE);
+
+const defaultServiceUrl = (envValue, localUrl, cloudUrl) =>
+  (envValue || (isCloudRun ? cloudUrl : localUrl) || "").replace(/\/+$/, "");
+
 module.exports = {
   port: toInt(process.env.PORT, 8010),
   corsOrigins: process.env.CORS_ORIGINS || "*",
-  agentDraftTemplateApiUrl: (process.env.AGENT_DRAFT_TEMPLATE_API_URL || "http://localhost:8000").replace(/\/+$/, ""),
+  agentDraftTemplateApiUrl: defaultServiceUrl(
+    process.env.AGENT_DRAFT_TEMPLATE_API_URL,
+    "http://localhost:8000",
+    "https://all-drafting-agent-120280829617.asia-south1.run.app"
+  ),
+  templateAnalyzerUrl: defaultServiceUrl(
+    process.env.TEMPLATE_ANALYZER_URL,
+    "http://localhost:5017",
+    "https://drafting-agents-120280829617.asia-south1.run.app"
+  ),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   anthropicModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-5",
   maxFiles: toInt(process.env.CHAT_DRAFT_MAX_FILES, 20),

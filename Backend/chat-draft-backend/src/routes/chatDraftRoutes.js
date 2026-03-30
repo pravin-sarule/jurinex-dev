@@ -264,7 +264,7 @@ async function fetchTemplateTextById(templateId, req) {
     if (skeleton) return skeleton;
   }
 
-  const analyzerBase = String(process.env.TEMPLATE_ANALYZER_URL || "http://localhost:5017").replace(/\/+$/, "");
+  const analyzerBase = config.templateAnalyzerUrl;
   const analyzerUrl = `${analyzerBase}/analysis/template/${encodeURIComponent(id)}`;
   const analyzerRes = await tryFetchJson(analyzerUrl);
   if (analyzerRes.ok) {
@@ -282,7 +282,7 @@ async function fetchTemplateTextById(templateId, req) {
     detailRes.payload?.detail ||
     analyzerRes.payload?.message ||
     analyzerRes.payload?.detail ||
-    "No template text could be resolved from templateId.";
+    `No template text could be resolved from templateId. Checked agent-draft at ${config.agentDraftTemplateApiUrl} and template-analyzer at ${config.templateAnalyzerUrl}.`;
   throw new Error(msg);
 }
 
