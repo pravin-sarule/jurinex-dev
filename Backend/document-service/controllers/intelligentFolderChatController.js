@@ -741,23 +741,10 @@ exports.intelligentFolderChat = async (req, res) => {
       }
     }
 
-    const { usage, plan, timeLeft } = await TokenUsageService.getUserUsageAndPlan(
-      userId,
-      authorizationHeader,
-      { accountType: req.user?.account_type }
-    );
-
-    const isFreeUser = TokenUsageService.isFreePlan(plan);
-    if (isFreeUser) {
-      console.log(`\n${'🆓'.repeat(40)}`);
-      console.log(`[FREE TIER] User is on free plan - applying restrictions`);
-      console.log(`[FREE TIER] - File size limit: 10 MB`);
-      console.log(`[FREE TIER] - Model: Forced to ${TokenUsageService.getFreeTierForcedModel()}`);
-      console.log(`[FREE TIER] - Gemini Eyeball: Only 1 use per day (first prompt)`);
-      console.log(`[FREE TIER] - Subsequent chats: Must use RAG retrieval`);
-      console.log(`[FREE TIER] - Daily token limit: 100,000 tokens (in + out)`);
-      console.log(`${'🆓'.repeat(40)}\n`);
-    }
+    // Skip usage/plan limits for folder chat – any authenticated user can chat
+    const usage = null;
+    const plan = null;
+    const isFreeUser = false;
 
     let folderRow;
     let fullFolderPath;
@@ -874,31 +861,7 @@ exports.intelligentFolderChat = async (req, res) => {
     } else {
       routingDecision = analyzeQueryForRouting(question);
 
-      if (isFreeUser) {
-        if (routingDecision.method === 'gemini_eyeball') {
-          const eyeballLimitCheck = await TokenUsageService.checkFreeTierEyeballLimit(userId, plan);
-          if (!eyeballLimitCheck.allowed) {
-            console.log(`\n${'🆓'.repeat(40)}`);
-            console.log(`[FREE TIER] Gemini Eyeball limit reached - forcing RAG`);
-            console.log(`[FREE TIER] ${eyeballLimitCheck.message}`);
-            console.log(`${'🆓'.repeat(40)}\n`);
-
-            routingDecision = {
-              method: 'rag',
-              reason: 'Free tier: Gemini Eyeball limit reached (1/day), using RAG retrieval instead',
-              confidence: 1.0
-            };
-          } else {
-            console.log(`\n${'🆓'.repeat(40)}`);
-            console.log(`[FREE TIER] Gemini Eyeball allowed: ${eyeballLimitCheck.message}`);
-            console.log(`${'🆓'.repeat(40)}\n`);
-          }
-        } else if (routingDecision.method === 'rag') {
-          console.log(`\n${'🆓'.repeat(40)}`);
-          console.log(`[FREE TIER] Using RAG retrieval (subsequent chat after first Eyeball use)`);
-          console.log(`${'🆓'.repeat(40)}\n`);
-        }
-      }
+      // Free-tier routing restrictions disabled – allow full routing for all users
 
       if (routingDecision.method === 'rag') {
         let dbLlmName = null;
@@ -2654,15 +2617,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
       }
     }
 
-    if (isFreeUser) {
-      const estimatedTokens = Math.ceil((actualQuestion?.length || 0) / 4) + 1000; // Add buffer for response
-      const tokenLimitCheck = await TokenUsageService.checkFreeTierDailyTokenLimit(userId, plan, estimatedTokens);
-      if (!tokenLimitCheck.allowed) {
-        sendError(tokenLimitCheck.message);
-        return;
-      }
-      sendStatus('info', `Free tier: ${tokenLimitCheck.remaining.toLocaleString()} tokens remaining today`);
-    }
+    // Daily token limits disabled – no per-plan token enforcement for folder chat
 
     let previousChats = [];
     if (hasExistingSession) {
