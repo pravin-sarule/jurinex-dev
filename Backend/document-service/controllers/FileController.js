@@ -12545,5 +12545,78 @@ exports.getFolderChunks = async (req, res) => {
   }
 };
 
+exports.deleteFolderWithContents = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const userId = parseInt(req.user?.id);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { folderName } = req.params;
+    if (!folderName) return res.status(400).json({ error: 'folderName is required' });
+
+    await client.query('BEGIN');
+
+    // Find the folder record
+    const folderRes = await client.query(
+      `SELECT id, gcs_path FROM user_files WHERE user_id = $1 AND is_folder = TRUE AND originalname = $2 ORDER BY created_at DESC LIMIT 1`,
+      [userId, folderName]
+    );
+
+    if (folderRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+
+    const folder = folderRes.rows[0];
+    const folderId = folder.id;
+    const gcsPath = folder.gcs_path;
+
+    // Delete all GCS files under this folder prefix
+    if (gcsPath) {
+      try {
+        await bucket.deleteFiles({ prefix: gcsPath });
+        console.log(`🗑️ Deleted GCS objects with prefix: ${gcsPath}`);
+      } catch (gcsErr) {
+        console.warn(`⚠️ GCS delete partial/failed for prefix ${gcsPath}: ${gcsErr.message}`);
+      }
+    }
+
+    // Delete all child file records in user_files that belong to this folder
+    await client.query(
+      `DELETE FROM user_files WHERE user_id = $1 AND folder_path LIKE $2`,
+      [userId, `%${folderName}%`]
+    );
+
+    // Delete the folder record itself
+    await client.query(
+      `DELETE FROM user_files WHERE id = $1::uuid AND user_id = $2`,
+      [folderId, userId]
+    );
+
+    // Delete associated case record if one exists
+    await client.query(
+      `DELETE FROM cases WHERE folder_id = $1 AND user_id = $2`,
+      [folderId, userId]
+    );
+
+    // Delete all folder chat history
+    await client.query(
+      `DELETE FROM folder_chats WHERE user_id = $1 AND folder_name = $2`,
+      [userId, folderName]
+    );
+
+    await client.query('COMMIT');
+    console.log(`🗑️ Deleted folder "${folderName}" and all contents for user ${userId}`);
+
+    return res.status(200).json({ message: 'Folder and all contents deleted successfully.' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ deleteFolderWithContents error:', error);
+    return res.status(500).json({ error: 'Internal server error', details: error.message });
+  } finally {
+    client.release();
+  }
+};
+
 // Export processDocumentWithAI for use by Google Drive controller
 exports.processDocumentWithAI = processDocumentWithAI;

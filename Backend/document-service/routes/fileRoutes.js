@@ -59,6 +59,7 @@ router.get("/:fileId/view", authMiddleware.protect, async (req, res, next) => {
 router.post("/create-folder", authMiddleware.protect, fileController.createFolder);
 router.post("/create", authMiddleware.protect, fileController.createCase);
 router.delete("/cases/:caseId", authMiddleware.protect, fileController.deleteCase);
+router.delete("/folder/:folderName", authMiddleware.protect, fileController.deleteFolderWithContents);
 router.put("/cases/:caseId", authMiddleware.protect, fileController.updateCase);
 router.get("/cases/:caseId", authMiddleware.protect, fileController.getCase);
 

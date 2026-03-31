@@ -1,5 +1,6 @@
 const FolderChat = require('../models/FolderChat');
 const File = require('../models/File');
+const { getAllowedUserIds } = require('../utils/firmAccess');
 const { askGeminiWithMultipleGCS, streamGeminiWithMultipleGCS } = require('../services/folderGeminiService');
 const { generateEmbedding } = require('../services/embeddingService');
 const ChunkVector = require('../models/ChunkVector');
@@ -746,20 +747,24 @@ exports.intelligentFolderChat = async (req, res) => {
     const plan = null;
     const isFreeUser = false;
 
+    // Get all firm member IDs so any firm user can access shared folders
+    const allowedUserIds = await getAllowedUserIds({ user: { id: userId } });
+    const effectiveUserIds = (allowedUserIds.length > 0) ? allowedUserIds : [userId];
+
     let folderRow;
     let fullFolderPath;
     let storedFolderPath = '';
 
     const folderQuery = `
-      SELECT id, originalname, folder_path, gcs_path
+      SELECT id, originalname, folder_path, gcs_path, user_id
       FROM user_files
-      WHERE user_id = $1
+      WHERE user_id = ANY($1::int[])
         AND is_folder = true
         AND originalname = $2
       ORDER BY created_at DESC
       LIMIT 1;
     `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
+    const { rows: folderRows } = await pool.query(folderQuery, [effectiveUserIds, folderName]);
 
     if (folderRows.length === 0) {
       console.warn(`⚠️ Folder record "${folderName}" not found in intelligentFolderChat. Trying as direct path...`);
@@ -773,23 +778,23 @@ exports.intelligentFolderChat = async (req, res) => {
       folderRow = folderRows[0];
       storedFolderPath = folderRow.folder_path || '';
 
-      // ✅ FIX: Calculate the full path of the folder to ensure we find all files
       fullFolderPath = storedFolderPath;
       if (folderRow.originalname && !fullFolderPath.endsWith(folderRow.originalname)) {
         fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folderRow.originalname}` : folderRow.originalname;
       }
     }
 
+    const uniqueOwnerIds = [...new Set([...(folderRow.user_id ? [folderRow.user_id] : []), ...effectiveUserIds])];
+
     console.log(`📂 [FOLDER ISOLATION] Folder: "${folderName}"`);
     console.log(`📂 [FOLDER ISOLATION] Stored path: "${storedFolderPath}"`);
     console.log(`📂 [FOLDER ISOLATION] Full path: "${fullFolderPath}"`);
+    console.log(`📂 [FOLDER ISOLATION] Searching across user IDs: ${uniqueOwnerIds}`);
 
-    // ✅ FIX: Use a more robust LIKE pattern to find all files in this folder branch
-    // This strictly matches files inside the folder or its sub-segments
     const filesQuery = `
       SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
       FROM user_files
-      WHERE user_id = $1
+      WHERE user_id = ANY($1::int[])
         AND is_folder = false
         AND (status = 'processed' OR status = 'uploaded' OR status = 'queued' OR status = 'processing')
         AND (
@@ -801,7 +806,7 @@ exports.intelligentFolderChat = async (req, res) => {
     `;
 
     const queryParams = [
-      userId,
+      uniqueOwnerIds,
       fullFolderPath,
       `${fullFolderPath}/%`,
       folderRow.gcs_path ? `${folderRow.gcs_path}%` : `impossible_path_fallback`
@@ -1874,29 +1879,30 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     sendStatus('analyzing', 'Analyzing query intent...');
 
-    const { usage, plan } = await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type });
-
-    const isFreeUser = TokenUsageService.isFreePlan(plan);
-    if (isFreeUser) {
-      console.log(`\n${'🆓'.repeat(40)}`);
-      console.log(`[FREE TIER STREAM] User is on free plan - applying restrictions`);
-      console.log(`${'🆓'.repeat(40)}\n`);
-    }
+    // Initialize user_usage record if missing; limits are not enforced for folder chat
+    await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type }).catch(err => {
+      console.warn(`⚠️ [Stream] Could not initialize user_usage for user ${userId}:`, err.message);
+    });
+    const isFreeUser = false; // No tier restrictions on folder chat
 
     let folderRow;
     let fullFolderPath;
     let storedFolderPath = '';
 
+    // Get all allowed user IDs (firm members) so any firm user can access shared folders
+    const allowedUserIds = await getAllowedUserIds({ user: { id: userId } });
+    const effectiveUserIds = (allowedUserIds.length > 0) ? allowedUserIds : [userId];
+
     const folderQuery = `
-      SELECT id, originalname, folder_path, gcs_path
+      SELECT id, originalname, folder_path, gcs_path, user_id
       FROM user_files
-      WHERE user_id = $1
+      WHERE user_id = ANY($1::int[])
         AND is_folder = true
         AND originalname = $2
       ORDER BY created_at DESC
       LIMIT 1;
     `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
+    const { rows: folderRows } = await pool.query(folderQuery, [effectiveUserIds, folderName]);
 
     if (folderRows.length === 0) {
       console.warn(`⚠️ Folder record "${folderName}" not found in intelligentFolderChatStream. Trying as direct path...`);
@@ -1910,26 +1916,29 @@ exports.intelligentFolderChatStream = async (req, res) => {
       folderRow = folderRows[0];
       storedFolderPath = folderRow.folder_path || '';
 
-      // ✅ FIX: Calculate the full path of the folder to ensure we find all files
       fullFolderPath = storedFolderPath;
       if (folderRow.originalname && !fullFolderPath.endsWith(folderRow.originalname)) {
         fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folderRow.originalname}` : folderRow.originalname;
       }
     }
 
+    // Use the folder owner's user_id for file lookups (files are stored under the owner)
+    const folderOwnerIds = folderRow.user_id ? [folderRow.user_id, ...effectiveUserIds] : effectiveUserIds;
+    const uniqueOwnerIds = [...new Set(folderOwnerIds)];
+
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Folder: "${folderName}"`);
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Stored path: "${storedFolderPath}"`);
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Full path: "${fullFolderPath}"`);
+    console.log(`📂 [Streaming] [FOLDER ISOLATION] Searching for files across user IDs: ${uniqueOwnerIds}`);
 
-    // ✅ FIX: Use a more robust LIKE pattern to find all files in this folder branch
     const filesQuery = `
       SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
       FROM user_files
-      WHERE user_id = $1
+      WHERE user_id = ANY($1::int[])
         AND is_folder = false
         AND (status = 'processed' OR status = 'uploaded' OR status = 'queued' OR status = 'processing')
         AND (
-          folder_path = $2 
+          folder_path = $2
           OR folder_path LIKE $3
           OR gcs_path LIKE $4
         )
@@ -1937,7 +1946,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
     `;
 
     const queryParams = [
-      userId,
+      uniqueOwnerIds,
       fullFolderPath,
       `${fullFolderPath}/%`,
       folderRow.gcs_path ? `${folderRow.gcs_path}%` : `impossible_path_fallback`

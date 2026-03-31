@@ -42,6 +42,44 @@ function isFreePlan(userPlan) {
 class TokenUsageService {
 
     static async getUserUsageAndPlan(userId, authorizationHeader, options = {}) {
+        // Document service has no plan restrictions — all authenticated users get unlimited access
+        const UNLIMITED_PLAN = {
+            id: null,
+            name: 'Unlimited',
+            type: 'firm',
+            price: null,
+            currency: 'INR',
+            interval: 'month',
+            token_limit: 999999999,
+            carry_over_limit: 0,
+            document_limit: 999999,
+            ai_analysis_limit: 999999,
+            storage_limit_gb: 100,
+            token_renew_interval_hours: 24
+        };
+
+        const syntheticUsage = {
+            id: null,
+            user_id: userId,
+            plan_id: null,
+            tokens_used: 0,
+            documents_used: 0,
+            ai_analysis_used: 0,
+            storage_used_gb: 0,
+            carry_over_tokens: 0,
+            period_start: new Date().toISOString(),
+            period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+            last_token_grant: null
+        };
+
+        const nowUTC = moment.utc();
+        const nowIST = nowUTC.clone().tz(TIMEZONE);
+        const periodStart = nowIST.clone().startOf('month').utc();
+        const periodEnd = nowIST.clone().endOf('month').utc();
+
+        return { usage: syntheticUsage, plan: UNLIMITED_PLAN, periodStart, periodEnd };
+
+        // Legacy plan-based code below (kept for reference)
         const accountType = (options.accountType && String(options.accountType).trim())
             ? String(options.accountType).toUpperCase()
             : '';
@@ -139,21 +177,22 @@ class TokenUsageService {
             }
 
             if (!userUsage) {
-                // Ensure we provide a non-null primary key for user_usage.id, since the column is NOT NULL
-                const usageId = uuidv4();
-
-                await client.query(
+                // Use 0 as sentinel plan_id for FIRM users or plans without a DB id (plan_id NOT NULL)
+                const planIdForInsert = userPlan.id != null ? userPlan.id : 0;
+                const insertRes = await client.query(
                     `INSERT INTO user_usage (
-                        id, user_id, plan_id, tokens_used, documents_used, ai_analysis_used,
+                        user_id, plan_id, tokens_used, documents_used, ai_analysis_used,
                         storage_used_gb, carry_over_tokens, period_start, period_end, last_token_grant
-                    ) VALUES ($1,$2,$3,0,0,0,0,0,$4,$5,NULL)`,
-                    [usageId, userId, userPlan.id, periodStart.toISOString(), periodEnd.toISOString()]
+                    ) VALUES ($1,$2,0,0,0,0,0,$3,$4,NULL)
+                    ON CONFLICT (user_id, plan_id) DO UPDATE SET period_end = EXCLUDED.period_end
+                    RETURNING id`,
+                    [userId, planIdForInsert, periodStart.toISOString(), periodEnd.toISOString()]
                 );
 
                 userUsage = {
-                    id: usageId,
+                    id: insertRes.rows[0].id,
                     user_id: userId,
-                    plan_id: userPlan.id,
+                    plan_id: planIdForInsert,
                     tokens_used: 0,
                     documents_used: 0,
                     ai_analysis_used: 0,
