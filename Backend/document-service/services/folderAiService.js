@@ -1637,6 +1637,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     if (error.code === 'ECONNABORTED') {
       throw new Error('Request timeout: Claude API took too long to respond');
     }
+    console.error('❌ [folderAiService] streamLLM Error:', error);
     throw error;
   }
 }

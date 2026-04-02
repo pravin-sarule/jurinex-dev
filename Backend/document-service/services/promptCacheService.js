@@ -14,6 +14,10 @@
 const crypto = require('crypto');
 const pool = require('../config/db');
 
+function cacheUserIdParam(userId) {
+  return userId == null ? userId : String(userId);
+}
+
 /**
  * Normalize prompt text for consistent hashing
  * - Trim whitespace
@@ -56,9 +60,9 @@ async function getUserMetadata(userId) {
     // Try to get existing metadata
     const getQuery = `
       SELECT * FROM user_metadata 
-      WHERE user_id = $1
+      WHERE user_id::text = $1::text
     `;
-    const { rows } = await pool.query(getQuery, [userId]);
+    const { rows } = await pool.query(getQuery, [cacheUserIdParam(userId)]);
     
     if (rows.length > 0) {
       return rows[0];
@@ -70,7 +74,7 @@ async function getUserMetadata(userId) {
       VALUES ($1, NULL)
       RETURNING *
     `;
-    const { rows: newRows } = await pool.query(insertQuery, [userId]);
+    const { rows: newRows } = await pool.query(insertQuery, [cacheUserIdParam(userId)]);
     return newRows[0];
   } catch (error) {
     console.error('[promptCacheService] Error getting user metadata:', error);
@@ -97,7 +101,7 @@ async function updateLastDocUpload(userId) {
         updated_at = CURRENT_TIMESTAMP
     `;
     
-    await pool.query(query, [userId]);
+    await pool.query(query, [cacheUserIdParam(userId)]);
     console.log(`✅ [promptCacheService] Updated last_doc_upload for user ${userId}`);
   } catch (error) {
     console.error('[promptCacheService] Error updating last_doc_upload:', error);
@@ -151,10 +155,10 @@ async function getCachedResponse(userId, promptText, options = {}) {
         context_id,
         session_id
       FROM prompt_cache
-      WHERE user_id = $1 AND context_id = $2 AND prompt_hash = $3
+      WHERE user_id::text = $1::text AND context_id = $2 AND prompt_hash = $3
     `;
     
-    const { rows } = await pool.query(cacheQuery, [userId, contextId, promptHash]);
+    const { rows } = await pool.query(cacheQuery, [cacheUserIdParam(userId), contextId, promptHash]);
     
     if (rows.length === 0) {
       // No cache entry found
@@ -198,8 +202,8 @@ async function getCachedResponse(userId, promptText, options = {}) {
     // Update cache hit statistics (optional)
     try {
       await pool.query(
-        `UPDATE user_metadata SET total_cache_hits = total_cache_hits + 1 WHERE user_id = $1`,
-        [userId]
+        `UPDATE user_metadata SET total_cache_hits = total_cache_hits + 1 WHERE user_id::text = $1::text`,
+        [cacheUserIdParam(userId)]
       );
     } catch (statError) {
       // Non-critical, just log
@@ -293,7 +297,7 @@ async function setCachedResponse(userId, promptText, output, options = {}) {
     `;
     
     await pool.query(query, [
-      userId,
+      cacheUserIdParam(userId),
       promptHash,
       output,
       storePromptText,
@@ -309,8 +313,8 @@ async function setCachedResponse(userId, promptText, output, options = {}) {
     // Update cache miss statistics (since we're storing, it was a miss)
     try {
       await pool.query(
-        `UPDATE user_metadata SET total_cache_misses = total_cache_misses + 1 WHERE user_id = $1`,
-        [userId]
+        `UPDATE user_metadata SET total_cache_misses = total_cache_misses + 1 WHERE user_id::text = $1::text`,
+        [cacheUserIdParam(userId)]
       );
     } catch (statError) {
       // Non-critical, just log
@@ -332,10 +336,10 @@ async function invalidateUserCache(userId) {
   try {
     const query = `
       DELETE FROM prompt_cache
-      WHERE user_id = $1
+      WHERE user_id::text = $1::text
     `;
     
-    const { rowCount } = await pool.query(query, [userId]);
+    const { rowCount } = await pool.query(query, [cacheUserIdParam(userId)]);
     console.log(`🗑️ [promptCacheService] Invalidated ${rowCount} cache entries for user ${userId}`);
     return rowCount;
   } catch (error) {
@@ -393,18 +397,18 @@ async function getCacheStats(userId) {
         last_doc_upload,
         last_cache_invalidation
       FROM user_metadata
-      WHERE user_id = $1
+      WHERE user_id::text = $1::text
     `;
     
-    const { rows: metaRows } = await pool.query(metaQuery, [userId]);
+    const { rows: metaRows } = await pool.query(metaQuery, [cacheUserIdParam(userId)]);
     
     const cacheCountQuery = `
       SELECT COUNT(*) as total_entries
       FROM prompt_cache
-      WHERE user_id = $1
+      WHERE user_id::text = $1::text
     `;
     
-    const { rows: countRows } = await pool.query(cacheCountQuery, [userId]);
+    const { rows: countRows } = await pool.query(cacheCountQuery, [cacheUserIdParam(userId)]);
     
     return {
       totalCacheEntries: parseInt(countRows[0]?.total_entries || 0),

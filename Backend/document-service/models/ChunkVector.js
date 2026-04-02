@@ -187,7 +187,7 @@ const ChunkVector = {
         (cv.embedding <=> $1::vector) AS distance,
         (1 / (1 + (cv.embedding <=> $1::vector))) AS similarity
       FROM chunk_vectors cv
-      INNER JOIN file_chunks fc ON cv.chunk_id = fc.id
+      INNER JOIN file_chunks fc ON cv.chunk_id::text = fc.id::text
     `;
 
     const params = [embeddingPgVector];
@@ -198,8 +198,10 @@ const ChunkVector = {
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const validFileIds = fileIds.filter(id => id && uuidRegex.test(String(id)));
       if (validFileIds.length > 0) {
-        query += ` WHERE fc.file_id = ANY($${params.length + 1}::uuid[])`;
-        params.push(validFileIds);
+        // file_id may be uuid or varchar in DB; compare as text
+        const asText = validFileIds.map((fid) => String(fid).trim());
+        query += ` WHERE fc.file_id::text = ANY($${params.length + 1}::text[])`;
+        params.push(asText);
       }
     }
 
@@ -245,10 +247,10 @@ const ChunkVector = {
           fc.page_start,
           fc.page_end
         FROM chunk_vectors cv
-        INNER JOIN file_chunks fc ON cv.chunk_id = fc.id
-        WHERE cv.file_id = $1::uuid
+        INNER JOIN file_chunks fc ON cv.chunk_id::text = fc.id::text
+        WHERE cv.file_id::text = $1::text
         ORDER BY fc.chunk_index ASC
-      `, [fileId]);
+      `, [String(fileId)]);
       
       console.log(`[ChunkVector] Found ${res.rows.length} vectors for file ${fileId}`);
       return res.rows;
@@ -266,9 +268,9 @@ const ChunkVector = {
           COUNT(cv.id) as total_embeddings,
           (COUNT(cv.id)::float / NULLIF(COUNT(fc.id), 0) * 100) as coverage_percentage
         FROM file_chunks fc
-        LEFT JOIN chunk_vectors cv ON cv.chunk_id = fc.id
-        WHERE fc.file_id = $1::uuid
-      `, [fileId]);
+        LEFT JOIN chunk_vectors cv ON cv.chunk_id::text = fc.id::text
+        WHERE fc.file_id::text = $1::text
+      `, [String(fileId)]);
       
       const stats = res.rows[0];
       console.log(`[ChunkVector] Embedding coverage for file ${fileId}:`);

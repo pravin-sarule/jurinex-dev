@@ -9,6 +9,11 @@ function isValidUUID(str) {
 
 const MAX_HISTORY_LENGTH = 20;
 
+/** DB user_id may be INTEGER or VARCHAR; node may pass number or string — compare as text. */
+function userIdParam(userId) {
+  return userId == null ? userId : String(userId);
+}
+
 function normalizeHistory(history = []) {
   if (!Array.isArray(history)) return [];
   return history
@@ -73,7 +78,7 @@ const FolderChat = {
       `,
       [
         id,
-        userId,
+        userIdParam(userId),
         folderName,
         question,
         answer,
@@ -109,9 +114,9 @@ const FolderChat = {
       SELECT id, user_id, folder_name, question, answer, session_id, summarized_file_ids, used_chunk_ids,
              used_secret_prompt, prompt_label, secret_id, chat_history, citations, created_at
       FROM folder_chats
-      WHERE user_id = $1 AND folder_name = $2
+      WHERE user_id::text = $1::text AND folder_name = $2
     `;
-    const params = [userId, folderName];
+    const params = [userIdParam(userId), folderName];
 
     if (sessionId && isValidUUID(sessionId)) {
       query += ` AND session_id = $3::uuid`;
@@ -129,11 +134,11 @@ const FolderChat = {
       SELECT id, user_id, folder_name, question, answer, session_id, summarized_file_ids, used_chunk_ids,
              used_secret_prompt, prompt_label, secret_id, chat_history, citations, created_at
       FROM folder_chats
-      WHERE user_id = $1
+      WHERE user_id::text = $1::text
       ORDER BY created_at ASC
     `;
 
-    const res = await pool.query(query, [userId]);
+    const res = await pool.query(query, [userIdParam(userId)]);
     return res.rows;
   },
 
@@ -149,8 +154,8 @@ const FolderChat = {
 
     if (options.where) {
       if (options.where.user_id) {
-        whereClauses.push(`user_id = $${paramIndex++}`);
-        params.push(options.where.user_id);
+        whereClauses.push(`user_id::text = $${paramIndex++}::text`);
+        params.push(userIdParam(options.where.user_id));
       }
       if (options.where.folder_name) {
         whereClauses.push(`folder_name = $${paramIndex++}`);
@@ -188,8 +193,8 @@ const FolderChat = {
 
     if (options.where) {
       if (options.where.user_id) {
-        whereClauses.push(`user_id = $${paramIndex++}`);
-        params.push(options.where.user_id);
+        whereClauses.push(`user_id::text = $${paramIndex++}::text`);
+        params.push(userIdParam(options.where.user_id));
       }
       if (options.where.folder_name) {
         whereClauses.push(`folder_name = $${paramIndex++}`);

@@ -29,7 +29,61 @@ const {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
+function applySecretPromptMetadataOverrides(jsonData, metadataOverrides = {}) {
+  if (!jsonData || typeof jsonData !== 'object') {
+    return jsonData;
+  }
+
+  const targetTemplate = jsonData?.schemas?.output_summary_template;
+  const targetMetadata = targetTemplate?.metadata || jsonData?.metadata;
+
+  if (!targetMetadata || typeof targetMetadata !== 'object') {
+    return jsonData;
+  }
+
+  const placeholderValues = new Set([
+    'legal analyst',
+    'actual preparer name',
+    'not specified in document',
+    'unknown',
+    'n/a',
+    'na',
+    ''
+  ]);
+
+  const placeholderDateValues = new Set([
+    'actual date',
+    'date',
+    'not specified in document',
+    'unknown',
+    'n/a',
+    'na',
+    ''
+  ]);
+
+  const normalize = (value) => String(value || '').trim().toLowerCase();
+  const shouldReplacePreparedBy = placeholderValues.has(normalize(targetMetadata.prepared_by));
+  const shouldReplaceDate = placeholderDateValues.has(normalize(targetMetadata.date))
+    || /^\d{4}-\d{2}-\d{2}$/.test(String(targetMetadata.date || '').trim());
+
+  if (metadataOverrides.prepared_by && shouldReplacePreparedBy) {
+    targetMetadata.prepared_by = metadataOverrides.prepared_by;
+  }
+
+  if (metadataOverrides.date && shouldReplaceDate) {
+    targetMetadata.date = metadataOverrides.date;
+  }
+
+  if (targetTemplate?.metadata) {
+    targetTemplate.metadata = targetMetadata;
+  } else if (jsonData.metadata) {
+    jsonData.metadata = targetMetadata;
+  }
+
+  return jsonData;
+}
+
+function postProcessSecretPromptResponse(rawResponse, outputTemplate = null, metadataOverrides = {}) {
   if (!rawResponse || typeof rawResponse !== 'string') {
     return rawResponse;
   }
@@ -39,7 +93,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
     try {
-      const jsonData = JSON.parse(jsonMatch[1].trim());
+      const jsonData = applySecretPromptMetadataOverrides(JSON.parse(jsonMatch[1].trim()), metadataOverrides);
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
       console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block:', e);
@@ -49,7 +103,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   const trimmed = cleanedResponse.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      const jsonData = JSON.parse(trimmed);
+      const jsonData = applySecretPromptMetadataOverrides(JSON.parse(trimmed), metadataOverrides);
       if (!cleanedResponse.includes('```json')) {
         return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
       }
@@ -63,7 +117,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   const jsonMatch2 = cleanedResponse.match(jsonPattern);
   if (jsonMatch2) {
     try {
-      const jsonData = JSON.parse(jsonMatch2[0]);
+      const jsonData = applySecretPromptMetadataOverrides(JSON.parse(jsonMatch2[0]), metadataOverrides);
       return `\`\`\`json\n${JSON.stringify(jsonData, null, 2)}\n\`\`\``;
     } catch (e) {
     }
@@ -607,6 +661,10 @@ exports.intelligentFolderChat = async (req, res) => {
       llm_name = 'gemini',
       secret_id = null,
     } = req.body;
+    const secretPromptMetadataOverrides = {
+      date: new Date().toISOString().slice(0, 10),
+      prepared_by: req.user?.name || req.user?.full_name || (req.user?.email ? req.user.email.split('@')[0] : 'User'),
+    };
 
     if (!folderName) {
       console.error('❌ [intelligentFolderChat] No folderName in params');
@@ -749,7 +807,7 @@ exports.intelligentFolderChat = async (req, res) => {
 
     // Get all firm member IDs so any firm user can access shared folders
     const allowedUserIds = await getAllowedUserIds({ user: { id: userId } });
-    const effectiveUserIds = (allowedUserIds.length > 0) ? allowedUserIds : [userId];
+    const effectiveUserIds = (allowedUserIds.length > 0 ? allowedUserIds : [userId]).map(id => String(id));
 
     let folderRow;
     let fullFolderPath;
@@ -758,7 +816,7 @@ exports.intelligentFolderChat = async (req, res) => {
     const folderQuery = `
       SELECT id, originalname, folder_path, gcs_path, user_id
       FROM user_files
-      WHERE user_id = ANY($1::int[])
+      WHERE user_id::text = ANY($1::text[])
         AND is_folder = true
         AND originalname = $2
       ORDER BY created_at DESC
@@ -784,7 +842,7 @@ exports.intelligentFolderChat = async (req, res) => {
       }
     }
 
-    const uniqueOwnerIds = [...new Set([...(folderRow.user_id ? [folderRow.user_id] : []), ...effectiveUserIds])];
+    const uniqueOwnerIds = [...new Set([...(folderRow.user_id ? [String(folderRow.user_id)] : []), ...effectiveUserIds].map(id => String(id)))];
 
     console.log(`📂 [FOLDER ISOLATION] Folder: "${folderName}"`);
     console.log(`📂 [FOLDER ISOLATION] Stored path: "${storedFolderPath}"`);
@@ -794,7 +852,7 @@ exports.intelligentFolderChat = async (req, res) => {
     const filesQuery = `
       SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
       FROM user_files
-      WHERE user_id = ANY($1::int[])
+      WHERE user_id::text = ANY($1::text[])
         AND is_folder = false
         AND (status = 'processed' OR status = 'uploaded' OR status = 'queued' OR status = 'processing')
         AND (
@@ -1011,7 +1069,7 @@ exports.intelligentFolderChat = async (req, res) => {
         answer = await Promise.race([geminiPromise, overallTimeout]);
 
         if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-          answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
+          answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate, secretPromptMetadataOverrides);
         } else {
           answer = ensurePlainText(answer);
         }
@@ -1313,7 +1371,7 @@ exports.intelligentFolderChat = async (req, res) => {
             });
 
             if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-              answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
+              answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate, secretPromptMetadataOverrides);
             } else {
               answer = ensurePlainText(answer);
             }
@@ -1349,10 +1407,10 @@ exports.intelligentFolderChat = async (req, res) => {
 
         const topChunks = validFolderChunks
           .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-          .slice(0, 30); // Increased to 30 for comprehensive context
+          .slice(0, 80);
 
         usedChunkIds = topChunks.map(c => c.chunk_id || c.id);
-        usedChunksForCitations = topChunks; // Store chunks for citation extraction
+        usedChunksForCitations = topChunks;
 
         console.log(`\n${'='.repeat(80)}`);
         console.log(`📋 [RAG RESPONSE] CHUNKS WITH CITATIONS (${topChunks.length} chunks):`);
@@ -1377,11 +1435,11 @@ exports.intelligentFolderChat = async (req, res) => {
         console.log(`🔍 [RAG] Using chunk IDs: ${usedChunkIds.slice(0, 5).join(', ')}${usedChunkIds.length > 5 ? '...' : ''}`);
 
         const chunkContext = topChunks
-          .map((c) => {
+          .map((c, idx) => {
             const pageInfo = c.page_start !== null && c.page_start !== undefined
               ? `Page ${c.page_start}${c.page_end && c.page_end !== c.page_start ? `-${c.page_end}` : ''}`
               : 'Page N/A';
-            return `📄 [${c.filename} - ${pageInfo}]\n${c.content || ''}`;
+            return `[${idx + 1}] [${c.filename} - ${pageInfo}]\n${c.content || ''}`;
           })
           .join('\n\n');
 
@@ -1401,7 +1459,7 @@ exports.intelligentFolderChat = async (req, res) => {
           console.warn(`🔍 [RAG] Could not fetch token limits: ${tokenError.message}`);
         }
 
-        let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
+        let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}\n\nCITATION INSTRUCTION: After each sentence or paragraph where you use information from the documents above, add the source number(s) in square brackets inline, e.g. [1], [2], or [1][3]. The numbers correspond to the numbered document sections above. Place citations at the end of the relevant sentence before the full stop, or at the end of a paragraph. Do not add a separate References section — citations are inline only.`;
 
         if (used_secret_prompt && secretValue) {
           console.log(`🔐 [RAG] Using secret prompt with JSON formatting as base: "${secretName}" (${promptText.length} chars)`);
@@ -1427,7 +1485,7 @@ exports.intelligentFolderChat = async (req, res) => {
 
           // Post-process the cached answer
           if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, secretTemplateData.outputTemplate);
+            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, secretTemplateData.outputTemplate, secretPromptMetadataOverrides);
           } else {
             cachedAnswer = ensurePlainText(cachedAnswer);
           }
@@ -1467,7 +1525,7 @@ exports.intelligentFolderChat = async (req, res) => {
 
         // Post-process answer (for both cached and fresh responses)
         if (used_secret_prompt && secretTemplateData?.outputTemplate) {
-          answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate);
+          answer = postProcessSecretPromptResponse(answer, secretTemplateData.outputTemplate, secretPromptMetadataOverrides);
         } else {
           answer = ensurePlainText(answer);
         }
@@ -1765,6 +1823,51 @@ exports.intelligentFolderChatStream = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
 
+  // EARLY VALIDATION AND LOGGING
+  console.log("\n" + "=".repeat(80));
+  console.log("🚀 [intelligentFolderChatStream] NEW REQUEST RECEIVED");
+  console.log("=".repeat(80));
+  console.log("📋 Request Details:");
+  console.log("  - Timestamp:", new Date().toISOString());
+  console.log("  - Method:", req.method);
+  console.log("  - URL:", req.url);
+  console.log("  - Params:", JSON.stringify(req.params, null, 2));
+  console.log("  - Body:", JSON.stringify({
+    ...req.body,
+    secret_id: req.body?.secret_id ? '***masked***' : undefined
+  }, null, 2));
+  console.log("  - Headers:", {
+    'content-type': req.headers['content-type'],
+    'authorization': req.headers['authorization'] ? '***present***' : 'missing',
+    'user-agent': req.headers['user-agent']
+  });
+  console.log("  - User ID:", req.user?.id || 'unknown');
+  console.log("=".repeat(80) + "\n");
+
+  const validationErrors = [];
+
+  if (!req.params?.folderName) validationErrors.push("Missing folderName in params");
+  if (!req.body) validationErrors.push("Missing request body");
+  if (!req.user?.id) validationErrors.push("Missing user authentication");
+
+  if (validationErrors.length > 0) {
+    console.error("❌ [intelligentFolderChatStream] VALIDATION FAILED:");
+    validationErrors.forEach(err => console.error(`   - ${err}`));
+
+    const sendError = (message, details = '') => {
+      try {
+        res.write(`data: ${JSON.stringify({ type: 'error', message, details })}\n\n`);
+        res.write(`data: [DONE]\n\n`);
+        res.end();
+      } catch (err) {
+        console.error('Error sending validation error:', err);
+      }
+    };
+
+    sendError('Validation failed: ' + validationErrors.join(', '));
+    return;
+  }
+
   const heartbeat = setInterval(() => {
     try {
       res.write(`data: [PING]\n\n`);
@@ -1779,34 +1882,48 @@ exports.intelligentFolderChatStream = async (req, res) => {
   const MAX_CHUNK_BUFFER_SIZE = 500; // chars - send if buffer exceeds this
 
   const flushChunkBuffer = () => {
-    if (chunkBuffer && !res.destroyed) {
-      try {
-        res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunkBuffer })}\n\n`);
-        chunkBuffer = '';
-        if (chunkBufferTimer) {
-          clearTimeout(chunkBufferTimer);
-          chunkBufferTimer = null;
-        }
-      } catch (err) {
-        console.error('Error flushing chunk buffer:', err);
+    if (!chunkBuffer || res.destroyed) return;
+
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunkBuffer })}\n\n`);
+      chunkBuffer = '';
+      if (chunkBufferTimer) {
+        clearTimeout(chunkBufferTimer);
+        chunkBufferTimer = null;
       }
+    } catch (err) {
+      console.error('❌ [flushChunkBuffer] Error:', {
+        message: err.message,
+        bufferLength: chunkBuffer?.length,
+        responseDestroyed: res.destroyed,
+        stack: err.stack
+      });
     }
   };
 
   const writeChunk = (text) => {
     if (!text || res.destroyed) return;
 
-    chunkBuffer += text;
+    try {
+      chunkBuffer += text;
 
-    if (chunkBuffer.length >= MAX_CHUNK_BUFFER_SIZE) {
-      flushChunkBuffer();
-      return;
-    }
-
-    if (!chunkBufferTimer) {
-      chunkBufferTimer = setTimeout(() => {
+      if (chunkBuffer.length >= MAX_CHUNK_BUFFER_SIZE) {
         flushChunkBuffer();
-      }, CHUNK_BUFFER_DELAY);
+        return;
+      }
+
+      if (!chunkBufferTimer) {
+        chunkBufferTimer = setTimeout(() => {
+          flushChunkBuffer();
+        }, CHUNK_BUFFER_DELAY);
+      }
+    } catch (err) {
+      console.error('❌ [writeChunk] Error:', {
+        message: err.message,
+        textLength: text?.length,
+        bufferLength: chunkBuffer?.length,
+        responseDestroyed: res.destroyed
+      });
     }
   };
 
@@ -1846,6 +1963,10 @@ exports.intelligentFolderChatStream = async (req, res) => {
       llm_name = 'gemini',
       secret_id = null,
     } = req.body;
+    const secretPromptMetadataOverrides = {
+      date: new Date().toISOString().slice(0, 10),
+      prepared_by: req.user?.name || req.user?.full_name || (req.user?.email ? req.user.email.split('@')[0] : 'User'),
+    };
 
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🚀 [STREAMING] Intelligent Folder Chat Controller Called`);
@@ -1862,7 +1983,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
       return;
     }
 
-    const actualQuestion = question || req.query.question || '';
+    let actualQuestion = question || req.query.question || '';
     const hasSecretId = secret_id && (secret_id !== null && secret_id !== undefined && secret_id !== '');
 
     if (!hasSecretId && (!actualQuestion || !actualQuestion.trim())) {
@@ -1874,15 +1995,22 @@ exports.intelligentFolderChatStream = async (req, res) => {
     console.log(`🔐 [Streaming] Secret ID: ${secret_id || 'none'}`);
     console.log(`📝 [Streaming] Full Question: "${actualQuestion}"`);
 
-    const hasExistingSession = session_id && UUID_REGEX.test(session_id);
+    const hasExistingSession = session_id &&
+                              session_id !== 'null' &&
+                              session_id !== 'undefined' &&
+                              session_id.trim() !== '' &&
+                              UUID_REGEX.test(session_id);
     const finalSessionId = hasExistingSession ? session_id : uuidv4();
+
+    console.log("📝 [Streaming] Session ID Details:");
+    console.log(`   - Received session_id: ${session_id || 'none'}`);
+    console.log(`   - Is existing session: ${hasExistingSession}`);
+    console.log(`   - Final session_id: ${finalSessionId}`);
 
     sendStatus('analyzing', 'Analyzing query intent...');
 
     // Initialize user_usage record if missing; limits are not enforced for folder chat
-    await TokenUsageService.getUserUsageAndPlan(userId, authorizationHeader, { accountType: req.user?.account_type }).catch(err => {
-      console.warn(`⚠️ [Stream] Could not initialize user_usage for user ${userId}:`, err.message);
-    });
+    // Token limits disabled for all users
     const isFreeUser = false; // No tier restrictions on folder chat
 
     let folderRow;
@@ -1891,40 +2019,60 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
     // Get all allowed user IDs (firm members) so any firm user can access shared folders
     const allowedUserIds = await getAllowedUserIds({ user: { id: userId } });
-    const effectiveUserIds = (allowedUserIds.length > 0) ? allowedUserIds : [userId];
+    const effectiveUserIds = (allowedUserIds.length > 0 ? allowedUserIds : [userId]).map(id => String(id));
 
-    const folderQuery = `
-      SELECT id, originalname, folder_path, gcs_path, user_id
-      FROM user_files
-      WHERE user_id = ANY($1::int[])
-        AND is_folder = true
-        AND originalname = $2
-      ORDER BY created_at DESC
-      LIMIT 1;
-    `;
-    const { rows: folderRows } = await pool.query(folderQuery, [effectiveUserIds, folderName]);
+    try {
+      const folderQuery = `
+        SELECT id, originalname, folder_path, gcs_path, user_id
+        FROM user_files
+        WHERE user_id::text = ANY($1::text[])
+          AND is_folder = true
+          AND originalname = $2
+        ORDER BY created_at DESC
+        LIMIT 1;
+      `;
+      const { rows: folderRows } = await pool.query(folderQuery, [effectiveUserIds, folderName]);
 
-    if (folderRows.length === 0) {
-      console.warn(`⚠️ Folder record "${folderName}" not found in intelligentFolderChatStream. Trying as direct path...`);
-      fullFolderPath = folderName;
-      folderRow = {
-        id: null,
-        originalname: folderName,
-        folder_path: folderName
-      };
-    } else {
-      folderRow = folderRows[0];
-      storedFolderPath = folderRow.folder_path || '';
+      console.log(`📂 [Streaming] Folder query executed:`);
+      console.log(`   - Folder name: ${folderName}`);
+      console.log(`   - User IDs searched: ${effectiveUserIds.join(', ')}`);
+      console.log(`   - Rows found: ${folderRows.length}`);
 
-      fullFolderPath = storedFolderPath;
-      if (folderRow.originalname && !fullFolderPath.endsWith(folderRow.originalname)) {
-        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folderRow.originalname}` : folderRow.originalname;
+      if (folderRows.length === 0) {
+        console.warn(`⚠️ [Streaming] Folder record "${folderName}" not found`);
+        fullFolderPath = folderName;
+        folderRow = {
+          id: null,
+          originalname: folderName,
+          folder_path: folderName
+        };
+      } else {
+        folderRow = folderRows[0];
+        console.log(`✅ [Streaming] Folder found:`, {
+          id: folderRow.id,
+          originalname: folderRow.originalname,
+          folder_path: folderRow.folder_path,
+          user_id: folderRow.user_id
+        });
+        storedFolderPath = folderRow.folder_path || '';
+        fullFolderPath = storedFolderPath;
+        if (folderRow.originalname && !fullFolderPath.endsWith(folderRow.originalname)) {
+          fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folderRow.originalname}` : folderRow.originalname;
+        }
       }
+    } catch (dbError) {
+      console.error("❌ [Streaming] Database error querying folder:");
+      console.error("  - Error:", dbError.message);
+      console.error("  - Folder name:", folderName);
+      console.error("  - User IDs:", effectiveUserIds);
+      console.error("  - Stack:", dbError.stack);
+      sendError('Database error: Failed to query folder', dbError.message);
+      return;
     }
 
     // Use the folder owner's user_id for file lookups (files are stored under the owner)
-    const folderOwnerIds = folderRow.user_id ? [folderRow.user_id, ...effectiveUserIds] : effectiveUserIds;
-    const uniqueOwnerIds = [...new Set(folderOwnerIds)];
+    const folderOwnerIds = folderRow.user_id ? [String(folderRow.user_id), ...effectiveUserIds] : effectiveUserIds;
+    const uniqueOwnerIds = [...new Set(folderOwnerIds.map(id => String(id)))];
 
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Folder: "${folderName}"`);
     console.log(`📂 [Streaming] [FOLDER ISOLATION] Stored path: "${storedFolderPath}"`);
@@ -1934,7 +2082,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
     const filesQuery = `
       SELECT id, originalname, folder_path, status, gcs_path, mimetype, is_folder
       FROM user_files
-      WHERE user_id = ANY($1::int[])
+      WHERE user_id::text = ANY($1::text[])
         AND is_folder = false
         AND (status = 'processed' OR status = 'uploaded' OR status = 'queued' OR status = 'processing')
         AND (
@@ -1975,6 +2123,30 @@ exports.intelligentFolderChatStream = async (req, res) => {
     let secretName = null;
     let secretTemplateData = null; // Store template data for streaming route
 
+    const buildFallbackSecretQuestion = (name) => {
+      const label = (name || 'document analysis').trim();
+      return `Prepare a detailed ${label} based only on the uploaded folder documents. Include key facts, dates, parties, obligations, risks, and next steps in a clean report format.`;
+    };
+
+    const downgradeSecretPromptToStandardChat = (reason, details = '') => {
+      console.warn(`⚠️ [Streaming Secret Prompt] Falling back to standard folder chat: ${reason}`);
+      if (details) {
+        console.warn(`⚠️ [Streaming Secret Prompt] Details: ${details}`);
+      }
+
+      if (!actualQuestion || !actualQuestion.trim()) {
+        actualQuestion = buildFallbackSecretQuestion(secretName);
+      }
+
+      used_secret_prompt = false;
+      secretLlmName = null;
+      secretProvider = null;
+      isSecretGemini = false;
+      secretValue = null;
+      secretTemplateData = null;
+      finalProvider = llm_name || finalProvider || 'gemini';
+    };
+
     if (hasSecretId) {
       used_secret_prompt = true;
       console.log(`🔐 [Streaming Secret Prompt] Fetching secret configuration for secret_id: ${secret_id}`);
@@ -1984,8 +2156,8 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
         if (!secretDetails) {
           console.warn(`🔐 [Streaming Secret Prompt] Secret not found in database`);
-          sendError('Secret configuration not found');
-          return;
+          downgradeSecretPromptToStandardChat('Secret configuration not found');
+          secretName = 'analysis';
         }
 
         const {
@@ -1996,10 +2168,10 @@ exports.intelligentFolderChatStream = async (req, res) => {
           chunking_method: dbChunkingMethod,
           input_template_id,
           output_template_id,
-        } = secretDetails;
+        } = secretDetails || {};
 
-        secretName = dbSecretName;
-        secretLlmName = dbLlmName;
+        secretName = dbSecretName || secretName;
+        secretLlmName = dbLlmName || secretLlmName;
 
         const { resolveProviderName } = require('../services/folderAiService');
         secretProvider = resolveProviderName(secretLlmName || 'gemini');
@@ -2055,21 +2227,22 @@ exports.intelligentFolderChatStream = async (req, res) => {
                 ? `Permission denied accessing GCP Secret Manager. Please ensure the service account has 'Secret Manager Secret Accessor' role (roles/secretmanager.secretAccessor). Secret: ${secret_manager_id}`
                 : `Failed to fetch secret from GCP Secret Manager: ${gcpError.message}`;
 
-              sendError(errorMessage, gcpError.message);
-              return;
+              downgradeSecretPromptToStandardChat(errorMessage, gcpError.message);
+              accessResponse = null;
             }
 
-            secretValue = accessResponse.payload.data.toString('utf8');
+            if (used_secret_prompt && accessResponse?.payload?.data) {
+              secretValue = accessResponse.payload.data.toString('utf8');
+            }
 
-            if (!secretValue?.trim()) {
+            if (used_secret_prompt && !secretValue?.trim()) {
               console.error(`\n${'='.repeat(80)}`);
               console.error(`🔐 [Streaming Secret Prompt] ❌ SECRET VALUE IS EMPTY`);
               console.error(`   Secret Name: ${secretName}`);
               console.error(`   GCP Secret ID: ${secret_manager_id}`);
               console.error(`${'='.repeat(80)}\n`);
-              sendError('Secret value is empty');
-              return;
-            } else {
+              downgradeSecretPromptToStandardChat('Secret value is empty');
+            } else if (used_secret_prompt) {
               console.log(`\n${'='.repeat(80)}`);
               console.log(`🔐 [STREAMING SECRET PROMPT] ✅ SECRET VALUE RETRIEVED SUCCESSFULLY`);
               console.log(`${'='.repeat(80)}`);
@@ -2081,7 +2254,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
               console.log(`${'='.repeat(80)}\n`);
             }
 
-            if (input_template_id || output_template_id) {
+            if (used_secret_prompt && (input_template_id || output_template_id)) {
               console.log(`\n📄 [Streaming Secret Prompt] Fetching template files:`);
               console.log(`   Input Template ID: ${input_template_id || 'not set'}`);
               console.log(`   Output Template ID: ${output_template_id || 'not set'}\n`);
@@ -2112,8 +2285,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
             console.error(`   Secret Name: ${secretName}`);
             console.error(`   GCP Secret ID: ${secret_manager_id}`);
             console.error(`${'='.repeat(80)}\n`);
-            sendError('Failed to fetch secret from GCP', gcpError.message);
-            return;
+            downgradeSecretPromptToStandardChat('Failed to fetch secret from GCP', gcpError.message);
           }
         } else {
           console.warn(`\n${'='.repeat(80)}`);
@@ -2121,13 +2293,11 @@ exports.intelligentFolderChatStream = async (req, res) => {
           console.warn(`   Secret Name: ${secretName}`);
           console.warn(`   Missing: ${!secret_manager_id ? 'secret_manager_id' : 'version'}`);
           console.warn(`${'='.repeat(80)}\n`);
-          sendError('Missing secret configuration (secret_manager_id or version)');
-          return;
+          downgradeSecretPromptToStandardChat('Missing secret configuration (secret_manager_id or version)');
         }
       } catch (secretError) {
         console.error(`🔐 [Streaming Secret Prompt] Error fetching secret:`, secretError.message);
-        sendError('Failed to fetch secret configuration', secretError.message);
-        return;
+        downgradeSecretPromptToStandardChat('Failed to fetch secret configuration', secretError.message);
       }
     }
 
@@ -2227,6 +2397,55 @@ exports.intelligentFolderChatStream = async (req, res) => {
       }
       console.log(`${'='.repeat(80)}\n`);
     }
+
+    // VALIDATE PROVIDER BEFORE STREAMING
+    if (!finalProvider) {
+      console.error("❌ [Streaming] finalProvider is undefined after routing!");
+      console.error("   - routingDecision:", routingDecision);
+      console.error("   - secretProvider:", secretProvider);
+      console.error("   - llm_name from request:", llm_name);
+      finalProvider = 'gemini';
+      console.log(`⚠️ [Streaming] Using emergency fallback provider: ${finalProvider}`);
+    }
+
+    const { ALL_LLM_CONFIGS: _providerConfigs } = require('../services/folderAiService');
+    const providerConfig = _providerConfigs[finalProvider];
+    if (!providerConfig) {
+      const availableProviders = Object.keys(_providerConfigs).join(', ');
+      console.error(`❌ [Streaming] Invalid provider: ${finalProvider}`);
+      console.error(`   - Available providers: ${availableProviders}`);
+      sendError(
+        `Invalid LLM provider: ${finalProvider}`,
+        `Provider not found in configuration. Available: ${availableProviders}`
+      );
+      return;
+    }
+
+    const providerName = finalProvider.toLowerCase();
+    let hasApiKey = false;
+    if (providerName.includes('gemini')) {
+      hasApiKey = !!process.env.GEMINI_API_KEY;
+    } else if (providerName.includes('claude') || providerName.includes('anthropic')) {
+      hasApiKey = !!process.env.ANTHROPIC_API_KEY;
+    } else if (providerName.includes('openai') || providerName.includes('gpt')) {
+      hasApiKey = !!process.env.OPENAI_API_KEY;
+    } else if (providerName.includes('deepseek')) {
+      hasApiKey = !!process.env.DEEPSEEK_API_KEY;
+    }
+
+    if (!hasApiKey) {
+      console.error(`❌ [Streaming] Missing API key for provider: ${finalProvider}`);
+      sendError(
+        `API key not configured for ${finalProvider}`,
+        'Please check environment variables'
+      );
+      return;
+    }
+
+    console.log(`✅ [Streaming] Provider validated:`);
+    console.log(`   - Provider: ${finalProvider}`);
+    console.log(`   - Model: ${providerConfig.model}`);
+    console.log(`   - API Key: present`);
 
     sendStatus('routing', `Using ${routingDecision.method.toUpperCase()} method: ${routingDecision.reason}`);
 
@@ -2726,9 +2945,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
 
         if (streamingTemplateData?.outputTemplate) {
-          fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
+          fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate, secretPromptMetadataOverrides);
         } else {
-          fullAnswer = postProcessSecretPromptResponse(fullAnswer, null);
+          fullAnswer = postProcessSecretPromptResponse(fullAnswer, null, secretPromptMetadataOverrides);
         }
       } else {
         fullAnswer = ensurePlainText(fullAnswer);
@@ -2889,7 +3108,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
       const topChunks = validFolderChunks
         .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-        .slice(0, 30); // Increased to 30 for comprehensive context
+        .slice(0, 80);
 
       console.log(`✅ [STREAMING] [FOLDER ISOLATION] Chunks collected from folder "${folderName}"`);
 
@@ -2919,11 +3138,11 @@ exports.intelligentFolderChatStream = async (req, res) => {
       console.log(`🔍 [STREAMING RAG] Selected top ${topChunks.length} chunks`);
 
       const chunkContext = topChunks
-        .map((c) => {
+        .map((c, idx) => {
           const pageInfo = c.page_start !== null && c.page_start !== undefined
             ? `Page ${c.page_start}${c.page_end && c.page_end !== c.page_start ? `-${c.page_end}` : ''}`
             : 'Page N/A';
-          return `📄 [${c.filename} - ${pageInfo}]\n${c.content || ''}`;
+          return `[${idx + 1}] [${c.filename} - ${pageInfo}]\n${c.content || ''}`;
         })
         .join('\n\n');
 
@@ -2954,9 +3173,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
           }
 
           if (streamingTemplateData?.outputTemplate) {
-            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, streamingTemplateData.outputTemplate);
+            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, streamingTemplateData.outputTemplate, secretPromptMetadataOverrides);
           } else {
-            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, null);
+            cachedAnswer = postProcessSecretPromptResponse(cachedAnswer, null, secretPromptMetadataOverrides);
           }
         } else {
           cachedAnswer = ensurePlainText(cachedAnswer);
@@ -3008,7 +3227,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         }
 
         // Combine RAG content with web search content if available
-        let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}`;
+        let fullPrompt = `${promptText}\n\n=== RELEVANT DOCUMENTS (FOLDER: "${folderName}") ===\n${chunkContext}\n\nCITATION INSTRUCTION: After each sentence or paragraph where you use information from the documents above, add the source number(s) in square brackets inline, e.g. [1], [2], or [1][3]. The numbers correspond to the numbered document sections above. Place citations at the end of the relevant sentence before the full stop, or at the end of a paragraph. Do not add a separate References section — citations are inline only.`;
 
         if (webSearchContent && webSearchContent.trim().length > 0) {
           console.log(`\n${'='.repeat(80)}`);
@@ -3050,50 +3269,63 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
         try {
           const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : actualQuestion;
+
+          console.log(`🔍 [STREAMING RAG] Starting LLM stream:`);
+          console.log(`   - Provider: ${provider}`);
+          console.log(`   - Prompt length: ${fullPrompt.length} chars`);
+          console.log(`   - Chunks: ${topChunks.length}`);
+
+          let chunkCount = 0;
+
           for await (const chunk of streamLLMFunc(provider, fullPrompt, '', topChunks, llmQuestion)) {
+            chunkCount++;
+
+            if (chunkCount % 50 === 0) {
+              console.log(`   - Streaming progress: ${chunkCount} chunks, ${fullAnswer.length} chars`);
+            }
+
             if (typeof chunk === 'string' && chunk.trim()) {
               fullAnswer += chunk;
-              writeChunk(chunk); // Use buffered write instead of immediate
+              writeChunk(chunk);
             } else if (typeof chunk === 'object' && chunk.type) {
               if (chunk.type === 'thinking' && chunk.text) {
-                flushChunkBuffer(); // Flush any pending content chunks first
+                flushChunkBuffer();
                 res.write(`data: ${JSON.stringify({ type: 'thinking', text: chunk.text })}\n\n`);
                 if (res.flush) res.flush();
               } else if (chunk.type === 'content' && chunk.text) {
                 fullAnswer += chunk.text;
-                writeChunk(chunk.text); // Use buffered write instead of immediate
+                writeChunk(chunk.text);
               }
             }
           }
           flushChunkBuffer();
 
-          // Store in cache after successful streaming (before post-processing)
-          await setCachedResponse(userId, cacheKey, fullAnswer, {
-            methodUsed: 'rag',
-            chatType: 'folder',
-            contextId: folderName,
-            secretId: used_secret_prompt ? secret_id : null,
-            sessionId: finalSessionId,
-            ttlDays: 30
-          }).catch(cacheError => {
-            console.warn(`⚠️ [CACHE] Failed to cache streaming response (non-critical):`, cacheError.message);
-          });
+          console.log(`✅ [STREAMING RAG] Stream completed: ${chunkCount} chunks, ${fullAnswer.length} chars`);
+
         } catch (streamError) {
-          console.error(`\n${'='.repeat(80)}`);
-          console.error(`❌ [STREAMING RAG] Error during streaming:`);
-          console.error(`   Error Type: ${streamError.name || 'Unknown'}`);
-          console.error(`   Error Message: ${streamError.message || 'No message'}`);
-          console.error(`   Provider: ${provider}`);
-          console.error(`   Prompt Length: ${fullPrompt.length} chars`);
-          console.error(`   Stack: ${streamError.stack}`);
-          console.error(`${'='.repeat(80)}\n`);
+          console.error("\n" + "=".repeat(80));
+          console.error("❌ [STREAMING RAG] ERROR DURING LLM STREAMING");
+          console.error("=".repeat(80));
+          console.error("Error Details:");
+          console.error("  - Type:", streamError.name);
+          console.error("  - Message:", streamError.message);
+          console.error("  - Code:", streamError.code);
+          console.error("  - Provider:", provider);
+          console.error("  - Prompt length:", fullPrompt.length);
+          console.error("  - Chunks used:", topChunks.length);
+          console.error("  - Answer so far:", fullAnswer.length, "chars");
+          console.error("\nStack Trace:");
+          console.error(streamError.stack);
+          console.error("=".repeat(80) + "\n");
 
           if (streamError.message && streamError.message.includes('fetch failed')) {
-            sendError('Network error: Failed to connect to LLM service. Please check your internet connection and API credentials.', streamError.message);
-            return;
+            sendError('Network error: Failed to connect to LLM service', 'Please check your internet connection and API credentials');
+          } else if (streamError.message && streamError.message.includes('timeout')) {
+            sendError('Request timeout: LLM service took too long to respond', 'The model may be overloaded. Please try again.');
+          } else {
+            sendError(`LLM streaming error: ${streamError.message}`, process.env.NODE_ENV === 'development' ? streamError.stack : undefined);
           }
-
-          throw streamError;
+          return;
         }
 
         console.log(`✅ [STREAMING RAG] Complete: ${fullAnswer.length} chars, ${topChunks.length} chunks, ${processedFiles.length} files, ${provider}`);
@@ -3110,9 +3342,9 @@ exports.intelligentFolderChatStream = async (req, res) => {
           }
 
           if (streamingTemplateData?.outputTemplate) {
-            fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate);
+            fullAnswer = postProcessSecretPromptResponse(fullAnswer, streamingTemplateData.outputTemplate, secretPromptMetadataOverrides);
           } else {
-            fullAnswer = postProcessSecretPromptResponse(fullAnswer, null);
+            fullAnswer = postProcessSecretPromptResponse(fullAnswer, null, secretPromptMetadataOverrides);
           }
         } else {
           fullAnswer = ensurePlainText(fullAnswer);
@@ -3364,8 +3596,60 @@ exports.intelligentFolderChatStream = async (req, res) => {
     res.end();
 
   } catch (error) {
-    console.error('❌ Streaming error:', error);
-    sendError('Failed to process streaming chat', error.message);
+    const errorDetails = {
+      timestamp: new Date().toISOString(),
+      errorType: error.name || 'Error',
+      errorMessage: error.message || 'Unknown error',
+      errorCode: error.code,
+      errorStatus: error.status,
+      folderName: folderName || 'unknown',
+      userId: userId || 'unknown',
+      question: actualQuestion?.substring(0, 100) || 'unknown',
+      hasSecretId: !!secret_id,
+      secretName: secretName || null,
+      finalProvider: finalProvider || 'unknown',
+      methodUsed: methodUsed || 'unknown',
+      routingMethod: routingDecision?.method || 'unknown',
+      processedFilesCount: processedFiles?.length || 0,
+      hasWebSearchContent: !!webSearchContent,
+      webSearchContentLength: webSearchContent?.length || 0,
+      chunkDetailsCount: usedChunksForCitations?.length || 0,
+      fullAnswerLength: fullAnswer?.length || 0,
+      headersSent: res.headersSent,
+      responseDestroyed: res.destroyed,
+    };
+
+    console.error("\n" + "=".repeat(80));
+    console.error("❌ [intelligentFolderChatStream] FATAL ERROR - COMPLETE DETAILS");
+    console.error("=".repeat(80));
+    console.error(JSON.stringify(errorDetails, null, 2));
+    console.error("\nFull Stack Trace:");
+    console.error(error.stack);
+    console.error("=".repeat(80) + "\n");
+
+    // SSE already called flushHeaders() + writes; headersSent is always true — still emit error event
+    if (!res.destroyed) {
+      try {
+        const pgBits = [error.code && `pg_code=${error.code}`, error.detail, error.hint]
+          .filter(Boolean)
+          .join(' | ');
+        const details =
+          pgBits ||
+          (process.env.NODE_ENV === 'development' ? error.stack : 'Enable NODE_ENV=development for stack trace');
+        sendError(`Streaming failed: ${error.message || 'Unknown error'}`, details);
+      } catch (sendErr) {
+        console.error('❌ Failed to send error to client:', sendErr.message);
+      }
+    } else {
+      console.error('⚠️ Cannot send error - response destroyed');
+    }
+
+    try {
+      if (heartbeat) clearInterval(heartbeat);
+      if (chunkBufferTimer) clearTimeout(chunkBufferTimer);
+    } catch (cleanupErr) {
+      console.error("⚠️ Cleanup error:", cleanupErr.message);
+    }
   }
 };
 

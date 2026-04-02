@@ -49,8 +49,14 @@ const authenticateToken = async (req, res, next) => {
       const resolved = await fetchAccountTypeFromAuth(userId);
       if (resolved && resolved !== 'SOLO') accountType = resolved;
     }
+    const resolvedName = decoded.name
+      || decoded.full_name
+      || [decoded.first_name, decoded.last_name].filter(Boolean).join(' ').trim()
+      || null;
     req.user = {
       id: userId,
+      name: resolvedName,
+      full_name: resolvedName,
       email: decoded.email || null,
       role: decoded.role || 'user',
       account_type: accountType, // SOLO | FIRM_ADMIN | FIRM_USER - skip plan limits for FIRM_ADMIN

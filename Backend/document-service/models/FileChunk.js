@@ -121,10 +121,10 @@ const FileChunk = {
       `
       SELECT id, chunk_index, content, token_count, page_start, page_end, heading
       FROM file_chunks
-      WHERE file_id = $1::uuid
+      WHERE file_id::text = $1::text
       ORDER BY chunk_index ASC
       `,
-      [fileId]
+      [String(fileId)]
     );
     return res.rows;
   },

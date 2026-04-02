@@ -8,6 +8,7 @@ const { askLLM: askFolderLLM } = require('../services/folderAiService'); // Impo
 const { v4: uuidv4 } = require('uuid');
 const File = require('../models/File'); // Import File model
 const FolderChat = require('../models/FolderChat'); // Import FolderChat model
+const ProcessingJobModel = require('../models/ProcessingJob');
 
 const MAX_STORED_HISTORY = 20;
 
@@ -22,6 +23,263 @@ function simplifyFolderChatHistory(chats = []) {
     }))
     .filter((entry) => typeof entry.question === 'string' && typeof entry.answer === 'string')
     .slice(-MAX_STORED_HISTORY);
+}
+
+function safeParseJsonText(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch (error) {
+    const codeBlockMatch =
+      trimmed.match(/```json\s*([\s\S]*?)\s*```/i) ||
+      trimmed.match(/```\s*([\s\S]*?)\s*```/i);
+
+    if (codeBlockMatch) {
+      try {
+        return JSON.parse(codeBlockMatch[1].trim());
+      } catch (innerError) {
+      }
+    }
+
+    try {
+      return JSON.parse(trimmed.replace(/,(\s*[}\]])/g, '$1'));
+    } catch (fixedError) {
+    }
+  }
+
+  return null;
+}
+
+function buildExampleFromSchema(schema) {
+  if (!schema || typeof schema !== 'object') return {};
+
+  if (schema.default !== undefined) {
+    return schema.default;
+  }
+
+  if (schema.type === 'array') {
+    if (schema.items && schema.items.properties) {
+      return [buildExampleFromSchema(schema.items)];
+    }
+    return [];
+  }
+
+  const properties = schema.properties;
+  if (!properties || typeof properties !== 'object') {
+    if (schema.type === 'string') return '';
+    if (schema.type === 'number' || schema.type === 'integer') return 0;
+    if (schema.type === 'boolean') return false;
+    return null;
+  }
+
+  const example = {};
+  Object.keys(properties).forEach((key) => {
+    example[key] = buildExampleFromSchema(properties[key]);
+  });
+  return example;
+}
+
+function extractOutputSummaryTemplateContainer(source) {
+  if (!source || typeof source !== 'object') return null;
+
+  if (source.schemas && source.schemas.output_summary_template) {
+    return source.schemas.output_summary_template;
+  }
+
+  if (source.output_summary_template) {
+    return source.output_summary_template;
+  }
+
+  if (source.generated_sections || source.metadata) {
+    return source;
+  }
+
+  return null;
+}
+
+function getTemplateStructureFromOutputTemplate(outputTemplate) {
+  if (!outputTemplate) return null;
+
+  const parsedExtractedText =
+    typeof outputTemplate.extracted_text === 'string'
+      ? safeParseJsonText(outputTemplate.extracted_text)
+      : outputTemplate.extracted_text;
+  const extractedTemplate = extractOutputSummaryTemplateContainer(parsedExtractedText);
+  if (extractedTemplate) {
+    return extractedTemplate;
+  }
+
+  if (!outputTemplate.structured_schema) {
+    return null;
+  }
+
+  try {
+    const parsedSchema =
+      typeof outputTemplate.structured_schema === 'string'
+        ? JSON.parse(outputTemplate.structured_schema)
+        : outputTemplate.structured_schema;
+
+    const schemaTemplate = extractOutputSummaryTemplateContainer(parsedSchema);
+    if (schemaTemplate) {
+      if (schemaTemplate.properties) {
+        return buildExampleFromSchema(schemaTemplate);
+      }
+      return schemaTemplate;
+    }
+
+    if (parsedSchema.properties) {
+      return buildExampleFromSchema(parsedSchema);
+    }
+  } catch (error) {
+    console.warn('[getTemplateStructureFromOutputTemplate] Could not parse structured_schema:', error);
+  }
+
+  return null;
+}
+
+function getRequiredSectionKeys(outputTemplate) {
+  const sectionKeys = [];
+
+  const pushKey = (key) => {
+    if (typeof key === 'string' && key.trim() && !sectionKeys.includes(key)) {
+      sectionKeys.push(key);
+    }
+  };
+
+  if (outputTemplate?.extracted_text) {
+    const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
+    let match;
+    while ((match = sectionPattern.exec(outputTemplate.extracted_text)) !== null) {
+      pushKey(match[1]);
+    }
+  }
+
+  const templateStructure = getTemplateStructureFromOutputTemplate(outputTemplate);
+  if (templateStructure?.generated_sections && typeof templateStructure.generated_sections === 'object') {
+    Object.keys(templateStructure.generated_sections).forEach(pushKey);
+  }
+
+  if (outputTemplate?.structured_schema) {
+    try {
+      const parsedSchema =
+        typeof outputTemplate.structured_schema === 'string'
+          ? JSON.parse(outputTemplate.structured_schema)
+          : outputTemplate.structured_schema;
+      const schemaTemplate = extractOutputSummaryTemplateContainer(parsedSchema);
+      if (
+        schemaTemplate?.properties?.generated_sections?.properties &&
+        typeof schemaTemplate.properties.generated_sections.properties === 'object'
+      ) {
+        Object.keys(schemaTemplate.properties.generated_sections.properties).forEach(pushKey);
+      } else if (
+        parsedSchema?.properties?.generated_sections?.properties &&
+        typeof parsedSchema.properties.generated_sections.properties === 'object'
+      ) {
+        Object.keys(parsedSchema.properties.generated_sections.properties).forEach(pushKey);
+      }
+    } catch (error) {
+      console.warn('[getRequiredSectionKeys] Could not parse structured_schema:', error);
+    }
+  }
+
+  return sectionKeys;
+}
+
+function normalizeSecretResponseShape(jsonData) {
+  if (!jsonData || typeof jsonData !== 'object' || Array.isArray(jsonData)) {
+    return jsonData;
+  }
+
+  if (jsonData.schemas?.output_summary_template) {
+    return jsonData;
+  }
+
+  if (jsonData.output_summary_template) {
+    return {
+      schemas: {
+        output_summary_template: jsonData.output_summary_template,
+      },
+    };
+  }
+
+  if (jsonData.generated_sections || jsonData.metadata) {
+    return {
+      schemas: {
+        output_summary_template: {
+          metadata: jsonData.metadata || {},
+          generated_sections: jsonData.generated_sections || {},
+        },
+      },
+    };
+  }
+
+  return jsonData;
+}
+
+function mergeDataIntoTemplate(template, data) {
+  if (!template || typeof template !== 'object' || !data || typeof data !== 'object') {
+    return template;
+  }
+
+  Object.keys(template).forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(data, key)) {
+      return;
+    }
+
+    if (
+      template[key] &&
+      typeof template[key] === 'object' &&
+      !Array.isArray(template[key]) &&
+      data[key] &&
+      typeof data[key] === 'object' &&
+      !Array.isArray(data[key])
+    ) {
+      mergeDataIntoTemplate(template[key], data[key]);
+      return;
+    }
+
+    template[key] = data[key];
+  });
+
+  return template;
+}
+
+function buildFallbackSecretResponse(rawResponse, outputTemplate) {
+  const fallbackBase = validateAndEnhanceJsonStructure(
+    {
+      schemas: {
+        output_summary_template: {
+          metadata: {},
+          generated_sections: {},
+        },
+      },
+    },
+    outputTemplate
+  );
+
+  const generatedSections = fallbackBase?.schemas?.output_summary_template?.generated_sections;
+  const requiredSections = Object.keys(generatedSections || {});
+
+  if (requiredSections.length > 0) {
+    const firstSectionKey = requiredSections[0];
+    generatedSections[firstSectionKey] = {
+      ...generatedSections[firstSectionKey],
+      generated_text: String(rawResponse || '').trim(),
+    };
+  } else if (fallbackBase?.schemas?.output_summary_template) {
+    fallbackBase.schemas.output_summary_template.generated_sections = {
+      summary: {
+        generated_text: String(rawResponse || '').trim(),
+        required_summary_type: 'Extractive',
+      },
+    };
+  }
+
+  return fallbackBase;
 }
 
 function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outputTemplate = null) {
@@ -43,34 +301,12 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
   }
 
   if (outputTemplate && outputTemplate.extracted_text) {
-    const templateText = outputTemplate.extracted_text;
-    const sectionKeys = [];
-    
-    const sectionPattern = /["']?(\d+_\d+_[a-z_]+)["']?/gi;
-    let match;
-    while ((match = sectionPattern.exec(templateText)) !== null) {
-      if (!sectionKeys.includes(match[1])) {
-        sectionKeys.push(match[1]);
-      }
-    }
-    
-    if (outputTemplate.structured_schema) {
-      try {
-        const schema = typeof outputTemplate.structured_schema === 'string' 
-          ? JSON.parse(outputTemplate.structured_schema) 
-          : outputTemplate.structured_schema;
-        if (schema.properties && schema.properties.generated_sections && schema.properties.generated_sections.properties) {
-          Object.keys(schema.properties.generated_sections.properties).forEach(key => {
-            if (!sectionKeys.includes(key)) {
-              sectionKeys.push(key);
-            }
-          });
-        }
-      } catch (e) {
-        console.warn('Could not parse structured_schema:', e);
-      }
-    }
-    
+    const resolvedTemplate = getTemplateStructureFromOutputTemplate(outputTemplate);
+    const templateText = resolvedTemplate
+      ? JSON.stringify({ schemas: { output_summary_template: resolvedTemplate } }, null, 2)
+      : outputTemplate.extracted_text;
+    const sectionKeys = getRequiredSectionKeys(outputTemplate);
+
     const sectionsList = sectionKeys.length > 0 
       ? `\n\n📋 REQUIRED SECTIONS (MUST INCLUDE ALL):\n${sectionKeys.map((key, idx) => `   ${idx + 1}. ${key}`).join('\n')}\n`
       : '';
@@ -89,7 +325,7 @@ function addSecretPromptJsonFormatting(secretPrompt, inputTemplate = null, outpu
 📋 OUTPUT TEMPLATE STRUCTURE (MUST FOLLOW EXACTLY):
 The output template below shows the EXACT JSON structure you must use. Your response must match this structure EXACTLY with ALL fields populated:
 
-${outputTemplate.extracted_text}${sectionsList}
+${templateText}${sectionsList}
 
 🔒 MANDATORY REQUIREMENTS FOR ALL LLMs:
 1. ✅ Your response MUST start with \`\`\`json and end with \`\`\`
@@ -214,217 +450,55 @@ function validateAndEnhanceJsonStructure(jsonData, outputTemplate = null) {
     return jsonData;
   }
 
-  // First, try to use the output template JSON structure as the base
-  if (outputTemplate && outputTemplate.extracted_text) {
+  jsonData = normalizeSecretResponseShape(jsonData);
+
+  const templateStructure = getTemplateStructureFromOutputTemplate(outputTemplate);
+  if (templateStructure && typeof templateStructure === 'object') {
     try {
-      // Helper function to safely parse JSON from text
-      const safeParseJson = (text) => {
-        if (!text || typeof text !== 'string') return null;
-        
-        // Try direct JSON parse
-        try {
-          return JSON.parse(text);
-        } catch (e) {
-          // Try extracting JSON from markdown code blocks
-          const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/i) || 
-                           text.match(/```\s*([\s\S]*?)\s*```/i);
-          if (jsonMatch) {
-            try {
-              return JSON.parse(jsonMatch[1].trim());
-            } catch (e2) {
-              // Ignore
-            }
-          }
-          
-          // Try if it starts with { or [
-          if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-            try {
-              return JSON.parse(text.trim());
-            } catch (e3) {
-              // Ignore
-            }
-          }
-        }
-        return null;
+      const normalizedTemplate = {
+        schemas: {
+          output_summary_template: JSON.parse(JSON.stringify(templateStructure)),
+        },
       };
-      
-      const templateJson = typeof outputTemplate.extracted_text === 'string'
-        ? safeParseJson(outputTemplate.extracted_text)
-        : outputTemplate.extracted_text;
-      
-      // If extracted_text is not JSON, try using structured_schema
-      if (!templateJson && outputTemplate.structured_schema) {
-        try {
-          const schema = typeof outputTemplate.structured_schema === 'string'
-            ? JSON.parse(outputTemplate.structured_schema)
-            : outputTemplate.structured_schema;
-          
-          // Build template structure from schema
-          if (schema && schema.properties) {
-            const builtTemplate = {};
-            if (schema.properties.generated_sections && schema.properties.generated_sections.properties) {
-              builtTemplate.generated_sections = {};
-              const sectionKeys = Object.keys(schema.properties.generated_sections.properties);
-              sectionKeys.forEach(key => {
-                builtTemplate.generated_sections[key] = {
-                  generated_text: '',
-                  required_summary_type: schema.properties.generated_sections.properties[key]?.properties?.required_summary_type?.default || 'Extractive'
-                };
-              });
-            }
-            // Use the built template structure
-            const mergedData = JSON.parse(JSON.stringify(builtTemplate)); // Deep clone template
-            const mergeDataIntoTemplate = (template, data) => {
-              for (const key in template) {
-                if (data && data.hasOwnProperty(key)) {
-                  if (typeof template[key] === 'object' && template[key] !== null && !Array.isArray(template[key])) {
-                    if (typeof data[key] === 'object' && data[key] !== null && !Array.isArray(data[key])) {
-                      mergeDataIntoTemplate(template[key], data[key]);
-                    } else {
-                      template[key] = data[key];
-                    }
-                  } else {
-                    template[key] = data[key];
-                  }
-                }
-              }
-            };
-            mergeDataIntoTemplate(mergedData, jsonData);
-            console.log('[validateAndEnhanceJsonStructure] ✅ Merged response into template structure built from schema');
-            return mergedData;
-          }
-        } catch (schemaError) {
-          console.warn('[validateAndEnhanceJsonStructure] Could not build template from structured_schema:', schemaError);
-        }
-      }
-      
-      if (templateJson && typeof templateJson === 'object') {
-        // If templateJson is a JSON schema (has properties), extract example structure
-        if (templateJson.properties) {
-          // It's a JSON schema - we need to build an example structure from it
-          const buildExampleFromSchema = (schema) => {
-            if (!schema.properties) return {};
-            
-            const example = {};
-            for (const key in schema.properties) {
-              const prop = schema.properties[key];
-              if (prop.type === 'object' && prop.properties) {
-                example[key] = buildExampleFromSchema(prop);
-              } else if (prop.type === 'array' && prop.items) {
-                example[key] = prop.items.properties ? [buildExampleFromSchema(prop.items)] : [];
-              } else {
-                // Use default value if available, otherwise use empty string or null
-                example[key] = prop.default !== undefined ? prop.default : (prop.type === 'string' ? '' : null);
-              }
-            }
-            return example;
-          };
-          
-          templateJson = buildExampleFromSchema(templateJson);
-          console.log('[validateAndEnhanceJsonStructure] ✅ Built example structure from JSON schema');
-        }
-        
-        // Merge response data into template structure
-        const mergedData = JSON.parse(JSON.stringify(templateJson)); // Deep clone template
-        
-        // Recursively merge response data into template structure
-        const mergeDataIntoTemplate = (template, data) => {
-          for (const key in template) {
-            if (data && data.hasOwnProperty(key)) {
-              if (typeof template[key] === 'object' && template[key] !== null && !Array.isArray(template[key])) {
-                if (typeof data[key] === 'object' && data[key] !== null && !Array.isArray(data[key])) {
-                  mergeDataIntoTemplate(template[key], data[key]);
-                } else {
-                  template[key] = data[key];
-                }
-              } else {
-                template[key] = data[key];
-              }
-            }
-          }
-        };
-        
-        mergeDataIntoTemplate(mergedData, jsonData);
-        console.log('[validateAndEnhanceJsonStructure] ✅ Merged response into template structure');
-        jsonData = mergedData;
-      }
-    } catch (e) {
-      console.warn('[validateAndEnhanceJsonStructure] Could not merge with template structure:', e);
+      jsonData = mergeDataIntoTemplate(normalizedTemplate, jsonData);
+      console.log('[validateAndEnhanceJsonStructure] ✅ Merged response into normalized template structure');
+    } catch (error) {
+      console.warn('[validateAndEnhanceJsonStructure] Could not merge with template structure:', error);
     }
   }
 
-  if (outputTemplate && outputTemplate.structured_schema) {
-    try {
-      const schema = typeof outputTemplate.structured_schema === 'string'
-        ? JSON.parse(outputTemplate.structured_schema)
-        : outputTemplate.structured_schema;
+  jsonData = normalizeSecretResponseShape(jsonData);
 
-      if (schema.properties && schema.properties.generated_sections) {
-        // Normalize the structure - ensure it's in the schemas.output_summary_template format
-        if (!jsonData.schemas || !jsonData.schemas.output_summary_template) {
-          if (jsonData.generated_sections) {
-            jsonData = {
-              ...jsonData,
-              schemas: {
-                output_summary_template: {
-                  metadata: jsonData.metadata || {},
-                  generated_sections: jsonData.generated_sections
-                }
-              }
-            };
-          } else if (jsonData.metadata) {
-            // If only metadata exists, create the full structure
-            jsonData = {
-              schemas: {
-                output_summary_template: {
-                  metadata: jsonData.metadata,
-                  generated_sections: {}
-                }
-              }
-            };
-          }
-        }
+  const outputSummaryTemplate = jsonData?.schemas?.output_summary_template;
+  if (!outputSummaryTemplate) {
+    return jsonData;
+  }
 
-        const requiredSections = Object.keys(schema.properties.generated_sections.properties || {});
-        console.log(`[validateAndEnhanceJsonStructure] Required sections from schema: ${requiredSections.length} sections`);
-        console.log(`[validateAndEnhanceJsonStructure] Required sections: ${requiredSections.join(', ')}`);
-        
-        if (jsonData.schemas && jsonData.schemas.output_summary_template) {
-          const existingSections = Object.keys(jsonData.schemas.output_summary_template.generated_sections || {});
-          console.log(`[validateAndEnhanceJsonStructure] Existing sections in response: ${existingSections.length} sections`);
-          console.log(`[validateAndEnhanceJsonStructure] Existing sections: ${existingSections.join(', ')}`);
-          
-          const missingSections = requiredSections.filter(section => !existingSections.includes(section));
-          
-          if (missingSections.length > 0) {
-            console.warn(`[validateAndEnhanceJsonStructure] ⚠️ MISSING ${missingSections.length} REQUIRED SECTIONS: ${missingSections.join(', ')}`);
-            console.warn(`[validateAndEnhanceJsonStructure] Adding placeholder sections. The LLM should have generated these!`);
-            
-            missingSections.forEach(section => {
-              if (!jsonData.schemas.output_summary_template.generated_sections) {
-                jsonData.schemas.output_summary_template.generated_sections = {};
-              }
-              // Get the section schema to determine the required_summary_type
-              const sectionSchema = schema.properties.generated_sections.properties[section];
-              const summaryType = sectionSchema?.properties?.required_summary_type?.default || 
-                                   sectionSchema?.properties?.required_summary_type?.enum?.[0] || 
-                                   'Extractive';
-              
-              jsonData.schemas.output_summary_template.generated_sections[section] = {
-                generated_text: `⚠️ WARNING: This section was missing from the LLM response. Expected section "${section}" with content extracted from documents.`,
-                required_summary_type: summaryType
-              };
-            });
-          } else {
-            console.log(`[validateAndEnhanceJsonStructure] ✅ All required sections are present!`);
-          }
-        } else {
-          console.warn(`[validateAndEnhanceJsonStructure] ⚠️ Response structure is missing schemas.output_summary_template.generated_sections`);
-        }
-      }
-    } catch (e) {
-      console.warn('[validateAndEnhanceJsonStructure] Error validating schema:', e);
-    }
+  if (!outputSummaryTemplate.metadata || typeof outputSummaryTemplate.metadata !== 'object') {
+    outputSummaryTemplate.metadata = {};
+  }
+
+  if (!outputSummaryTemplate.generated_sections || typeof outputSummaryTemplate.generated_sections !== 'object') {
+    outputSummaryTemplate.generated_sections = {};
+  }
+
+  const requiredSections = getRequiredSectionKeys(outputTemplate);
+  console.log(`[validateAndEnhanceJsonStructure] Required sections: ${requiredSections.length}`);
+
+  const existingSections = Object.keys(outputSummaryTemplate.generated_sections);
+  const missingSections = requiredSections.filter((section) => !existingSections.includes(section));
+
+  if (missingSections.length > 0) {
+    console.warn(
+      `[validateAndEnhanceJsonStructure] Missing ${missingSections.length} required sections: ${missingSections.join(', ')}`
+    );
+
+    missingSections.forEach((section) => {
+      outputSummaryTemplate.generated_sections[section] = {
+        generated_text: `WARNING: Missing generated content for required section "${section}".`,
+        required_summary_type: 'Extractive',
+      };
+    });
   }
 
   return jsonData;
@@ -440,34 +514,13 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   
   const jsonMatch = cleanedResponse.match(/```json\s*([\s\S]*?)\s*```/i);
   if (jsonMatch) {
-    try {
-      const jsonText = jsonMatch[1].trim();
-      jsonData = JSON.parse(jsonText);
-    } catch (e) {
-      console.warn('[postProcessSecretPromptResponse] Failed to parse JSON from code block:', e);
-      try {
-        let fixedJson = jsonText.replace(/,(\s*[}\]])/g, '$1');
-        jsonData = JSON.parse(fixedJson);
-      } catch (e2) {
-        console.warn('[postProcessSecretPromptResponse] Failed to fix and parse JSON:', e2);
-      }
-    }
+    jsonData = safeParseJsonText(jsonMatch[1]);
   }
   
   if (!jsonData) {
     const trimmed = cleanedResponse.trim();
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      try {
-        jsonData = JSON.parse(trimmed);
-      } catch (e) {
-        console.warn('[postProcessSecretPromptResponse] Failed to parse raw JSON:', e);
-        try {
-          let fixedJson = trimmed.replace(/,(\s*[}\]])/g, '$1');
-          jsonData = JSON.parse(fixedJson);
-        } catch (e2) {
-          console.warn('[postProcessSecretPromptResponse] Failed to fix raw JSON:', e2);
-        }
-      }
+      jsonData = safeParseJsonText(trimmed);
     }
   }
   
@@ -475,16 +528,7 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
     const jsonPattern = /\{[\s\S]{50,}\}/; // At least 50 chars to avoid false matches
     const jsonMatch2 = cleanedResponse.match(jsonPattern);
     if (jsonMatch2) {
-      try {
-        jsonData = JSON.parse(jsonMatch2[0]);
-      } catch (e) {
-        try {
-          let fixedJson = jsonMatch2[0].replace(/,(\s*[}\]])/g, '$1');
-          jsonData = JSON.parse(fixedJson);
-        } catch (e2) {
-          console.warn('[postProcessSecretPromptResponse] Could not extract valid JSON from text');
-        }
-      }
+      jsonData = safeParseJsonText(jsonMatch2[0]);
     }
   }
   
@@ -498,6 +542,8 @@ function postProcessSecretPromptResponse(rawResponse, outputTemplate = null) {
   if (outputTemplate && outputTemplate.structured_schema) {
     console.warn('[postProcessSecretPromptResponse] Response does not contain valid JSON, but template exists');
     console.warn('[postProcessSecretPromptResponse] Raw response preview:', cleanedResponse.substring(0, 200));
+    const fallbackJson = buildFallbackSecretResponse(cleanedResponse, outputTemplate);
+    return `\`\`\`json\n${JSON.stringify(fallbackJson, null, 2)}\n\`\`\``;
   }
   
   return cleanedResponse;
@@ -533,12 +579,12 @@ const fetchSecretValueFromGCP = async (req, res) => {
     const query = `
       SELECT s.secret_manager_id, s.version, s.llm_id, l.name AS llm_name, cm.method_name AS chunking_method
       FROM secret_manager s
-      LEFT JOIN chunking_methods cm ON s.chunking_method_id = cm.id
-      LEFT JOIN llm_models l ON s.llm_id = l.id
-      WHERE s.id = $1
+      LEFT JOIN chunking_methods cm ON s.chunking_method_id::text = cm.id::text
+      LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+      WHERE s.id::text = $1::text
     `;
 
-    const result = await db.query(query, [id]);
+    const result = await db.query(query, [String(id)]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: '❌ Secret config not found in DB' });
     }
@@ -677,7 +723,7 @@ const getAllSecrets = async (req, res) => {
         s.*, 
         l.name AS llm_name
       FROM secret_manager s
-      LEFT JOIN llm_models l ON s.llm_id = l.id
+      LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
       ORDER BY s.created_at DESC
     `;
 
@@ -974,11 +1020,11 @@ const triggerAskLlmForFolder = async (req, res) => {
         l.name AS llm_name,
         cm.method_name AS chunking_method
       FROM secret_manager s
-      LEFT JOIN chunking_methods cm ON s.chunking_method_id = cm.id
-      LEFT JOIN llm_models l ON s.llm_id = l.id
-      WHERE s.id = $1
+      LEFT JOIN chunking_methods cm ON s.chunking_method_id::text = cm.id::text
+      LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+      WHERE s.id::text = $1::text
     `;
-    const result = await db.query(query, [secretId]);
+    const result = await db.query(query, [String(secretId)]);
     if (result.rows.length === 0)
       return res.status(404).json({ error: '❌ Secret configuration not found in DB.' });
 
@@ -1006,7 +1052,7 @@ const triggerAskLlmForFolder = async (req, res) => {
     console.log(`[triggerAskLlmForFolder] Fetching secret from GCP: ${gcpSecretName}`);
 
     const [accessResponse] = await secretClient.accessSecretVersion({ name: gcpSecretName });
-    const secretValue = accessResponse.payload.data.toString('utf8');
+    let secretValue = accessResponse.payload.data.toString('utf8');
     if (!secretValue?.trim()) return res.status(500).json({ error: '❌ Secret value is empty in GCP.' });
 
     console.log(`[triggerAskLlmForFolder] Secret value length: ${secretValue.length} characters`);
@@ -1043,7 +1089,11 @@ const triggerAskLlmForFolder = async (req, res) => {
     let finalPrompt = `You are an expert AI legal assistant using the ${provider.toUpperCase()} model.\n\n`;
     
     let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
-    const { fetchTemplateFilesData, buildEnhancedSystemPromptWithTemplates } = require('../services/secretPromptTemplateService');
+    const {
+      fetchSecretManagerWithTemplates,
+      fetchTemplateFilesData,
+      buildEnhancedSystemPromptWithTemplates
+    } = require('../services/secretPromptTemplateService');
     const secretData = await fetchSecretManagerWithTemplates(secretId);
     if (secretData && (secretData.input_template_id || secretData.output_template_id)) {
       templateData = await fetchTemplateFilesData(secretData.input_template_id, secretData.output_template_id);
@@ -1189,11 +1239,11 @@ const getSecretDetailsById = async (secretId) => {
         l.name AS llm_name,
         cm.method_name AS chunking_method
       FROM secret_manager s
-      LEFT JOIN chunking_methods cm ON s.chunking_method_id = cm.id
-      LEFT JOIN llm_models l ON s.llm_id = l.id
-      WHERE s.id = $1
+      LEFT JOIN chunking_methods cm ON s.chunking_method_id::text = cm.id::text
+      LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+      WHERE s.id::text = $1::text
     `;
-    const result = await db.query(query, [secretId]);
+    const result = await db.query(query, [String(secretId)]);
     return result.rows[0];
   } catch (error) {
     console.error(`🚨 Error in getSecretDetailsById for secret ${secretId}:`, error.message);
@@ -1211,5 +1261,4 @@ module.exports = {
   getSecretDetailsById,
   postProcessSecretPromptResponse, // Export postProcessSecretPromptResponse
 };
-
 
