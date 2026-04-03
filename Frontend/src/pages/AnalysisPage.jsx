@@ -19,7 +19,7 @@ import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/r
 import { formatFileSize } from '../utils/planUtils';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
-import { API_BASE_URL } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 import {
   Search,
   Send,
@@ -397,7 +397,7 @@ const AnalysisPage = () => {
       const token = getAuthToken();
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${API_BASE_URL}/files/secrets?fetch=false`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=false`, {
         method: 'GET',
         headers,
       });

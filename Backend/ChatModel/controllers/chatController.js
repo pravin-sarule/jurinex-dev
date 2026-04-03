@@ -2161,3 +2161,100 @@ exports.getGeneralChatSessions = async (req, res) => {
     });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Secret prompts (same DB + GCP as ask/stream) — no document-service HTTP calls
+// ─────────────────────────────────────────────────────────────────────────────
+exports.listSecretPrompts = async (req, res) => {
+  const includeValues = String(req.query.fetch || '').toLowerCase() === 'true';
+
+  try {
+    const query = `
+      SELECT
+        s.*,
+        l.name AS llm_name
+      FROM secret_manager s
+      LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+      ORDER BY s.created_at DESC
+    `;
+
+    const result = await pool.query(query);
+    const rows = result.rows;
+
+    if (!includeValues) {
+      return res.status(200).json(rows);
+    }
+
+    const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
+    if (!GCLOUD_PROJECT_ID) {
+      return res.status(500).json({ error: 'GCLOUD_PROJECT_ID not configured' });
+    }
+
+    const secretClient = new SecretManagerServiceClient();
+
+    const enriched = await Promise.all(
+      rows.map(async (row) => {
+        try {
+          const name = `projects/${GCLOUD_PROJECT_ID}/secrets/${row.secret_manager_id}/versions/${row.version}`;
+          const [accessResponse] = await secretClient.accessSecretVersion({ name });
+          const value = accessResponse.payload.data.toString('utf8');
+          return { ...row, value };
+        } catch (err) {
+          return { ...row, value: '[ERROR: Cannot fetch]' };
+        }
+      })
+    );
+
+    return res.status(200).json(enriched);
+  } catch (error) {
+    console.error('🚨 [ChatModel] Error fetching secrets:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch secrets: ' + error.message });
+  }
+};
+
+exports.getSecretPromptById = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const query = `
+      SELECT
+        s.secret_manager_id,
+        s.version,
+        s.llm_id,
+        l.name AS llm_name,
+        cm.method_name AS chunking_method
+      FROM secret_manager s
+      LEFT JOIN chunking_methods cm ON s.chunking_method_id::text = cm.id::text
+      LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+      WHERE s.id::text = $1::text
+    `;
+
+    const result = await pool.query(query, [String(id)]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: '❌ Secret config not found in DB' });
+    }
+
+    const { secret_manager_id, version, llm_id, llm_name, chunking_method } = result.rows[0];
+    const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
+    if (!GCLOUD_PROJECT_ID) {
+      return res.status(500).json({ error: 'GCLOUD_PROJECT_ID not configured' });
+    }
+
+    const secretClient = new SecretManagerServiceClient();
+    const secretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
+    const [accessResponse] = await secretClient.accessSecretVersion({ name: secretName });
+    const secretValue = accessResponse.payload.data.toString('utf8');
+
+    return res.status(200).json({
+      secretManagerId: secret_manager_id,
+      version,
+      llm_id,
+      llm_name,
+      chunking_method,
+      value: secretValue,
+    });
+  } catch (err) {
+    console.error('🚨 [ChatModel] getSecretPromptById:', err.message);
+    return res.status(500).json({ error: 'Internal Server Error: ' + err.message });
+  }
+};

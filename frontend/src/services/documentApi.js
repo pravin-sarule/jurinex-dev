@@ -370,11 +370,12 @@
 
 
 import axios from 'axios';
-import { DOCS_BASE_URL, getUserIdForDrafting } from '../config/apiConfig';
+import { DOCS_BASE_URL, getUserIdForDrafting, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 
 // Docs and cases both go through the docs gateway prefix (`/docs/*` → document-service `/api/files/*`).
 const API_BASE_URL = DOCS_BASE_URL;
 const CASES_BASE_URL = DOCS_BASE_URL;
+const SECRETS_API_BASE = String(SECRET_PROMPTS_API_BASE || '').replace(/\/$/, '');
 
 const normalizeFolderFilesResponse = (data, folderName = '') => {
   const files = Array.isArray(data?.files)
@@ -874,14 +875,14 @@ const documentApi = {
   },
 
   getSecrets: async () => {
-    const response = await axios.get(`${API_BASE_URL}/files/secrets?fetch=true`, {
+    const response = await axios.get(`${SECRETS_API_BASE}/api/chat/secrets?fetch=true`, {
       headers: getAuthHeader(),
     });
     return response.data;
   },
 
   getSecretById: async (secretId) => {
-    const response = await axios.get(`${API_BASE_URL}/files/secrets/${secretId}`, {
+    const response = await axios.get(`${SECRETS_API_BASE}/api/chat/secrets/${secretId}`, {
       headers: getAuthHeader(),
     });
     return response.data;

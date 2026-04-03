@@ -9,7 +9,7 @@ import ApiService from '../services/api';
 import { BookOpen, ChevronDown, MessageSquare, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE_URL } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 
 const DocumentChatView = () => {
   const { selectedFolder, chatSessions, setChatSessions, selectedChatSessionId, setSelectedChatSessionId } = useContext(FileManagerContext);
@@ -102,7 +102,7 @@ const DocumentChatView = () => {
       const headers = { 'Content-Type': 'application/json' };
       if (token) { headers['Authorization'] = `Bearer ${token}`; }
 
-      const response = await fetch(`${API_BASE_URL}/files/secrets?fetch=true`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=true`, {
         method: 'GET',
         headers,
       });
@@ -134,7 +134,7 @@ const DocumentChatView = () => {
       const headers = { 'Content-Type': 'application/json' };
       if (token) { headers['Authorization'] = `Bearer ${token}`; }
 
-      const response = await fetch(`${API_BASE_URL}/files/secrets/${secretId}`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets/${secretId}`, {
         method: 'GET',
         headers,
       });

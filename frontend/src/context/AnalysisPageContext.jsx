@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
-import { API_BASE_URL } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 import {
   Search, Send, FileText, Layers, Trash2, RotateCcw,
   ArrowRight, ChevronRight, AlertTriangle, Clock, Loader2,
@@ -129,7 +129,7 @@ export const AnalysisPageProvider = ({
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const response = await fetch(`${API_BASE_URL}/files/secrets?fetch=false`, { method: 'GET', headers });
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=false`, { method: 'GET', headers });
       if (!response.ok) throw new Error(`Failed to fetch secrets: ${response.status}`);
 
       const secretsData = await response.json();

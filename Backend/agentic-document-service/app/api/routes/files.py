@@ -4,10 +4,11 @@ import base64
 import json
 import logging
 import uuid
+
 from pathlib import PurePosixPath
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, Body, File, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -39,11 +40,44 @@ from app.services.llm_chat_config import (
 )
 from app.services.legal_system_prompt import build_legal_system_prompt, fetch_full_profile
 from app.services.llm_policy_service import assert_upload_allowed
+from app.services.secret_manager_api import get_secret_prompt_detail, list_secret_prompts
 from app.services.secret_prompt_display import resolve_query_and_display
 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 logger = logging.getLogger("agentic_document_service.api.files")
+
+
+@router.get("/secrets")
+def list_secrets_endpoint(fetch: str | None = Query(None)) -> list[dict[str, Any]]:
+    """List secret prompts from `secret_manager` (+ optional GCP values when fetch=true)."""
+    try:
+        return list_secret_prompts(fetch=fetch)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[secrets] list failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch secrets: " + str(exc),
+        ) from exc
+
+
+@router.get("/secrets/{secret_id}")
+def get_secret_by_id_endpoint(secret_id: str) -> dict[str, Any]:
+    """Return one secret’s metadata + value from GCP (same contract as legacy document-service)."""
+    try:
+        body = get_secret_prompt_detail(secret_id)
+        if body is None:
+            raise HTTPException(status_code=404, detail="❌ Secret config not found in DB")
+        return body
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Internal Server Error: " + str(exc),
+        ) from exc
 
 
 class CreateFolderRequest(BaseModel):

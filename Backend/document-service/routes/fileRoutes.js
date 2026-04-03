@@ -3,11 +3,18 @@ const router = express.Router();
 const multer = require("multer");
 const fileController = require("../controllers/FileController");
 const intelligentChatController = require("../controllers/intelligentFolderChatController");
+const {
+  getAllSecrets,
+  fetchSecretValueFromGCP,
+} = require("../controllers/secretManagerController");
 const authMiddleware = require("../middleware/auth"); // Import auth middleware
 const { checkDocumentUploadLimits } = require("../middleware/checkTokenLimits"); // Import the new middleware
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Same handlers as /api/doc/secrets — exposed here so gateway /files → /api/files/secrets works.
+router.get("/secrets", authMiddleware.protect, getAllSecrets);
+router.get("/secrets/:id", authMiddleware.protect, fetchSecretValueFromGCP);
 
 router.get("/file/:fileId/view", authMiddleware.protect, async (req, res) => {
   try {

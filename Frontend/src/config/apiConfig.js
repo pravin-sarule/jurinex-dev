@@ -39,6 +39,12 @@ export const AUTH_SERVICE_URL =
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
   'https://chat-model-120280829617.asia-south1.run.app';
+
+/** Secret prompts list/detail — ChatModel `/api/chat/secrets` (not gateway `/files/secrets`). */
+export const SECRET_PROMPTS_API_BASE =
+  import.meta.env.VITE_APP_SECRET_PROMPTS_URL?.replace(/\/$/, '') ||
+  String(CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
+
 export const PAYMENT_SERVICE_URL =
   import.meta.env.VITE_APP_PAYMENT_SERVICE_URL ||
   'https://payment-service-120280829617.asia-south1.run.app';
@@ -140,6 +146,7 @@ const apiConfig = {
   API_BASE_URL,
   GATEWAY_BASE_URL,
   CHAT_MODEL_BASE_URL,
+  SECRET_PROMPTS_API_BASE,
   AGENT_DRAFT_TEMPLATE_API,
   CHAT_DRAFT_BACKEND_URL,
   TEMPLATE_ANALYZER_API_BASE,

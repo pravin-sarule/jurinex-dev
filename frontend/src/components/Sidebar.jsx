@@ -553,6 +553,7 @@ import {
   MagnifyingGlassCircleIcon,
   PencilSquareIcon,
   ScaleIcon,
+  BookOpenIcon,
   ClockIcon,
   UserGroupIcon,
   Bars3Icon,
@@ -798,6 +799,7 @@ const Sidebar = () => {
   const navigationItems = [
     { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
     { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
+    { name: 'Citation', path: '/citation', icon: BookOpenIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
     { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },

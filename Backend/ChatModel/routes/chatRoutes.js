@@ -27,6 +27,10 @@ function dynamicUploadSingle(fieldName) {
 /** Limits from DB (`llm_chat_config`) for client-side validation — no quota side effect */
 router.get('/limits', protect, chatController.getChatLlmLimits);
 
+/** Secret prompts — same DB + GCP as /ask; does not call document-service */
+router.get('/secrets', protect, chatController.listSecretPrompts);
+router.get('/secrets/:id', protect, chatController.getSecretPromptById);
+
 router.post(
   '/upload-document',
   protect,

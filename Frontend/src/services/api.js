@@ -1,4 +1,9 @@
-import { API_BASE_URL, CHAT_MODEL_BASE_URL, AUTH_SERVICE_URL } from '../config/apiConfig';
+import {
+  API_BASE_URL,
+  CHAT_MODEL_BASE_URL,
+  AUTH_SERVICE_URL,
+  SECRET_PROMPTS_API_BASE,
+} from '../config/apiConfig';
 
 class ApiService {
  constructor() {
@@ -438,11 +443,13 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  }
 
  async getSecrets() {
- return this.request(`/files/secrets?fetch=true`);
+ const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
+ return this.request(`${base}/api/chat/secrets?fetch=true`);
  }
 
  async getSecretById(secretId) {
- return this.request(`/files/secrets/${secretId}`);
+ const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
+ return this.request(`${base}/api/chat/secrets/${secretId}`);
  }
 
  async triggerLLMWithSecret(secretId, fileId, additionalInput = "") {

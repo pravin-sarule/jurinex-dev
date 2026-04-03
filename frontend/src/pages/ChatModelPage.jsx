@@ -1,6 +1,6 @@
 import '../styles/AnalysisPage.css';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { API_BASE_URL, CHAT_MODEL_BASE_URL } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
@@ -1127,7 +1127,7 @@ const ChatModelPage = () => {
       const token = getAuthToken();
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${API_BASE_URL}/files/secrets?fetch=false`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=false`, {
         method: 'GET',
         headers,
       });
