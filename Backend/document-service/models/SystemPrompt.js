@@ -13,13 +13,29 @@ const SystemPrompt = {
     }
 
     try {
-      const query = `
+      const queryWithType = `
+        SELECT system_prompt
+        FROM system_prompts
+        WHERE COALESCE(prompt_type, 'default') = 'default'
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT 1;
+      `;
+      const queryLegacy = `
         SELECT system_prompt
         FROM system_prompts
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1;
       `;
-      const { rows } = await pool.query(query);
+      let rows;
+      try {
+        ({ rows } = await pool.query(queryWithType));
+      } catch (err) {
+        if (err && err.code === '42703') {
+          ({ rows } = await pool.query(queryLegacy));
+        } else {
+          throw err;
+        }
+      }
       
       if (rows.length === 0 || !rows[0].system_prompt) {
         console.warn('[SystemPrompt] No system prompt found in database');

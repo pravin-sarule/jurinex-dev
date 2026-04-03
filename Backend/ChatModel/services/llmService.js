@@ -384,9 +384,11 @@ async function askLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata 
         const budgetHint = buildOutputBudgetHint(generationConfig.maxOutputTokens);
         const userText = budgetHint ? `${promptText}${budgetHint}` : promptText;
         const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
+        const chatModelSys = metadata.chatModelSystemInstruction || '';
+        const mergedSystem = [chatModelSys, sysBudget].filter(Boolean).join('\n\n');
         const model = vertex_ai.getGenerativeModel({
           model: modelName,
-          ...(sysBudget ? { systemInstruction: { parts: [{ text: sysBudget }] } } : {}),
+          ...(mergedSystem ? { systemInstruction: { parts: [{ text: mergedSystem }] } } : {}),
         });
         const fileParts = buildFilePartsFromGcsUris(uris);
 
@@ -482,9 +484,11 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
         const budgetHint = buildOutputBudgetHint(generationConfig.maxOutputTokens);
         const userText = budgetHint ? `${promptText}${budgetHint}` : promptText;
         const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
+        const chatModelSys = metadata.chatModelSystemInstruction || '';
+        const mergedSystem = [chatModelSys, sysBudget].filter(Boolean).join('\n\n');
         const model = vertex_ai.getGenerativeModel({
           model: modelName,
-          ...(sysBudget ? { systemInstruction: { parts: [{ text: sysBudget }] } } : {}),
+          ...(mergedSystem ? { systemInstruction: { parts: [{ text: mergedSystem }] } } : {}),
         });
         const fileParts = buildFilePartsFromGcsUris(uris);
 

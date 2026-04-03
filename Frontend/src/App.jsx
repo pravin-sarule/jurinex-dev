@@ -450,7 +450,7 @@
 
 
 import React, { Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import MainLayout from './layouts/MainLayout';
@@ -476,6 +476,7 @@ import MicrosoftWordPage from './pages/MicrosoftWordPage';
 import ChatHistoryPage from './pages/ChatHistoryPage';
 import { DraftingOiPage } from './components/drafting-frontend';
 import LandingPage from './pages/LandingPage';
+import ContactPage from './pages/ContactPage';
 import LawFirmRegistrationPage from './pages/auth/LawFirmRegistrationPage';
 import LoginPage from './pages/auth/LoginPage';
 import SetPasswordPage from './pages/auth/SetPasswordPage';
@@ -498,6 +499,21 @@ import { FileManagerProvider } from './context/FileManagerContext';
 import AuthChecker from './components/AuthChecker';
 import { TemplateListingPage, TemplatePreviewPage, DraftEditorPage as TemplateDraftEditorPage, SectionDraftingPage, AssembledPreviewPage } from './template_drafting_component';
 
+function ContactPageRoute() {
+  const navigate = useNavigate();
+
+  return (
+    <ContactPage
+      onBackToHome={() => navigate('/')}
+      onNavigateLogin={() => navigate('/login')}
+      onOpenDemo={() => navigate('/')}
+      onSectionNav={(sectionId) =>
+        navigate('/', { state: { scrollTo: sectionId } })
+      }
+    />
+  );
+}
+
 function App() {
   return (
     <Router>
@@ -506,6 +522,14 @@ function App() {
         <FileManagerProvider>
           <Routes>
             <Route path="/" element={<PublicLayout hideHeaderAndFooter={true}><LandingPage /></PublicLayout>} />
+            <Route
+              path="/contact"
+              element={
+                <PublicLayout hideHeaderAndFooter={true}>
+                  <ContactPageRoute />
+                </PublicLayout>
+              }
+            />
             <Route path="/register" element={<LawFirmRegistrationPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/set-password" element={<SetPasswordPage />} />

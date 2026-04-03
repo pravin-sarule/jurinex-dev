@@ -168,6 +168,7 @@ const {
 
 // Import Google Drive service from ChatModel services
 const { downloadFile: downloadFileFromGoogleDrive } = require('../services/googleDriveService');
+const { buildChatModelSystemInstruction } = require('../services/chatModelSystemPromptService');
 
 /** SSE cannot use wildcard Origin when the browser sends credentials; echo request Origin instead. */
 function setSseCorsHeaders(req, res) {
@@ -1023,6 +1024,7 @@ exports.askQuestion = async (req, res) => {
       resolved_model_name: resolvedModelName,
       env_default: process.env.GEMINI_MODEL_NAME || null
     });
+    const chatModelSystemInstruction = await buildChatModelSystemInstruction(fullProfile);
     const answer = await askLLMWithGCS(promptText, gcsUris, '', {
       userId: userId,
       endpoint: '/api/chat/ask',
@@ -1030,7 +1032,8 @@ exports.askQuestion = async (req, res) => {
       sessionId: finalSessionId,
       modelName: resolvedModelName,
       llmConfig: llmConfigForRequest,
-    }); // userContext already in promptText
+      chatModelSystemInstruction,
+    }); // userContext already in promptText; system instruction from DB prompt_type=chat_model
 
     let savedChat;
     try {
@@ -1446,6 +1449,7 @@ exports.askQuestionStream = async (req, res) => {
     let fullAnswer = '';
     let chunkCount = 0;
     const streamingDelayMs = getStreamingDelayMs(llmChatConfig);
+    const chatModelSystemInstruction = await buildChatModelSystemInstruction(fullProfile);
     try {
       console.log('🔄 Starting to stream LLM response...');
       
@@ -1456,6 +1460,7 @@ exports.askQuestionStream = async (req, res) => {
         fileId: sanitizedFileId,
         sessionId: finalSessionId,
         endpoint: '/api/chat/ask/stream',
+        chatModelSystemInstruction,
       })) {
         if (typeof chunk === 'string' && chunk.length > 0) {
           fullAnswer += chunk;
@@ -1792,48 +1797,8 @@ When asked about profile details, list ALL the above fields including those mark
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LEGAL DOMAIN SYSTEM PROMPT
-// ─────────────────────────────────────────────────────────────────────────────
-function buildLegalSystemPrompt(userProfile) {
-  const professional = userProfile?.professional || {};
-  const basic = userProfile?.basic || {};
-
-  const ns = (v) => v || 'Not set';
-  const name         = basic.username || professional.fullname || basic.email || professional.email || 'the user';
-
-  const profileSection = `\n\nUSER PROFILE (complete profile fetched from JuriNex auth service):
-- Name: ${name}
-- Email: ${ns(basic.email || professional.email)}
-- Role: ${ns(professional.primary_role)}
-- Organization: ${ns(professional.organization_name)}
-- Organization Type: ${ns(professional.organization_type)}
-- Primary Jurisdiction: ${ns(professional.primary_jurisdiction)}
-- Areas of Practice: ${ns(professional.main_areas_of_practice)}
-- Experience: ${ns(professional.experience)}
-- Bar Enrollment Number: ${ns(professional.bar_enrollment_number)}
-- Typical Client: ${ns(professional.typical_client)}
-- Preferred Tone: ${ns(professional.preferred_tone)}
-- Detail Level: ${ns(professional.preferred_detail_level)}
-- Citation Style: ${ns(professional.citation_style)}
-
-IMPORTANT: When the user asks about their profile details, list ALL the above fields exactly as shown, including those marked "Not set". Never say you do not have access to their profile — the complete profile is provided above. "Not set" means the user has not filled in that field yet.`;
-
-  return `You are JuriNex Legal Assistant — an expert AI assistant strictly specialised in legal matters.
-
-DOMAIN RESTRICTION:
-- You ONLY answer questions related to law, legal concepts, legal procedures, contracts, regulations, case law, statutes, compliance, legal rights, legal strategy, or legal research.
-- You MAY answer questions about the user's own profile details since the complete profile is provided to you above.
-- If a question is outside the legal domain and is not about the user's profile, politely decline and explain that you are a legal-only assistant.
-
-RESPONSE QUALITY:
-- Provide accurate, well-reasoned legal information.
-- Responses are for informational purposes only and not a substitute for formal legal advice from a licensed attorney.
-- Cite relevant statutes, regulations, or case law where appropriate.
-- Address the user by name.${profileSection}`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // General Chat (no document) — Streaming SSE
+// System prompt: system_prompts.prompt_type = 'chat_model' + profile (see chatModelSystemPromptService)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.askGeneralQuestionStream = async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1933,7 +1898,7 @@ exports.askGeneralQuestionStream = async (req, res) => {
       console.log(`📜 [General Chat] Sending ${previousChats.length} previous messages as context to LLM`);
     }
 
-    const systemInstruction = buildLegalSystemPrompt(userProfile);
+    const systemInstruction = await buildChatModelSystemInstruction(userProfile);
 
     let promptText = question.trim();
     if (conversationContext) {
