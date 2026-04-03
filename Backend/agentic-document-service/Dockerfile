@@ -10,7 +10,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 8092
+EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8092"]
-
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-${AGENTIC_DOCUMENT_SERVICE_PORT:-8092}}"]
