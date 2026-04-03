@@ -1,0 +1,122 @@
+/**
+ * Template Drafting Component - CSS Variables
+ * Jurinex Design System
+ */
+
+:root {
+  /* Primary Colors - Professional Blue */
+  --jx-primary: #1A365D;
+  --jx-primary-light: #2C5282;
+  --jx-primary-dark: #0D1F33;
+  --jx-primary-hover: #234876;
+  
+  /* Secondary Colors - Gold Accent */
+  --jx-secondary: #B7791F;
+  --jx-secondary-light: #D69E2E;
+  --jx-secondary-dark: #8B5E0E;
+  
+  /* Neutral Colors */
+  --jx-bg-primary: #FFFFFF;
+  --jx-bg-secondary: #F7FAFC;
+  --jx-bg-tertiary: #EDF2F7;
+  --jx-bg-dark: #1A202C;
+  --jx-text-primary: #2D3748;
+  --jx-text-secondary: #718096;
+  --jx-text-muted: #A0AEC0;
+  --jx-text-inverse: #FFFFFF;
+  --jx-border: #E2E8F0;
+  --jx-border-dark: #CBD5E0;
+  
+  /* Status Colors */
+  --jx-success: #38A169;
+  --jx-success-light: #C6F6D5;
+  --jx-warning: #DD6B20;
+  --jx-warning-light: #FEEBC8;
+  --jx-error: #E53E3E;
+  --jx-error-light: #FED7D7;
+  --jx-info: #3182CE;
+  --jx-info-light: #BEE3F8;
+  
+  /* AI Highlight */
+  --jx-ai-bg: #E6FFFA;
+  --jx-ai-border: #38B2AC;
+  --jx-ai-text: #234E52;
+  
+  /* Typography */
+  --jx-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --jx-font-serif: 'Times New Roman', 'Georgia', 'Cambria', serif;
+  --jx-font-mono: 'Fira Code', 'Consolas', 'Monaco', monospace;
+  
+  /* Font Sizes */
+  --jx-text-xs: 0.75rem;
+  --jx-text-sm: 0.875rem;
+  --jx-text-base: 1rem;
+  --jx-text-lg: 1.125rem;
+  --jx-text-xl: 1.25rem;
+  --jx-text-2xl: 1.5rem;
+  --jx-text-3xl: 1.875rem;
+  
+  /* Spacing Scale */
+  --jx-space-1: 0.25rem;
+  --jx-space-2: 0.5rem;
+  --jx-space-3: 0.75rem;
+  --jx-space-4: 1rem;
+  --jx-space-5: 1.25rem;
+  --jx-space-6: 1.5rem;
+  --jx-space-8: 2rem;
+  --jx-space-10: 2.5rem;
+  --jx-space-12: 3rem;
+  
+  /* Shadows */
+  --jx-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --jx-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --jx-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --jx-shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  
+  /* Border Radius */
+  --jx-radius-sm: 0.25rem;
+  --jx-radius-md: 0.5rem;
+  --jx-radius-lg: 0.75rem;
+  --jx-radius-xl: 1rem;
+  --jx-radius-full: 9999px;
+  
+  /* Transitions */
+  --jx-transition-fast: 100ms ease-in-out;
+  --jx-transition: 150ms ease-in-out;
+  --jx-transition-slow: 300ms ease-in-out;
+  
+  /* Z-index scale */
+  --jx-z-dropdown: 1000;
+  --jx-z-modal: 1100;
+  --jx-z-tooltip: 1200;
+  --jx-z-toast: 1300;
+}
+
+/* Dark Mode */
+[data-theme="dark"] {
+  --jx-bg-primary: #1A202C;
+  --jx-bg-secondary: #2D3748;
+  --jx-bg-tertiary: #4A5568;
+  --jx-text-primary: #F7FAFC;
+  --jx-text-secondary: #CBD5E0;
+  --jx-text-muted: #A0AEC0;
+  --jx-border: #4A5568;
+  --jx-border-dark: #718096;
+  --jx-ai-bg: #1C4532;
+}
+
+/* Base Reset */
+.template-drafting-root {
+  font-family: var(--jx-font-sans);
+  font-size: var(--jx-text-base);
+  color: var(--jx-text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.template-drafting-root *,
+.template-drafting-root *::before,
+.template-drafting-root *::after {
+  box-sizing: border-box;
+}

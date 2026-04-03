@@ -1,0 +1,262 @@
+/**
+ * Template Drafting Component - A4 Page Styles
+ * Print-safe A4 page rendering
+ */
+
+@import './variables.css';
+
+/* Page Container - Scrollable area */
+/* Page Container - Scrollable area */
+.a4-page-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--jx-space-6);
+    padding: var(--jx-space-6);
+    background: var(--jx-bg-secondary);
+    overflow-y: auto;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+    /* Ensure z-index context for shadows */
+    position: relative;
+    z-index: 0;
+}
+
+/* Single A4 Page */
+.a4-page {
+    width: 210mm;
+    min-height: 297mm;
+    padding: 25.4mm;
+    background: var(--jx-bg-primary);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    /* Softer shadow */
+    border: 1px solid var(--jx-border-dark);
+    /* Crisp edge */
+    font-family: var(--jx-font-serif);
+    font-size: 12pt;
+    line-height: 1.6;
+    color: var(--jx-text-primary);
+    position: relative;
+    flex-shrink: 0;
+}
+
+/* Page number indicator */
+.a4-page::after,
+.a4-page-wrapper::after {
+    content: attr(data-page-number);
+    position: absolute;
+    bottom: 15mm;
+    right: 25.4mm;
+    font-size: 10pt;
+    color: var(--jx-text-muted);
+    font-family: var(--jx-font-sans);
+    z-index: 1;
+    /* Ensure above content if needed */
+}
+
+/* Wrapper for pre-rendered pages (avoid double styling) */
+.a4-page-wrapper {
+    position: relative;
+    width: 210mm;
+    flex-shrink: 0;
+    /* No padding, bg, or shadow - inner content has it */
+}
+
+/* Compact view for smaller screens */
+@media (max-width: 900px) {
+
+    .a4-page,
+    .a4-page-wrapper {
+        width: 100%;
+        min-height: auto;
+    }
+
+    .a4-page {
+        padding: var(--jx-space-4);
+        box-shadow: var(--jx-shadow-md);
+    }
+
+    .a4-page::after,
+    .a4-page-wrapper::after {
+        bottom: var(--jx-space-2);
+        right: var(--jx-space-4);
+    }
+}
+
+/* Block Styles */
+.draft-block {
+    margin-bottom: var(--jx-space-4);
+    position: relative;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.draft-block--heading {
+    text-align: center;
+    font-weight: 600;
+    margin: 18px 0 14px;
+    letter-spacing: 0.4px;
+    font-size: 14pt;
+    text-transform: uppercase;
+}
+
+.draft-block--heading .draft-block__layout-text {
+    display: block;
+}
+
+.draft-block--subheading {
+    font-weight: 600;
+    margin-bottom: var(--jx-space-2);
+    font-size: 12pt;
+    /* align-left by default */
+}
+
+.draft-block--paragraph {
+    text-align: justify;
+    /* Justify paragraphs */
+    line-height: 1.8;
+}
+
+.draft-block__layout-text {
+    white-space: pre-wrap;
+    /* Preserves spaces + wraps */
+}
+
+/* Blank line rendering for underscores */
+.draft-blank-line {
+    display: inline-block;
+    border-bottom: 1px solid #111;
+    height: 0.9em;
+    vertical-align: baseline;
+    margin: 0 6px;
+}
+
+/* New style for list items detected as paragraphs */
+.draft-block--paragraph[data-content*="•"],
+.draft-block--paragraph[data-content*="- "] {
+    padding-left: 1em;
+    text-indent: -1em;
+    /* Hanging indent for bullets */
+}
+
+.draft-block--clause {
+    margin-left: 2em;
+    padding-left: 1em;
+    border-left: 2px solid var(--jx-border);
+}
+
+.draft-block--signature {
+    margin-top: var(--jx-space-8);
+    padding-top: var(--jx-space-4);
+    border-top: 1px solid var(--jx-text-primary);
+    width: 200px;
+}
+
+/* AI-generated content highlight */
+.draft-block--ai-generated {
+    background: var(--jx-ai-bg);
+    padding: var(--jx-space-3);
+    border-left: 3px solid var(--jx-ai-border);
+    margin-left: calc(-1 * var(--jx-space-3));
+    margin-right: calc(-1 * var(--jx-space-3));
+}
+
+.draft-block--ai-generated::before {
+    content: 'AI';
+    position: absolute;
+    top: 0;
+    right: 0;
+    background: var(--jx-ai-border);
+    color: white;
+    font-size: 8pt;
+    padding: 2px 6px;
+    border-radius: 0 0 0 var(--jx-radius-sm);
+    font-family: var(--jx-font-sans);
+}
+
+/* Field value styling */
+.draft-block__label {
+    font-weight: 600;
+    display: inline;
+}
+
+.draft-block__value {
+    display: inline;
+}
+
+.draft-block__value--empty {
+    color: var(--jx-text-muted);
+    font-style: italic;
+}
+
+.draft-block__value--editable {
+    background: rgba(49, 130, 206, 0.1);
+    padding: 0 2px;
+    transition: background-color var(--jx-transition);
+}
+
+/* Highlight effect when field is updated */
+.draft-block--highlight {
+    animation: highlightFade 2s ease-out;
+}
+
+@keyframes highlightFade {
+    0% {
+        background-color: var(--jx-warning-light);
+    }
+
+    100% {
+        background-color: transparent;
+    }
+}
+
+/* Page scroll indicator */
+.page-scroll-indicator {
+    position: fixed;
+    bottom: var(--jx-space-6);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--jx-bg-primary);
+    border: 1px solid var(--jx-border);
+    border-radius: var(--jx-radius-full);
+    padding: var(--jx-space-2) var(--jx-space-4);
+    font-size: var(--jx-text-sm);
+    color: var(--jx-text-secondary);
+    box-shadow: var(--jx-shadow-md);
+    z-index: 10;
+}
+
+/* Print Styles */
+@media print {
+    .a4-page-container {
+        padding: 0;
+        background: none;
+        gap: 0;
+    }
+
+    .a4-page {
+        box-shadow: none;
+        margin: 0;
+        page-break-after: always;
+        break-after: page;
+    }
+
+    .a4-page:last-child {
+        page-break-after: auto;
+    }
+
+    .page-scroll-indicator,
+    .no-print {
+        display: none !important;
+    }
+
+    .draft-block--ai-generated::before {
+        display: none;
+    }
+}
+
+@page {
+    size: A4;
+    margin: 0;
+}

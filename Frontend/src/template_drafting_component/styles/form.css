@@ -1,0 +1,215 @@
+/**
+ * Template Drafting Component - Form Panel Styles
+ */
+
+@import './variables.css';
+
+/* Form Panel */
+.form-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+.form-panel__header {
+    padding: var(--jx-space-3) var(--jx-space-4);
+    border-bottom: 1px solid var(--jx-border);
+    flex-shrink: 0;
+}
+
+.form-panel__title {
+    font-size: var(--jx-text-base);
+    font-weight: 600;
+    color: var(--jx-text-primary);
+    margin: 0;
+}
+
+.form-panel__subtitle {
+    font-size: var(--jx-text-sm);
+    color: var(--jx-text-secondary);
+    margin-top: var(--jx-space-1);
+}
+
+/* Form content area */
+.form-panel__content {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--jx-space-4);
+}
+
+/* Form field group */
+.form-field {
+    margin-bottom: var(--jx-space-5);
+}
+
+.form-field:last-child {
+    margin-bottom: 0;
+}
+
+/* Field label */
+.form-field__label {
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-1);
+    font-size: var(--jx-text-sm);
+    font-weight: 500;
+    color: var(--jx-text-secondary);
+    margin-bottom: var(--jx-space-2);
+}
+
+.form-field__required {
+    color: var(--jx-error);
+}
+
+/* Text input */
+.form-field__input {
+    width: 100%;
+    padding: var(--jx-space-2) var(--jx-space-3);
+    border: 1px solid var(--jx-border);
+    border-radius: var(--jx-radius-md);
+    font-family: var(--jx-font-sans);
+    font-size: var(--jx-text-base);
+    color: var(--jx-text-primary);
+    background: var(--jx-bg-primary);
+    transition: border-color var(--jx-transition), box-shadow var(--jx-transition);
+}
+
+.form-field__input:focus {
+    outline: none;
+    border-color: var(--jx-primary);
+    box-shadow: 0 0 0 3px rgba(26, 54, 93, 0.1);
+}
+
+.form-field__input::placeholder {
+    color: var(--jx-text-muted);
+}
+
+.form-field__input--error {
+    border-color: var(--jx-error);
+}
+
+.form-field__input--error:focus {
+    box-shadow: 0 0 0 3px rgba(229, 62, 62, 0.1);
+}
+
+/* Textarea */
+.form-field__textarea {
+    min-height: 100px;
+    resize: vertical;
+}
+
+/* Number input */
+.form-field__input[type="number"] {
+    -moz-appearance: textfield;
+}
+
+.form-field__input[type="number"]::-webkit-outer-spin-button,
+.form-field__input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* Date input */
+.form-field__input[type="date"] {
+    cursor: pointer;
+}
+
+/* Error message */
+.form-field__error {
+    font-size: var(--jx-text-sm);
+    color: var(--jx-error);
+    margin-top: var(--jx-space-1);
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-1);
+}
+
+/* Help text */
+.form-field__help {
+    font-size: var(--jx-text-xs);
+    color: var(--jx-text-muted);
+    margin-top: var(--jx-space-1);
+}
+
+/* Form footer with save indicator */
+.form-panel__footer {
+    padding: var(--jx-space-3) var(--jx-space-4);
+    border-top: 1px solid var(--jx-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}
+
+.form-panel__save-status {
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-2);
+    font-size: var(--jx-text-sm);
+    color: var(--jx-text-secondary);
+}
+
+.form-panel__save-status--saving {
+    color: var(--jx-warning);
+}
+
+.form-panel__save-status--saved {
+    color: var(--jx-success);
+}
+
+.form-panel__save-status--dirty {
+    color: var(--jx-text-muted);
+}
+
+.form-panel__save-status-icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* Undo/Redo buttons */
+.form-panel__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-2);
+}
+
+.form-panel__action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--jx-bg-secondary);
+    border: 1px solid var(--jx-border);
+    border-radius: var(--jx-radius-md);
+    color: var(--jx-text-secondary);
+    cursor: pointer;
+    transition: all var(--jx-transition);
+}
+
+.form-panel__action-btn:hover:not(:disabled) {
+    background: var(--jx-bg-tertiary);
+    color: var(--jx-text-primary);
+}
+
+.form-panel__action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Field section dividers */
+.form-section {
+    margin-bottom: var(--jx-space-6);
+}
+
+.form-section__title {
+    font-size: var(--jx-text-sm);
+    font-weight: 600;
+    color: var(--jx-text-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-bottom: var(--jx-space-2);
+    border-bottom: 1px solid var(--jx-border);
+    margin-bottom: var(--jx-space-4);
+}

@@ -1,0 +1,998 @@
+================================================================================
+         TEMPLATE DRAFTING SERVICE - BACKEND ANALYSIS FOR FRONTEND
+                    Comprehensive Study (January 24, 2026)
+================================================================================
+
+PURPOSE:
+This document provides a complete analysis of the drafting-template-service
+backend to inform frontend implementation decisions. All API endpoints, data
+structures, and constraints are documented here.
+
+================================================================================
+SECTION 1: SERVICE OVERVIEW
+================================================================================
+
+Service:           drafting-template-service
+Port:              5010
+Gateway Path:      /api/drafting-templates/*
+Database:          Template_Draft_DB (PostgreSQL)
+AI Service:        Gemini 2.0 Flash (via GEMINI_API_KEY)
+
+ALL API CALLS GO THROUGH GATEWAY (port 5006):
+http://localhost:5006/api/drafting-templates/*
+
+================================================================================
+SECTION 2: ENDPOINT-BY-ENDPOINT ANALYSIS
+================================================================================
+
+-------------------------------------------------------------------------------
+2.1 TEMPLATE ENDPOINTS (READ-ONLY FOR FRONTEND)
+-------------------------------------------------------------------------------
+
+GET /api/templates
+    Purpose: List all active templates for display
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "count": 2,
+        "templates": [
+            {
+                "id": "uuid",
+                "name": "Rent Agreement",
+                "description": "Standard residential rent agreement",
+                "category": "Real Estate",
+                "isActive": true,
+                "createdAt": "2026-01-22T..."
+            }
+        ]
+    }
+    
+    FRONTEND USAGE:
+    - Use for template listing cards
+    - Display name, category, description
+    - Filter by category if needed
+
+-------------------------------------------------------------------------------
+
+GET /api/templates/:id
+    Purpose: Get template details with schema and content
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "template": {
+            "id": "uuid",
+            "name": "Rent Agreement",
+            "description": "...",
+            "category": "Real Estate",
+            "schema": {
+                "fields": [
+                    {
+                        "key": "landlord_name",
+                        "label": "Landlord Name",
+                        "type": "string",
+                        "required": true
+                    },
+                    {
+                        "key": "monthly_rent",
+                        "label": "Monthly Rent (₹)",
+                        "type": "number",
+                        "required": true
+                    }
+                ]
+            },
+            "content": {
+                "format": "dual-document-v1",   // or legacy
+                "structured": {
+                    "pages": [
+                        {
+                            "pageNo": 1,
+                            "blocks": [...]
+                        }
+                    ],
+                    "pageCount": 4
+                },
+                "fallback_html": { ... }
+            },
+            "latestVersionId": "uuid",
+            "versionNo": 1,
+            "isActive": true
+        }
+    }
+    
+    FRONTEND USAGE:
+    - schema.fields → Generate dynamic form
+    - content → Use for preview rendering
+    - DO NOT modify content structure
+
+-------------------------------------------------------------------------------
+
+GET /api/templates/:id/schema
+    Purpose: Get only form schema (efficient)
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "templateId": "uuid",
+        "templateName": "Rent Agreement",
+        "schema": { "fields": [...] }
+    }
+
+-------------------------------------------------------------------------------
+2.2 DRAFT ENDPOINTS
+-------------------------------------------------------------------------------
+
+POST /api/drafts
+    Purpose: Create a new draft from template
+    Auth: Bearer token required
+    
+    Request Body:
+    {
+        "templateId": "uuid",
+        "title": "My Rent Agreement - January 2026"  // optional
+    }
+    
+    Response Shape:
+    {
+        "success": true,
+        "draft": {
+            "id": "draft-uuid",
+            "title": "My Rent Agreement - January 2026",
+            "status": "draft",
+            "templateVersionId": "uuid",
+            "currentVersionId": "uuid",
+            "createdAt": "2026-01-22T..."
+        }
+    }
+    
+    BACKEND BEHAVIOR:
+    1. Gets template with latest version
+    2. Creates draft in dt_drafts
+    3. Creates initial version in dt_draft_versions
+    4. Normalizes template content (dual-document-v1 → flat blocks)
+    5. Creates blocks in dt_draft_blocks
+    
+    IMMUTABLE: Template structure is preserved forever
+
+-------------------------------------------------------------------------------
+
+GET /api/drafts
+    Purpose: List all user's drafts
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "count": 5,
+        "drafts": [
+            {
+                "id": "draft-uuid",
+                "title": "My Rent Agreement",
+                "status": "draft",
+                "templateName": "Rent Agreement",
+                "templateCategory": "Real Estate",
+                "createdAt": "...",
+                "updatedAt": "..."
+            }
+        ]
+    }
+    
+    STATUS VALUES:
+    - "draft" → Active, editable
+    - "exported" → Has been exported
+    - "finalized" → Locked, no further edits
+    - "deleted" → Soft deleted
+
+-------------------------------------------------------------------------------
+
+GET /api/drafts/:id
+    Purpose: Get draft with current state (all blocks)
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "draft": {
+            "id": "draft-uuid",
+            "title": "My Rent Agreement",
+            "status": "draft",
+            "templateName": "Rent Agreement",
+            "templateVersionId": "uuid",
+            "currentVersionId": "uuid",
+            "schema": {
+                "fields": [...]
+            },
+            "blocks": [
+                {
+                    "id": "block-uuid",
+                    "key": "landlord_name",
+                    "content": {
+                        "value": "John Smith",
+                        "label": "Landlord Name",
+                        "type": "string",
+                        "pageNo": 1  // Injected by normalizer
+                    }
+                },
+                {
+                    "id": "block-uuid-2",
+                    "key": "grounds",
+                    "content": {
+                        "value": "The petitioner states...",
+                        "label": "Grounds",
+                        "aiGenerated": true
+                    }
+                }
+            ],
+            "createdAt": "...",
+            "updatedAt": "..."
+        }
+    }
+    
+    FRONTEND USAGE:
+    - blocks[] → Data for left panel preview
+    - blocks[].content.pageNo → Page grouping if present
+    - schema → Form field definitions
+    - blocks[].content.aiGenerated → Highlight AI content
+
+-------------------------------------------------------------------------------
+
+PUT /api/drafts/:id/fields
+    Purpose: Update form field values (creates new version)
+    Auth: Bearer token required
+    
+    Request Body:
+    {
+        "fields": {
+            "landlord_name": "John Smith",
+            "monthly_rent": 25000,
+            "tenant_name": "Jane Doe"
+        }
+    }
+    
+    Response Shape:
+    {
+        "success": true,
+        "versionId": "new-version-uuid",
+        "versionNo": 2
+    }
+    
+    BACKEND BEHAVIOR:
+    1. Creates NEW version in dt_draft_versions
+    2. Copies ALL blocks with updates
+    3. Updates draft.current_version_id
+    4. Previous version preserved for undo
+    
+    ⚠️ FRONTEND CONSTRAINT:
+    - Only update field VALUES via this endpoint
+    - DO NOT try to modify block structure/order
+    - Each update creates a new version (performance consideration)
+
+-------------------------------------------------------------------------------
+
+PUT /api/drafts/:id/title
+    Purpose: Update draft title only
+    Auth: Bearer token required
+    
+    Request Body:
+    { "title": "New Title" }
+
+-------------------------------------------------------------------------------
+
+DELETE /api/drafts/:id
+    Purpose: Soft delete a draft
+    Auth: Bearer token required
+    
+    Response: { "success": true, "message": "Draft deleted" }
+
+-------------------------------------------------------------------------------
+2.3 VERSION CONTROL ENDPOINTS (UNDO/REDO)
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/undo
+    Purpose: Undo last action
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "previousVersionId": "old-version-uuid",
+        "currentVersionId": "restored-version-uuid",
+        "versionNo": 2
+    }
+    
+    BACKEND BEHAVIOR:
+    - Copies blocks from parent version
+    - Creates new "undo" version
+    - Updates current_version_id
+    
+    ERROR IF: At initial version (no parent)
+
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/redo
+    Purpose: Redo undone action
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "previousVersionId": "old-version-uuid",
+        "currentVersionId": "restored-version-uuid",
+        "versionNo": 3
+    }
+    
+    ERROR IF: No action to redo
+
+-------------------------------------------------------------------------------
+
+GET /api/drafts/:id/versions
+    Purpose: Get version history
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "draftId": "draft-uuid",
+        "currentVersionId": "current-uuid",
+        "versions": [
+            {
+                "id": "v3",
+                "versionNo": 3,
+                "actionType": "ai_insert",
+                "parentVersionId": "v2",
+                "blockCount": 8,
+                "createdAt": "..."
+            },
+            {
+                "id": "v2",
+                "versionNo": 2,
+                "actionType": "form_update",
+                "parentVersionId": "v1",
+                "blockCount": 8,
+                "createdAt": "..."
+            },
+            {
+                "id": "v1",
+                "versionNo": 1,
+                "actionType": "initial",
+                "parentVersionId": null,
+                "blockCount": 8,
+                "createdAt": "..."
+            }
+        ]
+    }
+    
+    ACTION TYPES:
+    - "initial" → First version
+    - "form_update" → Field update
+    - "ai_insert" → AI suggestion inserted
+    - "undo" → Undo action
+    - "redo" → Redo action
+    - "restore" → Restored to specific version
+
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/versions/:vid/restore
+    Purpose: Restore to specific historical version
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "versionId": "new-version-uuid",
+        "versionNo": 4
+    }
+
+-------------------------------------------------------------------------------
+2.4 AI SUGGESTION ENDPOINTS
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/ai/suggest
+    Purpose: Request AI-generated content for a block
+    Auth: Bearer token required
+    
+    Request Body (Basic Mode):
+    {
+        "targetBlock": "rent_clause",
+        "prompt": "Generate a professional rent payment clause"
+    }
+    
+    Request Body (State-Aware Mode with Evidence):
+    {
+        "targetBlock": "grounds",
+        "instruction": "Generate grounds based on evidence documents",
+        "stateAware": true,
+        "fileIds": ["evidence-uuid-1", "evidence-uuid-2"],
+        "responseSize": "long"  // "short" | "medium" | "long"
+    }
+    
+    Response Shape:
+    {
+        "success": true,
+        "suggestion": {
+            "suggestionId": "suggestion-uuid",
+            "targetBlock": "grounds",
+            "content": "GROUNDS\n\nI. VIOLATION OF...",
+            "status": "pending",
+            "model": "gemini-2.0-flash",
+            "usage": {
+                "inputTokens": 266,
+                "outputTokens": 120,
+                "totalTokens": 386,
+                "modelUsed": "gemini-2.0-flash",
+                "estimatedCostUsd": 0.00005595,
+                "estimatedCostInr": 0.004644
+            },
+            "createdAt": "..."
+        }
+    }
+    
+    RESPONSE SIZE OPTIONS:
+    - "short": 3-5 precise legal sentences
+    - "medium": 1-2 structured paragraphs (default)
+    - "long": Detailed multi-paragraph drafting
+    
+    FRONTEND USAGE:
+    - Show suggestion in right panel
+    - Include "Insert" and "Undo" buttons
+    - Display usage/cost info
+
+-------------------------------------------------------------------------------
+
+GET /api/drafts/:id/ai/suggestions
+    Purpose: Get all pending suggestions for a draft
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "count": 1,
+        "suggestions": [
+            {
+                "id": "suggestion-uuid",
+                "targetBlock": "grounds",
+                "content": "...",
+                "status": "pending",
+                "createdAt": "..."
+            }
+        ]
+    }
+
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/ai/:suggestionId/insert
+    Purpose: Insert AI suggestion into draft (creates new version)
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "versionId": "new-version-uuid",
+        "versionNo": 3,
+        "targetBlock": "grounds"
+    }
+    
+    BACKEND BEHAVIOR:
+    - Creates new version with AI content in target block
+    - Sets aiGenerated: true on block content
+    - Marks suggestion as "inserted"
+
+-------------------------------------------------------------------------------
+
+DELETE /api/drafts/:id/ai/:suggestionId
+    Purpose: Reject/discard AI suggestion
+    Auth: Bearer token required
+    
+    Response: { "success": true, "message": "Suggestion rejected" }
+
+-------------------------------------------------------------------------------
+2.5 EVIDENCE ENDPOINTS (FOR AI CONTEXT)
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/evidence/upload
+    Purpose: Upload evidence file for AI context
+    Auth: Bearer token required
+    Content-Type: multipart/form-data
+    
+    URL: /api/drafting-templates/api/drafts/:id/evidence/upload
+    
+    Form Data:
+    - file: PDF/DOCX/TXT/Image (max 20MB)
+    
+    Response Shape:
+    {
+        "success": true,
+        "evidence": {
+            "id": "evidence-uuid",
+            "fileName": "uploaded_document.pdf",
+            "mimeType": "application/pdf",
+            "fileSize": 123456,
+            "extractMethod": "document_ai",
+            "extractCharacterCount": 5432,
+            "extractMeta": {
+                "pageCount": 5,
+                "status": "extracted"
+            },
+            "createdAt": "..."
+        }
+    }
+    
+    BACKEND BEHAVIOR:
+    - Uploads to GCS
+    - Auto-extracts text using Document AI or Tesseract OCR
+    - Stores in dt_draft_evidence
+
+-------------------------------------------------------------------------------
+
+GET /api/drafts/:id/evidence
+    Purpose: List all evidence for a draft
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "count": 2,
+        "evidence": [
+            {
+                "id": "evidence-uuid",
+                "fileName": "document.pdf",
+                "mimeType": "application/pdf",
+                "fileSize": 123456,
+                "extractMeta": {...}
+            }
+        ]
+    }
+
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/evidence/:evidenceId/extract
+    Purpose: Force text extraction (re-OCR)
+    Auth: Bearer token required
+
+-------------------------------------------------------------------------------
+
+DELETE /api/drafts/:id/evidence/:evidenceId
+    Purpose: Delete evidence file
+    Auth: Bearer token required
+
+-------------------------------------------------------------------------------
+2.6 PREVIEW & EXPORT ENDPOINTS
+-------------------------------------------------------------------------------
+
+GET /api/drafts/:id/preview
+    Purpose: Generate/retrieve HTML preview
+    Auth: Bearer token required
+    
+    Response: Raw HTML document
+    
+    Query Parameters:
+    - format=json → Returns metadata instead of HTML
+
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/export
+    Purpose: Export draft to DOCX
+    Auth: Bearer token required
+    
+    Response Shape:
+    {
+        "success": true,
+        "downloadUrl": "https://storage.googleapis.com/...",
+        "fileName": "My_Rent_Agreement.docx",
+        "expiresIn": "60 minutes",
+        "renderId": "render-uuid"
+    }
+    
+    FRONTEND USAGE:
+    - Open downloadUrl in browser
+    - URL is pre-signed (no auth needed for download)
+    - Expires in 60 minutes
+
+-------------------------------------------------------------------------------
+
+POST /api/drafts/:id/finalize
+    Purpose: Lock draft (no further edits)
+    Auth: Bearer token required
+    
+    Response: { "success": true, "message": "Draft finalized", "draftId": "..." }
+
+================================================================================
+SECTION 3: DATA FORMATS - CRITICAL FOR FRONTEND
+================================================================================
+
+3.1 TEMPLATE CONTENT FORMAT: DUAL-DOCUMENT-V1
+----------------------------------------------
+
+{
+    "format": "dual-document-v1",
+    "structured": {
+        "pages": [
+            {
+                "pageNo": 1,
+                "blocks": [
+                    {
+                        "key": "header",
+                        "content": {
+                            "type": "heading",
+                            "text": "RESIDENTIAL RENT AGREEMENT",
+                            "style": {...}
+                        }
+                    },
+                    {
+                        "key": "preamble",
+                        "content": {
+                            "type": "paragraph",
+                            "text": "This agreement is made on..."
+                        }
+                    }
+                ]
+            },
+            {
+                "pageNo": 2,
+                "blocks": [...]
+            }
+        ],
+        "pageCount": 4
+    },
+    "fallback_html": {
+        "pages": [
+            {
+                "pageNo": 1,
+                "html": "<div class='page'>...</div>"
+            }
+        ]
+    }
+}
+
+⚠️ FRONTEND RENDERING STRATEGY:
+- Use fallback_html.pages[].html for A4 preview
+- Preserve page boundaries exactly
+- DO NOT reflow content between pages
+- pageNo is the source of truth for pagination
+
+-------------------------------------------------------------------------------
+
+3.2 LEGACY TEMPLATE FORMAT
+--------------------------
+
+{
+    "blocks": [
+        { "key": "header", "content": {...} },
+        { "key": "preamble", "content": {...} }
+    ]
+}
+
+Backend normalizes this automatically to flat blocks.
+
+-------------------------------------------------------------------------------
+
+3.3 DRAFT BLOCK FORMAT (FROM GET /drafts/:id)
+----------------------------------------------
+
+{
+    "id": "block-uuid",
+    "key": "landlord_name",
+    "content": {
+        "value": "John Smith",        // MUTABLE by frontend via PUT /fields
+        "label": "Landlord Name",     // IMMUTABLE
+        "type": "string",             // IMMUTABLE  
+        "pageNo": 1,                  // IMMUTABLE (from normalizer)
+        "aiGenerated": true           // Set by backend on AI insert
+    }
+}
+
+MUTABLE FIELDS (Frontend can modify via PUT /fields):
+✅ content.value
+
+IMMUTABLE FIELDS (Frontend must NOT modify):
+❌ key
+❌ label
+❌ type
+❌ pageNo
+❌ block order
+❌ page boundaries
+
+-------------------------------------------------------------------------------
+
+3.4 TEMPLATE SCHEMA FORMAT (FOR FORM GENERATION)
+------------------------------------------------
+
+{
+    "fields": [
+        {
+            "key": "landlord_name",
+            "label": "Landlord Name",
+            "type": "string",
+            "required": true,
+            "maxLength": 100
+        },
+        {
+            "key": "monthly_rent",
+            "label": "Monthly Rent (₹)",
+            "type": "number",
+            "required": true,
+            "min": 0
+        },
+        {
+            "key": "property_address",
+            "label": "Property Address",
+            "type": "textarea",
+            "required": true
+        },
+        {
+            "key": "lease_start_date",
+            "label": "Lease Start Date",
+            "type": "date",
+            "required": true
+        }
+    ]
+}
+
+FIELD TYPES:
+- "string" → Text input
+- "number" → Number input
+- "integer" → Integer input
+- "textarea" → Multi-line text
+- "date" → Date picker
+
+================================================================================
+SECTION 4: PAGE BOUNDARIES & A4 LAYOUT
+================================================================================
+
+PAGE PRESERVATION RULES:
+1. Template content arrives with explicit page boundaries
+2. Each page in structured.pages[] or fallback_html.pages[] = 1 A4 page
+3. Frontend MUST render each page as a separate A4 container
+4. NO content reflow between pages
+5. Vertical scroll shows consecutive A4 pages
+
+A4 DIMENSIONS:
+- Width: 210mm (794px @ 96dpi)
+- Height: 297mm (1123px @ 96dpi)
+- Margins: Typically 25.4mm (1 inch) on all sides
+
+CSS STRATEGY:
+```css
+.a4-page {
+    width: 210mm;
+    height: 297mm;
+    padding: 25.4mm;
+    page-break-after: always;
+    background: white;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+}
+```
+
+SCROLL BEHAVIOR:
+- Container holds all A4 pages vertically
+- Use overflow-y: auto on container
+- Highlight active page on scroll
+
+================================================================================
+SECTION 5: NORMALIZATION (BACKEND RESPONSIBILITY)
+================================================================================
+
+The templateToDraftNormalizer.js handles format bridging:
+
+INPUT (Template storage format):
+{
+    "format": "dual-document-v1",
+    "structured": {
+        "pages": [
+            { "pageNo": 1, "blocks": [...] },
+            { "pageNo": 2, "blocks": [...] }
+        ]
+    }
+}
+
+OUTPUT (Flat draft blocks):
+[
+    { "key": "block1", "content": { ..., "pageNo": 1 } },
+    { "key": "block2", "content": { ..., "pageNo": 1 } },
+    { "key": "block3", "content": { ..., "pageNo": 2 } }
+]
+
+NORMALIZATION GUARANTEES:
+✅ Block order preserved
+✅ Page numbers injected into content
+✅ Legacy format passed through unchanged
+✅ No data loss during conversion
+
+FRONTEND IMPLICATION:
+- Frontend receives already-normalized blocks
+- Group blocks by content.pageNo for page rendering
+- Block order from API = rendering order
+
+================================================================================
+SECTION 6: VERSIONING SYSTEM
+================================================================================
+
+VERSION TREE STRUCTURE:
+```
+v1 (initial) → v2 (form_update) → v3 (ai_insert)
+                                       ↓
+                                  v4 (undo)
+                                       ↓
+                                  v5 (redo)
+```
+
+EACH VERSION STORES:
+- Complete snapshot of ALL blocks
+- Parent version reference
+- Action type
+
+UNDO/REDO FLOW:
+1. UNDO: Creates new version with parent's blocks
+2. REDO: Creates new version with child's blocks
+3. Both increment version_no
+
+FRONTEND UNDO STRATEGY:
+- Option A: Call POST /undo (recommended, server-authoritative)
+- Option B: Maintain local undoStack and call PUT /fields
+
+⚠️ RECOMMENDED: Use server-side versioning for reliability
+
+================================================================================
+SECTION 7: PERFORMANCE CONSTRAINTS
+================================================================================
+
+FOR 50-100 PAGE TEMPLATES:
+
+BLOCK COUNT ESTIMATE:
+- 50 pages × 10 blocks/page = 500 blocks
+- 100 pages × 10 blocks/page = 1000 blocks
+
+PERFORMANCE CONSIDERATIONS:
+
+1. INITIAL LOAD (GET /drafts/:id)
+   - Backend returns ALL blocks in one response
+   - Can be 100KB+ for large templates
+   - Frontend should lazy-render (virtualization)
+
+2. FIELD UPDATES (PUT /fields)
+   - Each update creates full version snapshot
+   - Minimize update frequency (debounce)
+   - Batch multiple field changes into one request
+
+3. PREVIEW GENERATION
+   - Backend caches per version
+   - Only regenerates on version change
+   - HTML can be 500KB+ for large docs
+
+FRONTEND OPTIMIZATION STRATEGIES:
+- Virtualized scrolling for page list
+- Lazy render pages outside viewport
+- Debounce form field updates (300ms)
+- Batch field updates on blur/save
+- Show loading states for large operations
+
+================================================================================
+SECTION 8: PREVIEW-ONLY VS FINALIZE-ONLY SERVICES
+================================================================================
+
+PREVIEW-ONLY OPERATIONS:
+- GET /drafts/:id/preview
+- Live editing in left panel
+- Form field updates
+- AI suggestions (before insert)
+
+FINALIZE-ONLY OPERATIONS:
+- POST /drafts/:id/finalize (locks draft)
+- POST /drafts/:id/export (generates DOCX)
+
+EXPORTING:
+- Available at any time (doesn't require finalize)
+- Updates draft status to "exported"
+- Document still editable after export
+
+FINALIZING:
+- Locks draft permanently
+- No further edits allowed
+- Returns "ALREADY_FINALIZED" error on edit attempts
+
+================================================================================
+SECTION 9: WHICH DATA FRONTEND CAN SAFELY MUTATE
+================================================================================
+
+✅ SAFE TO MUTATE (via API calls):
+
+1. Draft field values
+   PUT /drafts/:id/fields
+   { "fields": { "field_key": "new value" } }
+
+2. Draft title
+   PUT /drafts/:id/title
+   { "title": "New Title" }
+
+3. AI suggestions (accept/reject)
+   POST /drafts/:id/ai/:sid/insert
+   DELETE /drafts/:id/ai/:sid
+
+4. Evidence attachments
+   POST /drafts/:id/evidence/upload
+   DELETE /drafts/:id/evidence/:eid
+
+5. Version navigation
+   POST /drafts/:id/undo
+   POST /drafts/:id/redo
+   POST /drafts/:id/versions/:vid/restore
+
+❌ IMMUTABLE (Frontend MUST NOT modify):
+
+1. Block structure/order
+2. Block keys
+3. Page boundaries
+4. Template content
+5. Version history
+6. User ID / ownership
+
+================================================================================
+SECTION 10: BACKEND READINESS CONFIRMATION
+================================================================================
+
+✅ TEMPLATES API: READY
+   - List templates: Works
+   - Get template with content: Works
+   - Schema for form generation: Works
+
+✅ DRAFTS API: READY
+   - Create draft: Works
+   - Get draft with blocks: Works
+   - Update fields: Works
+   - Delete draft: Works
+
+✅ VERSIONING API: READY
+   - Undo: Works
+   - Redo: Works
+   - Version history: Works
+   - Restore: Works
+
+✅ AI SUGGESTIONS API: READY
+   - Generate (basic): Works
+   - Generate (state-aware): Works
+   - Insert: Works
+   - Reject: Works
+
+✅ EVIDENCE API: READY
+   - Upload: Works
+   - List: Works
+   - Extract: Works
+   - Delete: Works
+
+✅ PREVIEW & EXPORT API: READY
+   - Preview: Works
+   - Export DOCX: Works
+   - Finalize: Works
+
+================================================================================
+SECTION 11: EXPLICIT CONFIRMATION
+================================================================================
+
+*** NO BACKEND CHANGES REQUIRED FOR FRONTEND IMPLEMENTATION ***
+
+The backend provides all necessary endpoints for:
+1. Template listing and preview
+2. Draft creation from templates
+3. Form-based field editing
+4. AI-assisted content generation
+5. Version control (undo/redo)
+6. Evidence document management
+7. Preview and export
+
+All APIs are:
+- Authenticated via JWT
+- Routed through gateway
+- Returning consistent JSON shapes
+- Handling 50-100 page templates
+- Supporting dual-document-v1 format
+
+Frontend can proceed with implementation using existing backend APIs.
+
+================================================================================
+END OF BACKEND ANALYSIS
+================================================================================

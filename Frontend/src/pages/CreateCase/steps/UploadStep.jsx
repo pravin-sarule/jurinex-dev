@@ -1,0 +1,850 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Loader2, CheckCircle, AlertCircle, HardDrive, Cloud } from 'lucide-react';
+import documentApi from '../../../services/documentApi';
+import googleDriveApi from '../../../services/googleDriveApi';
+import { toast } from 'react-toastify';
+import GoogleDrivePicker from '../../../components/GoogleDrivePicker';
+import {
+  matchCaseType,
+  matchCourtName,
+  matchJurisdiction,
+  matchSubType,
+  matchPriorityLevel,
+  matchCourtLevel
+} from '../../../utils/fieldMatcher.js';
+import { CONTENT_SERVICE_DIRECT } from '../../../config/apiConfig';
+
+const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange }) => {
+  const [selectedFiles, setSelectedFiles] = useState(caseData.uploadedFiles || []);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null); // 'uploading', 'processing', 'extracting', 'success', 'error'
+  const [uploadMessage, setUploadMessage] = useState('');
+  const [processingProgress, setProcessingProgress] = useState(0); // 0-100
+  const [pendingGoogleDriveFiles, setPendingGoogleDriveFiles] = useState([]); // Pending Google Drive files (not uploaded yet)
+  const fileInputRef = useRef(null);
+  
+  // Dropdown options for matching
+  const [caseTypes, setCaseTypes] = useState([]);
+  const [courts, setCourts] = useState([]);
+  const [jurisdictions, setJurisdictions] = useState([]);
+  const [subTypes, setSubTypes] = useState([]);
+  
+  // Fetch dropdown options on component mount
+  useEffect(() => {
+    fetchDropdownOptions();
+  }, []);
+
+  // Notify parent component when upload status changes
+  useEffect(() => {
+    if (onUploadStatusChange && uploadStatus) {
+      onUploadStatusChange(uploadStatus);
+    }
+  }, [uploadStatus, onUploadStatusChange]);
+  
+  const fetchDropdownOptions = async () => {
+    try {
+      // Fetch case types
+      const caseTypesRes = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types`);
+      if (caseTypesRes.ok) {
+        const caseTypesData = await caseTypesRes.json();
+        setCaseTypes(Array.isArray(caseTypesData) ? caseTypesData : []);
+      }
+      
+      // Fetch jurisdictions
+      const jurisdictionsRes = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions`);
+      if (jurisdictionsRes.ok) {
+        const jurisdictionsData = await jurisdictionsRes.json();
+        setJurisdictions(Array.isArray(jurisdictionsData) ? jurisdictionsData : []);
+      }
+      
+      // Note: Courts and subTypes will be fetched after matching caseType/jurisdiction
+    } catch (error) {
+      console.error('Error fetching dropdown options:', error);
+    }
+  };
+  
+  const fetchCourtsByJurisdiction = async (jurisdictionId) => {
+    try {
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions/${jurisdictionId}/courts`);
+      if (response.ok) {
+        const data = await response.json();
+        setCourts(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
+      console.error('Error fetching courts:', error);
+    }
+  };
+  
+  const fetchSubTypes = async (caseTypeId) => {
+    try {
+      const response = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types/${caseTypeId}/sub-types`);
+      if (response.ok) {
+        const data = await response.json();
+        setSubTypes(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
+      console.error('Error fetching subTypes:', error);
+    }
+  };
+
+  // Handle file selection
+  const handleFileChange = (e) => {
+    const files = Array.from(e.target.files);
+    const newFiles = [...selectedFiles, ...files];
+    setSelectedFiles(newFiles);
+    setCaseData({
+      ...caseData,
+      uploadedFiles: newFiles,
+    });
+  };
+
+  const handleUploadAndExtract = async () => {
+    if (selectedFiles.length === 0) {
+      toast.error('Please select at least one file to upload');
+      return;
+    }
+
+    // Separate local files from Google Drive files
+    const localFiles = selectedFiles.filter(f => !f.fromGoogleDrive);
+    const googleDriveFileIds = pendingGoogleDriveFiles.map(f => ({ id: f.id, name: f.name, mimeType: f.mimeType }));
+
+    if (localFiles.length === 0 && googleDriveFileIds.length === 0) {
+      toast.error('Please select at least one file to upload');
+      return;
+    }
+
+    setIsUploading(true);
+    setProcessingProgress(0);
+    setUploadStatus('uploading');
+    setUploadMessage('Uploading files...');
+
+    try {
+      let folderName = null;
+      let uploadedFiles = [];
+
+      // Step 1: Upload local files first (if any) - 5% progress
+      if (localFiles.length > 0) {
+        setUploadStatus('uploading');
+        setUploadMessage(`Uploading ${localFiles.length} local file(s)...`);
+        setProcessingProgress(5);
+        console.log('[UploadStep] Uploading local files...');
+        
+        const uploadResult = await documentApi.uploadDocumentsForProcessing(localFiles);
+        
+        if (!uploadResult.success || !uploadResult.folderName) {
+          throw new Error(uploadResult.message || 'Failed to upload local documents');
+        }
+
+        folderName = uploadResult.folderName;
+        uploadedFiles = uploadResult.uploadedFiles || [];
+        console.log('[UploadStep] Local files uploaded to folder:', folderName);
+      }
+
+      // Step 2: Download Google Drive files (if any) - 10% progress
+      if (googleDriveFileIds.length > 0) {
+        setUploadStatus('uploading');
+        setUploadMessage(`Downloading ${googleDriveFileIds.length} file(s) from Google Drive...`);
+        setProcessingProgress(10);
+        console.log('[UploadStep] Downloading Google Drive files...');
+        
+        try {
+          // Get fresh access token
+          const tokenData = await googleDriveApi.getAccessToken();
+          if (!tokenData || !tokenData.accessToken) {
+            throw new Error('Failed to get Google Drive access token. Please reconnect your Google Drive.');
+          }
+
+          // Download Google Drive files to the folder (or create new folder if no local files)
+          const gdResult = await googleDriveApi.downloadMultipleFiles(
+            googleDriveFileIds, 
+            tokenData.accessToken, 
+            folderName // Pass folder name if local files were uploaded, otherwise it will create new
+          );
+
+          if (gdResult.success) {
+            // If no local files, use the folder from Google Drive upload
+            if (!folderName && gdResult.documents && gdResult.documents.length > 0) {
+              folderName = gdResult.documents[0].folderName || gdResult.folderName;
+            }
+            
+            // Add successfully downloaded files to uploadedFiles
+            const successfulGdFiles = gdResult.documents.filter(d => d.status !== 'failed');
+            uploadedFiles = [...uploadedFiles, ...successfulGdFiles];
+            
+            console.log('[UploadStep] Google Drive files downloaded:', successfulGdFiles.length);
+            
+            if (gdResult.summary?.failed > 0) {
+              toast.warning(`${gdResult.summary.failed} Google Drive file(s) failed to download`);
+            }
+          } else {
+            throw new Error(gdResult.message || 'Failed to download Google Drive files');
+          }
+        } catch (gdError) {
+          console.error('[UploadStep] Google Drive download error:', gdError);
+          if (localFiles.length === 0) {
+            // If no local files, this is a critical error
+            throw new Error(`Google Drive error: ${gdError.message}`);
+          } else {
+            // If we have local files, continue with warning
+            toast.warning(`Google Drive files couldn't be downloaded: ${gdError.message}`);
+          }
+        }
+      }
+
+      if (!folderName) {
+        throw new Error('No folder created. Please try again.');
+      }
+
+      setProcessingProgress(20);
+      console.log('[UploadStep] All uploads complete, progress set to 20%');
+
+      // Step 2: Wait for processing to complete (20-90% progress)
+      setUploadStatus('processing');
+      setUploadMessage('Processing documents... Please wait...');
+      
+      let allProcessed = false;
+      let attempts = 0;
+      let consecutiveErrors = 0;
+      let maxAttempts = 300; // 5 minutes max (300 * 2s = 600 seconds) - increased for large files
+      const pollInterval = 2000; // 2 seconds - increased to reduce API calls
+      const maxConsecutiveErrors = 10; // Allow up to 10 consecutive errors before failing
+      const extendedTimeoutAttempts = 120; // Additional 4 minutes if files are still processing
+
+      while (!allProcessed && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        attempts++;
+        
+        try {
+          const statusResult = await documentApi.getFolderProcessingStatus(folderName);
+          consecutiveErrors = 0; // Reset error counter on success
+          const filesInFolder = statusResult.documents || [];
+          const totalFiles = uploadedFiles.length;
+          
+          // If no documents found yet, continue waiting (files might still be uploading)
+          if (filesInFolder.length === 0 && attempts < 20) {
+            console.log(`[UploadStep] Waiting for files to appear in folder... (attempt ${attempts})`);
+            continue;
+          }
+          
+          const processedCount = filesInFolder.filter(f => f.status === 'processed').length;
+          const failedCount = filesInFolder.filter(f => f.status === 'error').length;
+          const processingCount = filesInFolder.filter(f => 
+            f.status === 'processing' || f.status === 'queued' || f.status === 'embedding_pending'
+          ).length;
+          
+          // Calculate progress: 20% (upload) + 70% (processing) based on completion
+          const processingProgressPercent = totalFiles > 0 && filesInFolder.length > 0
+            ? Math.round((processedCount / totalFiles) * 70)
+            : 0;
+          const newProgress = 20 + processingProgressPercent;
+          
+          // Force state update with explicit value
+          setProcessingProgress(newProgress);
+          console.log(`[UploadStep] Progress update: ${newProgress}% (${processedCount}/${totalFiles} files processed)`);
+          
+          // Update status message with more detail
+          if (processingCount > 0) {
+            setUploadMessage(`Processing documents... ${processedCount}/${totalFiles} completed, ${processingCount} in progress`);
+          } else {
+            setUploadMessage(`Processing documents... ${processedCount}/${totalFiles} completed`);
+          }
+          
+          allProcessed = processedCount === totalFiles && processedCount > 0 && totalFiles > 0;
+          
+          // If all files are either processed or failed, we can proceed
+          if (processedCount + failedCount === totalFiles && totalFiles > 0) {
+            if (processedCount > 0) {
+              // At least some files processed, proceed with extraction
+              console.log(`[UploadStep] ${processedCount} files processed, ${failedCount} failed. Proceeding with extraction...`);
+              break;
+            }
+          }
+          
+          // Check timeout only if we're not making progress
+          if (attempts >= maxAttempts) {
+            if (processedCount > 0) {
+              // Some files processed, proceed with extraction
+              console.warn(`[UploadStep] Processing timeout after ${maxAttempts} attempts, but ${processedCount} files are processed. Proceeding with extraction...`);
+              break;
+            } else if (processingCount > 0 && attempts < maxAttempts + extendedTimeoutAttempts) {
+              // Files are still processing, extend timeout and continue waiting
+              if (attempts === maxAttempts) {
+                console.log(`[UploadStep] Initial timeout reached but ${processingCount} files still processing. Extending timeout by ${extendedTimeoutAttempts} more attempts...`);
+                maxAttempts += extendedTimeoutAttempts;
+              }
+              // Continue waiting
+            } else {
+              throw new Error(`File processing timed out after ${attempts} attempts. Please try again or check if files are still processing.`);
+            }
+          }
+        } catch (statusError) {
+          consecutiveErrors++;
+          console.error(`[UploadStep] Error getting processing status (attempt ${attempts}, consecutive errors: ${consecutiveErrors}):`, statusError);
+          
+          // If too many consecutive errors, fail
+          if (consecutiveErrors >= maxConsecutiveErrors) {
+            throw new Error(`Failed to get processing status after ${consecutiveErrors} consecutive errors: ${statusError.message}`);
+          }
+          
+          // For network errors, continue retrying with exponential backoff
+          const backoffDelay = Math.min(5000, 1000 * Math.pow(2, consecutiveErrors - 1));
+          console.log(`[UploadStep] Retrying after ${backoffDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+          continue;
+        }
+      }
+
+      if (!allProcessed && attempts >= maxAttempts && uploadedFiles.length > 0) {
+        // Check one more time
+        const finalStatus = await documentApi.getFolderProcessingStatus(folderName);
+        const finalFiles = finalStatus.documents || [];
+        const finalProcessed = finalFiles.filter(f => f.status === 'processed').length;
+        if (finalProcessed === 0) {
+          throw new Error('No files were processed successfully. Please try again.');
+        }
+      }
+
+      setProcessingProgress(90);
+      console.log('[UploadStep] Processing complete, progress set to 90%');
+      
+      // Step 3: Extract fields only after 100% processing (90-100% progress)
+      setUploadStatus('extracting');
+      setUploadMessage('Extracting case information from processed documents...');
+      
+      const extractResult = await documentApi.extractCaseFieldsFromFolder(folderName);
+      
+      if (!extractResult.success) {
+        throw new Error(extractResult.message || 'Failed to extract case fields');
+      }
+      
+      setProcessingProgress(100);
+      console.log('[UploadStep] Extraction complete, progress set to 100%');
+
+      // Step 4: Auto-fill form with extracted data (only populate, don't create case)
+      const extracted = extractResult.extractedData || {};
+      
+      // Match extracted values with dropdown options
+      let matchedCaseType = null;
+      let matchedCourtName = null;
+      let matchedJurisdiction = null;
+      let matchedSubType = null;
+      let fetchedCourts = [];
+      let fetchedSubTypes = [];
+      
+      // AUTO-FILL LOGIC - Respects strict dependency order:
+      // Chain 1: Adjudicating Authority (Jurisdiction) → Court → Bench → Case Prefix/Number/Year
+      // Chain 2: Case Type → Sub-Type → Case Nature
+      
+      // Chain 1: Step 1 - Match Adjudicating Authority (Jurisdiction) first
+      if (extracted.jurisdiction && !caseData.jurisdictionId && !caseData.jurisdiction) {
+        matchedJurisdiction = matchJurisdiction(extracted.jurisdiction, jurisdictions);
+        if (matchedJurisdiction) {
+          console.log(`✅ Matched jurisdiction (Adjudicating Authority): "${extracted.jurisdiction}" → "${matchedJurisdiction.label}" (score: ${matchedJurisdiction.score.toFixed(2)})`);
+          // Fetch courts for matched jurisdiction (dependency chain)
+          await fetchCourtsByJurisdiction(matchedJurisdiction.value);
+          await new Promise(resolve => setTimeout(resolve, 100));
+          try {
+            const courtsRes = await fetch(`${CONTENT_SERVICE_DIRECT}/jurisdictions/${matchedJurisdiction.value}/courts`);
+            if (courtsRes.ok) {
+              fetchedCourts = await courtsRes.json();
+              setCourts(Array.isArray(fetchedCourts) ? fetchedCourts : []);
+            }
+          } catch (err) {
+            console.error('Error fetching courts:', err);
+          }
+        }
+      }
+      
+      // Chain 1: Step 2 - Match Court (only if jurisdiction matched)
+      const courtsToUse = fetchedCourts.length > 0 ? fetchedCourts : courts;
+      if (matchedJurisdiction && extracted.courtName && !caseData.courtId && !caseData.courtName && courtsToUse.length > 0) {
+        matchedCourtName = matchCourtName(extracted.courtName, courtsToUse);
+        if (matchedCourtName) {
+          console.log(`✅ Matched courtName: "${extracted.courtName}" → "${matchedCourtName.label}" (score: ${matchedCourtName.score.toFixed(2)})`);
+          // Note: Bench matching would happen here if we have bench data extracted, but typically
+          // we only extract court name, so bench selection remains manual
+        }
+      }
+      
+      // Chain 2: Step 1 - Match Case Type
+      if (extracted.caseType && !caseData.caseTypeId && !caseData.caseType) {
+        matchedCaseType = matchCaseType(extracted.caseType, caseTypes);
+        if (matchedCaseType) {
+          console.log(`✅ Matched caseType: "${extracted.caseType}" → "${matchedCaseType.label}" (score: ${matchedCaseType.score.toFixed(2)})`);
+          // Fetch subTypes for matched caseType (dependency chain)
+          await fetchSubTypes(matchedCaseType.value);
+          await new Promise(resolve => setTimeout(resolve, 100));
+          try {
+            const subTypesRes = await fetch(`${CONTENT_SERVICE_DIRECT}/case-types/${matchedCaseType.value}/sub-types`);
+            if (subTypesRes.ok) {
+              fetchedSubTypes = await subTypesRes.json();
+              setSubTypes(Array.isArray(fetchedSubTypes) ? fetchedSubTypes : []);
+            }
+          } catch (err) {
+            console.error('Error fetching subTypes:', err);
+          }
+        }
+      }
+      
+      // Chain 2: Step 2 - Match Sub-Type (only if caseType matched)
+      const subTypesToUse = fetchedSubTypes.length > 0 ? fetchedSubTypes : subTypes;
+      if (matchedCaseType && extracted.subType && !caseData.subTypeId && !caseData.subType && subTypesToUse.length > 0) {
+        matchedSubType = matchSubType(extracted.subType, subTypesToUse);
+        if (matchedSubType) {
+          console.log(`✅ Matched subType: "${extracted.subType}" → "${matchedSubType.label}" (score: ${matchedSubType.score.toFixed(2)})`);
+        }
+      }
+      
+      // Match priorityLevel
+      const matchedPriority = extracted.priorityLevel ? matchPriorityLevel(extracted.priorityLevel) : null;
+      
+      // Match courtLevel
+      const matchedCourtLevel = extracted.courtLevel ? matchCourtLevel(extracted.courtLevel) : null;
+      
+      // Track which fields were auto-filled for highlighting
+      const autoFilledFields = new Set();
+      
+      // Generate case title from petitioners vs respondents if not provided or if extracted caseTitle is empty
+      let generatedCaseTitle = extracted.caseTitle || '';
+      
+      // If no case title in extracted data, generate from petitioners vs respondents
+      if (!generatedCaseTitle && extracted.petitioners && extracted.respondents) {
+        const petitionerNames = Array.isArray(extracted.petitioners) && extracted.petitioners.length > 0
+          ? extracted.petitioners.map(p => typeof p === 'string' ? p : (p.fullName || '')).filter(Boolean)
+          : (typeof extracted.petitioners === 'string' ? [extracted.petitioners] : []);
+        
+        const respondentNames = Array.isArray(extracted.respondents) && extracted.respondents.length > 0
+          ? extracted.respondents.map(r => typeof r === 'string' ? r : (r.fullName || '')).filter(Boolean)
+          : (typeof extracted.respondents === 'string' ? [extracted.respondents] : []);
+
+        if (petitionerNames.length > 0 && respondentNames.length > 0) {
+          const petitionerPart = petitionerNames.length === 1
+            ? petitionerNames[0]
+            : `${petitionerNames[0]} & ${petitionerNames.length - 1} Other${petitionerNames.length - 1 > 1 ? 's' : ''}`;
+          
+          const respondentPart = respondentNames.length === 1
+            ? respondentNames[0]
+            : `${respondentNames[0]} & ${respondentNames.length - 1} Other${respondentNames.length - 1 > 1 ? 's' : ''}`;
+          
+          generatedCaseTitle = `${petitionerPart} vs ${respondentPart}`;
+        } else if (petitionerNames.length > 0) {
+          generatedCaseTitle = `${petitionerNames[0]} vs Unknown`;
+        } else if (respondentNames.length > 0) {
+          generatedCaseTitle = `Unknown vs ${respondentNames[0]}`;
+        }
+      }
+
+      // Map extracted data to caseData format with matched dropdown values
+      // Only fill fields that are empty or missing, allowing user to edit later
+      const updatedCaseData = {
+        ...caseData,
+        // Only fill if current value is empty - track auto-filled fields
+        caseTitle: (() => {
+          const value = caseData.caseTitle || generatedCaseTitle || '';
+          if (!caseData.caseTitle && generatedCaseTitle) autoFilledFields.add('caseTitle');
+          return value;
+        })(),
+        caseNumber: (() => {
+          const value = caseData.caseNumber || extracted.caseNumber || '';
+          if (!caseData.caseNumber && extracted.caseNumber) autoFilledFields.add('caseNumber');
+          return value;
+        })(),
+        casePrefix: (() => {
+          const value = caseData.casePrefix || extracted.casePrefix || '';
+          if (!caseData.casePrefix && extracted.casePrefix) autoFilledFields.add('casePrefix');
+          return value;
+        })(),
+        caseYear: (() => {
+          const value = caseData.caseYear || extracted.caseYear || '';
+          if (!caseData.caseYear && extracted.caseYear) autoFilledFields.add('caseYear');
+          return value;
+        })(),
+        // Use matched dropdown values
+        caseType: (() => {
+          // Only fill if empty (don't overwrite manually edited values)
+          const value = caseData.caseType || (matchedCaseType ? matchedCaseType.label : extracted.caseType || '');
+          if (!caseData.caseType && matchedCaseType) autoFilledFields.add('caseType');
+          return value;
+        })(),
+        caseTypeId: caseData.caseTypeId || (matchedCaseType ? matchedCaseType.value.toString() : ''),
+        caseNature: (() => {
+          const value = caseData.caseNature || extracted.caseNature || '';
+          if (!caseData.caseNature && extracted.caseNature) autoFilledFields.add('caseNature');
+          return value;
+        })(),
+        subType: (() => {
+          // Only auto-fill subType if caseType was matched (dependency chain)
+          const value = caseData.subType || (matchedCaseType && matchedSubType ? matchedSubType.label : (matchedCaseType && extracted.subType ? extracted.subType : ''));
+          if (!caseData.subType && matchedCaseType && (matchedSubType || extracted.subType)) autoFilledFields.add('subType');
+          return value;
+        })(),
+        subTypeId: caseData.subTypeId || (matchedCaseType && matchedSubType ? matchedSubType.value.toString() : ''),
+        courtName: (() => {
+          // Only auto-fill courtName if jurisdiction was matched (dependency chain)
+          const value = caseData.courtName || (matchedJurisdiction && matchedCourtName ? matchedCourtName.label : (matchedJurisdiction && extracted.courtName ? extracted.courtName : ''));
+          if (!caseData.courtName && matchedJurisdiction && (matchedCourtName || extracted.courtName)) autoFilledFields.add('courtName');
+          return value;
+        })(),
+        courtId: (() => {
+          // Only auto-fill courtId if jurisdiction was matched (dependency chain)
+          const value = caseData.courtId || (matchedJurisdiction && matchedCourtName ? matchedCourtName.value.toString() : '');
+          if (!caseData.courtId && matchedJurisdiction && matchedCourtName) autoFilledFields.add('courtId');
+          return value;
+        })(),
+        courtLevel: (() => {
+          const value = caseData.courtLevel || matchedCourtLevel || extracted.courtLevel || '';
+          if (!caseData.courtLevel && (matchedCourtLevel || extracted.courtLevel)) autoFilledFields.add('courtLevel');
+          return value;
+        })(),
+        benchDivision: (() => {
+          const value = caseData.benchDivision || extracted.benchDivision || '';
+          if (!caseData.benchDivision && extracted.benchDivision) autoFilledFields.add('benchDivision');
+          return value;
+        })(),
+        // Use matched jurisdiction (treat as same as Adjudicating Authority)
+        jurisdiction: (() => {
+          const value = caseData.jurisdiction || (matchedJurisdiction ? matchedJurisdiction.label : extracted.jurisdiction || '');
+          if (!caseData.jurisdiction && (matchedJurisdiction || extracted.jurisdiction)) autoFilledFields.add('jurisdiction');
+          return value;
+        })(),
+        jurisdictionName: caseData.jurisdictionName || (matchedJurisdiction ? matchedJurisdiction.label : extracted.jurisdiction || ''),
+        jurisdictionId: (() => {
+          const value = caseData.jurisdictionId || (matchedJurisdiction ? matchedJurisdiction.value.toString() : '');
+          if (!caseData.jurisdictionId && matchedJurisdiction) autoFilledFields.add('jurisdictionId');
+          return value;
+        })(),
+        state: (() => {
+          const value = caseData.state || extracted.state || '';
+          if (!caseData.state && extracted.state) autoFilledFields.add('state');
+          return value;
+        })(),
+        filingDate: (() => {
+          const value = caseData.filingDate || extracted.filingDate || '';
+          if (!caseData.filingDate && extracted.filingDate) autoFilledFields.add('filingDate');
+          return value;
+        })(),
+        judges: (() => {
+          const value = caseData.judges && caseData.judges.length > 0 ? caseData.judges : (extracted.judges || []);
+          if ((!caseData.judges || caseData.judges.length === 0) && extracted.judges && extracted.judges.length > 0) autoFilledFields.add('judges');
+          return value;
+        })(),
+        courtRoom: (() => {
+          const value = caseData.courtRoom || extracted.courtRoom || '';
+          if (!caseData.courtRoom && extracted.courtRoom) autoFilledFields.add('courtRoom');
+          return value;
+        })(),
+        // Handle petitioners - merge or replace based on existing data
+        // If extracted petitioners is a string, convert to array format
+        petitioners: (caseData.petitioners && caseData.petitioners.length > 0 && caseData.petitioners[0].fullName) 
+          ? caseData.petitioners 
+          : (extracted.petitioners 
+              ? (Array.isArray(extracted.petitioners) && extracted.petitioners.length > 0
+                  ? extracted.petitioners.map(p => typeof p === 'string' 
+                    ? { fullName: p, role: '', advocateName: '', barRegistration: '', contact: '' }
+                    : { fullName: p.fullName || '', role: p.role || '', advocateName: p.advocateName || '', barRegistration: p.barRegistration || '', contact: p.contact || '' })
+                  : typeof extracted.petitioners === 'string'
+                    ? [{ fullName: extracted.petitioners, role: '', advocateName: '', barRegistration: '', contact: '' }]
+                    : [{ fullName: '', role: '', advocateName: '', barRegistration: '', contact: '' }])
+              : [{ fullName: '', role: '', advocateName: '', barRegistration: '', contact: '' }]),
+        // Handle respondents - merge or replace based on existing data
+        // If extracted respondents is a string, convert to array format
+        respondents: (caseData.respondents && caseData.respondents.length > 0 && caseData.respondents[0].fullName)
+          ? caseData.respondents
+          : (extracted.respondents
+              ? (Array.isArray(extracted.respondents) && extracted.respondents.length > 0
+                  ? extracted.respondents.map(r => typeof r === 'string'
+                    ? { fullName: r, role: '', advocateName: '', barRegistration: '', contact: '' }
+                    : { fullName: r.fullName || '', role: r.role || '', advocateName: r.advocateName || '', barRegistration: r.barRegistration || '', contact: r.contact || '' })
+                  : typeof extracted.respondents === 'string'
+                    ? [{ fullName: extracted.respondents, role: '', advocateName: '', barRegistration: '', contact: '' }]
+                    : [{ fullName: '', role: '', advocateName: '', barRegistration: '', contact: '' }])
+              : [{ fullName: '', role: '', advocateName: '', barRegistration: '', contact: '' }]),
+        categoryType: caseData.categoryType || extracted.categoryType || '',
+        primaryCategory: caseData.primaryCategory || extracted.primaryCategory || '',
+        subCategory: caseData.subCategory || extracted.subCategory || '',
+        complexity: caseData.complexity || extracted.complexity || '',
+        // Parse monetary value - extract numeric value only (remove currency symbols, commas)
+        monetaryValue: caseData.monetaryValue || (extracted.monetaryValue ? 
+          String(extracted.monetaryValue).replace(/[₹,]/g, '').replace(/\s+/g, '').trim() : ''),
+        priorityLevel: caseData.priorityLevel || matchedPriority || extracted.priorityLevel || 'Medium',
+        currentStatus: caseData.currentStatus || extracted.currentStatus || '',
+        nextHearingDate: caseData.nextHearingDate || extracted.nextHearingDate || '',
+        documentType: caseData.documentType || extracted.documentType || '',
+        filedBy: caseData.filedBy || extracted.filedBy || '',
+        uploadedFiles: uploadedFiles,
+        tempFolderName: folderName, // Store temp folder name for later use
+        autoFilledFields: Array.from(autoFilledFields), // Store auto-filled fields for highlighting
+      };
+
+      // Update caseData - this ONLY fills fields, DOES NOT create the case
+      // IMPORTANT: Case creation only happens when user clicks "Create Case" button in ReviewStep
+      // This endpoint only extracts and returns data for auto-filling the form
+      setCaseData(updatedCaseData);
+      
+      setUploadStatus('success');
+      setUploadMessage('Documents processed successfully! Form fields have been auto-filled. You can edit any field in the subsequent steps.');
+      toast.success('Documents uploaded and form fields auto-filled successfully! You can edit any field before submitting.');
+      
+    } catch (error) {
+      console.error('Error uploading and extracting:', error);
+      setUploadStatus('error');
+      setUploadMessage(error.message || 'Failed to upload and process documents');
+      toast.error(error.message || 'Failed to upload and process documents');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleBrowseClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const removeFile = (index) => {
+    const newFiles = selectedFiles.filter((_, i) => i !== index);
+    setSelectedFiles(newFiles);
+    setCaseData({
+      ...caseData,
+      uploadedFiles: newFiles,
+    });
+  };
+
+  // Handle Google Drive file selection (NOT upload yet - just add to pending list)
+  const handleGoogleDriveFilesSelected = (files) => {
+    console.log('[UploadStep] Google Drive files selected:', files);
+    
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    // Store Google Drive file metadata for later upload
+    const newPendingFiles = files.map(file => ({
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.sizeBytes || 0,
+      fromGoogleDrive: true
+    }));
+
+    setPendingGoogleDriveFiles(prev => [...prev, ...newPendingFiles]);
+    
+    // Add to selected files for display
+    const displayFiles = files.map(file => ({
+      name: file.name,
+      size: file.sizeBytes || 0,
+      fromGoogleDrive: true,
+      googleDriveId: file.id
+    }));
+    
+    const newFiles = [...selectedFiles, ...displayFiles];
+    setSelectedFiles(newFiles);
+    setCaseData({
+      ...caseData,
+      uploadedFiles: newFiles,
+    });
+
+    toast.success(`${files.length} file(s) selected from Google Drive`);
+  };
+
+  // Remove Google Drive file from pending list
+  const removeGoogleDriveFile = (googleDriveId) => {
+    setPendingGoogleDriveFiles(prev => prev.filter(f => f.id !== googleDriveId));
+    
+    // Also update selected files display
+    const newSelectedFiles = selectedFiles.filter(f => 
+      !(f.fromGoogleDrive && f.googleDriveId === googleDriveId)
+    );
+    setSelectedFiles(newSelectedFiles);
+    
+    setCaseData({
+      ...caseData,
+      uploadedFiles: newSelectedFiles,
+    });
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="mb-8">
+        <h2 className="text-2xl font-semibold text-gray-900 mb-2">Upload Documents</h2>
+        <p className="text-sm text-gray-600">Upload your case documents to automatically extract and fill case information</p>
+        <p className="text-xs text-gray-500 mt-1">You can select multiple files at once in the file dialog (Ctrl/Cmd or Shift + click)</p>
+      </div>
+
+      {/* Upload Source Options */}
+      <div className="mt-8 mb-6">
+        <div className="bg-white border-2 border-gray-200 rounded-xl p-8 shadow-sm">
+          <div className="flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onClick={handleBrowseClick}
+              disabled={isUploading}
+              className="flex items-center gap-2 px-6 py-3 bg-white border-2 border-gray-300 text-gray-700 rounded-xl hover:border-gray-400 hover:text-gray-900 transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+            >
+              <HardDrive className="w-5 h-5" />
+              Local Files
+            </button>
+            <span className="text-gray-400 font-medium">or</span>
+            <GoogleDrivePicker
+              onFilesSelected={handleGoogleDriveFilesSelected}
+              buttonText="Google Drive"
+              buttonClassName="flex items-center gap-2 px-6 py-3 bg-white border-2 border-gray-300 text-gray-700 rounded-xl hover:border-[#4285F4] hover:text-[#4285F4] transition-all duration-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+              iconClassName="w-5 h-5"
+              multiselect={true}
+              disabled={isUploading}
+            />
+          </div>
+        </div>
+      </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple={true}
+        onChange={handleFileChange}
+        className="hidden"
+        accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
+        aria-label="Select one or more files"
+      />
+
+      {/* Selected Files List */}
+      {selectedFiles.length > 0 && (
+        <div className="mt-6">
+          <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
+            <p className="text-sm font-semibold text-gray-800 mb-4">
+              Selected files ({selectedFiles.length})
+            </p>
+            <div className="space-y-3 max-h-64 overflow-y-auto">
+              {selectedFiles.map((file, index) => (
+                <div
+                  key={index}
+                  className={`flex items-center justify-between bg-gray-50 p-4 rounded-xl border shadow-sm hover:shadow-md transition-all duration-200 ${
+                    file.fromGoogleDrive ? 'border-blue-200' : 'border-gray-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    {file.fromGoogleDrive && (
+                      <Cloud className="w-5 h-5 text-[#4285F4] flex-shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {file.fromGoogleDrive ? (
+                          <span className="text-[#4285F4]">From Google Drive</span>
+                        ) : (
+                          `${(file.size / 1024).toFixed(2)} KB`
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (file.fromGoogleDrive && file.googleDriveId) {
+                        removeGoogleDriveFile(file.googleDriveId);
+                      } else {
+                        removeFile(index);
+                      }
+                    }}
+                    disabled={isUploading}
+                    className="ml-4 text-red-500 hover:text-red-700 hover:bg-red-50 text-sm px-3 py-1.5 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upload Button */}
+      {selectedFiles.length > 0 && !isUploading && (
+        <div className="flex justify-center">
+          <button
+            onClick={handleUploadAndExtract}
+            className="px-12 py-4 bg-[#21C1B6] text-white rounded-xl hover:bg-[#1AA89E] transition-all duration-300 font-semibold flex items-center shadow-md hover:shadow-lg transform hover:scale-105 text-base"
+          >
+            <Upload className="w-5 h-5 mr-2" />
+            Upload & Extract Information
+          </button>
+        </div>
+      )}
+
+      {/* Upload Status with Progress Bar */}
+      {isUploading && (
+        <div className="mt-6 p-6 bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl shadow-sm">
+          <div className="flex items-center mb-4">
+            <Loader2 className="w-6 h-6 mr-4 text-[#21C1B6] animate-spin" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-gray-900">{uploadMessage}</p>
+              <p className="text-xs text-gray-600 mt-1.5">
+                {uploadStatus === 'uploading' && 'Please wait while files are being uploaded...'}
+                {uploadStatus === 'processing' && 'Documents are being processed. This may take a few minutes...'}
+                {uploadStatus === 'extracting' && 'Extracting case information from processed documents...'}
+              </p>
+            </div>
+            <span className="text-lg font-bold text-[#21C1B6] ml-4 min-w-[60px] text-right">
+              {Math.round(processingProgress)}%
+            </span>
+          </div>
+          {/* Progress Bar with Percentage */}
+          <div className="relative w-full bg-blue-200 rounded-full h-5 overflow-hidden shadow-inner">
+            <div
+              className="bg-gradient-to-r from-[#21C1B6] to-[#1AA89E] h-5 rounded-full transition-all duration-500 ease-out shadow-sm relative flex items-center justify-center"
+              style={{ 
+                width: `${Math.max(0, Math.min(100, Math.round(processingProgress)))}%`,
+                minWidth: processingProgress > 0 ? '2%' : '0%'
+              }}
+            >
+              {/* Percentage text inside progress bar - always show when there's progress */}
+              {Math.round(processingProgress) > 8 && (
+                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow-sm">
+                  {Math.round(processingProgress)}%
+                </span>
+              )}
+            </div>
+            {/* Percentage text outside progress bar (when percentage is low) */}
+            {Math.round(processingProgress) <= 8 && Math.round(processingProgress) > 0 && (
+              <span className="absolute inset-0 flex items-center justify-start pl-3 text-xs font-bold text-[#21C1B6]">
+                {Math.round(processingProgress)}%
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {uploadStatus === 'success' && (
+        <div className="mt-6 p-6 bg-gradient-to-br from-green-50 to-emerald-50 border border-green-200 rounded-2xl shadow-sm">
+          <div className="flex items-start">
+            <CheckCircle className="w-6 h-6 mr-4 text-green-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-green-900">{uploadMessage}</p>
+              <p className="text-xs text-green-700 mt-2">
+                Please review and edit the auto-filled fields in the following steps to ensure accuracy.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {uploadStatus === 'error' && (
+        <div className="mt-6 p-6 bg-gradient-to-br from-red-50 to-rose-50 border border-red-200 rounded-2xl shadow-sm">
+          <div className="flex items-center">
+            <AlertCircle className="w-6 h-6 mr-4 text-red-600 flex-shrink-0" />
+            <p className="text-sm font-semibold text-red-900">{uploadMessage}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Info Note */}
+      <div className="mt-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
+        <p className="text-sm text-gray-700">
+          <span className="font-semibold text-gray-900">Note:</span> Upload your case documents to automatically populate all form fields. You can review and edit the extracted information in the subsequent steps.
+        </p>
+      </div>
+    </div>
+  );
+};
+
+export default UploadStep;

@@ -1,0 +1,193 @@
+/**
+ * Template Drafting Component - Preview Panel Styles
+ */
+
+@import './variables.css';
+
+/* Left Panel - Preview */
+.left-panel {
+    flex: 1;
+    min-width: 55%;
+    background: var(--jx-bg-secondary);
+    border-right: 1px solid var(--jx-border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.left-panel--collapsed {
+    min-width: 0;
+    width: 60px;
+    flex: none;
+}
+
+/* Panel Header */
+.left-panel__header {
+    padding: var(--jx-space-3) var(--jx-space-4);
+    background: var(--jx-bg-primary);
+    border-bottom: 1px solid var(--jx-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}
+
+.left-panel__title {
+    font-size: var(--jx-text-lg);
+    font-weight: 600;
+    color: var(--jx-text-primary);
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-2);
+}
+
+.left-panel__title-icon {
+    width: 20px;
+    height: 20px;
+    color: var(--jx-primary);
+}
+
+/* Action toolbar */
+.action-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-2);
+}
+
+.action-toolbar__button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--jx-space-1);
+    padding: var(--jx-space-2) var(--jx-space-3);
+    background: var(--jx-bg-primary);
+    border: 1px solid var(--jx-border);
+    border-radius: var(--jx-radius-md);
+    font-size: var(--jx-text-sm);
+    font-weight: 500;
+    color: var(--jx-text-primary);
+    cursor: pointer;
+    transition: all var(--jx-transition);
+}
+
+.action-toolbar__button:hover {
+    background: var(--jx-bg-secondary);
+    border-color: var(--jx-border-dark);
+}
+
+.action-toolbar__button--primary {
+    background: var(--jx-primary);
+    border-color: var(--jx-primary);
+    color: var(--jx-text-inverse);
+}
+
+.action-toolbar__button--primary:hover {
+    background: var(--jx-primary-hover);
+    border-color: var(--jx-primary-hover);
+}
+
+.action-toolbar__button-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* Dropdown menu */
+.action-toolbar__dropdown {
+    position: relative;
+}
+
+.action-toolbar__dropdown-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: var(--jx-space-1);
+    background: var(--jx-bg-primary);
+    border: 1px solid var(--jx-border);
+    border-radius: var(--jx-radius-md);
+    box-shadow: var(--jx-shadow-lg);
+    min-width: 180px;
+    z-index: var(--jx-z-dropdown);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-4px);
+    transition: all var(--jx-transition);
+}
+
+.action-toolbar__dropdown--open .action-toolbar__dropdown-menu {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.action-toolbar__dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-2);
+    padding: var(--jx-space-2) var(--jx-space-3);
+    color: var(--jx-text-primary);
+    font-size: var(--jx-text-sm);
+    cursor: pointer;
+    transition: background-color var(--jx-transition);
+}
+
+.action-toolbar__dropdown-item:hover {
+    background: var(--jx-bg-secondary);
+}
+
+.action-toolbar__dropdown-item:first-child {
+    border-radius: var(--jx-radius-md) var(--jx-radius-md) 0 0;
+}
+
+.action-toolbar__dropdown-item:last-child {
+    border-radius: 0 0 var(--jx-radius-md) var(--jx-radius-md);
+}
+
+/* Content area */
+.left-panel__content {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+/* Zoom controls */
+.zoom-controls {
+    position: absolute;
+    bottom: var(--jx-space-4);
+    right: var(--jx-space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--jx-space-2);
+    background: var(--jx-bg-primary);
+    border: 1px solid var(--jx-border);
+    border-radius: var(--jx-radius-md);
+    padding: var(--jx-space-1);
+    box-shadow: var(--jx-shadow-md);
+    z-index: 5;
+}
+
+.zoom-controls__button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    border-radius: var(--jx-radius-sm);
+    color: var(--jx-text-secondary);
+    cursor: pointer;
+    transition: all var(--jx-transition);
+}
+
+.zoom-controls__button:hover {
+    background: var(--jx-bg-secondary);
+    color: var(--jx-text-primary);
+}
+
+.zoom-controls__value {
+    font-size: var(--jx-text-sm);
+    color: var(--jx-text-secondary);
+    min-width: 40px;
+    text-align: center;
+}
