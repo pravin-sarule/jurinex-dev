@@ -13,7 +13,15 @@ const pool = require("./src/config/db.js");
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-const allowedOrigins = ['https://jurinex.netlify.app', 'http://localhost:5173'];
+const allowedOrigins = (
+  process.env.CORS_ALLOWED_ORIGINS
+    ? process.env.CORS_ALLOWED_ORIGINS.split(",").map((v) => v.trim()).filter(Boolean)
+    : [
+        "https://jurinex.netlify.app",
+        "https://jurinex-dev.netlify.app",
+        "http://localhost:5173",
+      ]
+);
 
 app.use(cors({
   origin: function(origin, callback) {
