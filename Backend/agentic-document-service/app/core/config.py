@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
+from pydantic import field_validator
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,6 +34,7 @@ class Settings(BaseSettings):
     )
     log_level: str = "INFO"
     cors_origins: list[str] = Field(
+        validation_alias=AliasChoices("CORS_ORIGINS"),
         default_factory=lambda: [
             "http://localhost:3000",
             "http://localhost:5173",
@@ -39,6 +42,9 @@ class Settings(BaseSettings):
             "http://127.0.0.1:3000",
             "http://127.0.0.1:5173",
             "http://127.0.0.1:5000",
+            "https://jurinex.netlify.app",
+            "https://jurinex-dev.netlify.app",
+            "https://nexintel.netlify.app",
         ]
     )
     enable_adk_runtime: bool = True
@@ -113,6 +119,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LEGACY_DOCUMENT_SERVICE_URL"),
     )
     proxy_timeout_seconds: float = 300.0
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+            return [origin.strip() for origin in text.split(",") if origin.strip()]
+        return value
 
     @model_validator(mode="after")
     def apply_derived_defaults(self) -> "Settings":
