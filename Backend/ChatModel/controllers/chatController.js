@@ -143,7 +143,19 @@
 const File = require('../models/File');
 const FileChat = require('../models/FileChat');
 const { uploadFileToGCS } = require('../services/gcsService');
-const { askLLMWithGCS, streamLLMWithGCS } = require('../services/llmService');
+const { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral } = require('../services/llmService');
+const {
+  getLLMConfig,
+  getStreamingDelayMs,
+  mergeRequestLlmOverrides,
+  flattenLlmRequestBody,
+  getMulterUploadCeilingMb,
+} = require('../services/llmConfigService');
+const {
+  assertStoredFileMeetsDashboardLimits,
+  assertUploadAllowed,
+  getNextUtcMidnightIsoString,
+} = require('../services/llmChatPolicyService');
 const UserProfileService = require('../services/userProfileService');
 const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
@@ -156,6 +168,152 @@ const {
 
 // Import Google Drive service from ChatModel services
 const { downloadFile: downloadFileFromGoogleDrive } = require('../services/googleDriveService');
+
+/** SSE cannot use wildcard Origin when the browser sends credentials; echo request Origin instead. */
+function setSseCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+
+function sleep(ms) {
+  if (!ms || ms <= 0) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+const UUID_FILE_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function sanitizeOneFileId(raw) {
+  if (raw == null || raw === '') return null;
+  const s = String(raw).trim().replace(/^\{+\s*|\s*\}+$/g, '').trim();
+  return UUID_FILE_ID_REGEX.test(s) ? s : null;
+}
+
+/** Accepts `file_id` (single UUID) or `file_ids` (array). Deduplicates, preserves order. */
+function parseFileIdsFromBody(body) {
+  const ids = [];
+  if (Array.isArray(body?.file_ids) && body.file_ids.length) {
+    for (const x of body.file_ids) {
+      const id = sanitizeOneFileId(x);
+      if (id) ids.push(id);
+    }
+  } else if (body?.file_id != null && String(body.file_id).trim()) {
+    const id = sanitizeOneFileId(body.file_id);
+    if (id) ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
+/** Persisted on each Chat Model turn: all attached files + gs:// URI for session restore. */
+function buildAttachedFilesSnapshot(files, bucketName) {
+  if (!Array.isArray(files) || !files.length || !bucketName) return null;
+  return files.map((f) => ({
+    file_id: f.id,
+    filename: f.originalname || f.filename || 'document',
+    mimetype: f.mimetype || null,
+    size: f.size != null ? Number(f.size) : null,
+    gcs_uri: f.gcs_path ? `gs://${bucketName}/${f.gcs_path}` : null,
+  }));
+}
+
+function parseAttachedFilesCell(raw) {
+  if (raw == null) return null;
+  if (Array.isArray(raw)) return raw.length ? raw : null;
+  if (typeof raw === 'string') {
+    try {
+      const p = JSON.parse(raw);
+      return Array.isArray(p) && p.length ? p : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Prefer latest row with attached_files; else derive from primary user_files row. */
+function resolveAttachedFilesForSession(historyRows, file, primaryFileId, bucketName) {
+  if (Array.isArray(historyRows) && historyRows.length) {
+    for (let i = historyRows.length - 1; i >= 0; i--) {
+      const parsed = parseAttachedFilesCell(historyRows[i].attached_files);
+      if (parsed && parsed.length) return parsed;
+    }
+  }
+  if (file && primaryFileId && file.gcs_path && bucketName) {
+    return [
+      {
+        file_id: primaryFileId,
+        filename: file.originalname || file.filename || 'document',
+        mimetype: file.mimetype || null,
+        size: file.size != null ? Number(file.size) : null,
+        gcs_uri: `gs://${bucketName}/${file.gcs_path}`,
+      },
+    ];
+  }
+  return null;
+}
+
+/**
+ * Dashboard row from DB + per-request overrides (set by enforceLLMChatPolicy).
+ * Falls back if the route was not wired through that middleware (e.g. tests).
+ */
+async function ensureLlmRequestConfig(req) {
+  if (req.llmChatConfig && req.llmConfigForRequest) {
+    return { llmChatConfig: req.llmChatConfig, llmConfigForRequest: req.llmConfigForRequest };
+  }
+  const userId = req.user?.id ?? req.userId ?? null;
+  const base = await getLLMConfig(userId);
+  const merged = mergeRequestLlmOverrides(base, flattenLlmRequestBody(req.body));
+  return { llmChatConfig: base, llmConfigForRequest: merged };
+}
+
+/**
+ * Limits from `llm_chat_config` for client-side upload validation (must match server enforcement).
+ */
+exports.getChatLlmLimits = async (req, res) => {
+  try {
+    const userId = req.user?.id ?? req.userId ?? null;
+    const cfg = await getLLMConfig(userId);
+    const uploadCeilingMb = getMulterUploadCeilingMb(cfg);
+    return res.status(200).json({
+      success: true,
+      data: {
+        max_document_size_mb: cfg.max_document_size_mb,
+        multer_upload_ceiling_mb: cfg.multer_upload_ceiling_mb,
+        max_upload_mb: uploadCeilingMb,
+        max_upload_bytes: Math.floor(uploadCeilingMb * 1024 * 1024),
+        max_upload_files: cfg.max_upload_files,
+        max_file_upload_per_day: cfg.max_file_upload_per_day,
+        max_document_pages: cfg.max_document_pages,
+        max_output_tokens: cfg.max_output_tokens,
+        max_output_tokens_cap: cfg.max_output_tokens_cap,
+        min_output_tokens: cfg.min_output_tokens,
+        model_temperature: cfg.model_temperature,
+        temperature_min: cfg.temperature_min,
+        temperature_max: cfg.temperature_max,
+        streaming_delay_ms: getStreamingDelayMs(cfg),
+        quota_chats_per_minute: cfg.quota_chats_per_minute,
+        messages_per_hour: cfg.messages_per_hour,
+        chats_per_day: cfg.chats_per_day,
+        total_tokens_per_day: cfg.total_tokens_per_day,
+        next_daily_reset_utc: getNextUtcMidnightIsoString(),
+        llm_model: cfg.llm_model,
+        llm_provider: cfg.llm_provider,
+      },
+    });
+  } catch (err) {
+    console.error('[getChatLlmLimits]', err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || 'Failed to load LLM config',
+    });
+  }
+};
 
 exports.uploadDocumentAndGetURI = async (req, res) => {
   try {
@@ -292,6 +450,28 @@ exports.uploadDocumentFromGoogleDrive = async (req, res) => {
     const fileSizeBytes = buffer.length;
 
     console.log(`✅ [ChatModel] Downloaded file from Google Drive: ${filename}, size: ${fileSizeBytes} bytes, type: ${mimeType}`);
+
+    const llmCfg = await getLLMConfig(userId);
+    const uploadPolicy = await assertUploadAllowed(userId, llmCfg, {
+      sizeBytes: fileSizeBytes,
+      buffer,
+      mimetype: mimeType,
+      originalname: filename,
+    });
+    if (!uploadPolicy.ok) {
+      const st =
+        uploadPolicy.code === 'DAILY_UPLOAD_LIMIT'
+          ? 429
+          : uploadPolicy.code === 'FILE_TOO_LARGE' || uploadPolicy.code === 'DOCUMENT_TOO_MANY_PAGES'
+            ? 413
+            : 400;
+      return res.status(st).json({
+        success: false,
+        code: uploadPolicy.code,
+        message: uploadPolicy.message,
+        details: uploadPolicy.details,
+      });
+    }
 
     // Step 2: Upload to GCS (same path structure as regular upload)
     const timestamp = Date.now();
@@ -514,7 +694,7 @@ async function fetchSecretManagerWithTemplates(secretId) {
     } catch (tableError) {
       console.error(`❌ [ChatModel] Cannot access secret_manager table:`, tableError.message);
       if (tableError.message && tableError.message.includes('does not exist')) {
-        throw new Error(`Database table 'secret_manager' does not exist. Please ensure ChatModel has access to the same database as Document Service.`);
+        throw new Error(`Database table 'secret_manager' does not exist. Please ensure ChatModel has access to its configured database schema.`);
       }
       throw tableError;
     }
@@ -574,7 +754,6 @@ exports.askQuestion = async (req, res) => {
     const authorizationHeader = req.headers.authorization;
     const { 
       question, 
-      file_id, 
       session_id,
       secret_id,
       used_secret_prompt,
@@ -597,58 +776,69 @@ exports.askQuestion = async (req, res) => {
       });
     }
 
-    if (!file_id) {
+    const fileIds = parseFileIdsFromBody(req.body);
+    if (!fileIds.length) {
       return res.status(400).json({
         success: false,
-        message: 'file_id is required'
+        message: 'file_id or file_ids is required',
       });
     }
 
-    let sanitizedFileId = file_id.trim();
-    sanitizedFileId = sanitizedFileId.replace(/^\{+\s*|\s*\}+$/g, '').trim();
-    
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(sanitizedFileId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid file_id format. file_id must be a valid UUID.',
-        error: `Received: ${file_id}`
-      });
-    }
-
+    const uuidRegex = UUID_FILE_ID_REGEX;
     const hasExistingSession = session_id && uuidRegex.test(session_id);
     const finalSessionId = hasExistingSession ? session_id : uuidv4();
 
-    console.log(`💬 User ${userId} asking question about file ${sanitizedFileId} (session: ${finalSessionId})`);
-
-    const file = await File.findById(sanitizedFileId);
-    
-    if (!file) {
-      return res.status(404).json({
-        success: false,
-        message: 'File not found'
-      });
-    }
-
-    if (String(file.user_id) !== String(userId)) {
-      console.log('❌ Permission denied: user_id mismatch');
-      return res.status(403).json({
-        success: false,
-        message: 'You do not have permission to access this file'
-      });
-    }
-    
-    console.log('✅ Permission granted: user_id matches');
-
-    if (!file.gcs_path) {
+    const { llmChatConfig, llmConfigForRequest } = await ensureLlmRequestConfig(req);
+    const maxFiles = Math.max(1, Math.floor(Number(llmChatConfig?.max_upload_files)) || 8);
+    if (fileIds.length > maxFiles) {
       return res.status(400).json({
         success: false,
-        message: 'GCS path not found for this file'
+        message: `Too many files attached (${fileIds.length}). Maximum is ${maxFiles} (configured in llm_chat_config).`,
       });
     }
-    
+
+    const sanitizedFileId = fileIds[0];
+
+    console.log(`💬 User ${userId} asking about file(s) ${fileIds.join(', ')} (session: ${finalSessionId})`);
+
     const bucketName = process.env.GCS_BUCKET_NAME;
-    const gcsUri = `gs://${bucketName}/${file.gcs_path}`;
+    const files = [];
+    for (const fid of fileIds) {
+      const file = await File.findById(fid);
+      if (!file) {
+        return res.status(404).json({
+          success: false,
+          message: `File not found: ${fid}`,
+        });
+      }
+      if (String(file.user_id) !== String(userId)) {
+        console.log('❌ Permission denied: user_id mismatch for', fid);
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have permission to access one or more of these files',
+        });
+      }
+      if (!file.gcs_path) {
+        return res.status(400).json({
+          success: false,
+          message: `GCS path not found for file ${fid}`,
+        });
+      }
+      const filePolicy = assertStoredFileMeetsDashboardLimits(file, llmChatConfig);
+      if (!filePolicy.ok) {
+        return res.status(403).json({
+          success: false,
+          code: filePolicy.code,
+          message: filePolicy.message,
+          details: filePolicy.details,
+        });
+      }
+      files.push(file);
+    }
+
+    console.log('✅ Permission granted for all attached file(s)');
+
+    const gcsUris = files.map((f) => `gs://${bucketName}/${f.gcs_path}`);
 
     let previousChats = [];
     if (hasExistingSession) {
@@ -681,20 +871,15 @@ exports.askQuestion = async (req, res) => {
       console.log(`📜 No previous conversation context available (new conversation)`);
     }
 
-    const userProfile = await UserProfileService.getUserProfile(userId, authorizationHeader);
-    let userContext = '';
-    if (userProfile) {
-      userContext = `User: ${userProfile.username || userProfile.email || 'User'}`;
-      if (userProfile.professional_profile) {
-        userContext += `\nProfessional Profile: ${JSON.stringify(userProfile.professional_profile)}`;
-      }
-    }
+    const fullProfile = await UserProfileService.getFullProfile(userId, authorizationHeader);
+    const userContext = buildUserContextFromProfile(fullProfile);
 
     let finalQuestion = question?.trim() || '';
     let finalPromptLabel = prompt_label || null;
     let secretIdToSave = null;
     let usedSecretPrompt = false;
     let outputTemplate = null;
+    let resolvedModelName = (typeof llm_name === 'string' && llm_name.trim()) ? llm_name.trim() : null;
 
     if (used_secret_prompt && secret_id) {
       console.log(`🔐 [ChatModel] Processing secret prompt with secret_id: ${secret_id}`);
@@ -739,6 +924,9 @@ exports.askQuestion = async (req, res) => {
       finalPromptLabel = secretName;
       usedSecretPrompt = true;
       secretIdToSave = secret_id;
+      if (!resolvedModelName && typeof dbLlmName === 'string' && dbLlmName.trim()) {
+        resolvedModelName = dbLlmName.trim();
+      }
 
       const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
       if (!GCLOUD_PROJECT_ID) {
@@ -807,17 +995,41 @@ exports.askQuestion = async (req, res) => {
       promptText = `USER CONTEXT:\n${userContext}\n\n${promptText}`;
     }
 
+    if (files.length > 1) {
+      const names = files.map((f) => f.originalname || f.filename || 'document').join(', ');
+      promptText = `The user attached ${files.length} documents (${names}). Use information from all of them when answering.\n\n${promptText}`;
+    }
+
+    // ── LLM config (loaded earlier for file size vs Dashboard) ─────────────────
+    console.log(`\n📋 [DB → LLM Config] Parameters used for this request:`);
+    console.log(`   - llm_provider         : ${llmConfigForRequest.llm_provider}`);
+    console.log(`   - llm_model            : ${llmConfigForRequest.llm_model}`);
+    console.log(`   - max_output_tokens    : ${llmConfigForRequest.max_output_tokens}`);
+    console.log(`   - model_temperature    : ${llmConfigForRequest.model_temperature}`);
+    console.log(`   - chats_per_day        : ${llmConfigForRequest.chats_per_day}`);
+    console.log(`   - messages_per_hour    : ${llmConfigForRequest.messages_per_hour}`);
+    console.log(`   - streaming_delay_ms   : ${getStreamingDelayMs(llmChatConfig)}`);
+    // ─────────────────────────────────────────────────────────────────────────
+
     console.log(`🤖 Asking LLM question with document context and ${previousChats.length} previous messages...`);
     console.log(`📝 Final Prompt Preview (first 500 chars):`);
     console.log('─'.repeat(80));
     console.log(promptText.substring(0, 500) + (promptText.length > 500 ? '...' : ''));
     console.log('─'.repeat(80));
     console.log(`📊 Full prompt length: ${promptText.length} characters`);
-    const answer = await askLLMWithGCS(promptText, gcsUri, '', {
+    console.log(`🧭 [ChatModel] Model selection:`, {
+      from_request_llm_name: (typeof llm_name === 'string' && llm_name.trim()) ? llm_name.trim() : null,
+      from_db_llm_name: (usedSecretPrompt ? 'available via secret config' : null),
+      resolved_model_name: resolvedModelName,
+      env_default: process.env.GEMINI_MODEL_NAME || null
+    });
+    const answer = await askLLMWithGCS(promptText, gcsUris, '', {
       userId: userId,
       endpoint: '/api/chat/ask',
       fileId: sanitizedFileId,
-      sessionId: finalSessionId
+      sessionId: finalSessionId,
+      modelName: resolvedModelName,
+      llmConfig: llmConfigForRequest,
     }); // userContext already in promptText
 
     let savedChat;
@@ -829,6 +1041,8 @@ exports.askQuestion = async (req, res) => {
       const questionToSave = usedSecretPrompt ? (finalPromptLabel || 'Secret Prompt') : (question?.trim() || '');
       console.log(`   - Question length: ${questionToSave.length} chars`);
       console.log(`   - Answer length: ${answer.length} chars`);
+
+      const attachedSnapshot = buildAttachedFilesSnapshot(files, bucketName);
       
       savedChat = await FileChat.saveChat(
         sanitizedFileId,
@@ -840,7 +1054,8 @@ exports.askQuestion = async (req, res) => {
         usedSecretPrompt, // usedSecretPrompt
         finalPromptLabel, // promptLabel
         secretIdToSave, // secretId
-        historyForStorage
+        historyForStorage,
+        attachedSnapshot
       );
 
       console.log(`✅ [ChatModel] Chat saved successfully!`);
@@ -859,6 +1074,12 @@ exports.askQuestion = async (req, res) => {
     }
 
     const historyRows = await FileChat.getChatHistory(sanitizedFileId, finalSessionId);
+    const attached_files = resolveAttachedFilesForSession(
+      historyRows,
+      files[0],
+      sanitizedFileId,
+      bucketName || ''
+    );
     const history = historyRows.map((row) => ({
       id: row.id,
       question: row.question,
@@ -869,6 +1090,7 @@ exports.askQuestion = async (req, res) => {
       prompt_label: row.prompt_label || null,
       secret_id: row.secret_id || null,
       file_id: row.file_id || sanitizedFileId,
+      attached_files: parseAttachedFilesCell(row.attached_files),
     }));
 
     return res.status(200).json({
@@ -877,13 +1099,15 @@ exports.askQuestion = async (req, res) => {
         question: usedSecretPrompt ? (finalPromptLabel || 'Secret Prompt') : (question?.trim() || ''),
         answer: answer,
         file_id: sanitizedFileId,
-        filename: file.originalname,
+        file_ids: fileIds,
+        filename: files[0]?.originalname,
         session_id: finalSessionId,
         chat_id: savedChat.id,
         history: history,
         used_secret_prompt: usedSecretPrompt,
         prompt_label: finalPromptLabel,
-        secret_id: secretIdToSave
+        secret_id: secretIdToSave,
+        attached_files,
       }
     });
 
@@ -902,11 +1126,10 @@ exports.askQuestionStream = async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
-  res.setHeader('Access-Control-Allow-Origin', '*'); // CORS for testing
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
+  setSseCorsHeaders(req, res);
+
   res.flushHeaders();
-  
+
   console.log('📡 SSE connection established for streaming chat');
 
   const heartbeat = setInterval(() => {
@@ -944,7 +1167,6 @@ exports.askQuestionStream = async (req, res) => {
     const authorizationHeader = req.headers.authorization;
     const { 
       question, 
-      file_id, 
       session_id,
       secret_id,
       used_secret_prompt,
@@ -965,62 +1187,93 @@ exports.askQuestionStream = async (req, res) => {
       return;
     }
 
-    if (!file_id) {
-      sendError('file_id is required');
+    const fileIds = parseFileIdsFromBody(req.body);
+    if (!fileIds.length) {
+      sendError('file_id or file_ids is required');
       return;
     }
 
-    let sanitizedFileId = file_id.trim();
-    sanitizedFileId = sanitizedFileId.replace(/^\{+\s*|\s*\}+$/g, '').trim();
-    
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(sanitizedFileId)) {
-      sendError('Invalid file_id format. file_id must be a valid UUID.');
-      return;
-    }
-
+    const uuidRegex = UUID_FILE_ID_REGEX;
     const hasExistingSession = session_id && uuidRegex.test(session_id);
     const finalSessionId = hasExistingSession ? session_id : uuidv4();
 
+    const sanitizedFileId = fileIds[0];
+
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`📋 [DB Chat Params] Incoming chat request:`);
+    console.log(`   - user_id        : ${userId}`);
+    console.log(`   - file_id(s)     : ${fileIds.join(', ')} (primary: ${sanitizedFileId})`);
+    console.log(`   - session_id     : ${session_id || 'none (new session)'}`);
+    console.log(`   - is_valid_uuid  : ${hasExistingSession}`);
+    console.log(`   - final_session  : ${finalSessionId}`);
+    console.log(`   - action         : ${hasExistingSession ? '🔄 CONTINUING existing session' : '🆕 STARTING new session'}`);
+    console.log(`   - used_secret    : ${!!used_secret_prompt}`);
+    console.log(`   - secret_id      : ${secret_id || 'none'}`);
+    console.log(
+      `   - client LLM overrides (raw): max_output_tokens=${req.body?.max_output_tokens ?? req.body?.maxOutputTokens ?? '—'}, model_temperature=${req.body?.model_temperature ?? req.body?.temperature ?? '—'}`
+    );
+    console.log(`${'='.repeat(80)}\n`);
+
     sendStatus('validating', 'Validating file access...');
 
-    const file = await File.findById(sanitizedFileId);
-    
-    if (!file) {
-      sendError('File not found');
+    const { llmChatConfig, llmConfigForRequest } = await ensureLlmRequestConfig(req);
+    const maxFiles = Math.max(1, Math.floor(Number(llmChatConfig?.max_upload_files)) || 8);
+    if (fileIds.length > maxFiles) {
+      sendError(`Too many files attached (${fileIds.length}). Maximum is ${maxFiles}.`);
       return;
     }
 
-    if (String(file.user_id) !== String(userId)) {
-      sendError('You do not have permission to access this file');
-      return;
-    }
-
-    if (!file.gcs_path) {
-      sendError('GCS path not found for this file');
-      return;
-    }
-    
     const bucketName = process.env.GCS_BUCKET_NAME;
-    const gcsUri = `gs://${bucketName}/${file.gcs_path}`;
+    const files = [];
+    for (const fid of fileIds) {
+      const file = await File.findById(fid);
+      if (!file) {
+        sendError(`File not found: ${fid}`);
+        return;
+      }
+      if (String(file.user_id) !== String(userId)) {
+        sendError('You do not have permission to access one or more of these files');
+        return;
+      }
+      if (!file.gcs_path) {
+        sendError(`GCS path not found for file ${fid}`);
+        return;
+      }
+      const filePolicy = assertStoredFileMeetsDashboardLimits(file, llmChatConfig);
+      if (!filePolicy.ok) {
+        sendError(filePolicy.message);
+        return;
+      }
+      files.push(file);
+    }
+
+    const gcsUris = files.map((f) => `gs://${bucketName}/${f.gcs_path}`);
 
     sendStatus('fetching', 'Fetching previous conversation context...');
 
     let previousChats = [];
     if (hasExistingSession) {
       previousChats = await FileChat.getChatHistory(sanitizedFileId, finalSessionId);
-      console.log(`📜 Loaded ${previousChats.length} previous messages from session ${finalSessionId}`);
+      console.log(`\n📦 [DB Load] Session continuation — loaded ${previousChats.length} messages from DB:`);
+      console.log(`   - DB query: SELECT FROM file_chats WHERE file_id='${sanitizedFileId}' AND session_id='${finalSessionId}'`);
+      previousChats.forEach((chat, i) => {
+        console.log(`   [${i + 1}] id=${chat.id} | created=${chat.created_at} | Q="${(chat.question||'').substring(0,60)}..."`);
+      });
     } else {
       const allChats = await FileChat.getChatHistory(sanitizedFileId, null);
       previousChats = allChats.slice(-5);
-      console.log(`📜 Loaded ${previousChats.length} recent messages from file for context (new session)`);
+      console.log(`\n📦 [DB Load] New session — loaded last ${previousChats.length} messages for context:`);
+      console.log(`   - DB query: SELECT FROM file_chats WHERE file_id='${sanitizedFileId}' ORDER BY created_at ASC (last 5)`);
+      previousChats.forEach((chat, i) => {
+        console.log(`   [${i + 1}] id=${chat.id} | session=${chat.session_id} | Q="${(chat.question||'').substring(0,60)}..."`);
+      });
     }
 
     const conversationContext = formatConversationHistory(previousChats);
     const historyForStorage = simplifyHistory(previousChats);
 
     if (conversationContext) {
-      console.log(`📜 Previous Conversation Context (${previousChats.length} messages):`);
+      console.log(`\n📜 [DB Context] Sending ${previousChats.length} messages as conversation context to LLM:`);
       console.log('─'.repeat(80));
       previousChats.forEach((chat, index) => {
         console.log(`\n[Previous Message ${index + 1}]`);
@@ -1032,25 +1285,29 @@ exports.askQuestionStream = async (req, res) => {
       console.log(conversationContext);
       console.log('─'.repeat(80));
     } else {
-      console.log(`📜 No previous conversation context available (new conversation)`);
+      console.log(`📜 [DB Context] No previous conversation context — this is a fresh conversation`);
     }
 
     sendStatus('analyzing', 'Analyzing document and preparing context...');
 
-    const userProfile = await UserProfileService.getUserProfile(userId, authorizationHeader);
-    let userContext = '';
-    if (userProfile) {
-      userContext = `User: ${userProfile.username || userProfile.email || 'User'}`;
-      if (userProfile.professional_profile) {
-        userContext += `\nProfessional Profile: ${JSON.stringify(userProfile.professional_profile)}`;
-      }
-    }
+    console.log(`\n📋 [DB → LLM Config] Parameters used for this request:`);
+    console.log(`   - llm_model            : ${llmConfigForRequest.llm_model}`);
+    console.log(`   - max_output_tokens    : ${llmConfigForRequest.max_output_tokens}`);
+    console.log(`   - model_temperature    : ${llmConfigForRequest.model_temperature}`);
+    console.log(`   - chats_per_day        : ${llmConfigForRequest.chats_per_day}`);
+    console.log(`   - messages_per_hour    : ${llmConfigForRequest.messages_per_hour}`);
+    console.log(`   - quota_chats_per_min  : ${llmConfigForRequest.quota_chats_per_minute}`);
+    console.log(`   - streaming_delay_ms   : ${getStreamingDelayMs(llmChatConfig)}`);
+
+    const fullProfile = await UserProfileService.getFullProfile(userId, authorizationHeader);
+    const userContext = buildUserContextFromProfile(fullProfile);
 
     let finalQuestion = question?.trim() || '';
     let finalPromptLabel = prompt_label || null;
     let secretIdToSave = null;
     let usedSecretPrompt = false;
     let outputTemplate = null;
+    let resolvedModelName = (typeof llm_name === 'string' && llm_name.trim()) ? llm_name.trim() : null;
 
     if (used_secret_prompt && secret_id) {
       sendStatus('fetching', 'Fetching secret prompt configuration...');
@@ -1090,6 +1347,9 @@ exports.askQuestionStream = async (req, res) => {
       finalPromptLabel = secretName;
       usedSecretPrompt = true;
       secretIdToSave = secret_id;
+      if (!resolvedModelName && typeof dbLlmName === 'string' && dbLlmName.trim()) {
+        resolvedModelName = dbLlmName.trim();
+      }
 
       const GCLOUD_PROJECT_ID = process.env.GCLOUD_PROJECT_ID;
       if (!GCLOUD_PROJECT_ID) {
@@ -1155,24 +1415,49 @@ exports.askQuestionStream = async (req, res) => {
       promptText = `USER CONTEXT:\n${userContext}\n\n${promptText}`;
     }
 
+    if (files.length > 1) {
+      const names = files.map((f) => f.originalname || f.filename || 'document').join(', ');
+      promptText = `The user attached ${files.length} documents (${names}). Use information from all of them when answering.\n\n${promptText}`;
+    }
+
     console.log(`🤖 Streaming LLM response with document context and ${previousChats.length} previous messages...`);
     console.log(`📝 Final Prompt Preview (first 500 chars):`);
     console.log('─'.repeat(80));
     console.log(promptText.substring(0, 500) + (promptText.length > 500 ? '...' : ''));
     console.log('─'.repeat(80));
     console.log(`📊 Full prompt length: ${promptText.length} characters`);
+    console.log(`🧭 [ChatModel Stream] Model selection:`, {
+      from_request_llm_name: (typeof llm_name === 'string' && llm_name.trim()) ? llm_name.trim() : null,
+      resolved_model_name: resolvedModelName,
+      env_default: process.env.GEMINI_MODEL_NAME || null
+    });
 
     sendStatus('generating', 'Generating response from AI...');
 
-    res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId, file_id: sanitizedFileId })}\n\n`);
+    res.write(
+      `data: ${JSON.stringify({
+        type: 'metadata',
+        session_id: finalSessionId,
+        file_id: sanitizedFileId,
+        file_ids: fileIds,
+      })}\n\n`
+    );
 
     let fullAnswer = '';
     let chunkCount = 0;
+    const streamingDelayMs = getStreamingDelayMs(llmChatConfig);
     try {
       console.log('🔄 Starting to stream LLM response...');
       
-      for await (const chunk of streamLLMWithGCS(promptText, gcsUri, '')) {
-        if (chunk && chunk.trim()) {
+      for await (const chunk of streamLLMWithGCS(promptText, gcsUris, '', {
+        modelName: resolvedModelName,
+        llmConfig: llmConfigForRequest,
+        userId,
+        fileId: sanitizedFileId,
+        sessionId: finalSessionId,
+        endpoint: '/api/chat/ask/stream',
+      })) {
+        if (typeof chunk === 'string' && chunk.length > 0) {
           fullAnswer += chunk;
           chunkCount++;
           
@@ -1181,6 +1466,10 @@ exports.askQuestionStream = async (req, res) => {
           
           if (res.flush && typeof res.flush === 'function') {
             res.flush();
+          }
+
+          if (streamingDelayMs > 0) {
+            await sleep(streamingDelayMs);
           }
           
           if (chunkCount % 10 === 0) {
@@ -1213,6 +1502,8 @@ exports.askQuestionStream = async (req, res) => {
       const questionToSave = usedSecretPrompt ? (finalPromptLabel || 'Secret Prompt') : (question?.trim() || '');
       console.log(`   - Question length: ${questionToSave.length} chars`);
       console.log(`   - Answer length: ${fullAnswer.length} chars`);
+
+      const attachedSnapshot = buildAttachedFilesSnapshot(files, bucketName);
       
       savedChat = await FileChat.saveChat(
         sanitizedFileId,
@@ -1224,7 +1515,8 @@ exports.askQuestionStream = async (req, res) => {
         usedSecretPrompt,
         finalPromptLabel,
         secretIdToSave,
-        historyForStorage
+        historyForStorage,
+        attachedSnapshot
       );
 
       console.log(`✅ [ChatModel] Streaming chat saved successfully!`);
@@ -1248,7 +1540,8 @@ exports.askQuestionStream = async (req, res) => {
       chat_id: savedChat.id,
       answer: fullAnswer,
       file_id: sanitizedFileId,
-      filename: file.originalname,
+      file_ids: fileIds,
+      filename: files[0]?.originalname,
       answer_length: fullAnswer.length,
       chunks_received: chunkCount,
       used_secret_prompt: usedSecretPrompt,
@@ -1339,6 +1632,13 @@ exports.getChatHistory = async (req, res) => {
     }
 
     const historyRows = await FileChat.getChatHistory(file_id, session_id || null);
+    const bucketName = process.env.GCS_BUCKET_NAME || '';
+    const attached_files = resolveAttachedFilesForSession(historyRows, file, file_id, bucketName);
+    const file_ids =
+      attached_files && attached_files.length
+        ? [...new Set(attached_files.map((a) => a.file_id).filter(Boolean))]
+        : [file_id];
+
     const history = historyRows.map((row) => ({
       id: row.id,
       question: row.question,
@@ -1349,6 +1649,7 @@ exports.getChatHistory = async (req, res) => {
       prompt_label: row.prompt_label || null,
       secret_id: row.secret_id || null,
       file_id: row.file_id || file_id,
+      attached_files: parseAttachedFilesCell(row.attached_files),
     }));
 
     return res.status(200).json({
@@ -1358,7 +1659,9 @@ exports.getChatHistory = async (req, res) => {
         filename: file.originalname,
         session_id: session_id || null,
         history: history,
-        count: history.length
+        count: history.length,
+        attached_files,
+        file_ids,
       }
     });
 
@@ -1454,6 +1757,406 @@ exports.getDocumentSessions = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch document sessions',
+      error: error.message
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Build a plain-text user context string for document chat prompts
+// Takes the { basic, professional } object from getFullProfile
+// ─────────────────────────────────────────────────────────────────────────────
+function buildUserContextFromProfile(fullProfile) {
+  const p = fullProfile?.professional || {};
+  const b = fullProfile?.basic || {};
+
+  const name         = b.username || p.fullname || b.email || p.email || 'Unknown';
+  const ns = (v) => v || 'Not set';
+
+  return `USER PROFILE (complete profile fetched from JuriNex auth service):
+- Name: ${name}
+- Email: ${ns(b.email || p.email)}
+- Role: ${ns(p.primary_role)}
+- Organization: ${ns(p.organization_name)}
+- Organization Type: ${ns(p.organization_type)}
+- Primary Jurisdiction: ${ns(p.primary_jurisdiction)}
+- Areas of Practice: ${ns(p.main_areas_of_practice)}
+- Experience: ${ns(p.experience)}
+- Bar Enrollment Number: ${ns(p.bar_enrollment_number)}
+- Typical Client: ${ns(p.typical_client)}
+- Preferred Tone: ${ns(p.preferred_tone)}
+- Detail Level: ${ns(p.preferred_detail_level)}
+- Citation Style: ${ns(p.citation_style)}
+
+When asked about profile details, list ALL the above fields including those marked "Not set". Never claim you lack access to profile data — the complete profile is listed above.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGAL DOMAIN SYSTEM PROMPT
+// ─────────────────────────────────────────────────────────────────────────────
+function buildLegalSystemPrompt(userProfile) {
+  const professional = userProfile?.professional || {};
+  const basic = userProfile?.basic || {};
+
+  const ns = (v) => v || 'Not set';
+  const name         = basic.username || professional.fullname || basic.email || professional.email || 'the user';
+
+  const profileSection = `\n\nUSER PROFILE (complete profile fetched from JuriNex auth service):
+- Name: ${name}
+- Email: ${ns(basic.email || professional.email)}
+- Role: ${ns(professional.primary_role)}
+- Organization: ${ns(professional.organization_name)}
+- Organization Type: ${ns(professional.organization_type)}
+- Primary Jurisdiction: ${ns(professional.primary_jurisdiction)}
+- Areas of Practice: ${ns(professional.main_areas_of_practice)}
+- Experience: ${ns(professional.experience)}
+- Bar Enrollment Number: ${ns(professional.bar_enrollment_number)}
+- Typical Client: ${ns(professional.typical_client)}
+- Preferred Tone: ${ns(professional.preferred_tone)}
+- Detail Level: ${ns(professional.preferred_detail_level)}
+- Citation Style: ${ns(professional.citation_style)}
+
+IMPORTANT: When the user asks about their profile details, list ALL the above fields exactly as shown, including those marked "Not set". Never say you do not have access to their profile — the complete profile is provided above. "Not set" means the user has not filled in that field yet.`;
+
+  return `You are JuriNex Legal Assistant — an expert AI assistant strictly specialised in legal matters.
+
+DOMAIN RESTRICTION:
+- You ONLY answer questions related to law, legal concepts, legal procedures, contracts, regulations, case law, statutes, compliance, legal rights, legal strategy, or legal research.
+- You MAY answer questions about the user's own profile details since the complete profile is provided to you above.
+- If a question is outside the legal domain and is not about the user's profile, politely decline and explain that you are a legal-only assistant.
+
+RESPONSE QUALITY:
+- Provide accurate, well-reasoned legal information.
+- Responses are for informational purposes only and not a substitute for formal legal advice from a licensed attorney.
+- Cite relevant statutes, regulations, or case law where appropriate.
+- Address the user by name.${profileSection}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// General Chat (no document) — Streaming SSE
+// ─────────────────────────────────────────────────────────────────────────────
+exports.askGeneralQuestionStream = async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  setSseCorsHeaders(req, res);
+  res.flushHeaders();
+
+  console.log('📡 [General] SSE connection established for general legal chat');
+
+  const heartbeat = setInterval(() => {
+    try { res.write(`data: [PING]\n\n`); } catch (e) { clearInterval(heartbeat); }
+  }, 15000);
+
+  const sendStatus = (status, message = '') => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'status', status, message })}\n\n`);
+      if (res.flush) res.flush();
+    } catch (e) { console.error('Error sending status:', e); }
+  };
+
+  const sendError = (message, details = '') => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'error', message, details })}\n\n`);
+      res.write(`data: [DONE]\n\n`);
+      clearInterval(heartbeat);
+      res.end();
+    } catch (e) { console.error('Error sending error:', e); }
+  };
+
+  try {
+    const userId = req.user.id;
+    const authorizationHeader = req.headers.authorization;
+    const { question, session_id, llm_name: generalLlmName } = req.body;
+
+    sendStatus('initializing', 'Starting legal chat...');
+
+    if (!question || !question.trim()) {
+      sendError('Question is required');
+      return;
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const hasExistingSession = session_id && uuidRegex.test(session_id);
+    const finalSessionId = hasExistingSession ? session_id : uuidv4();
+
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`📋 [General Chat DB Params] Incoming general legal chat request:`);
+    console.log(`   - user_id        : ${userId}`);
+    console.log(`   - session_id     : ${session_id || 'none (new session)'}`);
+    console.log(`   - is_valid_uuid  : ${hasExistingSession}`);
+    console.log(`   - final_session  : ${finalSessionId}`);
+    console.log(`   - action         : ${hasExistingSession ? '🔄 CONTINUING existing session' : '🆕 STARTING new session'}`);
+    console.log(`   - question       : ${question.trim().substring(0, 100)}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    sendStatus('fetching', 'Loading your professional profile...');
+
+    // Fetch full user profile (basic + professional) for legal context
+    const userProfile = await UserProfileService.getFullProfile(userId, authorizationHeader);
+
+    console.log(`\n📦 [General Chat DB Load] Profile loaded from auth service:`);
+    console.log(`   - username       : ${userProfile.basic?.username || 'N/A'}`);
+    console.log(`   - role           : ${userProfile.professional?.primary_role || 'N/A'}`);
+    console.log(`   - jurisdiction   : ${userProfile.professional?.primary_jurisdiction || 'N/A'}`);
+    console.log(`   - practice areas : ${userProfile.professional?.main_areas_of_practice || 'N/A'}`);
+    console.log(`   - tone pref      : ${userProfile.professional?.preferred_tone || 'N/A'}`);
+    console.log(`   - detail level   : ${userProfile.professional?.preferred_detail_level || 'N/A'}\n`);
+
+    // Load previous messages for this session (file_id IS NULL)
+    let previousChats = [];
+    if (hasExistingSession) {
+      const result = await pool.query(
+        `SELECT id, question, answer, session_id, created_at
+         FROM file_chats
+         WHERE user_id = $1 AND session_id = $2 AND file_id IS NULL AND chat_type = 'chat_model'
+         ORDER BY created_at ASC`,
+        [userId, finalSessionId]
+      );
+      previousChats = result.rows;
+      console.log(`\n📦 [General Chat DB Load] Loaded ${previousChats.length} previous messages from DB:`);
+      console.log(`   - DB query: SELECT FROM file_chats WHERE user_id='${userId}' AND session_id='${finalSessionId}' AND file_id IS NULL`);
+      previousChats.forEach((chat, i) => {
+        console.log(`   [${i + 1}] id=${chat.id} | Q="${(chat.question||'').substring(0,60)}..."`);
+      });
+    } else {
+      console.log(`📦 [General Chat] New session — no previous messages to load`);
+    }
+
+    // Build conversation history string for context
+    let conversationContext = '';
+    if (previousChats.length > 0) {
+      conversationContext = previousChats
+        .map((c, i) => `Turn ${i + 1}:\nUser: ${c.question}\nAssistant: ${c.answer}`)
+        .join('\n\n');
+      console.log(`📜 [General Chat] Sending ${previousChats.length} previous messages as context to LLM`);
+    }
+
+    const systemInstruction = buildLegalSystemPrompt(userProfile);
+
+    let promptText = question.trim();
+    if (conversationContext) {
+      promptText = `PREVIOUS CONVERSATION:\n${conversationContext}\n\nCURRENT QUESTION:\n${promptText}`;
+    }
+
+    console.log(`📝 [General Chat] System instruction length: ${systemInstruction.length} chars`);
+    console.log(`📝 [General Chat] Prompt length: ${promptText.length} chars`);
+
+    // ── LLM config: DB row + per-request overrides (enforceLLMChatPolicy) ─────
+    const { llmChatConfig, llmConfigForRequest } = await ensureLlmRequestConfig(req);
+    const resolvedGeneralModel =
+      typeof generalLlmName === 'string' && generalLlmName.trim() ? generalLlmName.trim() : null;
+    console.log(`\n📋 [DB → General Chat LLM Config] Parameters used:`);
+    console.log(`   - llm_model            : ${llmConfigForRequest.llm_model}`);
+    console.log(`   - max_output_tokens    : ${llmConfigForRequest.max_output_tokens}`);
+    console.log(`   - model_temperature    : ${llmConfigForRequest.model_temperature}`);
+    console.log(`   - chats_per_day        : ${llmConfigForRequest.chats_per_day}`);
+    console.log(`   - messages_per_hour    : ${llmConfigForRequest.messages_per_hour}`);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    sendStatus('generating', 'Generating legal response...');
+
+    res.write(`data: ${JSON.stringify({ type: 'metadata', session_id: finalSessionId })}\n\n`);
+
+    let fullAnswer = '';
+    let chunkCount = 0;
+    const streamingDelayMs = getStreamingDelayMs(llmChatConfig);
+
+    try {
+      for await (const chunk of streamLLMGeneral(promptText, systemInstruction, llmConfigForRequest, {
+        modelName: resolvedGeneralModel,
+        userId,
+        sessionId: finalSessionId,
+        endpoint: '/api/chat/ask/general/stream',
+      })) {
+        if (typeof chunk === 'string' && chunk.length > 0) {
+          fullAnswer += chunk;
+          chunkCount++;
+          res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+          if (res.flush) res.flush();
+          if (streamingDelayMs > 0) {
+            await sleep(streamingDelayMs);
+          }
+        }
+      }
+
+      if (!fullAnswer || fullAnswer.trim().length === 0) {
+        throw new Error('Received empty response from LLM');
+      }
+
+      console.log(`✅ [General Chat] Streaming completed: ${chunkCount} chunks, ${fullAnswer.length} chars`);
+    } catch (streamError) {
+      console.error('❌ [General Chat] Streaming error:', streamError);
+      sendError('Streaming failed', streamError.message);
+      return;
+    }
+
+    sendStatus('saving', 'Saving conversation to database...');
+
+    // Build history snapshot for storage
+    const historyForStorage = previousChats.map(c => ({
+      id: c.id,
+      question: c.question,
+      answer: c.answer,
+      created_at: c.created_at,
+    }));
+
+    let savedChat;
+    try {
+      console.log(`💾 [General Chat] Saving to DB — file_id: NULL, session: ${finalSessionId}`);
+      savedChat = await FileChat.saveChat(
+        null,          // file_id — null for general chat
+        userId,
+        question.trim(),
+        fullAnswer,
+        finalSessionId,
+        [],            // usedChunkIds
+        false,         // usedSecretPrompt
+        null,          // promptLabel
+        null,          // secretId
+        historyForStorage,
+        null           // attached_files — N/A for general legal chat
+      );
+      console.log(`✅ [General Chat] Saved — chat_id: ${savedChat.id}, session: ${savedChat.session_id}`);
+    } catch (saveError) {
+      console.error(`❌ [General Chat] Failed to save to DB:`, saveError.message);
+      savedChat = { id: null, session_id: finalSessionId, created_at: new Date().toISOString() };
+    }
+
+    const completionData = {
+      type: 'done',
+      session_id: finalSessionId,
+      chat_id: savedChat.id,
+      answer: fullAnswer,
+      answer_length: fullAnswer.length,
+      chunks_received: chunkCount,
+      is_general_chat: true,
+    };
+
+    res.write(`data: ${JSON.stringify(completionData)}\n\n`);
+    if (res.flush) res.flush();
+    res.write(`data: [DONE]\n\n`);
+    if (res.flush) res.flush();
+
+    clearInterval(heartbeat);
+    res.end();
+
+  } catch (error) {
+    console.error('❌ [General Chat] Error:', error.message);
+    sendError('Failed to process chat request', error.message);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get general chat history by session (file_id IS NULL)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getGeneralChatHistory = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { session_id } = req.params;
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(session_id)) {
+      return res.status(400).json({ success: false, message: 'Invalid session_id format' });
+    }
+
+    console.log(`📋 [General Chat] Fetching history — user: ${userId}, session: ${session_id}`);
+
+    const result = await pool.query(
+      `SELECT id, user_id, question, answer, session_id, used_secret_prompt,
+              prompt_label, secret_id, created_at
+       FROM file_chats
+       WHERE user_id = $1 AND session_id = $2 AND file_id IS NULL AND chat_type = 'chat_model'
+       ORDER BY created_at ASC`,
+      [userId, session_id]
+    );
+
+    const history = result.rows.map(row => ({
+      id: row.id,
+      question: row.question,
+      answer: row.answer,
+      session_id: row.session_id,
+      created_at: row.created_at,
+      used_secret_prompt: false,
+      prompt_label: null,
+      file_id: null,
+      is_general_chat: true,
+    }));
+
+    console.log(`✅ [General Chat] Loaded ${history.length} messages for session ${session_id}`);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        session_id,
+        history,
+        count: history.length,
+        is_general_chat: true,
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [General Chat] Error fetching history:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch general chat history',
+      error: error.message
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// List all general chat sessions for the current user (file_id IS NULL)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getGeneralChatSessions = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    console.log(`\n📋 [General Sessions] Fetching all general chat sessions for user ${userId}`);
+    console.log(`   - DB query: SELECT DISTINCT session_id FROM file_chats WHERE user_id=${userId} AND file_id IS NULL`);
+
+    const result = await pool.query(
+      `SELECT
+         session_id,
+         MIN(created_at)  AS first_message_at,
+         MAX(created_at)  AS last_message_at,
+         COUNT(*)::int    AS message_count,
+         (array_agg(question ORDER BY created_at ASC))[1]  AS first_question,
+         (array_agg(question ORDER BY created_at DESC))[1] AS last_question
+       FROM file_chats
+       WHERE user_id = $1 AND file_id IS NULL AND chat_type = 'chat_model'
+       GROUP BY session_id
+       ORDER BY MAX(created_at) DESC`,
+      [userId]
+    );
+
+    console.log(`✅ [General Sessions] Found ${result.rows.length} session(s) for user ${userId}`);
+    result.rows.forEach((row, i) => {
+      console.log(`   [${i + 1}] session=${row.session_id} | msgs=${row.message_count} | last="${(row.last_question||'').substring(0,60)}"`);
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        sessions: result.rows.map(row => ({
+          session_id: row.session_id,
+          first_message_at: row.first_message_at,
+          last_message_at: row.last_message_at,
+          message_count: row.message_count,
+          first_question: row.first_question,
+          last_question: row.last_question,
+          is_general_chat: true,
+        })),
+        count: result.rows.length,
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [General Sessions] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch general chat sessions',
       error: error.message
     });
   }

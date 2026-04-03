@@ -7,7 +7,7 @@ import uuid
 from pathlib import PurePosixPath
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -30,8 +30,16 @@ from app.core.config import get_settings
 from app.services.container import get_folder_service
 from app.services.adapters import gcs
 from app.services.adapters import google_drive_tool
-from app.services.secret_prompt_display import resolve_query_and_display
 from app.services.db import get_db_connection, is_db_available
+from app.services.llm_chat_config import (
+    get_llm_chat_config,
+    get_request_upload_ceiling_mb,
+    merge_folder_chat_request_llm_overrides,
+    resolve_model_name,
+)
+from app.services.legal_system_prompt import build_legal_system_prompt, fetch_full_profile
+from app.services.llm_policy_service import assert_upload_allowed
+from app.services.secret_prompt_display import resolve_query_and_display
 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -108,6 +116,38 @@ def _build_gcs_object_path(user_id: str, folder_name: str, filename: str) -> str
     return str(PurePosixPath(user_id) / "documents" / folder_name / f"{uuid.uuid4().hex[:10]}_{safe_name}")
 
 
+def _normalize_gs_uri_from_record(gcs_path: str | None) -> str | None:
+    raw = str(gcs_path or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("gs://"):
+        return raw
+    settings = get_settings()
+    bucket_name = settings.gcs_input_bucket_name or settings.gcs_bucket_name or "fileinputbucket"
+    return f"gs://{bucket_name}/{raw.lstrip('/')}"
+
+
+def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | None:
+    if not is_db_available():
+        return None
+    accessible_user_ids = get_folder_service()._get_accessible_user_ids(user_id)
+    if not accessible_user_ids:
+        return None
+    with get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, user_id, originalname, mimetype, size, gcs_path, status, created_at
+            FROM user_files
+            WHERE id::text = %s
+              AND is_folder = false
+              AND user_id::text = ANY(%s::text[])
+            LIMIT 1
+            """,
+            [str(file_id), accessible_user_ids],
+        )
+        return cur.fetchone()
+
+
 async def _upload_to_gcs_and_build_document(user_id: str, folder_name: str, upload: UploadFile) -> DocumentReference:
     file_bytes = await upload.read()
     mimetype = upload.content_type or "application/octet-stream"
@@ -154,6 +194,105 @@ def _upload_drive_bytes_and_build_document(
     )
 
 
+@router.get("/chat-sessions")
+async def get_analysis_chat_sessions(
+    page: int = 1,
+    limit: int = 20,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Return paginated analysis chat sessions (chat_type = 'analysis') for the current user."""
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not is_db_available():
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    offset = (page - 1) * limit
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, user_id, question, answer, used_chunk_ids, created_at,
+                   session_id, file_id, used_secret_prompt, prompt_label, chat_history
+            FROM file_chats
+            WHERE user_id = %s AND (chat_type = 'analysis' OR (chat_type IS NULL AND file_id IS NOT NULL))
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (user_id, limit, offset),
+        ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+@router.get("/file/{file_id}/view")
+async def view_file(
+    file_id: str,
+    page: int | None = None,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    record = _get_file_record_for_user(file_id, user_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    gs_uri = _normalize_gs_uri_from_record(record.get("gcs_path"))
+    if not gs_uri:
+        raise HTTPException(status_code=404, detail="Document storage path is missing")
+
+    try:
+        signed_url = gcs.signed_read_url(gs_uri, expiration_minutes=60)
+    except Exception as exc:
+        logger.exception("[Route:view_file] file_id=%s failed to sign read URL: %s", file_id, exc)
+        raise HTTPException(status_code=500, detail="Could not generate document view URL") from exc
+
+    page_number = max(1, int(page or 1))
+    return {
+        "success": True,
+        "document": {
+            "id": str(record.get("id") or file_id),
+            "name": record.get("originalname") or "document",
+            "mimetype": record.get("mimetype") or "application/octet-stream",
+            "size": int(record.get("size") or 0),
+            "status": record.get("status") or "",
+        },
+        "signedUrl": signed_url,
+        "viewUrl": signed_url,
+        "viewUrlWithPage": f"{signed_url}#page={page_number}",
+        "page": page_number,
+    }
+
+
+@router.get("/llm-limits")
+async def get_llm_limits_for_client(
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Upload caps from `summarization_chat_config` (same source as assert_upload_allowed)."""
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    cfg = get_llm_chat_config()
+    ceiling = get_request_upload_ceiling_mb(cfg)
+    return {
+        "success": True,
+        "data": {
+            "max_file_size_mb": cfg.get("max_file_size_mb"),
+            "max_document_size_mb": cfg.get("max_document_size_mb"),
+            "max_upload_mb": ceiling,
+            "max_upload_bytes": int(ceiling * 1024 * 1024),
+            "max_upload_files": cfg.get("max_upload_files"),
+            "max_file_upload_per_day": cfg.get("max_file_upload_per_day"),
+            "max_document_pages": cfg.get("max_document_pages"),
+        },
+    }
+
+
 @router.post("/upload-for-processing")
 async def upload_for_processing(
     files: list[UploadFile] = File(...),
@@ -161,6 +300,7 @@ async def upload_for_processing(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    llm_config = get_llm_chat_config()
     # Keep temp folder style aligned with document-service uploadForProcessing flow.
     folder_name = f"temp-{uuid.uuid4().hex[:12]}"
     logger.info(
@@ -171,6 +311,19 @@ async def upload_for_processing(
     )
     documents: list[DocumentReference] = []
     for upload in files:
+        file_bytes = await upload.read()
+        upload.file.seek(0)
+        check = assert_upload_allowed(
+            user_id,
+            llm_config,
+            files_count=len(files),
+            size_bytes=len(file_bytes),
+            buffer=file_bytes,
+            mimetype=upload.content_type,
+            originalname=upload.filename,
+        )
+        if not check.get("ok"):
+            raise HTTPException(status_code=429, detail=check)
         documents.append(await _upload_to_gcs_and_build_document(user_id, folder_name, upload))
     return enqueue_case_documents(
         user_id=user_id,
@@ -187,6 +340,7 @@ async def upload_documents_to_folder(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    llm_config = get_llm_chat_config()
     logger.info(
         "[Route:upload_documents_to_folder] status=received user_id=%s folder=%s files=%s",
         user_id,
@@ -195,6 +349,19 @@ async def upload_documents_to_folder(
     )
     documents: list[DocumentReference] = []
     for upload in files:
+        file_bytes = await upload.read()
+        upload.file.seek(0)
+        check = assert_upload_allowed(
+            user_id,
+            llm_config,
+            files_count=len(files),
+            size_bytes=len(file_bytes),
+            buffer=file_bytes,
+            mimetype=upload.content_type,
+            originalname=upload.filename,
+        )
+        if not check.get("ok"):
+            raise HTTPException(status_code=429, detail=check)
         documents.append(await _upload_to_gcs_and_build_document(user_id, folder_name, upload))
     return enqueue_case_documents(
         user_id=user_id,
@@ -212,6 +379,7 @@ def import_google_drive_documents(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    llm_config = get_llm_chat_config()
     file_ids = [str(item).strip() for item in (request.file_ids or []) if str(item).strip()]
     if not file_ids:
         raise HTTPException(status_code=400, detail="file_ids is required")
@@ -232,6 +400,18 @@ def import_google_drive_documents(
             data, filename, mime_type = google_drive_tool.download_file_bytes(
                 x_google_access_token, file_id
             )
+            check = assert_upload_allowed(
+                user_id,
+                llm_config,
+                files_count=len(file_ids),
+                size_bytes=len(data),
+                buffer=data,
+                mimetype=mime_type,
+                originalname=filename,
+            )
+            if not check.get("ok"):
+                failed.append({"file_id": file_id, "error": check.get("message", "Upload restricted by policy")})
+                continue
             documents.append(
                 _upload_drive_bytes_and_build_document(
                     user_id=user_id,
@@ -279,6 +459,7 @@ def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUpload
         content_type=request.mimetype or "application/octet-stream",
         bucket_type="input",
     )
+    llm_config = get_llm_chat_config()
     settings = get_settings()
     bucket_name = settings.gcs_input_bucket_name or settings.gcs_bucket_name or "fileinputbucket"
     return {
@@ -286,6 +467,7 @@ def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUpload
         "signedUrl": signed_url,
         "gcsPath": f"gs://{bucket_name}/{object_path}",
         "filename": safe_name,
+        "maxAllowedSizeMb": get_request_upload_ceiling_mb(llm_config),
     }
 
 
@@ -298,7 +480,19 @@ def generate_upload_url_for_folder(
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     try:
+        check = assert_upload_allowed(
+            user_id,
+            get_llm_chat_config(),
+            files_count=1,
+            size_bytes=int(request.size or 0),
+            mimetype=request.mimetype,
+            originalname=request.filename,
+        )
+        if not check.get("ok"):
+            raise HTTPException(status_code=429, detail=check)
         return _build_signed_upload(user_id, folder_name, request)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("[Route:generate_upload_url] folder=%s error=%s", folder_name, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -313,6 +507,16 @@ def complete_upload_for_folder(
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     try:
+        check = assert_upload_allowed(
+            user_id,
+            get_llm_chat_config(),
+            files_count=1,
+            size_bytes=int(request.size or 0),
+            mimetype=request.mimetype,
+            originalname=request.filename,
+        )
+        if not check.get("ok"):
+            raise HTTPException(status_code=429, detail=check)
         payload = enqueue_case_documents(
             user_id=user_id,
             folder_name=folder_name,
@@ -335,6 +539,8 @@ def complete_upload_for_folder(
             "folderName": folder_name,
             "document": payload,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("[Route:complete_upload] folder=%s error=%s", folder_name, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -515,6 +721,7 @@ def intelligent_chat(
 async def intelligent_chat_stream(
     folder_name: str,
     request: FolderChatRequest,
+    fastapi_request: Request,
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> StreamingResponse:
@@ -537,6 +744,48 @@ async def intelligent_chat_stream(
         import asyncio
         from app.services.adapters.document_ai import _call_gemini_for_qa
 
+        async def _run_blocking(func, *, timeout_s: float, timeout_message: str):
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(None, func),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError as exc:
+                logger.warning(
+                    "[Route:intelligent_chat_stream] folder=%s timeout=%ss step=%s",
+                    folder_name,
+                    timeout_s,
+                    timeout_message,
+                )
+                raise TimeoutError(timeout_message) from exc
+
+        # Emit immediately so the frontend does not look stuck while we gather profile/config context.
+        yield _sse({"type": "status", "status": "initializing", "message": "Preparing legal assistant context..."})
+        yield _sse({"type": "thinking", "text": "Loading legal prompt and profile context...\n"})
+
+        loop = asyncio.get_running_loop()
+        llm_config = getattr(fastapi_request.state, "llm_chat_config", None) or get_llm_chat_config()
+        llm_config = merge_folder_chat_request_llm_overrides(llm_config, request)
+        try:
+            user_profile = await _run_blocking(
+                lambda: fetch_full_profile(user_id, authorization),
+                timeout_s=3.0,
+                timeout_message="profile_fetch",
+            )
+        except Exception:
+            logger.warning(
+                "[Route:intelligent_chat_stream] folder=%s user_id=%s profile fetch timed out, using empty profile",
+                folder_name,
+                user_id,
+            )
+            user_profile = {}
+        system_instruction = build_legal_system_prompt(user_profile)
+        logger.info(
+            "[Route:intelligent_chat_stream] system_prompt_chars=%s user_id=%s folder=%s",
+            len(system_instruction),
+            user_id,
+            folder_name,
+        )
         try:
             query_text, display_question = resolve_query_and_display(
                 question=request.question,
@@ -560,8 +809,6 @@ async def intelligent_chat_stream(
         # ── Step 1: emit status so the frontend shows "Analyzing..." ──
         yield _sse({"type": "status", "status": "analyzing", "message": "Analyzing query intent..."})
         yield _sse({"type": "thinking", "text": "Understanding your question and selecting the best answer path...\n"})
-
-        loop = asyncio.get_event_loop()
 
         # ── Step 2: try the in-memory vector store path ──
         vector_result = None
@@ -635,11 +882,24 @@ async def intelligent_chat_stream(
                         except Exception:
                             serialized_citations.append({"document_name": str(c)})
 
+                if answer_segments:
+                    vector_answer_text = "\n".join(
+                        (
+                            segment.get("statement", "")
+                            if isinstance(segment, dict)
+                            else getattr(segment, "statement", "")
+                        )
+                        for segment in answer_segments
+                    ).strip()
+                else:
+                    vector_answer_text = (full_answer or "").strip()
+
                 yield _sse({
                     "type": "done",
                     "session_id": session_id,
                     "method": "grounded_retrieval",
                     "routing_decision": "vector_search",
+                    "answer": vector_answer_text,
                     "citations": serialized_citations,
                     "used_chunk_ids": [c.get("chunk_id", "") for c in serialized_citations if isinstance(c, dict)],
                 })
@@ -661,19 +921,21 @@ async def intelligent_chat_stream(
             folder_service = get_folder_service()
 
             # Fetch all documents for this folder (DB path)
-            docs_result = await loop.run_in_executor(
-                None,
+            docs_result = await _run_blocking(
                 lambda: folder_service.get_documents_in_folder(folder_name, user_id),
+                timeout_s=10.0,
+                timeout_message="folder_documents_fetch",
             )
             documents = docs_result.get("documents") or docs_result.get("files") or []
 
             # Build list of {name, text} for Gemini
+            max_context_documents = max(1, int(llm_config.get("max_context_documents") or 8))
             doc_texts = [
                 {"name": d.get("name") or d.get("originalname") or "document",
                  "text": d.get("full_text_content") or d.get("summary") or ""}
                 for d in documents
                 if d.get("full_text_content") or d.get("summary")
-            ]
+            ][:max_context_documents]
 
             if not doc_texts:
                 # No text available at all
@@ -689,6 +951,16 @@ async def intelligent_chat_stream(
 
             yield _sse({"type": "status", "status": "generating", "message": "Generating answer from documents..."})
             yield _sse({"type": "thinking", "text": f"Loaded {len(doc_texts)} document(s). Generating answer now...\n"})
+
+            non_stream_timeout_s = min(
+                180.0,
+                max(
+                    60.0,
+                    30.0
+                    + (len(doc_texts) * 8.0)
+                    + (float(llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 15000) / 400.0),
+                ),
+            )
 
             # Real-time Gemini streaming: emit chunk events as text is generated.
             answer_parts: list[str] = []
@@ -718,7 +990,8 @@ async def intelligent_chat_stream(
 
                     context = "\n\n---\n\n".join(context_parts)
                     prompt = (
-                        "You are a legal expert assistant. Answer the user's question based ONLY on the "
+                        f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                        "Answer the user's question based ONLY on the "
                         "following legal documents. Be concise and factual. If the answer is not in the "
                         "documents, say so clearly.\n\n"
                         f"=== DOCUMENTS ===\n{context}\n\n"
@@ -726,12 +999,38 @@ async def intelligent_chat_stream(
                         "=== ANSWER ==="
                     )
                     client = genai.Client(api_key=settings.gemini_api_key)
+                    model_name = resolve_model_name(llm_config, for_summary=True) or resolve_model_name(llm_config) or "gemini-2.0-flash"
                     stream_iter = client.models.generate_content_stream(
-                        model="gemini-2.0-flash",
+                        model=model_name,
                         contents=prompt,
+                        config={
+                            "temperature": float(llm_config.get("model_temperature") or 0.7),
+                            "max_output_tokens": int(
+                                llm_config.get("max_summarization_output_tokens")
+                                or llm_config.get("max_output_tokens")
+                                or 15000
+                            ),
+                        },
                     )
+                    # Generous limits: short per-chunk timeouts were stopping the stream mid-answer
+                    # when the model paused between chunks, producing truncated UI responses.
+                    first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
+                    next_chunk_timeout_s = 600.0
                     while True:
-                        chunk = await loop.run_in_executor(None, lambda: next(stream_iter, None))
+                        chunk_timeout_s = first_chunk_timeout_s if not streamed else next_chunk_timeout_s
+                        try:
+                            chunk = await asyncio.wait_for(
+                                loop.run_in_executor(None, lambda: next(stream_iter, None)),
+                                timeout=chunk_timeout_s,
+                            )
+                        except asyncio.TimeoutError:
+                            if streamed:
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s gemini stream stalled after partial output; finalizing partial answer",
+                                    folder_name,
+                                )
+                                break
+                            raise TimeoutError("gemini_stream_first_chunk_timeout")
                         if chunk is None:
                             break
                         chunk_text = (getattr(chunk, "text", None) or "")
@@ -751,9 +1050,23 @@ async def intelligent_chat_stream(
                 yield _sse({"type": "thinking", "text": "Live stream unavailable, sending complete response...\n"})
 
             if not streamed:
-                qa_result = await loop.run_in_executor(
-                    None,
-                    lambda: _call_gemini_for_qa(query_text, doc_texts),
+                logger.info(
+                    "[Route:intelligent_chat_stream] folder=%s using non-stream Gemini fallback timeout=%ss doc_count=%s max_output_tokens=%s",
+                    folder_name,
+                    non_stream_timeout_s,
+                    len(doc_texts),
+                    llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 15000,
+                )
+                qa_result = await _run_blocking(
+                    lambda: _call_gemini_for_qa(
+                        query_text,
+                        doc_texts,
+                        query_intent="summary",
+                        output_format="structured",
+                        system_instruction=system_instruction,
+                    ),
+                    timeout_s=non_stream_timeout_s,
+                    timeout_message="gemini_non_stream_generation",
                 )
                 answer = (qa_result.get("answer") or "").strip()
                 if not answer:
@@ -820,6 +1133,7 @@ async def intelligent_chat_stream(
                 "session_id": session_id,
                 "method": "gemini_direct",
                 "routing_decision": "db_text_fallback",
+                "answer": answer,
                 "citations": [{"document_name": s} for s in source_names if s],
                 "used_chunk_ids": [],
                 "prompt_label": display_question if (request.secret_id or "").strip() else None,

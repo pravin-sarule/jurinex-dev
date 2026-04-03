@@ -8,16 +8,30 @@ const SCOPES = [
 ];
 
 /**
+ * Redirect URI sent to Google must match Google Cloud Console → OAuth client → Authorized redirect URIs (exact string).
+ * Trailing slashes and stray spaces in .env cause redirect_uri_mismatch.
+ */
+function resolveDriveRedirectUri() {
+  const fallback = 'http://localhost:5000/api/auth/google/drive/callback';
+  const raw =
+    (process.env.GOOGLE_DRIVE_REDIRECT_URI || '').trim() ||
+    (process.env.GOOGLE_DRIVE_CALLBACK_URL || '').trim() ||
+    (process.env.GATEWAY_URL && process.env.GATEWAY_URL.trim()
+      ? `${process.env.GATEWAY_URL.replace(/\/$/, '')}/api/auth/google/drive/callback`
+      : fallback);
+  const base = String(raw || fallback).trim();
+  const uri = base.startsWith('http') ? base : fallback;
+  const normalized = uri.replace(/\/+$/, '');
+  // Keep Google Drive OAuth on the dedicated callback path even if an older env
+  // value points to the generic Google callback.
+  return normalized.replace(/\/api\/auth\/google\/callback$/i, '/api/auth/google/drive/callback');
+}
+
+/**
  * Get OAuth2 client for Google Drive
  */
 const getOAuth2Client = () => {
-  // Redirect URI should point to the gateway (Google redirects here, then we redirect to frontend)
-  const base = process.env.GOOGLE_DRIVE_REDIRECT_URI ||
-    (process.env.GATEWAY_URL && process.env.GATEWAY_URL.trim()
-      ? process.env.GATEWAY_URL.replace(/\/$/, '') + '/api/auth/google/callback'
-      : 'http://localhost:5000/api/auth/google/callback');
-  const redirectUri = base.startsWith('http') ? base : 'http://localhost:5000/api/auth/google/callback';
-
+  const redirectUri = resolveDriveRedirectUri();
   console.log('[GoogleDrive] Using redirect URI:', redirectUri);
 
   const clientId = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID;
@@ -44,25 +58,32 @@ const initiateAuth = async (req, res) => {
     }
 
     const clientId = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID;
-    if (!clientId || !clientId.trim()) {
-      console.error('[GoogleDrive] GOOGLE_CLIENT_ID (or GOOGLE_DRIVE_CLIENT_ID) is not set');
-      return res.status(500).json({
-        message: 'Google Drive OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the auth service environment.',
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_DRIVE_CLIENT_SECRET;
+    if (!clientId || !clientId.trim() || !clientSecret || !clientSecret.trim()) {
+      console.error('[GoogleDrive] Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (or GOOGLE_DRIVE_* variants)');
+      return res.status(503).json({
+        message:
+          'Google Drive OAuth is not configured. In Backend/authservice/.env set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (Web OAuth client from Google Cloud Console). In the console, add Authorized redirect URI http://localhost:5000/api/auth/google/drive/callback (or your GATEWAY_URL + /api/auth/google/drive/callback).',
         code: 'OAUTH_NOT_CONFIGURED'
       });
     }
 
+    const redirectUri = resolveDriveRedirectUri();
     const oauth2Client = getOAuth2Client();
-    
-    // Generate authorization URL
+
+    // Must match Authorized redirect URIs for this Web client (exact string). Passing explicitly avoids SDK drift.
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
       scope: SCOPES,
-      prompt: 'consent', // Force consent screen to get refresh token
-      state: userId.toString() // Include user ID in state for security
+      prompt: 'consent',
+      state: userId.toString(),
+      redirect_uri: redirectUri,
     });
 
-    res.json({ authUrl });
+    console.log('[GoogleDrive] OAuth redirect_uri (must match Google Cloud Console):', redirectUri);
+
+    // Helps fix redirect_uri_mismatch: add this exact string in Google Cloud Console for this client ID
+    res.json({ authUrl, redirectUri });
   } catch (error) {
     console.error('[GoogleDrive] Error initiating auth:', error);
     res.status(500).json({ message: 'Failed to initiate Google Drive authorization' });
@@ -130,10 +151,13 @@ const handleCallbackGet = async (req, res) => {
     }
 
     console.log('[GoogleDrive] Exchanging code for tokens...');
+    const redirectUriForToken = resolveDriveRedirectUri();
     const oauth2Client = getOAuth2Client();
 
-    // Exchange code for tokens
-    const { tokens } = await oauth2Client.getToken(code);
+    const { tokens } = await oauth2Client.getToken({
+      code,
+      redirect_uri: redirectUriForToken,
+    });
     
     const { access_token, refresh_token, expiry_date } = tokens;
 
@@ -204,11 +228,14 @@ const handleCallbackPost = async (req, res) => {
       return res.status(403).json({ message: 'Invalid state parameter' });
     }
 
+    const redirectUriForToken = resolveDriveRedirectUri();
     const oauth2Client = getOAuth2Client();
 
-    // Exchange code for tokens
-    const { tokens } = await oauth2Client.getToken(code);
-    
+    const { tokens } = await oauth2Client.getToken({
+      code,
+      redirect_uri: redirectUriForToken,
+    });
+
     const { access_token, refresh_token, expiry_date } = tokens;
 
     if (!refresh_token) {

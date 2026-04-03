@@ -25,7 +25,26 @@ const chatRoutes = require('./routes/chatRoutes');
 const app = express();
 const PORT = process.env.PORT || 5003;
 
-app.use(cors());
+// Must not use Access-Control-Allow-Origin: * with credentialed requests.
+// origin: true reflects the request Origin so fetch/XHR with credentials works in dev (e.g. 5173 → 8088).
+const corsOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
+  : null;
+app.use(
+  cors({
+    origin:
+      corsOrigins && corsOrigins.length
+        ? (origin, callback) => {
+            if (!origin || corsOrigins.includes(origin)) {
+              callback(null, true);
+            } else {
+              callback(null, false);
+            }
+          }
+        : true,
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

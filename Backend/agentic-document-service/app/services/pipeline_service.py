@@ -2,6 +2,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import re
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -27,6 +28,7 @@ from app.services.adapters import chunking, embeddings, ocr
 from app.services.adapters.document_ai import DocumentAIAdapter, _call_gemini_for_qa
 from app.services.adapters.vector_store import ChunkRecord, InMemoryVectorStore
 from app.services.db import get_db_connection, is_db_available
+from app.services.llm_chat_config import get_llm_chat_config
 
 logger = logging.getLogger("agentic_document_service.pipeline")
 
@@ -211,6 +213,7 @@ class LegalCasePipelineService:
         intent: QueryIntent,
         output_format: str = "plain",
         extra_instructions: str | None = None,
+        system_instruction: str | None = None,
     ) -> tuple[str, bool]:
         qa_result = _call_gemini_for_qa(
             query,
@@ -218,6 +221,7 @@ class LegalCasePipelineService:
             query_intent=intent.value,
             output_format=output_format,
             extra_instructions=extra_instructions,
+            system_instruction=system_instruction,
         )
         synthesized_answer = (qa_result.get("answer") or "").strip()
         if synthesized_answer:
@@ -463,39 +467,194 @@ class LegalCasePipelineService:
         )
         return persisted
 
-    def answer_query_for_files(self, request: QueryRequest, file_ids: list[str]) -> QueryResponse:
+    def _resolve_retrieval_params(self, request: QueryRequest, llm_config: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "top_k": int(request.top_k or llm_config.get("retrieval_top_k") or self._settings.retrieval_top_k or 8),
+            "max_context_documents": max(1, int(llm_config.get("max_context_documents") or 8)),
+            "use_hybrid_search": bool(llm_config.get("use_hybrid_search")),
+            "use_rrf": bool(llm_config.get("use_rrf")),
+            "semantic_weight": max(0.0, float(llm_config.get("semantic_weight") or 0.7)),
+            "keyword_weight": max(0.0, float(llm_config.get("keyword_weight") or 0.3)),
+            "text_search_language": str(llm_config.get("text_search_language") or "english").strip() or "english",
+        }
+
+    def _log_retrieval_params(self, request: QueryRequest, llm_config: dict[str, Any], params: dict[str, Any], *, source: str) -> None:
+        logger.info(
+            "[RetrievalConfig] source=%s case_id=%s query=%s llm_model=%s summarization_model=%s embedding_model=%s "
+            "top_k=%s max_context_documents=%s use_hybrid_search=%s use_rrf=%s semantic_weight=%s keyword_weight=%s "
+            "text_search_language=%s max_output_tokens=%s max_summarization_output_tokens=%s model_temperature=%s streaming_delay=%s",
+            source,
+            request.case_id,
+            request.query[:120],
+            llm_config.get("llm_model"),
+            llm_config.get("summarization_model"),
+            llm_config.get("embedding_model"),
+            params.get("top_k"),
+            params.get("max_context_documents"),
+            params.get("use_hybrid_search"),
+            params.get("use_rrf"),
+            params.get("semantic_weight"),
+            params.get("keyword_weight"),
+            params.get("text_search_language"),
+            llm_config.get("max_output_tokens"),
+            llm_config.get("max_summarization_output_tokens"),
+            llm_config.get("model_temperature"),
+            llm_config.get("streaming_delay"),
+        )
+
+    def _search_db_chunks(
+        self,
+        *,
+        request: QueryRequest,
+        valid_file_ids: list[str],
+        query_embedding: list[float],
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        top_k = int(params["top_k"])
+        semantic_limit = max(top_k * 3, top_k)
+        text_search_language = params["text_search_language"]
+        keyword_query = self._build_keyword_query(request.query)
+        embedding_pg = f"[{','.join(str(float(v)) for v in query_embedding)}]"
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  cv.chunk_id,
+                  fc.content,
+                  fc.file_id,
+                  COALESCE(uf.originalname, fc.file_id::text) AS document_name,
+                  (cv.embedding <=> %s::vector) AS distance,
+                  (1 / (1 + (cv.embedding <=> %s::vector))) AS similarity
+                FROM chunk_vectors cv
+                INNER JOIN file_chunks fc ON cv.chunk_id::text = fc.id::text
+                LEFT JOIN user_files uf ON uf.id::text = fc.file_id::text
+                WHERE fc.file_id::text = ANY(%s::text[])
+                ORDER BY distance ASC
+                LIMIT %s
+                """,
+                (embedding_pg, embedding_pg, valid_file_ids, semantic_limit),
+            )
+            semantic_rows = list(cur.fetchall())
+
+            keyword_rows: list[dict[str, Any]] = []
+            if params["use_hybrid_search"] and keyword_query:
+                try:
+                    cur.execute(
+                        """
+                        SELECT
+                          fc.id::text AS chunk_id,
+                          fc.content,
+                          fc.file_id,
+                          COALESCE(uf.originalname, fc.file_id::text) AS document_name,
+                          ts_rank_cd(
+                            to_tsvector(%s::regconfig, COALESCE(fc.content, '')),
+                            websearch_to_tsquery(%s::regconfig, %s)
+                          ) AS keyword_score
+                        FROM file_chunks fc
+                        LEFT JOIN user_files uf ON uf.id::text = fc.file_id::text
+                        WHERE fc.file_id::text = ANY(%s::text[])
+                          AND to_tsvector(%s::regconfig, COALESCE(fc.content, '')) @@ websearch_to_tsquery(%s::regconfig, %s)
+                        ORDER BY keyword_score DESC
+                        LIMIT %s
+                        """,
+                        (
+                            text_search_language,
+                            text_search_language,
+                            keyword_query,
+                            valid_file_ids,
+                            text_search_language,
+                            text_search_language,
+                            keyword_query,
+                            semantic_limit,
+                        ),
+                    )
+                    keyword_rows = list(cur.fetchall())
+                except Exception as exc:
+                    logger.warning(
+                        "[Pipeline] DB keyword search skipped case_id=%s error=%s keyword_query=%r",
+                        request.case_id,
+                        exc,
+                        keyword_query[:160],
+                    )
+
+        if not params["use_hybrid_search"]:
+            return semantic_rows[:top_k]
+
+        merged: dict[str, dict[str, Any]] = {}
+        if params["use_rrf"]:
+            rank_constant = 60.0
+            for rank, row in enumerate(semantic_rows, start=1):
+                entry = merged.setdefault(str(row.get("chunk_id")), dict(row))
+                entry["combined_score"] = float(entry.get("combined_score") or 0.0) + (1.0 / (rank_constant + rank))
+            for rank, row in enumerate(keyword_rows, start=1):
+                entry = merged.setdefault(str(row.get("chunk_id")), dict(row))
+                entry["combined_score"] = float(entry.get("combined_score") or 0.0) + (1.0 / (rank_constant + rank))
+                entry["keyword_score"] = float(row.get("keyword_score") or 0.0)
+            rows = list(merged.values())
+            rows.sort(key=lambda item: float(item.get("combined_score") or 0.0), reverse=True)
+            return rows[:top_k]
+
+        semantic_weight = float(params["semantic_weight"])
+        keyword_weight = float(params["keyword_weight"])
+        for row in semantic_rows:
+            entry = merged.setdefault(str(row.get("chunk_id")), dict(row))
+            entry["semantic_score"] = float(row.get("similarity") or 0.0)
+        for row in keyword_rows:
+            entry = merged.setdefault(str(row.get("chunk_id")), dict(row))
+            entry["keyword_score"] = float(row.get("keyword_score") or 0.0)
+        for entry in merged.values():
+            entry["combined_score"] = (float(entry.get("semantic_score") or 0.0) * semantic_weight) + (
+                float(entry.get("keyword_score") or 0.0) * keyword_weight
+            )
+        rows = list(merged.values())
+        rows.sort(key=lambda item: float(item.get("combined_score") or 0.0), reverse=True)
+        return rows[:top_k]
+
+    def _build_keyword_query(self, raw_query: str) -> str:
+        text = str(raw_query or "").strip()
+        if not text:
+            return ""
+        current_question_match = re.search(r"current question:\s*(.+)$", text, flags=re.IGNORECASE | re.DOTALL)
+        if current_question_match:
+            text = current_question_match.group(1).strip()
+        tokens = re.findall(r"[A-Za-z0-9_]{2,}", text.lower())
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            deduped.append(token)
+            if len(deduped) >= 24:
+                break
+        return " ".join(deduped)
+
+    def answer_query_for_files(
+        self,
+        request: QueryRequest,
+        file_ids: list[str],
+        *,
+        system_instruction: str | None = None,
+    ) -> QueryResponse:
         valid_file_ids = [str(item) for item in file_ids if item]
         if not valid_file_ids or not is_db_available():
             return self.answer_query(request)
 
-        top_k = int(request.top_k or self._settings.retrieval_top_k or 8)
+        llm_config = get_llm_chat_config()
+        retrieval_params = self._resolve_retrieval_params(request, llm_config)
+        self._log_retrieval_params(request, llm_config, retrieval_params, source="db")
         intent, _effective_required_doc_types = self._infer_query_context(request.query, request.required_doc_types)
         query_embedding = embeddings.embed_text(request.query)
-        embedding_pg = f"[{','.join(str(float(v)) for v in query_embedding)}]"
         try:
-            with get_db_connection() as conn, conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                      cv.chunk_id,
-                      fc.content,
-                      fc.file_id,
-                      COALESCE(uf.originalname, fc.file_id::text) AS document_name,
-                      (cv.embedding <=> %s::vector) AS distance,
-                      (1 / (1 + (cv.embedding <=> %s::vector))) AS similarity
-                    FROM chunk_vectors cv
-                    INNER JOIN file_chunks fc ON cv.chunk_id::text = fc.id::text
-                    LEFT JOIN user_files uf ON uf.id::text = fc.file_id::text
-                    WHERE fc.file_id::text = ANY(%s::text[])
-                    ORDER BY distance ASC
-                    LIMIT %s
-                    """,
-                    (embedding_pg, embedding_pg, valid_file_ids, top_k),
-                )
-                rows = list(cur.fetchall())
+            rows = self._search_db_chunks(
+                request=request,
+                valid_file_ids=valid_file_ids,
+                query_embedding=query_embedding,
+                params=retrieval_params,
+            )
         except Exception as exc:
             logger.exception("[Pipeline] DB vector search failed case_id=%s error=%s", request.case_id, exc)
-            return self.answer_query(request)
+            raise ValueError(f"Indexed search failed for case '{request.case_id}'.") from exc
 
         if not rows:
             raise ValueError(f"No indexed chunks found for case '{request.case_id}'.")
@@ -510,7 +669,7 @@ class LegalCasePipelineService:
                     document_name=str(row.get("document_name") or "document"),
                     chunk_id=str(row.get("chunk_id") or ""),
                     quote=quote,
-                    score=float(row.get("similarity") or 0.0),
+                    score=float(row.get("combined_score") or row.get("similarity") or row.get("keyword_score") or 0.0),
                 )
             )
             answer_lines.append(f"{rank}. {quote}")
@@ -526,12 +685,14 @@ class LegalCasePipelineService:
                     "text": content,
                 }
             )
+        max_context_documents = int(retrieval_params["max_context_documents"])
         answer_text, grounded = self._build_grounded_answer(
             query=request.query,
-            doc_texts=doc_texts,
+            doc_texts=doc_texts[:max_context_documents],
             citations=citations,
             intent=intent,
             output_format="structured",
+            system_instruction=system_instruction,
         )
         segment = AnswerSegment(statement=answer_text, confidence=0.9 if grounded else 0.72, citations=citations)
         return QueryResponse(
@@ -549,15 +710,21 @@ class LegalCasePipelineService:
         if not case:
             raise ValueError(f"Case '{request.case_id}' not found.")
 
-        top_k = int(request.top_k or self._settings.retrieval_top_k or 8)
+        llm_config = get_llm_chat_config()
+        retrieval_params = self._resolve_retrieval_params(request, llm_config)
+        self._log_retrieval_params(request, llm_config, retrieval_params, source="memory")
         intent, effective_required_doc_types = self._infer_query_context(request.query, request.required_doc_types)
         query_embedding = embeddings.embed_text(request.query)
         hits = self._vector_store.search(
             case_id=request.case_id,
             query=request.query,
             query_embedding=query_embedding,
-            top_k=top_k,
+            top_k=int(retrieval_params["top_k"]),
             required_doc_types=effective_required_doc_types,
+            use_hybrid_search=bool(retrieval_params["use_hybrid_search"]),
+            use_rrf=bool(retrieval_params["use_rrf"]),
+            semantic_weight=float(retrieval_params["semantic_weight"]),
+            keyword_weight=float(retrieval_params["keyword_weight"]),
         )
         if not hits:
             raise ValueError(f"No indexed chunks found for case '{request.case_id}'.")
@@ -582,9 +749,10 @@ class LegalCasePipelineService:
             for chunk, _score in hits
             if (chunk.text or "").strip()
         ]
+        max_context_documents = int(retrieval_params["max_context_documents"])
         answer_text, grounded = self._build_grounded_answer(
             query=request.query,
-            doc_texts=doc_texts,
+            doc_texts=doc_texts[:max_context_documents],
             citations=citations,
             intent=intent,
             output_format="structured",

@@ -14,14 +14,14 @@ router.use("/files", (req, res, next) => {
 router.use("/files", authMiddleware);
 router.use("/docs", authMiddleware);
 router.use("/mindmap", authMiddleware);
-// Proxy: /files/* → File Service /api/doc/*
+// Proxy: /files/* → File Service /api/files/*
 router.use(
   "/files",
   createProxyMiddleware({
-    target: process.env.FILE_SERVICE_URL || "http://localhost:5002",
+    target: process.env.FILE_SERVICE_URL || "http://localhost:8092",
     changeOrigin: true,
     pathRewrite: {
-      "^/": "/api/doc/", // Rewrite /batch-upload to /api/doc/batch-upload
+      "^/": "/api/files/", // Rewrite /files/* to /api/files/*
     },
     onProxyReq: (proxyReq, req) => {
       // Inject user ID from JWT into header for Document Service
@@ -43,7 +43,7 @@ router.use(
 router.use(
   "/docs",
   createProxyMiddleware({
-    target: process.env.FILE_SERVICE_URL || "http://localhost:5002",
+    target: process.env.FILE_SERVICE_URL || "http://localhost:8092",
     changeOrigin: true,
     pathRewrite: {
       "^/": "/api/files/", // Rewrite /docs/* to /api/files/*
@@ -73,7 +73,7 @@ router.use(
 router.use(
   "/mindmap",
   createProxyMiddleware({
-    target: process.env.FILE_SERVICE_URL || "http://localhost:5002",
+    target: process.env.FILE_SERVICE_URL || "http://localhost:8092",
     changeOrigin: true,
     pathRewrite: (path) => {
       // When router matches /mindmap, the remaining path (e.g., /files) is passed here

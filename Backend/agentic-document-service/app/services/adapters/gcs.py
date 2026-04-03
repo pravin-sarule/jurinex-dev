@@ -126,3 +126,27 @@ def signed_upload_url(
     )
     logger.info("[GCS] Generated signed upload URL for %s in %s bucket", destination_path, bucket_type)
     return url
+
+
+def signed_read_url(gs_uri: str, expiration_minutes: int = 60) -> str:
+    """
+    Generate a v4 signed GET URL for a gs:// URI.
+    """
+    if not gs_uri.startswith("gs://"):
+        raise ValueError(f"Not a valid gs:// URI: {gs_uri}")
+
+    without_scheme = gs_uri[5:]
+    bucket_name, _, object_path = without_scheme.partition("/")
+    if not bucket_name or not object_path:
+        raise ValueError(f"Incomplete gs:// URI: {gs_uri}")
+
+    client = _get_gcs_client()
+    bucket_obj = client.bucket(bucket_name)
+    blob = bucket_obj.blob(object_path)
+    url = blob.generate_signed_url(
+        version="v4",
+        expiration=timedelta(minutes=expiration_minutes),
+        method="GET",
+    )
+    logger.info("[GCS] Generated signed read URL for %s", gs_uri)
+    return url

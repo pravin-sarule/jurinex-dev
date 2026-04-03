@@ -1,5 +1,5 @@
 """
-Fetch llm_models from document-service (HTTP). Document-service holds the llm_models table.
+Fetch llm_models from agentic-document-service (HTTP).
 """
 
 from __future__ import annotations
@@ -13,7 +13,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DOCUMENT_SERVICE_URL = os.environ.get("DOCUMENT_SERVICE_URL", "https://document-service-120280829617.asia-south1.run.app")
+DOCUMENT_SERVICE_URL = (
+    os.environ.get("AGENTIC_DOCUMENT_SERVICE_URL")
+    or os.environ.get("DOCUMENT_SERVICE_URL")
+    or "http://localhost:8092"
+)
 LLM_MODELS_PATH = "/api/llm-models"
 TIMEOUT = 15
 
@@ -24,7 +28,7 @@ _MODELS_CACHE_TTL = 600  # seconds
 
 def fetch_models_from_document_service() -> List[Dict[str, Any]]:
     """
-    GET document-service /api/llm-models and return list of { id, name }.
+    GET agentic-document-service /api/llm-models and return list of { id, name }.
     Log each model name to console. On failure returns [].
     Results are cached in-process for 10 minutes.
     """
@@ -40,7 +44,7 @@ def fetch_models_from_document_service() -> List[Dict[str, Any]]:
         models = data.get("models") if isinstance(data, dict) else []
         if not isinstance(models, list):
             models = []
-        logger.info("[document_service] Fetched %d models from document-service", len(models))
+        logger.info("[document_service] Fetched %d models from agentic-document-service", len(models))
         names = []
         for m in models:
             mid = m.get("id")

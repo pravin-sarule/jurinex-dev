@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class DocumentType(str, Enum):
@@ -225,6 +225,14 @@ class FolderChatRequest(BaseModel):
     llm_name: str | None = None
     prompt_label: str | None = None
     secret_id: str | None = None
+    max_output_tokens: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("max_output_tokens", "maxOutputTokens"),
+    )
+    model_temperature: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("model_temperature", "temperature"),
+    )
 
 
 class FolderChatResponse(BaseModel):

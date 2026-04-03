@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from app.schemas.contracts import DocumentReference, DocumentType
+from app.services.llm_chat_config import get_llm_chat_config, resolve_model_name
 
 logger = logging.getLogger("agentic_document_service.document_ai")
 _gemini_extract_unavailable_logged = False
@@ -92,13 +93,31 @@ def _gemini_client():
         return None
 
 
-def _generate_text(prompt: str) -> str:
+def _generation_config(*, for_summary: bool = False) -> tuple[str, dict[str, float | int]]:
+    config = get_llm_chat_config()
+    model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
+    max_tokens = int(
+        config.get("max_summarization_output_tokens") if for_summary else config.get("max_output_tokens") or 0
+    )
+    max_cap = max(1, int(config.get("max_output_tokens_cap") or 65536))
+    min_tokens = max(1, int(config.get("min_output_tokens") or 1))
+    if max_tokens <= 0:
+        max_tokens = 15000 if for_summary else 20000
+    max_tokens = max(min_tokens, min(max_tokens, max_cap))
+    temperature = float(config.get("model_temperature") or 0.7)
+    temperature = min(max(temperature, float(config.get("temperature_min") or 0.0)), float(config.get("temperature_max") or 2.0))
+    return model_name, {"temperature": temperature, "max_output_tokens": max_tokens}
+
+
+def _generate_text(prompt: str, *, for_summary: bool = False) -> str:
     client = _gemini_client()
     if client is None:
         return ""
+    model_name, generation_config = _generation_config(for_summary=for_summary)
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model=model_name,
         contents=prompt,
+        config=generation_config,
     )
     return (getattr(response, "text", None) or "").strip()
 
@@ -131,6 +150,7 @@ def _call_gemini_for_qa(
     query_intent: str | None = None,
     output_format: str | None = None,
     extra_instructions: str | None = None,
+    system_instruction: str | None = None,
 ) -> dict[str, str]:
     """
     Ask Gemini a question grounded in the provided document texts.
@@ -199,7 +219,9 @@ def _call_gemini_for_qa(
             f"=== QUESTION ===\n{question}\n\n"
             "=== ANSWER ==="
         )
-        answer = _generate_text(prompt)
+        if system_instruction:
+            prompt = f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n{prompt}"
+        answer = _generate_text(prompt, for_summary=intent_hint == "summary")
         return {
             "answer": answer,
             "source_documents": ", ".join(source_names),

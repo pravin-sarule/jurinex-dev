@@ -10,6 +10,7 @@ const MODEL_PRICING = {
   'gemini-2.0-flash-001': { input: 8.45, output: 33.80 },
   'gemini-2.0-flash': { input: 8.45, output: 33.80 },
   'gemini-2.0-flash-lite': { input: 6.35, output: 25.35 },
+  'gemini-2.0-flash-lite-001': { input: 6.35, output: 25.35 },
   'gemini-2.5-flash-001': { input: 25.35, output: 211.25 },
   'gemini-2.5-flash': { input: 25.35, output: 211.25 },
   'gemini-2.5-flash-lite': { input: 8.45, output: 33.80 },
@@ -81,6 +82,8 @@ async function logLLMUsage(usageData) {
       modelName,
       inputTokens = 0,
       outputTokens = 0,
+      /** When Vertex returns totalTokenCount but prompt/candidates are 0, set this for accurate global pool sums */
+      totalTokens: totalTokensExplicit = null,
       endpoint = null,
       requestId = null,
       fileId = null,
@@ -92,13 +95,24 @@ async function logLLMUsage(usageData) {
       return null;
     }
 
-    const totalTokens = inputTokens + outputTokens;
+    const normalizedUserId = Number(userId);
+    if (!Number.isInteger(normalizedUserId) || normalizedUserId <= 0) {
+      console.warn(`⚠️ [LLM Usage] Invalid userId for llm_usage_logs.user_id INTEGER: ${userId}`);
+      return null;
+    }
+
+    let totalTokens = inputTokens + outputTokens;
+    if (totalTokensExplicit != null && Number.isFinite(Number(totalTokensExplicit))) {
+      const t = Math.floor(Number(totalTokensExplicit));
+      if (t > 0) totalTokens = t;
+    }
 
     // Calculate costs
     const costData = calculateCost(modelName, inputTokens, outputTokens);
 
     const query = `
       INSERT INTO public.llm_usage_logs (
+        id,
         user_id,
         model_name,
         input_tokens,
@@ -112,12 +126,22 @@ async function logLLMUsage(usageData) {
         file_id,
         session_id,
         used_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+      ) VALUES (
+        (
+          CASE
+            WHEN pg_get_serial_sequence('public.llm_usage_logs', 'id') IS NOT NULL THEN
+              nextval(pg_get_serial_sequence('public.llm_usage_logs', 'id'))
+            ELSE
+              (SELECT COALESCE(MAX(id), 0) + 1 FROM public.llm_usage_logs)
+          END
+        ),
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
+      )
       RETURNING *
     `;
 
     const values = [
-      userId,
+      normalizedUserId,
       modelName,
       inputTokens,
       outputTokens,
@@ -133,7 +157,7 @@ async function logLLMUsage(usageData) {
 
     const result = await pool.query(query, values);
     
-    console.log(`✅ [LLM Usage] Logged usage for user ${userId}, model ${modelName}, tokens: ${totalTokens}, cost: ₹${costData.totalCost.toFixed(4)}`);
+    console.log(`✅ [LLM Usage] Logged usage for user ${normalizedUserId}, model ${modelName}, tokens: ${totalTokens}, cost: ₹${costData.totalCost.toFixed(4)}`);
     
     return result.rows[0];
   } catch (error) {

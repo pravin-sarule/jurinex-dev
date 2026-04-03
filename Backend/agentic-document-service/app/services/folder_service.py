@@ -30,8 +30,10 @@ from app.schemas.contracts import (
 )
 from app.core.config import get_settings
 from app.services.db import get_db_connection, is_db_available
+from app.services.llm_chat_config import get_llm_chat_config
+from app.services.legal_system_prompt import build_legal_system_prompt, fetch_full_profile
 from app.services.pipeline_service import LegalCasePipelineService, StoredCase
-from app.services.secret_prompt_display import resolve_query_and_display
+from app.services.secret_prompt_display import post_process_secret_prompt_response, resolve_query_and_display
 
 
 logger = logging.getLogger("agentic_document_service.folder")
@@ -975,6 +977,22 @@ class FolderWorkflowService:
         )
         if not query_text:
             raise ValueError("question is required")
+        llm_config = get_llm_chat_config(force_refresh=True)
+        user_profile = fetch_full_profile(user_id, authorization)
+        system_instruction = build_legal_system_prompt(user_profile)
+        logger.info(
+            "[FolderService] task=answer_folder_chat system_prompt_chars=%s user_id=%s folder=%s",
+            len(system_instruction),
+            user_id,
+            folder_name,
+        )
+        effective_query_text = self._build_query_with_recent_history(
+            user_id=user_id,
+            folder_name=folder_name,
+            session_id=request.session_id,
+            query_text=query_text,
+            max_history=int(llm_config.get("max_conversation_history") or 0),
+        )
         self._record_prompt(
             case_id=case_id,
             user_id=user_id,
@@ -997,7 +1015,12 @@ class FolderWorkflowService:
         query_response = self._pipeline.answer_query_for_files(
             QueryRequest(user_id=user_id, case_id=case_id, query=query_text),
             file_ids,
+            system_instruction=system_instruction,
         )
+        if secret_id:
+            # Secret/preset prompts are expected to produce machine-readable JSON.
+            # Wrap/normalize the output so the frontend renderer can parse reliably.
+            query_response.answer = post_process_secret_prompt_response(query_response.answer)
         session = self._get_or_create_session(user_id, folder_name, request.session_id, display_question)
         self._append_message(session, "user", display_question)
         self._append_message(session, "assistant", query_response.answer)
@@ -1025,6 +1048,94 @@ class FolderWorkflowService:
             prompt_stored=True,
             generated_at=query_response.generated_at,
         )
+
+    def _build_query_with_recent_history(
+        self,
+        *,
+        user_id: str,
+        folder_name: str,
+        session_id: str | None,
+        query_text: str,
+        max_history: int,
+    ) -> str:
+        history_limit = max(0, int(max_history or 0))
+        if history_limit <= 0:
+            return query_text
+        history = self._get_recent_chat_history(
+            user_id=user_id,
+            folder_name=folder_name,
+            session_id=session_id,
+            max_history=history_limit,
+        )
+        if not history:
+            return query_text
+        history_lines: list[str] = []
+        for item in history:
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if question:
+                history_lines.append(f"User: {question}")
+            if answer:
+                history_lines.append(f"Assistant: {answer}")
+        if not history_lines:
+            return query_text
+        return (
+            "Use the prior conversation only as supporting context. If the latest question narrows or changes the issue, "
+            "prioritize the latest question.\n\n"
+            f"Conversation history:\n{chr(10).join(history_lines)}\n\n"
+            f"Current question:\n{query_text}"
+        )
+
+    def _get_recent_chat_history(
+        self,
+        *,
+        user_id: str,
+        folder_name: str,
+        session_id: str | None,
+        max_history: int,
+    ) -> list[dict[str, Any]]:
+        if max_history <= 0:
+            return []
+        history: list[dict[str, Any]] = []
+        if is_db_available() and session_id:
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT question, answer, created_at
+                        FROM folder_chats
+                        WHERE folder_name = %s
+                          AND user_id::text = %s
+                          AND session_id::text = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                        """,
+                        [folder_name, str(user_id), str(session_id), max_history],
+                    )
+                    rows = list(cur.fetchall())
+                history = [{"question": row.get("question"), "answer": row.get("answer")} for row in reversed(rows)]
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] task=recent_chat_history status=db_fallback folder=%s session_id=%s error=%s",
+                    folder_name,
+                    session_id,
+                    exc,
+                )
+        if history:
+            return history
+        with self._lock:
+            session = self._sessions.get(folder_name, {}).get(session_id or "")
+            if not session:
+                return []
+            pairs: list[dict[str, Any]] = []
+            current_question: str | None = None
+            for message in session.messages[-(max_history * 2) :]:
+                if message.role == "user":
+                    current_question = message.content
+                elif message.role == "assistant":
+                    pairs.append({"question": current_question or "", "answer": message.content})
+                    current_question = None
+            return pairs[-max_history:]
 
     def list_sessions(self, folder_name: str) -> list[ChatSession]:
         sessions = self._sessions.get(folder_name, {})

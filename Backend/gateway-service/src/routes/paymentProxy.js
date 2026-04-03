@@ -121,6 +121,8 @@ router.use(
       console.error("Payment service proxy error:", err.message);
       res.status(500).json({ error: "Payment Service is unavailable" });
     },
+    proxyTimeout: 120000,
+    timeout: 120000,
   })
 );
 
@@ -158,6 +160,8 @@ router.use(
       console.error("User Resources service proxy error:", err.message);
       res.status(500).json({ error: "Payment Service is unavailable" });
     },
+    proxyTimeout: 120000,
+    timeout: 120000,
   })
 );
 

@@ -9,15 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-DOCUMENT_SERVICE_DIR = BASE_DIR.parent / "document-service"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(
-            DOCUMENT_SERVICE_DIR / ".env",
-            BASE_DIR / ".env",
-        ),
+        env_file=(BASE_DIR / ".env",),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -39,6 +35,10 @@ class Settings(BaseSettings):
         default_factory=lambda: [
             "http://localhost:3000",
             "http://localhost:5173",
+            "http://localhost:5000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:5000",
         ]
     )
     enable_adk_runtime: bool = True
@@ -108,10 +108,6 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = 1000
     max_parallel_document_workers: int = 4
     auto_fill_confidence_threshold: float = 0.90
-    document_service_port: int | None = Field(
-        default=None,
-        validation_alias=AliasChoices("DOCUMENT_SERVICE_PORT", "PORT"),
-    )
     legacy_document_service_url: str = Field(
         default="",
         validation_alias=AliasChoices("LEGACY_DOCUMENT_SERVICE_URL"),
@@ -120,9 +116,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def apply_derived_defaults(self) -> "Settings":
-        if not self.legacy_document_service_url:
-            port = self.document_service_port or 5002
-            self.legacy_document_service_url = f"http://localhost:{port}"
         return self
 
 

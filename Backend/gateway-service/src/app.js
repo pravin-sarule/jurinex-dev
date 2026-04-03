@@ -8,7 +8,10 @@ dotenv.config();
 console.log(`[Gateway] PAYMENT_SERVICE_URL: ${process.env.PAYMENT_SERVICE_URL}`);
 console.log(`[Gateway] Gateway Port: ${process.env.PORT || 5000}`);
 
-const { createProxyMiddleware } = require("http-proxy-middleware");
+const {
+  createProxyMiddleware,
+  legacyCreateProxyMiddleware,
+} = require("http-proxy-middleware");
 const axios = require("axios");
 const { authMiddleware } = require("./middlewares/authMiddleware");
 const authProxy = require("./routes/authProxy");
@@ -91,43 +94,32 @@ app.get("/health", (req, res) => {
   res.json({ status: "API Gateway is running" });
 });
 
-// Google OAuth callback - handle BEFORE other auth routes
-// This is a special route because Google redirects here directly
-// Use app.get() to ensure exact matching and query param preservation
-app.get("/api/auth/google/callback", createProxyMiddleware({
+// Google OAuth callbacks — Google redirects with query params. http-proxy-middleware v3 can
+// rewrite paths to "/callback/?query" (extra slash) and upstream returns 404; legacy middleware
+// restores v2 req.url behavior. See https://github.com/chimurai/http-proxy-middleware/issues/1016
+const googleOAuthProxyOpts = {
   target: targetAuth,
   changeOrigin: true,
-  pathRewrite: (path, req) => {
-    // Preserve query string from original request
-    const queryString = req.url.includes('?') ? req.url.split('?')[1] : '';
-    const targetPath = `/api/auth/google/callback${queryString ? '?' + queryString : ''}`;
-    console.log(`[GATEWAY] Google OAuth callback: ${req.method} ${req.originalUrl}`);
-    console.log(`[GATEWAY] Query string: ${queryString || 'none'}`);
-    console.log(`[GATEWAY] Proxying to: ${targetPath}`);
-    return targetPath;
-  },
   onProxyReq: (proxyReq, req) => {
-    // Log the actual request being sent
-    console.log(`[GATEWAY] Proxy request path: ${proxyReq.path}`);
+    console.log(`[GATEWAY] Google OAuth proxy → ${targetAuth}${req.originalUrl}`);
   },
-  onProxyRes: (proxyRes, req, res) => {
-    console.log(`[GATEWAY] Google OAuth callback response: ${proxyRes.statusCode}`);
+  onProxyRes: (proxyRes) => {
+    console.log(`[GATEWAY] Google OAuth upstream status: ${proxyRes.statusCode}`);
   },
   onError: (err, req, res) => {
-    console.error("[GATEWAY] Google OAuth callback error:", err.message);
-    res.status(502).send("Bad Gateway - auth service unreachable");
+    console.error("[GATEWAY] Google OAuth proxy error:", err.message);
+    if (!res.headersSent) {
+      res.status(502).send("Bad Gateway - auth service unreachable");
+    }
   },
-}));
+};
 
-// Also handle with trailing slash
-app.get("/api/auth/google/callback/", createProxyMiddleware({
-  target: targetAuth,
-  changeOrigin: true,
-  pathRewrite: (path, req) => {
-    const queryString = req.url.includes('?') ? req.url.split('?')[1] : '';
-    return `/api/auth/google/callback${queryString ? '?' + queryString : ''}`;
-  },
-}));
+app.use(
+  legacyCreateProxyMiddleware("/api/auth/google/callback", googleOAuthProxyOpts)
+);
+app.use(
+  legacyCreateProxyMiddleware("/api/auth/google/drive/callback", googleOAuthProxyOpts)
+);
 
 // ✅ Direct Authentication route using axios
 // This handles POST /api/auth/login explicitly as requested
@@ -165,6 +157,15 @@ app.post("/api/auth/login", async (req, res) => {
 // Mount proxies - authProxy handles other /api/auth/* routes
 app.use("/api", authProxy);
 app.use(fileProxy);
+
+// Local dev: no payment microservice — answer /user-resources (and /api/user-resources for backends) on the gateway
+if (process.env.SKIP_PAYMENT_SERVICE === "true") {
+  console.log(
+    "[Gateway] SKIP_PAYMENT_SERVICE=true — mocking user-resources (payment service not required)"
+  );
+  app.use(require("./routes/mockUserResourcesRoutes"));
+}
+
 // app.use(paymentProxy);
 app.use(paymentProxy);
 app.use("/support", supportProxy);

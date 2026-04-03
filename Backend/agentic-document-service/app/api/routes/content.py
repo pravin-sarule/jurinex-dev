@@ -114,6 +114,31 @@ def get_courts_by_jurisdiction(jurisdiction_id: str) -> list[dict]:
         return list(cur.fetchall())
 
 
+@router.get("/courts")
+def get_courts(level: str | None = None) -> list[dict]:
+    _require_db()
+    with get_db_connection() as conn, conn.cursor() as cur:
+        if level:
+            cur.execute(
+                "SELECT * FROM courts WHERE LOWER(level) = LOWER(%s) ORDER BY court_name ASC",
+                (level,),
+            )
+        else:
+            cur.execute("SELECT * FROM courts ORDER BY court_name ASC")
+        return list(cur.fetchall())
+
+
+@router.get("/courts/level/{level}")
+def get_courts_by_level(level: str) -> list[dict]:
+    _require_db()
+    with get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM courts WHERE LOWER(level) = LOWER(%s) ORDER BY court_name ASC",
+            (level,),
+        )
+        return list(cur.fetchall())
+
+
 @router.get("/courts/{court_id}/benches")
 def get_benches_by_court(court_id: str) -> list[dict]:
     _require_db()

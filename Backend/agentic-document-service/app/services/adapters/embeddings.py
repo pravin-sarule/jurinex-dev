@@ -12,8 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import time
-from typing import Sequence
+from app.services.llm_chat_config import get_llm_chat_config
 
 logger = logging.getLogger("agentic_document_service.embeddings")
 
@@ -25,6 +24,24 @@ EMBEDDING_DIMS = 768
 EMBEDDING_MODELS = ("text-embedding-004", "gemini-embedding-001")
 
 
+def _embedding_dims() -> int:
+    config = get_llm_chat_config()
+    dims = int(config.get("embedding_dimension") or EMBEDDING_DIMS)
+    return dims if dims > 0 else EMBEDDING_DIMS
+
+
+def _embedding_models() -> tuple[str, ...]:
+    config = get_llm_chat_config()
+    preferred = str(config.get("embedding_model") or "").strip()
+    ordered: list[str] = []
+    if preferred:
+        ordered.append(preferred)
+    for model_name in EMBEDDING_MODELS:
+        if model_name not in ordered:
+            ordered.append(model_name)
+    return tuple(ordered)
+
+
 def embed_text(text: str) -> list[float]:
     """
     Embed a single text string. Returns a 768-dim float list.
@@ -34,7 +51,8 @@ def embed_text(text: str) -> list[float]:
     if cache_key in _embedding_cache:
         return _embedding_cache[cache_key]
 
-    vec = _gemini_embed(text) or _hash_embed(text, EMBEDDING_DIMS)
+    dims = _embedding_dims()
+    vec = _gemini_embed(text, dims=dims) or _hash_embed(text, dims)
     _embedding_cache[cache_key] = vec
     return vec
 
@@ -103,8 +121,9 @@ def _fit_embedding_dims(values: list[float], dims: int = EMBEDDING_DIMS) -> list
 
 # ── Gemini embedding calls ─────────────────────────────────────────────────────
 
-def _gemini_embed(text: str) -> list[float] | None:
+def _gemini_embed(text: str, *, dims: int | None = None) -> list[float] | None:
     global _gemini_unavailable_logged
+    target_dims = dims or _embedding_dims()
     try:
         from google import genai  # type: ignore
         from app.core.config import get_settings
@@ -113,14 +132,14 @@ def _gemini_embed(text: str) -> list[float] | None:
         if not api_key:
             return None
         client = genai.Client(api_key=api_key)
-        for model_name in EMBEDDING_MODELS:
+        for model_name in _embedding_models():
             try:
                 result = client.models.embed_content(
                     model=model_name,
                     contents=text,
                     config={
                         "task_type": "RETRIEVAL_DOCUMENT",
-                        "output_dimensionality": EMBEDDING_DIMS,
+                        "output_dimensionality": target_dims,
                     },
                 )
                 embeddings_payload = getattr(result, "embeddings", None)
@@ -129,9 +148,9 @@ def _gemini_embed(text: str) -> list[float] | None:
                 else:
                     vec = []
                 if vec:
-                    if len(vec) != EMBEDDING_DIMS:
-                        logger.warning("[Embeddings] Unexpected embedding dim: %d (expected %d)", len(vec), EMBEDDING_DIMS)
-                    return _fit_embedding_dims(vec, EMBEDDING_DIMS)
+                    if len(vec) != target_dims:
+                        logger.warning("[Embeddings] Unexpected embedding dim: %d (expected %d)", len(vec), target_dims)
+                    return _fit_embedding_dims(vec, target_dims)
             except Exception:
                 continue
         return None
@@ -144,6 +163,7 @@ def _gemini_embed(text: str) -> list[float] | None:
 
 def _gemini_embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed multiple texts; falls back to sequential if batch API unavailable."""
+    target_dims = _embedding_dims()
     try:
         from google import genai  # type: ignore
         from app.core.config import get_settings
@@ -152,14 +172,14 @@ def _gemini_embed_batch(texts: list[str]) -> list[list[float]]:
         if not api_key:
             raise RuntimeError("No Gemini API key")
         client = genai.Client(api_key=api_key)
-        for model_name in EMBEDDING_MODELS:
+        for model_name in _embedding_models():
             try:
                 result = client.models.embed_content(
                     model=model_name,
                     contents=texts,
                     config={
                         "task_type": "RETRIEVAL_DOCUMENT",
-                        "output_dimensionality": EMBEDDING_DIMS,
+                        "output_dimensionality": target_dims,
                     },
                 )
                 embeddings_payload = getattr(result, "embeddings", None) or []
@@ -167,18 +187,18 @@ def _gemini_embed_batch(texts: list[str]) -> list[list[float]]:
                 for item in embeddings_payload:
                     values = list(getattr(item, "values", []) or [])
                     if values:
-                        parsed.append(_fit_embedding_dims(values, EMBEDDING_DIMS))
+                        parsed.append(_fit_embedding_dims(values, target_dims))
                 if len(parsed) == len(texts):
                     return parsed
             except Exception:
                 continue
-        return [_gemini_embed(t) or _hash_embed(t, EMBEDDING_DIMS) for t in texts]
+        return [_gemini_embed(t, dims=target_dims) or _hash_embed(t, target_dims) for t in texts]
     except Exception as exc:
         global _gemini_unavailable_logged
         if not _gemini_unavailable_logged:
             logger.warning("[Embeddings] Gemini batch unavailable, using fallback embeddings: %s", exc)
             _gemini_unavailable_logged = True
-        return [_gemini_embed(t) or _hash_embed(t, EMBEDDING_DIMS) for t in texts]
+        return [_gemini_embed(t, dims=target_dims) or _hash_embed(t, target_dims) for t in texts]
 
 
 def _hash_embed(text: str, dims: int) -> list[float]:

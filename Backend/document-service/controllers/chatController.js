@@ -16,7 +16,7 @@ const getAllChats = async (req, res) => {
 };
 const getUserChats = async (req, res) => {
   try {
-    const userId = req.user.id;  
+    const userId = req.user.id;
 
     const result = await pool.query(
       `SELECT id, user_id, question, answer, used_chunk_ids, created_at, session_id, file_id, used_secret_prompt, prompt_label, chat_history

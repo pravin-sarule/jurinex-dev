@@ -21,6 +21,10 @@ app.use(cors({
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
+    // Local dev: any localhost / 127.0.0.1 port (Vite may use 5174, etc.)
+    if (origin && (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:'))) {
+      return callback(null, true);
+    }
     return callback(new Error("Not allowed by CORS"));
   },
   credentials: true,

@@ -322,25 +322,31 @@ app.add_middleware(
 
 async def _fetch_case_context(case_id: str, auth_header: Optional[str]):
     """
-    Fetch case file context from document-service.
+    Fetch case file context from agentic-document-service.
     Returns (context_items, summary). Always returns something usable:
     - If chunks load → full context items
     - If case data loads but no chunks → stub item with case title so pipeline has a search seed
     - If everything fails → ([], "")
     """
-    # Try multiple base URL candidates
-    base_url = (
-        os.environ.get("DOCUMENT_SERVICE_URL")
-        or os.environ.get("GATEWAY_URL", "").rstrip("/") + "/docs"
+    # Prefer agentic URL, but keep backwards compatibility with DOCUMENT_SERVICE_URL.
+    raw_base_url = (
+        os.environ.get("AGENTIC_DOCUMENT_SERVICE_URL")
+        or os.environ.get("DOCUMENT_SERVICE_URL")
+        or os.environ.get("GATEWAY_URL")
+        or "http://localhost:8092"
     )
-    if not base_url or base_url == "/docs":
-        logger.warning("[CASE_CONTEXT] DOCUMENT_SERVICE_URL not set; skipping case context fetch.")
+    if not raw_base_url:
+        logger.warning("[CASE_CONTEXT] Agentic document service URL not set; skipping case context fetch.")
         return [], ""
     if not auth_header:
         logger.warning("[CASE_CONTEXT] Missing Authorization header; skipping case context fetch.")
         return [], ""
 
-    base_url = base_url.rstrip('/')
+    base_url = raw_base_url.rstrip("/")
+    if base_url.endswith("/api/files"):
+        base_url = base_url[: -len("/api/files")]
+    elif base_url.endswith("/docs"):
+        base_url = base_url[: -len("/docs")]
     headers = {"Authorization": auth_header}
     case_title_fallback = ""
 

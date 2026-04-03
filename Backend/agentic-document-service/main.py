@@ -13,6 +13,7 @@ from app.api.routes.files import router as files_router
 from app.api.routes.health import router as health_router
 from app.core.config import BASE_DIR, get_settings
 from app.core.logging import configure_logging
+from app.middleware.llm_chat_policy import LLMChatPolicyMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,11 @@ def create_app() -> FastAPI:
         version=settings.version,
     )
 
+    app.add_middleware(LLMChatPolicyMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

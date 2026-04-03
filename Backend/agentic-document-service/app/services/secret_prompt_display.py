@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -144,63 +145,6 @@ def _fetch_secret_value_from_gcp(secret_manager_id: str, version: str | int | No
         return None
 
 
-def _fetch_secret_value_from_legacy(secret_id: str, authorization: str | None) -> str | None:
-    """
-    Temporary fallback path when local GCP Secret Manager SDK is unavailable
-    (e.g. grpc/cygrpc on Python 3.14).
-    """
-    try:
-        from app.core.config import get_settings
-
-        base = (get_settings().legacy_document_service_url or "").rstrip("/")
-    except Exception:
-        base = ""
-    if not base:
-        return None
-    headers: dict[str, str] = {}
-    if authorization:
-        headers["Authorization"] = authorization
-    candidate_urls: list[str] = []
-    if base:
-        candidate_urls.extend(
-            [
-                f"{base}/api/doc/secrets/{secret_id}",
-                f"{base}/files/secrets/{secret_id}",
-                f"{base}/api/files/secrets/{secret_id}",
-            ]
-        )
-    try:
-        from app.core.config import get_settings
-
-        gateway = (get_settings().api_gateway_url or "").rstrip("/")
-        if gateway:
-            candidate_urls.extend(
-                [
-                    f"{gateway}/files/secrets/{secret_id}",
-                    f"{gateway}/api/files/secrets/{secret_id}",
-                ]
-            )
-    except Exception:
-        pass
-    seen: set[str] = set()
-    for url in candidate_urls:
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        try:
-            with httpx.Client(timeout=20.0) as client:
-                response = client.get(url, headers=headers)
-                if response.status_code != 200:
-                    continue
-                data = response.json()
-                value = data.get("value")
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        except Exception as exc:
-            logger.warning("[SecretFallback] Legacy secret fetch failed id=%s url=%s: %s", secret_id, url, exc)
-    return None
-
-
 def _fetch_secret_value_from_gcp_rest(secret_manager_id: str, version: str | int | None) -> str | None:
     sid = str(secret_manager_id or "").strip()
     if not sid:
@@ -283,7 +227,92 @@ def _augment_prompt_with_templates(secret_text: str, input_template_text: str | 
             "Format your final answer strictly using this structure.\n"
             f"{output_template_text.strip()}"
         )
+
+        # Mirror the strict output expectations used in the Node `postProcessSecretPromptResponse`
+        # flow: force the model to return valid JSON wrapped in markdown code blocks.
+        required_section_keys = _extract_required_section_keys(output_template_text)
+        sections_list = ""
+        if required_section_keys:
+            sections_list = "\n\n📋 REQUIRED SECTIONS (MUST INCLUDE ALL):\n" + "\n".join(
+                [f"   {idx + 1}. {key}" for idx, key in enumerate(required_section_keys)]
+            )
+
+        prompt += (
+            "\n\n"
+            "═══════════════════════════════════════════════════════════════════════\n"
+            "🚨 CRITICAL OUTPUT FORMATTING REQUIREMENTS - MANDATORY FOR ALL LLMs 🚨\n"
+            "═══════════════════════════════════════════════════════════════════════\n\n"
+            "⚠️ ABSOLUTE REQUIREMENT: Your response MUST be valid JSON wrapped in markdown code blocks.\n"
+            "⚠️ NO EXCEPTIONS: This applies to ALL LLM models (Gemini, Claude, GPT, DeepSeek, etc.).\n"
+            "⚠️ NO RAW JSON: Never return raw JSON without markdown code blocks.\n"
+            "⚠️ NO EXPLANATIONS: Do not include any text before or after the JSON code block.\n"
+            f"{sections_list}\n\n"
+            "📝 Output MUST match the OUTPUT TEMPLATE structure provided above.\n"
+            "🧾 Wrap ONLY the JSON (no extra text) like this:\n"
+            "```json\n"
+            "{}\n"
+            "```\n"
+        )
     return prompt
+
+
+def _extract_required_section_keys(output_template_text: str) -> list[str]:
+    """
+    Extract keys like `2_1_ground_wise_summary` from the stored extracted_text.
+    Mirrors the regex used in the Node controller layer.
+    """
+    if not output_template_text or not isinstance(output_template_text, str):
+        return []
+    # Keys often appear inside quotes in templates, so accept optional quotes.
+    pattern = r"""["']?(\d+_\d+_[a-z_]+)["']?"""
+    matches = re.findall(pattern, output_template_text, flags=re.IGNORECASE)
+    # Preserve order while de-duping
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for key in matches:
+        key_norm = str(key).strip()
+        if not key_norm:
+            continue
+        if key_norm in seen:
+            continue
+        seen.add(key_norm)
+        ordered.append(key_norm)
+    return ordered
+
+
+def post_process_secret_prompt_response(raw_response: str) -> str:
+    """
+    Ensure secret/preset prompt responses are wrapped as:
+    ```json
+    {...}
+    ```
+    so the frontend renderer can reliably parse/format them.
+    """
+    if not raw_response or not isinstance(raw_response, str):
+        return raw_response
+
+    cleaned = raw_response.strip()
+
+    # 1) Extract from ```json code block if present
+    code_block_match = re.search(r"```json\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
+    if code_block_match:
+        inner = code_block_match.group(1).strip()
+        try:
+            parsed = json.loads(inner)
+            return f"```json\n{json.dumps(parsed, indent=2)}\n```"
+        except Exception:
+            # If already in a code block but invalid JSON, fall back to original.
+            return cleaned
+
+    # 2) Try direct JSON parse (raw JSON string)
+    try:
+        if cleaned.startswith("{") or cleaned.startswith("["):
+            parsed = json.loads(cleaned)
+            return f"```json\n{json.dumps(parsed, indent=2)}\n```"
+    except Exception:
+        pass
+
+    return cleaned
 
 
 def resolve_query_and_display(
@@ -317,9 +346,6 @@ def resolve_query_and_display(
         str(row.get("secret_manager_id") or ""),
         row.get("version"),
     )
-    if not secret_body:
-        # Then try legacy document-service endpoint.
-        secret_body = _fetch_secret_value_from_legacy(sid, authorization)
     if not secret_body:
         secret_body = _fetch_secret_value_from_gcp(
             str(row.get("secret_manager_id") or ""),

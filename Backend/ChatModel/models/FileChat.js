@@ -38,7 +38,8 @@ const FileChat = {
     usedSecretPrompt = false,
     promptLabel = null,
     secretId = null,
-    chatHistory = []
+    chatHistory = [],
+    attachedFiles = null
   ) {
     try {
       const currentSessionId = isValidUUID(sessionId) ? sessionId : uuidv4();
@@ -65,10 +66,10 @@ const FileChat = {
       const res = await pool.query(
         `
         INSERT INTO file_chats
-          (file_id, user_id, question, answer, session_id, used_chunk_ids, 
-           used_secret_prompt, prompt_label, secret_id, chat_history, created_at)
+          (file_id, user_id, question, answer, session_id, used_chunk_ids,
+           used_secret_prompt, prompt_label, secret_id, chat_history, attached_files, chat_type, created_at)
         VALUES
-          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'chat_model', NOW())
         RETURNING id, session_id, created_at
         `,
         [
@@ -82,6 +83,9 @@ const FileChat = {
           promptLabel,
           normalizedSecretId,
           JSON.stringify(existingHistory),
+          attachedFiles != null && Array.isArray(attachedFiles) && attachedFiles.length
+            ? JSON.stringify(attachedFiles)
+            : null,
         ]
       );
 
@@ -139,7 +143,7 @@ const FileChat = {
 
       let query = `
         SELECT id, file_id, user_id, question, answer, session_id, used_chunk_ids,
-               used_secret_prompt, prompt_label, secret_id, chat_history, created_at
+               used_secret_prompt, prompt_label, secret_id, chat_history, attached_files, created_at
         FROM file_chats
         WHERE file_id = $1
       `;
@@ -180,7 +184,7 @@ const FileChat = {
       const res = await pool.query(
         `
           SELECT id, file_id, user_id, question, answer, session_id, used_chunk_ids,
-                 used_secret_prompt, prompt_label, secret_id, chat_history, created_at
+                 used_secret_prompt, prompt_label, secret_id, chat_history, attached_files, created_at
           FROM file_chats
           WHERE user_id = $1 AND session_id = $2
           ORDER BY created_at ASC
@@ -208,7 +212,7 @@ const FileChat = {
 
       const query = `
         SELECT id, file_id, user_id, question, answer, session_id, used_chunk_ids,
-               used_secret_prompt, prompt_label, secret_id, chat_history, created_at
+               used_secret_prompt, prompt_label, secret_id, chat_history, attached_files, created_at
         FROM file_chats
         WHERE user_id = $1
         ORDER BY created_at ASC
