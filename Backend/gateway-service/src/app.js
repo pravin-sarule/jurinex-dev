@@ -47,15 +47,21 @@ const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
 // }));
 
 // ✅ Update allowed origins for frontend + local dev
-const allowedOrigins = [
-  "http://localhost:5173", // Vite dev server
-  "http://localhost:5000", // local testing
-  "http://localhost:8000", // HTTP server for test pages
-  "http://localhost:3000", // Alternative test server
-  "http://127.0.0.1:8000", // HTTP server (alternative)
-  "http://127.0.0.1:3000", // Alternative test server
-  "https://nexintel.netlify.app" // your production frontend
-];
+const allowedOrigins = (
+  process.env.CORS_ALLOWED_ORIGINS
+    ? process.env.CORS_ALLOWED_ORIGINS.split(",").map((v) => v.trim()).filter(Boolean)
+    : [
+        "http://localhost:5173", // Vite dev server
+        "http://localhost:5000", // local testing
+        "http://localhost:8000", // HTTP server for test pages
+        "http://localhost:3000", // Alternative test server
+        "http://127.0.0.1:8000", // HTTP server (alternative)
+        "http://127.0.0.1:3000", // Alternative test server
+        "https://nexintel.netlify.app", // production frontend
+        "https://jurinex.netlify.app",
+        "https://jurinex-dev.netlify.app",
+      ]
+);
 
 app.use(cors({
   origin: function (origin, callback) {
