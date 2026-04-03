@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = Field(
         default=8092,
-        validation_alias=AliasChoices("AGENTIC_DOCUMENT_SERVICE_PORT", "SERVICE_PORT"),
+        validation_alias=AliasChoices("PORT", "AGENTIC_DOCUMENT_SERVICE_PORT", "SERVICE_PORT"),
     )
     log_level: str = "INFO"
     cors_origins: list[str] = Field(
