@@ -1,8 +1,8 @@
 import axios from "axios";
-import { CONTENT_SERVICE_URL } from "../config/apiConfig";
+import { CONTENT_SERVICE_DIRECT } from "../config/apiConfig";
 
 const ApiService = axios.create({
-  baseURL: CONTENT_SERVICE_URL,
+  baseURL: CONTENT_SERVICE_DIRECT,
   withCredentials: false,
 });
 

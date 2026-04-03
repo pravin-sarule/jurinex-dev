@@ -37,15 +37,14 @@ export const draftService = {
         },
       });
 
-      if (response.status === 404) {
-        return null;
-      }
-
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const result = await response.json();
+      if (result.exists === false || !result.draft_data) {
+        return null;
+      }
       return {
         ...result,
         draft_data: typeof result.draft_data === 'string' 

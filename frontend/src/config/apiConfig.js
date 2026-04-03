@@ -5,11 +5,13 @@
  * Environment variables are supported with sensible defaults.
  */
 
-// Get base gateway URL from environment or use local default for development
+const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
+
+// Get base gateway URL from environment or use deployed default
 const GATEWAY_URL =
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  'https://gateway-service-120280829617.asia-south1.run.app';
+  DEFAULT_GATEWAY_URL;
 
 function ensureLocalhostPort(url, fallbackPort) {
   try {
@@ -44,9 +46,29 @@ export const VISUAL_SERVICE_URL =
   import.meta.env.VITE_APP_VISUAL_SERVICE_URL ||
   'https://visual-service-120280829617.asia-south1.run.app';
 
-export const DOCUMENT_SERVICE_URL =
-  import.meta.env.VITE_APP_DOCUMENT_SERVICE_URL ||
-  'https://document-service-120280829617.asia-south1.run.app';
+/**
+ * Agentic document service (Python, port 8092).
+ * If unset, cases/docs default directly to the standalone agentic service.
+ * Set e.g. VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL=https://.../api/files for a custom host.
+ */
+const DEFAULT_AGENTIC_DOCUMENT_HOST =
+  'https://agentic-document-service-120280829617.asia-south1.run.app';
+
+const rawAgenticDocs =
+  import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
+  import.meta.env.VITE_AGENTIC_DOCUMENT_SERVICE_URL ||
+  '';
+
+function agenticServiceHost() {
+  const s = String(rawAgenticDocs || '').trim().replace(/\/$/, '');
+  if (!s) return DEFAULT_AGENTIC_DOCUMENT_HOST;
+  return (
+    s.replace(/\/api\/files\/?$/, '').replace(/\/$/, '') || DEFAULT_AGENTIC_DOCUMENT_HOST
+  );
+}
+
+/** Base host for agentic-only paths (e.g. /api/files/chat-sessions). Defaults to :8092. */
+export const DOCUMENT_SERVICE_URL = agenticServiceHost();
 export const FILES_SERVICE_URL = `${GATEWAY_URL}/api/files`;
 export const CONTENT_SERVICE_URL = `${GATEWAY_URL}/api/content`;
 export const MINDMAP_SERVICE_URL = `${GATEWAY_URL}/api/mindmap`;
@@ -73,12 +95,11 @@ export const CHAT_DRAFT_BACKEND_URL =
   'https://chat-draft-backend-120280829617.asia-south1.run.app';
 
 // Template Analyzer (user upload templates): User Template Analyzer Agent
-export const TEMPLATE_ANALYZER_API_BASE =
-  ensureLocalhostPort(
-    import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-      'https://drafting-agents-120280829617.asia-south1.run.app',
-    5017
-  );
+export const TEMPLATE_ANALYZER_API_BASE = ensureLocalhostPort(
+  import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
+    'https://drafting-agents-120280829617.asia-south1.run.app',
+  5017
+);
 
 /**
  * Get current user id for drafting/template APIs (Custom Template Isolation).
@@ -103,16 +124,14 @@ export function getUserIdForDrafting() {
   return null;
 }
 
-// Legacy support - backward compatibility
-// Docs API continues to go through the gateway so routes like `/docs/cases`
-// and other aggregated endpoints remain stable.
-export const DOCS_BASE_URL = `${GATEWAY_URL}/docs`;
+// Default docs/chat flows to the standalone agentic service instead of the legacy gateway `/docs` path.
+export const DOCS_BASE_URL = rawAgenticDocs.trim()
+  ? rawAgenticDocs.trim().replace(/\/$/, '')
+  : `${agenticServiceHost()}/api/files`;
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
-// For direct service access (document service)
-export const DOCUMENT_SERVICE_DIRECT =
-  import.meta.env.VITE_DOCUMENT_SERVICE_URL ||
-  'https://document-service-120280829617.asia-south1.run.app';
+export const DOCUMENT_SERVICE_DIRECT = DOCUMENT_SERVICE_URL;
+export const AGENTIC_DOCUMENT_SERVICE_URL = DOCUMENT_SERVICE_DIRECT;
 export const CONTENT_SERVICE_DIRECT = `${DOCUMENT_SERVICE_DIRECT}/api/content`;
 
 // Export default object for convenience
@@ -126,6 +145,7 @@ const apiConfig = {
   TEMPLATE_ANALYZER_API_BASE,
   getUserIdForDrafting,
   DOCUMENT_SERVICE_URL,
+  AGENTIC_DOCUMENT_SERVICE_URL,
   FILES_SERVICE_URL,
   CONTENT_SERVICE_URL,
   MINDMAP_SERVICE_URL,
@@ -139,13 +159,8 @@ const apiConfig = {
   DOCS_BASE_URL,
   FILES_BASE_URL,
   DOCUMENT_SERVICE_DIRECT,
+  AGENTIC_DOCUMENT_SERVICE_URL,
   CONTENT_SERVICE_DIRECT,
 };
 
 export default apiConfig;
-
-
-
-
-
-

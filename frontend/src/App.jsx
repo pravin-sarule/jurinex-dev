@@ -646,8 +646,9 @@ function App() {
               }
             />
 
+            {/* Must be before /chatmodel/:fileId/:sessionId or "session" is parsed as fileId */}
             <Route
-              path="/chatmodel/:fileId/:sessionId"
+              path="/chatmodel/session/:sessionId"
               element={
                 <AuthChecker>
                   <MainLayout>
@@ -658,7 +659,7 @@ function App() {
             />
 
             <Route
-              path="/chatmodel/session/:sessionId"
+              path="/chatmodel/:fileId/:sessionId"
               element={
                 <AuthChecker>
                   <MainLayout>

@@ -41,9 +41,7 @@ export const isUserFreeTier = () => {
   return isFreeTier(plan);
 };
 
-export const FREE_TIER_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
-
-export const FREE_TIER_MAX_FILE_SIZE_MB = 10;
+/** Upload caps are loaded from ChatModel `llm_chat_config` via GET /chat/limits (see useLlmChatLimits). */
 
 export const formatFileSize = (bytes) => {
   if (bytes === 0) return '0 Bytes';

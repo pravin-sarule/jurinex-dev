@@ -3,12 +3,15 @@ import { useParams, useLocation } from 'react-router-dom';
 import MindmapViewer from '../components/AnalysisPage/MindmapViewer';
 import { Network, FileText, Loader2, ChevronDown, AlertCircle, CheckCircle, Upload, X, Plus } from 'lucide-react';
 import { mindmapService } from '../services/mindmapService';
-import { isUserFreeTier, FREE_TIER_MAX_FILE_SIZE_BYTES, FREE_TIER_MAX_FILE_SIZE_MB, formatFileSize } from '../utils/planUtils';
+import { formatFileSize } from '../utils/planUtils';
+import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
+import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
 import { API_BASE_URL } from '../config/apiConfig';
 
 const ToolsPage = () => {
   const location = useLocation();
   const { fileId: paramFileId, sessionId: paramSessionId } = useParams();
+  const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError } = useLlmChatLimits();
   const fileInputRef = useRef(null);
   
   const [files, setFiles] = useState([]);
@@ -131,17 +134,29 @@ const ToolsPage = () => {
     const selectedFiles = Array.from(event.target.files || []);
     if (selectedFiles.length === 0) return;
 
-    const isFreeUser = isUserFreeTier();
-    const maxSize = isFreeUser ? FREE_TIER_MAX_FILE_SIZE_BYTES : 300 * 1024 * 1024;
+    if (limitsLoading) {
+      setUploadError('Loading upload limits from server… Please try again in a moment.');
+      event.target.value = '';
+      return;
+    }
+    if (limitsError || maxUploadBytes == null) {
+      setUploadError('Could not load upload limits (llm_chat_config). Please refresh the page.');
+      event.target.value = '';
+      return;
+    }
+
+    const maxSize = maxUploadBytes;
     let hasFileSizeError = false;
 
     const validFiles = selectedFiles.filter((file) => {
-      if (isFreeUser && file.size > maxSize) {
+      if (file.size > maxSize) {
         const fileSizeFormatted = formatFileSize(file.size);
         setFileSizeLimitError({
-          fileName: file.name,
-          fileSize: fileSizeFormatted,
-          maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB`
+          message: formatUploadLimitExceededMessage({
+            fileName: file.name,
+            fileSizeFormatted,
+            limitMbLabel: maxUploadMbLabel,
+          }),
         });
         hasFileSizeError = true;
         return false;
@@ -432,12 +447,16 @@ const ToolsPage = () => {
         {fileSizeLimitError && (
           <div className="mt-3 animate-fadeIn" style={{ zIndex: 1000 }}>
             <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg shadow-sm p-3">
-              <div className="flex items-center space-x-2">
-                <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0" />
-                <p className="text-xs text-gray-700 flex-1">
-                  <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
-                </p>
+              <div className="flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-gray-900 mb-1">Upload limit exceeded</p>
+                  <p className="text-xs text-gray-700 leading-relaxed">
+                    {fileSizeLimitError.message}
+                  </p>
+                </div>
                 <button
+                  type="button"
                   onClick={() => setFileSizeLimitError(null)}
                   className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-1"
                   aria-label="Close"

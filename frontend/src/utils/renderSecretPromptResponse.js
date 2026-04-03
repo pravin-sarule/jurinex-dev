@@ -532,11 +532,11 @@ export function renderSecretPromptResponse(response) {
         const formattedCaseTitle = convertMarkdownToHtml(template.metadata.case_title);
         markdown += `<p style="margin: 6pt 0;"><strong>Case Title:</strong> ${formattedCaseTitle}</p>\n`;
       }
-      if (template.metadata.date) {
+      if (template.metadata.date && !isReplaceableMetadataDate(template.metadata.date)) {
         const formattedDate = convertMarkdownToHtml(template.metadata.date);
         markdown += `<p style="margin: 6pt 0;"><strong>Date:</strong> ${formattedDate}</p>\n`;
       }
-      if (template.metadata.prepared_by) {
+      if (template.metadata.prepared_by && !isPlaceholderPreparedBy(template.metadata.prepared_by)) {
         const formattedPreparedBy = convertMarkdownToHtml(template.metadata.prepared_by);
         markdown += `<p style="margin: 6pt 0;"><strong>Prepared By:</strong> ${formattedPreparedBy}</p>\n`;
       }
@@ -676,10 +676,10 @@ export function renderSecretPromptResponse(response) {
       if (jsonData.metadata.case_title) {
         markdown += `**Case:** ${jsonData.metadata.case_title}\n\n`;
       }
-      if (jsonData.metadata.date) {
+      if (jsonData.metadata.date && !isReplaceableMetadataDate(jsonData.metadata.date)) {
         markdown += `**Date:** ${jsonData.metadata.date}\n\n`;
       }
-      if (jsonData.metadata.prepared_by) {
+      if (jsonData.metadata.prepared_by && !isPlaceholderPreparedBy(jsonData.metadata.prepared_by)) {
         markdown += `**Prepared By:** ${jsonData.metadata.prepared_by}\n\n`;
       }
       markdown += '---\n\n';
@@ -965,4 +965,16 @@ export function isStructuredJsonResponse(response) {
   }
   
   return false;
+}
+
+function isPlaceholderPreparedBy(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || ['legal analyst', 'actual preparer name', 'not specified in document', 'unknown', 'n/a', 'na'].includes(normalized);
+}
+
+function isReplaceableMetadataDate(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized
+    || ['actual date', 'date', 'not specified in document', 'unknown', 'n/a', 'na'].includes(normalized)
+    || /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
 }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 
 const MessagesList = ({
   messages,
@@ -8,13 +8,12 @@ const MessagesList = ({
   displayLimit,
   showAllChats,
   setShowAllChats,
-  isLoading,
   highlightText,
   formatDate,
   searchQuery,
 }) => {
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300">
+    <div className="flex-1 overflow-y-auto px-3 py-1.5 [scrollbar-width:thin] [scrollbar-color:#c5c7cc_#f3f4f6] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full">
         <div className="space-y-1.5">
           {messages
             .filter(
@@ -59,14 +58,6 @@ const MessagesList = ({
               >
                 See All ({messages.length - displayLimit} more)
               </button>
-            </div>
-          )}
-          {isLoading && (
-            <div className="p-2 rounded-lg border bg-[#E0F7F6] border-[#21C1B6]">
-              <div className="flex items-center space-x-1.5">
-                <Loader2 className="h-3 w-3 animate-spin text-[#21C1B6]" />
-                <span className="text-xs text-[#21C1B6]">Processing...</span>
-              </div>
             </div>
           )}
         </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
 import { BookOpen, ChevronDown } from 'lucide-react';
 import './IntelligentFolderChat.css';
@@ -37,6 +37,22 @@ export default function IntelligentFolderChat({
   const inputRef = useRef(null);
   const dropdownRef = useRef(null);
   const finalizedMessageIds = useRef(new Set());
+
+  /** Same optional LLM overrides as ChatModelPage (VITE_* env). */
+  const folderChatStreamFetchParams = useMemo(() => {
+    const o = {};
+    const mot = import.meta.env.VITE_CHAT_MODEL_MAX_OUTPUT_TOKENS;
+    if (mot != null && String(mot).trim() !== '') {
+      const n = Number(mot);
+      if (Number.isFinite(n)) o.max_output_tokens = n;
+    }
+    const temp = import.meta.env.VITE_CHAT_MODEL_TEMPERATURE;
+    if (temp != null && String(temp).trim() !== '') {
+      const t = Number(temp);
+      if (Number.isFinite(t)) o.model_temperature = t;
+    }
+    return Object.keys(o).length ? o : null;
+  }, []);
 
   const {
     text,
@@ -300,7 +316,7 @@ export default function IntelligentFolderChat({
     setTimeout(() => inputRef.current?.focus(), 100);
 
     try {
-      await sendMessage(input.trim(), null);
+      await sendMessage(input.trim(), null, folderChatStreamFetchParams || undefined);
     } catch (err) {
       console.error('Error sending message:', err);
       if (currentMessageId === aiMessageId) {
@@ -347,7 +363,7 @@ export default function IntelligentFolderChat({
     setTimeout(() => inputRef.current?.focus(), 100);
 
     try {
-      await sendMessage(null, selectedSecretId);
+      await sendMessage(null, selectedSecretId, folderChatStreamFetchParams || undefined);
     } catch (err) {
       console.error('Error sending secret prompt:', err);
       if (currentMessageId === aiMessageId) {

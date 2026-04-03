@@ -19,7 +19,30 @@
       "Read(//c/Users/ADMIN/.claude/projects/c--Users-ADMIN-jurinex-dev/**)",
       "Bash(python -c \"from src.routers.generate import router; print\\(''generate router OK''\\)\")",
       "Bash(python -c \"from src.app import app; print\\(''app OK''\\)\")",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(node --check services/tokenUsageService.js)",
+      "Bash(node --check utils/firmAccess.js)",
+      "Bash(netstat -ano)",
+      "Bash(wmic process:*)",
+      "Bash(taskkill /PID 19164 /F)",
+      "Bash(pm2 list:*)",
+      "Read(//c/Users/ADMIN/jurinex-dev/**)",
+      "Bash(powershell -Command \"Get-Process -Id 21200 | Select-Object -ExpandProperty Path; \\(Get-WmiObject Win32_Process -Filter ''ProcessId=21200''\\).ExecutablePath; \\(Get-WmiObject Win32_Process -Filter ''ProcessId=21200''\\).CommandLine\")",
+      "Bash(powershell -Command \"\\(Get-WmiObject Win32_Process -Filter ''ProcessId=21200''\\) | Select-Object WorkingDirectory\")",
+      "Read(//c/Users/ADMIN/AppData/Local/Temp/claude/c--Users-ADMIN-jurinex-dev/d6a098e2-f098-4033-a616-1c5b11023739/tasks/**)",
+      "Bash(node -e \"require\\(''''./Backend/document-service/controllers/intelligentFolderChatController.js''''\\)\")",
+      "Bash(node --check controllers/intelligentFolderChatController.js)",
+      "Bash(tasklist /FI \"PID eq 14348\")",
+      "Bash(taskkill /F /PID 14348)",
+      "Bash(grep -v \"/\\\\|\\\\\\\\.\")",
+      "Bash(grep -rn \"llm_models\\\\|llm_chat\" \"c:\\\\Users\\\\ADMIN\\\\jurinex-dev\\\\Backend\\\\document-service\" ! -path \"*/node_modules/*\")",
+      "Bash(grep -rn \"CREATE TABLE.*file_chats\\\\|CREATE TABLE.*llm\" \"c:\\\\Users\\\\ADMIN\\\\jurinex-dev\\\\Backend\\\\document-service\" ! -path \"*/node_modules/*\")",
+      "Bash(node -e ':*)",
+      "Bash(ls c:/Users/ADMIN/jurinex-dev/Backend/document-service/*.js)",
+      "Bash(ls c:/Users/ADMIN/jurinex-dev/Backend/authservice/*.js)",
+      "Bash(grep -n \"DOCUMENT_SERVICE_URL\" /c/Users/ADMIN/jurinex-dev/frontend/src/services/*.js)",
+      "Bash(grep -l \"DOCUMENT_SERVICE_URL\\\\|DOCS_BASE_URL\\\\|AGENTIC\\\\|/api/files\\\\|/files\\\\|/docs\" /c/Users/ADMIN/jurinex-dev/frontend/src/services/*.js)",
+      "Bash(find /c/Users/ADMIN/jurinex-dev/Backend -type f -name \"*.py\" -exec grep -l \"requests.get\\\\|requests.post\\\\|httpx\\\\|aiohttp\" {} \\\\;)"
     ]
   }
 }

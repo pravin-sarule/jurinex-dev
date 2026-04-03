@@ -34,6 +34,18 @@ function tryParsePartialJson(text) {
   }
 }
 
+function isPlaceholderPreparedBy(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || ['legal analyst', 'actual preparer name', 'not specified in document', 'unknown', 'n/a', 'na'].includes(normalized);
+}
+
+function isReplaceableMetadataDate(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized
+    || ['actual date', 'date', 'not specified in document', 'unknown', 'n/a', 'na'].includes(normalized)
+    || /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
+}
+
 export function convertJsonToPlainText(text) {
   if (!text) {
     return '';
@@ -47,9 +59,9 @@ export function convertJsonToPlainText(text) {
     text = String(text);
   }
 
+  const trimmed = text.trim();
   let jsonData = null;
   try {
-    const trimmed = text.trim();
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       jsonData = JSON.parse(trimmed);
     }
@@ -89,10 +101,10 @@ function formatJsonAsPlainText(jsonData) {
       if (template.metadata.case_title) {
         formattedText += `**Case:** ${template.metadata.case_title}\n`;
       }
-      if (template.metadata.date) {
+      if (template.metadata.date && !isReplaceableMetadataDate(template.metadata.date)) {
         formattedText += `**Date:** ${template.metadata.date}\n`;
       }
-      if (template.metadata.prepared_by) {
+      if (template.metadata.prepared_by && !isPlaceholderPreparedBy(template.metadata.prepared_by)) {
         formattedText += `**Prepared By:** ${template.metadata.prepared_by}\n`;
       }
       formattedText += '\n---\n\n';

@@ -1,8 +1,26 @@
 import axios from 'axios';
-import { GATEWAY_BASE_URL, DOCS_BASE_URL } from '../config/apiConfig';
+import { DOCS_BASE_URL, API_BASE_URL } from '../config/apiConfig';
 
-// Google Drive auth routes go through gateway at /api (authProxy is mounted at /api)
-const GOOGLE_DRIVE_AUTH_URL = `${GATEWAY_BASE_URL}/api/auth/google/drive`;
+/** Use API gateway (same host as redirect_uri) so OAuth config stays consistent; avoid calling :5001 while redirect is :5000. */
+const GOOGLE_DRIVE_AUTH_URL = `${API_BASE_URL}/api/auth/google/drive`;
+
+const readViteEnv = (name) => {
+  const value = import.meta.env?.[name];
+  return typeof value === 'string' ? value.trim() : '';
+};
+
+export const getGooglePickerApiKey = () =>
+  readViteEnv('VITE_GOOGLE_DRIVE_API_KEY') || readViteEnv('VITE_GOOGLE_API_KEY');
+
+export const validateGooglePickerApiKey = (apiKey = getGooglePickerApiKey()) => {
+  if (!apiKey) {
+    return { valid: false, reason: 'missing' };
+  }
+  if (!/^AIza[0-9A-Za-z_-]{20,}$/.test(apiKey)) {
+    return { valid: false, reason: 'format' };
+  }
+  return { valid: true, reason: null };
+};
 
 const getAuthHeader = () => {
   const token = localStorage.getItem('token');
@@ -91,12 +109,29 @@ const googleDriveApi = {
    * @param {string} folderName - Optional folder name
    */
   downloadFile: async (fileId, accessToken, folderName = null) => {
+    if (!folderName) {
+      throw new Error('Folder name is required for Google Drive import');
+    }
     const response = await axios.post(
-      `${DOCS_BASE_URL}/google-drive/download`,
-      { fileId, accessToken, folderName },
-      { headers: getAuthHeader() }
+      `${DOCS_BASE_URL}/${encodeURIComponent(folderName)}/google-drive/import`,
+      { file_ids: [fileId] },
+      {
+        headers: {
+          ...getAuthHeader(),
+          'X-Google-Access-Token': accessToken,
+        },
+      }
     );
-    return response.data;
+    const data = response.data || {};
+    return {
+      ...data,
+      success: Boolean(data.success),
+      documents: data.uploadedFiles || [],
+      summary: {
+        successful: data.google_drive?.imported_count ?? (data.uploadedFiles || []).length,
+        failed: data.google_drive?.failed_count ?? 0,
+      },
+    };
   },
 
   /**
@@ -106,12 +141,32 @@ const googleDriveApi = {
    * @param {string} folderName - Optional folder name
    */
   downloadMultipleFiles: async (files, accessToken, folderName = null) => {
+    if (!folderName) {
+      throw new Error('Folder name is required for Google Drive import');
+    }
+    const fileIds = (files || [])
+      .map((item) => item?.id)
+      .filter(Boolean);
     const response = await axios.post(
-      `${DOCS_BASE_URL}/google-drive/download-multiple`,
-      { files, accessToken, folderName },
-      { headers: getAuthHeader() }
+      `${DOCS_BASE_URL}/${encodeURIComponent(folderName)}/google-drive/import`,
+      { file_ids: fileIds },
+      {
+        headers: {
+          ...getAuthHeader(),
+          'X-Google-Access-Token': accessToken,
+        },
+      }
     );
-    return response.data;
+    const data = response.data || {};
+    return {
+      ...data,
+      success: Boolean(data.success),
+      documents: data.uploadedFiles || [],
+      summary: {
+        successful: data.google_drive?.imported_count ?? (data.uploadedFiles || []).length,
+        failed: data.google_drive?.failed_count ?? 0,
+      },
+    };
   },
 
   /**
@@ -180,6 +235,14 @@ export const openGooglePicker = async ({
   onCancel,
   multiselect = true
 }) => {
+  const resolvedApiKey = (apiKey || getGooglePickerApiKey() || '').trim();
+  const apiKeyValidation = validateGooglePickerApiKey(resolvedApiKey);
+  if (!apiKeyValidation.valid) {
+    throw new Error(
+      'Google Drive Picker API key is missing or invalid. Set VITE_GOOGLE_DRIVE_API_KEY in frontend/.env and restart the frontend.'
+    );
+  }
+
   await loadGooglePickerApi();
 
   // Remove any blur from background when picker opens
@@ -240,7 +303,7 @@ export const openGooglePicker = async ({
     .addView(sharedWithMeView)
     .addView(starredView)
     .setOAuthToken(accessToken)
-    .setDeveloperKey(apiKey)
+    .setDeveloperKey(resolvedApiKey)
     .setCallback((data) => {
       if (data.action === window.google.picker.Action.PICKED) {
         const files = data.docs.map(doc => ({

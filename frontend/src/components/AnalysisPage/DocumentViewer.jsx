@@ -1,11 +1,56 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
-import { Bot, Copy, MessageSquare, ArrowRight } from 'lucide-react';
+import { Bot, Copy, MessageSquare } from 'lucide-react';
 import DownloadPdf from '../DownloadPdf/DownloadPdf';
 import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
+
+const paginateMarkdownContent = (text) => {
+  const normalized = convertJsonToPlainText(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) return [];
+
+  const explicitPages = normalized
+    .split(/\n\s*(?:\f|---\s*PAGE BREAK\s*---|PAGE_BREAK|PAGE BREAK)\s*\n/gi)
+    .map((chunk) => chunk.trim())
+    .filter(Boolean);
+
+  if (explicitPages.length > 1) {
+    return explicitPages;
+  }
+
+  const blocks = normalized
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  const pages = [];
+  let currentBlocks = [];
+  let currentWeight = 0;
+  const maxWeight = 2900;
+
+  blocks.forEach((block) => {
+    const isHeading = /^#{1,6}\s/.test(block) || /^<h[1-6][\s>]/i.test(block);
+    const isCode = /^```/.test(block) || /^<pre/i.test(block);
+    const weight = Math.max(180, block.length + (isHeading ? 240 : 0) + (isCode ? 280 : 0));
+
+    if (currentBlocks.length && currentWeight + weight > maxWeight) {
+      pages.push(currentBlocks.join('\n\n'));
+      currentBlocks = [];
+      currentWeight = 0;
+    }
+
+    currentBlocks.push(block);
+    currentWeight += weight;
+  });
+
+  if (currentBlocks.length) {
+    pages.push(currentBlocks.join('\n\n'));
+  }
+
+  return pages;
+};
 
 const DocumentViewer = ({
   selectedMessageId,
@@ -19,7 +64,8 @@ const DocumentViewer = ({
   formatDate,
   markdownComponents,
   responseContainerRef,
-  fileId,
+  suggestedQuestions = [],
+  onSuggestedQuestionClick,
 }) => {
   const horizontalScrollRef = useRef(null);
   const stickyScrollbarRef = useRef(null);
@@ -50,7 +96,6 @@ const DocumentViewer = ({
     });
     resizeObserver.observe(contentElement);
     resizeObserver.observe(horizontalElement);
-
     window.addEventListener('resize', updateScrollbarState);
 
     return () => {
@@ -89,21 +134,26 @@ const DocumentViewer = ({
     if (responseContainerRef?.current && (currentResponse || animatedResponseContent)) {
       const timeout = setTimeout(() => {
         if (responseContainerRef.current) {
-          responseContainerRef.current.scrollTop = responseContainerRef.current.scrollHeight;
+          responseContainerRef.current.scrollTop = 0;
         }
       }, 100);
       return () => clearTimeout(timeout);
     }
+    return undefined;
   }, [currentResponse, animatedResponseContent, responseContainerRef]);
 
   const selectedMessage = messages.find((msg) => msg.id === selectedMessageId);
   const hasContent = currentResponse || animatedResponseContent;
   const isStreaming = selectedMessage?.isStreaming;
-  
+  const responseText = isAnimatingResponse
+    ? animatedResponseContent
+    : animatedResponseContent || currentResponse || '';
+  const pages = useMemo(() => paginateMarkdownContent(responseText), [responseText]);
+
   if (!selectedMessageId || (!hasContent && !isStreaming)) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center text-gray-400">
+      <div className="flex items-center justify-center h-full rounded-[22px] bg-white/80 border border-[#e5dfd4]">
+        <div className="text-center text-[#807868] px-6">
           <MessageSquare className="h-12 w-12 mx-auto mb-3 opacity-50" />
           <p className="text-base font-medium">Select a question to view the response</p>
         </div>
@@ -112,143 +162,138 @@ const DocumentViewer = ({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0 overflow-hidden">
-      <div className="px-2 sm:px-4 pt-2 sm:pt-4 flex-shrink-0">
-        <div className="max-w-none">
-          <div className="pb-2 sm:pb-3 border-b border-gray-200 bg-white rounded-lg p-2 sm:p-3 shadow-sm">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-2 sm:mb-2.5">
-              <h2 className="text-base sm:text-lg font-semibold text-gray-900 flex items-center">
-                <Bot className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-1.5 text-[#21C1B6]" />
-                JuriNex Response
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-white rounded-[24px] border border-[#e0d9ca]">
+      <div className="px-4 sm:px-5 pt-4 pb-3 border-b border-[#e3dccf] bg-white">
+        <div className="flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-[18px] sm:text-[20px] font-medium text-[#2b3528] flex items-center gap-2 truncate">
+                <Bot className="h-4 w-4 text-[#1f6b5f] shrink-0" />
+                {selectedMessage?.display_text_left_panel || selectedMessage?.question || 'Response'}
               </h2>
-              <div className="flex items-center flex-wrap gap-1 sm:gap-1.5 text-xs text-gray-500">
-                <button
-                  onClick={handleCopyResponse}
-                  className="flex items-center px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-                  title="Copy AI Response"
-                >
-                  <Copy className="h-3 w-3 mr-1" />
-                  Copy
-                </button>
-                <DownloadPdf
-                  markdownOutputRef={markdownOutputRef}
-                  questionTitle={selectedMessage?.question || selectedMessage?.display_text_left_panel || 'AI_Analysis'}
-                />
-                {selectedMessage?.timestamp && (
-                  <span>{formatDate(selectedMessage.timestamp)}</span>
-                )}
-                {selectedMessage?.session_id && (
-                  <>
-                    <span>•</span>
-                    <span className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">
-                      {selectedMessage.session_id.split('-')[1]?.substring(0, 6) || 'N/A'}
-                    </span>
-                  </>
-                )}
-              </div>
             </div>
-            <div className="p-2 sm:p-2.5 bg-gradient-to-r from-[#E0F7F6] to-indigo-50 rounded-lg border-l-4 border-[#21C1B6]">
-              <p className="text-xs font-medium text-[#21C1B6] mb-1 flex items-center">
-                <MessageSquare className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
-                Question:
-              </p>
-              <p className="text-xs text-[#21C1B6] leading-relaxed break-words max-h-32 overflow-y-auto">
-                {selectedMessage?.question || 'No question available'}
-              </p>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleCopyResponse}
+                className="inline-flex items-center px-3 py-2 text-xs font-medium text-[#4e4a41] hover:text-[#1d1d1b] bg-white border border-[#ddd6c8] rounded-md transition-colors"
+                title="Copy AI Response"
+              >
+                <Copy className="h-3.5 w-3.5 mr-1.5" />
+                Copy
+              </button>
+              <DownloadPdf
+                markdownOutputRef={markdownOutputRef}
+                questionTitle={selectedMessage?.question || selectedMessage?.display_text_left_panel || 'AI_Analysis'}
+              />
             </div>
-            {isAnimatingResponse && (
-              <div className="mt-2 flex justify-end">
-                <button
-                  onClick={() => showResponseImmediately(currentResponse)}
-                  className="text-xs text-[#21C1B6] hover:text-[#1AA49B] flex items-center space-x-1"
-                >
-                  <span>Skip animation</span>
-                  <ArrowRight className="h-2.5 w-2.5" />
-                </button>
-              </div>
-            )}
+          </div>
+          <div className="flex items-center justify-between text-xs text-[#807868] gap-3">
+            <span className="truncate">
+              {selectedMessage?.timestamp ? formatDate(selectedMessage.timestamp) : 'Preparing response'}
+            </span>
+            <span>{pages.length || 1} page{pages.length === 1 ? '' : 's'}</span>
           </div>
         </div>
       </div>
+
       <div
-        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-2 sm:px-4 pb-2 sm:pb-4 response-scroll-container"
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-4 [scrollbar-width:thin] [scrollbar-color:#b8b1a3_#f3f1ec] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-[#f3f1ec] [&::-webkit-scrollbar-thumb]:bg-[#b8b1a3] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb:hover]:bg-[#a59d8d]"
         ref={responseContainerRef ?? null}
       >
-        <div className="bg-white rounded-lg shadow-sm p-2 sm:p-4 relative overflow-visible max-w-none">
-          <style>{`
-            .document-viewer-horizontal-container {
-              overflow-x: auto;
-              overflow-y: hidden;
-              scrollbar-width: none;
-            }
-            .document-viewer-horizontal-container::-webkit-scrollbar {
-              display: none;
-            }
-            .response-scroll-container {
-              scrollbar-width: thin;
-              scrollbar-color: #9CA3AF #E5E7EB;
-            }
-            .response-scroll-container::-webkit-scrollbar {
-              width: 8px;
-            }
-            .response-scroll-container::-webkit-scrollbar-track {
-              background: #F3F4F6;
-              border-radius: 4px;
-            }
-            .response-scroll-container::-webkit-scrollbar-thumb {
-              background: #9CA3AF;
-              border-radius: 4px;
-            }
-            .response-scroll-container::-webkit-scrollbar-thumb:hover {
-              background: #6B7280;
-            }
-          `}</style>
-          <div className="space-y-2 pb-10">
-            <div
-              className="document-viewer-horizontal-container"
-              ref={horizontalScrollRef}
+        <style>{`
+          .document-viewer-horizontal-container {
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: none;
+          }
+          .document-viewer-horizontal-container::-webkit-scrollbar {
+            display: none;
+          }
+        `}</style>
+        <div className="space-y-5">
+          {pages.length ? pages.map((pageContent, index) => (
+            <article
+              key={`response-page-${index + 1}`}
+              className="mx-auto w-full max-w-[780px] min-h-[1040px] bg-white border border-[#d9d2c6] rounded-[8px] shadow-[0_16px_34px_rgba(15,23,42,0.12)] px-8 sm:px-10 py-7"
             >
-              <div
-                className="prose prose-gray prose-sm max-w-none"
-                ref={markdownOutputRef}
-                style={{ minWidth: 'fit-content' }}
-              >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                  components={markdownComponents}
+              <div className="flex items-center justify-between border-b border-[#e4ddd2] pb-3 text-[11px] uppercase tracking-[0.12em] text-[#807868]">
+                <span className="truncate max-w-[68%]">JuriNex Analysis</span>
+                <span>Page {index + 1}</span>
+              </div>
+              <div className="pt-6">
+                <div
+                  className="document-viewer-horizontal-container"
+                  ref={index === 0 ? horizontalScrollRef : undefined}
                 >
-                  {convertJsonToPlainText(
-                    isAnimatingResponse
-                      ? animatedResponseContent
-                      : animatedResponseContent || currentResponse || ''
-                  )}
-                </ReactMarkdown>
-                {(isAnimatingResponse || isStreaming) && (
-                  <span className="inline-flex items-center ml-1">
-                    <span className="inline-block w-1.5 h-4 bg-[#21C1B6] animate-pulse"></span>
-                  </span>
-                )}
+                  <div
+                    className="prose prose-gray max-w-none"
+                    ref={index === 0 ? markdownOutputRef : undefined}
+                    style={{
+                      width: '100%',
+                      minWidth: 0,
+                      overflowWrap: 'anywhere',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                      components={markdownComponents}
+                    >
+                      {pageContent}
+                    </ReactMarkdown>
+                    {index === pages.length - 1 && (isAnimatingResponse || isStreaming) && (
+                      <span className="inline-flex items-center ml-1">
+                        <span className="inline-block w-1.5 h-4 bg-[#1f6b5f] animate-pulse"></span>
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-          {needsHorizontalScroll && (
-            <div className="sticky bottom-0 left-0 right-0 pt-2 bg-white z-10">
-              <div
-                ref={stickyScrollbarRef}
-                className="overflow-x-auto overflow-y-hidden bg-gray-100 border border-gray-200 rounded-lg shadow-sm"
-                style={{
-                  height: '16px',
-                  scrollbarWidth: 'thin',
-                  scrollbarColor: '#9CA3AF #E5E7EB',
-                  WebkitOverflowScrolling: 'touch',
-                }}
-              >
-                <div style={{ width: `${scrollbarWidth}px`, height: '1px' }} />
+              <div className="mt-10 pt-4 border-t border-[#e7e1d7] text-right text-[11px] text-[#807868]">
+                Page {index + 1} / {pages.length}
               </div>
-            </div>
+            </article>
+          )) : (
+            <div className="mx-auto w-full max-w-[780px] min-h-[1040px] bg-white border border-[#d9d2c6] rounded-[8px] shadow-[0_16px_34px_rgba(15,23,42,0.12)] px-8 py-7" />
+          )}
+          {!isStreaming && !isAnimatingResponse && suggestedQuestions.length > 0 && (
+            <section className="mx-auto w-full max-w-[780px] bg-[#f8fbfa] border border-[#d7e8e1] rounded-[16px] px-5 py-4">
+              <div className="mb-3">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-[#6f7f79] mb-1">Suggested Questions</p>
+                <p className="text-sm text-[#3e4b46]">Use these to dig deeper into the completed response.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {suggestedQuestions.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => onSuggestedQuestionClick?.(suggestion)}
+                    className="text-left px-3 py-2 rounded-full bg-white border border-[#c9ddd5] text-sm text-[#20463f] hover:bg-[#eef7f4] transition-colors"
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            </section>
           )}
         </div>
+        {needsHorizontalScroll && (
+          <div className="sticky bottom-0 left-0 right-0 pt-2 bg-transparent z-10">
+            <div
+              ref={stickyScrollbarRef}
+              className="overflow-x-auto overflow-y-hidden bg-white/95 border border-[#ddd6ca] rounded-lg shadow-sm"
+              style={{
+                height: '10px',
+                scrollbarWidth: 'thin',
+                scrollbarColor: '#9CA3AF #E5E7EB',
+                WebkitOverflowScrolling: 'touch',
+              }}
+            >
+              <div style={{ width: `${scrollbarWidth}px`, height: '1px' }} />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

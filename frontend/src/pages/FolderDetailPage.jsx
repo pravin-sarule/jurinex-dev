@@ -82,10 +82,12 @@
 import React, { useState, useEffect, useContext } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { FileManagerContext } from "../context/FileManagerContext";
+import documentApi from "../services/documentApi";
 import {
   ArrowLeft,
   Star,
   MoreVertical,
+  Trash2,
 } from "lucide-react";
 import FolderContent from "../components/FolderContent/FolderContent";
 import DocumentPreviewModal from "../components/DocumentPreviewModal";
@@ -103,6 +105,7 @@ const FolderDetailPage = () => {
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [isStarred, setIsStarred] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     if (folderName) {
@@ -130,6 +133,22 @@ const FolderDetailPage = () => {
     setIsStarred((prev) => !prev);
   };
 
+  const handleDeleteFolder = async () => {
+    const name = folderName || selectedFolder;
+    if (!name) return;
+    if (!window.confirm(`Delete case "${name}" and all its documents? This cannot be undone.`)) return;
+    setIsDeleting(true);
+    setShowMoreMenu(false);
+    try {
+      await documentApi.deleteFolderWithContents(name);
+      navigate('/documents');
+    } catch (err) {
+      console.error('Failed to delete folder:', err);
+      alert(`Failed to delete: ${err.response?.data?.error || err.message}`);
+      setIsDeleting(false);
+    }
+  };
+
   return (
     <div className="h-screen bg-[#FDFCFB] text-gray-800 overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent" style={{marginLeft: '0px', marginRight: '0px'}}>
       <div className="h-full flex flex-col mx-auto">
@@ -142,18 +161,14 @@ const FolderDetailPage = () => {
             <span className="text-sm">All projects</span>
           </button>
           {showMoreMenu && (
-            <div className="absolute top-8 right-0 bg-white border border-gray-200 rounded-md shadow-lg p-2 z-50">
+            <div className="absolute top-8 right-0 bg-white border border-gray-200 rounded-md shadow-lg p-2 z-50 min-w-[160px]">
               <button
-                className="block w-full text-left px-4 py-2 hover:bg-gray-100 text-sm"
-                onClick={() => alert("Rename project")}
+                className="w-full text-left px-4 py-2 hover:bg-red-50 text-sm text-red-600 flex items-center gap-2 rounded"
+                onClick={handleDeleteFolder}
+                disabled={isDeleting}
               >
-                Rename Project
-              </button>
-              <button
-                className="block w-full text-left px-4 py-2 hover:bg-gray-100 text-sm"
-                onClick={() => alert("Delete project")}
-              >
-                Delete Project
+                <Trash2 className="w-4 h-4" />
+                {isDeleting ? 'Deleting...' : 'Delete Case'}
               </button>
             </div>
           )}

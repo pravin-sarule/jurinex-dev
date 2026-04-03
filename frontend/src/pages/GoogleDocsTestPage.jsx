@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
-import googleDriveApi, { openGooglePicker, loadGooglePickerApi } from '../services/googleDriveApi';
-
-// Get API key from environment
-const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
+import googleDriveApi, {
+    loadGooglePickerApi,
+    getGooglePickerApiKey,
+    validateGooglePickerApiKey,
+} from '../services/googleDriveApi';
 
 const GoogleDocsTestPage = () => {
     const [isConnected, setIsConnected] = useState(false);
@@ -80,6 +81,18 @@ const GoogleDocsTestPage = () => {
         try {
             setIsLoading(true);
 
+            const pickerApiKey = getGooglePickerApiKey();
+            const keyValidation = validateGooglePickerApiKey(pickerApiKey);
+            if (!keyValidation.valid) {
+                toast.error('Google Drive Picker is not configured. Set VITE_GOOGLE_DRIVE_API_KEY in frontend/.env and restart frontend.');
+                console.error('[GoogleDocsTest] Missing/invalid Google Picker API key:', {
+                    reason: keyValidation.reason,
+                    hasLegacyKey: Boolean(import.meta.env.VITE_GOOGLE_API_KEY),
+                    hasDriveKey: Boolean(import.meta.env.VITE_GOOGLE_DRIVE_API_KEY),
+                });
+                return;
+            }
+
             // Get fresh access token
             let tokenData;
             try {
@@ -108,7 +121,7 @@ const GoogleDocsTestPage = () => {
             const picker = new window.google.picker.PickerBuilder()
                 .addView(docsView)
                 .setOAuthToken(tokenData.accessToken)
-                .setDeveloperKey(GOOGLE_API_KEY)
+                .setDeveloperKey(pickerApiKey)
                 .setCallback((data) => {
                     if (data.action === window.google.picker.Action.PICKED) {
                         const doc = data.docs[0];

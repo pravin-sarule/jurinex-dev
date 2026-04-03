@@ -2511,7 +2511,7 @@
 import React, { useState, useEffect, useContext, useRef, useMemo, useCallback, startTransition } from "react";
 import { FileManagerContext } from "../../context/FileManagerContext";
 import documentApi from "../../services/documentApi";
-import { API_BASE_URL, GATEWAY_BASE_URL } from "../../config/apiConfig";
+import { API_BASE_URL, DOCS_BASE_URL } from "../../config/apiConfig";
 import {
   Plus,
   Search,
@@ -2527,7 +2527,6 @@ import {
   Trash2,
   FileText,
   X,
-  ArrowRight,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -2541,6 +2540,7 @@ import CitationsPanel from "../AnalysisPage/CitationsPanel";
 import apiService from "../../services/api";
 import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../utils/renderSecretPromptResponse";
+import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
 
 
 
@@ -3304,6 +3304,7 @@ const ChatInterface = () => {
   const [isSecretPromptSelected, setIsSecretPromptSelected] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [pendingQuestion, setPendingQuestion] = useState('');
   const [needsHorizontalScroll, setNeedsHorizontalScroll] = useState(false);
   const [scrollbarWidth, setScrollbarWidth] = useState(0);
   const [showCitations, setShowCitations] = useState(false);
@@ -3326,15 +3327,50 @@ const ChatInterface = () => {
   const formattedResponseContent = useMemo(() => {
     const rawResponse = animatedResponseContent || '';
     if (!rawResponse) return '';
-   
-    const isStructured = isStructuredJsonResponse(rawResponse);
-   
-    if (isStructured) {
-      return renderSecretPromptResponse(rawResponse);
+
+    const clean = (text) => text
+      .replace(/\|\s*\|\s*\|[\s|]*\n/g, '')
+      .replace(/^\s*\|\s*[-: ]+\s*\|\s*$/gm, (m) => m);
+
+    let text;
+    if (isGenerating) {
+      text = clean(rawResponse);
+    } else {
+      const isStructured = isStructuredJsonResponse(rawResponse);
+      text = clean(isStructured ? renderSecretPromptResponse(rawResponse) : convertJsonToPlainText(rawResponse));
     }
-   
-    return convertJsonToPlainText(rawResponse);
-  }, [animatedResponseContent]);
+
+    // Inject inline citation superscripts if citations are loaded
+    if (citations && citations.length > 0) {
+      text = text.replace(/\[(\d+)\]/g, (match, numStr) => {
+        const n = parseInt(numStr);
+        if (n >= 1 && n <= citations.length) {
+          const cite = citations[n - 1];
+          const filenameShort = (cite.filename || 'document').replace(/\.[^.]+$/, '');
+          const label = cite.pageLabel || (cite.page ? `Page ${cite.page}` : 'Source');
+          return `<sup class="inline-cite" data-n="${n}" title="${filenameShort} · ${label}">[${n}]</sup>`;
+        }
+        return match;
+      });
+    }
+
+    return text;
+  }, [animatedResponseContent, isGenerating, citations]);
+
+  const selectedMessage = useMemo(
+    () => currentChatHistory.find((msg) => msg.id === selectedMessageId) || null,
+    [currentChatHistory, selectedMessageId]
+  );
+
+  const suggestedQuestions = useMemo(
+    () =>
+      buildSuggestedQuestions({
+        question: selectedMessage?.question || '',
+        response: formattedResponseContent || animatedResponseContent || selectedMessage?.response || '',
+        promptLabel: selectedMessage?.prompt_label || '',
+      }),
+    [selectedMessage, formattedResponseContent, animatedResponseContent]
+  );
 
   const shouldShowHorizontalScrollbar = useMemo(() => {
     return isSmallScreen && responseHasTable && needsHorizontalScroll;
@@ -3374,37 +3410,19 @@ const ChatInterface = () => {
   };
 
   const fetchDocumentUrl = async (fileId, pageNumber = null, token) => {
-    const GATEWAY_URL = GATEWAY_BASE_URL;
-   
-    let url = pageNumber
-      ? `${GATEWAY_URL}/docs/file/${fileId}/view?page=${pageNumber}`
-      : `${GATEWAY_URL}/docs/file/${fileId}/view`;
-   
-    console.log('[Document URL] Fetching from gateway:', url);
-   
-    let response = await fetch(url, {
+    const url = pageNumber
+      ? `${DOCS_BASE_URL}/file/${fileId}/view?page=${pageNumber}`
+      : `${DOCS_BASE_URL}/file/${fileId}/view`;
+
+    console.log('[Document URL] Fetching from agentic service:', url);
+
+    const response = await fetch(url, {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       }
     });
-   
-    if (!response.ok && response.status === 404) {
-      console.log('[Document URL] Primary gateway endpoint failed, trying fallback...');
-      url = pageNumber
-        ? `${GATEWAY_URL}/docs/${fileId}/view?page=${pageNumber}`
-        : `${GATEWAY_URL}/docs/${fileId}/view`;
-     
-      console.log('[Document URL] Trying fallback gateway endpoint:', url);
-     
-      response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
-      });
-    }
-   
+
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.message || errorData.error || `Failed to fetch document: ${response.status} ${response.statusText}`);
@@ -3454,6 +3472,14 @@ const ChatInterface = () => {
       console.error("Failed to copy:", error);
       alert("Failed to copy to clipboard");
     }
+  };
+
+  const handleSuggestedQuestionClick = (suggestion) => {
+    setChatInput(suggestion);
+    setIsSecretPromptSelected(false);
+    setActiveDropdown("Custom Query");
+    setSelectedSecretId(null);
+    setSelectedLlmName(null);
   };
 
   const skipAnimation = () => {
@@ -3693,6 +3719,18 @@ const ChatInterface = () => {
           setCitations([]);
           setShowCitations(false);
         }
+      } else if (chatsWithChunks.length > 0) {
+        // Keep all historical questions visible on the left when opening a folder.
+        // Do not auto-select any response; show folder files panel on the right
+        // until the user explicitly clicks a question.
+        setSelectedChatSessionId(null);
+        setSelectedMessageId(null);
+        setAnimatedResponseContent("");
+        setIsAnimatingResponse(false);
+        setIsGenerating(false);
+        setHasResponse(false);
+        setHasAiResponse(false);
+        setForceSidebarCollapsed(false);
       } else {
         setHasResponse(false);
         setHasAiResponse(false);
@@ -3765,7 +3803,7 @@ const ChatInterface = () => {
             fileId: fileId,
             text: text,
             link: `${filename}#page=${page || 1}`,
-            viewUrl: fileId ? `${API_BASE_URL}/docs/file/${fileId}/view?page=${page || 1}` : null
+            viewUrl: fileId ? `${DOCS_BASE_URL}/file/${fileId}/view?page=${page || 1}` : null
           };
         });
         console.log('[Citations] Formatted citations from chunk_details:', formattedCitations);
@@ -3802,7 +3840,7 @@ const ChatInterface = () => {
             fileId: citation.fileId || citation.file_id,
             text: toPlainText(citation.text || citation.content || citation.text_preview || ''),
             link: `${citation.filename || 'document.pdf'}#page=${page || pageStart || 1}`,
-            viewUrl: citation.viewUrl || (citation.fileId ? `${API_BASE_URL}/docs/file/${citation.fileId}/view?page=${page || pageStart || 1}` : null)
+            viewUrl: citation.viewUrl || ((citation.fileId || citation.file_id) ? `${DOCS_BASE_URL}/file/${citation.fileId || citation.file_id}/view?page=${page || pageStart || 1}` : null)
           };
         });
         console.log('[Citations] Formatted citations from metadata:', formattedCitations);
@@ -3866,7 +3904,7 @@ const ChatInterface = () => {
             fileId: chunk.file_id || chunk.fileId,
             text: chunk.content || chunk.text || '',
             link: `${chunk.filename || 'document.pdf'}#page=${page || pageStart || 1}`,
-            viewUrl: chunk.file_id ? `${API_BASE_URL}/docs/file/${chunk.file_id}/view?page=${page || pageStart || 1}` : null
+            viewUrl: chunk.file_id ? `${DOCS_BASE_URL}/file/${chunk.file_id}/view?page=${page || pageStart || 1}` : null
           };
         });
 
@@ -3988,6 +4026,7 @@ const ChatInterface = () => {
     setIsAnimatingResponse(false);
     setIsGenerating(false);
     setLoadingChat(false);
+    setPendingQuestion('');
   };
 
   useEffect(() => {
@@ -4039,9 +4078,11 @@ const ChatInterface = () => {
       const selectedSecret = secrets.find((s) => s.id === secretId);
       if (!selectedSecret) throw new Error("No prompt found for selected analysis type");
       const promptLabel = selectedSecret.name;
+      // Server loads the secret body from document-service (same as SecretManager flow).
+      // Do not send the full preset text in `question` — DB and UI store the prompt name only.
 
       const token = getAuthToken();
-      const response = await fetch(`${API_BASE_URL}/docs/${folder}/intelligent-chat/stream`, {
+      const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folder)}/intelligent-chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -4049,6 +4090,8 @@ const ChatInterface = () => {
           'Accept': 'text/event-stream',
         },
         body: JSON.stringify({
+          question: '',
+          prompt_label: promptLabel,
           secret_id: secretId,
           session_id: currentSessionId,
           llm_name: 'gemini',
@@ -4115,7 +4158,9 @@ const ChatInterface = () => {
               panelStatesSetRef.current = true;
             }
             if (finalResponse && finalResponse.trim()) {
-              animateResponse(finalResponse, false, true);
+              setAnimatedResponseContent(finalResponse);
+              setIsAnimatingResponse(false);
+              setIsGenerating(false);
             } else {
               setIsAnimatingResponse(false);
               setIsGenerating(false);
@@ -4181,12 +4226,14 @@ const ChatInterface = () => {
                 setForceSidebarCollapsed(true);
                 panelStatesSetRef.current = true;
               }
-              if (finalResponse && finalResponse.trim()) {
-                animateResponse(finalResponse, false, true);
-              } else {
-                setIsAnimatingResponse(false);
-                setIsGenerating(false);
-              }
+                if (finalResponse && finalResponse.trim()) {
+                  setAnimatedResponseContent(finalResponse);
+                  setIsAnimatingResponse(false);
+                  setIsGenerating(false);
+                } else {
+                  setIsAnimatingResponse(false);
+                  setIsGenerating(false);
+                }
             }
             return;
           }
@@ -4220,7 +4267,17 @@ const ChatInterface = () => {
             } else if (parsed.type === 'chunk') {
               const chunkText = parsed.text || '';
               if (chunkText) {
+                if (streamThinkingRef.current || thinkingContent) {
+                  streamThinkingRef.current = '';
+                  setThinkingContent('');
+                }
                 streamBufferRef.current += chunkText;
+                setHasResponse(true);
+                setHasAiResponse(true);
+                if (!panelStatesSetRef.current) {
+                  setForceSidebarCollapsed(true);
+                  panelStatesSetRef.current = true;
+                }
               }
             } else if (parsed.type === 'done') {
               finalMetadata = { ...finalMetadata, ...parsed };
@@ -4228,12 +4285,12 @@ const ChatInterface = () => {
               console.log('[ChatInterface] used_chunk_ids:', finalMetadata?.used_chunk_ids);
               console.log('[ChatInterface] citations:', finalMetadata?.citations);
               console.log('[ChatInterface] chunk_details:', finalMetadata?.chunk_details);
-             
+
               let usedChunkIds = finalMetadata?.used_chunk_ids || [];
               if (!usedChunkIds.length && finalMetadata?.citations && Array.isArray(finalMetadata.citations)) {
                 usedChunkIds = finalMetadata.citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
               }
-             
+
                 const isStructured = isStructuredJsonResponse(streamBufferRef.current);
                 let finalResponse = isStructured
                   ? renderSecretPromptResponse(streamBufferRef.current)
@@ -4243,15 +4300,17 @@ const ChatInterface = () => {
                 if (streamThinkingRef.current) {
                   setThinkingContent(streamThinkingRef.current);
                 }
-               
+
               const messageId = finalMetadata?.message_id || finalMetadata?.id || Date.now().toString();
               const newMessage = {
                 id: messageId,
-                question: questionText,
+                question: promptLabel,
+                prompt_label: promptLabel,
                 response: finalResponse,
                 timestamp: new Date().toISOString(),
                 created_at: new Date().toISOString(),
-                isSecretPrompt: false,
+                isSecretPrompt: true,
+                used_secret_prompt: true,
                 used_chunk_ids: usedChunkIds,
                 citations: finalMetadata?.citations || null,
                 chunk_details: finalMetadata?.chunk_details || null,
@@ -4259,20 +4318,9 @@ const ChatInterface = () => {
               const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
               setCurrentChatHistory(history);
               setSelectedMessageId(newMessage.id);
-             
-              if (!panelStatesSetRef.current) {
-                setHasResponse(true);
-                setHasAiResponse(true);
-                setForceSidebarCollapsed(true);
-                panelStatesSetRef.current = true;
-              }
-             
-              if (finalResponse && finalResponse.trim()) {
-                animateResponse(finalResponse, false, true);
-              } else {
-                setIsAnimatingResponse(false);
-                setIsGenerating(false);
-              }
+              setAnimatedResponseContent(finalResponse);
+              setIsAnimatingResponse(false);
+              setIsGenerating(false);
             } else if (parsed.type === 'error') {
               setChatError(parsed.message || parsed.error);
               setLoadingChat(false);
@@ -4310,13 +4358,15 @@ const ChatInterface = () => {
     } else {
       if (!chatInput.trim()) return;
       const questionText = chatInput.trim();
-     
+
       setAnimatedResponseContent('');
       setThinkingContent('');
       streamBufferRef.current = '';
       streamThinkingRef.current = '';
       setChatError(null);
       setLoadingChat(true);
+      setIsGenerating(true);
+      setPendingQuestion(questionText);
       setIsAnimatingResponse(false);
       panelStatesSetRef.current = false;
      
@@ -4343,7 +4393,7 @@ const ChatInterface = () => {
      
       try {
         const token = getAuthToken();
-        const response = await fetch(`${API_BASE_URL}/docs/${selectedFolder}/intelligent-chat/stream`, {
+        const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(selectedFolder)}/intelligent-chat/stream`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -4403,11 +4453,12 @@ const ChatInterface = () => {
             };
             const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
             setCurrentChatHistory(history);
-           
+            setPendingQuestion('');
+
             if (newSessionId) {
               setSelectedChatSessionId(newSessionId);
             }
-           
+
             if (finalResponse && finalResponse.trim()) {
               setSelectedMessageId(messageId);
               if (!panelStatesSetRef.current) {
@@ -4416,16 +4467,14 @@ const ChatInterface = () => {
                 setForceSidebarCollapsed(true);
                 panelStatesSetRef.current = true;
               }
-              const contentMatches = animatedResponseContent.trim() === finalResponse.trim() ||
-                                    animatedResponseContent === finalResponse ||
-                                    (animatedResponseContent.length > 0 && finalResponse.startsWith(animatedResponseContent));
-             
-              if (finalResponse && finalResponse.trim()) {
-                animateResponse(finalResponse, false, true);
-              } else {
-                setIsAnimatingResponse(false);
-                setIsGenerating(false);
-              }
+                if (finalResponse && finalResponse.trim()) {
+                  setAnimatedResponseContent(finalResponse);
+                  setIsAnimatingResponse(false);
+                  setIsGenerating(false);
+                } else {
+                  setIsAnimatingResponse(false);
+                  setIsGenerating(false);
+                }
             }
             setChatInput("");
             break;
@@ -4477,17 +4526,20 @@ const ChatInterface = () => {
             };
               const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
               setCurrentChatHistory(history);
-             
+              setPendingQuestion('');
+
               if (newSessionId) {
                 setSelectedChatSessionId(newSessionId);
               }
-             
+
               if (finalResponse && finalResponse.trim()) {
                 setSelectedMessageId(messageId);
                 setHasResponse(true);
                 setHasAiResponse(true);
                 setForceSidebarCollapsed(true);
-                animateResponse(finalResponse);
+                setAnimatedResponseContent(finalResponse);
+                setIsAnimatingResponse(false);
+                setIsGenerating(false);
               }
               setChatInput("");
               return;
@@ -4509,7 +4561,17 @@ const ChatInterface = () => {
               } else if (parsed.type === 'chunk') {
                 const chunkText = parsed.text || '';
                 if (chunkText) {
+                  if (streamThinkingRef.current || thinkingContent) {
+                    streamThinkingRef.current = '';
+                    setThinkingContent('');
+                  }
                   streamBufferRef.current += chunkText;
+                  setHasResponse(true);
+                  setHasAiResponse(true);
+                  if (!panelStatesSetRef.current) {
+                    setForceSidebarCollapsed(true);
+                    panelStatesSetRef.current = true;
+                  }
                 }
               } else if (parsed.type === 'done') {
                 finalMetadata = parsed;
@@ -4517,21 +4579,21 @@ const ChatInterface = () => {
                 console.log('[ChatInterface] used_chunk_ids:', finalMetadata?.used_chunk_ids);
                 console.log('[ChatInterface] citations:', finalMetadata?.citations);
                 console.log('[ChatInterface] chunk_details:', finalMetadata?.chunk_details);
-               
+
                 let usedChunkIds = finalMetadata?.used_chunk_ids || [];
-               
+
                 if (!usedChunkIds.length && finalMetadata?.citations && Array.isArray(finalMetadata.citations)) {
                   usedChunkIds = finalMetadata.citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
                   console.log('[ChatInterface] Extracted chunk IDs from citations:', usedChunkIds);
                 }
-               
+
                 if (!usedChunkIds.length && finalMetadata?.citations) {
                   const citations = Array.isArray(finalMetadata.citations)
                     ? finalMetadata.citations
                     : Object.values(finalMetadata.citations || {});
                   usedChunkIds = citations.map(cit => cit.chunk_id || cit.id).filter(Boolean);
                 }
-               
+
                 const isStructured = isStructuredJsonResponse(streamBufferRef.current);
                 let finalResponse = isStructured
                   ? renderSecretPromptResponse(streamBufferRef.current)
@@ -4541,7 +4603,7 @@ const ChatInterface = () => {
                 if (streamThinkingRef.current) {
                   setThinkingContent(streamThinkingRef.current);
                 }
-               
+
                 const newMessage = {
                   id: finalMetadata.message_id || finalMetadata.id || messageId,
                   question: questionText,
@@ -4555,14 +4617,11 @@ const ChatInterface = () => {
                 };
                 const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
                 setCurrentChatHistory(history);
+                setPendingQuestion('');
                 setSelectedMessageId(newMessage.id);
-               
-                if (finalResponse && finalResponse.trim()) {
-                  animateResponse(finalResponse, false, true);
-                } else {
-                  setIsAnimatingResponse(false);
-                  setIsGenerating(false);
-                }
+                setAnimatedResponseContent(finalResponse);
+                setIsAnimatingResponse(false);
+                setIsGenerating(false);
               } else if (parsed.type === 'error') {
                 setChatError(parsed.message || parsed.error);
                 setLoadingChat(false);
@@ -4577,6 +4636,8 @@ const ChatInterface = () => {
         setHasResponse(false);
         setHasAiResponse(false);
         setForceSidebarCollapsed(false);
+        setPendingQuestion('');
+        setIsGenerating(false);
       } finally {
         setLoadingChat(false);
         streamReaderRef.current = null;
@@ -4695,6 +4756,7 @@ const ChatInterface = () => {
     setAnimatedResponseContent("");
     setIsAnimatingResponse(false);
     setIsGenerating(false);
+    setPendingQuestion('');
     setIsSecretPromptSelected(false);
     setSelectedSecretId(null);
     setSelectedLlmName(null);
@@ -4832,6 +4894,13 @@ const ChatInterface = () => {
     fetchSecrets();
   }, []);
 
+  // Auto-scroll only when a new prompt starts, not on every chunk.
+  useEffect(() => {
+    if (responseRef.current && pendingQuestion) {
+      responseRef.current.scrollTop = responseRef.current.scrollHeight;
+    }
+  }, [pendingQuestion]);
+
   useEffect(() => {
     console.log('[ChatInterface] useEffect triggered, selectedFolder:', selectedFolder);
     if (animationFrameRef.current) {
@@ -4844,6 +4913,8 @@ const ChatInterface = () => {
     setHasAiResponse(false);
     setForceSidebarCollapsed(false);
     setAnimatedResponseContent("");
+    setPendingQuestion('');
+    setIsGenerating(false);
     setSelectedMessageId(null);
     setIsAnimatingResponse(false);
     setActiveDropdown("Custom Query");
@@ -4888,97 +4959,184 @@ const ChatInterface = () => {
     ? "p-2.5 bg-gray-500 hover:bg-gray-600 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-full transition-colors"
     : "p-2.5 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 disabled:cursor-not-allowed rounded-full transition-colors";
 
+  // ── Pagination helpers ──────────────────────────────────────────────────────
+  const paginateContent = (text) => {
+    const normalized = convertJsonToPlainText(text || '').replace(/\r\n/g, '\n').trim();
+    if (!normalized) return [''];
+    const explicitPages = normalized
+      .split(/\n\s*(?:\f|---\s*PAGE BREAK\s*---|PAGE_BREAK|PAGE BREAK)\s*\n/gi)
+      .map(c => c.trim())
+      .filter(Boolean);
+    if (explicitPages.length > 1) return explicitPages;
+    const blocks = normalized.split(/\n{2,}/).map(b => b.trim()).filter(Boolean);
+    const pages = [];
+    let currentBlocks = [];
+    let currentWeight = 0;
+    const maxWeight = 2900;
+    blocks.forEach(block => {
+      const isHeading = /^#{1,6}\s/.test(block) || /^<h[1-6][\s>]/i.test(block);
+      const isCode = /^```/.test(block) || /^<pre/i.test(block);
+      const weight = Math.max(180, block.length + (isHeading ? 240 : 0) + (isCode ? 280 : 0));
+      if (currentBlocks.length && currentWeight + weight > maxWeight) {
+        pages.push(currentBlocks.join('\n\n'));
+        currentBlocks = [];
+        currentWeight = 0;
+      }
+      currentBlocks.push(block);
+      currentWeight += weight;
+    });
+    if (currentBlocks.length) pages.push(currentBlocks.join('\n\n'));
+    return pages.length ? pages : [''];
+  };
+
+  // ────────────────────────────────────────────────────────────────────────────
+
   return (
-    <div className="flex h-full min-h-0 w-full bg-[#F8FAFD] px-4 sm:px-6 py-4 gap-4 overflow-hidden relative">
-      <div
-        className={`${hasResponse ? "flex-[0.4]" : "flex-1"} flex flex-col bg-white h-full transition-all duration-300 overflow-hidden rounded-2xl border border-gray-200 shadow-sm min-w-0`}
-      >
-        <div className="p-4 border-b border-black border-opacity-20 flex-shrink-0">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-gray-900">Questions</h2>
-            <div className="flex items-center gap-2">
-              {currentChatHistory.length > 0 && (
-                <button
-                  onClick={handleDeleteAllChats}
-                  disabled={loadingChat}
-                  className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed rounded-md transition-colors flex items-center gap-1.5"
-                  title="Delete all chats"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Delete All
-                </button>
-              )}
-              <button
-                onClick={handleNewChat}
-                className="px-3 py-1.5 text-sm font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] rounded-md transition-colors"
-              >
-                New Chat
+    <div className="flex h-full min-h-0 w-full overflow-hidden relative" style={{ background: '#fff' }}>
+      {/* LEFT — conversation panel */}
+      <div className={`${hasResponse ? 'flex-[0.42]' : 'flex-1'} flex flex-col h-full border-r border-gray-200 min-w-0 transition-all duration-300`} style={{ background: '#fff' }}>
+
+        {/* top bar */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-shrink-0">
+          <span className="text-sm font-medium text-gray-700">Chat</span>
+          <div className="flex items-center gap-2">
+            {currentChatHistory.length > 0 && (
+              <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all" className="p-1 text-gray-400 hover:text-red-500 transition-colors">
+                <Trash2 className="w-4 h-4" />
               </button>
-            </div>
-          </div>
-          <div className="relative mb-4">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search questions..."
-              className="w-full pl-9 pr-3 py-2 bg-gray-100 rounded-lg text-sm text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#21C1B6] border-[#21C1B6]"
-            />
+            )}
+            <button onClick={handleNewChat} className="px-3 py-1 text-xs font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] rounded-full transition-colors">
+              New Chat
+            </button>
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto px-4 py-2 scrollbar-custom">
+
+        {/* conversation messages */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 scrollbar-custom" ref={responseRef} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           {loadingChat && currentChatHistory.length === 0 ? (
-            <div className="flex justify-center py-8">
-              <Loader2 className="h-8 w-8 animate-spin text-[#21C1B6]" />
-            </div>
+            <div className="flex justify-center py-16"><Loader2 className="h-7 w-7 animate-spin text-[#21C1B6]" /></div>
           ) : currentChatHistory.length === 0 ? (
-            <div className="text-center py-12">
-              <MessageSquare className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-              <p className="text-gray-500">No chats yet. Start a conversation!</p>
+            <div className="flex flex-col items-center justify-center h-full text-center pt-20">
+              <MessageSquare className="h-10 w-10 mb-3 text-gray-200" />
+              <p className="text-gray-400 text-sm">Ask a question about this case</p>
             </div>
           ) : (
-            <div className="space-y-2">
-              {currentChatHistory.map((chat) => (
-                <div
-                  key={chat.id}
-                  onClick={() => handleSelectChat(chat)}
-                  className={`p-3 rounded-lg border cursor-pointer transition-all duration-200 hover:shadow-md group ${
-                    selectedMessageId === chat.id
-                      ? "bg-blue-50 border-blue-200 shadow-sm"
-                      : "bg-white border-gray-200 hover:bg-gray-50"
-                  }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 mb-1 line-clamp-2">
-                        {chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled"}
-                      </p>
-                      <p className="text-xs text-gray-500">{getRelativeTime(chat.created_at || chat.timestamp)}</p>
-                    </div>
-                    <div className={`relative transition-opacity duration-200 ${openChatMenuId === chat.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
-                      <button
-                        onClick={(e) => handleChatMenuToggle(chat.id, e)}
-                        className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
-                        title="More options"
-                        type="button"
-                      >
-                        <MoreVertical className="h-4 w-4 text-gray-600" />
-                      </button>
-                      {openChatMenuId === chat.id && (
-                        <div className="absolute right-0 top-8 mt-1 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-                          <button
-                            onClick={(e) => handleDeleteChat(chat.id, e)}
-                            className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg transition-colors"
-                            type="button"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                            Delete
-                          </button>
-                        </div>
-                      )}
-                    </div>
+            currentChatHistory.map((chat) => (
+              <div key={chat.id} className="flex flex-col gap-3">
+                {/* user bubble */}
+                <div className="flex justify-flex-start">
+                  <div
+                    style={{ background: '#f0f0f0', borderRadius: '18px', padding: '12px 16px', maxWidth: '88%', fontSize: '15px', color: '#1a1a1a', lineHeight: '1.6', fontFamily: 'Georgia, serif', cursor: 'pointer' }}
+                    onClick={() => handleSelectChat(chat)}
+                  >
+                    {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
+                      ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
+                      : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
                   </div>
                 </div>
-              ))}
+
+                {/* AI response preview bubble — click to see full response in right panel */}
+                {chat.response && (
+                  <div
+                    onClick={() => handleSelectChat(chat)}
+                    style={{ cursor: 'pointer', paddingLeft: '4px' }}
+                  >
+                    <div
+                      style={{
+                        background: selectedMessageId === chat.id ? '#e8f4f3' : '#f8f8f8',
+                        border: selectedMessageId === chat.id ? '1px solid #21C1B6' : '1px solid #e5e7eb',
+                        borderRadius: '12px',
+                        padding: '10px 14px',
+                        maxWidth: '92%',
+                        fontSize: '13px',
+                        color: '#555',
+                        lineHeight: '1.5',
+                        fontFamily: 'Inter, sans-serif',
+                        transition: 'background 0.15s, border-color 0.15s',
+                      }}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', fontSize: '11px', fontWeight: 600, color: '#21C1B6', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="5"/></svg>
+                        JuriNex Response
+                      </span>
+                      <span style={{ color: '#374151' }}>
+                        {(() => {
+                          const raw = chat.response || '';
+                          const isStructured = isStructuredJsonResponse(raw);
+                          const plain = isStructured
+                            ? convertJsonToPlainText(raw)
+                            : convertJsonToPlainText(raw);
+                          const firstLine = plain.replace(/^#+\s*/gm, '').replace(/\*\*/g, '').trim().split('\n').find(l => l.trim().length > 10) || '';
+                          return firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine || 'View full response →';
+                        })()}
+                      </span>
+                      <span style={{ display: 'block', marginTop: '4px', fontSize: '11px', color: '#9ca3af' }}>Click to view full document</span>
+                    </div>
+                  </div>
+                )}
+
+
+                {/* delete option */}
+                <div className="mt-1 flex justify-end">
+                  <div className="relative" ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
+                    <button onClick={(e) => handleChatMenuToggle(chat.id, e)} className="p-1 text-gray-300 hover:text-gray-500 transition-colors" type="button">
+                      <MoreVertical className="h-3.5 w-3.5" />
+                    </button>
+                    {openChatMenuId === chat.id && (
+                      <div className="absolute right-0 bottom-6 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                        <button
+                          onClick={(e) => handleDeleteChat(chat.id, e)}
+                          className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg transition-colors"
+                          type="button"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          Delete
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+
+
+          {/* Pending/streaming message — shown while waiting for response */}
+          {pendingQuestion && (
+            <div className="flex flex-col gap-3">
+              {/* user bubble */}
+              <div className="flex justify-start">
+                <div style={{ background: '#f0f0f0', borderRadius: '18px', padding: '12px 16px', maxWidth: '88%', fontSize: '15px', color: '#1a1a1a', lineHeight: '1.6', fontFamily: 'Georgia, serif' }}>
+                  {pendingQuestion}
+                </div>
+              </div>
+              {/* streaming AI response */}
+              <div style={{ fontFamily: 'Georgia, serif', fontSize: '16px', lineHeight: '1.75', color: '#1a1a1a', paddingLeft: '4px' }}>
+                {animatedResponseContent ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                    components={{
+                      p: ({node,...p}) => <p style={{marginBottom:'10px',lineHeight:'1.75',fontFamily:'Georgia,serif',fontSize:'16px'}} {...p}/>,
+                      strong: ({node,...p}) => <strong style={{fontWeight:700}} {...p}/>,
+                      ul: ({node,...p}) => <ul style={{paddingLeft:'22px',marginBottom:'10px',listStyleType:'disc'}} {...p}/>,
+                      ol: ({node,...p}) => <ol style={{paddingLeft:'22px',marginBottom:'10px',listStyleType:'decimal'}} {...p}/>,
+                      li: ({node,...p}) => <li style={{marginBottom:'4px',fontFamily:'Georgia,serif',fontSize:'16px'}} {...p}/>,
+                      h1: ({node,...p}) => <h1 style={{fontSize:'18px',fontWeight:700,margin:'14px 0 6px',fontFamily:'Georgia,serif'}} {...p}/>,
+                      h2: ({node,...p}) => <h2 style={{fontSize:'17px',fontWeight:700,margin:'12px 0 6px',fontFamily:'Georgia,serif'}} {...p}/>,
+                      h3: ({node,...p}) => <h3 style={{fontSize:'16px',fontWeight:700,margin:'10px 0 4px',fontFamily:'Georgia,serif'}} {...p}/>,
+                    }}
+                  >
+                    {animatedResponseContent}
+                  </ReactMarkdown>
+                ) : (
+                  <div className="flex items-center gap-2 text-gray-400">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span style={{fontSize:'14px'}}>Thinking...</span>
+                  </div>
+                )}
+                {isGenerating && (
+                  <span style={{display:'inline-block',width:'2px',height:'16px',background:'#555',marginLeft:'2px',verticalAlign:'middle',animation:'blink 1s step-end infinite'}}/>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -4989,7 +5147,9 @@ const ChatInterface = () => {
               if (isGenerating) {
                 handleStopGeneration();
               } else {
-                handleNewMessage();
+                handleNewMessage().catch((err) => {
+                  console.error("[ChatInterface] submit failed:", err);
+                });
               }
             }}
             className="flex items-center space-x-3 bg-white rounded-xl border border-[#21C1B6] px-4 py-4 focus-within:ring-[#21C1B6] focus-within:shadow-sm"
@@ -5032,12 +5192,6 @@ const ChatInterface = () => {
               placeholder={isSecretPromptSelected ? `Analysis: ${activeDropdown}` : "How can I help you today?"}
               value={chatInput}
               onChange={handleChatInputChange}
-              onKeyPress={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleNewMessage();
-                }
-              }}
               className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
               disabled={loadingChat}
             />
@@ -5067,51 +5221,29 @@ const ChatInterface = () => {
         </div>
       </div>
       {hasResponse && (
-        <div className="flex-[0.6] flex flex-col h-full overflow-hidden bg-white rounded-2xl border border-gray-200 shadow-sm min-w-0 relative" style={{ overflow: showCitations ? 'visible' : 'hidden' }}>
+        <div className="flex-[0.6] flex flex-col h-full min-w-0 relative" style={{ background: '#ffffff', overflow: 'hidden' }}>
+          {/* Toolbar */}
           {selectedMessageId && animatedResponseContent && (
-            <div className="flex-shrink-0 px-6 pt-6 pb-4 border-b border-gray-200 bg-white">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-gray-900">JuriNex Response</h2>
-                <div className="flex items-center gap-2">
-                  <div className="text-sm text-gray-500 mr-2">
-                    {currentChatHistory.find((msg) => msg.id === selectedMessageId)?.timestamp && (
-                      <span>{formatDate(currentChatHistory.find((msg) => msg.id === selectedMessageId).timestamp)}</span>
-                    )}
-                  </div>
-                  <DownloadPdf markdownOutputRef={markdownOutputRef} />
-                  <button
-                    onClick={handleCopyResponse}
-                    className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-                    title="Copy to clipboard"
-                  >
-                    {copySuccess ? (
-                      <Check className="h-4 w-4 text-green-600" />
-                    ) : (
-                      <Copy className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
+            <div className="flex-shrink-0 px-4 py-2 flex items-center justify-between" style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb' }}>
+              <div className="flex items-center gap-2">
+                <DownloadPdf markdownOutputRef={markdownOutputRef} />
+                <button
+                  onClick={handleCopyResponse}
+                  className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded transition-colors"
+                  title="Copy to clipboard"
+                >
+                  {copySuccess ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                </button>
               </div>
-              <div className="mt-3 p-3 bg-blue-50 rounded-lg border-l-4 border-[#21C1B6]">
-                <p className="text-sm font-medium text-blue-900 mb-1">Question:</p>
-                <p className="text-sm text-blue-800">
-                  {currentChatHistory.find((msg) => msg.id === selectedMessageId)?.question || "No question available"}
-                </p>
+              <div className="text-xs text-gray-500">
+                {currentChatHistory.find((msg) => msg.id === selectedMessageId)?.timestamp && (
+                  <span>{formatDate(currentChatHistory.find((msg) => msg.id === selectedMessageId).timestamp)}</span>
+                )}
               </div>
-              {isAnimatingResponse && (
-                <div className="mt-3 flex justify-end">
-                  <button
-                    onClick={skipAnimation}
-                    className="text-xs text-[#21C1B6] hover:text-[#1AA49B] flex items-center space-x-1 transition-colors font-medium"
-                  >
-                    <span>Skip animation</span>
-                    <ArrowRight className="h-3 w-3" />
-                  </button>
-                </div>
-              )}
             </div>
           )}
-          <div className="flex-1 overflow-y-auto scrollbar-custom" ref={responseRef}>
+          {/* A4 scroll area */}
+          <div className="flex-1 overflow-y-auto scrollbar-custom" ref={responseRef} style={{ background: '#ffffff', padding: '24px 0' }}>
             {currentStatus && (
               <div className="px-6 pt-6">
                 <div className="status-display" style={{
@@ -5162,178 +5294,178 @@ const ChatInterface = () => {
                 </div>
               </div>
             ) : selectedMessageId && (animatedResponseContent || thinkingContent || currentStatus) ? (
-              <div className="px-6 py-6">
+              /* Paginated A4 pages — one card per page, Claude-style */
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '0 0 32px 0' }}>
+                {/* Thinking section above page 1 */}
                 {thinkingContent && (
-                  <div className="thinking-section" style={{
-                    background: '#f5f5f5',
-                    borderLeft: '4px solid #4285f4',
-                    borderRadius: '8px',
-                    padding: '16px',
-                    marginBottom: '16px',
-                    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif'
+                  <div style={{
+                    margin: '0 auto', width: '210mm', background: '#f5f5f5',
+                    borderLeft: '4px solid #4285f4', borderRadius: '8px', padding: '16px',
+                    boxSizing: 'border-box', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif'
                   }}>
-                    <div className="thinking-header" style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      marginBottom: '12px',
-                      color: '#5f6368',
-                      fontSize: '14px',
-                      fontWeight: '500'
-                    }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', color: '#5f6368', fontSize: '14px', fontWeight: '500' }}>
                       <span style={{ fontSize: '18px' }}>🧠</span>
                       <span>Thinking...</span>
                     </div>
-                    <div className="thinking-content" style={{
-                      color: '#3c4043',
-                      fontSize: '14px',
-                      lineHeight: '1.6',
-                      whiteSpace: 'pre-wrap',
-                      fontFamily: '"Roboto Mono", "Courier New", monospace',
-                      background: 'white',
-                      padding: '12px',
-                      borderRadius: '4px',
-                      border: '1px solid #e0e0e0',
-                      wordWrap: 'break-word'
-                    }}>
+                    <div style={{ color: '#3c4043', fontSize: '14px', lineHeight: '1.6', whiteSpace: 'pre-wrap', fontFamily: '"Roboto Mono", "Courier New", monospace', background: 'white', padding: '12px', borderRadius: '4px', border: '1px solid #e0e0e0', wordWrap: 'break-word' }}>
                       {thinkingContent}
                       {loadingChat && <span style={{ animation: 'blink 1s infinite' }}>▋</span>}
                     </div>
                   </div>
                 )}
-               
-                {animatedResponseContent && (
-                  <div className="bg-white rounded-lg shadow-sm p-6">
-                    <div className="horizontal-scroll-container" ref={horizontalScrollRef}>
+                {/* Paginated content */}
+                {(() => {
+                  const pages = paginateContent(formattedResponseContent || '');
+                  const totalPages = pages.length || 1;
+                  const mdComponents = {
+                    h1: ({node, ...props}) => <h1 style={{ fontFamily: 'Georgia, serif', fontSize: '22px', fontWeight: 700, margin: '24px 0 12px', color: '#111', lineHeight: 1.3 }} {...props} />,
+                    h2: ({node, ...props}) => <h2 style={{ fontFamily: 'Georgia, serif', fontSize: '19px', fontWeight: 700, margin: '20px 0 10px', color: '#111', lineHeight: 1.3 }} {...props} />,
+                    h3: ({node, ...props}) => <h3 style={{ fontFamily: 'Georgia, serif', fontSize: '17px', fontWeight: 700, margin: '16px 0 8px', color: '#111' }} {...props} />,
+                    h4: ({node, ...props}) => <h4 style={{ fontFamily: 'Georgia, serif', fontSize: '17px', fontWeight: 700, margin: '14px 0 6px', color: '#222' }} {...props} />,
+                    h5: ({node, ...props}) => <h5 style={{ fontFamily: 'Georgia, serif', fontSize: '16px', fontWeight: 700, margin: '12px 0 4px', color: '#333' }} {...props} />,
+                    h6: ({node, ...props}) => <h6 style={{ fontFamily: 'Georgia, serif', fontSize: '16px', fontWeight: 700, margin: '10px 0 4px', color: '#444' }} {...props} />,
+                    p: ({node, ...props}) => <p style={{ fontFamily: 'Georgia, serif', marginBottom: '14px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '17px' }} {...props} />,
+                    strong: ({node, ...props}) => <strong style={{ fontWeight: 700, color: '#111' }} {...props} />,
+                    em: ({node, ...props}) => <em style={{ fontStyle: 'italic' }} {...props} />,
+                    ul: ({node, ...props}) => <ul style={{ listStyleType: 'disc', paddingLeft: '28px', marginBottom: '14px', marginTop: '6px' }} {...props} />,
+                    ol: ({node, ...props}) => <ol style={{ listStyleType: 'decimal', paddingLeft: '28px', marginBottom: '14px', marginTop: '6px' }} {...props} />,
+                    li: ({node, ...props}) => <li style={{ fontFamily: 'Georgia, serif', marginBottom: '6px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '17px' }} {...props} />,
+                    a: ({node, ...props}) => <a {...props} style={{ color: '#1a6db5', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" />,
+                    blockquote: ({node, ...props}) => <blockquote style={{ borderLeft: '3px solid #ccc', paddingLeft: '16px', margin: '16px 0', color: '#555', fontStyle: 'italic' }} {...props} />,
+                    code: ({node, inline, className, children, ...props}) => {
+                      const match = /language-(\w+)/.exec(className || '');
+                      const language = match ? match[1] : '';
+                      if (inline) return <code className="bg-gray-100 text-red-600 px-1.5 py-0.5 rounded text-sm font-mono border border-gray-200" {...props}>{children}</code>;
+                      return (
+                        <div className="relative my-4">
+                          {language && <div className="bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-t font-mono">{language}</div>}
+                          <pre className={`bg-gray-900 text-gray-100 p-4 ${language ? 'rounded-b' : 'rounded'} overflow-x-auto`}>
+                            <code className="font-mono text-sm" {...props}>{children}</code>
+                          </pre>
+                        </div>
+                      );
+                    },
+                    pre: ({node, ...props}) => <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />,
+                    table: ({node, ...props}) => <div className="my-6 rounded-lg border border-gray-300 shadow-sm overflow-x-auto"><table className="min-w-full divide-y divide-gray-300" {...props} /></div>,
+                    thead: ({node, ...props}) => <thead className="bg-gradient-to-r from-gray-50 to-gray-100" {...props} />,
+                    th: ({node, ...props}) => <th className="px-6 py-4 text-left text-xs font-bold text-gray-800 uppercase tracking-wider border-b-2 border-gray-300" {...props} />,
+                    tbody: ({node, ...props}) => <tbody className="bg-white divide-y divide-gray-200" {...props} />,
+                    tr: ({node, ...props}) => <tr className="hover:bg-gray-50 transition-colors" {...props} />,
+                    td: ({node, ...props}) => <td className="px-6 py-4 text-sm text-gray-800 border-b border-gray-100 leading-relaxed" {...props} />,
+                    hr: ({node, ...props}) => <hr className="my-6 border-t-2 border-gray-300" {...props} />,
+                    img: ({node, ...props}) => <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />,
+                  };
+                  return pages.map((pageContent, idx) => (
+                    <article
+                      key={`ci-page-${idx}`}
+                      style={{
+                        margin: '0 auto',
+                        width: '210mm',
+                        minHeight: '297mm',
+                        background: '#ffffff',
+                        boxShadow: '0 16px 34px rgba(15,23,42,0.12)',
+                        padding: '20mm 18mm',
+                        boxSizing: 'border-box',
+                        borderRadius: '8px',
+                        border: '1px solid #d9d2c6',
+                      }}
+                    >
+                      {/* Page header */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e4ddd2', paddingBottom: '10px', marginBottom: '24px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.12em', color: '#807868' }}>
+                        <span>JuriNex Analysis</span>
+                        <span>Page {idx + 1}</span>
+                      </div>
+                      {/* Content */}
                       <div
-                        className="prose prose-gray prose-lg max-w-none"
-                        ref={markdownOutputRef}
-                        style={{ minWidth: "fit-content" }}
+                        ref={idx === 0 ? markdownOutputRef : undefined}
+                        onClick={(e) => {
+                          const sup = e.target.closest('.inline-cite');
+                          if (sup) {
+                            const n = parseInt(sup.getAttribute('data-n'));
+                            const cite = citations[n - 1];
+                            if (cite && cite.fileId) openDocumentAtPage(cite.fileId, cite.page || cite.pageStart || 1, cite.filename, getAuthToken());
+                          }
+                        }}
                       >
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                          components={{
-                            h1: ({node, ...props}) => (
-                              <h1 className="text-4xl font-bold mb-8 mt-8 text-gray-900 border-b-2 border-blue-500 pb-4 analysis-page-ai-response tracking-tight" {...props} />
-                            ),
-                            h2: ({node, ...props}) => (
-                              <h2 className="text-2xl font-bold mb-6 mt-8 text-gray-900 border-b border-gray-300 pb-3 analysis-page-ai-response tracking-tight" {...props} />
-                            ),
-                            h3: ({node, ...props}) => (
-                              <h3 className="text-xl font-semibold mb-4 mt-6 text-gray-800 analysis-page-ai-response" {...props} />
-                            ),
-                            h4: ({node, ...props}) => (
-                              <h4 className="text-lg font-semibold mb-3 mt-5 text-gray-800 analysis-page-ai-response" {...props} />
-                            ),
-                            h5: ({node, ...props}) => (
-                              <h5 className="text-base font-semibold mb-2 mt-4 text-gray-700 analysis-page-ai-response" {...props} />
-                            ),
-                            h6: ({node, ...props}) => (
-                              <h6 className="text-sm font-semibold mb-2 mt-3 text-gray-700 analysis-page-ai-response" {...props} />
-                            ),
-                            p: ({node, ...props}) => (
-                              <p className="mb-5 leading-relaxed text-gray-800 text-[15px] analysis-page-ai-response" {...props} />
-                            ),
-                            strong: ({node, ...props}) => (
-                              <strong className="font-bold text-gray-900" {...props} />
-                            ),
-                            em: ({node, ...props}) => (
-                              <em className="italic text-gray-800" {...props} />
-                            ),
-                            ul: ({node, ...props}) => (
-                              <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />
-                            ),
-                            ol: ({node, ...props}) => (
-                              <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />
-                            ),
-                            li: ({node, ...props}) => (
-                              <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
-                            ),
-                            a: ({node, ...props}) => (
-                              <a
-                                {...props}
-                                className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              />
-                            ),
-                            blockquote: ({node, ...props}) => (
-                              <blockquote className="border-l-4 border-blue-500 pl-6 py-3 my-6 bg-blue-50 text-gray-800 italic rounded-r-lg analysis-page-ai-response shadow-sm" {...props} />
-                            ),
-                            code: ({node, inline, className, children, ...props}) => {
-                              const match = /language-(\w+)/.exec(className || '');
-                              const language = match ? match[1] : '';
-                             
-                              if (inline) {
-                                return (
-                                  <code
-                                    className="bg-gray-100 text-red-600 px-1.5 py-0.5 rounded text-sm font-mono border border-gray-200"
-                                    {...props}
-                                  >
-                                    {children}
-                                  </code>
-                                );
-                              }
-                             
-                              return (
-                                <div className="relative my-4">
-                                  {language && (
-                                    <div className="bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-t font-mono">
-                                      {language}
-                                    </div>
-                                  )}
-                                  <pre className={`bg-gray-900 text-gray-100 p-4 ${language ? 'rounded-b' : 'rounded'} overflow-x-auto`}>
-                                    <code className="font-mono text-sm" {...props}>
-                                      {children}
-                                    </code>
-                                  </pre>
-                                </div>
-                              );
-                            },
-                            pre: ({node, ...props}) => (
-                              <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />
-                            ),
-                            table: ({node, ...props}) => (
-                              <div className="my-6 rounded-lg border border-gray-300 shadow-sm overflow-hidden">
-                                <table className="min-w-full divide-y divide-gray-300" {...props} />
-                              </div>
-                            ),
-                            thead: ({node, ...props}) => (
-                              <thead className="bg-gradient-to-r from-gray-50 to-gray-100" {...props} />
-                            ),
-                            th: ({node, ...props}) => (
-                              <th className="px-6 py-4 text-left text-xs font-bold text-gray-800 uppercase tracking-wider border-b-2 border-gray-300" {...props} />
-                            ),
-                            tbody: ({node, ...props}) => (
-                              <tbody className="bg-white divide-y divide-gray-200" {...props} />
-                            ),
-                            tr: ({node, ...props}) => (
-                              <tr className="hover:bg-gray-50 transition-colors" {...props} />
-                            ),
-                            td: ({node, ...props}) => (
-                              <td className="px-6 py-4 text-sm text-gray-800 border-b border-gray-100 leading-relaxed" {...props} />
-                            ),
-                            hr: ({node, ...props}) => (
-                              <hr className="my-6 border-t-2 border-gray-300" {...props} />
-                            ),
-                            img: ({node, ...props}) => (
-                              <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />
-                            ),
-                          }}
-                        >
-                          {formattedResponseContent}
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={mdComponents}>
+                          {pageContent}
                         </ReactMarkdown>
-                        {isAnimatingResponse && (
-                          <span className="inline-flex items-center ml-1">
-                            <span className="inline-block w-2 h-5 bg-blue-600 animate-pulse"></span>
-                          </span>
+                        {idx === pages.length - 1 && isGenerating && (
+                          <span style={{ display: 'inline-block', width: '2px', height: '18px', background: '#555', marginLeft: '2px', verticalAlign: 'middle', animation: 'blink 1s step-end infinite' }} />
+                        )}
+                        {/* Citations on last page */}
+                        {idx === pages.length - 1 && !isGenerating && citations && citations.length > 0 && (
+                          <div style={{ marginTop: '28px', borderTop: '1px solid #e5e7eb', paddingTop: '14px' }}>
+                            <p style={{ fontSize: '12px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '10px', fontFamily: 'Inter, sans-serif' }}>References</p>
+                            {citations.map((cite, cidx) => (
+                              <div
+                                key={cidx}
+                                onClick={() => cite.fileId && openDocumentAtPage(cite.fileId, cite.page || cite.pageStart || 1, cite.filename, getAuthToken())}
+                                style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginBottom: '6px', cursor: cite.fileId ? 'pointer' : 'default', fontSize: '13px', fontFamily: 'Inter, sans-serif', color: '#374151', padding: '5px 8px', borderRadius: '6px', transition: 'background 0.15s' }}
+                                onMouseEnter={e => { if (cite.fileId) e.currentTarget.style.background = '#f0f7ff'; }}
+                                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                              >
+                                <span style={{ color: '#1d4ed8', fontWeight: 700, minWidth: '22px', fontSize: '12px', paddingTop: '1px' }}>[{cidx + 1}]</span>
+                                <span>
+                                  <span style={{ fontWeight: 600, color: '#111827' }}>{(cite.filename || 'document').replace(/\.[^.]+$/, '')}</span>
+                                  {(cite.pageLabel || cite.page) && <span style={{ color: '#6b7280', marginLeft: '6px' }}>· {cite.pageLabel || `Page ${cite.page}`}</span>}
+                                  {cite.fileId && <span style={{ color: '#2563eb', marginLeft: '6px', fontSize: '11px' }}>↗ open</span>}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
+                      {/* Page footer */}
+                      <div style={{ marginTop: '32px', paddingTop: '12px', borderTop: '1px solid #e7e1d7', textAlign: 'right', fontSize: '11px', color: '#807868' }}>
+                        Page {idx + 1} / {totalPages}
+                      </div>
+                    </article>
+                  ));
+                })()}
+                {!loadingChat && !isGenerating && suggestedQuestions.length > 0 && (
+                  <div
+                    style={{
+                      margin: '0 auto',
+                      width: '210mm',
+                      background: '#f8fbfa',
+                      border: '1px solid #d7e8e1',
+                      borderRadius: '16px',
+                      padding: '18px 20px',
+                      boxSizing: 'border-box',
+                    }}
+                  >
+                    <div style={{ marginBottom: '12px' }}>
+                      <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.18em', color: '#6f7f79', marginBottom: '6px' }}>
+                        Suggested Questions
+                      </div>
+                      <div style={{ fontSize: '14px', color: '#3e4b46' }}>
+                        Use these follow-up questions to study the case in more detail.
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+                      {suggestedQuestions.map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          onClick={() => handleSuggestedQuestionClick(suggestion)}
+                          style={{
+                            textAlign: 'left',
+                            padding: '10px 14px',
+                            borderRadius: '999px',
+                            background: '#ffffff',
+                            border: '1px solid #c9ddd5',
+                            color: '#20463f',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
-               
               </div>
             ) : (
               <div className="flex items-center justify-center h-full">
@@ -5347,15 +5479,14 @@ const ChatInterface = () => {
               </div>
             )}
           </div>
-         
-          {selectedMessageId && (() => {
+          {false && selectedMessageId && (() => {
             const message = currentChatHistory.find((msg) => msg.id === selectedMessageId);
             const hasCitations = message && (
               (message.used_chunk_ids && message.used_chunk_ids.length > 0) ||
               (message.citations && Array.isArray(message.citations) && message.citations.length > 0) ||
               (citations && citations.length > 0)
             );
-           
+
             return hasCitations ? (
               <div className="px-6 py-4 border-t border-gray-200 bg-white flex justify-center flex-shrink-0" style={{ position: 'relative', zIndex: 10 }}>
                 <button
@@ -5416,9 +5547,8 @@ const ChatInterface = () => {
           )}
         </div>
       )}
-
       {hasResponse && showCitations && (
-        <div className="absolute" style={{ right: '16px', top: '16px', bottom: '16px', width: '380px', zIndex: 50 }}>
+          <div className="absolute" style={{ right: '16px', top: '16px', bottom: '16px', width: '380px', zIndex: 50 }}>
           <CitationsPanel
             citations={citations || []}
             folderName={selectedFolder}
@@ -5750,6 +5880,33 @@ const ChatInterface = () => {
         @keyframes statusSpin {
           0% { transform: rotate(0deg); }
           100% { transform: rotate(360deg); }
+        }
+
+        @keyframes blink {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0; }
+        }
+
+        .inline-cite {
+          display: inline-block;
+          color: #1d4ed8;
+          cursor: pointer;
+          font-size: 10.5px;
+          font-weight: 700;
+          font-family: Inter, sans-serif;
+          margin-left: 2px;
+          padding: 0 3px;
+          border-radius: 3px;
+          background: #eff6ff;
+          border: 1px solid #bfdbfe;
+          vertical-align: super;
+          line-height: 1.2;
+          transition: background 0.15s, color 0.15s;
+          user-select: none;
+        }
+        .inline-cite:hover {
+          background: #dbeafe;
+          color: #1e40af;
         }
       `}</style>
     </div>

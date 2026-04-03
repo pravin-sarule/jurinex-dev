@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { toast } from 'react-toastify';
-import googleDriveApi, { loadGooglePickerApi } from '../services/googleDriveApi';
-
-// Get API key from environment
-const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
+import googleDriveApi, {
+  loadGooglePickerApi,
+  getGooglePickerApiKey,
+  validateGooglePickerApiKey,
+} from '../services/googleDriveApi';
 
 /**
  * TemplatePicker Component
@@ -102,6 +103,18 @@ const TemplatePicker = ({
     try {
       setIsLoading(true);
 
+      const pickerApiKey = getGooglePickerApiKey();
+      const keyValidation = validateGooglePickerApiKey(pickerApiKey);
+      if (!keyValidation.valid) {
+        toast.error('Google Drive Picker is not configured. Set VITE_GOOGLE_DRIVE_API_KEY in frontend/.env and restart frontend.');
+        console.error('[TemplatePicker] Missing/invalid Google Picker API key:', {
+          reason: keyValidation.reason,
+          hasLegacyKey: Boolean(import.meta.env.VITE_GOOGLE_API_KEY),
+          hasDriveKey: Boolean(import.meta.env.VITE_GOOGLE_DRIVE_API_KEY),
+        });
+        return;
+      }
+
       // Get fresh access token
       let tokenData;
       try {
@@ -123,7 +136,7 @@ const TemplatePicker = ({
       // Create picker specifically for Google Docs templates
       openTemplatePicker({
         accessToken: tokenData.accessToken,
-        apiKey: GOOGLE_API_KEY,
+        apiKey: pickerApiKey,
         folderId,
         onSelect: (file) => {
           console.log('[TemplatePicker] Template selected:', file);

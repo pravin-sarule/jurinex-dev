@@ -53,6 +53,8 @@ class ApiService {
  const error = new Error(
  errorData.message || errorData.error || `HTTP error! status: ${response.status}`
  );
+ error.code = errorData.code;
+ error.details = errorData.details;
  error.response = {
  status: response.status,
  data: errorData
@@ -131,13 +133,13 @@ class ApiService {
   }
 
  async getProfessionalProfile() {
- return this.request("/api/auth/professional-profile", {
+return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  method: "GET",
  });
  }
 
  async updateProfessionalProfile(profileData) {
- return this.request("/api/auth/professional-profile", {
+return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  method: "PUT",
  body: JSON.stringify(profileData),
  });
@@ -347,7 +349,8 @@ class ApiService {
  }
 
  async fetchChatSessions(page = 1, limit = 20) {
- return this.request(`/files?page=${page}&limit=${limit}`);
+ // Analysis chat sessions routed via backend gateway (/docs -> /api/files).
+ return this.request(`/docs/chat-sessions?page=${page}&limit=${limit}`);
  }
 
  async getFolderChatSessions(folderName) {
@@ -478,9 +481,10 @@ class ApiService {
    headers["Authorization"] = `Bearer ${token}`;
  }
 
+ // ChatModel uses Bearer token only; omit cookies so CORS can use reflected Origin (not wildcard + credentials).
  const config = {
    headers,
-   credentials: "include",
+   credentials: "omit",
    ...fetchOptions,
  };
 
@@ -492,6 +496,8 @@ class ApiService {
      const error = new Error(
        errorData.message || errorData.error || `HTTP error! status: ${response.status}`
      );
+     error.code = errorData.code;
+     error.details = errorData.details;
      error.response = {
        status: response.status,
        data: errorData
@@ -512,7 +518,7 @@ class ApiService {
  async uploadChatModelDocument(file) {
  const formData = new FormData();
  formData.append("document", file);
- return this.chatModelRequest("/chat/upload-document", {
+ return this.chatModelRequest("/api/chat/upload-document", {
    method: "POST",
    body: formData,
  });
@@ -523,16 +529,19 @@ class ApiService {
  if (sessionId) {
    body.session_id = sessionId;
  }
- return this.chatModelRequest("/chat/ask", {
+ return this.chatModelRequest("/api/chat/ask", {
    method: "POST",
    body: JSON.stringify(body),
  });
  }
 
- async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null) {
+ async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null, extraFetchParams = null, fileIds = null) {
  const token = this.getAuthToken();
  
  const body = { question, file_id: fileId };
+ if (Array.isArray(fileIds) && fileIds.length > 1) {
+   body.file_ids = fileIds;
+ }
  if (sessionId) {
    body.session_id = sessionId;
  }
@@ -543,8 +552,26 @@ class ApiService {
    if (additionalInput) {
      body.additional_input = additionalInput;
    }
-   if (llmName) {
-     body.llm_name = llmName;
+ }
+ if (llmName) {
+   body.llm_name = llmName;
+ }
+ if (extraFetchParams && typeof extraFetchParams === 'object') {
+   const rawMot =
+     extraFetchParams.max_output_tokens != null && extraFetchParams.max_output_tokens !== ''
+       ? extraFetchParams.max_output_tokens
+       : extraFetchParams.maxOutputTokens;
+   if (rawMot != null && rawMot !== '') {
+     const n = Number(rawMot);
+     if (Number.isFinite(n)) body.max_output_tokens = n;
+   }
+   const rawTemp =
+     extraFetchParams.model_temperature != null && extraFetchParams.model_temperature !== ''
+       ? extraFetchParams.model_temperature
+       : extraFetchParams.temperature;
+   if (rawTemp != null && rawTemp !== '') {
+     const t = Number(rawTemp);
+     if (Number.isFinite(t)) body.model_temperature = t;
    }
  }
 
@@ -557,7 +584,7 @@ class ApiService {
  }
 
  try {
-   const response = await fetch(`${CHAT_MODEL_BASE_URL}/chat/ask/stream`, {
+   const response = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/ask/stream`, {
      method: "POST",
      headers,
      body: JSON.stringify(body),
@@ -565,27 +592,29 @@ class ApiService {
 
    if (!response.ok) {
      const errorData = await response.json().catch(() => ({}));
-     throw new Error(errorData.message || errorData.error || `HTTP error! status: ${response.status}`);
+     const err = new Error(errorData.message || errorData.error || `HTTP error! status: ${response.status}`);
+     err.code = errorData.code;
+     err.details = errorData.details;
+     err.status = response.status;
+     throw err;
    }
 
    const reader = response.body.getReader();
    const decoder = new TextDecoder();
    let buffer = '';
    let streamDone = false;
+   let doneDispatched = false;
+   let accumulatedAnswer = '';
 
    while (true) {
      const { done, value } = await reader.read();
      
      if (done) {
-       streamDone = true;
-       if (onDone && !streamDone) {
-         onDone({ answer: buffer });
-       }
        break;
      }
 
      buffer += decoder.decode(value, { stream: true });
-     const lines = buffer.split('\n');
+     const lines = buffer.split(/\r\n|\n|\r/);
      buffer = lines.pop() || '';
 
      for (const line of lines) {
@@ -615,14 +644,20 @@ class ApiService {
          } else if (parsed.type === 'metadata' && onMetadata) {
            onMetadata(parsed);
          } else if (parsed.type === 'chunk' && onChunk) {
-           onChunk(parsed.text || '');
+           const piece = typeof parsed.text === 'string' ? parsed.text : '';
+           accumulatedAnswer += piece;
+           onChunk(piece);
          } else if (parsed.type === 'done' && onDone) {
-           onDone(parsed);
+           const fromServer = typeof parsed.answer === 'string' ? parsed.answer : '';
+           const merged =
+             fromServer.length > accumulatedAnswer.length ? fromServer : (accumulatedAnswer || fromServer);
+           doneDispatched = true;
+           onDone({ ...parsed, answer: merged });
            streamDone = true;
-         } else if (parsed.type === 'error' && onError) {
-           onError(parsed.message, parsed.details);
-           streamDone = true;
-         }
+          } else if (parsed.type === 'error' && onError) {
+            onError(parsed.message, parsed.details, parsed.code);
+            streamDone = true;
+          }
        } catch (e) {
          console.warn('Failed to parse SSE data:', data, e);
        }
@@ -630,21 +665,26 @@ class ApiService {
      
      if (streamDone) break;
    }
- } catch (error) {
-   console.error("ChatModel streaming error:", error);
-   if (onError) {
-     onError(error.message);
+
+   if (onDone && !doneDispatched) {
+     doneDispatched = true;
+     onDone({ answer: accumulatedAnswer });
    }
-   throw error;
- }
+  } catch (error) {
+    console.error("ChatModel streaming error:", error);
+    if (onError) {
+      onError(error.message, error.details, error.code);
+    }
+    throw error;
+  }
  }
 
  async getChatModelFiles() {
- return this.chatModelRequest("/chat/files");
+ return this.chatModelRequest("/api/chat/files");
  }
 
  async getChatModelHistory(fileId, sessionId = null) {
- let endpoint = `/chat/history/${fileId}`;
+ let endpoint = `/api/chat/history/${fileId}`;
  if (sessionId) {
    endpoint += `?session_id=${sessionId}`;
  }
@@ -652,7 +692,129 @@ class ApiService {
  }
 
  async getChatModelSessions(fileId) {
- return this.chatModelRequest(`/chat/sessions/${fileId}`);
+ return this.chatModelRequest(`/api/chat/sessions/${fileId}`);
+ }
+
+ async getGeneralChatHistory(sessionId) {
+   return this.chatModelRequest(`/api/chat/general/history/${sessionId}`);
+ }
+
+ async getGeneralChatSessions() {
+   return this.chatModelRequest('/api/chat/general/sessions');
+ }
+
+ async askGeneralChatStream(question, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, extraFetchParams = null) {
+   const token = this.getAuthToken();
+
+   const body = { question };
+   if (sessionId) body.session_id = sessionId;
+   if (extraFetchParams && typeof extraFetchParams === 'object') {
+     if (extraFetchParams.llm_name) body.llm_name = String(extraFetchParams.llm_name);
+     const rawMot =
+       extraFetchParams.max_output_tokens != null && extraFetchParams.max_output_tokens !== ''
+         ? extraFetchParams.max_output_tokens
+         : extraFetchParams.maxOutputTokens;
+     if (rawMot != null && rawMot !== '') {
+       const n = Number(rawMot);
+       if (Number.isFinite(n)) body.max_output_tokens = n;
+     }
+     const rawTemp =
+       extraFetchParams.model_temperature != null && extraFetchParams.model_temperature !== ''
+         ? extraFetchParams.model_temperature
+         : extraFetchParams.temperature;
+     if (rawTemp != null && rawTemp !== '') {
+       const t = Number(rawTemp);
+       if (Number.isFinite(t)) body.model_temperature = t;
+     }
+   }
+
+   const headers = {
+     'Content-Type': 'application/json',
+     'Accept': 'text/event-stream',
+   };
+   if (token) headers['Authorization'] = `Bearer ${token}`;
+
+   console.log('[API] askGeneralChatStream called with params:', {
+     session_id: sessionId,
+     question_preview: question.substring(0, 80),
+     endpoint: `${CHAT_MODEL_BASE_URL}/api/chat/ask/general/stream`,
+   });
+
+   try {
+     const response = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/ask/general/stream`, {
+       method: 'POST',
+       headers,
+       body: JSON.stringify(body),
+       credentials: 'omit',
+     });
+
+     if (!response.ok) {
+       const errorData = await response.json().catch(() => ({}));
+       const err = new Error(errorData.message || errorData.error || `HTTP error! status: ${response.status}`);
+       err.code = errorData.code;
+       err.details = errorData.details;
+       err.status = response.status;
+       throw err;
+     }
+
+     const reader = response.body.getReader();
+     const decoder = new TextDecoder();
+     let buffer = '';
+     let streamDone = false;
+     let doneDispatched = false;
+     let accumulatedAnswer = '';
+
+     while (true) {
+       const { done, value } = await reader.read();
+       if (done) {
+         break;
+       }
+
+       buffer += decoder.decode(value, { stream: true });
+       const lines = buffer.split(/\r\n|\n|\r/);
+       buffer = lines.pop() || '';
+
+       for (const line of lines) {
+         if (!line.trim()) continue;
+         let data = line.trim();
+         if (data.startsWith('data: ')) data = data.substring(6).trim();
+         if (data === '[PING]') continue;
+         if (data === '[DONE]') { streamDone = true; break; }
+         if (!data) continue;
+
+         try {
+           const parsed = JSON.parse(data);
+           if (parsed.type === 'status' && onStatus) onStatus(parsed.status, parsed.message);
+           else if (parsed.type === 'metadata' && onMetadata) onMetadata(parsed);
+           else if (parsed.type === 'chunk' && onChunk) {
+             const piece = typeof parsed.text === 'string' ? parsed.text : '';
+             accumulatedAnswer += piece;
+             onChunk(piece);
+           } else if (parsed.type === 'done' && onDone) {
+             const fromServer = typeof parsed.answer === 'string' ? parsed.answer : '';
+             const merged =
+               fromServer.length > accumulatedAnswer.length ? fromServer : (accumulatedAnswer || fromServer);
+             doneDispatched = true;
+             onDone({ ...parsed, answer: merged });
+             streamDone = true;
+           } else if (parsed.type === 'error' && onError) { onError(parsed.message, parsed.details); streamDone = true; }
+         } catch (e) {
+           console.warn('[API] Failed to parse SSE data:', data, e);
+         }
+       }
+
+       if (streamDone) break;
+     }
+
+     if (onDone && !doneDispatched) {
+       doneDispatched = true;
+       onDone({ answer: accumulatedAnswer });
+     }
+  } catch (error) {
+     console.error('[API] General chat streaming error:', error);
+     if (onError) onError(error.message, error.details, error.code);
+     throw error;
+   }
  }
 
  async getChunkDetails(chunkIds, fileId) {

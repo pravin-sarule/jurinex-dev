@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'react-toastify';
-import googleDriveApi, { openGooglePicker, loadGooglePickerApi } from '../services/googleDriveApi';
+import googleDriveApi, {
+  openGooglePicker,
+  loadGooglePickerApi,
+  getGooglePickerApiKey,
+  validateGooglePickerApiKey,
+} from '../services/googleDriveApi';
 import driveLogo from '../assets/3128271.png';
-
-// Get API key from environment
-const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
 
 const GoogleDrivePicker = ({ 
   onFilesSelected, 
@@ -184,7 +186,11 @@ const GoogleDrivePicker = ({
 
     } catch (error) {
       console.error('[GoogleDrive] Error initiating auth:', error);
-      toast.error('Failed to start Google Drive connection');
+      const msg =
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        (error.response?.status === 503 ? 'Google Drive OAuth is not configured on the server' : null);
+      toast.error(msg || 'Failed to start Google Drive connection');
       setIsLoading(false);
     }
   };
@@ -192,6 +198,18 @@ const GoogleDrivePicker = ({
   const handleOpenPicker = async () => {
     try {
       setIsLoading(true);
+
+      const pickerApiKey = getGooglePickerApiKey();
+      const keyValidation = validateGooglePickerApiKey(pickerApiKey);
+      if (!keyValidation.valid) {
+        toast.error('Google Drive Picker is not configured. Set VITE_GOOGLE_DRIVE_API_KEY in frontend/.env and restart frontend.');
+        console.error('[GoogleDrive] Missing/invalid Google Picker API key:', {
+          reason: keyValidation.reason,
+          hasLegacyKey: Boolean(import.meta.env.VITE_GOOGLE_API_KEY),
+          hasDriveKey: Boolean(import.meta.env.VITE_GOOGLE_DRIVE_API_KEY),
+        });
+        return;
+      }
 
       // Get fresh access token
       let tokenData;
@@ -214,7 +232,7 @@ const GoogleDrivePicker = ({
       
       openGooglePicker({
         accessToken: tokenData.accessToken,
-        apiKey: GOOGLE_API_KEY,
+        apiKey: pickerApiKey,
         multiselect,
         onSelect: (files) => handleFilesSelected(files, tokenData.accessToken),
         onCancel: () => {

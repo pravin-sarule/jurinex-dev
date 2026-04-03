@@ -14,10 +14,11 @@ import DocumentList from '../components/AnalysisPage/DocumentList';
 import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
 import UploadOptionsMenu from '../components/UploadOptionsMenu';
-import googleDriveApi from '../services/googleDriveApi';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
-import { isUserFreeTier, FREE_TIER_MAX_FILE_SIZE_BYTES, FREE_TIER_MAX_FILE_SIZE_MB, formatFileSize } from '../utils/planUtils';
+import { formatFileSize } from '../utils/planUtils';
+import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
+import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
 import { API_BASE_URL } from '../config/apiConfig';
 import {
   Search,
@@ -48,7 +49,6 @@ import {
   Circle,
   CreditCard,
   Square,
-  Zap,
 } from 'lucide-react';
 
 const PROGRESS_STAGES = {
@@ -243,6 +243,8 @@ const AnalysisPage = () => {
   const { fileId: paramFileId, sessionId: paramSessionId } = useParams();
   const { setIsSidebarHidden, setIsSidebarCollapsed } = useSidebar();
   const navigate = useNavigate();
+
+  const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError } = useLlmChatLimits();
 
   const [activeDropdown, setActiveDropdown] = useState('Custom Query');
   const [isLoading, setIsLoading] = useState(false);
@@ -1506,10 +1508,20 @@ const AnalysisPage = () => {
     const files = Array.from(event.target.files);
     console.log('Files selected:', files.length);
     if (files.length === 0) return;
-    
-    const isFreeUser = isUserFreeTier();
-    console.log('Is free user:', isFreeUser);
-    
+
+    if (limitsLoading) {
+      setError('Loading upload limits from server… Please try again in a moment.');
+      event.target.value = '';
+      return;
+    }
+    if (limitsError || maxUploadBytes == null) {
+      setError('Could not load upload limits (llm_chat_config). Please refresh the page.');
+      event.target.value = '';
+      return;
+    }
+
+    const maxSize = maxUploadBytes;
+
     const allowedTypes = [
       'application/pdf',
       'application/msword',
@@ -1520,8 +1532,6 @@ const AnalysisPage = () => {
       'image/tiff',
     ];
     
-    const maxSize = isFreeUser ? FREE_TIER_MAX_FILE_SIZE_BYTES : 300 * 1024 * 1024;
-    
     let hasFileSizeError = false;
     const validFiles = files.filter((file) => {
       if (!allowedTypes.includes(file.type)) {
@@ -1529,18 +1539,17 @@ const AnalysisPage = () => {
         return false;
       }
       
-      if (isFreeUser && file.size > maxSize) {
+      if (file.size > maxSize) {
         const fileSizeFormatted = formatFileSize(file.size);
-        console.log('File size limit exceeded:', { fileName: file.name, fileSize: fileSizeFormatted, maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB` });
+        console.log('File size limit exceeded:', { fileName: file.name, fileSize: fileSizeFormatted, maxSizeMB: maxUploadMbLabel });
         hasFileSizeError = true;
         setFileSizeLimitError({
-          fileName: file.name,
-          fileSize: fileSizeFormatted,
-          maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB`
+          message: formatUploadLimitExceededMessage({
+            fileName: file.name,
+            fileSizeFormatted,
+            limitMbLabel: maxUploadMbLabel,
+          }),
         });
-        return false;
-      } else if (!isFreeUser && file.size > maxSize) {
-        setError(`File "${file.name}" is too large (max 300MB).`);
         return false;
       }
       
@@ -3136,25 +3145,17 @@ const AnalysisPage = () => {
                   <div className="flex items-start gap-2">
                     <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
+                      <p className="text-xs sm:text-sm font-semibold text-gray-900 mb-1">Upload limit exceeded</p>
                       <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
-                        <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                        {fileSizeLimitError.message}
                       </p>
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => {
-                            setFileSizeLimitError(null);
-                            navigate('/subscription-plans');
-                          }}
-                          className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
-                        >
-                          <Zap className="h-3 w-3 mr-1.5" />
-                          Upgrade Plan
-                        </button>
-                        <button
+                          type="button"
                           onClick={() => setFileSizeLimitError(null)}
-                          className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                          className="px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
                         >
-                          Dismiss
+                          OK
                         </button>
                       </div>
                     </div>
@@ -3282,7 +3283,6 @@ const AnalysisPage = () => {
               displayLimit={displayLimit}
               showAllChats={showAllChats}
               setShowAllChats={setShowAllChats}
-              isLoading={isLoading}
               highlightText={highlightText}
               formatDate={formatDate}
               searchQuery={searchQuery}

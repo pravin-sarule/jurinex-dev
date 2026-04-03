@@ -69,13 +69,12 @@ const DocumentUploadPage = () => {
         }
       });
 
-      if (response.status === 404) {
-        setDraftData(null);
-        return;
-      }
-
       if (response.ok) {
         const result = await response.json();
+        if (result.exists === false || !result.draft_data) {
+          setDraftData(null);
+          return;
+        }
         const parsedDraft = {
           ...result,
           draft_data: typeof result.draft_data === 'string'

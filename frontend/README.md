@@ -18,3 +18,16 @@ http://localhost:5000	gateway-service
 http://localhost:5002	document-service
 http://localhost:5017	drafting-agents (Template Analyzer)
 http://localhost:8000	all-drafting-agent (agent-draft-service: templates, drafts)
+
+## Google Drive Picker Env
+
+Set these in `frontend/.env` before using Google Drive picker integrations:
+
+```
+VITE_GOOGLE_DRIVE_API_KEY=AIza...
+```
+
+Notes:
+- `VITE_GOOGLE_DRIVE_API_KEY` must be a browser API key from Google Cloud with Drive Picker/Drive API access enabled.
+- `VITE_GOOGLE_API_KEY` is still accepted as a legacy fallback, but `VITE_GOOGLE_DRIVE_API_KEY` is preferred.
+- Restart the frontend dev server after changing env vars.

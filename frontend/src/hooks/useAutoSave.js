@@ -175,10 +175,10 @@ export const useAutoSave = (caseData, currentStep, providedUserId = null, isEnab
         },
       });
 
-      if (response.status === 404) return null;
       if (!response.ok) throw new Error('Failed to load draft');
 
       const result = await response.json();
+      if (result.exists === false || !result.draft_data) return null;
       return {
         ...result,
         draft_data: typeof result.draft_data === 'string'

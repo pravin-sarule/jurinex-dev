@@ -370,15 +370,34 @@
 
 
 import axios from 'axios';
-import { DOCS_BASE_URL } from '../config/apiConfig';
+import { DOCS_BASE_URL, getUserIdForDrafting } from '../config/apiConfig';
 
 // Docs and cases both go through the docs gateway prefix (`/docs/*` → document-service `/api/files/*`).
 const API_BASE_URL = DOCS_BASE_URL;
 const CASES_BASE_URL = DOCS_BASE_URL;
 
+const normalizeFolderFilesResponse = (data, folderName = '') => {
+  const files = Array.isArray(data?.files)
+    ? data.files
+    : Array.isArray(data?.documents)
+      ? data.documents
+      : [];
+  return {
+    ...data,
+    folderName: data?.folderName || folderName || '',
+    files,
+    documents: files,
+    totalDocuments: typeof data?.totalDocuments === 'number' ? data.totalDocuments : files.length,
+  };
+};
+
 const getAuthHeader = () => {
   const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const userId = getUserIdForDrafting();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(userId ? { 'X-User-Id': userId } : {}),
+  };
 };
 
 const documentApi = {
@@ -395,7 +414,10 @@ const documentApi = {
     const response = await axios.get(`${API_BASE_URL}/folders`, {
       headers: getAuthHeader(),
     });
-    return response.data;
+    return {
+      ...response.data,
+      folders: Array.isArray(response.data?.folders) ? response.data.folders : [],
+    };
   },
 
   getDocumentsInFolder: async (folderName) => {
@@ -403,7 +425,7 @@ const documentApi = {
       `${API_BASE_URL}/${folderName}/files`,
       { headers: getAuthHeader(), timeout: 8000 }
     );
-    return response.data;
+    return normalizeFolderFilesResponse(response.data, folderName);
   },
 
   uploadDocuments: async (folderName, files, secret_id = null) => {
@@ -580,14 +602,10 @@ const documentApi = {
 
   // Upload files for processing (separate from extraction)
   uploadDocumentsForProcessing: async (files) => {
-    try {
-      console.log(`[uploadDocumentsForProcessing] 🚀 Uploading ${files.length} file(s)...`);
-      
+    const fallbackToDirectUpload = async () => {
+      console.warn('[uploadDocumentsForProcessing] Falling back to direct multipart upload');
       const formData = new FormData();
-      files.forEach(file => {
-        formData.append('files', file);
-      });
-
+      files.forEach((file) => formData.append('files', file));
       const response = await axios.post(
         `${API_BASE_URL}/upload-for-processing`,
         formData,
@@ -596,19 +614,93 @@ const documentApi = {
             ...getAuthHeader(),
             'Content-Type': 'multipart/form-data',
           },
-          timeout: 60000, // 1 minute for upload
+          timeout: 120000,
         }
       );
-
-      console.log(`[uploadDocumentsForProcessing] ✅ Upload completed`);
-      
       return {
         success: true,
         folderName: response.data.folderName,
-        uploadedFiles: response.data.uploadedFiles || []
+        uploadedFiles: response.data.uploadedFiles || response.data.documents || response.data.files || [],
+      };
+    };
+
+    try {
+      console.log(`[uploadDocumentsForProcessing] 🚀 Signed upload for ${files.length} file(s)...`);
+      const uploadedFiles = [];
+      // Keep one temporary folder for the whole upload batch, just like document-service.
+      const tempFolderName = `temp-${Math.random().toString(16).slice(2, 14)}`;
+      let folderName = tempFolderName;
+
+      for (const file of files) {
+        const urlResponse = await axios.post(
+          `${API_BASE_URL}/${encodeURIComponent(tempFolderName)}/generate-upload-url`,
+          {
+            filename: file.name,
+            mimetype: file.type || 'application/octet-stream',
+            size: file.size || 0,
+          },
+          { headers: getAuthHeader() }
+        );
+
+        const { signedUrl, gcsPath, filename: safeFilename } = urlResponse.data || {};
+        if (!signedUrl || !gcsPath) {
+          throw new Error('Failed to get signed upload URL.');
+        }
+
+        const putResponse = await fetch(signedUrl, {
+          method: 'PUT',
+          body: file,
+          headers: {
+            'Content-Type': file.type || 'application/octet-stream',
+          },
+        });
+        if (!putResponse.ok) {
+          throw new Error(`Failed to upload to signed URL: ${putResponse.statusText}`);
+        }
+
+        const completeResponse = await axios.post(
+          `${API_BASE_URL}/${encodeURIComponent(tempFolderName)}/complete-upload`,
+          {
+            gcsPath,
+            filename: safeFilename || file.name,
+            mimetype: file.type || 'application/octet-stream',
+            size: file.size || 0,
+          },
+          { headers: getAuthHeader() }
+        );
+
+        const completeData = completeResponse.data || {};
+        folderName = completeData.folderName || folderName;
+        uploadedFiles.push(completeData.document || completeData);
+      }
+
+      if (!folderName) {
+        throw new Error('Folder name missing after signed uploads.');
+      }
+
+      return {
+        success: true,
+        folderName,
+        uploadedFiles,
       };
     } catch (error) {
       console.error('[uploadDocumentsForProcessing] ❌ Error:', error);
+      const isNetworkSignedUrlError =
+        String(error?.message || '').toLowerCase().includes('failed to fetch') ||
+        String(error?.message || '').toLowerCase().includes('signed url');
+      if (isNetworkSignedUrlError) {
+        try {
+          return await fallbackToDirectUpload();
+        } catch (fallbackError) {
+          console.error('[uploadDocumentsForProcessing] ❌ Fallback upload failed:', fallbackError);
+          throw new Error(
+            fallbackError.response?.data?.message ||
+            fallbackError.response?.data?.error ||
+            fallbackError.message ||
+            'Failed to upload documents'
+          );
+        }
+      }
       throw new Error(error.response?.data?.message || error.response?.data?.error || error.message || 'Failed to upload documents');
     }
   },
@@ -648,7 +740,7 @@ const documentApi = {
       // URL encode the folderName to handle paths with slashes
       const encodedFolderName = encodeURIComponent(folderName);
       const response = await axios.post(
-        `${API_BASE_URL}/extract-case-fields/${encodedFolderName}`,
+        `${API_BASE_URL}/${encodedFolderName}/extract-case-fields`,
         {},
         {
           headers: getAuthHeader(),
@@ -671,34 +763,34 @@ const documentApi = {
   // Legacy combined function (kept for backward compatibility)
   uploadAndExtractCaseFields: async (files) => {
     try {
-      // Use new backend endpoint that handles upload, processing, and extraction
-      // POST /upload-and-extract-case-fields
       console.log(`[uploadAndExtractCaseFields] 🚀 Starting upload and extraction for ${files.length} file(s)...`);
-      
-      const formData = new FormData();
-      files.forEach(file => {
-        formData.append('files', file);
-      });
 
-      const response = await axios.post(
-        `${API_BASE_URL}/upload-and-extract-case-fields`,
-        formData,
-        {
-          headers: {
-            ...getAuthHeader(),
-            'Content-Type': 'multipart/form-data',
-          },
-          timeout: 300000, // 5 minutes timeout for processing
+      const uploadResult = await documentApi.uploadDocumentsForProcessing(files);
+      const folderName = uploadResult.folderName;
+      if (!folderName) {
+        throw new Error('Folder name missing after upload-for-processing');
+      }
+
+      // Poll processing status before extraction
+      let attempts = 0;
+      const maxAttempts = 60; // ~5 minutes at 5s interval
+      while (attempts < maxAttempts) {
+        attempts += 1;
+        const statusResult = await documentApi.getFolderProcessingStatus(folderName);
+        const status = String(statusResult?.status || '').toLowerCase();
+        if (status === 'processed') break;
+        if (status === 'error') {
+          throw new Error(statusResult?.message || 'Document processing failed');
         }
-      );
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      }
 
-      console.log(`[uploadAndExtractCaseFields] ✅ Upload and extraction completed successfully`);
-      
+      const extracted = await documentApi.extractCaseFieldsFromFolder(folderName);
       return {
         success: true,
-        folderName: response.data.folderName,
-        extractedData: response.data.extractedData || {},
-        uploadedFiles: response.data.uploadedFiles || []
+        folderName,
+        extractedData: extracted?.extractedData || {},
+        uploadedFiles: uploadResult.uploadedFiles || [],
       };
     } catch (error) {
       console.error('[uploadAndExtractCaseFields] ❌ Error:', error);
@@ -851,6 +943,13 @@ const documentApi = {
     return response.data;
   },
 
+  deleteFolderWithContents: async (folderName) => {
+    const response = await axios.delete(`${API_BASE_URL}/cases/${encodeURIComponent(folderName)}`, {
+      headers: getAuthHeader(),
+    });
+    return response.data;
+  },
+
   deleteFile: async (fileId) => {
     const response = await axios.delete(`${API_BASE_URL}/${fileId}`, {
       headers: getAuthHeader(),
@@ -859,9 +958,8 @@ const documentApi = {
   },
 
   generateDocumentUploadUrl: async (filename, mimetype, size) => {
-    const baseUrl = API_BASE_URL.replace('/docs', '/files');
     const response = await axios.post(
-      `${baseUrl}/generate-upload-url`,
+      `${API_BASE_URL}/generate-upload-url`,
       { filename, mimetype, size },
       { headers: getAuthHeader() }
     );
@@ -869,9 +967,8 @@ const documentApi = {
   },
 
   completeDocumentUpload: async (gcsPath, filename, mimetype, size, secret_id = null) => {
-    const baseUrl = API_BASE_URL.replace('/docs', '/files');
     const response = await axios.post(
-      `${baseUrl}/complete-upload`,
+      `${API_BASE_URL}/complete-upload`,
       { gcsPath, filename, mimetype, size, secret_id },
       { headers: getAuthHeader() }
     );

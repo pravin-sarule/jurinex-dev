@@ -11,7 +11,6 @@ import rehypeSanitize from 'rehype-sanitize';
 import UploadProgressPanel from '../components/AnalysisPage/UploadProgressPanel';
 import ChatInputArea from '../components/AnalysisPage/ChatInputArea';
 import MessagesList from '../components/AnalysisPage/MessageList';
-import DocumentList from '../components/AnalysisPage/DocumentList';
 import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
 import UploadOptionsMenu from '../components/UploadOptionsMenu';
@@ -19,14 +18,17 @@ import googleDriveApi from '../services/googleDriveApi';
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
-import { isUserFreeTier, FREE_TIER_MAX_FILE_SIZE_BYTES, FREE_TIER_MAX_FILE_SIZE_MB, formatFileSize } from '../utils/planUtils';
+import { buildSuggestedQuestions } from '../utils/suggestedQuestions';
+import { formatFileSize } from '../utils/planUtils';
+import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
+import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
+import { getChatModelQuotaUserMessage } from '../utils/llmQuotaMessages';
 import {
   Search,
   Send,
   FileText,
   Trash2,
   RotateCcw,
-  ArrowRight,
   ChevronRight,
   AlertTriangle,
   Clock,
@@ -49,7 +51,6 @@ import {
   Circle,
   CreditCard,
   Square,
-  Zap,
 } from 'lucide-react';
 
 const PROGRESS_STAGES = {
@@ -91,6 +92,35 @@ const getStageStatus = (stageKey, progress) => {
   if (progress >= stage.range[1]) return 'completed';
   if (progress >= stage.range[0] && progress < stage.range[1]) return 'active';
   return 'pending';
+};
+
+const formatRateQuotaValue = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 'Unlimited';
+  return String(Math.floor(n));
+};
+
+const RateQuotaPills = ({ limits, className = '' }) => {
+  if (!limits) return null;
+  const items = [
+    { key: 'messages_per_hour', label: 'Messages / hour' },
+    { key: 'quota_chats_per_minute', label: 'Chats / minute' },
+    { key: 'chats_per_day', label: 'Chats / day' },
+    { key: 'total_tokens_per_day', label: 'Tokens / 24h' },
+  ];
+  return (
+    <div className={`rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 ${className}`.trim()}>
+      <p className="text-[11px] uppercase tracking-[0.16em] text-[#807868] mb-1.5">Rate & Quota Limits</p>
+      <div className="flex flex-wrap gap-2">
+        {items.map((item) => (
+          <div key={item.key} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1">
+            <span className="text-[11px] text-gray-500">{item.label}</span>
+            <span className="text-xs font-semibold text-gray-800">{formatRateQuotaValue(limits[item.key])}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 };
 
 const RealTimeProgressPanel = ({ processingStatus }) => {
@@ -245,6 +275,11 @@ const ChatModelPage = () => {
   const { setIsSidebarHidden, setIsSidebarCollapsed } = useSidebar();
   const navigate = useNavigate();
 
+  const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError, limits, refresh: refreshLimits } = useLlmChatLimits();
+
+  /** All file UUIDs attached in this session (multi-doc chat). Primary id is fileId / first entry. */
+  const chatAttachmentFileIdsRef = useRef([]);
+
   const [activeDropdown, setActiveDropdown] = useState('Custom Query');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false);
@@ -257,6 +292,8 @@ const ChatModelPage = () => {
 
   const [documentData, setDocumentData] = useState(null);
   const [messages, setMessages] = useState([]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const [fileId, setFileId] = useState(paramFileId || null);
   const [sessionId, setSessionId] = useState(paramSessionId || null);
   const [currentResponse, setCurrentResponse] = useState('');
@@ -264,6 +301,11 @@ const ChatModelPage = () => {
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [showSplitView, setShowSplitView] = useState(false);
+  const [splitLeftWidth, setSplitLeftWidth] = useState(48);
+  const [isResizingSplit, setIsResizingSplit] = useState(false);
+  const [isDesktopSplit, setIsDesktopSplit] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMessageId, setSelectedMessageId] = useState(null);
   const [displayLimit, setDisplayLimit] = useState(10);
@@ -289,9 +331,28 @@ const ChatModelPage = () => {
  
   const [streamingStatus, setStreamingStatus] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState('');
+  const [pendingQuestion, setPendingQuestion] = useState(null);
  
   const [chatModelFiles, setChatModelFiles] = useState([]);
   const [chatModelHistory, setChatModelHistory] = useState([]);
+
+  /** Messages for the active session only (UI + viewer; `messages` may hold mixed sessions from restore). */
+  const sessionMessages = useMemo(() => {
+    if (!Array.isArray(messages) || messages.length === 0) return [];
+
+    if (sessionId) {
+      const matched = messages.filter(
+        (m) => m.session_id != null && String(m.session_id) === String(sessionId)
+      );
+      if (matched.length > 0) return matched;
+    }
+
+    // Fallback for fresh streams before session_id is attached on metadata/done.
+    const pendingWithoutSession = messages.filter((m) => m.session_id == null);
+    if (pendingWithoutSession.length > 0) return pendingWithoutSession;
+
+    return [];
+  }, [messages, sessionId]);
 
   const fileInputRef = useRef(null);
   const dropdownRef = useRef(null);
@@ -301,9 +362,64 @@ const ChatModelPage = () => {
   const streamBufferRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
   const streamReaderRef = useRef(null);
+  const splitContainerRef = useRef(null);
+  /** Optional per-request LLM overrides (VITE_CHAT_MODEL_MAX_OUTPUT_TOKENS, VITE_CHAT_MODEL_TEMPERATURE). */
+  const chatModelStreamFetchParams = useMemo(() => {
+    const o = {};
+    const mot = import.meta.env.VITE_CHAT_MODEL_MAX_OUTPUT_TOKENS;
+    if (mot != null && String(mot).trim() !== '') {
+      const n = Number(mot);
+      if (Number.isFinite(n)) o.max_output_tokens = n;
+    }
+    const temp = import.meta.env.VITE_CHAT_MODEL_TEMPERATURE;
+    if (temp != null && String(temp).trim() !== '') {
+      const t = Number(temp);
+      if (Number.isFinite(t)) o.model_temperature = t;
+    }
+    return Object.keys(o).length ? o : null;
+  }, []);
+
   const pollingIntervalRef = useRef(null);
   const batchPollingIntervalsRef = useRef({});
   const uploadIntervalRef = useRef(null);
+
+  useEffect(() => {
+    const handleWindowResize = () => {
+      setIsDesktopSplit(window.innerWidth >= 1024);
+    };
+    window.addEventListener('resize', handleWindowResize);
+    return () => window.removeEventListener('resize', handleWindowResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizingSplit) return undefined;
+
+    const handleMouseMove = (event) => {
+      const container = splitContainerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      if (!rect.width) return;
+      const rawPercent = ((event.clientX - rect.left) / rect.width) * 100;
+      const clampedPercent = Math.min(72, Math.max(28, rawPercent));
+      setSplitLeftWidth(clampedPercent);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingSplit(false);
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingSplit]);
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -373,7 +489,8 @@ const ChatModelPage = () => {
     }
   };
 
-  const uploadDocumentToChat = async (file) => {
+  const uploadDocumentToChat = async (file, options = {}) => {
+    const { skipFinalize = false } = options;
     try {
       setIsChatUploading(true);
       setUploadProgress(0);
@@ -416,24 +533,28 @@ const ChatModelPage = () => {
               }
              
               console.log('[uploadDocumentToChat] Extracted file_id:', fileId);
-             
+
+              chatAttachmentFileIdsRef.current = [...new Set([...chatAttachmentFileIdsRef.current, fileId])];
+
               setUploadedFileId(fileId);
               setFileId(fileId);
               setUploadProgress(100);
-             
-              setTimeout(() => {
-                setIsChatUploading(false);
-                setSuccess('Document uploaded successfully! You can now ask questions about it.');
-               
-                setShowSplitView(true);
-                setHasResponse(true);
-               
-                setStreamingStatus('ready');
-                setStreamingMessage('Document ready. You can now ask questions about it.');
-              }, 500);
-             
-              fetchChatModelFiles();
-             
+
+              if (!skipFinalize) {
+                setTimeout(() => {
+                  setIsChatUploading(false);
+                  setSuccess('Document uploaded successfully! You can now ask questions about it.');
+
+                  setShowSplitView(true);
+                  setHasResponse(true);
+
+                  setStreamingStatus('ready');
+                  setStreamingMessage('Document ready. You can now ask questions about it.');
+                }, 500);
+
+                fetchChatModelFiles();
+              }
+
               resolve({ file_id: fileId, ...response });
             } catch (error) {
               console.error('[uploadDocumentToChat] Error parsing upload response:', error);
@@ -444,12 +565,13 @@ const ChatModelPage = () => {
             }
           } else {
             let errorMessage = 'Upload failed';
+            let errorData = {};
             try {
-              const errorData = JSON.parse(xhr.responseText);
+              errorData = JSON.parse(xhr.responseText);
               errorMessage = errorData.error || errorData.message || errorMessage;
             } catch (e) {
               if (xhr.status === 404) {
-                errorMessage = `Endpoint not found (404). Please check if the server is running and the endpoint '/chat/upload-document' exists.`;
+                errorMessage = `Endpoint not found (404). Please check if the server is running and the endpoint '/api/chat/upload-document' exists.`;
               } else {
                 errorMessage = `Upload failed with status ${xhr.status}`;
               }
@@ -458,11 +580,15 @@ const ChatModelPage = () => {
               status: xhr.status,
               statusText: xhr.statusText,
               responseText: xhr.responseText,
-              url: `${CHAT_MODEL_BASE_URL}/chat/upload-document`,
+              url: `${CHAT_MODEL_BASE_URL}/api/chat/upload-document`,
             });
-            setError(errorMessage);
+            const quotaErr = new Error(errorMessage);
+            quotaErr.code = errorData.code;
+            quotaErr.details = errorData.details;
+            const friendly = getChatModelQuotaUserMessage(quotaErr) || errorMessage;
+            setError(friendly);
             setIsChatUploading(false);
-            reject(new Error(errorMessage));
+            reject(quotaErr);
           }
         });
 
@@ -478,8 +604,8 @@ const ChatModelPage = () => {
           reject(new Error('Upload cancelled'));
         });
 
-        xhr.open('POST', `${CHAT_MODEL_BASE_URL}/chat/upload-document`);
-        console.log('[uploadDocumentToChat] Uploading to:', `${CHAT_MODEL_BASE_URL}/chat/upload-document`);
+        xhr.open('POST', `${CHAT_MODEL_BASE_URL}/api/chat/upload-document`);
+        console.log('[uploadDocumentToChat] Uploading to:', `${CHAT_MODEL_BASE_URL}/api/chat/upload-document`);
         Object.keys(headers).forEach((key) => {
           xhr.setRequestHeader(key, headers[key]);
         });
@@ -487,7 +613,7 @@ const ChatModelPage = () => {
       });
     } catch (error) {
       console.error('[uploadDocumentToChat] Error:', error);
-      setError(`Upload failed: ${error.message}`);
+      setError(getChatModelQuotaUserMessage(error) || `Upload failed: ${error.message}`);
       setIsChatUploading(false);
       throw error;
     }
@@ -495,14 +621,14 @@ const ChatModelPage = () => {
  
   const getStatusMessage = (status) => {
     const statusMessages = {
-      'initializing': 'Starting chat request...',
-      'validating': 'Validating file access...',
-      'fetching': 'Fetching previous conversation context...',
-      'analyzing': 'Analyzing document and preparing context...',
-      'generating': 'Generating response from AI...',
-      'saving': 'Saving conversation to database...',
+      initializing: 'Starting…',
+      validating: 'Validating…',
+      fetching: 'Loading context…',
+      analyzing: 'Preparing…',
+      generating: 'Model thinking',
+      saving: 'Saving…',
     };
-    return statusMessages[status] || 'Processing...';
+    return statusMessages[status] || 'Working…';
   };
 
   const fetchChatModelFiles = async () => {
@@ -518,8 +644,43 @@ const ChatModelPage = () => {
  
   const fetchChatModelHistory = async (fileId, sessionId = null) => {
     try {
+      console.log('[DB] fetchChatModelHistory called with params:', {
+        fileId,
+        sessionId,
+        endpoint: `/api/chat/history/${fileId}${sessionId ? `?session_id=${sessionId}` : ''}`,
+      });
+
       const response = await apiService.getChatModelHistory(fileId, sessionId);
+
+      console.log('[DB] Raw response from getChatModelHistory:', {
+        success: response.success,
+        file_id: response.data?.file_id,
+        filename: response.data?.filename,
+        session_id: response.data?.session_id,
+        message_count: response.data?.count,
+        history_preview: response.data?.history?.slice(0, 2).map(h => ({
+          id: h.id,
+          session_id: h.session_id,
+          question_preview: (h.question || '').substring(0, 80),
+          used_secret_prompt: h.used_secret_prompt,
+          created_at: h.created_at,
+        })),
+      });
+
       if (response.success && response.data?.history) {
+        const idsFromApi =
+          Array.isArray(response.data.file_ids) && response.data.file_ids.length
+            ? response.data.file_ids
+            : Array.isArray(response.data.attached_files) && response.data.attached_files.length
+              ? response.data.attached_files.map((a) => a.file_id).filter(Boolean)
+              : [fileId];
+        chatAttachmentFileIdsRef.current = [...new Set(idsFromApi.filter(Boolean))];
+
+        const primaryAttachment =
+          Array.isArray(response.data.attached_files) && response.data.attached_files.length
+            ? response.data.attached_files[0]
+            : null;
+
         const history = response.data.history.map((item) => ({
           id: item.id,
           file_id: item.file_id || fileId,
@@ -535,8 +696,39 @@ const ChatModelPage = () => {
           prompt_label: item.prompt_label || null,
           secret_id: item.secret_id || null,
         }));
+
+        console.log('[DB] Loaded chat history for continuation:', {
+          total_messages: history.length,
+          session_id_used: sessionId,
+          file_id_used: fileId,
+          filename_from_db: response.data.filename,
+          file_ids_restored: chatAttachmentFileIdsRef.current,
+          sessions_in_history: [...new Set(history.map(h => h.session_id))],
+        });
+
         setChatModelHistory(history);
         setMessages(history);
+
+        const primaryId = primaryAttachment?.file_id || fileId;
+        if (primaryId) {
+          setFileId(primaryId);
+        }
+        const dbFilename =
+          primaryAttachment?.filename ||
+          response.data.filename ||
+          `Document (${String(fileId).substring(0, 8)}...)`;
+        setDocumentData({
+          id: primaryId,
+          title: dbFilename,
+          originalName: dbFilename,
+          size: primaryAttachment?.size ?? 0,
+          type: primaryAttachment?.mimetype || 'unknown',
+          gcs_uri: primaryAttachment?.gcs_uri || null,
+          uploadedAt: history.length > 0 ? history[0].timestamp : new Date().toISOString(),
+          status: 'processed',
+          processingProgress: 100,
+        });
+
         if (history.length > 0) {
           const lastMessage = history[history.length - 1];
           setSelectedMessageId(lastMessage.id);
@@ -546,6 +738,9 @@ const ChatModelPage = () => {
             ? renderSecretPromptResponse(rawAnswer)
             : convertJsonToPlainText(rawAnswer);
           setCurrentResponse(responseToDisplay);
+          showResponseImmediately(responseToDisplay);
+          setHasResponse(true);
+          setShowSplitView(true);
         }
       }
     } catch (error) {
@@ -554,7 +749,186 @@ const ChatModelPage = () => {
     }
   };
 
-  const askQuestionToChat = async (question, fileId) => {
+  // General legal chat — no document required
+  const fetchGeneralChatHistory = async (currentSessionId) => {
+    try {
+      console.log('[DB] fetchGeneralChatHistory called with params:', {
+        session_id: currentSessionId,
+        endpoint: `/api/chat/general/history/${currentSessionId}`,
+      });
+
+      const response = await apiService.getGeneralChatHistory(currentSessionId);
+
+      console.log('[DB] Raw response from getGeneralChatHistory:', {
+        success: response.success,
+        session_id: response.data?.session_id,
+        message_count: response.data?.count,
+        is_general_chat: response.data?.is_general_chat,
+      });
+
+      if (response.success && response.data?.history) {
+        const history = response.data.history.map((item) => ({
+          id: item.id,
+          file_id: null,
+          session_id: item.session_id || currentSessionId,
+          question: item.question,
+          answer: item.answer,
+          display_text_left_panel: item.question,
+          timestamp: item.created_at,
+          type: 'general_chat',
+          used_secret_prompt: false,
+          prompt_label: null,
+          is_general_chat: true,
+        }));
+
+        console.log('[DB] Loaded general chat history for continuation:', {
+          total_messages: history.length,
+          session_id_used: currentSessionId,
+        });
+
+        setMessages(history);
+        setSessionId(currentSessionId);
+        setHasResponse(true);
+        setShowSplitView(true);
+
+        if (history.length > 0) {
+          const lastMessage = history[history.length - 1];
+          setSelectedMessageId(lastMessage.id);
+          setCurrentResponse(lastMessage.answer || '');
+          showResponseImmediately(lastMessage.answer || '');
+        }
+      }
+    } catch (error) {
+      console.error('[fetchGeneralChatHistory] Error:', error);
+      setError(`Failed to fetch general chat history: ${error.message}`);
+    }
+  };
+
+  const askGeneralQuestionToChat = async (question) => {
+    try {
+      setIsLoading(true);
+      setIsGeneratingInsights(true);
+      setError(null);
+      setCurrentResponse('');
+      streamBufferRef.current = '';
+      setStreamingStatus('initializing');
+      setStreamingMessage('Starting legal chat...');
+
+      const messageId = Date.now();
+      setPendingQuestion(question.trim());
+      setHasResponse(true);
+      setShowSplitView(true);
+      setChatInput('');
+
+      console.log('[General Chat] Sending question with DB params:', {
+        session_id: sessionId,
+        question_preview: question.trim().substring(0, 80),
+        is_continuing_session: !!sessionId,
+      });
+
+      let newSessionId = sessionId;
+
+      const generalStreamOpts = {
+        ...(chatModelStreamFetchParams || {}),
+        ...(selectedLlmName ? { llm_name: selectedLlmName } : {}),
+      };
+
+      await apiService.askGeneralChatStream(
+        question.trim(),
+        sessionId,
+        (text) => {
+          if (typeof text === 'string') {
+            streamBufferRef.current += text;
+            setCurrentResponse(streamBufferRef.current);
+            setAnimatedResponseContent(streamBufferRef.current);
+            if (!streamingStatus || streamingStatus !== 'generating') {
+              setStreamingStatus('generating');
+              setStreamingMessage('Model thinking');
+            }
+          }
+        },
+        (status, message) => {
+          setStreamingStatus(status);
+          setStreamingMessage(
+            status === 'generating' ? 'Model thinking' : message || getStatusMessage(status)
+          );
+          console.log('[General Chat] Status:', status, message);
+        },
+        (metadata) => {
+          console.log('[General Chat] Metadata from DB:', metadata);
+          if (metadata.session_id) {
+            newSessionId = metadata.session_id;
+            setSessionId(metadata.session_id);
+          }
+        },
+        (doneData) => {
+          console.log('[General Chat] Stream complete. DB params used:', {
+            chat_id: doneData.chat_id,
+            session_id: doneData.session_id,
+            is_general_chat: doneData.is_general_chat,
+            answer_length: doneData.answer_length,
+          });
+          const fromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
+          const fromBuf = streamBufferRef.current || '';
+          const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
+          if (doneData.session_id) newSessionId = doneData.session_id;
+          const resolvedSessionId = newSessionId || sessionId || null;
+
+          setStreamingStatus(null);
+          setStreamingMessage('');
+          const newChat = {
+            id: messageId,
+            file_id: null,
+            session_id: resolvedSessionId,
+            question: question.trim(),
+            answer: finalResponse,
+            display_text_left_panel: question.trim(),
+            timestamp: new Date().toISOString(),
+            type: 'general_chat',
+            used_secret_prompt: false,
+            is_general_chat: true,
+          };
+          setMessages((prev) => [...prev, newChat]);
+          setSelectedMessageId(messageId);
+          setPendingQuestion(null);
+          if (resolvedSessionId) setSessionId(resolvedSessionId);
+          setCurrentResponse(finalResponse);
+          showResponseImmediately(finalResponse);
+          setIsLoading(false);
+          setIsGeneratingInsights(false);
+          setSuccess('Legal question answered!');
+        },
+        (errorMessage, details, code) => {
+          console.error('[General Chat] Stream error:', errorMessage, { code, details });
+          const synthetic = new Error(errorMessage);
+          synthetic.code = code;
+          synthetic.details = details;
+          const friendly = getChatModelQuotaUserMessage(synthetic);
+          if (code) {
+            refreshLimits().catch(() => {});
+          }
+          setError(friendly || errorMessage || 'Failed to get answer.');
+          setIsLoading(false);
+          setIsGeneratingInsights(false);
+          setStreamingStatus(null);
+          setStreamingMessage('');
+          setPendingQuestion(null);
+        },
+        Object.keys(generalStreamOpts).length ? generalStreamOpts : null
+      );
+    } catch (error) {
+      console.error('[General Chat] Error:', error);
+      setError(getChatModelQuotaUserMessage(error) || error.message || 'Failed to get answer.');
+      setIsLoading(false);
+      setIsGeneratingInsights(false);
+      setStreamingStatus(null);
+      setStreamingMessage('');
+      setPendingQuestion(null);
+      throw error;
+    }
+  };
+
+  const askQuestionToChat = async (question, fileId, fileIdsOverride = null) => {
     try {
       setIsLoading(true);
       setIsGeneratingInsights(true);
@@ -577,14 +951,22 @@ const ChatModelPage = () => {
         streamUpdateTimeoutRef.current = null;
       }
 
-      let cleanFileId = fileId;
-      if (fileId && typeof fileId === 'string') {
-        cleanFileId = fileId.replace(/\{\{|\}\}/g, '').replace(/\{|\}/g, '').trim();
-      }
+      const sanitizeId = (id) =>
+        id && typeof id === 'string' ? id.replace(/\{\{|\}\}/g, '').replace(/\{|\}/g, '').trim() : id;
 
-      if (!cleanFileId) {
+      let ids =
+        Array.isArray(fileIdsOverride) && fileIdsOverride.length > 0
+          ? fileIdsOverride.map(sanitizeId).filter(Boolean)
+          : [];
+
+      let cleanFileId = sanitizeId(fileId);
+      if (!ids.length && cleanFileId) {
+        ids = [cleanFileId];
+      }
+      if (!ids.length) {
         throw new Error('No file_id available. Please upload a document first.');
       }
+      cleanFileId = ids[0];
 
       let newSessionId = sessionId;
       let finalMetadata = null;
@@ -609,40 +991,33 @@ const ChatModelPage = () => {
       setShowSplitView(true);
       setChatInput('');
 
+      console.log('[DB] Sending chat request with DB params:', {
+        file_id: cleanFileId,
+        file_ids: ids.length > 1 ? ids : undefined,
+        session_id: sessionId,
+        question_preview: question.trim().substring(0, 100),
+        is_continuing_session: !!sessionId,
+        endpoint: `${CHAT_MODEL_BASE_URL}/api/chat/ask/stream`,
+      });
+
       await apiService.askChatModelQuestionStream(
         question.trim(),
         cleanFileId,
         sessionId,
         (text) => {
-          if (text) {
+          if (typeof text === 'string') {
             streamBufferRef.current += text;
-           
-            const currentText = streamBufferRef.current;
-            setCurrentResponse(currentText);
-            setAnimatedResponseContent(currentText);
-           
-            setMessages((prev) => {
-              const updated = prev.map((msg) =>
-                msg.id === messageId
-                  ? { ...msg, answer: currentText, isStreaming: true }
-                  : msg
-              );
-              return updated;
-            });
-           
-            if (responseRef.current) {
-              responseRef.current.scrollTop = responseRef.current.scrollHeight;
-            }
-           
             if (!streamingStatus || streamingStatus !== 'generating') {
               setStreamingStatus('generating');
-              setStreamingMessage('Generating response from AI...');
+              setStreamingMessage('Model thinking');
             }
           }
         },
         (status, message) => {
           setStreamingStatus(status);
-          setStreamingMessage(message || getStatusMessage(status));
+          setStreamingMessage(
+            status === 'generating' ? 'Model thinking' : message || getStatusMessage(status)
+          );
           console.log('[askQuestionToChat] Status:', status, message);
         },
         (metadata) => {
@@ -663,11 +1038,14 @@ const ChatModelPage = () => {
         (doneData) => {
           console.log('[askQuestionToChat] Stream complete:', doneData);
           finalMetadata = doneData;
-          const finalResponse = streamBufferRef.current;
+          const fromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
+          const fromBuf = streamBufferRef.current || '';
+          const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
          
           if (doneData.session_id) {
             newSessionId = doneData.session_id;
           }
+          const resolvedSessionId = newSessionId || sessionId || null;
          
           setStreamingStatus(null);
           setStreamingMessage('');
@@ -678,7 +1056,7 @@ const ChatModelPage = () => {
                 ? {
                     ...msg,
                     answer: finalResponse,
-                    session_id: newSessionId,
+                    session_id: resolvedSessionId,
                     isStreaming: false,
                   }
                 : msg
@@ -687,9 +1065,9 @@ const ChatModelPage = () => {
           });
          
           setSelectedMessageId(messageId);
-          setSessionId(newSessionId);
+          if (resolvedSessionId) setSessionId(resolvedSessionId);
           setCurrentResponse(finalResponse);
-          setAnimatedResponseContent(finalResponse);
+          showResponseImmediately(finalResponse);
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setSuccess('Question answered!');
@@ -703,9 +1081,15 @@ const ChatModelPage = () => {
             }, 100);
           }
         },
-        (errorMessage, details) => {
-          console.error('[askQuestionToChat] Stream error:', errorMessage, details);
-          setError(`Failed to get answer: ${errorMessage}`);
+        (errorMessage, details, code) => {
+          console.error('[askQuestionToChat] Stream error:', errorMessage, { code, details });
+          const synthetic = new Error(errorMessage);
+          synthetic.code = code;
+          synthetic.details = details;
+          if (code) {
+            refreshLimits().catch(() => {});
+          }
+          setError(getChatModelQuotaUserMessage(synthetic) || errorMessage || 'Failed to get answer.');
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setStreamingStatus(null);
@@ -714,13 +1098,20 @@ const ChatModelPage = () => {
           setMessages((prev) => {
             return prev.filter((msg) => msg.id !== messageId);
           });
-        }
+        },
+        null,
+        false,
+        null,
+        null,
+        selectedLlmName,
+        chatModelStreamFetchParams,
+        ids.length > 1 ? ids : null
       );
      
       return finalMetadata;
     } catch (error) {
       console.error('[askQuestionToChat] Error:', error);
-      setError(`Failed to get answer: ${error.message}`);
+      setError(getChatModelQuotaUserMessage(error) || `Failed to get answer: ${error.message}`);
       setIsLoading(false);
       setIsGeneratingInsights(false);
       setStreamingStatus(null);
@@ -1242,6 +1633,25 @@ const ChatModelPage = () => {
     showResponseImmediately(fullText);
   };
 
+  const selectedMessage = useMemo(
+    () => sessionMessages.find((msg) => msg.id === selectedMessageId) || null,
+    [sessionMessages, selectedMessageId]
+  );
+
+  const suggestedQuestions = useMemo(
+    () =>
+      buildSuggestedQuestions({
+        question: selectedMessage?.question || selectedMessage?.display_text_left_panel || '',
+        response: currentResponse || animatedResponseContent || selectedMessage?.answer || '',
+        promptLabel: selectedMessage?.prompt_label || '',
+      }),
+    [selectedMessage, currentResponse, animatedResponseContent]
+  );
+
+  const handleSuggestedQuestionClick = (suggestion) => {
+    setChatInput(suggestion);
+  };
+
   const baseSendDisabled =
     isLoading ||
     isGeneratingInsights ||
@@ -1310,8 +1720,14 @@ const ChatModelPage = () => {
       if (llm_name) {
         body.llm_name = llm_name;
       }
+      if (chatModelStreamFetchParams?.max_output_tokens != null) {
+        body.max_output_tokens = chatModelStreamFetchParams.max_output_tokens;
+      }
+      if (chatModelStreamFetchParams?.model_temperature != null) {
+        body.model_temperature = chatModelStreamFetchParams.model_temperature;
+      }
 
-      const response = await fetch(`${CHAT_MODEL_BASE_URL}/files/chat/stream`, {
+      const response = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/ask/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1335,12 +1751,14 @@ const ChatModelPage = () => {
       while (true) {
         const { done, value } = await reader.read();
        
-        if (done) {
-          setIsLoading(false);
-          const finalResponse = streamBufferRef.current;
-          if (finalMetadata) {
-            newSessionId = finalMetadata.session_id || newSessionId;
-          }
+          if (done) {
+            setIsLoading(false);
+            const fromDone = (finalMetadata && typeof finalMetadata.answer === 'string') ? finalMetadata.answer : '';
+            const fromBuf = streamBufferRef.current || '';
+            const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
+            if (finalMetadata) {
+              newSessionId = finalMetadata.session_id || newSessionId;
+            }
          
           const newChat = {
             id: Date.now(),
@@ -1362,12 +1780,12 @@ const ChatModelPage = () => {
           setCurrentResponse(finalResponse);
           setHasResponse(true);
           setSuccess('Question answered!');
-          animateResponse(finalResponse);
+          showResponseImmediately(finalResponse);
           break;
         }
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
+        const lines = buffer.split(/\r\n|\n|\r/);
         buffer = lines.pop() || '';
 
         for (const line of lines) {
@@ -1381,7 +1799,9 @@ const ChatModelPage = () => {
          
           if (data === '[DONE]') {
             setIsLoading(false);
-            const finalResponse = streamBufferRef.current;
+            const fromDoneDone = (finalMetadata && typeof finalMetadata.answer === 'string') ? finalMetadata.answer : '';
+            const fromBufDone = streamBufferRef.current || '';
+            const finalResponse = fromDoneDone.length >= fromBufDone.length ? (fromDoneDone || fromBufDone) : fromBufDone;
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || newSessionId;
             }
@@ -1406,7 +1826,7 @@ const ChatModelPage = () => {
             setCurrentResponse(finalResponse);
             setHasResponse(true);
             setSuccess('Question answered!');
-            animateResponse(finalResponse);
+            showResponseImmediately(finalResponse);
             return;
           }
 
@@ -1420,15 +1840,18 @@ const ChatModelPage = () => {
               streamBufferRef.current += parsed.text || '';
             } else if (parsed.type === 'done') {
               finalMetadata = parsed;
-              const finalResponse = streamBufferRef.current;
+              const fd = typeof parsed.answer === 'string' ? parsed.answer : '';
+              const fb = streamBufferRef.current || '';
+              const finalResponse = fd.length >= fb.length ? (fd || fb) : fb;
               setCurrentResponse(finalResponse);
               setIsLoading(false);
-              animateResponse(finalResponse);
+              showResponseImmediately(finalResponse);
             } else if (parsed.type === 'error') {
               setError(parsed.error);
               setIsLoading(false);
             }
           } catch (e) {
+            console.warn('[chatWithDocument] Failed to parse SSE line:', e, data);
           }
         }
       }
@@ -1451,10 +1874,20 @@ const ChatModelPage = () => {
     const files = Array.from(event.target.files);
     console.log('Files selected:', files.length);
     if (files.length === 0) return;
-   
-    const isFreeUser = isUserFreeTier();
-    console.log('Is free user:', isFreeUser);
-   
+
+    if (limitsLoading) {
+      setError('Loading upload limits from server… Please try again in a moment.');
+      event.target.value = '';
+      return;
+    }
+    if (limitsError || maxUploadBytes == null) {
+      setError('Could not load upload limits (llm_chat_config). Please refresh the page.');
+      event.target.value = '';
+      return;
+    }
+
+    const maxSize = maxUploadBytes;
+
     const allowedTypes = [
       'application/pdf',
       'application/msword',
@@ -1465,8 +1898,6 @@ const ChatModelPage = () => {
       'image/tiff',
     ];
     
-    const maxSize = isFreeUser ? FREE_TIER_MAX_FILE_SIZE_BYTES : 300 * 1024 * 1024;
-    
     let hasFileSizeError = false;
     const validFiles = files.filter((file) => {
       if (!allowedTypes.includes(file.type)) {
@@ -1474,18 +1905,17 @@ const ChatModelPage = () => {
         return false;
       }
       
-      if (isFreeUser && file.size > maxSize) {
+      if (file.size > maxSize) {
         const fileSizeFormatted = formatFileSize(file.size);
-        console.log('File size limit exceeded:', { fileName: file.name, fileSize: fileSizeFormatted, maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB` });
+        console.log('File size limit exceeded:', { fileName: file.name, fileSize: fileSizeFormatted, maxSizeMB: maxUploadMbLabel });
         hasFileSizeError = true;
         setFileSizeLimitError({
-          fileName: file.name,
-          fileSize: fileSizeFormatted,
-          maxSize: `${FREE_TIER_MAX_FILE_SIZE_MB} MB`
+          message: formatUploadLimitExceededMessage({
+            fileName: file.name,
+            fileSizeFormatted,
+            limitMbLabel: maxUploadMbLabel,
+          }),
         });
-        return false;
-      } else if (!isFreeUser && file.size > maxSize) {
-        setError(`File "${file.name}" is too large (max 300MB).`);
         return false;
       }
       
@@ -1510,25 +1940,56 @@ const ChatModelPage = () => {
     }
 
     if (validFiles.length > 0) {
-      const fileToUpload = validFiles[0];
-      if (validFiles.length > 1) {
-        setError(`Multiple files selected. Uploading "${fileToUpload.name}" only.`);
+      const maxFilesFromLimits =
+        limits?.max_upload_files != null ? Math.max(1, Number(limits.max_upload_files)) : 8;
+      let toUpload = validFiles;
+      if (validFiles.length > maxFilesFromLimits) {
+        setError(
+          `Only the first ${maxFilesFromLimits} file(s) are uploaded (maximum ${maxFilesFromLimits} per selection).`
+        );
+        toUpload = validFiles.slice(0, maxFilesFromLimits);
       }
-     
+
       try {
-        setDocumentData({
-          name: fileToUpload.name,
-          originalName: fileToUpload.name,
-          size: fileToUpload.size,
-          type: fileToUpload.type,
-          uploadedAt: new Date().toISOString(),
-        });
-        const result = await uploadDocumentToChat(fileToUpload);
-        console.log('[handleFileUpload] Document uploaded successfully:', result);
+        if (toUpload.length === 1) {
+          const fileToUpload = toUpload[0];
+          setDocumentData({
+            name: fileToUpload.name,
+            originalName: fileToUpload.name,
+            size: fileToUpload.size,
+            type: fileToUpload.type,
+            uploadedAt: new Date().toISOString(),
+          });
+          const result = await uploadDocumentToChat(fileToUpload);
+          console.log('[handleFileUpload] Document uploaded successfully:', result);
+        } else {
+          setDocumentData({
+            name: `${toUpload.length} documents`,
+            originalName: toUpload.map((f) => f.name).join(', '),
+            size: toUpload.reduce((s, f) => s + f.size, 0),
+            type: 'multi',
+            uploadedAt: new Date().toISOString(),
+          });
+          for (const f of toUpload) {
+            await uploadDocumentToChat(f, { skipFinalize: true });
+          }
+          setIsChatUploading(false);
+          setUploadProgress(100);
+          setSuccess(
+            `${toUpload.length} documents uploaded successfully. You can ask questions about all of them.`
+          );
+          setShowSplitView(true);
+          setHasResponse(true);
+          setStreamingStatus('ready');
+          setStreamingMessage('Documents ready. You can now ask questions.');
+          fetchChatModelFiles();
+          console.log('[handleFileUpload] Multi-document upload finished');
+        }
       } catch (error) {
         console.error('[handleFileUpload] Upload error:', error);
         setError(`Failed to upload document: ${error.message}`);
         setDocumentData(null);
+        setIsChatUploading(false);
       }
     }
    
@@ -1589,7 +2050,7 @@ const ChatModelPage = () => {
 
       setUploadProgress(40);
 
-      const response = await fetch(`${CHAT_MODEL_BASE_URL}/chat/google-drive/upload`, {
+      const response = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/google-drive/upload`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -1627,6 +2088,8 @@ const ChatModelPage = () => {
       }
 
       console.log('[handleGoogleDriveUpload] Extracted file_id:', uploadedFileId);
+
+      chatAttachmentFileIdsRef.current = [...new Set([...chatAttachmentFileIdsRef.current, uploadedFileId])];
 
       setUploadedFileId(uploadedFileId);
       setFileId(uploadedFileId);
@@ -1685,15 +2148,15 @@ const ChatModelPage = () => {
     setShowDropdown(false);
    
     console.log('[handleDropdownSelect] Looking for messages with secret_id:', secretId, 'file_id:', fileId);
-    console.log('[handleDropdownSelect] Total messages:', messages.length);
-    console.log('[handleDropdownSelect] Messages with secret prompts:', messages.filter(m => m.used_secret_prompt).map(m => ({
+    console.log('[handleDropdownSelect] Total messages (session):', sessionMessages.length);
+    console.log('[handleDropdownSelect] Messages with secret prompts:', sessionMessages.filter(m => m.used_secret_prompt).map(m => ({
       id: m.id,
       secret_id: m.secret_id,
       prompt_label: m.prompt_label,
       file_id: m.file_id
     })));
    
-    const messagesForThisPrompt = messages.filter(
+    const messagesForThisPrompt = sessionMessages.filter(
       (msg) => {
         const matches = msg.used_secret_prompt &&
                        msg.secret_id === secretId &&
@@ -1787,12 +2250,19 @@ const ChatModelPage = () => {
       }
      
       const promptLabel = selectedSecret.name || 'Secret Prompt';
+      const secretAttachmentIds =
+        chatAttachmentFileIdsRef.current.length > 0
+          ? chatAttachmentFileIdsRef.current
+          : fileId
+            ? [fileId]
+            : [];
       try {
         setIsGeneratingInsights(true);
         setError(null);
         console.log('[handleSend] Triggering secret analysis with streaming:', {
           secretId: selectedSecretId,
-          fileId,
+          fileId: secretAttachmentIds[0],
+          file_ids: secretAttachmentIds.length > 1 ? secretAttachmentIds : undefined,
           additionalInput: chatInput.trim(),
           promptLabel: promptLabel,
           llmName: selectedLlmName,
@@ -1821,7 +2291,7 @@ const ChatModelPage = () => {
 
         const newChat = {
           id: messageId,
-          file_id: fileId,
+          file_id: secretAttachmentIds[0] || fileId,
           session_id: sessionId,
           question: promptLabel,
           answer: '',
@@ -1844,10 +2314,10 @@ const ChatModelPage = () => {
 
         await apiService.askChatModelQuestionStream(
           '',
-          fileId,
+          secretAttachmentIds[0] || fileId,
           sessionId,
           (text) => {
-            if (text) {
+            if (typeof text === 'string') {
               streamBufferRef.current += text;
             }
           },
@@ -1864,7 +2334,9 @@ const ChatModelPage = () => {
           (doneData) => {
             console.log('[Secret Prompt] Stream complete:', doneData);
             finalMetadata = doneData;
-            const finalResponse = (doneData && doneData.answer) ? doneData.answer : (streamBufferRef.current || '');
+            const sFromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
+            const sFromBuf = streamBufferRef.current || '';
+            const finalResponse = sFromDone.length >= sFromBuf.length ? (sFromDone || sFromBuf) : sFromBuf;
             console.log('[Secret Prompt] Final response length:', finalResponse.length);
             console.log('[Secret Prompt] Response preview:', finalResponse.substring(0, 200));
            
@@ -1945,7 +2417,7 @@ const ChatModelPage = () => {
             setSessionId(newSessionId);
             setCurrentResponse(responseToDisplay);
             setAnimatedResponseContent(responseToDisplay);
-            animateResponse(responseToDisplay, true);
+            showResponseImmediately(responseToDisplay);
             setHasResponse(true);
             setSuccess('Analysis completed successfully!');
             setIsGeneratingInsights(false);
@@ -1961,14 +2433,16 @@ const ChatModelPage = () => {
           true,
           promptLabel,
           chatInput.trim() || '',
-          selectedLlmName
+          selectedLlmName,
+          chatModelStreamFetchParams,
+          secretAttachmentIds.length > 1 ? secretAttachmentIds : null
         );
       } catch (error) {
         console.error('[handleSend] Analysis error:', error);
         if (error.message && error.message.includes('No content found')) {
           setError('Document is still processing. Please wait a few moments and try again.');
         } else {
-          setError(`Analysis failed: ${error.message}`);
+          setError(getChatModelQuotaUserMessage(error) || `Analysis failed: ${error.message}`);
         }
       } finally {
         setIsGeneratingInsights(false);
@@ -2005,17 +2479,20 @@ const ChatModelPage = () => {
       try {
         const currentFileId = uploadedFileId || fileId;
         if (currentFileId) {
-          console.log('[handleSend] Using new chat ask API');
-          console.log('[handleSend] file_id:', currentFileId);
-          console.log('[handleSend] question:', chatInput.trim());
-          await askQuestionToChat(chatInput, currentFileId);
+          const attachmentIds =
+            chatAttachmentFileIdsRef.current.length > 0
+              ? chatAttachmentFileIdsRef.current
+              : [currentFileId];
+          console.log('[handleSend] Document chat — file_id(s):', attachmentIds, 'session_id:', sessionId);
+          await askQuestionToChat(chatInput, attachmentIds[0], attachmentIds);
         } else {
-          setError('Please upload a document first before asking questions.');
-          console.warn('[handleSend] No file_id available. uploadedFileId:', uploadedFileId, 'fileId:', fileId);
+          // No document uploaded — use general legal chat
+          console.log('[handleSend] No document — routing to general legal chat, session_id:', sessionId);
+          await askGeneralQuestionToChat(chatInput);
         }
       } catch (error) {
         console.error('[handleSend] Chat error:', error);
-        setError(error.message || 'Failed to get answer. Please try again.');
+        setError(getChatModelQuotaUserMessage(error) || error.message || 'Failed to get answer. Please try again.');
       }
     }
   };
@@ -2112,9 +2589,12 @@ const ChatModelPage = () => {
     setIsSecretPromptSelected(false);
     setSelectedMessageId(null);
     setActiveDropdown('Custom Query');
-    const newSessionId = `session-${Date.now()}`;
+    const newSessionId = crypto.randomUUID();
     setSessionId(newSessionId);
+    console.log('[Session] New chat session created with UUID:', newSessionId);
+    chatAttachmentFileIdsRef.current = [];
     setSuccess('New chat session started!');
+    navigate('/chatmodel', { replace: true });
   };
 
   const startNewChat = () => {
@@ -2230,8 +2710,8 @@ const ChatModelPage = () => {
 
   // Format structured JSON responses (similar to AnalysisPage)
   useEffect(() => {
-    if (selectedMessageId && messages.length > 0 && currentResponse) {
-      const selectedMessage = messages.find(msg => msg.id === selectedMessageId);
+    if (selectedMessageId && sessionMessages.length > 0 && currentResponse) {
+      const selectedMessage = sessionMessages.find(msg => msg.id === selectedMessageId);
       if (selectedMessage) {
         const rawAnswer = selectedMessage.answer || selectedMessage.response || '';
         const isSecretPrompt = selectedMessage.used_secret_prompt || false;
@@ -2247,7 +2727,37 @@ const ChatModelPage = () => {
         }
       }
     }
-  }, [selectedMessageId, messages, currentResponse]);
+  }, [selectedMessageId, sessionMessages, currentResponse]);
+
+  // When the active session changes, drop selection/response that belong to another session.
+  useEffect(() => {
+    if (!sessionId) return;
+    const list = messages.filter(
+      (m) => m.session_id != null && String(m.session_id) === String(sessionId)
+    );
+    if (list.length === 0) {
+      if (selectedMessageId != null) setSelectedMessageId(null);
+      setCurrentResponse('');
+      setAnimatedResponseContent('');
+      setHasResponse(false);
+      return;
+    }
+    const stillValid =
+      selectedMessageId != null && list.some((m) => m.id === selectedMessageId);
+    if (!stillValid && selectedMessageId != null) {
+      const last = list[list.length - 1];
+      setSelectedMessageId(last.id);
+      const rawAnswer = last.answer || '';
+      const isStructured = last.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
+      const responseToDisplay = isStructured
+        ? renderSecretPromptResponse(rawAnswer)
+        : convertJsonToPlainText(rawAnswer);
+      setCurrentResponse(responseToDisplay);
+      setAnimatedResponseContent(responseToDisplay);
+      setIsAnimatingResponse(false);
+      setHasResponse(true);
+    }
+  }, [sessionId, messages, selectedMessageId]);
 
 
 
@@ -2435,6 +2945,117 @@ const ChatModelPage = () => {
       console.error('Error cleaning up processing state:', err);
     }
 
+    // URL / navigation state first so refresh and deep links do not lose the chat to localStorage.
+    if (location.state?.newChat) {
+      clearAllChatData();
+      window.history.replaceState({}, document.title);
+      return;
+    }
+
+    if (paramFileId && paramSessionId) {
+      console.log('[DB] Resuming past session from URL params:', {
+        file_id: paramFileId,
+        session_id: paramSessionId,
+        source: 'URL params',
+      });
+      setFileId(paramFileId);
+      chatAttachmentFileIdsRef.current = [paramFileId];
+      setSessionId(paramSessionId);
+      setShowSplitView(true);
+      setHasResponse(true);
+      fetchChatModelHistory(paramFileId, paramSessionId);
+      window.history.replaceState({}, document.title);
+      return;
+    }
+
+    if (paramFileId && !paramSessionId) {
+      console.log('[ChatModelPage] Loading chat from fileId only (resolve latest session):', { paramFileId });
+      setFileId(paramFileId);
+      chatAttachmentFileIdsRef.current = [paramFileId];
+      setShowSplitView(true);
+      setMessages([]);
+      setChatModelHistory([]);
+      setSelectedMessageId(null);
+      setCurrentResponse('');
+      setAnimatedResponseContent('');
+      (async () => {
+        try {
+          const sessRes = await apiService.getChatModelSessions(paramFileId);
+          if (sessRes.success && sessRes.data?.sessions?.length) {
+            const latest = sessRes.data.sessions[0];
+            setSessionId(latest.session_id);
+            setHasResponse(true);
+            await fetchChatModelHistory(paramFileId, latest.session_id);
+          } else {
+            const nid = crypto.randomUUID();
+            setSessionId(nid);
+            setHasResponse(false);
+            await fetchChatModelHistory(paramFileId, nid);
+          }
+        } catch (e) {
+          console.error('[ChatModelPage] Failed to resolve session for file:', e);
+          setError('Failed to load document chats');
+        }
+      })();
+      return;
+    }
+
+    // /chatmodel/session/:sessionId — general LLM chat (refresh-safe)
+    if (paramSessionId && !paramFileId) {
+      console.log('[ChatModelPage] General chat from URL:', paramSessionId);
+      setFileId(null);
+      setDocumentData(null);
+      chatAttachmentFileIdsRef.current = [];
+      setSessionId(paramSessionId);
+      setShowSplitView(true);
+      setHasResponse(true);
+      const msgs = messagesRef.current;
+      const skipFetch =
+        msgs.length > 0 &&
+        msgs.every((m) => !m.isStreaming) &&
+        msgs.some((m) => String(m.session_id || sessionId || '') === String(paramSessionId));
+      if (!skipFetch) {
+        setMessages([]);
+        fetchGeneralChatHistory(paramSessionId);
+      }
+      window.history.replaceState({}, document.title);
+      return;
+    }
+
+    if (location.state?.chat) {
+      const chatData = location.state.chat;
+      console.log('[DB] Resuming past session from navigation state:', {
+        file_id: chatData.file_id,
+        session_id: chatData.session_id,
+        chat_id: chatData.id,
+        source: 'location.state.chat',
+      });
+      if (chatData.is_general_chat || (!chatData.file_id && chatData.session_id)) {
+        // General legal chat — load by session only (no document)
+        console.log('[DB] Resuming general legal chat session:', chatData.session_id);
+        setSessionId(chatData.session_id);
+        setHasResponse(true);
+        fetchGeneralChatHistory(chatData.session_id);
+      } else if (chatData.file_id && chatData.session_id) {
+        setFileId(chatData.file_id);
+        chatAttachmentFileIdsRef.current = [chatData.file_id];
+        setSessionId(chatData.session_id);
+        setShowSplitView(true);
+        setHasResponse(true);
+        fetchChatHistory(chatData.file_id, chatData.session_id, chatData.id);
+      } else if (chatData.session_id) {
+        console.log('[DB] Loading chat by session_id only:', chatData.session_id);
+        setSessionId(chatData.session_id);
+        setShowSplitView(true);
+        setHasResponse(true);
+        fetchChatHistoryBySessionId(chatData.session_id, chatData.id);
+      } else {
+        setError('Unable to load chat: Missing required information (session_id or file_id)');
+      }
+      window.history.replaceState({}, document.title);
+      return;
+    }
+
     try {
       const savedMessages = localStorage.getItem('messages');
       if (savedMessages) {
@@ -2445,9 +3066,11 @@ const ChatModelPage = () => {
       }
       const savedSessionId = localStorage.getItem('sessionId');
       if (savedSessionId) {
+        console.log('[DB] Restored session ID from localStorage:', savedSessionId);
         setSessionId(savedSessionId);
       } else {
-        const newSessionId = `session-${Date.now()}`;
+        const newSessionId = crypto.randomUUID();
+        console.log('[Session] No saved session, created new UUID session:', newSessionId);
         setSessionId(newSessionId);
       }
       const savedCurrentResponse = localStorage.getItem('currentResponse');
@@ -2476,7 +3099,10 @@ const ChatModelPage = () => {
         setDocumentData(parsed);
       }
       const savedFileId = localStorage.getItem('fileId');
-      if (savedFileId) setFileId(savedFileId);
+      if (savedFileId) {
+        setFileId(savedFileId);
+        chatAttachmentFileIdsRef.current = [savedFileId];
+      }
       const savedProcessingStatus = localStorage.getItem('processingStatus');
       if (savedProcessingStatus) {
         const parsed = JSON.parse(savedProcessingStatus);
@@ -2486,48 +3112,29 @@ const ChatModelPage = () => {
     } catch (error) {
       console.error('[AnalysisPage] Error restoring from localStorage:', error);
       if (!sessionId) {
-        const newSessionId = `session-${Date.now()}`;
+        const newSessionId = crypto.randomUUID();
+        console.log('[Session] Error recovery: created new UUID session:', newSessionId);
         setSessionId(newSessionId);
       }
     }
-
-    if (location.state?.newChat) {
-      clearAllChatData();
-      window.history.replaceState({}, document.title);
-    } else if (paramFileId && paramSessionId) {
-      console.log('[ChatModelPage] Loading chat from URL params:', { paramFileId, paramSessionId });
-      setFileId(paramFileId);
-      setSessionId(paramSessionId);
-      setShowSplitView(true);
-      setHasResponse(true);
-      fetchChatModelHistory(paramFileId, paramSessionId);
-    } else if (paramFileId && !paramSessionId) {
-      console.log('[ChatModelPage] Loading chat from fileId only:', { paramFileId });
-      setFileId(paramFileId);
-      setShowSplitView(true);
-      setHasResponse(true);
-      fetchChatModelHistory(paramFileId, null);
-    } else if (location.state?.chat) {
-      const chatData = location.state.chat;
-      console.log('[ChatModelPage] Loading chat from location state:', chatData);
-      if (chatData.file_id && chatData.session_id) {
-        setFileId(chatData.file_id);
-        setSessionId(chatData.session_id);
-        setShowSplitView(true);
-        setHasResponse(true);
-        fetchChatHistory(chatData.file_id, chatData.session_id, chatData.id);
-      } else if (chatData.session_id) {
-        console.log('[AnalysisPage] Loading chat with session_id only:', chatData.session_id);
-        setSessionId(chatData.session_id);
-        setShowSplitView(true);
-        setHasResponse(true);
-        fetchChatHistoryBySessionId(chatData.session_id, chatData.id);
-      } else {
-        setError('Unable to load chat: Missing required information (session_id or file_id)');
-      }
-      window.history.replaceState({}, document.title);
-    }
   }, [location.state, paramFileId, paramSessionId]);
+
+  // Keep URL in sync so refresh restores the same session (general vs document chat).
+  useEffect(() => {
+    if (location.state?.newChat) return;
+    if (!sessionId) return;
+    if (fileId) {
+      const target = `/chatmodel/${fileId}/${sessionId}`;
+      if (location.pathname !== target) {
+        navigate(target, { replace: true });
+      }
+      return;
+    }
+    if (location.pathname.startsWith('/chatmodel/session/')) return;
+    if (location.pathname !== '/chatmodel') return;
+    if (!hasResponse && messagesRef.current.length === 0) return;
+    navigate(`/chatmodel/session/${encodeURIComponent(sessionId)}`, { replace: true });
+  }, [sessionId, fileId, hasResponse, navigate, location.pathname, location.state?.newChat, messages.length]);
 
   useEffect(() => {
     if (showSplitView) {
@@ -2562,15 +3169,15 @@ const ChatModelPage = () => {
   const markdownComponents = {
     h1: ({ node, ...props }) => (
       <h1
-        className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 mt-6 sm:mt-8 text-gray-900 border-b-2 border-gray-300 pb-2 sm:pb-3 analysis-page-ai-response break-words"
+        className="text-[26px] font-bold mb-5 mt-7 text-[#243124] border-b border-[#d8d1c5] pb-3 analysis-page-ai-response break-words"
         {...props}
       />
     ),
     h2: ({ node, ...props }) => (
-      <h2 className="text-lg sm:text-xl lg:text-2xl font-bold mb-4 sm:mb-5 mt-5 sm:mt-7 text-gray-900 border-b border-gray-200 pb-2 analysis-page-ai-response break-words" {...props} />
+      <h2 className="text-[22px] font-bold mb-4 mt-6 text-[#243124] border-b border-[#e4ddd2] pb-2 analysis-page-ai-response break-words" {...props} />
     ),
     h3: ({ node, ...props }) => (
-      <h3 className="text-base sm:text-lg lg:text-xl font-semibold mb-3 sm:mb-4 mt-4 sm:mt-6 text-gray-800 analysis-page-ai-response break-words" {...props} />
+      <h3 className="text-[18px] font-semibold mb-3 mt-5 text-[#243124] analysis-page-ai-response break-words" {...props} />
     ),
     h4: ({ node, ...props }) => (
       <h4 className="text-sm sm:text-base lg:text-lg font-semibold mb-2 sm:mb-3 mt-3 sm:mt-5 text-gray-800 analysis-page-ai-response break-words" {...props} />
@@ -2582,13 +3189,13 @@ const ChatModelPage = () => {
       <h6 className="text-xs sm:text-sm font-semibold mb-2 mt-2 sm:mt-3 text-gray-700 analysis-page-ai-response break-words" {...props} />
     ),
     p: ({ node, ...props }) => (
-      <p className="mb-3 sm:mb-4 leading-relaxed text-gray-800 text-sm sm:text-[15px] analysis-page-ai-response break-words" {...props} />
+      <p className="mb-4 leading-[1.9] text-[#2f2a22] text-[17px] analysis-page-ai-response break-words" {...props} />
     ),
     strong: ({ node, ...props }) => <strong className="font-bold text-gray-900" {...props} />,
     em: ({ node, ...props }) => <em className="italic text-gray-800" {...props} />,
-    ul: ({ node, ...props }) => <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />,
-    ol: ({ node, ...props }) => <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />,
-    li: ({ node, ...props }) => <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />,
+    ul: ({ node, ...props }) => <ul className="list-disc pl-7 mb-4 space-y-2 text-[#2f2a22]" {...props} />,
+    ol: ({ node, ...props }) => <ol className="list-decimal pl-7 mb-4 space-y-2 text-[#2f2a22]" {...props} />,
+    li: ({ node, ...props }) => <li className="leading-[1.9] text-[#2f2a22] text-[17px] analysis-page-ai-response" {...props} />,
     a: ({ node, ...props }) => (
       <a
         className="text-[#21C1B6] hover:text-[#1AA49B] underline font-medium transition-colors"
@@ -2599,7 +3206,7 @@ const ChatModelPage = () => {
     ),
     blockquote: ({ node, ...props }) => (
       <blockquote
-        className="border-l-4 border-[#21C1B6] pl-3 sm:pl-4 py-2 my-3 sm:my-4 bg-[#E0F7F6] text-gray-700 italic rounded-r analysis-page-ai-response text-sm sm:text-base break-words"
+        className="border-l-4 border-[#1f6b5f] pl-4 py-3 my-4 bg-gray-50 text-[#5b554a] italic rounded-r analysis-page-ai-response text-[16px] break-words"
         {...props}
       />
     ),
@@ -2609,7 +3216,7 @@ const ChatModelPage = () => {
       if (inline) {
         return (
           <code
-            className="bg-gray-100 text-red-600 px-1 sm:px-1.5 py-0.5 rounded text-xs sm:text-sm font-mono border border-gray-200 break-all"
+            className="bg-gray-100 text-[#a53d2d] px-1.5 py-0.5 rounded text-[13px] font-mono border border-[#ddd6ca] break-all"
             {...props}
           >
             {children}
@@ -2623,8 +3230,8 @@ const ChatModelPage = () => {
               {language}
             </div>
           )}
-          <pre className={`bg-gray-900 text-gray-100 p-2 sm:p-4 ${language ? 'rounded-b' : 'rounded'} overflow-x-auto`}>
-            <code className="font-mono text-xs sm:text-sm" {...props}>
+          <pre className={`bg-[#f3f4f6] text-[#243124] p-4 ${language ? 'rounded-b' : 'rounded'} overflow-x-auto border border-[#d8d1c5]`}>
+            <code className="font-mono text-[13px]" {...props}>
               {children}
             </code>
           </pre>
@@ -2632,26 +3239,26 @@ const ChatModelPage = () => {
       );
     },
     pre: ({ node, ...props }) => (
-      <pre className="bg-gray-900 text-gray-100 p-2 sm:p-4 rounded my-3 sm:my-4 overflow-x-auto text-xs sm:text-sm" {...props} />
+      <pre className="bg-[#f3f4f6] text-[#243124] p-4 rounded my-4 overflow-x-auto text-[13px] border border-[#d8d1c5]" {...props} />
     ),
     table: ({ node, ...props }) => (
-      <div className="my-4 sm:my-6 rounded-lg border border-gray-300 block max-w-full">
-        <table className="border-collapse text-xs sm:text-sm w-full" {...props} />
+      <div className="my-6 rounded-lg border border-[#d6d0c4] block max-w-full overflow-hidden">
+        <table className="border-collapse text-[14px] w-full" {...props} />
       </div>
     ),
-    thead: ({ node, ...props }) => <thead className="bg-gray-100" {...props} />,
+    thead: ({ node, ...props }) => <thead className="bg-gray-50" {...props} />,
     th: ({ node, ...props }) => (
       <th
-        className="px-2 sm:px-3 py-2 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-r border-gray-300 whitespace-normal last:border-r-0 break-words"
+        className="px-3 py-2.5 text-left text-[11px] font-semibold text-[#5b554a] uppercase tracking-[0.12em] border-b border-r border-[#d6d0c4] whitespace-normal last:border-r-0 break-words"
         {...props}
       />
     ),
-    tbody: ({ node, ...props }) => <tbody className="bg-white divide-y divide-gray-200" {...props} />,
+    tbody: ({ node, ...props }) => <tbody className="bg-white divide-y divide-[#ece7de]" {...props} />,
     tr: ({ node, ...props }) => <tr className="hover:bg-gray-50 transition-colors" {...props} />,
     td: ({ node, ...props }) => (
-      <td className="px-2 sm:px-3 py-2 text-xs sm:text-sm text-gray-800 border-b border-r border-gray-200 align-top last:border-r-0 break-words" {...props} />
+      <td className="px-3 py-2.5 text-[14px] text-[#2f2a22] border-b border-r border-[#ece7de] align-top last:border-r-0 break-words" {...props} />
     ),
-    hr: ({ node, ...props }) => <hr className="my-6 border-t-2 border-gray-300" {...props} />,
+    hr: ({ node, ...props }) => <hr className="my-6 border-t border-[#d8d1c5]" {...props} />,
     img: ({ node, ...props }) => <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />,
   };
 
@@ -2660,37 +3267,86 @@ const ChatModelPage = () => {
       return `Analysis : ${activeDropdown}...`;
     }
     if (!fileId) {
-      return 'Upload a document to get started';
+      return 'Ask a legal question... (or upload a document for document-specific chat)';
     }
     if (processingStatus?.status && processingStatus.status !== 'processed' && progressPercentage < 100) {
       return `${processingStatus.current_operation || 'Processing document...'} (${Math.round(progressPercentage)}%)`;
     }
-    return showSplitView ? 'Ask a question...' : 'Message Legal Assistant...';
+    return showSplitView ? 'Ask a question about the document...' : 'Ask a legal question or question about your document...';
   };
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
-      {error && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
-          <div className="bg-red-50 border border-red-200 text-red-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-start space-x-2">
-            <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm">{error}</p>
+      {error && (() => {
+        const isLimitError = typeof error === 'object' && error.isLimit;
+        const errorTitle = isLimitError ? error.title : 'Something went wrong';
+        const errorBody = isLimitError ? error.body : (typeof error === 'string' ? error : error.body || String(error));
+        const limitIcons = { minute: '⏱️', hour: '🕐', daily: '📅', tokens: '🔋' };
+        const limitEmoji = isLimitError ? (limitIcons[error.limitType] || '🚫') : null;
+
+        if (isLimitError) {
+          return (
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-md">
+              <div className="bg-white rounded-2xl shadow-2xl border border-[#cfe1db] overflow-hidden">
+                <div className="bg-gradient-to-r from-[#21C1B6] to-[#1f6b5f] px-5 py-3.5 flex items-center justify-between">
+                  <div className="flex items-center space-x-2.5">
+                    <span className="text-xl leading-none">{limitEmoji}</span>
+                    <h3 className="text-white font-semibold text-sm tracking-wide">{errorTitle}</h3>
+                  </div>
+                  <button onClick={() => setError(null)} className="text-white/70 hover:text-white transition-colors ml-3">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="bg-[#eef5f2] px-5 py-4">
+                  <p className="text-sm text-[#2b3528] leading-relaxed">{errorBody}</p>
+                  <div className="mt-4 pt-3 border-t border-[#cfe1db] flex items-center justify-between">
+                    <div className="flex items-center space-x-1.5 text-xs text-[#1f6b5f]/70">
+                      <Clock className="h-3 w-3" />
+                      <span>Limits reset automatically</span>
+                    </div>
+                    <button
+                      onClick={() => setError(null)}
+                      className="px-4 py-1.5 bg-[#21C1B6] hover:bg-[#1AA49B] text-white text-xs font-semibold rounded-lg transition-colors"
+                    >
+                      Got it
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">
-              <X className="h-4 w-4" />
-            </button>
+          );
+        }
+        return (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-md">
+            <div className="bg-white rounded-xl shadow-xl border border-[#cfe1db] overflow-hidden">
+              <div className="bg-gradient-to-r from-[#21C1B6] to-[#1f6b5f] px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <AlertCircle className="h-4 w-4 text-white flex-shrink-0" />
+                  <h3 className="text-white font-semibold text-sm">{errorTitle}</h3>
+                </div>
+                <button onClick={() => setError(null)} className="text-white/70 hover:text-white transition-colors ml-3">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="bg-[#eef5f2] px-4 py-3">
+                <p className="text-sm text-[#2b3528] leading-relaxed">{errorBody}</p>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
       {success && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
-          <div className="bg-green-50 border border-green-200 text-green-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-center space-x-2">
-            <CheckCircle className="h-5 w-5 flex-shrink-0" />
-            <span className="text-sm">{success}</span>
-            <button onClick={() => setSuccess(null)} className="ml-auto text-green-500 hover:text-green-700">
-              <X className="h-4 w-4" />
-            </button>
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-sm">
+          <div className="bg-white rounded-xl shadow-xl border border-[#cfe1db] overflow-hidden">
+            <div className="bg-gradient-to-r from-[#21C1B6] to-[#1f6b5f] px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <CheckCircle className="h-4 w-4 text-white flex-shrink-0" />
+                <span className="text-white font-semibold text-sm">{success}</span>
+              </div>
+              <button onClick={() => setSuccess(null)} className="text-white/70 hover:text-white transition-colors ml-3">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2873,6 +3529,7 @@ const ChatModelPage = () => {
                 </div>
                 )}
               </form>
+              <RateQuotaPills limits={limits} className="mt-2" />
               
               {fileSizeLimitError && (
                 <div className="mt-2 animate-fadeIn">
@@ -2880,25 +3537,17 @@ const ChatModelPage = () => {
                     <div className="flex items-start gap-2">
                       <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
                       <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm font-semibold text-gray-900 mb-1">Upload limit exceeded</p>
                         <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
-                          <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                          {fileSizeLimitError.message}
                         </p>
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => {
-                              setFileSizeLimitError(null);
-                              navigate('/subscription-plans');
-                            }}
-                            className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
-                          >
-                            <Zap className="h-3 w-3 mr-1.5" />
-                            Upgrade Plan
-                          </button>
-                          <button
+                            type="button"
                             onClick={() => setFileSizeLimitError(null)}
-                            className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                            className="px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
                           >
-                            Dismiss
+                            OK
                           </button>
                         </div>
                       </div>
@@ -2916,7 +3565,7 @@ const ChatModelPage = () => {
           </div>
           </div>
          
-          {messages.length > 0 && (
+          {sessionMessages.length > 0 && (
             <div className="border-t border-gray-200 bg-white flex-shrink-0" style={{ height: '30vh', minHeight: '250px' }}>
               <div className="h-full flex flex-col">
                 <div className="p-2 sm:p-3 border-b border-gray-200 flex-shrink-0">
@@ -2925,13 +3574,13 @@ const ChatModelPage = () => {
                       <MessageSquare className="h-4 w-4 mr-2" />
                       Recent Questions
                     </h2>
-                    <span className="text-xs text-gray-500">{messages.length} question{messages.length !== 1 ? 's' : ''}</span>
+                    <span className="text-xs text-gray-500">{sessionMessages.length} question{sessionMessages.length !== 1 ? 's' : ''}</span>
                   </div>
                 </div>
                
-                <div className="flex-1 overflow-y-auto px-2 sm:px-3 py-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300">
+                <div className="flex-1 overflow-y-auto px-2 sm:px-3 py-2 [scrollbar-width:thin] [scrollbar-color:#c5c7cc_#f3f4f6] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full">
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                    {messages.slice(0, 9).map((msg, i) => (
+                    {sessionMessages.slice(0, 9).map((msg, i) => (
                       <div
                         key={msg.id || i}
                         onClick={() => {
@@ -2951,13 +3600,13 @@ const ChatModelPage = () => {
                     ))}
                   </div>
                  
-                  {messages.length > 9 && (
+                  {sessionMessages.length > 9 && (
                     <div className="mt-2 text-center">
                       <button
                         onClick={() => setShowSplitView(true)}
                         className="text-xs text-[#21C1B6] hover:text-[#1AA49B] font-medium"
                       >
-                        View all {messages.length} questions →
+                        View all {sessionMessages.length} questions →
                       </button>
                     </div>
                   )}
@@ -2970,60 +3619,89 @@ const ChatModelPage = () => {
 
 
         <>
-          <div className="w-full lg:w-2/5 border-r-0 lg:border-r border-b lg:border-b-0 border-gray-200 flex flex-col bg-white h-1/3 lg:h-full">
-            <div className="p-2 sm:p-3 border-b border-black border-opacity-20">
-              <div className="flex items-center justify-between mb-2 sm:mb-3">
-                <h2 className="text-sm sm:text-base font-semibold text-gray-900">Questions</h2>
+          <div
+            ref={splitContainerRef}
+            className={`w-full h-full flex flex-col lg:flex-row ${isResizingSplit ? 'select-none' : ''}`}
+          >
+          <div
+            className="w-full border-r-0 lg:border-r border-b lg:border-b-0 border-gray-200 flex flex-col bg-white h-1/2 lg:h-full"
+            style={
+              isDesktopSplit
+                ? { width: `${splitLeftWidth}%`, flex: `0 0 ${splitLeftWidth}%` }
+                : undefined
+            }
+          >
+            <div className="p-4 border-b border-gray-200 bg-white">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="min-w-0">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-[#807868]">
+                    {documentData?.originalName ? 'AI Projects' : 'Legal Assistant'}
+                  </p>
+                  <h2 className="text-base sm:text-lg font-semibold text-[#2b3528] truncate">
+                    {documentData?.originalName
+                      ? documentData.originalName
+                      : selectedMessageId
+                        ? (sessionMessages.find((msg) => msg.id === selectedMessageId)?.display_text_left_panel || 'Legal Chat')
+                        : 'General Legal Chat'}
+                  </h2>
+                </div>
                 <button
                   onClick={startNewChat}
-                  className="px-3 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
+                  className="px-3 py-1.5 text-xs font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors border border-gray-200"
                 >
                   New Chat
                 </button>
               </div>
-              <div className="relative mb-3">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400" />
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#8e8678]" />
                 <input
                   type="text"
                   placeholder="Search questions..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 bg-gray-100 rounded-lg text-xs text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#21C1B6] focus:border-transparent"
+                  className="w-full pl-9 pr-3 py-2 bg-white rounded-lg text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1f6b5f] border border-gray-200"
                 />
               </div>
             </div>
-            <DocumentList
-              uploadedDocuments={uploadedDocuments}
-              fileId={fileId}
-              setFileId={setFileId}
-              setDocumentData={setDocumentData}
-              formatFileSize={formatFileSize}
-            />
-           
-            <div className="flex-1 overflow-y-auto px-3 py-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300">
-              <div className="space-y-1.5">
+
+            <div className="flex-1 min-h-0 px-4 pt-3 pb-2 bg-white">
+              <p className="text-[11px] uppercase tracking-[0.16em] text-[#807868] mb-2">
+                Recent Questions
+              </p>
+              {pendingQuestion && (
+                <div className="mb-2 p-3 rounded-xl border border-[#cfe1db] bg-[#eef5f2] animate-pulse">
+                  <p className="text-xs font-medium text-[#2b3528] line-clamp-2 mb-2">{pendingQuestion}</p>
+                  <div className="flex items-center space-x-1.5">
+                    <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
+                    <span className="text-xs text-[#1f6b5f] font-medium">
+                      {streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
                 <MessagesList
-              messages={messages}
-              selectedMessageId={selectedMessageId}
-              handleMessageClick={handleMessageClick}
-              displayLimit={displayLimit}
-              showAllChats={showAllChats}
-              setShowAllChats={setShowAllChats}
-              isLoading={isLoading}
-              highlightText={highlightText}
-              formatDate={formatDate}
-              searchQuery={searchQuery}
-            />
+                  messages={sessionMessages}
+                  selectedMessageId={selectedMessageId}
+                  handleMessageClick={handleMessageClick}
+                  displayLimit={displayLimit}
+                  showAllChats={showAllChats}
+                  setShowAllChats={setShowAllChats}
+                  highlightText={highlightText}
+                  formatDate={formatDate}
+                  searchQuery={searchQuery}
+                />
               </div>
             </div>
+
             <div className="border-t border-gray-200 p-3 bg-white flex-shrink-0">
               {documentData && (
-                <div className="mb-2 p-1.5 bg-gray-50 rounded-lg border border-gray-200">
+                <div className="mb-2 p-2 bg-white rounded-lg border border-gray-200">
                   <div className="flex items-center space-x-1.5">
                     <FileCheck className="h-3 w-3 text-green-600" />
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-gray-900 truncate">{documentData.originalName}</p>
-                      <p className="text-xs text-gray-500">{formatFileSize(documentData.size)}</p>
+                      <p className="text-xs font-medium text-[#2b3528] truncate">{documentData.originalName}</p>
+                      <p className="text-xs text-[#807868]">{formatFileSize(documentData.size)}</p>
                     </div>
                   </div>
                 </div>
@@ -3142,6 +3820,7 @@ const ChatModelPage = () => {
                   </div>
                 )}
               </form>
+              <RateQuotaPills limits={limits} className="mt-2" />
               
               {fileSizeLimitError && (
                 <div className="mt-2 animate-fadeIn">
@@ -3149,25 +3828,17 @@ const ChatModelPage = () => {
                     <div className="flex items-start gap-2">
                       <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
                       <div className="flex-1 min-w-0">
+                        <p className="text-xs sm:text-sm font-semibold text-gray-900 mb-1">Upload limit exceeded</p>
                         <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
-                          <span className="font-semibold text-gray-900">{fileSizeLimitError.fileName}</span> ({fileSizeLimitError.fileSize}) exceeds the free plan limit of <span className="font-semibold text-[#21C1B6]">{fileSizeLimitError.maxSize}</span>.
+                          {fileSizeLimitError.message}
                         </p>
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => {
-                              setFileSizeLimitError(null);
-                              navigate('/subscription-plans');
-                            }}
-                            className="flex items-center px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
-                          >
-                            <Zap className="h-3 w-3 mr-1.5" />
-                            Upgrade Plan
-                          </button>
-                          <button
+                            type="button"
                             onClick={() => setFileSizeLimitError(null)}
-                            className="px-3 py-1.5 text-gray-600 hover:text-gray-900 hover:bg-white/50 rounded-md transition-colors text-xs font-medium"
+                            className="px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
                           >
-                            Dismiss
+                            OK
                           </button>
                         </div>
                       </div>
@@ -3185,52 +3856,45 @@ const ChatModelPage = () => {
             </div>
           </div>
 
-          <div className="w-full lg:w-3/5 flex flex-col h-2/3 lg:h-full bg-gray-50">
-            <div className="flex-1 p-2 sm:p-4 min-h-0">
-              <div className="h-full flex flex-col">
-                {(streamingStatus && streamingMessage) || (isLoading || isGeneratingInsights) ? (
-                  <div className="flex-shrink-0 mb-4">
-                    <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border-2 border-blue-200 shadow-lg animate-fade-in">
-                      <div className="flex items-start space-x-3">
-                        <Loader2 className="h-5 w-5 text-blue-600 animate-spin flex-shrink-0 mt-0.5" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-base font-semibold text-blue-900 mb-1">
-                            {streamingMessage || getStatusMessage(streamingStatus) || 'Processing your request...'}
-                          </p>
-                          <p className="text-sm text-blue-700 capitalize font-medium">
-                            {streamingStatus ?
-                              streamingStatus.replace(/_/g, ' ').split(' ').map(word =>
-                                word.charAt(0).toUpperCase() + word.slice(1)
-                              ).join(' ')
-                              : (isGeneratingInsights ? 'Generating...' : 'Initializing...')}
-                          </p>
-                          <div className="flex items-center space-x-1 mt-2">
-                            <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0ms' }}></div>
-                            <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '150ms' }}></div>
-                            <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '300ms' }}></div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-                <div className="flex-1 min-h-0">
-                  <DocumentViewer
-                    selectedMessageId={selectedMessageId}
-                    currentResponse={currentResponse}
-                    animatedResponseContent={animatedResponseContent}
-                    messages={messages}
-                    handleCopyResponse={handleCopyResponse}
-                    markdownOutputRef={markdownOutputRef}
-                    isAnimatingResponse={isAnimatingResponse}
-                    showResponseImmediately={showResponseImmediately}
-                    formatDate={formatDate}
-                    markdownComponents={markdownComponents}
-                    responseContainerRef={responseRef}
-                  />
-                </div>
+          <div
+            className="hidden lg:flex items-center justify-center w-3 cursor-col-resize bg-white border-x border-gray-200 hover:bg-[#eef5f2] transition-colors"
+            onMouseDown={() => setIsResizingSplit(true)}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize chat panels"
+            title="Drag to resize panels"
+          >
+            <div className="h-12 w-[3px] rounded-full bg-[#c9c2b4]" />
+          </div>
+
+          <div
+            className="w-full flex flex-col h-1/2 lg:h-full bg-white min-h-0"
+            style={
+              isDesktopSplit
+                ? { width: `${100 - splitLeftWidth}%`, flex: `0 0 ${100 - splitLeftWidth}%` }
+                : undefined
+            }
+          >
+            <div className="flex-1 min-h-0 p-4">
+              <div className="h-[calc(100%-0px)] min-h-0">
+                <DocumentViewer
+                  selectedMessageId={selectedMessageId}
+                  currentResponse={currentResponse}
+                  animatedResponseContent={animatedResponseContent}
+                  messages={sessionMessages}
+                  handleCopyResponse={handleCopyResponse}
+                  markdownOutputRef={markdownOutputRef}
+                  isAnimatingResponse={isAnimatingResponse}
+                  showResponseImmediately={showResponseImmediately}
+                  formatDate={formatDate}
+                  markdownComponents={markdownComponents}
+                  responseContainerRef={responseRef}
+                  suggestedQuestions={suggestedQuestions}
+                  onSuggestedQuestionClick={handleSuggestedQuestionClick}
+                />
               </div>
             </div>
+          </div>
           </div>
         </>
       )}

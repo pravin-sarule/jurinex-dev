@@ -112,10 +112,10 @@
 }
 
 .analysis-page-ai-response {
-  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
-  font-size: 24px !important;
-  line-height: 1.8 !important;
-  color: #111 !important;
+  font-family: Georgia, "Times New Roman", serif !important;
+  font-size: 17px !important;
+  line-height: 1.75 !important;
+  color: #1a1a1a !important;
 }
 
 .response-content h1 {
@@ -249,20 +249,20 @@
 .prose table,
 .prose th,
 .prose td {
-  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
 }
 
 .prose table {
-  font-size: 20px !important;
+  font-size: 14px !important;
 }
 
 .prose th {
-  font-size: 18px !important;
+  font-size: 13px !important;
   font-weight: 600 !important;
 }
 
 .prose td {
-  font-size: 18px !important;
+  font-size: 14px !important;
 }
 
 .response-content ul,

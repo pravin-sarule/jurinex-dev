@@ -345,8 +345,20 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
   const abortControllerRef = useRef(null);
   const updateTimeoutRef = useRef(null);
+  const chunkDisplayTimeoutRef = useRef(null);
 
-  const sendMessage = useCallback(async (question, secretId = null) => {
+  const formatAssistantText = (raw) => {
+    if (!raw) return '';
+    try {
+      const isStructured = isStructuredJsonResponse(raw);
+      return isStructured ? renderSecretPromptResponse(raw) : convertJsonToPlainText(raw);
+    } catch (e) {
+      console.warn('[useIntelligentFolderChat] formatAssistantText failed, using raw text', e);
+      return raw;
+    }
+  };
+
+  const sendMessage = useCallback(async (question, secretId = null, streamOpts = null) => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -369,12 +381,23 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
     try {
       const token = authToken || getAuthToken();
-      const endpoint = `${API_BASE}/${folderName}/intelligent-chat/stream`;
+      const endpoint = `${API_BASE}/${encodeURIComponent(folderName)}/intelligent-chat/stream`;
 
       const requestBody = {
         session_id: sessionId,
         llm_name: 'gemini',
       };
+      if (streamOpts && typeof streamOpts === 'object') {
+        if (streamOpts.llm_name) requestBody.llm_name = streamOpts.llm_name;
+        if (streamOpts.max_output_tokens != null && streamOpts.max_output_tokens !== '') {
+          const n = Number(streamOpts.max_output_tokens);
+          if (Number.isFinite(n)) requestBody.max_output_tokens = n;
+        }
+        if (streamOpts.model_temperature != null && streamOpts.model_temperature !== '') {
+          const t = Number(streamOpts.model_temperature);
+          if (Number.isFinite(t)) requestBody.model_temperature = t;
+        }
+      }
 
       if (secretId) {
         requestBody.secret_id = secretId;
@@ -427,12 +450,12 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
         if (done) {
           setIsStreaming(false);
+          if (chunkDisplayTimeoutRef.current) {
+            clearTimeout(chunkDisplayTimeoutRef.current);
+            chunkDisplayTimeoutRef.current = null;
+          }
           if (accumulatedText) {
-            const isStructured = isStructuredJsonResponse(accumulatedText);
-            const formattedResponse = isStructured
-              ? renderSecretPromptResponse(accumulatedText)
-              : convertJsonToPlainText(accumulatedText);
-            setText(formattedResponse);
+            setText(formatAssistantText(accumulatedText));
           }
           if (accumulatedThinking) {
             setThinking(accumulatedThinking);
@@ -441,7 +464,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         }
 
         lineBuffer += decoder.decode(value, { stream: true });
-        const lines = lineBuffer.split('\n');
+        const lines = lineBuffer.split(/\r\n|\n|\r/);
         lineBuffer = lines.pop() || '';
 
         for (const line of lines) {
@@ -453,12 +476,12 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
           if (data === '[DONE]') {
             setIsStreaming(false);
+            if (chunkDisplayTimeoutRef.current) {
+              clearTimeout(chunkDisplayTimeoutRef.current);
+              chunkDisplayTimeoutRef.current = null;
+            }
             if (accumulatedText) {
-              const isStructured = isStructuredJsonResponse(accumulatedText);
-              const formattedResponse = isStructured
-                ? renderSecretPromptResponse(accumulatedText)
-                : convertJsonToPlainText(accumulatedText);
-              setText(formattedResponse);
+              setText(formatAssistantText(accumulatedText));
             }
             if (accumulatedThinking) {
               setThinking(accumulatedThinking);
@@ -505,15 +528,27 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 }
                 break;
 
-              case 'chunk':
+              case 'chunk': {
                 const chunkText = parsed.text || '';
                 if (chunkText) {
                   accumulatedText += chunkText;
+                  if (chunkDisplayTimeoutRef.current) {
+                    clearTimeout(chunkDisplayTimeoutRef.current);
+                  }
+                  chunkDisplayTimeoutRef.current = setTimeout(() => {
+                    setText(accumulatedText);
+                    chunkDisplayTimeoutRef.current = null;
+                  }, 16);
                 }
                 break;
+              }
 
               case 'done':
                 setIsStreaming(false);
+                if (chunkDisplayTimeoutRef.current) {
+                  clearTimeout(chunkDisplayTimeoutRef.current);
+                  chunkDisplayTimeoutRef.current = null;
+                }
                 if (parsed.session_id) setSessionId(parsed.session_id);
                 if (parsed.method) setMethodUsed(parsed.method);
                 if (parsed.routing_decision) {
@@ -523,12 +558,13 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 console.log('[useIntelligentFolderChat] Done metadata:', parsed);
                 console.log('[useIntelligentFolderChat] used_chunk_ids:', parsed.used_chunk_ids);
                 console.log('[useIntelligentFolderChat] citations:', parsed.citations);
-                if (accumulatedText) {
-                  const isStructured = isStructuredJsonResponse(accumulatedText);
-                  const formattedResponse = isStructured
-                    ? renderSecretPromptResponse(accumulatedText)
-                    : convertJsonToPlainText(accumulatedText);
-                  setText(formattedResponse);
+                {
+                  const fromDone = typeof parsed.answer === 'string' ? parsed.answer : '';
+                  const raw =
+                    fromDone.length > accumulatedText.length ? fromDone : (accumulatedText || fromDone);
+                  if (raw) {
+                    setText(formatAssistantText(raw));
+                  }
                 }
                 if (accumulatedThinking) {
                   setThinking(accumulatedThinking);
@@ -566,6 +602,10 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         clearTimeout(updateTimeoutRef.current);
         updateTimeoutRef.current = null;
       }
+      if (chunkDisplayTimeoutRef.current) {
+        clearTimeout(chunkDisplayTimeoutRef.current);
+        chunkDisplayTimeoutRef.current = null;
+      }
     }
   }, [folderName, authToken, sessionId]);
 
@@ -594,6 +634,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
       }
       if (updateTimeoutRef.current) {
         clearTimeout(updateTimeoutRef.current);
+      }
+      if (chunkDisplayTimeoutRef.current) {
+        clearTimeout(chunkDisplayTimeoutRef.current);
       }
     };
   }, []);
