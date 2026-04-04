@@ -38,7 +38,7 @@ app = FastAPI(
 app.state.migration_version = "2.5.pro.v1"
 
 # CORS
-_allowed_origins = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").strip().split(",")
+_allowed_origins = os.environ.get("CORS_ORIGINS", "http://localhost:5173,https://ailearn.co.in").strip().split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _allowed_origins if o.strip()],

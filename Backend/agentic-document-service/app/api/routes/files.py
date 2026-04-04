@@ -35,6 +35,7 @@ from app.services.db import get_db_connection, is_db_available
 from app.services.llm_chat_config import (
     get_llm_chat_config,
     get_request_upload_ceiling_mb,
+    get_streaming_delay_ms,
     merge_folder_chat_request_llm_overrides,
     resolve_model_name,
 )
@@ -46,6 +47,55 @@ from app.services.secret_prompt_display import resolve_query_and_display
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 logger = logging.getLogger("agentic_document_service.api.files")
+
+
+def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[str]:
+    """Break long model output into small SSE chunks so the UI can render incrementally."""
+    text = text or ""
+    if not text:
+        return []
+    chunks: list[str] = []
+    for para in text.split("\n"):
+        if para == "":
+            chunks.append("\n")
+            continue
+        current: list[str] = []
+        size = 0
+        for word in para.split():
+            add = len(word) + (1 if current else 0)
+            if current and size + add > max_chunk_chars:
+                chunks.append(" ".join(current) + " ")
+                current = [word]
+                size = len(word)
+            else:
+                current.append(word)
+                size += add
+        if current:
+            chunks.append(" ".join(current) + "\n")
+    return chunks if chunks else [text]
+
+
+def _gemini_chunk_text(chunk: Any) -> str:
+    raw = getattr(chunk, "text", None)
+    if raw is not None and str(raw).strip() != "":
+        return str(raw)
+    return ""
+
+
+async def _yield_text_as_streaming_chunks(
+    sse_fn,
+    text: str,
+    *,
+    delay_ms: int,
+) -> AsyncGenerator[str, None]:
+    """Emit type=chunk SSE events; optional delay between chunks from summarization_chat_config."""
+    import asyncio
+
+    for piece in _split_text_for_sse_stream(text):
+        if piece:
+            yield sse_fn({"type": "chunk", "text": piece})
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
 
 
 @router.get("/secrets")
@@ -894,16 +944,25 @@ async def intelligent_chat_stream(
                     "routing_decision": "vector_search",
                 })
                 if answer_segments:
-                    for segment in answer_segments:
-                        text = (
+                    vector_answer_text = "\n".join(
+                        (
                             segment.get("statement", "")
                             if isinstance(segment, dict)
                             else getattr(segment, "statement", "")
                         )
-                        if text:
-                            yield _sse({"type": "chunk", "text": text + "\n"})
+                        for segment in answer_segments
+                    ).strip()
                 else:
-                    yield _sse({"type": "chunk", "text": full_answer})
+                    vector_answer_text = (full_answer or "").strip()
+
+                # Pipeline often returns one large segment; split into many SSE chunks for real-time UI.
+                stream_delay_ms = get_streaming_delay_ms(llm_config)
+                async for sse_line in _yield_text_as_streaming_chunks(
+                    _sse,
+                    vector_answer_text,
+                    delay_ms=stream_delay_ms,
+                ):
+                    yield sse_line
 
                 citations = vector_result.get("citations") or []
                 serialized_citations = []
@@ -915,18 +974,6 @@ async def intelligent_chat_stream(
                             serialized_citations.append(c.model_dump(mode="json"))
                         except Exception:
                             serialized_citations.append({"document_name": str(c)})
-
-                if answer_segments:
-                    vector_answer_text = "\n".join(
-                        (
-                            segment.get("statement", "")
-                            if isinstance(segment, dict)
-                            else getattr(segment, "statement", "")
-                        )
-                        for segment in answer_segments
-                    ).strip()
-                else:
-                    vector_answer_text = (full_answer or "").strip()
 
                 yield _sse({
                     "type": "done",
@@ -1000,6 +1047,7 @@ async def intelligent_chat_stream(
             answer_parts: list[str] = []
             source_names: list[str] = [str(d.get("name") or "document").strip() for d in doc_texts if d.get("name")]
             streamed = False
+            stream_delay_ms = get_streaming_delay_ms(llm_config)
             try:
                 from google import genai  # type: ignore
 
@@ -1050,11 +1098,12 @@ async def intelligent_chat_stream(
                     # when the model paused between chunks, producing truncated UI responses.
                     first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
                     next_chunk_timeout_s = 600.0
+                    agg_full = ""
                     while True:
                         chunk_timeout_s = first_chunk_timeout_s if not streamed else next_chunk_timeout_s
                         try:
                             chunk = await asyncio.wait_for(
-                                loop.run_in_executor(None, lambda: next(stream_iter, None)),
+                                loop.run_in_executor(None, lambda it=stream_iter: next(it, None)),
                                 timeout=chunk_timeout_s,
                             )
                         except asyncio.TimeoutError:
@@ -1067,12 +1116,26 @@ async def intelligent_chat_stream(
                             raise TimeoutError("gemini_stream_first_chunk_timeout")
                         if chunk is None:
                             break
-                        chunk_text = (getattr(chunk, "text", None) or "")
-                        if not chunk_text:
+                        piece = _gemini_chunk_text(chunk)
+                        if not piece:
+                            continue
+                        if not agg_full:
+                            delta = piece
+                            agg_full = piece
+                        elif piece.startswith(agg_full):
+                            delta = piece[len(agg_full) :]
+                            agg_full = piece
+                        else:
+                            delta = piece
+                            agg_full = agg_full + piece
+                        if not delta:
                             continue
                         streamed = True
-                        answer_parts.append(chunk_text)
-                        yield _sse({"type": "chunk", "text": chunk_text})
+                        answer_parts.append(delta)
+                        async for sse_line in _yield_text_as_streaming_chunks(
+                            _sse, delta, delay_ms=stream_delay_ms
+                        ):
+                            yield sse_line
                     if streamed:
                         yield _sse({"type": "thinking", "text": "Finalizing response and citations...\n"})
             except Exception as stream_exc:
@@ -1110,7 +1173,10 @@ async def intelligent_chat_stream(
                 if source_docs:
                     source_names = [item.strip() for item in source_docs.split(",") if item.strip()]
                 answer_parts = [answer]
-                yield _sse({"type": "chunk", "text": answer})
+                async for sse_line in _yield_text_as_streaming_chunks(
+                    _sse, answer, delay_ms=stream_delay_ms
+                ):
+                    yield sse_line
                 yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
 
             answer = "".join(answer_parts).strip()

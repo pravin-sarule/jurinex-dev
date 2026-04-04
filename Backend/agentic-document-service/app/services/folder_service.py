@@ -977,7 +977,7 @@ class FolderWorkflowService:
         )
         if not query_text:
             raise ValueError("question is required")
-        llm_config = get_llm_chat_config(force_refresh=True)
+        llm_config = get_llm_chat_config(user_id=user_id, force_refresh=False)
         user_profile = fetch_full_profile(user_id, authorization)
         system_instruction = build_legal_system_prompt(user_profile)
         logger.info(

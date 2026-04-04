@@ -11,6 +11,7 @@ from app.api.routes.cases import router as cases_router
 from app.api.routes.content import router as content_router
 from app.api.routes.files import router as files_router
 from app.api.routes.health import router as health_router
+from app.api.routes.summarization_config_admin import router as summarization_config_admin_router
 from app.core.config import BASE_DIR, get_settings
 from app.core.logging import configure_logging
 from app.middleware.llm_chat_policy import LLMChatPolicyMiddleware
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router)
+    app.include_router(summarization_config_admin_router)
     app.include_router(cases_router)
     app.include_router(content_router)
     app.include_router(files_router)

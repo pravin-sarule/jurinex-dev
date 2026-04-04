@@ -114,11 +114,39 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = 1000
     max_parallel_document_workers: int = 4
     auto_fill_confidence_threshold: float = 0.90
+
+    # Embedding batching & rate-limit protection
+    # Max texts per single Gemini embed_content call (Gemini supports up to 100)
+    embedding_batch_size: int = Field(
+        default=50,
+        validation_alias=AliasChoices("EMBEDDING_BATCH_SIZE"),
+    )
+    # Max retry attempts on 429 / quota errors (exponential backoff between each)
+    embedding_max_retries: int = Field(
+        default=5,
+        validation_alias=AliasChoices("EMBEDDING_MAX_RETRIES"),
+    )
+    # Token-bucket rate: max Gemini embed API calls per minute across all threads
+    # gemini-embedding-001 free-tier = 1500 RPM; set lower if you hit limits
+    embedding_rpm_limit: int = Field(
+        default=1500,
+        validation_alias=AliasChoices("EMBEDDING_RPM_LIMIT"),
+    )
     legacy_document_service_url: str = Field(
         default="",
         validation_alias=AliasChoices("LEGACY_DOCUMENT_SERVICE_URL"),
     )
     proxy_timeout_seconds: float = 300.0
+    # 0 = always read latest summarization_chat_config from DB (recommended when admins edit often).
+    summarization_chat_config_cache_seconds: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("SUMMARIZATION_CHAT_CONFIG_CACHE_SECONDS"),
+    )
+    # Optional: require this header value for POST .../invalidate-cache (empty = endpoint disabled).
+    summarization_config_admin_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("SUMMARIZATION_CONFIG_ADMIN_KEY"),
+    )
 
     @field_validator("cors_origins", mode="before")
     @classmethod

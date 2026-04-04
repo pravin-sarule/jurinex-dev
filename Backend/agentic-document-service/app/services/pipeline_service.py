@@ -343,26 +343,40 @@ class LegalCasePipelineService:
         chunk_rows: list[ChunkRecord] = []
         logger.info("[Pipeline] Step 2/4: done — %d raw sections", len(sections))
 
-        non_empty = sum(1 for s in sections if (s.text or "").strip())
-        logger.info("[Pipeline] Step 3/4: Embedding — %d non-empty chunks", non_empty)
-        for section_idx, section in enumerate(sections):
-            chunk_text = (section.text or "").strip()
-            if not chunk_text:
-                continue
-            chunk_id = str(uuid.uuid4())
-            chunk_embedding = embeddings.embed_text(chunk_text)
-            chunk_rows.append(
-                ChunkRecord(
-                    chunk_id=chunk_id,
-                    case_id=case_id,
-                    document_id=document_id,
-                    document_name=document.document_name,
-                    doc_type=doc_type,
-                    text=chunk_text,
-                    embedding=chunk_embedding,
-                    metadata={"heading": section.heading or "", "chunk_index": str(section_idx)},
+        # Collect non-empty sections for batch embedding
+        non_empty_sections: list[tuple[int, Any]] = [
+            (idx, s) for idx, s in enumerate(sections) if (s.text or "").strip()
+        ]
+        non_empty = len(non_empty_sections)
+        logger.info(
+            "[Pipeline] Step 3/4: Embedding — %d non-empty chunks (batch mode, size=%s)",
+            non_empty,
+            self._settings.embedding_batch_size,
+        )
+
+        if non_empty_sections:
+            chunk_texts = [(s.text or "").strip() for _, s in non_empty_sections]
+            # Single embed_batch call; internally splits into sub-batches with
+            # rate-limit protection and exponential-backoff retry.
+            chunk_embeddings = embeddings.embed_batch(chunk_texts)
+
+            for (section_idx, section), chunk_text, chunk_embedding in zip(
+                non_empty_sections, chunk_texts, chunk_embeddings
+            ):
+                chunk_id = str(uuid.uuid4())
+                chunk_rows.append(
+                    ChunkRecord(
+                        chunk_id=chunk_id,
+                        case_id=case_id,
+                        document_id=document_id,
+                        document_name=document.document_name,
+                        doc_type=doc_type,
+                        text=chunk_text,
+                        embedding=chunk_embedding,
+                        metadata={"heading": section.heading or "", "chunk_index": str(section_idx)},
+                    )
                 )
-            )
+
         logger.info("[Pipeline] Step 3/4: done — %d vectors stored in bundle", len(chunk_rows))
 
         stored_document = StoredDocument(
