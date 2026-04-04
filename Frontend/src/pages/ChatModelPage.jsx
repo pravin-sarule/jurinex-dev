@@ -51,6 +51,8 @@ import {
   Circle,
   CreditCard,
   Square,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 
 const PROGRESS_STAGES = {
@@ -380,6 +382,57 @@ const ChatModelPage = () => {
   }, []);
 
   const pollingIntervalRef = useRef(null);
+  
+  const [isListening, setIsListening] = useState(false);
+  const [recognition, setRecognition] = useState(null);
+
+  // Speech recognition setup
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognitionInstance = new SpeechRecognition();
+      recognitionInstance.continuous = false;
+      recognitionInstance.interimResults = false;
+      recognitionInstance.lang = 'en-US';
+
+      recognitionInstance.onstart = () => setIsListening(true);
+      recognitionInstance.onend = () => setIsListening(false);
+      recognitionInstance.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setChatInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        
+        // Reset secret prompt if voice input is given
+        if (isSecretPromptSelected) {
+          setIsSecretPromptSelected(false);
+          setActiveDropdown("Custom Query");
+          setSelectedSecretId(null);
+        }
+      };
+      recognitionInstance.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      setRecognition(recognitionInstance);
+    }
+  }, [isSecretPromptSelected]);
+
+  const toggleListening = () => {
+    if (!recognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    if (isListening) {
+      recognition.stop();
+    } else {
+      try {
+        recognition.start();
+      } catch (err) {
+        console.error('Failed to start recognition:', err);
+      }
+    }
+  };
   const batchPollingIntervalsRef = useRef({});
   const uploadIntervalRef = useRef(null);
 
@@ -3498,6 +3551,23 @@ const ChatModelPage = () => {
                   disabled={isLoading || isGeneratingInsights}
                 />
                 <button
+                  type="button"
+                  onClick={toggleListening}
+                  className={`p-2 rounded-full transition-all duration-300 flex-shrink-0 ${
+                    isListening 
+                      ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
+                      : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
+                  }`}
+                  disabled={isLoading || isGeneratingInsights || isSecretPromptSelected}
+                  title={isListening ? "Stop listening" : "Start voice input"}
+                >
+                  {isListening ? (
+                    <MicOff className="h-4 w-4" />
+                  ) : (
+                    <Mic className="h-4 w-4" />
+                  )}
+                </button>
+                <button
                   type={sendButtonType}
                   disabled={isSendButtonDisabled}
                   onClick={handleSendButtonClick}
@@ -3788,6 +3858,23 @@ const ChatModelPage = () => {
                   className="flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-xs font-medium py-1 min-w-0 analysis-page-user-input"
                   disabled={isLoading || isGeneratingInsights}
                 />
+                <button
+                  type="button"
+                  onClick={toggleListening}
+                  className={`p-1.5 rounded-full transition-all duration-300 flex-shrink-0 ${
+                    isListening 
+                      ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
+                      : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
+                  }`}
+                  disabled={isLoading || isGeneratingInsights || isSecretPromptSelected}
+                  title={isListening ? "Stop listening" : "Start voice input"}
+                >
+                  {isListening ? (
+                    <MicOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Mic className="h-3.5 w-3.5" />
+                  )}
+                </button>
                   <button
                     type={sendButtonType}
                     disabled={isSendButtonDisabled}

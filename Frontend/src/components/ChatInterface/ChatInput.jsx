@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { BookOpen, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { BookOpen, ChevronDown, Mic, MicOff, Send } from 'lucide-react';
 
 const ChatInput = ({
   onSendMessage,
@@ -18,6 +18,57 @@ const ChatInput = ({
   dropdownRef,
 }) => {
   const [message, setMessage] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [recognition, setRecognition] = useState(null);
+
+  useEffect(() => {
+    // Check for browser support
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognitionInstance = new SpeechRecognition();
+      recognitionInstance.continuous = false; // We want it to stop after one phrase
+      recognitionInstance.interimResults = false;
+      recognitionInstance.lang = 'en-US';
+
+      recognitionInstance.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognitionInstance.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionInstance.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setMessage((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        handleChatInputChange();
+      };
+
+      recognitionInstance.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      setRecognition(recognitionInstance);
+    }
+  }, [handleChatInputChange]);
+
+  const toggleListening = () => {
+    if (!recognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    if (isListening) {
+      recognition.stop();
+    } else {
+      try {
+        recognition.start();
+      } catch (err) {
+        console.error('Failed to start recognition:', err);
+      }
+    }
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -78,13 +129,35 @@ const ChatInput = ({
         placeholder={disabled ? "Select a folder to chat" : "Ask a question about the documents..."}
         disabled={disabled || isSecretPromptSelected}
       />
-      <button
-        type="submit"
-        className="p-1.5 bg-black hover:bg-gray-800 disabled:bg-gray-300 text-white rounded-lg transition-colors flex-shrink-0"
-        disabled={disabled || (!message.trim() && !isSecretPromptSelected)}
-      >
-        Send
-      </button>
+      
+      <div className="flex items-center space-x-2">
+        <button
+          type="button"
+          onClick={toggleListening}
+          className={`p-2 rounded-full transition-all duration-300 ${
+            isListening 
+              ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
+              : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-100'
+          }`}
+          disabled={disabled || isSecretPromptSelected}
+          title={isListening ? "Stop listening" : "Start voice input"}
+        >
+          {isListening ? (
+            <MicOff className="h-5 w-5" />
+          ) : (
+            <Mic className="h-5 w-5" />
+          )}
+        </button>
+
+        <button
+          type="submit"
+          className="p-2 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 text-white rounded-lg transition-all duration-300 flex-shrink-0 flex items-center justify-center gap-2 px-4 shadow-sm active:scale-95"
+          disabled={disabled || (!message.trim() && !isSecretPromptSelected)}
+        >
+          <Send className="h-4 w-4" />
+          <span className="text-sm font-semibold">Send</span>
+        </button>
+      </div>
     </form>
   );
 };

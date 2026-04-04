@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
-import { BookOpen, ChevronDown } from 'lucide-react';
+import { BookOpen, ChevronDown, Mic, MicOff, Send } from 'lucide-react';
 import './IntelligentFolderChat.css';
 import CitationsPanel from '../AnalysisPage/CitationsPanel';
 import apiService from '../services/api';
@@ -33,10 +33,54 @@ export default function IntelligentFolderChat({
   const [showDropdown, setShowDropdown] = useState(false);
   const [isSecretPromptSelected, setIsSecretPromptSelected] = useState(false);
 
+  const [isListening, setIsListening] = useState(false);
+  const [recognition, setRecognition] = useState(null);
+
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const dropdownRef = useRef(null);
   const finalizedMessageIds = useRef(new Set());
+
+  // Setup speech recognition
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognitionInstance = new SpeechRecognition();
+      recognitionInstance.continuous = false;
+      recognitionInstance.interimResults = false;
+      recognitionInstance.lang = 'en-US';
+
+      recognitionInstance.onstart = () => setIsListening(true);
+      recognitionInstance.onend = () => setIsListening(false);
+      recognitionInstance.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      };
+      recognitionInstance.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      setRecognition(recognitionInstance);
+    }
+  }, []);
+
+  const toggleListening = () => {
+    if (!recognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    if (isListening) {
+      recognition.stop();
+    } else {
+      try {
+        recognition.start();
+      } catch (err) {
+        console.error('Failed to start recognition:', err);
+      }
+    }
+  };
 
   /** Same optional LLM overrides as ChatModelPage (VITE_* env). */
   const folderChatStreamFetchParams = useMemo(() => {
@@ -624,7 +668,7 @@ export default function IntelligentFolderChat({
       </div>
 
       <form onSubmit={handleSubmit} className="chat-input-form">
-        <div className="input-container">
+        <div className="input-container flex items-center space-x-2 bg-white rounded-xl border border-[#21C1B6] px-4 py-2 focus-within:ring-2 focus-within:ring-[#21C1B6]/20 transition-all">
           <input
             ref={inputRef}
             type="text"
@@ -632,38 +676,38 @@ export default function IntelligentFolderChat({
             onChange={handleInputChange}
             placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : "Ask a question about your documents..."}
             disabled={isStreaming}
-            className="chat-input"
+            className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
             autoFocus
           />
-          <div className="input-actions">
-            <div className="relative" ref={dropdownRef} style={{ marginRight: '8px' }}>
+          <div className="input-actions flex items-center space-x-2">
+            <div className="relative flex-shrink-0" ref={dropdownRef}>
               <button
                 type="button"
                 onClick={() => setShowDropdown(!showDropdown)}
                 disabled={isLoadingSecrets || isStreaming}
-                className="secret-dropdown-button"
+                className="flex items-center space-x-2 px-3 py-1.5 text-xs font-semibold text-gray-700 bg-gray-50 border border-gray-200 rounded-lg hover:border-[#21C1B6] hover:bg-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Select analysis prompt"
               >
-                <BookOpen className="h-4 w-4" />
-                <span className="text-sm">{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                <ChevronDown className="h-4 w-4" />
+                <BookOpen className="h-3.5 w-3.5 text-[#21C1B6]" />
+                <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
+                <ChevronDown className="h-3.5 w-3.5" />
               </button>
 
               {showDropdown && !isLoadingSecrets && (
-                <div className="secret-dropdown-menu">
+                <div className="absolute bottom-full right-0 mb-2 w-56 bg-white border border-gray-200 rounded-xl shadow-xl z-50 py-1 overflow-hidden">
                   {secrets.length > 0 ? (
                     secrets.map((secret) => (
                       <button
                         key={secret.id}
                         type="button"
                         onClick={() => handleDropdownSelect(secret.name, secret.id)}
-                        className="secret-dropdown-item"
+                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-[#21C1B6]/5 hover:text-[#21C1B6] transition-colors"
                       >
                         {secret.name}
                       </button>
                     ))
                   ) : (
-                    <div className="secret-dropdown-empty">
+                    <div className="px-4 py-3 text-sm text-gray-500 italic">
                       No analysis prompts available
                     </div>
                   )}
@@ -671,11 +715,29 @@ export default function IntelligentFolderChat({
               )}
             </div>
 
+            <button
+              type="button"
+              onClick={toggleListening}
+              className={`p-2 rounded-full transition-all duration-300 ${
+                isListening 
+                  ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
+                  : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-100'
+              }`}
+              disabled={isStreaming || isSecretPromptSelected}
+              title={isListening ? "Stop listening" : "Start voice input"}
+            >
+              {isListening ? (
+                <MicOff className="h-4 w-4" />
+              ) : (
+                <Mic className="h-4 w-4" />
+              )}
+            </button>
+
             {isStreaming ? (
               <button
                 type="button"
                 onClick={handleStop}
-                className="stop-button"
+                className="px-4 py-2 bg-black text-white rounded-lg text-sm font-semibold hover:bg-gray-800 transition-colors shadow-sm"
                 title="Stop streaming"
               >
                 Stop
@@ -684,10 +746,11 @@ export default function IntelligentFolderChat({
               <button
                 type="submit"
                 disabled={(!input.trim() && !(isSecretPromptSelected && selectedSecretId)) || isStreaming}
-                className="send-button"
+                className="flex items-center space-x-2 px-4 py-2 bg-[#21C1B6] text-white rounded-lg text-sm font-semibold hover:bg-[#1AA49B] transition-all disabled:bg-gray-200 disabled:text-gray-400 shadow-sm active:scale-95"
                 title="Send message"
               >
-                Send
+                <Send className="h-4 w-4" />
+                <span>Send</span>
               </button>
             )}
           </div>

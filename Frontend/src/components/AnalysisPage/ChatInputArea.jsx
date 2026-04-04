@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
-import { Send, Loader2, BookOpen, ChevronDown, Bot, X, Wrench } from 'lucide-react';
+import React, { useRef, useState, useEffect } from 'react';
+import { Send, Loader2, BookOpen, ChevronDown, Bot, X, Wrench, Mic, MicOff } from 'lucide-react';
 import UploadOptionsMenu from '../UploadOptionsMenu';
 
 const ChatInputArea = ({
@@ -35,9 +35,62 @@ const ChatInputArea = ({
   setShowToolsDropdown,
   handleMindmapClick,
   folderName = null,
+  setChatInput, // Need this to update input from voice
 }) => {
   const dropdownRef = useRef(null);
   const toolsDropdownRef = useRef(null);
+  const [isListening, setIsListening] = useState(false);
+  const [recognition, setRecognition] = useState(null);
+
+  // Speech recognition setup
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognitionInstance = new SpeechRecognition();
+      recognitionInstance.continuous = false;
+      recognitionInstance.interimResults = false;
+      recognitionInstance.lang = 'en-US';
+
+      recognitionInstance.onstart = () => setIsListening(true);
+      recognitionInstance.onend = () => setIsListening(false);
+      recognitionInstance.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        if (setChatInput) {
+          setChatInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        }
+        
+        // Reset secret prompt if voice input is given
+        if (isSecretPromptSelected) {
+          setIsSecretPromptSelected(false);
+          if (setActiveDropdown) setActiveDropdown("Custom Query");
+          if (setSelectedSecretId) setSelectedSecretId(null);
+        }
+      };
+      recognitionInstance.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      setRecognition(recognitionInstance);
+    }
+  }, [isSecretPromptSelected, setChatInput, setActiveDropdown, setSelectedSecretId, setIsSecretPromptSelected]);
+
+  const toggleListening = () => {
+    if (!recognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    if (isListening) {
+      recognition.stop();
+    } else {
+      try {
+        recognition.start();
+      } catch (err) {
+        console.error('Failed to start recognition:', err);
+      }
+    }
+  };
 
   return (
     <div className={isSplitView ? '' : 'flex flex-col items-center justify-center h-full w-full'}>
@@ -142,6 +195,25 @@ const ChatInputArea = ({
                   progressPercentage < 100)
               }
             />
+
+            <button
+              type="button"
+              onClick={toggleListening}
+              className={`p-2 rounded-full transition-all duration-300 flex-shrink-0 ${
+                isListening 
+                  ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
+                  : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
+              }`}
+              disabled={isLoading || isGeneratingInsights || !fileId || isSecretPromptSelected}
+              title={isListening ? "Stop listening" : "Start voice input"}
+            >
+              {isListening ? (
+                <MicOff className={isSplitView ? 'h-3 w-3' : 'h-4 w-4'} />
+              ) : (
+                <Mic className={isSplitView ? 'h-3 w-3' : 'h-4 w-4'} />
+              )}
+            </button>
+
             <button
               type="submit"
               disabled={

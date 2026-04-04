@@ -2527,6 +2527,8 @@ import {
   Trash2,
   FileText,
   X,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -3316,6 +3318,58 @@ const ChatInterface = () => {
     return window.innerWidth < 1024;
   });
   const [openChatMenuId, setOpenChatMenuId] = useState(null);
+
+  const [isListening, setIsListening] = useState(false);
+  const [recognition, setRecognition] = useState(null);
+
+  // Speech recognition setup
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognitionInstance = new SpeechRecognition();
+      recognitionInstance.continuous = false;
+      recognitionInstance.interimResults = false;
+      recognitionInstance.lang = 'en-US';
+
+      recognitionInstance.onstart = () => setIsListening(true);
+      recognitionInstance.onend = () => setIsListening(false);
+      recognitionInstance.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setChatInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        
+        // Reset secret prompt if voice input is given
+        if (isSecretPromptSelected) {
+          setIsSecretPromptSelected(false);
+          setActiveDropdown("Custom Query");
+          setSelectedSecretId(null);
+          setSelectedLlmName(null);
+        }
+      };
+      recognitionInstance.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      setRecognition(recognitionInstance);
+    }
+  }, [isSecretPromptSelected]);
+
+  const toggleListening = () => {
+    if (!recognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    if (isListening) {
+      recognition.stop();
+    } else {
+      try {
+        recognition.start();
+      } catch (err) {
+        console.error('Failed to start recognition:', err);
+      }
+    }
+  };
 
   const responseHasTable = useMemo(() => {
     if (!animatedResponseContent) return false;
@@ -5195,6 +5249,25 @@ const ChatInterface = () => {
               className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
               disabled={loadingChat}
             />
+            
+            <button
+              type="button"
+              onClick={toggleListening}
+              className={`p-2 rounded-full transition-all duration-300 flex-shrink-0 ${
+                isListening 
+                  ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
+                  : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
+              }`}
+              disabled={loadingChat || isSecretPromptSelected}
+              title={isListening ? "Stop listening" : "Start voice input"}
+            >
+              {isListening ? (
+                <MicOff className="h-4 w-4" />
+              ) : (
+                <Mic className="h-4 w-4" />
+              )}
+            </button>
+
             <button
               type="submit"
               className={`p-1.5 text-white rounded-lg transition-colors flex-shrink-0 ${

@@ -5,7 +5,7 @@
  * Environment variables are supported with sensible defaults.
  */
 
-const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
+const DEFAULT_GATEWAY_URL = 'http://localhost:5000';
 
 // Get base gateway URL from environment or use deployed default
 const GATEWAY_URL =
@@ -35,10 +35,10 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'https://authservice-120280829617.asia-south1.run.app';
+  'http://localhost:5001';
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
-  'https://chat-model-120280829617.asia-south1.run.app';
+  'http://localhost:8080';
 
 /** Secret prompts list/detail — ChatModel `/api/chat/secrets` (not gateway `/files/secrets`). */
 export const SECRET_PROMPTS_API_BASE =
@@ -58,7 +58,7 @@ export const VISUAL_SERVICE_URL =
  * Set e.g. VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL=https://.../api/files for a custom host.
  */
 const DEFAULT_AGENTIC_DOCUMENT_HOST =
-  'https://agentic-document-service-120280829617.asia-south1.run.app';
+  'http://localhost:8092';
 
 const rawAgenticDocs =
   import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
