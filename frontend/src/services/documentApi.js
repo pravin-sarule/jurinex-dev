@@ -582,6 +582,15 @@ const documentApi = {
     return response.data;
   },
 
+  /** Signed URL to the original file in storage (PDF/image/etc.) — prefer this over status `full_text_content` for preview. */
+  getDocumentViewInfo: async (fileId, page = 1) => {
+    const response = await axios.get(`${API_BASE_URL}/file/${fileId}/view`, {
+      params: page != null ? { page } : {},
+      headers: getAuthHeader(),
+    });
+    return response.data;
+  },
+
   queryFolderDocuments: async (folderName, question, sessionId = null, options = {}) => {
     if (!folderName) {
       throw new Error('Folder name is required to query documents');

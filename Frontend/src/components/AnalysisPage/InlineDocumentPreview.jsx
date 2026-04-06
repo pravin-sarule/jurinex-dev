@@ -122,20 +122,40 @@ const InlineDocumentPreview = ({ document: file }) => {
           return;
         }
 
+        try {
+          const viewData = await documentApi.getDocumentViewInfo(file.id, 1);
+          const url =
+            viewData.viewUrlWithPage ||
+            viewData.viewUrl ||
+            viewData.signedUrl;
+          if (url && isMounted) {
+            setFileUrl(url);
+            setFileType(
+              detectFileType(
+                url,
+                viewData.document?.mimetype || file.type || file.mimetype
+              )
+            );
+            return;
+          }
+        } catch (viewErr) {
+          console.warn('[InlineDocumentPreview] Original file view URL unavailable:', viewErr);
+        }
+
         const response = await documentApi.getDocumentContent(file.id);
         if (!isMounted) return;
-
-        const text = extractTextContent(response);
-        if (text) {
-          setTextContent(text);
-          setFileType('text');
-        }
 
         const remoteUrl = response?.previewUrl || response?.viewUrl || response?.url;
         if (remoteUrl) {
           setFileUrl(remoteUrl);
           setFileType(detectFileType(remoteUrl, response?.mimeType || file.type || file.mimetype));
           return;
+        }
+
+        const text = extractTextContent(response);
+        if (text) {
+          setTextContent(text);
+          setFileType('text');
         }
 
         if (
