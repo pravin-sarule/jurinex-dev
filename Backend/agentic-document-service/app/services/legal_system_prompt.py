@@ -52,6 +52,7 @@ def fetch_full_profile(user_id: str | None, authorization_header: str | None) ->
 
 
 def build_legal_system_prompt(user_profile: dict[str, Any] | None) -> str:
+    """General-purpose legal assistant prompt — used for profile Q&A and general legal chat."""
     professional = (user_profile or {}).get("professional") or {}
     basic = (user_profile or {}).get("basic") or {}
     name = basic.get("username") or professional.get("fullname") or basic.get("email") or professional.get("email") or "the user"
@@ -87,3 +88,57 @@ RESPONSE QUALITY:
 - Responses are for informational purposes only and not a substitute for formal legal advice from a licensed attorney.
 - Cite relevant statutes, regulations, or case law where appropriate.
 - Address the user by name.{profile_section}"""
+
+
+def build_document_qa_system_prompt(user_profile: dict[str, Any] | None) -> str:
+    """
+    System prompt for document-grounded Q&A inside a case folder.
+
+    The user profile is used ONLY to personalise HOW the answer is written
+    (tone, jurisdiction context, detail level, practice area) — it is NOT a
+    source of facts for answering. All factual answers must come from the
+    documents provided in the prompt.
+    """
+    professional = (user_profile or {}).get("professional") or {}
+    basic = (user_profile or {}).get("basic") or {}
+    name = (
+        basic.get("username")
+        or professional.get("fullname")
+        or basic.get("email")
+        or professional.get("email")
+        or "the user"
+    )
+    role          = (professional.get("primary_role") or "").strip()
+    jurisdiction  = (professional.get("primary_jurisdiction") or "").strip()
+    practice      = (professional.get("main_areas_of_practice") or "").strip()
+    tone          = (professional.get("preferred_tone") or "professional").strip()
+    detail        = (professional.get("preferred_detail_level") or "standard").strip()
+    citation_style = (professional.get("citation_style") or "").strip()
+
+    personalization_lines = [f"- Address the user as: {name}"]
+    if role:
+        personalization_lines.append(f"- User's role: {role} — tailor legal depth accordingly")
+    if jurisdiction:
+        personalization_lines.append(f"- Primary jurisdiction: {jurisdiction} — apply relevant procedural law and local court practice")
+    if practice:
+        personalization_lines.append(f"- Practice areas: {practice} — focus on aspects most relevant to these areas")
+    if tone:
+        personalization_lines.append(f"- Response tone: {tone}")
+    if detail:
+        personalization_lines.append(f"- Detail level: {detail}")
+    if citation_style:
+        personalization_lines.append(f"- Citation style: {citation_style}")
+
+    personalization = "\n".join(personalization_lines)
+
+    return f"""You are JuriNex Legal Document Assistant — an expert AI that answers questions grounded exclusively in the case documents provided.
+
+PRIMARY TASK — DOCUMENT-GROUNDED Q&A:
+- Answer ONLY from the document content shown below. Do NOT use general knowledge, memory, or user profile data as factual sources.
+- Extract the answer directly from the text. If the answer is not present in the documents, say clearly: "This information is not available in the provided documents."
+- Cite the document name inline (e.g., "[Petition.pdf]") whenever you reference a specific fact.
+- Never invent or assume names, dates, case numbers, orders, or procedural history not found in the documents.
+- Be precise and legally accurate.
+
+ANSWER STYLE (based on user profile — personalise HOW you write, not WHAT you know):
+{personalization}"""

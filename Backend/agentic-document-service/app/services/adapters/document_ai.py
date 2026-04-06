@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from app.schemas.contracts import DocumentReference, DocumentType
 from app.services.llm_chat_config import get_llm_chat_config, resolve_model_name
@@ -16,7 +17,10 @@ _gemini_qa_unavailable_logged = False
 _AGENT_EXTRACTION = "form_population_agent"
 _AGENT_QA = "grounded_retrieval_agent"
 
-_EXTRACTION_PROMPT = """You are an expert legal document analyst. Extract ALL case information from the document using semantic understanding and intelligent field matching.
+# Public name for routes that must use the same agent as document Q&A (folder chat SSE, etc.).
+GROUNDED_RETRIEVAL_AGENT_NAME = _AGENT_QA
+
+_EXTRACTION_PROMPT = """You are an expert legal document analyst specialised in Indian court documents. Extract ALL case information from the document using semantic understanding and intelligent field matching.
 
 INSTRUCTIONS:
 1. Read the entire document carefully and understand the context
@@ -38,9 +42,23 @@ INSTRUCTIONS:
 7. For monetary values, extract numeric value only (remove currency symbols, commas)
 8. For arrays (petitioners, respondents, judges), extract ALL entries
 
+⚠️  CRITICAL — DO NOT EXTRACT LABELS AS NAMES:
+Indian court documents use structural label headings like "PETITIONER", "RESPONDENT", "PLAINTIFF",
+"DEFENDANT", "APPELLANT", "COMPLAINANT", "APPLICANT", "ACCUSED", "OPPOSITE PARTY" as column/section
+headers — these are NOT the actual party names.
+Rules:
+  a. NEVER use a bare label word ("PETITIONER", "RESPONDENT", etc.) as a fullName or in caseTitle.
+  b. The ACTUAL name appears immediately after the label (on the same line or next line).
+     Example in document:  "PETITIONER : Rajesh Kumar Sharma"  → fullName = "Rajesh Kumar Sharma"
+     Example in document:  "PETITIONER\nRajesh Kumar Sharma"   → fullName = "Rajesh Kumar Sharma"
+  c. If a document title heading reads "PETITIONER vs State of Maharashtra" that means the actual
+     petitioner name was not captured yet — look elsewhere in the document for the real name and use it.
+  d. "The State" must always be combined: "The State of Maharashtra", "State of Maharashtra & Others", etc.
+  e. For caseTitle NEVER generate "PETITIONER vs X" — always replace label words with the real person/entity name.
+
 EXTRACT THE FOLLOWING FIELDS:
 {
-  "caseTitle": "Generate as 'Plaintiff Name vs Defendant Name' format. Use title from document or construct from petitioners/respondents",
+  "caseTitle": "ACTUAL party names in 'Petitioner Full Name vs Respondent Full Name' format — never use label words like PETITIONER/RESPONDENT as names",
   "caseNumber": "Case number (Case No., Suit No., Petition No., WP No., Criminal Case No.)",
   "casePrefix": "Case prefix like WP, CR, WP(C), SLP, etc.",
   "caseYear": "Year from case number or filing date (YYYY format)",
@@ -132,82 +150,155 @@ def _anthropic_client():
         return None
 
 
-def _generation_config(
-    *,
-    for_summary: bool = False,
-    agent_name: str | None = None,
-) -> tuple[str, dict, dict]:
-    """
-    Build (model_name, gen_kwargs, llm_params) for a Gemini call.
-
-    Priority:
-      1. agent_prompts DB row for `agent_name`  (source=db)
-      2. summarization_chat_config              (fallback)
-
-    Returns three values:
-      model_name  — string model id
-      gen_kwargs  — core generation params (temperature, max_output_tokens)
-      llm_params  — full llm_parameters blob from DB (contains tool flags like
-                    url_context, grounding_google_search, code_execution, etc.)
-                    Empty dict when coming from summarization_chat_config.
-    """
-    if agent_name:
-        try:
-            from app.services.agent_config_service import get_agent_config
-            cfg = get_agent_config(agent_name)
-            if cfg.source == "db":
-                llm_params = cfg.llm_parameters
-                max_tokens = int(
-                    llm_params.get("max_output_tokens")
-                    or (15000 if for_summary else 20000)
-                )
-                gen_kwargs: dict = {
-                    "temperature": cfg.temperature,
-                    "max_output_tokens": max_tokens,
-                }
-                logger.info(
-                    "[DocumentAI] generation_config  source=agent_prompts  agent=%s  "
-                    "model=%s  temperature=%.2f  max_output_tokens=%d  "
-                    "url_context=%s  grounding_search=%s  code_execution=%s",
-                    agent_name, cfg.model_name, cfg.temperature, max_tokens,
-                    llm_params.get("url_context", False),
-                    llm_params.get("grounding_google_search", False),
-                    llm_params.get("code_execution", False),
-                )
-                return cfg.model_name, gen_kwargs, llm_params
-            logger.debug(
-                "[DocumentAI] generation_config  source=DEFAULT(no-db-row)  agent=%s  "
-                "model=%s  temperature=%.2f  — using summarization_chat_config",
-                agent_name, cfg.model_name, cfg.temperature,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[DocumentAI] agent_config_service failed for agent=%s: %s "
-                "— falling back to summarization_chat_config",
-                agent_name, exc,
-            )
-
-    # ── Fallback: summarization_chat_config ───────────────────────────────────
-    config = get_llm_chat_config()
-    model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
+def _max_tokens_from_summarization_config(config: dict, *, for_summary: bool) -> int:
+    """Compute effective max_output_tokens from a merged summarization_chat_config dict."""
     max_tokens = int(
         config.get("max_summarization_output_tokens") if for_summary
-        else config.get("max_output_tokens") or 0
+        else (config.get("max_output_tokens") or 0)
     )
     max_cap = max(1, int(config.get("max_output_tokens_cap") or 65536))
     min_tokens = max(1, int(config.get("min_output_tokens") or 1))
     if max_tokens <= 0:
         max_tokens = 15000 if for_summary else 20000
-    max_tokens = max(min_tokens, min(max_tokens, max_cap))
+    return max(min_tokens, min(max_tokens, max_cap))
+
+
+def _describe_agent_prompts_origin(cfg: Any) -> str:
+    """Log line: whether the agent row was loaded from public.agent_prompts."""
+    if getattr(cfg, "source", None) == "db" and getattr(cfg, "db_id", None) is not None:
+        return (
+            f"from_db table=agent_prompts row_id={cfg.db_id} "
+            f"agent_type={getattr(cfg, 'agent_type', '') or 'n/a'}"
+        )
+    if getattr(cfg, "source", None) == "db":
+        return "from_db table=agent_prompts (row_id missing)"
+    return "not_from_db (no agent_prompts row; using settings.adk_model + defaults)"
+
+
+def _describe_summarization_token_origin(token_cfg: dict, *, caller_supplied: bool) -> str:
+    """Log line: where token limits dict came from (DB vs fallback vs caller merge)."""
+    scope = (token_cfg or {}).get("summarization_config_scope")
+    cid = (token_cfg or {}).get("config_id")
+    if caller_supplied:
+        if scope in ("user_merged", "global"):
+            return (
+                f"from_db table=summarization_chat_config (request merge) "
+                f"scope={scope} config_id={cid}"
+            )
+        if scope in ("fallback_no_db", "fallback_error"):
+            return f"not_from_db scope={scope} (request merge)"
+        return "caller_merge (effective limits; may include DB + request overrides)"
+    if scope in ("fallback_no_db", "fallback_error"):
+        return f"not_from_db scope={scope}"
+    if scope in ("user_merged", "global"):
+        return f"from_db table=summarization_chat_config scope={scope} config_id={cid}"
+    return f"from_db table=summarization_chat_config config_id={cid} scope={scope or 'n/a'}"
+
+
+def _describe_summarization_full_origin(config: dict, *, caller_supplied: bool) -> str:
+    """Log line: origin of summarization dict when it drives model + temperature + tokens (no-agent path)."""
+    scope = (config or {}).get("summarization_config_scope")
+    cid = (config or {}).get("config_id")
+    if caller_supplied:
+        if scope in ("user_merged", "global"):
+            return (
+                f"from_db table=summarization_chat_config (request merge) "
+                f"scope={scope} config_id={cid}"
+            )
+        if scope in ("fallback_no_db", "fallback_error"):
+            return f"not_from_db scope={scope} (request merge)"
+        return "caller_merge (model/temp/tokens; may include DB + overrides)"
+    if scope in ("fallback_no_db", "fallback_error"):
+        return f"not_from_db scope={scope}"
+    return f"from_db table=summarization_chat_config scope={scope or 'n/a'} config_id={cid}"
+
+
+def _generation_config(
+    *,
+    for_summary: bool = False,
+    agent_name: str | None = None,
+    user_id: str | int | None = None,
+    summarization_llm_config: dict | None = None,
+) -> tuple[str, dict, dict]:
+    """
+    Build (model_name, gen_kwargs, llm_params) for a Gemini call.
+
+    When `agent_name` is set:
+      - Model, temperature, and llm_parameters (tools, thinking, etc.) come from agent_prompts
+        (or agent defaults when no DB row). Summarization's llm_model / model_temperature are not used.
+      - max_output_tokens follows summarization_chat_config in full (merged row + min/cap).
+        Use `summarization_llm_config` when the caller already has the effective dict (e.g. request
+        overrides); otherwise `user_id` selects the per-user merge from the DB.
+
+    When `agent_name` is None (no agent context):
+      - Model, temperature, and max_output_tokens all come from summarization_chat_config.
+
+    Returns three values:
+      model_name  — string model id
+      gen_kwargs  — core generation params (temperature, max_output_tokens)
+      llm_params  — full llm_parameters blob from DB (tool flags, thinking, etc.)
+    """
+    if agent_name:
+        try:
+            from app.services.agent_config_service import get_agent_config
+
+            cfg = get_agent_config(agent_name)
+            llm_params = cfg.llm_parameters
+            token_cfg = summarization_llm_config or get_llm_chat_config(user_id=user_id)
+            max_tokens = _max_tokens_from_summarization_config(
+                token_cfg,
+                for_summary=for_summary,
+            )
+            gen_kwargs: dict = {
+                "temperature": float(cfg.temperature),
+                "max_output_tokens": max_tokens,
+            }
+            logger.info(
+                "[DocumentAI] generation_config  agent_prompts=%s  summarization_tokens=%s  "
+                "agent=%s  model=%s  temperature=%.2f  max_output_tokens=%s  "
+                "url_context=%s  grounding_search=%s  code_execution=%s",
+                _describe_agent_prompts_origin(cfg),
+                _describe_summarization_token_origin(
+                    token_cfg,
+                    caller_supplied=summarization_llm_config is not None,
+                ),
+                agent_name,
+                cfg.model_name,
+                gen_kwargs["temperature"],
+                max_tokens,
+                llm_params.get("url_context", False),
+                llm_params.get("grounding_google_search", False),
+                llm_params.get("code_execution", False),
+            )
+            return cfg.model_name, gen_kwargs, llm_params
+        except Exception as exc:
+            logger.warning(
+                "[DocumentAI] agent_config_service failed for agent=%s: %s "
+                "— falling back to summarization_chat_config",
+                agent_name,
+                exc,
+            )
+
+    # ── Fallback: summarization_chat_config (no agent_name or agent load error) ──
+    config = summarization_llm_config or get_llm_chat_config(user_id=user_id)
+    model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
+    max_tokens = _max_tokens_from_summarization_config(config, for_summary=for_summary)
     temperature = float(config.get("model_temperature") or 0.7)
     temperature = min(
         max(temperature, float(config.get("temperature_min") or 0.0)),
         float(config.get("temperature_max") or 2.0),
     )
     logger.info(
-        "[DocumentAI] generation_config  source=summarization_chat_config  agent=%s  "
+        "[DocumentAI] generation_config  summarization_full=%s  agent=%s  "
         "model=%s  temperature=%.2f  max_output_tokens=%d",
-        agent_name or "N/A", model_name, temperature, max_tokens,
+        _describe_summarization_full_origin(
+            config,
+            caller_supplied=summarization_llm_config is not None,
+        ),
+        agent_name or "N/A",
+        model_name,
+        temperature,
+        max_tokens,
     )
     return model_name, {"temperature": temperature, "max_output_tokens": max_tokens}, {}
 
@@ -339,6 +430,29 @@ def _build_gemini_config(gen_kwargs: dict, llm_params: dict):
         return gen_kwargs
 
 
+def gemini_stream_config_for_folder_chat(
+    *,
+    for_summary: bool = True,
+    user_id: str | int | None = None,
+    summarization_llm_config: dict | None = None,
+) -> tuple[str, Any] | None:
+    """
+    Model + Gemini config for folder intelligent-chat SSE streaming.
+
+    Uses the same agent_prompts resolution as _generate_text for grounded retrieval.
+    Returns None when the resolved model is not Gemini (caller should use the non-stream path).
+    """
+    model_name, gen_kwargs, llm_params = _generation_config(
+        for_summary=for_summary,
+        agent_name=GROUNDED_RETRIEVAL_AGENT_NAME,
+        user_id=user_id,
+        summarization_llm_config=summarization_llm_config,
+    )
+    if _detect_provider(model_name) != "gemini":
+        return None
+    return model_name, _build_gemini_config(gen_kwargs, llm_params)
+
+
 # ── Claude (Anthropic) generation ─────────────────────────────────────────────
 
 def _generate_text_claude(
@@ -416,6 +530,8 @@ def _generate_text(
     *,
     for_summary: bool = False,
     agent_name: str | None = None,
+    user_id: str | int | None = None,
+    summarization_llm_config: dict | None = None,
 ) -> str:
     """
     Generate text using either Gemini or Claude depending on the model name
@@ -426,7 +542,10 @@ def _generate_text(
       everything else            → Gemini API
     """
     model_name, gen_kwargs, llm_params = _generation_config(
-        for_summary=for_summary, agent_name=agent_name
+        for_summary=for_summary,
+        agent_name=agent_name,
+        user_id=user_id,
+        summarization_llm_config=summarization_llm_config,
     )
     provider = _detect_provider(model_name)
 
@@ -486,6 +605,8 @@ def _call_gemini_for_qa(
     output_format: str | None = None,
     extra_instructions: str | None = None,
     system_instruction: str | None = None,
+    user_id: str | int | None = None,
+    summarization_llm_config: dict | None = None,
 ) -> dict[str, str]:
     """
     Ask Gemini a question grounded in the provided document texts.
@@ -560,6 +681,8 @@ def _call_gemini_for_qa(
             prompt,
             for_summary=intent_hint == "summary",
             agent_name=_AGENT_QA,
+            user_id=user_id,
+            summarization_llm_config=summarization_llm_config,
         )
         return {
             "answer": answer,

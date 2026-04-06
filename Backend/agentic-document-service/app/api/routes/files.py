@@ -37,9 +37,8 @@ from app.services.llm_chat_config import (
     get_request_upload_ceiling_mb,
     get_streaming_delay_ms,
     merge_folder_chat_request_llm_overrides,
-    resolve_model_name,
 )
-from app.services.legal_system_prompt import build_legal_system_prompt, fetch_full_profile
+from app.services.legal_system_prompt import build_document_qa_system_prompt, build_legal_system_prompt, fetch_full_profile
 from app.services.llm_policy_service import assert_upload_allowed
 from app.services.secret_manager_api import get_secret_prompt_detail, list_secret_prompts
 from app.services.secret_prompt_display import resolve_query_and_display
@@ -844,7 +843,7 @@ async def intelligent_chat_stream(
             return f"data: {json.dumps(payload)}\n\n"
 
         import asyncio
-        from app.services.adapters.document_ai import _call_gemini_for_qa
+        from app.services.adapters.document_ai import _call_gemini_for_qa, gemini_stream_config_for_folder_chat
 
         async def _run_blocking(func, *, timeout_s: float, timeout_message: str):
             try:
@@ -881,7 +880,7 @@ async def intelligent_chat_stream(
                 user_id,
             )
             user_profile = {}
-        system_instruction = build_legal_system_prompt(user_profile)
+        system_instruction = build_document_qa_system_prompt(user_profile)
         logger.info(
             "[Route:intelligent_chat_stream] system_prompt_chars=%s user_id=%s folder=%s",
             len(system_instruction),
@@ -1099,18 +1098,17 @@ async def intelligent_chat_stream(
                         "=== ANSWER ==="
                     )
                     client = genai.Client(api_key=settings.gemini_api_key)
-                    model_name = resolve_model_name(llm_config, for_summary=True) or resolve_model_name(llm_config) or "gemini-2.0-flash"
+                    stream_bundle = gemini_stream_config_for_folder_chat(
+                        for_summary=True,
+                        summarization_llm_config=llm_config,
+                    )
+                    if stream_bundle is None:
+                        raise RuntimeError("folder_chat_stream_requires_gemini_model")
+                    model_name, gemini_config = stream_bundle
                     stream_iter = client.models.generate_content_stream(
                         model=model_name,
                         contents=prompt,
-                        config={
-                            "temperature": float(llm_config.get("model_temperature") or 0.7),
-                            "max_output_tokens": int(
-                                llm_config.get("max_summarization_output_tokens")
-                                or llm_config.get("max_output_tokens")
-                                or 15000
-                            ),
-                        },
+                        config=gemini_config,
                     )
                     # Generous limits: short per-chunk timeouts were stopping the stream mid-answer
                     # when the model paused between chunks, producing truncated UI responses.
@@ -1179,6 +1177,7 @@ async def intelligent_chat_stream(
                         query_intent="summary",
                         output_format="structured",
                         system_instruction=system_instruction,
+                        summarization_llm_config=llm_config,
                     ),
                     timeout_s=non_stream_timeout_s,
                     timeout_message="gemini_non_stream_generation",

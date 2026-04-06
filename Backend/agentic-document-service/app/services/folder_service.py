@@ -32,7 +32,7 @@ from app.schemas.contracts import (
 from app.core.config import get_settings
 from app.services.db import get_db_connection, is_db_available
 from app.services.llm_chat_config import get_llm_chat_config
-from app.services.legal_system_prompt import build_legal_system_prompt, fetch_full_profile
+from app.services.legal_system_prompt import build_document_qa_system_prompt, build_legal_system_prompt, fetch_full_profile
 from app.services.pipeline_service import LegalCasePipelineService, StoredCase
 from app.services.secret_prompt_display import post_process_secret_prompt_response, resolve_query_and_display
 
@@ -1099,7 +1099,7 @@ class FolderWorkflowService:
             raise ValueError("question is required")
         llm_config = get_llm_chat_config(user_id=user_id, force_refresh=False)
         user_profile = fetch_full_profile(user_id, authorization)
-        system_instruction = build_legal_system_prompt(user_profile)
+        system_instruction = build_document_qa_system_prompt(user_profile)
         logger.info(
             "[FolderService] task=answer_folder_chat system_prompt_chars=%s user_id=%s folder=%s",
             len(system_instruction),
