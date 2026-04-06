@@ -4040,7 +4040,7 @@ const ChatInterface = () => {
             fileId: chunk.file_id || chunk.fileId,
             text: chunk.content || chunk.text || '',
             link: `${chunk.filename || 'document.pdf'}#page=${page || pageStart || 1}`,
-            viewUrl: chunk.file_id ? `${DOCS_BASE_URL}/file/${chunk.file_id}/view?page=${page || pageStart || 1}` : null
+            viewUrl: (chunk.file_id || chunk.fileId) ? `${DOCS_BASE_URL}/file/${chunk.file_id || chunk.fileId}/view?page=${page || pageStart || 1}` : null
           };
         });
 
@@ -5155,7 +5155,9 @@ const ChatInterface = () => {
 
   // ── Pagination helpers ──────────────────────────────────────────────────────
   const paginateContent = (text) => {
-    const normalized = convertJsonToPlainText(text || '').replace(/\r\n/g, '\n').trim();
+    const raw = text || '';
+    const hasInlineCiteHtml = /class\s*=\s*["'][^"']*inline-cite/.test(raw);
+    const normalized = (hasInlineCiteHtml ? raw : convertJsonToPlainText(raw)).replace(/\r\n/g, '\n').trim();
     if (!normalized) return [''];
     const explicitPages = normalized
       .split(/\n\s*(?:\f|---\s*PAGE BREAK\s*---|PAGE_BREAK|PAGE BREAK)\s*\n/gi)
@@ -5530,6 +5532,31 @@ const ChatInterface = () => {
                 {(() => {
                   const pages = paginateContent(formattedResponseContent || '');
                   const totalPages = pages.length || 1;
+
+                  const openCitationByIndex = (n) => {
+                    if (!Number.isFinite(n) || n < 1) return;
+                    const cite = citations?.[n - 1];
+                    if (!cite) return;
+                    const fid = cite.fileId || cite.file_id;
+                    const pageNum = cite.page ?? cite.pageStart ?? 1;
+                    const token = getAuthToken();
+                    if (!token) {
+                      toast.error('Please sign in to open the document.');
+                      return;
+                    }
+                    if (!fid) {
+                      toast.error('Document link is not available for this citation.');
+                      return;
+                    }
+                    openDocumentAtPage(fid, pageNum, cite.filename, token);
+                  };
+
+                  const classListIncludesInlineCite = (cls) => {
+                    if (!cls) return false;
+                    const parts = Array.isArray(cls) ? cls : String(cls).split(/\s+/);
+                    return parts.some((c) => String(c).includes('inline-cite'));
+                  };
+
                   const mdComponents = {
                     h1: ({node, ...props}) => <h1 style={{ fontFamily: 'Georgia, serif', fontSize: '22px', fontWeight: 700, margin: '24px 0 12px', color: '#111', lineHeight: 1.3 }} {...props} />,
                     h2: ({node, ...props}) => <h2 style={{ fontFamily: 'Georgia, serif', fontSize: '19px', fontWeight: 700, margin: '20px 0 10px', color: '#111', lineHeight: 1.3 }} {...props} />,
@@ -5567,6 +5594,60 @@ const ChatInterface = () => {
                     td: ({node, ...props}) => <td className="px-6 py-4 text-sm text-gray-800 border-b border-gray-100 leading-relaxed" {...props} />,
                     hr: ({node, ...props}) => <hr className="my-6 border-t-2 border-gray-300" {...props} />,
                     img: ({node, ...props}) => <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />,
+                    span: ({ node, className, children, ...props }) => {
+                      const hastClass = node?.properties?.className;
+                      const isCite =
+                        classListIncludesInlineCite(className) || classListIncludesInlineCite(hastClass);
+                      const rawN =
+                        props['data-n'] ??
+                        node?.properties?.['data-n'] ??
+                        node?.properties?.dataN;
+                      const n = rawN != null ? parseInt(String(rawN), 10) : NaN;
+                      if (
+                        isCite &&
+                        Number.isFinite(n) &&
+                        citations?.length &&
+                        n >= 1 &&
+                        n <= citations.length
+                      ) {
+                        const cite = citations[n - 1];
+                        const pageNum = cite.page ?? cite.pageStart ?? 1;
+                        const pageLabel =
+                          cite.pageLabel ||
+                          (cite.page || cite.pageStart ? `p. ${cite.page || cite.pageStart}` : null);
+                        const titleBits = [cite.filename, pageLabel].filter(Boolean).join(' · ');
+                        return (
+                          <span
+                            role="link"
+                            tabIndex={0}
+                            data-n={n}
+                            className={`inline-cite ${className || ''}`.trim()}
+                            title={titleBits || 'Citation'}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              openCitationByIndex(n);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key !== 'Enter' && e.key !== ' ') return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              openCitationByIndex(n);
+                            }}
+                          >
+                            <span className="inline-cite-num">[{n}]</span>
+                            {pageLabel ? (
+                              <span className="inline-cite-page"> {pageLabel}</span>
+                            ) : null}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className={className} {...props}>
+                          {children}
+                        </span>
+                      );
+                    },
                   };
                   return pages.map((pageContent, idx) => (
                     <article
@@ -5592,35 +5673,23 @@ const ChatInterface = () => {
                       <div
                         ref={idx === 0 ? markdownOutputRef : undefined}
                         onClick={(e) => {
-                          const el = e.target.closest(".inline-cite");
+                          const t = e.target;
+                          const el =
+                            (t && t.nodeType === 3 ? t.parentElement : t)?.closest?.('.inline-cite');
                           if (!el) return;
                           e.preventDefault();
-                          const n = parseInt(el.getAttribute("data-n"), 10);
-                          const cite = citations[n - 1];
-                          if (cite && (cite.fileId || cite.file_id)) {
-                            openDocumentAtPage(
-                              cite.fileId || cite.file_id,
-                              cite.page || cite.pageStart || 1,
-                              cite.filename,
-                              getAuthToken()
-                            );
-                          }
+                          const n = parseInt(el.getAttribute('data-n'), 10);
+                          openCitationByIndex(n);
                         }}
                         onKeyDown={(e) => {
-                          if (e.key !== "Enter" && e.key !== " ") return;
-                          const el = e.target.closest(".inline-cite");
+                          if (e.key !== 'Enter' && e.key !== ' ') return;
+                          const t = e.target;
+                          const el =
+                            (t && t.nodeType === 3 ? t.parentElement : t)?.closest?.('.inline-cite');
                           if (!el) return;
                           e.preventDefault();
-                          const n = parseInt(el.getAttribute("data-n"), 10);
-                          const cite = citations[n - 1];
-                          if (cite && (cite.fileId || cite.file_id)) {
-                            openDocumentAtPage(
-                              cite.fileId || cite.file_id,
-                              cite.page || cite.pageStart || 1,
-                              cite.filename,
-                              getAuthToken()
-                            );
-                          }
+                          const n = parseInt(el.getAttribute('data-n'), 10);
+                          openCitationByIndex(n);
                         }}
                       >
                         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={mdComponents}>
@@ -6121,6 +6190,12 @@ const ChatInterface = () => {
         .inline-cite:hover {
           background: #dbeafe;
           color: #1e40af;
+        }
+        .inline-cite .inline-cite-page {
+          font-weight: 500;
+          font-size: 9px;
+          color: #1e3a8a;
+          margin-left: 2px;
         }
       `}</style>
     </div>
