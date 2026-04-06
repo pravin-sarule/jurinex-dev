@@ -2529,7 +2529,6 @@ import {
   X,
   Mic,
   MicOff,
-  ExternalLink,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -2589,11 +2588,26 @@ function loadSourcePassagesFromStorage(folderName, messageId) {
   }
 }
 
-function truncatePassageForDisplay(text, max = 480) {
-  if (text == null) return "";
-  const s = String(text).replace(/\s+/g, " ").trim();
-  if (s.length <= max) return s;
-  return `${s.slice(0, max).trim()}…`;
+/**
+ * When the model omits [1], [2], … markers, append them to successive paragraph blocks
+ * so each paragraph can show an inline link to the matching source (best-effort: order matches citation order).
+ */
+function injectCitationMarkersIntoParagraphs(text, maxCitations) {
+  if (!text || !maxCitations) return text;
+  let assigned = 0;
+  return text
+    .split(/(\n{2,})/g)
+    .map((seg) => {
+      if (/^\n{2,}$/.test(seg)) return seg;
+      const t = seg.trim();
+      if (!t) return seg;
+      if (t.startsWith("#") || t.startsWith("|") || t.startsWith("```") || t.startsWith("<")) return seg;
+      if (/\[\d+\]/.test(seg)) return seg;
+      if (assigned >= maxCitations) return seg;
+      assigned += 1;
+      return seg.replace(/\s*$/, "") + ` [${assigned}]`;
+    })
+    .join("");
 }
 
 
@@ -3446,15 +3460,23 @@ const ChatInterface = () => {
       text = clean(isStructured ? renderSecretPromptResponse(rawResponse) : convertJsonToPlainText(rawResponse));
     }
 
-    // Inject inline citation superscripts if citations are loaded
+    // Inline [n] → clickable link (opens document viewer). Inject [n] per paragraph when missing.
     if (citations && citations.length > 0) {
+      text = injectCitationMarkersIntoParagraphs(text, citations.length);
       text = text.replace(/\[(\d+)\]/g, (match, numStr) => {
-        const n = parseInt(numStr);
+        const n = parseInt(numStr, 10);
         if (n >= 1 && n <= citations.length) {
           const cite = citations[n - 1];
-          const filenameShort = (cite.filename || 'document').replace(/\.[^.]+$/, '');
-          const label = cite.pageLabel || (cite.page ? `Page ${cite.page}` : 'Source');
-          return `<sup class="inline-cite" data-n="${n}" title="${filenameShort} · ${label}">[${n}]</sup>`;
+          const filenameShort = (cite.filename || "document").replace(/\.[^.]+$/, "");
+          const pageBit =
+            cite.pageLabel ||
+            (cite.page || cite.pageStart ? `p. ${cite.page || cite.pageStart}` : "source");
+          const safeTitle = `${filenameShort} · ${pageBit}`.replace(/"/g, "&quot;");
+          return (
+            `<span class="inline-cite" data-n="${n}" role="link" tabindex="0" title="${safeTitle}" ` +
+            `style="font-size:0.92em;color:#1d4ed8;font-weight:600;text-decoration:underline;` +
+            `cursor:pointer;white-space:nowrap;margin-left:3px">[${n}]</span>`
+          );
         }
         return match;
       });
@@ -5570,11 +5592,34 @@ const ChatInterface = () => {
                       <div
                         ref={idx === 0 ? markdownOutputRef : undefined}
                         onClick={(e) => {
-                          const sup = e.target.closest('.inline-cite');
-                          if (sup) {
-                            const n = parseInt(sup.getAttribute('data-n'));
-                            const cite = citations[n - 1];
-                            if (cite && cite.fileId) openDocumentAtPage(cite.fileId, cite.page || cite.pageStart || 1, cite.filename, getAuthToken());
+                          const el = e.target.closest(".inline-cite");
+                          if (!el) return;
+                          e.preventDefault();
+                          const n = parseInt(el.getAttribute("data-n"), 10);
+                          const cite = citations[n - 1];
+                          if (cite && (cite.fileId || cite.file_id)) {
+                            openDocumentAtPage(
+                              cite.fileId || cite.file_id,
+                              cite.page || cite.pageStart || 1,
+                              cite.filename,
+                              getAuthToken()
+                            );
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Enter" && e.key !== " ") return;
+                          const el = e.target.closest(".inline-cite");
+                          if (!el) return;
+                          e.preventDefault();
+                          const n = parseInt(el.getAttribute("data-n"), 10);
+                          const cite = citations[n - 1];
+                          if (cite && (cite.fileId || cite.file_id)) {
+                            openDocumentAtPage(
+                              cite.fileId || cite.file_id,
+                              cite.page || cite.pageStart || 1,
+                              cite.filename,
+                              getAuthToken()
+                            );
                           }
                         }}
                       >
@@ -5583,92 +5628,6 @@ const ChatInterface = () => {
                         </ReactMarkdown>
                         {idx === pages.length - 1 && isGenerating && (
                           <span style={{ display: 'inline-block', width: '2px', height: '18px', background: '#555', marginLeft: '2px', verticalAlign: 'middle', animation: 'blink 1s step-end infinite' }} />
-                        )}
-                        {/* Source passages: paragraph excerpt + link to PDF page (also persisted in browser for this Q&A) */}
-                        {idx === pages.length - 1 && !isGenerating && citations && citations.length > 0 && (
-                          <div style={{ marginTop: '28px', borderTop: '1px solid #e5e7eb', paddingTop: '14px' }}>
-                            <p style={{ fontSize: '12px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px', fontFamily: 'Inter, sans-serif' }}>Source passages</p>
-                            <p style={{ fontSize: '12px', color: '#9ca3af', marginBottom: '14px', fontFamily: 'Inter, sans-serif', lineHeight: 1.45 }}>
-                              Excerpts stay with this answer in your browser so you can reopen them anytime. Use the button to jump to that page in the document viewer.
-                            </p>
-                            {citations.map((cite, cidx) => {
-                              const fid = cite.fileId || cite.file_id;
-                              const pageNum = cite.page || cite.pageStart || 1;
-                              const passage = truncatePassageForDisplay(cite.text || '', 520);
-                              const pageLabel = cite.pageLabel || (cite.page || cite.pageStart ? `Page ${cite.page || cite.pageStart}` : null);
-                              const legalTitle = cite.caseName || cite.primaryCitation;
-                              if (!fid) {
-                                return (
-                                  <div
-                                    key={cidx}
-                                    style={{
-                                      marginBottom: '10px',
-                                      padding: '10px 12px',
-                                      background: '#fafafa',
-                                      borderRadius: '8px',
-                                      border: '1px solid #e5e7eb',
-                                      fontSize: '13px',
-                                      fontFamily: 'Georgia, serif',
-                                      color: '#374151',
-                                    }}
-                                  >
-                                    <span style={{ color: '#1d4ed8', fontWeight: 700, fontSize: '12px', fontFamily: 'Inter, sans-serif', marginRight: '8px' }}>[{cidx + 1}]</span>
-                                    {legalTitle || cite.source || 'Reference'}
-                                  </div>
-                                );
-                              }
-                              return (
-                                <div
-                                  key={cidx}
-                                  style={{
-                                    marginBottom: '14px',
-                                    padding: '12px 14px',
-                                    background: '#f9fafb',
-                                    borderRadius: '8px',
-                                    border: '1px solid #e5e7eb',
-                                  }}
-                                >
-                                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                                    <span style={{ color: '#1d4ed8', fontWeight: 700, fontSize: '12px', fontFamily: 'Inter, sans-serif' }}>[{cidx + 1}]</span>
-                                    <span style={{ fontWeight: 600, color: '#111827', fontSize: '13px', fontFamily: 'Georgia, serif' }}>
-                                      {(cite.filename || 'Document').replace(/\.[^.]+$/, '')}
-                                    </span>
-                                    {pageLabel && (
-                                      <span style={{ fontSize: '12px', color: '#6b7280', fontFamily: 'Inter, sans-serif' }}>{pageLabel}</span>
-                                    )}
-                                  </div>
-                                  {passage ? (
-                                    <p style={{ fontSize: '14px', lineHeight: 1.65, color: '#374151', fontFamily: 'Georgia, serif', margin: '0 0 10px 0', whiteSpace: 'pre-wrap' }}>
-                                      {passage}
-                                    </p>
-                                  ) : (
-                                    <p style={{ fontSize: '12px', color: '#9ca3af', fontStyle: 'italic', margin: '0 0 10px 0' }}>No passage text on file for this reference.</p>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => openDocumentAtPage(fid, pageNum, cite.filename, getAuthToken())}
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '6px',
-                                      padding: '6px 12px',
-                                      fontSize: '12px',
-                                      fontWeight: 600,
-                                      fontFamily: 'Inter, sans-serif',
-                                      color: '#1d4ed8',
-                                      background: '#fff',
-                                      border: '1px solid #bfdbfe',
-                                      borderRadius: '6px',
-                                      cursor: 'pointer',
-                                    }}
-                                  >
-                                    <ExternalLink className="h-3.5 w-3.5" />
-                                    Open this page in document
-                                  </button>
-                                </div>
-                              );
-                            })}
-                          </div>
                         )}
                       </div>
                       {/* Page footer */}
