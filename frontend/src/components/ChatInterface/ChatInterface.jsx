@@ -2529,6 +2529,7 @@ import {
   X,
   Mic,
   MicOff,
+  ExternalLink,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -2559,6 +2560,40 @@ function plainTextPreviewFromResponse(raw) {
   } catch {
     return String(raw).slice(0, 2000);
   }
+}
+
+function sourcePassagesStorageKey(folderName, messageId) {
+  return `jurinex.chat.sourcePassages.v1:${String(folderName || "")}:${String(messageId ?? "")}`;
+}
+
+function saveSourcePassagesToStorage(folderName, messageId, citations) {
+  try {
+    if (!folderName || messageId == null) return;
+    const key = sourcePassagesStorageKey(folderName, messageId);
+    if (!citations?.length) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify({ citations, savedAt: Date.now() }));
+  } catch (_) {}
+}
+
+function loadSourcePassagesFromStorage(folderName, messageId) {
+  try {
+    const raw = localStorage.getItem(sourcePassagesStorageKey(folderName, messageId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.citations) ? parsed.citations : null;
+  } catch {
+    return null;
+  }
+}
+
+function truncatePassageForDisplay(text, max = 480) {
+  if (text == null) return "";
+  const s = String(text).replace(/\s+/g, " ").trim();
+  if (s.length <= max) return s;
+  return `${s.slice(0, max).trim()}…`;
 }
 
 
@@ -3879,6 +3914,7 @@ const ChatInterface = () => {
         });
         console.log('[Citations] Formatted citations from chunk_details:', formattedCitations);
         setCitations(formattedCitations);
+        saveSourcePassagesToStorage(folderName, message.id, formattedCitations);
         setLoadingCitations(false);
         return;
       }
@@ -3916,13 +3952,20 @@ const ChatInterface = () => {
         });
         console.log('[Citations] Formatted citations from metadata:', formattedCitations);
         setCitations(formattedCitations);
+        saveSourcePassagesToStorage(folderName, message.id, formattedCitations);
         setLoadingCitations(false);
         return;
       }
      
       if (!message.used_chunk_ids || message.used_chunk_ids.length === 0) {
         console.log('[Citations] No used_chunk_ids or citations in message:', message.used_chunk_ids);
-        setCitations([]);
+        const cached = loadSourcePassagesFromStorage(folderName, message.id);
+        if (cached?.length) {
+          setCitations(cached);
+        } else {
+          setCitations([]);
+          saveSourcePassagesToStorage(folderName, message.id, []);
+        }
         setShowCitations(false);
         return;
       }
@@ -3981,9 +4024,15 @@ const ChatInterface = () => {
 
         console.log('[Citations] Formatted citations:', formattedCitations);
         setCitations(formattedCitations);
+        saveSourcePassagesToStorage(folderName, message.id, formattedCitations);
       } catch (error) {
         console.error('[Citations] Failed to fetch citations:', error);
-        setCitations([]);
+        const cached = loadSourcePassagesFromStorage(folderName, message.id);
+        if (cached?.length) {
+          setCitations(cached);
+        } else {
+          setCitations([]);
+        }
       } finally {
         setLoadingCitations(false);
       }
@@ -5535,26 +5584,90 @@ const ChatInterface = () => {
                         {idx === pages.length - 1 && isGenerating && (
                           <span style={{ display: 'inline-block', width: '2px', height: '18px', background: '#555', marginLeft: '2px', verticalAlign: 'middle', animation: 'blink 1s step-end infinite' }} />
                         )}
-                        {/* Citations on last page */}
+                        {/* Source passages: paragraph excerpt + link to PDF page (also persisted in browser for this Q&A) */}
                         {idx === pages.length - 1 && !isGenerating && citations && citations.length > 0 && (
                           <div style={{ marginTop: '28px', borderTop: '1px solid #e5e7eb', paddingTop: '14px' }}>
-                            <p style={{ fontSize: '12px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '10px', fontFamily: 'Inter, sans-serif' }}>References</p>
-                            {citations.map((cite, cidx) => (
-                              <div
-                                key={cidx}
-                                onClick={() => cite.fileId && openDocumentAtPage(cite.fileId, cite.page || cite.pageStart || 1, cite.filename, getAuthToken())}
-                                style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginBottom: '6px', cursor: cite.fileId ? 'pointer' : 'default', fontSize: '13px', fontFamily: 'Inter, sans-serif', color: '#374151', padding: '5px 8px', borderRadius: '6px', transition: 'background 0.15s' }}
-                                onMouseEnter={e => { if (cite.fileId) e.currentTarget.style.background = '#f0f7ff'; }}
-                                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-                              >
-                                <span style={{ color: '#1d4ed8', fontWeight: 700, minWidth: '22px', fontSize: '12px', paddingTop: '1px' }}>[{cidx + 1}]</span>
-                                <span>
-                                  <span style={{ fontWeight: 600, color: '#111827' }}>{(cite.filename || 'document').replace(/\.[^.]+$/, '')}</span>
-                                  {(cite.pageLabel || cite.page) && <span style={{ color: '#6b7280', marginLeft: '6px' }}>· {cite.pageLabel || `Page ${cite.page}`}</span>}
-                                  {cite.fileId && <span style={{ color: '#2563eb', marginLeft: '6px', fontSize: '11px' }}>↗ open</span>}
-                                </span>
-                              </div>
-                            ))}
+                            <p style={{ fontSize: '12px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px', fontFamily: 'Inter, sans-serif' }}>Source passages</p>
+                            <p style={{ fontSize: '12px', color: '#9ca3af', marginBottom: '14px', fontFamily: 'Inter, sans-serif', lineHeight: 1.45 }}>
+                              Excerpts stay with this answer in your browser so you can reopen them anytime. Use the button to jump to that page in the document viewer.
+                            </p>
+                            {citations.map((cite, cidx) => {
+                              const fid = cite.fileId || cite.file_id;
+                              const pageNum = cite.page || cite.pageStart || 1;
+                              const passage = truncatePassageForDisplay(cite.text || '', 520);
+                              const pageLabel = cite.pageLabel || (cite.page || cite.pageStart ? `Page ${cite.page || cite.pageStart}` : null);
+                              const legalTitle = cite.caseName || cite.primaryCitation;
+                              if (!fid) {
+                                return (
+                                  <div
+                                    key={cidx}
+                                    style={{
+                                      marginBottom: '10px',
+                                      padding: '10px 12px',
+                                      background: '#fafafa',
+                                      borderRadius: '8px',
+                                      border: '1px solid #e5e7eb',
+                                      fontSize: '13px',
+                                      fontFamily: 'Georgia, serif',
+                                      color: '#374151',
+                                    }}
+                                  >
+                                    <span style={{ color: '#1d4ed8', fontWeight: 700, fontSize: '12px', fontFamily: 'Inter, sans-serif', marginRight: '8px' }}>[{cidx + 1}]</span>
+                                    {legalTitle || cite.source || 'Reference'}
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div
+                                  key={cidx}
+                                  style={{
+                                    marginBottom: '14px',
+                                    padding: '12px 14px',
+                                    background: '#f9fafb',
+                                    borderRadius: '8px',
+                                    border: '1px solid #e5e7eb',
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                                    <span style={{ color: '#1d4ed8', fontWeight: 700, fontSize: '12px', fontFamily: 'Inter, sans-serif' }}>[{cidx + 1}]</span>
+                                    <span style={{ fontWeight: 600, color: '#111827', fontSize: '13px', fontFamily: 'Georgia, serif' }}>
+                                      {(cite.filename || 'Document').replace(/\.[^.]+$/, '')}
+                                    </span>
+                                    {pageLabel && (
+                                      <span style={{ fontSize: '12px', color: '#6b7280', fontFamily: 'Inter, sans-serif' }}>{pageLabel}</span>
+                                    )}
+                                  </div>
+                                  {passage ? (
+                                    <p style={{ fontSize: '14px', lineHeight: 1.65, color: '#374151', fontFamily: 'Georgia, serif', margin: '0 0 10px 0', whiteSpace: 'pre-wrap' }}>
+                                      {passage}
+                                    </p>
+                                  ) : (
+                                    <p style={{ fontSize: '12px', color: '#9ca3af', fontStyle: 'italic', margin: '0 0 10px 0' }}>No passage text on file for this reference.</p>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => openDocumentAtPage(fid, pageNum, cite.filename, getAuthToken())}
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '6px',
+                                      padding: '6px 12px',
+                                      fontSize: '12px',
+                                      fontWeight: 600,
+                                      fontFamily: 'Inter, sans-serif',
+                                      color: '#1d4ed8',
+                                      background: '#fff',
+                                      border: '1px solid #bfdbfe',
+                                      borderRadius: '6px',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    <ExternalLink className="h-3.5 w-3.5" />
+                                    Open this page in document
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
