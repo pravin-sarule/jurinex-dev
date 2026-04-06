@@ -2542,7 +2542,24 @@ import CitationsPanel from "../AnalysisPage/CitationsPanel";
 import apiService from "../../services/api";
 import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../utils/renderSecretPromptResponse";
+import {
+  parseLlmPolicyErrorForUi,
+  stringToChatErrorDisplay,
+} from "../../utils/llmQuotaMessages";
+import ChatQuotaErrorModal from "../ChatQuotaErrorModal";
 import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
+
+/** Full plain text for chat list preview (not a single 120-char line). */
+function plainTextPreviewFromResponse(raw) {
+  if (raw == null || raw === "") return "";
+  try {
+    let t = convertJsonToPlainText(raw);
+    t = t.replace(/^#+\s*/gm, "").replace(/\*\*/g, "").trim();
+    return t;
+  } catch {
+    return String(raw).slice(0, 2000);
+  }
+}
 
 
 
@@ -3678,7 +3695,7 @@ const ChatInterface = () => {
       setIsSecretPromptSelected(false);
     } catch (error) {
       console.error("Error fetching secrets:", error);
-      setChatError(`Failed to load analysis prompts: ${error.message}`);
+      setChatError(stringToChatErrorDisplay(`Failed to load analysis prompts: ${error.message}`));
     } finally {
       setIsLoadingSecrets(false);
     }
@@ -3793,7 +3810,7 @@ const ChatInterface = () => {
     } catch (err) {
       console.error("[ChatInterface] fetchChatHistory: Error fetching chats:", err);
       console.error("[ChatInterface] fetchChatHistory: Error details:", err.response?.data || err.message);
-      setChatError("Failed to fetch chat history.");
+      setChatError(stringToChatErrorDisplay('Failed to fetch chat history.'));
     } finally {
       setLoadingChat(false);
       console.log('[ChatInterface] fetchChatHistory: Completed');
@@ -4153,7 +4170,17 @@ const ChatInterface = () => {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        let errBody = {};
+        try {
+          errBody = await response.json();
+        } catch {
+          errBody = {};
+        }
+        setChatError(parseLlmPolicyErrorForUi(response.status, errBody));
+        setHasResponse(false);
+        setHasAiResponse(false);
+        setForceSidebarCollapsed(false);
+        return;
       }
 
       const reader = response.body.getReader();
@@ -4332,6 +4359,13 @@ const ChatInterface = () => {
                   setForceSidebarCollapsed(true);
                   panelStatesSetRef.current = true;
                 }
+                const raw = streamBufferRef.current;
+                const live = isStructuredJsonResponse(raw)
+                  ? raw
+                  : convertJsonToPlainText(raw);
+                setAnimatedResponseContent(live);
+                setIsGenerating(true);
+                setIsAnimatingResponse(true);
               }
             } else if (parsed.type === 'done') {
               finalMetadata = { ...finalMetadata, ...parsed };
@@ -4376,7 +4410,11 @@ const ChatInterface = () => {
               setIsAnimatingResponse(false);
               setIsGenerating(false);
             } else if (parsed.type === 'error') {
-              setChatError(parsed.message || parsed.error);
+              setChatError(
+                stringToChatErrorDisplay(
+                  parsed.message || parsed.error || 'An error occurred'
+                )
+              );
               setLoadingChat(false);
             }
           } catch (e) {
@@ -4385,7 +4423,11 @@ const ChatInterface = () => {
       }
     } catch (error) {
       console.error("Chat error:", error);
-      setChatError(`Analysis failed: ${error.message}`);
+      setChatError(
+        stringToChatErrorDisplay(
+          error.message || 'Analysis could not complete. Please try again.'
+        )
+      );
       setHasResponse(false);
       setHasAiResponse(false);
       setForceSidebarCollapsed(false);
@@ -4400,7 +4442,7 @@ const ChatInterface = () => {
     if (!selectedFolder) return;
     if (isSecretPromptSelected) {
       if (!selectedSecretId) {
-        setChatError("Please select an analysis type.");
+        setChatError(stringToChatErrorDisplay('Please select an analysis type.', 'Missing selection'));
         return;
       }
       await chatWithAI(selectedFolder, selectedSecretId, selectedChatSessionId);
@@ -4462,7 +4504,19 @@ const ChatInterface = () => {
         });
 
         if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
+          let errBody = {};
+          try {
+            errBody = await response.json();
+          } catch {
+            errBody = {};
+          }
+          setChatError(parseLlmPolicyErrorForUi(response.status, errBody));
+          setHasResponse(false);
+          setHasAiResponse(false);
+          setForceSidebarCollapsed(false);
+          setPendingQuestion('');
+          setIsGenerating(false);
+          return;
         }
 
         const reader = response.body.getReader();
@@ -4626,6 +4680,13 @@ const ChatInterface = () => {
                     setForceSidebarCollapsed(true);
                     panelStatesSetRef.current = true;
                   }
+                  const raw = streamBufferRef.current;
+                  const live = isStructuredJsonResponse(raw)
+                    ? raw
+                    : convertJsonToPlainText(raw);
+                  setAnimatedResponseContent(live);
+                  setIsGenerating(true);
+                  setIsAnimatingResponse(true);
                 }
               } else if (parsed.type === 'done') {
                 finalMetadata = parsed;
@@ -4677,7 +4738,11 @@ const ChatInterface = () => {
                 setIsAnimatingResponse(false);
                 setIsGenerating(false);
               } else if (parsed.type === 'error') {
-                setChatError(parsed.message || parsed.error);
+                setChatError(
+                  stringToChatErrorDisplay(
+                    parsed.message || parsed.error || 'An error occurred'
+                  )
+                );
                 setLoadingChat(false);
               }
             } catch (e) {
@@ -4686,7 +4751,11 @@ const ChatInterface = () => {
         }
       } catch (err) {
         console.error("Error sending message:", err);
-        setChatError(`Failed to send message: ${err.response?.data?.details || err.message}`);
+        setChatError(
+          stringToChatErrorDisplay(
+            err.message || "Couldn't send your message. Please try again."
+          )
+        );
         setHasResponse(false);
         setHasAiResponse(false);
         setForceSidebarCollapsed(false);
@@ -4782,7 +4851,7 @@ const ChatInterface = () => {
     } catch (err) {
       console.error("❌ Error deleting chat:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete chat';
-      setChatError(errorMessage);
+      setChatError(stringToChatErrorDisplay(errorMessage));
     } finally {
       setLoadingChat(false);
     }
@@ -4867,7 +4936,7 @@ const ChatInterface = () => {
     } catch (err) {
       console.error("❌ Error deleting all chats:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete all chats';
-      setChatError(errorMessage);
+      setChatError(stringToChatErrorDisplay(errorMessage));
     } finally {
       setLoadingChat(false);
     }
@@ -5047,6 +5116,7 @@ const ChatInterface = () => {
 
   return (
     <div className="flex h-full min-h-0 w-full overflow-hidden relative" style={{ background: '#fff' }}>
+      <ChatQuotaErrorModal error={chatError} onDismiss={() => setChatError(null)} />
       {/* LEFT — conversation panel */}
       <div className={`${hasResponse ? 'flex-[0.42]' : 'flex-1'} flex flex-col h-full border-r border-gray-200 min-w-0 transition-all duration-300`} style={{ background: '#fff' }}>
 
@@ -5113,18 +5183,22 @@ const ChatInterface = () => {
                         <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="5"/></svg>
                         JuriNex Response
                       </span>
-                      <span style={{ color: '#374151' }}>
-                        {(() => {
-                          const raw = chat.response || '';
-                          const isStructured = isStructuredJsonResponse(raw);
-                          const plain = isStructured
-                            ? convertJsonToPlainText(raw)
-                            : convertJsonToPlainText(raw);
-                          const firstLine = plain.replace(/^#+\s*/gm, '').replace(/\*\*/g, '').trim().split('\n').find(l => l.trim().length > 10) || '';
-                          return firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine || 'View full response →';
-                        })()}
-                      </span>
-                      <span style={{ display: 'block', marginTop: '4px', fontSize: '11px', color: '#9ca3af' }}>Click to view full document</span>
+                      <div
+                        style={{
+                          color: '#374151',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 8,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
+                          wordBreak: 'break-word',
+                          whiteSpace: 'pre-wrap',
+                          lineHeight: '1.45',
+                          maxHeight: '11.5rem',
+                        }}
+                      >
+                        {plainTextPreviewFromResponse(chat.response || '') || 'View full response →'}
+                      </div>
+                      <span style={{ display: 'block', marginTop: '6px', fontSize: '11px', color: '#9ca3af' }}>Click to view full response in the panel →</span>
                     </div>
                   </div>
                 )}
@@ -5286,11 +5360,6 @@ const ChatInterface = () => {
               )}
             </button>
           </form>
-          {chatError && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-sm">
-              {chatError}
-            </div>
-          )}
         </div>
       </div>
       {hasResponse && (

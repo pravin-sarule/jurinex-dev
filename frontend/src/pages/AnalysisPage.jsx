@@ -19,7 +19,7 @@ import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/r
 import { formatFileSize } from '../utils/planUtils';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
-import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCS_BASE_URL } from '../config/apiConfig';
 import {
   Search,
   Send,
@@ -477,7 +477,7 @@ const AnalysisPage = () => {
       const token = getAuthToken();
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${API_BASE_URL}/files/status/${file_id}`, {
+      const response = await fetch(`${DOCS_BASE_URL}/status/${file_id}`, {
         method: 'GET',
         headers,
       });
@@ -711,7 +711,7 @@ const AnalysisPage = () => {
             )
           );
          
-          const generateUrlEndpoint = `${API_BASE_URL}/files/generate-upload-url`;
+          const generateUrlEndpoint = `${DOCS_BASE_URL}/generate-upload-url`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 1/3: Requesting signed URL from: ${generateUrlEndpoint}`);
          
           const urlResponse = await fetch(generateUrlEndpoint, {
@@ -807,7 +807,7 @@ const AnalysisPage = () => {
             xhr.send(file);
           });
          
-          const completeEndpoint = `${API_BASE_URL}/files/complete-upload`;
+          const completeEndpoint = `${DOCS_BASE_URL}/complete-upload`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 3/3: Notifying backend to process file: ${completeEndpoint}`);
          
           const completeResponse = await fetch(completeEndpoint, {

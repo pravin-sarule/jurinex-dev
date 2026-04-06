@@ -310,6 +310,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { DOCS_BASE_URL } from '../config/apiConfig';
+import { parseLlmPolicyErrorForUi, stringToChatErrorDisplay } from '../utils/llmQuotaMessages';
 
 const API_BASE = DOCS_BASE_URL;
 
@@ -404,7 +405,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
       } else if (question && question.trim()) {
         requestBody.question = question.trim();
       } else {
-        setError('Please enter a question or select an analysis prompt.');
+        setError(stringToChatErrorDisplay('Please enter a question or select an analysis prompt.'));
         setIsStreaming(false);
         return;
       }
@@ -422,12 +423,20 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        const errorMessage = errorData.error || errorData.message || `HTTP ${response.status}`;
-        
-        if (secretId && errorMessage.toLowerCase().includes('question') && errorMessage.toLowerCase().includes('required')) {
-          setError('Backend error: Secret prompt could not be processed. Please try again or contact support.');
+        const display = parseLlmPolicyErrorForUi(response.status, errorData);
+        const errorMessage = display.body || '';
+        if (
+          secretId &&
+          errorMessage.toLowerCase().includes('question') &&
+          errorMessage.toLowerCase().includes('required')
+        ) {
+          setError(
+            stringToChatErrorDisplay(
+              'Backend error: Secret prompt could not be processed. Please try again or contact support.'
+            )
+          );
         } else {
-          setError(errorMessage);
+          setError(display);
         }
         setIsStreaming(false);
         return;
@@ -512,21 +521,22 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 });
                 break;
 
-              case 'thinking':
+              case 'thinking': {
                 const thinkingText = parsed.text || '';
                 if (thinkingText) {
                   accumulatedThinking += thinkingText;
-                  
+
                   if (updateTimeoutRef.current) {
                     clearTimeout(updateTimeoutRef.current);
                   }
-                  
+
                   updateTimeoutRef.current = setTimeout(() => {
                     setThinking(accumulatedThinking);
                     updateTimeoutRef.current = null;
                   }, 10);
                 }
                 break;
+              }
 
               case 'chunk': {
                 const chunkText = parsed.text || '';
@@ -534,11 +544,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                   accumulatedText += chunkText;
                   if (chunkDisplayTimeoutRef.current) {
                     clearTimeout(chunkDisplayTimeoutRef.current);
-                  }
-                  chunkDisplayTimeoutRef.current = setTimeout(() => {
-                    setText(accumulatedText);
                     chunkDisplayTimeoutRef.current = null;
-                  }, 16);
+                  }
+                  setText(accumulatedText);
                 }
                 break;
               }
@@ -571,15 +579,24 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 }
                 break;
 
-              case 'error':
+              case 'error': {
                 const errorMsg = parsed.message || parsed.error || 'An error occurred';
-                if (isUsingSecretId && errorMsg.toLowerCase().includes('question') && errorMsg.toLowerCase().includes('required')) {
-                  setError('Backend error: Secret prompt could not be processed. Please try again or contact support.');
+                if (
+                  isUsingSecretId &&
+                  errorMsg.toLowerCase().includes('question') &&
+                  errorMsg.toLowerCase().includes('required')
+                ) {
+                  setError(
+                    stringToChatErrorDisplay(
+                      'Backend error: Secret prompt could not be processed. Please try again or contact support.'
+                    )
+                  );
                 } else {
-                  setError(errorMsg);
+                  setError(stringToChatErrorDisplay(errorMsg));
                 }
                 setIsStreaming(false);
                 break;
+              }
 
               default:
                 console.log('Unknown stream event type:', parsed.type);
@@ -595,7 +612,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         setIsStreaming(false);
         return;
       }
-      setError(err.message || 'An error occurred');
+      setError(stringToChatErrorDisplay(err.message || 'An error occurred'));
       setIsStreaming(false);
     } finally {
       if (updateTimeoutRef.current) {
@@ -627,6 +644,10 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     stopStreaming();
   }, [stopStreaming]);
 
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -654,5 +675,6 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     sendMessage,
     stopStreaming,
     clear,
+    clearError,
   };
 }

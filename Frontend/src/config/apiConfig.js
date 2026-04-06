@@ -130,10 +130,16 @@ export function getUserIdForDrafting() {
   return null;
 }
 
-// Default docs/chat flows to the standalone agentic service instead of the legacy gateway `/docs` path.
-export const DOCS_BASE_URL = rawAgenticDocs.trim()
-  ? rawAgenticDocs.trim().replace(/\/$/, '')
-  : `${agenticServiceHost()}/api/files`;
+// Default docs/chat flows to the standalone agentic service (FastAPI router prefix `/api/files`).
+// If env is only the host (e.g. http://localhost:8092), append `/api/files` so `/folders` is not 404.
+export const DOCS_BASE_URL = (() => {
+  const raw = String(rawAgenticDocs || '').trim().replace(/\/$/, '');
+  if (!raw) {
+    return `${agenticServiceHost()}/api/files`;
+  }
+  const hostOnly = raw.replace(/\/api\/files\/?$/, '');
+  return `${hostOnly}/api/files`;
+})();
 export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 export const DOCUMENT_SERVICE_DIRECT = DOCUMENT_SERVICE_URL;

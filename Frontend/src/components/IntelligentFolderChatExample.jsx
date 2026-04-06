@@ -41,6 +41,7 @@ export function IntelligentChatWithCallback() {
 }
 
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
+import { errorToString } from '../utils/llmQuotaMessages';
 
 export function CustomIntelligentChat() {
   const folderName = 'my-case-folder';
@@ -81,7 +82,7 @@ export function CustomIntelligentChat() {
       )}
 
       {error && (
-        <div style={{ color: 'red' }}>Error: {error}</div>
+        <div style={{ color: 'red' }}>Error: {errorToString(error)}</div>
       )}
 
       <div style={{ marginTop: '20px', padding: '10px', background: '#f5f5f5' }}>

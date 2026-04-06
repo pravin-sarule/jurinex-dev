@@ -11,6 +11,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import ChatQuotaErrorModal from './ChatQuotaErrorModal';
 
 export default function IntelligentFolderChat({
   folderName,
@@ -111,6 +112,7 @@ export default function IntelligentFolderChat({
     sendMessage,
     stopStreaming,
     clear,
+    clearError,
   } = useIntelligentFolderChat(folderName, authToken);
 
 
@@ -473,6 +475,7 @@ export default function IntelligentFolderChat({
 
   return (
     <div className={`intelligent-folder-chat ${className}`}>
+      <ChatQuotaErrorModal error={error} onDismiss={clearError} />
       <div className="chat-header">
         <h3>Intelligent Folder Chat</h3>
         {sessionId && (
@@ -656,13 +659,6 @@ export default function IntelligentFolderChat({
             </div>
           </div>
         ))}
-
-        {error && (
-          <div className="error-message">
-            <span className="error-icon">⚠️</span>
-            <span>{error}</span>
-          </div>
-        )}
 
         <div ref={messagesEndRef} />
       </div>

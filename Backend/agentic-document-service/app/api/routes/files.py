@@ -231,6 +231,85 @@ def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | No
         return cur.fetchone()
 
 
+def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str, Any] | None:
+    """
+    Build the same shape the legacy document-service GET /files/status/:file_id returns
+    (used by AnalysisPage polling and document preview).
+    """
+    if not is_db_available():
+        return None
+    accessible = get_folder_service()._get_accessible_user_ids(user_id)
+    if not accessible:
+        return None
+    fid = str(file_id).strip()
+    if not fid:
+        return None
+    try:
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, originalname, mimetype, size, gcs_path, status,
+                       processing_progress, current_operation, summary, updated_at, processed_at,
+                       full_text_content
+                FROM user_files
+                WHERE id::text = %s
+                  AND COALESCE(is_folder, false) = false
+                  AND user_id::text = ANY(%s::text[])
+                LIMIT 1
+                """,
+                (fid, accessible),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            chunk_count = 0
+            try:
+                cur.execute(
+                    "SELECT COUNT(*)::int AS c FROM file_chunks WHERE file_id::text = %s",
+                    (fid,),
+                )
+                cr = cur.fetchone()
+                if cr:
+                    chunk_count = int(cr.get("c") or 0)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("[files.status] file_id=%s lookup error: %s", fid, exc)
+        return None
+
+    st = str(row.get("status") or "unknown")
+    prog = float(row.get("processing_progress") or 0)
+    updated = row.get("updated_at")
+    last_updated = updated.isoformat() if hasattr(updated, "isoformat") else str(updated or "")
+    proc_at = row.get("processed_at")
+    processed_at = proc_at.isoformat() if proc_at is not None and hasattr(proc_at, "isoformat") else proc_at
+
+    out: dict[str, Any] = {
+        "document_id": str(row.get("id") or fid),
+        "filename": row.get("originalname") or "",
+        "status": st,
+        "processing_progress": prog,
+        "current_operation": str(row.get("current_operation") or ""),
+        "chunk_count": chunk_count,
+        "last_updated": last_updated,
+        "summary": row.get("summary"),
+        "processed_at": processed_at,
+        "mime_type": row.get("mimetype") or "",
+        "file_size": int(row.get("size") or 0),
+        "job_error": None,
+        "job_status": "unknown",
+        "embeddings_generated": 0,
+        "embeddings_total": 0,
+        "chunks_saved": chunk_count,
+        "estimated_pages": None,
+        "chunking_method": None,
+    }
+    ftc = row.get("full_text_content")
+    if ftc:
+        out["full_text_content"] = ftc
+    return out
+
+
 async def _upload_to_gcs_and_build_document(user_id: str, folder_name: str, upload: UploadFile) -> DocumentReference:
     file_bytes = await upload.read()
     mimetype = upload.content_type or "application/octet-stream"
@@ -389,6 +468,34 @@ async def get_queue_status(
         "success": True,
         "queue": get_folder_service().get_queue_status(),
     }
+
+
+@router.get("/status/{file_id}")
+async def get_file_processing_status(
+    file_id: str,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """
+    Per-file processing status (parity with legacy document-service GET /files/status/:file_id).
+
+    The analysis UI polls this for progress; document preview also depends on a successful status
+    lookup for the same file id in user_files.
+    """
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    payload = _get_file_processing_status_payload(file_id, user_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Document not found")
+    logger.info(
+        "[Route:file_status] file_id=%s user_id=%s status=%s progress=%s",
+        file_id,
+        user_id,
+        payload.get("status"),
+        payload.get("processing_progress"),
+    )
+    return payload
 
 
 @router.post("/upload-for-processing")

@@ -106,7 +106,44 @@ export function getChatModelQuotaUserMessage(error) {
   if (code === 'RATE_LIMIT_MESSAGES_PER_HOUR') {
     return buildPerHourQuotaMessage(details);
   }
+  if (code === 'POLICY_CHECK_UNAVAILABLE') {
+    return {
+      title: 'Please try again',
+      body:
+        (typeof data.message === 'string' && data.message.trim()) ||
+        "We couldn't verify usage limits right now. Please try again in a moment.",
+      isLimit: false,
+      limitType: 'unknown',
+    };
+  }
   return null;
+}
+
+/**
+ * Plain string for folder intelligent-chat / agentic policy errors (429/503 JSON body).
+ * Matches ChatModel-style { code, message, details } from LLMChatPolicyMiddleware.
+ * @param {number} status - HTTP status
+ * @param {object} [body] - Parsed JSON response body
+ * @returns {string}
+ */
+export function getLlmPolicyErrorUserText(status, body) {
+  if (body && typeof body === 'object') {
+    const quota = getChatModelQuotaUserMessage({
+      response: { data: body },
+      code: body.code,
+      details: body.details,
+    });
+    if (quota?.body) return quota.body;
+    if (typeof body.message === 'string' && body.message.trim()) return body.message.trim();
+    if (typeof body.error === 'string' && body.error.trim()) return body.error.trim();
+  }
+  if (status === 429) {
+    return "You've reached a usage limit (too many messages or chats in this period). Please wait a bit and try again.";
+  }
+  if (status === 503) {
+    return "The service couldn't verify your usage limits. Please try again shortly.";
+  }
+  return '';
 }
 
 /** Extract a plain string from an error value (handles both string and { title, body } objects). */
@@ -115,4 +152,58 @@ export function errorToString(err) {
   if (typeof err === 'string') return err;
   if (typeof err === 'object' && err.body) return err.body;
   return String(err);
+}
+
+/** Generic non-quota error card (same shape as quota messages for shared UI). */
+export function stringToChatErrorDisplay(body, title = 'Something went wrong') {
+  const b = typeof body === 'string' ? body : String(body ?? '');
+  return { title, body: b || 'An error occurred', isLimit: false, limitType: 'unknown' };
+}
+
+/**
+ * Normalize folder-chat / policy HTTP errors to the same { title, body, isLimit, limitType } shape as ChatModel.
+ * @param {number} status
+ * @param {object} [body] - Parsed JSON response body
+ * @returns {{ title: string, body: string, isLimit: boolean, limitType: string }}
+ */
+export function parseLlmPolicyErrorForUi(status, body) {
+  if (body && typeof body === 'object') {
+    const quota = getChatModelQuotaUserMessage({
+      response: { data: body },
+      code: body.code,
+      details: body.details,
+    });
+    if (quota) return quota;
+  }
+  let text = getLlmPolicyErrorUserText(status, body);
+  if (!text && body && typeof body === 'object') {
+    if (typeof body.message === 'string' && body.message.trim()) text = body.message.trim();
+    else if (typeof body.error === 'string' && body.error.trim()) text = body.error.trim();
+  }
+  if (!text) text = `Something went wrong (${status}).`;
+
+  if (status === 429) {
+    return { title: 'Usage limit', body: text, isLimit: true, limitType: 'minute' };
+  }
+  return stringToChatErrorDisplay(text);
+}
+
+/**
+ * Accept string or display object (for backward compatibility).
+ * @returns {{ title: string, body: string, isLimit: boolean, limitType: string } | null}
+ */
+export function coerceChatErrorDisplay(input) {
+  if (input == null) return null;
+  if (typeof input === 'object' && input.body != null && input.title != null) {
+    return {
+      title: String(input.title),
+      body: String(input.body),
+      isLimit: !!input.isLimit,
+      limitType: input.limitType || 'unknown',
+    };
+  }
+  if (typeof input === 'string') {
+    return stringToChatErrorDisplay(input);
+  }
+  return stringToChatErrorDisplay(String(input));
 }
