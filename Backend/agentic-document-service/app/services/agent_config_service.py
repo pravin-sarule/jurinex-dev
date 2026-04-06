@@ -86,6 +86,54 @@ def _mono() -> float:
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
+def _coerce_model_id_list(raw: Any) -> list[int]:
+    """
+    Normalize agent_prompts.model_ids from PostgreSQL / dashboards into a list of ints.
+
+    Handles: int[], tuple, JSON string "[1,2]", PostgreSQL literal "{1,2}", single int.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, bool):
+        return []
+    if isinstance(raw, int):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        out: list[int] = []
+        for x in raw:
+            if x is None:
+                continue
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [int(x) for x in parsed if x is not None]
+        except Exception:
+            pass
+        # PostgreSQL array text: {1,2,3} or {}
+        if s.startswith("{") and s.endswith("}"):
+            inner = s[1:-1].strip()
+            if not inner:
+                return []
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
+            out = []
+            for p in parts:
+                try:
+                    out.append(int(p))
+                except ValueError:
+                    continue
+            return out
+    return []
+
+
 def _resolve_model_ids(model_ids: Any) -> str | None:
     """
     Resolve first model_id in the array to a model name string by querying llm_models.
@@ -93,16 +141,7 @@ def _resolve_model_ids(model_ids: Any) -> str | None:
     """
     from app.services.db import get_db_connection, is_db_available
 
-    ids: list[int] = []
-    if isinstance(model_ids, list):
-        ids = [int(x) for x in model_ids if x is not None]
-    elif isinstance(model_ids, str):
-        try:
-            parsed = json.loads(model_ids)
-            if isinstance(parsed, list):
-                ids = [int(x) for x in parsed if x is not None]
-        except Exception:
-            pass
+    ids = _coerce_model_id_list(model_ids)
 
     if not ids or not is_db_available():
         return None
@@ -125,6 +164,59 @@ def _resolve_model_ids(model_ids: Any) -> str | None:
                 return name if name else None
     except Exception as exc:
         logger.warning("[AgentConfig] model_ids=%s resolve error: %s", ids, exc)
+    return None
+
+
+def _model_name_from_llm_parameters(llm_params: dict[str, Any]) -> str | None:
+    """
+    Some dashboards store the API model id only in llm_parameters (model / model_name / llm_model).
+    Use when model_ids is empty or could not be resolved.
+    """
+    if not llm_params:
+        return None
+    for key in ("model", "model_name", "llm_model", "llm_model_name", "chat_model"):
+        v = llm_params.get(key)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("claude") or low.startswith("gemini") or "/" in s:
+            return s
+    return None
+
+
+def _resolve_model_from_llm_parameters_model_id(llm_params: dict[str, Any]) -> str | None:
+    """Resolve llm_parameters.model_id (single int FK) via llm_models."""
+    from app.services.db import get_db_connection, is_db_available
+
+    raw = llm_params.get("model_id") or llm_params.get("llm_model_id")
+    if raw is None:
+        return None
+    try:
+        mid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if mid <= 0 or not is_db_available():
+        return None
+    try:
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT TRIM(name::text) AS name
+                FROM public.llm_models
+                WHERE id = %s AND name IS NOT NULL AND TRIM(name::text) <> ''
+                LIMIT 1
+                """,
+                (mid,),
+            )
+            row = cur.fetchone()
+            if row:
+                name = str(row.get("name") or "").strip()
+                return name if name else None
+    except Exception as exc:
+        logger.warning("[AgentConfig] llm_parameters model_id=%s resolve error: %s", raw, exc)
     return None
 
 
@@ -290,9 +382,27 @@ def get_agent_config(agent_name: str, *, default_prompt: str = "") -> AgentConfi
         else:
             temperature = _DEFAULT_TEMPERATURE
 
-        # model: resolve model_ids → llm_models.name; fall back to settings
+        # model: model_ids → llm_models.name; else llm_parameters model_id FK; else model string; else ADK default
         resolved_model = _resolve_model_ids(row.get("model_ids"))
-        model_name = resolved_model if resolved_model else _default_model_from_settings()
+        if not resolved_model:
+            resolved_model = _resolve_model_from_llm_parameters_model_id(llm_params)
+        if not resolved_model:
+            resolved_model = _model_name_from_llm_parameters(llm_params)
+
+        if resolved_model:
+            from app.services.llm_models_catalog import resolve_chat_llm_model
+
+            model_name = resolve_chat_llm_model(resolved_model, resolved_model)
+        else:
+            model_name = _default_model_from_settings()
+            logger.warning(
+                "[AgentConfig] DB row id=%s agent=%s: could not resolve model — model_ids=%r "
+                "and no claude/gemini id in llm_parameters. Using ADK default (often Gemini): %s",
+                row.get("id"),
+                agent_name,
+                row.get("model_ids"),
+                model_name,
+            )
 
         prompt = str(row.get("prompt") or default_prompt).strip() or default_prompt
         agent_type = str(row.get("agent_type") or "").strip()

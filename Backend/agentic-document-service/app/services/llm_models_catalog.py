@@ -95,11 +95,22 @@ def get_gemini_claude_models_map(*, force_refresh: bool = False) -> dict[str, st
         return _lower_to_canonical
 
 
+def _api_model_tail(raw: str) -> str:
+    """Last path segment (e.g. anthropic/claude-sonnet-4 -> claude-sonnet-4)."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if "/" in s:
+        return s.split("/")[-1].strip()
+    return s
+
+
 def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
     """
     Align config model strings with llm_models when present; otherwise keep sensible behavior.
 
     - Exact (case-insensitive) match to a row in llm_models -> use that row's spelling.
+    - Also matches on the last path segment (e.g. vendor/anthropic/claude-4-6 -> claude-4-6 in catalog).
     - Catalog empty (DB down / no rows) -> trust the raw string from config/env.
     - Catalog loaded but name not listed: still allow typical Gemini/Claude API ids; else fallback.
     """
@@ -109,12 +120,15 @@ def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
         return fb
 
     catalog = get_gemini_claude_models_map()
-    key = candidate.lower()
-    if key in catalog:
-        return catalog[key]
+    key_full = candidate.lower()
+    tail = _api_model_tail(candidate).lower()
+    if key_full in catalog:
+        return catalog[key_full]
+    if tail and tail in catalog:
+        return catalog[tail]
     if not catalog:
         return candidate
-    if key.startswith("gemini") or key.startswith("claude"):
+    if tail.startswith("gemini") or tail.startswith("claude"):
         return candidate
     return fb if fb else candidate
 

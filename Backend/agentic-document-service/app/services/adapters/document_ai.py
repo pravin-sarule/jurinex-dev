@@ -103,16 +103,37 @@ class ExtractionResult:
 
 # ── Provider detection ────────────────────────────────────────────────────────
 
+def _model_tail_lower(model_name: str) -> str:
+    """Last path segment, lowercased (handles anthropic/claude-4-6, models/claude-*, etc.)."""
+    s = (model_name or "").strip()
+    if not s:
+        return ""
+    if "/" in s:
+        s = s.split("/")[-1].strip()
+    return s.lower()
+
+
 def _detect_provider(model_name: str) -> str:
     """
-    Detect the LLM provider from the model name string.
+    Detect the LLM provider from the model name string (from agent_prompts → llm_models.name).
     Returns 'gemini' or 'claude'.
+    Uses the last path segment so DB values like 'anthropic/claude-sonnet-4-20250514' route to Claude.
     Default is 'gemini' for unknown names.
     """
-    name = (model_name or "").lower().strip()
-    if name.startswith("claude"):
+    tail = _model_tail_lower(model_name)
+    if tail.startswith("claude"):
         return "claude"
-    return "gemini"   # gemini-*, models/gemini-*, or unknown → Gemini
+    return "gemini"
+
+
+def _anthropic_messages_model_id(model_name: str) -> str:
+    """Anthropic Messages API expects 'claude-...' without vendor or URI prefix."""
+    s = (model_name or "").strip()
+    if not s:
+        return s
+    if "/" in s:
+        return s.split("/")[-1].strip()
+    return s
 
 
 # ── API clients ───────────────────────────────────────────────────────────────
@@ -482,8 +503,9 @@ def _generate_text_claude(
     max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
     temperature = float(gen_kwargs.get("temperature") or 1.0)
 
+    api_model = _anthropic_messages_model_id(model_name)
     create_kwargs: dict = {
-        "model": model_name,
+        "model": api_model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -510,8 +532,11 @@ def _generate_text_claude(
         logger.info("[DocumentAI] Claude flags active: %s", ", ".join(active_flags))
 
     logger.info(
-        "[DocumentAI] ▶ Claude generate  model=%s  temperature=%.2f  max_tokens=%d",
-        model_name, temperature, max_tokens,
+        "[DocumentAI] ▶ Claude generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
+        api_model,
+        model_name,
+        temperature,
+        max_tokens,
     )
 
     response = client.messages.create(**create_kwargs)
@@ -538,8 +563,8 @@ def _generate_text(
     stored in agent_prompts.model_ids → llm_models.name.
 
     Routing:
-      model starts with "claude" → Anthropic API
-      everything else            → Gemini API
+      model id tail starts with "claude" (after any vendor/ path prefix) → Anthropic API
+      everything else → Gemini API
     """
     model_name, gen_kwargs, llm_params = _generation_config(
         for_summary=for_summary,

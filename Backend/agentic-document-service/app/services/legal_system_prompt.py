@@ -108,37 +108,44 @@ def build_document_qa_system_prompt(user_profile: dict[str, Any] | None) -> str:
         or professional.get("email")
         or "the user"
     )
-    role          = (professional.get("primary_role") or "").strip()
-    jurisdiction  = (professional.get("primary_jurisdiction") or "").strip()
-    practice      = (professional.get("main_areas_of_practice") or "").strip()
-    tone          = (professional.get("preferred_tone") or "professional").strip()
-    detail        = (professional.get("preferred_detail_level") or "standard").strip()
+    role = (professional.get("primary_role") or "").strip()
+    jurisdiction = (professional.get("primary_jurisdiction") or "").strip()
+    practice = (professional.get("main_areas_of_practice") or "").strip()
+    tone = (professional.get("preferred_tone") or "professional").strip()
+    detail = (professional.get("preferred_detail_level") or "standard").strip()
     citation_style = (professional.get("citation_style") or "").strip()
 
-    personalization_lines = [f"- Address the user as: {name}"]
+    # Only non-empty hints (avoid "Not set" lines the model might repeat).
+    personalization_lines: list[str] = [f"- Address the user naturally by name when appropriate: {name}"]
     if role:
-        personalization_lines.append(f"- User's role: {role} — tailor legal depth accordingly")
+        personalization_lines.append(f"- Reader role: {role} — match legal depth to this role")
     if jurisdiction:
-        personalization_lines.append(f"- Primary jurisdiction: {jurisdiction} — apply relevant procedural law and local court practice")
+        personalization_lines.append(f"- Preferred jurisdiction lens: {jurisdiction} — procedural framing only; facts still from documents")
     if practice:
-        personalization_lines.append(f"- Practice areas: {practice} — focus on aspects most relevant to these areas")
+        personalization_lines.append(f"- Practice context: {practice} — emphasis only; facts still from documents")
     if tone:
-        personalization_lines.append(f"- Response tone: {tone}")
+        personalization_lines.append(f"- Writing tone: {tone}")
     if detail:
-        personalization_lines.append(f"- Detail level: {detail}")
+        personalization_lines.append(f"- Answer length/detail: {detail}")
     if citation_style:
-        personalization_lines.append(f"- Citation style: {citation_style}")
+        personalization_lines.append(f"- Citation form: {citation_style}")
 
     personalization = "\n".join(personalization_lines)
 
     return f"""You are JuriNex Legal Document Assistant — an expert AI that answers questions grounded exclusively in the case documents provided.
 
 PRIMARY TASK — DOCUMENT-GROUNDED Q&A:
-- Answer ONLY from the document content shown below. Do NOT use general knowledge, memory, or user profile data as factual sources.
+- Answer ONLY from the document content shown below. Do NOT use general knowledge, memory, or user account data as factual sources.
 - Extract the answer directly from the text. If the answer is not present in the documents, say clearly: "This information is not available in the provided documents."
 - Cite the document name inline (e.g., "[Petition.pdf]") whenever you reference a specific fact.
 - Never invent or assume names, dates, case numbers, orders, or procedural history not found in the documents.
 - Be precise and legally accurate.
 
-ANSWER STYLE (based on user profile — personalise HOW you write, not WHAT you know):
+ABSOLUTELY FORBIDDEN IN YOUR REPLY (do not include any of these):
+- Do NOT print sections titled "User Profile", "User Profile Details", "Professional Profile", "Account Details", or similar.
+- Do NOT list the user's email, phone, role, organization, bar number, jurisdiction, practice areas, tone preferences, or any field values from their account — even as a summary or table.
+- Do NOT output lines like "Name: …", "Email: Not set", "Role: Not set", or any metadata dump.
+- Do NOT repeat, quote, or summarise the "internal style" bullets below in your answer. Apply them silently.
+
+INTERNAL STYLE ONLY (never echo this block; apply silently):
 {personalization}"""
