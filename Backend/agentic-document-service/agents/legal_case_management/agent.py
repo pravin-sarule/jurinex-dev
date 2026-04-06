@@ -25,8 +25,11 @@ SERVICE = get_pipeline_service()
 FOLDER_SERVICE = get_folder_service()
 DRAFT_SERVICE = get_draft_service()
 SETTINGS = get_settings()
-MODEL_NAME = SETTINGS.adk_model or "gemini-2.5-pro"
 logger = logging.getLogger("agentic_document_service.agents")
+
+# Agent configs are resolved lazily at ADK initialisation time (see bottom of file).
+# Import here so the module is available immediately; actual DB calls happen later.
+from app.services.agent_config_service import get_agent_config  # noqa: E402
 
 COMMON_TOOL_INSTRUCTIONS = """
 Shared tool policy:
@@ -621,47 +624,93 @@ if SequentialAgent and LlmAgent:
         answer_case_folder_chat,
         execute_case_preset,
     ]
+
+    # ── Load per-agent config from agent_prompts DB table ─────────────────────
+    # Each call logs ✅ (db) or ⚠️ (default) to the console with model/temperature/source.
+    # Default prompts are the hardcoded instructions in this file (already formatted).
+
+    _intake_cfg = get_agent_config(
+        "form_population_agent",
+        default_prompt=FORM_POPULATION_INSTRUCTION.format(
+            common_tool_instructions=COMMON_TOOL_INSTRUCTIONS
+        ),
+    )
+
+    _processing_cfg = get_agent_config(
+        "document_processing_agent",
+        default_prompt=DOCUMENT_PROCESSING_INSTRUCTION.format(
+            common_tool_instructions=COMMON_TOOL_INSTRUCTIONS
+        ),
+    )
+
+    _retrieval_cfg = get_agent_config(
+        "grounded_retrieval_agent",
+        default_prompt=GROUNDED_RETRIEVAL_INSTRUCTION.format(
+            common_tool_instructions=COMMON_TOOL_INSTRUCTIONS
+        ),
+    )
+
+    _preset_cfg = get_agent_config(
+        "preset_execution_agent",
+        default_prompt=PRESET_EXECUTION_INSTRUCTION.format(
+            common_tool_instructions=COMMON_TOOL_INSTRUCTIONS
+        ),
+    )
+
+    logger.info(
+        "[AgentInit] legal_case_management_root  sub-agents initialized:\n"
+        "  form_population_agent     source=%-8s  model=%s  temperature=%.2f\n"
+        "  document_processing_agent source=%-8s  model=%s  temperature=%.2f\n"
+        "  grounded_retrieval_agent  source=%-8s  model=%s  temperature=%.2f\n"
+        "  preset_execution_agent    source=%-8s  model=%s  temperature=%.2f",
+        _intake_cfg.source,     _intake_cfg.model_name,     _intake_cfg.temperature,
+        _processing_cfg.source, _processing_cfg.model_name, _processing_cfg.temperature,
+        _retrieval_cfg.source,  _retrieval_cfg.model_name,  _retrieval_cfg.temperature,
+        _preset_cfg.source,     _preset_cfg.model_name,     _preset_cfg.temperature,
+    )
+
+    # ── Build ADK LlmAgent instances ──────────────────────────────────────────
     intake_agent = LlmAgent(
         name="form_population_agent",
-        model=MODEL_NAME,
+        model=_intake_cfg.model_name,
         description=(
             "Production legal intake agent that extracts and validates case metadata "
             "with conservative auto-fill behavior."
         ),
-        instruction=FORM_POPULATION_INSTRUCTION.format(common_tool_instructions=COMMON_TOOL_INSTRUCTIONS),
+        instruction=_intake_cfg.prompt,
         tools=shared_tools,
     )
 
     processing_agent = LlmAgent(
         name="document_processing_agent",
-        model=MODEL_NAME,
+        model=_processing_cfg.model_name,
         description=(
             "Production legal ingestion agent that classifies, extracts, and prepares "
             "documents for grounded retrieval."
         ),
-        instruction=DOCUMENT_PROCESSING_INSTRUCTION.format(common_tool_instructions=COMMON_TOOL_INSTRUCTIONS),
+        instruction=_processing_cfg.prompt,
         tools=shared_tools,
     )
 
     retrieval_agent = LlmAgent(
         name="grounded_retrieval_agent",
-        model=MODEL_NAME,
+        model=_retrieval_cfg.model_name,
         description=(
             "Zero-hallucination retrieval agent that answers legal case questions "
             "strictly from indexed evidence and citations."
         ),
-        instruction=GROUNDED_RETRIEVAL_INSTRUCTION.format(common_tool_instructions=COMMON_TOOL_INSTRUCTIONS),
+        instruction=_retrieval_cfg.prompt,
         tools=shared_tools,
     )
 
     preset_agent = LlmAgent(
         name="preset_execution_agent",
-        model=MODEL_NAME,
+        model=_preset_cfg.model_name,
         description=(
             "Preset workflow agent that executes hidden legal prompt templates "
             "without exposing internal instructions."
         ),
-        instruction=PRESET_EXECUTION_INSTRUCTION.format(common_tool_instructions=COMMON_TOOL_INSTRUCTIONS),
+        instruction=_preset_cfg.prompt,
         tools=shared_tools,
     )
 

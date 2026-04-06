@@ -12,6 +12,10 @@ logger = logging.getLogger("agentic_document_service.document_ai")
 _gemini_extract_unavailable_logged = False
 _gemini_qa_unavailable_logged = False
 
+# Internal agent names used for document AI operations
+_AGENT_EXTRACTION = "form_population_agent"
+_AGENT_QA = "grounded_retrieval_agent"
+
 _EXTRACTION_PROMPT = """You are an expert legal document analyst. Extract ALL case information from the document using semantic understanding and intelligent field matching.
 
 INSTRUCTIONS:
@@ -93,7 +97,52 @@ def _gemini_client():
         return None
 
 
-def _generation_config(*, for_summary: bool = False) -> tuple[str, dict[str, float | int]]:
+def _generation_config(
+    *,
+    for_summary: bool = False,
+    agent_name: str | None = None,
+) -> tuple[str, dict[str, float | int]]:
+    """
+    Build (model_name, generation_kwargs) for a Gemini call.
+
+    Priority:
+      1. agent_prompts DB row for `agent_name`  (source=db)
+      2. summarization_chat_config              (source=summarization_config)
+
+    Console log shows resolved model, temperature, and which source was used.
+    """
+    if agent_name:
+        try:
+            from app.services.agent_config_service import get_agent_config
+            cfg = get_agent_config(agent_name)
+            if cfg.source == "db":
+                llm_params = cfg.llm_parameters
+                max_tokens = int(
+                    llm_params.get("max_output_tokens")
+                    or (15000 if for_summary else 20000)
+                )
+                gen_kwargs: dict[str, float | int] = {
+                    "temperature": cfg.temperature,
+                    "max_output_tokens": max_tokens,
+                }
+                logger.info(
+                    "[DocumentAI] generation_config  source=agent_prompts  agent=%s  model=%s  temperature=%.2f  max_output_tokens=%d",
+                    agent_name, cfg.model_name, cfg.temperature, max_tokens,
+                )
+                return cfg.model_name, gen_kwargs
+            # source=="default" — fall through to summarization_chat_config below
+            logger.info(
+                "[DocumentAI] generation_config  source=DEFAULT(no-db-row)  agent=%s  model=%s  temperature=%.2f"
+                "  — falling through to summarization_chat_config",
+                agent_name, cfg.model_name, cfg.temperature,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[DocumentAI] agent_config_service failed for agent=%s: %s — falling back to summarization_chat_config",
+                agent_name, exc,
+            )
+
+    # ── Fallback: summarization_chat_config ───────────────────────────────────
     config = get_llm_chat_config()
     model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
     max_tokens = int(
@@ -105,15 +154,29 @@ def _generation_config(*, for_summary: bool = False) -> tuple[str, dict[str, flo
         max_tokens = 15000 if for_summary else 20000
     max_tokens = max(min_tokens, min(max_tokens, max_cap))
     temperature = float(config.get("model_temperature") or 0.7)
-    temperature = min(max(temperature, float(config.get("temperature_min") or 0.0)), float(config.get("temperature_max") or 2.0))
+    temperature = min(
+        max(temperature, float(config.get("temperature_min") or 0.0)),
+        float(config.get("temperature_max") or 2.0),
+    )
+    logger.info(
+        "[DocumentAI] generation_config  source=summarization_chat_config  agent=%s  model=%s  temperature=%.2f  max_output_tokens=%d",
+        agent_name or "N/A", model_name, temperature, max_tokens,
+    )
     return model_name, {"temperature": temperature, "max_output_tokens": max_tokens}
 
 
-def _generate_text(prompt: str, *, for_summary: bool = False) -> str:
+def _generate_text(
+    prompt: str,
+    *,
+    for_summary: bool = False,
+    agent_name: str | None = None,
+) -> str:
     client = _gemini_client()
     if client is None:
         return ""
-    model_name, generation_config = _generation_config(for_summary=for_summary)
+    model_name, generation_config = _generation_config(
+        for_summary=for_summary, agent_name=agent_name
+    )
     response = client.models.generate_content(
         model=model_name,
         contents=prompt,
@@ -123,11 +186,11 @@ def _generate_text(prompt: str, *, for_summary: bool = False) -> str:
 
 
 def _call_gemini_for_extraction(text: str) -> dict:
-    """Use Gemini to extract all case fields from document text."""
+    """Use Gemini to extract all case fields from document text (uses form_population_agent config)."""
     try:
         limited_text = text[:80000]  # stay within token limits
         prompt = _EXTRACTION_PROMPT + limited_text
-        raw = _generate_text(prompt)
+        raw = _generate_text(prompt, agent_name=_AGENT_EXTRACTION)
         if not raw:
             return {}
         # Try to extract JSON
@@ -221,7 +284,11 @@ def _call_gemini_for_qa(
         )
         if system_instruction:
             prompt = f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n{prompt}"
-        answer = _generate_text(prompt, for_summary=intent_hint == "summary")
+        answer = _generate_text(
+            prompt,
+            for_summary=intent_hint == "summary",
+            agent_name=_AGENT_QA,
+        )
         return {
             "answer": answer,
             "source_documents": ", ".join(source_names),
