@@ -162,13 +162,89 @@ def _parse_model_ids(raw: Any) -> List[int]:
 
 # ── DB fetch helpers ─────────────────────────────────────────────────────────
 
+def _prompt_name_variants(name: str) -> List[str]:
+    """
+    Match agent_prompts.name like agentic-document-service / agent-draft-service:
+    internal ids (underscore), display names, and 'CitationAgent' -> 'citation'.
+    """
+    s = (name or "").strip().lower()
+    if not s:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for cand in (s, s.replace(" ", "_")):
+        if cand and cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+    if s.endswith("agent") and len(s) > 5:
+        base = s[:-5].rstrip("_")
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+    if s.endswith("_agent") and len(s) > 6:
+        base = s[:-6].rstrip("_")
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+    return out
+
+
 def _fetch_prompt_from_db(name: str, agent_type: str) -> Optional[Dict[str, Any]]:
-    """Fetch prompt row from Draft_DB.agent_prompts. Returns dict or None."""
+    """Fetch prompt row from Draft_DB.agent_prompts. Tolerant name/type (incl. summarization rows)."""
     try:
         from db.connections import get_draft_db_conn, release_draft_db_conn
     except ImportError:
         logger.warning("[PROMPT_RESOLVER] db.connections not available")
         return None
+
+    def _row_to_dict(row: tuple) -> Dict[str, Any]:
+        return {
+            "id": row[0],
+            "name": row[1],
+            "prompt": row[2],
+            "model_ids": row[3],
+            "temperature": row[4],
+            "agent_type": row[5],
+            "llm_parameters": row[6],
+        }
+
+    variants = _prompt_name_variants(name)
+
+    queries: List[tuple] = []
+    if variants:
+        queries.append(
+            (
+                """SELECT id, name, prompt, model_ids, temperature, agent_type, llm_parameters
+                   FROM public.agent_prompts
+                   WHERE LOWER(TRIM(name::text)) = ANY(%s)
+                     AND LOWER(TRIM(agent_type::text)) = LOWER(TRIM(%s))
+                   ORDER BY updated_at DESC NULLS LAST, id DESC
+                   LIMIT 1""",
+                (variants, agent_type or ""),
+            )
+        )
+        queries.append(
+            (
+                """SELECT id, name, prompt, model_ids, temperature, agent_type, llm_parameters
+                   FROM public.agent_prompts
+                   WHERE LOWER(TRIM(name::text)) = ANY(%s)
+                     AND LOWER(TRIM(agent_type::text)) IN ('summarization', 'summary')
+                   ORDER BY updated_at DESC NULLS LAST, id DESC
+                   LIMIT 1""",
+                (variants,),
+            )
+        )
+    queries.append(
+        (
+            """SELECT id, name, prompt, model_ids, temperature, agent_type, llm_parameters
+               FROM public.agent_prompts
+               WHERE LOWER(TRIM(name::text)) = LOWER(TRIM(%s))
+                 AND LOWER(TRIM(agent_type::text)) = LOWER(TRIM(%s))
+               ORDER BY updated_at DESC NULLS LAST, id DESC
+               LIMIT 1""",
+            (name or "", agent_type or ""),
+        )
+    )
 
     conn = None
     try:
@@ -176,26 +252,24 @@ def _fetch_prompt_from_db(name: str, agent_type: str) -> Optional[Dict[str, Any]
         if not conn:
             return None
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, name, prompt, model_ids, temperature, agent_type, llm_parameters
-                   FROM public.agent_prompts
-                   WHERE name = %s AND agent_type = %s
-                   ORDER BY updated_at DESC
-                   LIMIT 1""",
-                (name, agent_type),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                "id": row[0],
-                "name": row[1],
-                "prompt": row[2],
-                "model_ids": row[3],
-                "temperature": row[4],
-                "agent_type": row[5],
-                "llm_parameters": row[6],
-            }
+            for sql, params in queries:
+                try:
+                    cur.execute(sql, params)
+                    row = cur.fetchone()
+                    if row:
+                        logger.info(
+                            "[PROMPT_RESOLVER] Matched agent_prompts id=%s name=%r agent_type=%r (requested name=%r type=%r)",
+                            row[0],
+                            row[1],
+                            row[5],
+                            name,
+                            agent_type,
+                        )
+                        return _row_to_dict(row)
+                except Exception as exc:
+                    logger.debug("[PROMPT_RESOLVER] query skip: %s", exc)
+                    continue
+        return None
     except Exception as exc:
         logger.error("[PROMPT_RESOLVER] DB fetch failed for %s/%s: %s", name, agent_type, exc)
         return None

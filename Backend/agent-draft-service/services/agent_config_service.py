@@ -82,6 +82,94 @@ def _normalize_agent_name(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
 
+def _internal_name_variants(agent_name: str) -> List[str]:
+    """
+    Same idea as agentic-document-service: match DB name column for internal ids
+    (e.g. grounded_retrieval_agent) and common variants (grounded_retrieval).
+    """
+    s = (agent_name or "").strip().lower()
+    if not s:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for cand in (s, s.replace(" ", "_")):
+        if cand and cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+    if s.endswith("_agent") and len(s) > 6:
+        base = s[:-6].rstrip("_")
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+    return out
+
+
+def _collect_preferred_name_variants(preferred_names: Optional[List[str]]) -> List[str]:
+    if not preferred_names:
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+    for pn in preferred_names:
+        if not pn:
+            continue
+        for v in _internal_name_variants(str(pn)):
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
+def _fetch_agent_row_by_name_variants(name_variants: List[str]) -> Optional[Dict[str, Any]]:
+    """Direct lookup by agent_prompts.name (any type), then summarization+name. Returns hydrated row or None."""
+    if not name_variants:
+        return None
+    queries = [
+        (
+            f"""
+            SELECT id, name, prompt, model_ids, temperature, agent_type,
+                   created_at, updated_at, llm_parameters
+            FROM {AGENTS_TABLE}
+            WHERE LOWER(TRIM(name::text)) = ANY(%s)
+            ORDER BY updated_at DESC NULLS LAST, id DESC
+            LIMIT 1
+            """,
+            (name_variants,),
+        ),
+        (
+            f"""
+            SELECT id, name, prompt, model_ids, temperature, agent_type,
+                   created_at, updated_at, llm_parameters
+            FROM {AGENTS_TABLE}
+            WHERE LOWER(TRIM(agent_type::text)) IN ('summarization', 'summary')
+              AND LOWER(TRIM(name::text)) = ANY(%s)
+            ORDER BY updated_at DESC NULLS LAST, id DESC
+            LIMIT 1
+            """,
+            (name_variants,),
+        ),
+    ]
+    for sql, params in queries:
+        try:
+            with draft_db.get_draft_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    row = cur.fetchone()
+                    if not row:
+                        continue
+                    colnames = [d[0] for d in cur.description]
+                    raw = _hydrate_agent_row(dict(zip(colnames, row)))
+                    logger.info(
+                        "[agent_config] Matched agent by name variants: name=%r agent_type=%r id=%s",
+                        raw.get("name"),
+                        raw.get("agent_type"),
+                        raw.get("id"),
+                    )
+                    return raw
+        except Exception as e:
+            logger.warning("agent_config_service: name-variant fetch failed: %s", e)
+    return None
+
+
 def _hydrate_agent_row(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Parse and enrich a raw DB row with resolved model metadata."""
     from config.gemini_models import (
@@ -115,15 +203,22 @@ def _fetch_agents(agent_types: Optional[List[str]] = None) -> List[Dict[str, Any
         with draft_db.get_draft_conn() as conn:
             with conn.cursor() as cur:
                 if agent_types:
+                    norm_types = [
+                        str(x).strip().lower()
+                        for x in agent_types
+                        if str(x or "").strip()
+                    ]
+                    if not norm_types:
+                        return []
                     cur.execute(
                         f"""
                         SELECT id, name, prompt, model_ids, temperature, agent_type,
                                created_at, updated_at, llm_parameters
                         FROM {AGENTS_TABLE}
-                        WHERE agent_type = ANY(%s)
+                        WHERE LOWER(TRIM(agent_type::text)) = ANY(%s)
                         ORDER BY updated_at DESC
                         """,
-                        (agent_types,),
+                        (norm_types,),
                     )
                 else:
                     cur.execute(
@@ -178,7 +273,17 @@ def get_agent_by_preferences(
 
     This prevents selecting the wrong row when multiple agent_prompts share a broad
     agent_type such as 'drafting' but represent different logical agents.
+
+    Also aligns with agentic-document-service: rows stored as agent_type=summarization
+    and name=grounded_retrieval_agent (or similar) resolve via name-variant queries.
     """
+    # 0) Exact / variant name match on agent_prompts.name (incl. summarization + name)
+    name_variants = _collect_preferred_name_variants(preferred_names)
+    if name_variants:
+        hit = _fetch_agent_row_by_name_variants(name_variants)
+        if hit:
+            return hit
+
     candidate_types: List[str] = []
     for value in [agent_type, *(fallback_agent_types or [])]:
         cleaned = str(value or "").strip()
@@ -219,7 +324,7 @@ def get_agent_by_type(agent_type: str) -> Optional[Dict[str, Any]]:
                     SELECT id, name, prompt, model_ids, temperature, agent_type,
                            created_at, updated_at, llm_parameters
                     FROM {AGENTS_TABLE}
-                    WHERE agent_type = %s
+                    WHERE LOWER(TRIM(agent_type::text)) = LOWER(TRIM(%s))
                     ORDER BY updated_at DESC
                     LIMIT 1
                     """,
@@ -327,7 +432,7 @@ def get_agents_by_type(agent_type: str) -> List[Dict[str, Any]]:
                     SELECT id, name, prompt, model_ids, temperature, agent_type,
                            created_at, updated_at, llm_parameters
                     FROM {AGENTS_TABLE}
-                    WHERE agent_type = %s
+                    WHERE LOWER(TRIM(agent_type::text)) = LOWER(TRIM(%s))
                     ORDER BY name, updated_at DESC
                     """,
                     (agent_type,),
