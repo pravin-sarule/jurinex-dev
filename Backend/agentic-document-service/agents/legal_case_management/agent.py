@@ -714,9 +714,18 @@ if SequentialAgent and LlmAgent:
         tools=shared_tools,
     )
 
+    _root_cfg = get_agent_config(
+        "legal_case_management_root",
+        default_prompt="Multi-phase legal case management workflow powered by Google ADK.",
+    )
+    logger.info(
+        "[AgentInit] legal_case_management_root  source=%-8s  model=%s  temperature=%.2f",
+        _root_cfg.source, _root_cfg.model_name, _root_cfg.temperature,
+    )
+
     root_agent = SequentialAgent(
         name="legal_case_management_root",
-        description="Multi-phase legal case management workflow powered by Google ADK.",
+        description=_root_cfg.prompt,
         sub_agents=[intake_agent, processing_agent, retrieval_agent, preset_agent],
     )
 else:  # pragma: no cover

@@ -93,6 +93,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EMBEDDING_MODEL"),
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
+    anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
     jwt_secret: str = Field(default="", validation_alias=AliasChoices("JWT_SECRET"))
     redis_url: str = Field(default="", validation_alias=AliasChoices("REDIS_URL"))
     auth_service_url: str = Field(

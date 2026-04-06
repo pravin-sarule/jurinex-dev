@@ -41,18 +41,20 @@ _DEFAULT_TEMPERATURE: float = 0.7
 
 # Maps internal agent name → agent_type values to search in DB (first match wins)
 _AGENT_TYPE_SEARCH: dict[str, list[str]] = {
-    "form_population_agent":     ["intake", "form_population", "form population"],
-    "document_processing_agent": ["document_processing", "document processing", "processing"],
-    "grounded_retrieval_agent":  ["retrieval", "grounded_retrieval", "grounded retrieval", "qa"],
-    "preset_execution_agent":    ["preset", "preset_execution", "preset execution"],
+    "legal_case_management_root": ["orchestration", "root", "legal_case_management_root"],
+    "form_population_agent":      ["intake", "form_population", "form population"],
+    "document_processing_agent":  ["document_processing", "document processing", "processing"],
+    "grounded_retrieval_agent":   ["retrieval", "grounded_retrieval", "grounded retrieval", "qa"],
+    "preset_execution_agent":     ["preset", "preset_execution", "preset execution"],
 }
 
 # Fallback: search by ILIKE on name when agent_type has no match
 _AGENT_NAME_KEYWORDS: dict[str, list[str]] = {
-    "form_population_agent":     ["form population", "intake"],
-    "document_processing_agent": ["document processing", "classification"],
-    "grounded_retrieval_agent":  ["retrieval", "grounded"],
-    "preset_execution_agent":    ["preset"],
+    "legal_case_management_root": ["legal case management root", "orchestrator", "case management root"],
+    "form_population_agent":      ["form population", "intake"],
+    "document_processing_agent":  ["document processing", "classification"],
+    "grounded_retrieval_agent":   ["retrieval", "grounded"],
+    "preset_execution_agent":     ["preset"],
 }
 
 

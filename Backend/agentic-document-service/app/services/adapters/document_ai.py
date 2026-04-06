@@ -83,8 +83,24 @@ class ExtractionResult:
     quality_score: float
 
 
+# ── Provider detection ────────────────────────────────────────────────────────
+
+def _detect_provider(model_name: str) -> str:
+    """
+    Detect the LLM provider from the model name string.
+    Returns 'gemini' or 'claude'.
+    Default is 'gemini' for unknown names.
+    """
+    name = (model_name or "").lower().strip()
+    if name.startswith("claude"):
+        return "claude"
+    return "gemini"   # gemini-*, models/gemini-*, or unknown → Gemini
+
+
+# ── API clients ───────────────────────────────────────────────────────────────
+
 def _gemini_client():
-    """Return a configured google.genai client, or None if unavailable."""
+    """Return a configured google.genai Client, or None if unavailable."""
     try:
         from google import genai  # type: ignore
         from app.core.config import get_settings
@@ -97,19 +113,43 @@ def _gemini_client():
         return None
 
 
+def _anthropic_client():
+    """Return a configured anthropic.Anthropic client, or None if unavailable."""
+    try:
+        import anthropic as _anthropic  # type: ignore
+        from app.core.config import get_settings
+
+        api_key = get_settings().anthropic_api_key
+        if not api_key:
+            logger.warning("[DocumentAI] ANTHROPIC_API_KEY is not set — Claude calls will fail")
+            return None
+        return _anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        logger.warning("[DocumentAI] anthropic package not installed — run: pip install anthropic>=0.40.0")
+        return None
+    except Exception as exc:
+        logger.warning("[DocumentAI] Anthropic client init failed: %s", exc)
+        return None
+
+
 def _generation_config(
     *,
     for_summary: bool = False,
     agent_name: str | None = None,
-) -> tuple[str, dict[str, float | int]]:
+) -> tuple[str, dict, dict]:
     """
-    Build (model_name, generation_kwargs) for a Gemini call.
+    Build (model_name, gen_kwargs, llm_params) for a Gemini call.
 
     Priority:
       1. agent_prompts DB row for `agent_name`  (source=db)
-      2. summarization_chat_config              (source=summarization_config)
+      2. summarization_chat_config              (fallback)
 
-    Console log shows resolved model, temperature, and which source was used.
+    Returns three values:
+      model_name  — string model id
+      gen_kwargs  — core generation params (temperature, max_output_tokens)
+      llm_params  — full llm_parameters blob from DB (contains tool flags like
+                    url_context, grounding_google_search, code_execution, etc.)
+                    Empty dict when coming from summarization_chat_config.
     """
     if agent_name:
         try:
@@ -121,24 +161,29 @@ def _generation_config(
                     llm_params.get("max_output_tokens")
                     or (15000 if for_summary else 20000)
                 )
-                gen_kwargs: dict[str, float | int] = {
+                gen_kwargs: dict = {
                     "temperature": cfg.temperature,
                     "max_output_tokens": max_tokens,
                 }
                 logger.info(
-                    "[DocumentAI] generation_config  source=agent_prompts  agent=%s  model=%s  temperature=%.2f  max_output_tokens=%d",
+                    "[DocumentAI] generation_config  source=agent_prompts  agent=%s  "
+                    "model=%s  temperature=%.2f  max_output_tokens=%d  "
+                    "url_context=%s  grounding_search=%s  code_execution=%s",
                     agent_name, cfg.model_name, cfg.temperature, max_tokens,
+                    llm_params.get("url_context", False),
+                    llm_params.get("grounding_google_search", False),
+                    llm_params.get("code_execution", False),
                 )
-                return cfg.model_name, gen_kwargs
-            # source=="default" — fall through to summarization_chat_config below
+                return cfg.model_name, gen_kwargs, llm_params
             logger.info(
-                "[DocumentAI] generation_config  source=DEFAULT(no-db-row)  agent=%s  model=%s  temperature=%.2f"
-                "  — falling through to summarization_chat_config",
+                "[DocumentAI] generation_config  source=DEFAULT(no-db-row)  agent=%s  "
+                "model=%s  temperature=%.2f  — falling through to summarization_chat_config",
                 agent_name, cfg.model_name, cfg.temperature,
             )
         except Exception as exc:
             logger.warning(
-                "[DocumentAI] agent_config_service failed for agent=%s: %s — falling back to summarization_chat_config",
+                "[DocumentAI] agent_config_service failed for agent=%s: %s "
+                "— falling back to summarization_chat_config",
                 agent_name, exc,
             )
 
@@ -146,7 +191,8 @@ def _generation_config(
     config = get_llm_chat_config()
     model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
     max_tokens = int(
-        config.get("max_summarization_output_tokens") if for_summary else config.get("max_output_tokens") or 0
+        config.get("max_summarization_output_tokens") if for_summary
+        else config.get("max_output_tokens") or 0
     )
     max_cap = max(1, int(config.get("max_output_tokens_cap") or 65536))
     min_tokens = max(1, int(config.get("min_output_tokens") or 1))
@@ -159,11 +205,211 @@ def _generation_config(
         float(config.get("temperature_max") or 2.0),
     )
     logger.info(
-        "[DocumentAI] generation_config  source=summarization_chat_config  agent=%s  model=%s  temperature=%.2f  max_output_tokens=%d",
+        "[DocumentAI] generation_config  source=summarization_chat_config  agent=%s  "
+        "model=%s  temperature=%.2f  max_output_tokens=%d",
         agent_name or "N/A", model_name, temperature, max_tokens,
     )
-    return model_name, {"temperature": temperature, "max_output_tokens": max_tokens}
+    return model_name, {"temperature": temperature, "max_output_tokens": max_tokens}, {}
 
+
+# ── Thinking level → token budget ─────────────────────────────────────────────
+
+_THINKING_BUDGET_GEMINI = {"low": 1024,  "medium": 8192,  "high": 16384}
+_THINKING_BUDGET_CLAUDE = {"low": 5000,  "medium": 10000, "high": 16000}
+
+
+def _resolve_thinking_budget(llm_params: dict, provider: str) -> int:
+    budget_map = _THINKING_BUDGET_GEMINI if provider == "gemini" else _THINKING_BUDGET_CLAUDE
+    raw = llm_params.get("thinking_budget")
+    if raw and isinstance(raw, (int, float)) and float(raw) > 0:
+        return int(raw)
+    level = str(llm_params.get("thinking_level") or "low").lower()
+    return budget_map.get(level, list(budget_map.values())[0])
+
+
+# ── Gemini config builder ─────────────────────────────────────────────────────
+
+def _build_gemini_config(gen_kwargs: dict, llm_params: dict):
+    """
+    Build a GenerateContentConfig from gen_kwargs + every flag in llm_parameters.
+
+    Handled flags:
+      url_context              bool  — model fetches URLs in the prompt
+      grounding_google_search  bool  — live Google Search grounding
+      code_execution           bool  — model can execute Python
+      thinking_mode            bool  — extended thinking (Gemini 2.5+)
+      thinking_level           str   — "low" | "medium" | "high" (maps to token budget)
+      thinking_budget          int   — explicit budget_tokens (overrides thinking_level)
+      media_resolution         str   — "low" | "medium" | "high" | "default"
+      system_instructions      str   — prepended system instruction text
+      structured_outputs_enabled bool — forces JSON response
+      structured_outputs_config  dict — JSON schema for the response
+      function_calling_enabled   bool — enable function calling
+      function_calling_config    dict — {mode: "AUTO"|"ANY"|"NONE", allowed_function_names: [...]}
+
+    Falls back to a plain dict when google-genai types are unavailable.
+    """
+    try:
+        from google.genai import types  # type: ignore
+
+        config_kwargs = dict(gen_kwargs)
+        tools: list = []
+        active_flags: list[str] = []
+
+        # ── Tools ────────────────────────────────────────────────────────────
+        if llm_params.get("url_context"):
+            tools.append(types.Tool(url_context=types.UrlContext()))
+            active_flags.append("url_context")
+
+        if llm_params.get("grounding_google_search"):
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
+            active_flags.append("grounding_google_search")
+
+        if llm_params.get("code_execution"):
+            tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
+            active_flags.append("code_execution")
+
+        if tools:
+            config_kwargs["tools"] = tools
+
+        # ── Thinking (Gemini 2.5+) ───────────────────────────────────────────
+        if llm_params.get("thinking_mode"):
+            budget = _resolve_thinking_budget(llm_params, "gemini")
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+            active_flags.append(f"thinking(budget={budget})")
+
+        # ── Media resolution ─────────────────────────────────────────────────
+        media_res = str(llm_params.get("media_resolution") or "default").lower()
+        if media_res not in ("default", "", "none"):
+            _res_map = {
+                "low":    "MEDIA_RESOLUTION_LOW",
+                "medium": "MEDIA_RESOLUTION_MEDIUM",
+                "high":   "MEDIA_RESOLUTION_HIGH",
+            }
+            if media_res in _res_map:
+                try:
+                    config_kwargs["media_resolution"] = getattr(
+                        types.MediaResolution, _res_map[media_res]
+                    )
+                    active_flags.append(f"media_resolution={media_res}")
+                except AttributeError:
+                    config_kwargs["media_resolution"] = media_res
+
+        # ── System instructions ──────────────────────────────────────────────
+        sys_instr = str(llm_params.get("system_instructions") or "").strip()
+        if sys_instr:
+            config_kwargs["system_instruction"] = sys_instr
+            active_flags.append("system_instructions")
+
+        # ── Structured outputs ───────────────────────────────────────────────
+        if llm_params.get("structured_outputs_enabled"):
+            config_kwargs["response_mime_type"] = "application/json"
+            schema = llm_params.get("structured_outputs_config")
+            if isinstance(schema, dict) and schema:
+                config_kwargs["response_schema"] = schema
+            active_flags.append("structured_outputs")
+
+        # ── Function calling ─────────────────────────────────────────────────
+        if llm_params.get("function_calling_enabled"):
+            fc_raw = llm_params.get("function_calling_config") or {}
+            mode_str = str(fc_raw.get("mode") or "AUTO").upper()
+            try:
+                mode = getattr(types.FunctionCallingConfig.Mode, mode_str,
+                               types.FunctionCallingConfig.Mode.AUTO)
+            except AttributeError:
+                mode = mode_str
+            fc_cfg = types.FunctionCallingConfig(mode=mode)
+            allowed = fc_raw.get("allowed_function_names")
+            if allowed:
+                fc_cfg = types.FunctionCallingConfig(
+                    mode=mode, allowed_function_names=list(allowed)
+                )
+            config_kwargs["tool_config"] = types.ToolConfig(
+                function_calling_config=fc_cfg
+            )
+            active_flags.append(f"function_calling(mode={mode_str})")
+
+        if active_flags:
+            logger.info("[DocumentAI] Gemini flags active: %s", ", ".join(active_flags))
+
+        return types.GenerateContentConfig(**config_kwargs)
+
+    except Exception as exc:
+        logger.debug("[DocumentAI] GenerateContentConfig build failed (%s) — using plain dict", exc)
+        return gen_kwargs
+
+
+# ── Claude (Anthropic) generation ─────────────────────────────────────────────
+
+def _generate_text_claude(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+) -> str:
+    """
+    Call the Anthropic Messages API with all applicable llm_parameters flags.
+
+    Handled flags:
+      thinking_mode       bool  — Claude extended thinking
+      thinking_level      str   — "low"|"medium"|"high" → budget_tokens
+      thinking_budget     int   — explicit budget_tokens (overrides thinking_level)
+      system_instructions str   — system prompt prepended to the conversation
+      max_output_tokens   int   — mapped to Anthropic's max_tokens
+
+    Note: when thinking_mode=true, temperature is forced to 1.0 (Anthropic requirement).
+    """
+    client = _anthropic_client()
+    if client is None:
+        logger.warning("[DocumentAI] Claude call skipped — Anthropic client unavailable")
+        return ""
+
+    max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
+    temperature = float(gen_kwargs.get("temperature") or 1.0)
+
+    create_kwargs: dict = {
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    active_flags: list[str] = []
+
+    # ── System instructions ──────────────────────────────────────────────────
+    sys_instr = str(llm_params.get("system_instructions") or "").strip()
+    if sys_instr:
+        create_kwargs["system"] = sys_instr
+        active_flags.append("system_instructions")
+
+    # ── Extended thinking ────────────────────────────────────────────────────
+    if llm_params.get("thinking_mode"):
+        budget = _resolve_thinking_budget(llm_params, "claude")
+        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # Anthropic requires temperature=1 when extended thinking is on
+        temperature = 1.0
+        active_flags.append(f"thinking(budget={budget})")
+
+    create_kwargs["temperature"] = temperature
+
+    if active_flags:
+        logger.info("[DocumentAI] Claude flags active: %s", ", ".join(active_flags))
+
+    logger.info(
+        "[DocumentAI] ▶ Claude generate  model=%s  temperature=%.2f  max_tokens=%d",
+        model_name, temperature, max_tokens,
+    )
+
+    response = client.messages.create(**create_kwargs)
+
+    # Extract text from content blocks (thinking blocks are skipped)
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return (block.text or "").strip()
+    return ""
+
+
+# ── Unified text generation (routes Gemini ↔ Claude) ─────────────────────────
 
 def _generate_text(
     prompt: str,
@@ -171,16 +417,42 @@ def _generate_text(
     for_summary: bool = False,
     agent_name: str | None = None,
 ) -> str:
-    client = _gemini_client()
-    if client is None:
-        return ""
-    model_name, generation_config = _generation_config(
+    """
+    Generate text using either Gemini or Claude depending on the model name
+    stored in agent_prompts.model_ids → llm_models.name.
+
+    Routing:
+      model starts with "claude" → Anthropic API
+      everything else            → Gemini API
+    """
+    model_name, gen_kwargs, llm_params = _generation_config(
         for_summary=for_summary, agent_name=agent_name
     )
+    provider = _detect_provider(model_name)
+
+    logger.info(
+        "[DocumentAI] generate  provider=%s  model=%s  agent=%s",
+        provider, model_name, agent_name or "N/A",
+    )
+
+    if provider == "claude":
+        return _generate_text_claude(
+            prompt,
+            model_name=model_name,
+            gen_kwargs=gen_kwargs,
+            llm_params=llm_params,
+        )
+
+    # ── Gemini ───────────────────────────────────────────────────────────────
+    client = _gemini_client()
+    if client is None:
+        logger.warning("[DocumentAI] Gemini client unavailable — check GEMINI_API_KEY")
+        return ""
+    gemini_config = _build_gemini_config(gen_kwargs, llm_params)
     response = client.models.generate_content(
         model=model_name,
         contents=prompt,
-        config=generation_config,
+        config=gemini_config,
     )
     return (getattr(response, "text", None) or "").strip()
 
