@@ -113,6 +113,21 @@ class Settings(BaseSettings):
     chunk_min_tokens: int = 500
     chunk_max_tokens: int = 1000
     max_parallel_document_workers: int = 4
+    # Document AI page limit per request (online processing max is 15 pages)
+    document_ai_page_limit: int = Field(
+        default=15,
+        validation_alias=AliasChoices("DOCUMENT_AI_PAGE_LIMIT"),
+    )
+    # Threads used to send parallel page-batch OCR requests to Document AI
+    ocr_parallel_workers: int = Field(
+        default=4,
+        validation_alias=AliasChoices("OCR_PARALLEL_WORKERS"),
+    )
+    # Persistent background worker threads in the document processing queue
+    processing_queue_workers: int = Field(
+        default=4,
+        validation_alias=AliasChoices("PROCESSING_QUEUE_WORKERS"),
+    )
     auto_fill_confidence_threshold: float = 0.90
 
     # Embedding batching & rate-limit protection

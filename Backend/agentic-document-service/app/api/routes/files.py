@@ -377,6 +377,21 @@ async def get_llm_limits_for_client(
     }
 
 
+@router.get("/queue/status")
+async def get_queue_status(
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Return current document processing queue depth and worker stats."""
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return {
+        "success": True,
+        "queue": get_folder_service().get_queue_status(),
+    }
+
+
 @router.post("/upload-for-processing")
 async def upload_for_processing(
     files: list[UploadFile] = File(...),

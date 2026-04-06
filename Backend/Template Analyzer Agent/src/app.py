@@ -23,6 +23,7 @@ _cors_origins = [
     "http://127.0.0.1:3000",
     "https://jurinex-dev.netlify.app",
     "https://nexintel.netlify.app",
+    "https://ailearn.co.in",
 ]
 _extra = os.environ.get("CORS_ORIGINS", "").strip()
 if _extra:
@@ -30,7 +31,7 @@ if _extra:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_origin_regex=r"https://.*\.netlify\.app",
+    allow_origin_regex=r"https://.*\.netlify\.app|https://.*\.ailearn\.co\.in",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import threading
 import uuid
@@ -64,6 +65,70 @@ class ChatSessionRecord:
     messages: list[ChatMessage] = field(default_factory=list)
 
 
+class DocumentProcessingQueue:
+    """
+    Persistent background worker queue for document processing jobs.
+
+    Unlike a plain ThreadPoolExecutor, worker threads stay alive between
+    submissions and pick up new jobs as soon as they arrive.  This lets
+    multiple concurrent file-upload batches be processed without spinning
+    up new threads on every request.
+    """
+
+    def __init__(self, num_workers: int = 4) -> None:
+        self._num_workers = num_workers
+        self._task_queue: queue.Queue = queue.Queue()
+        self._workers: list[threading.Thread] = []
+        self._shutdown_event = threading.Event()
+        self._pending_count = 0
+        self._count_lock = threading.Lock()
+        self._start_workers()
+        logger.info(
+            "[DocumentProcessingQueue] started num_workers=%d",
+            self._num_workers,
+        )
+
+    def _start_workers(self) -> None:
+        for i in range(self._num_workers):
+            t = threading.Thread(
+                target=self._worker_loop,
+                name=f"doc-queue-worker-{i}",
+                daemon=True,
+            )
+            t.start()
+            self._workers.append(t)
+
+    def _worker_loop(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                fn, args, kwargs = self._task_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                fn(*args, **kwargs)
+            except Exception as exc:
+                logger.exception("[DocumentProcessingQueue] worker error: %s", exc)
+            finally:
+                self._task_queue.task_done()
+                with self._count_lock:
+                    self._pending_count = max(0, self._pending_count - 1)
+
+    def submit(self, fn, *args, **kwargs) -> None:
+        with self._count_lock:
+            self._pending_count += 1
+        self._task_queue.put((fn, args, kwargs))
+
+    def status(self) -> dict:
+        return {
+            "num_workers": self._num_workers,
+            "queued_jobs": self._task_queue.qsize(),
+            "pending_count": self._pending_count,
+        }
+
+    def shutdown(self) -> None:
+        self._shutdown_event.set()
+
+
 class FolderWorkflowService:
     def __init__(self, pipeline: LegalCasePipelineService) -> None:
         self._pipeline = pipeline
@@ -73,7 +138,8 @@ class FolderWorkflowService:
         self._sessions: dict[str, dict[str, ChatSessionRecord]] = {}
         self._prompt_audit: list[PromptAuditRecord] = []
         self._extracted_by_case: dict[str, dict[str, Any]] = {}
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="folder-orchestrator")
+        num_workers = getattr(settings, "processing_queue_workers", 4)
+        self._job_queue = DocumentProcessingQueue(num_workers=num_workers)
 
     def queue_documents(
         self,
@@ -158,7 +224,7 @@ class FolderWorkflowService:
             job_id,
             len(db_ready_documents),
         )
-        self._executor.submit(self._run_job, job_id, case_id, db_ready_documents)
+        self._job_queue.submit(self._run_job, job_id, case_id, db_ready_documents)
         return UploadBatchResponse(
             success=True,
             folderName=folder_name,
@@ -168,6 +234,10 @@ class FolderWorkflowService:
             uploadedFiles=uploaded_files,
             message="Documents queued successfully for parallel processing.",
         )
+
+    def get_queue_status(self) -> dict:
+        """Return current processing queue depth and worker count."""
+        return self._job_queue.status()
 
     def create_folder(self, user_id: str, folder_name: str, parent_path: str = "") -> dict[str, Any]:
         # Sanitize folder name — same logic as document-service sanitizeName()
