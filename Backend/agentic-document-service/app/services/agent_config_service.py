@@ -39,7 +39,8 @@ CACHE_TTL_SECONDS: float = 120.0
 _DEFAULT_MODEL: str = "gemini-2.5-pro"
 _DEFAULT_TEMPERATURE: float = 0.7
 
-# Maps internal agent name → agent_type values to search in DB (first match wins)
+# Maps internal agent name → agent_type values to search in DB (first match wins).
+# Do NOT add broad types like "summarization" here without a name guard — multiple agents share it.
 _AGENT_TYPE_SEARCH: dict[str, list[str]] = {
     "legal_case_management_root": ["orchestration", "root", "legal_case_management_root"],
     "form_population_agent":      ["intake", "form_population", "form population"],
@@ -48,12 +49,12 @@ _AGENT_TYPE_SEARCH: dict[str, list[str]] = {
     "preset_execution_agent":     ["preset", "preset_execution", "preset execution"],
 }
 
-# Fallback: search by ILIKE on name when agent_type has no match
+# Fallback: search by ILIKE on name when agent_type has no match (more specific phrases first).
 _AGENT_NAME_KEYWORDS: dict[str, list[str]] = {
     "legal_case_management_root": ["legal case management root", "orchestrator", "case management root"],
     "form_population_agent":      ["form population", "intake"],
     "document_processing_agent":  ["document processing", "classification"],
-    "grounded_retrieval_agent":   ["retrieval", "grounded"],
+    "grounded_retrieval_agent":   ["grounded_retrieval", "grounded retrieval", "grounded", "retrieval"],
     "preset_execution_agent":     ["preset"],
 }
 
@@ -230,6 +231,28 @@ def _is_table_missing_error(exc: Exception) -> bool:
     )
 
 
+def _internal_name_variants(agent_name: str) -> list[str]:
+    """
+    DB rows may use internal ids (grounded_retrieval_agent) or omit the _agent suffix.
+    Admin "Summarization" agents still use the name column for the internal id in most setups.
+    """
+    s = (agent_name or "").strip().lower()
+    if not s:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for cand in (s, s.replace(" ", "_")):
+        if cand and cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+    if s.endswith("_agent") and len(s) > 6:
+        base = s[:-6].rstrip("_")
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base)
+    return out
+
+
 def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
     """
     Query agent_prompts for the best matching row.
@@ -253,24 +276,53 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
 
     agent_types = _AGENT_TYPE_SEARCH.get(agent_name, [])
     name_keywords = _AGENT_NAME_KEYWORDS.get(agent_name, [])
+    name_variants = _internal_name_variants(agent_name)
 
     try:
         with get_db_connection() as conn, conn.cursor() as cur:
-            # ── Pass 1: exact name match (covers all standard rows) ──────────
-            cur.execute(
-                """
-                SELECT *
-                FROM public.agent_prompts
-                WHERE LOWER(TRIM(name::text)) = %s
-                ORDER BY updated_at DESC NULLS LAST, id DESC
-                LIMIT 1
-                """,
-                (agent_name.lower().strip(),),
-            )
-            row = cur.fetchone()
-            if row:
-                logger.debug("[AgentConfig] found by exact name=%s id=%s", agent_name, row.get("id"))
-                return dict(row)
+            # ── Pass 1: exact name match (internal id + common variants) ─────
+            if name_variants:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM public.agent_prompts
+                    WHERE LOWER(TRIM(name::text)) = ANY(%s)
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """,
+                    (name_variants,),
+                )
+                row = cur.fetchone()
+                if row:
+                    logger.debug(
+                        "[AgentConfig] found by name IN %s id=%s",
+                        name_variants,
+                        row.get("id"),
+                    )
+                    return dict(row)
+
+            # ── Pass 1b: Admin UI "Summarization" type + same name variants ──
+            # Many deployments store all case-chat agents under agent_type = summarization.
+            if name_variants:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM public.agent_prompts
+                    WHERE LOWER(TRIM(agent_type::text)) IN ('summarization', 'summary')
+                      AND LOWER(TRIM(name::text)) = ANY(%s)
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """,
+                    (name_variants,),
+                )
+                row = cur.fetchone()
+                if row:
+                    logger.debug(
+                        "[AgentConfig] found by summarization+name id=%s name=%s",
+                        row.get("id"),
+                        row.get("name"),
+                    )
+                    return dict(row)
 
             # ── Pass 2: exact agent_type match ───────────────────────────────
             for atype in agent_types:
@@ -439,9 +491,13 @@ def get_agent_config(agent_name: str, *, default_prompt: str = "") -> AgentConfi
             source="default",
         )
 
-        logger.debug(
-            "[AgentConfig] source=DEFAULT  agent=%s  model=%s  temperature=%.2f",
-            agent_name, model_name, _DEFAULT_TEMPERATURE,
+        logger.warning(
+            "[AgentConfig] source=DEFAULT  agent=%s  model=%s  temperature=%.2f  — "
+            "no matching row in public.agent_prompts (check name e.g. grounded_retrieval_agent, "
+            "agent_type summarization vs retrieval, and that DATABASE_URL matches the admin DB).",
+            agent_name,
+            model_name,
+            _DEFAULT_TEMPERATURE,
         )
 
     with _cache_lock:
