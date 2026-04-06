@@ -45,6 +45,8 @@ class Settings(BaseSettings):
             "https://jurinex.netlify.app",
             "https://jurinex-dev.netlify.app",
             "https://nexintel.netlify.app",
+            "https://ailearn.co.in",
+            "https://www.ailearn.co.in",
         ]
     )
     enable_adk_runtime: bool = True
