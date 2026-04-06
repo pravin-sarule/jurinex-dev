@@ -76,6 +76,10 @@ class AgentConfig:
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[AgentConfig, float]] = {}   # agent_name → (config, expires_at)
 
+# Set to True the first time we confirm the table is missing so we stop hitting DB
+_table_missing: bool = False
+_table_missing_logged: bool = False   # log the notice only once
+
 
 def _mono() -> float:
     return time.monotonic()
@@ -124,15 +128,33 @@ def _resolve_model_ids(model_ids: Any) -> str | None:
     return None
 
 
+def _is_table_missing_error(exc: Exception) -> bool:
+    """Return True when the exception means the agent_prompts table doesn't exist."""
+    msg = str(exc).lower()
+    return (
+        "relation" in msg and "does not exist" in msg
+        or "undefined_table" in type(exc).__name__.lower()
+        or "undefinedtable" in type(exc).__name__.lower()
+    )
+
+
 def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
     """
     Query agent_prompts for the best matching row.
-    Strategy:
-      1. Exact match on agent_type (case-insensitive), tried for each candidate type string.
-      2. ILIKE match on name column, tried for each keyword.
-    Returns the raw DB dict or None.
+
+    Lookup priority:
+      1. Exact name match        — WHERE name = '<agent_name>'           (most reliable)
+      2. Exact agent_type match  — WHERE agent_type IN (<candidates>)
+      3. ILIKE name keyword      — WHERE name ILIKE '%<keyword>%'
+
+    The name column in the DB stores the internal agent names directly
+    (e.g. 'form_population_agent'), so pass 1 handles all standard rows.
     """
+    global _table_missing, _table_missing_logged
     from app.services.db import get_db_connection, is_db_available
+
+    if _table_missing:
+        return None
 
     if not is_db_available():
         return None
@@ -142,7 +164,23 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
 
     try:
         with get_db_connection() as conn, conn.cursor() as cur:
-            # ── Pass 1: exact agent_type match ───────────────────────────────
+            # ── Pass 1: exact name match (covers all standard rows) ──────────
+            cur.execute(
+                """
+                SELECT *
+                FROM public.agent_prompts
+                WHERE LOWER(TRIM(name::text)) = %s
+                ORDER BY updated_at DESC NULLS LAST, id DESC
+                LIMIT 1
+                """,
+                (agent_name.lower().strip(),),
+            )
+            row = cur.fetchone()
+            if row:
+                logger.debug("[AgentConfig] found by exact name=%s id=%s", agent_name, row.get("id"))
+                return dict(row)
+
+            # ── Pass 2: exact agent_type match ───────────────────────────────
             for atype in agent_types:
                 cur.execute(
                     """
@@ -156,9 +194,10 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
                 )
                 row = cur.fetchone()
                 if row:
+                    logger.debug("[AgentConfig] found by agent_type=%s id=%s", atype, row.get("id"))
                     return dict(row)
 
-            # ── Pass 2: ILIKE name keyword match ─────────────────────────────
+            # ── Pass 3: ILIKE name keyword ────────────────────────────────────
             for keyword in name_keywords:
                 cur.execute(
                     """
@@ -172,10 +211,21 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
                 )
                 row = cur.fetchone()
                 if row:
+                    logger.debug("[AgentConfig] found by name keyword=%s id=%s", keyword, row.get("id"))
                     return dict(row)
 
     except Exception as exc:
-        logger.warning("[AgentConfig] DB lookup failed for agent=%s: %s", agent_name, exc)
+        if _is_table_missing_error(exc):
+            _table_missing = True
+            if not _table_missing_logged:
+                _table_missing_logged = True
+                logger.info(
+                    "[AgentConfig] agent_prompts table not found — "
+                    "all agents will use hardcoded default prompts and settings.adk_model. "
+                    "Create the table and add rows to enable per-agent DB config."
+                )
+        else:
+            logger.warning("[AgentConfig] DB lookup failed for agent=%s: %s", agent_name, exc)
 
     return None
 
@@ -279,9 +329,8 @@ def get_agent_config(agent_name: str, *, default_prompt: str = "") -> AgentConfi
             source="default",
         )
 
-        logger.warning(
-            "[AgentConfig] ⚠️   source=DEFAULT  agent=%-35s  model=%-30s  temperature=%.2f"
-            "  (no row in agent_prompts — using hardcoded prompt)",
+        logger.debug(
+            "[AgentConfig] source=DEFAULT  agent=%s  model=%s  temperature=%.2f",
             agent_name, model_name, _DEFAULT_TEMPERATURE,
         )
 

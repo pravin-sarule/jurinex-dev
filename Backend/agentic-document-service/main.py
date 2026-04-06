@@ -4,8 +4,9 @@ import logging
 import sys
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes.cases import router as cases_router
 from app.api.routes.content import router as content_router
@@ -28,6 +29,27 @@ logger.info(
 )
 
 
+def _cors_error_response(request: Request, status_code: int, detail: str) -> JSONResponse:
+    """
+    Build a JSONResponse that always carries the correct CORS headers.
+
+    FastAPI's CORSMiddleware only adds headers when the inner app returns a normal
+    response.  When an unhandled exception propagates through BaseHTTPMiddleware the
+    middleware stack re-raises it, which means CORSMiddleware never gets to add its
+    headers.  By catching exceptions here (at the exception-handler level, before the
+    middleware stack is unwound) we can inject the headers ourselves.
+    """
+    origin = request.headers.get("origin", "")
+    allowed = set(settings.cors_origins)
+    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    if origin and (origin in allowed or origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1")):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Agentic Document Service",
@@ -37,6 +59,19 @@ def create_app() -> FastAPI:
         ),
         version=settings.version,
     )
+
+    # ── Global exception handlers (run before middleware unwind) ───────────────
+    from fastapi import HTTPException as _HTTPException
+    from fastapi.exception_handlers import http_exception_handler as _default_http_handler
+
+    @app.exception_handler(_HTTPException)
+    async def cors_http_exception_handler(request: Request, exc: _HTTPException) -> JSONResponse:
+        return _cors_error_response(request, exc.status_code, str(exc.detail))
+
+    @app.exception_handler(Exception)
+    async def cors_unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("[GlobalHandler] Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+        return _cors_error_response(request, 500, "Internal server error")
 
     app.add_middleware(LLMChatPolicyMiddleware)
     app.add_middleware(

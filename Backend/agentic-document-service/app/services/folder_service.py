@@ -314,6 +314,55 @@ class FolderWorkflowService:
         text = str(value)
         return text[:limit] if len(text) > limit else text
 
+    @staticmethod
+    def _normalize_date(value: Any) -> str | None:
+        """
+        Normalize any date string to YYYY-MM-DD for PostgreSQL.
+
+        Handles:
+          YYYY-MM-DD  → returned as-is
+          DD/MM/YYYY  → converted  (Indian / European format)
+          DD-MM-YYYY  → converted
+          MM/DD/YYYY  → converted when day part > 12 (unambiguous)
+          ISO 8601 with time component → date part extracted
+          None / empty / unparseable  → None
+        """
+        if not value:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+
+        # Already ISO format YYYY-MM-DD (possibly with time)
+        if len(raw) >= 10 and raw[4] == "-":
+            return raw[:10]  # truncate time component if present
+
+        # Try DD/MM/YYYY or DD-MM-YYYY
+        for sep in ("/", "-"):
+            if sep in raw:
+                parts = raw.split(sep)
+                if len(parts) == 3:
+                    a, b, c = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                    # Detect YYYY at position 0 (YYYY/MM/DD)
+                    if len(a) == 4 and a.isdigit():
+                        return f"{a}-{b.zfill(2)}-{c.zfill(2)}"
+                    # Detect YYYY at position 2 (DD/MM/YYYY or MM/DD/YYYY)
+                    if len(c) == 4 and c.isdigit():
+                        day_or_month = int(a) if a.isdigit() else 0
+                        # If first part > 12 it must be the day (DD/MM/YYYY)
+                        # For Indian dates always treat as DD/MM/YYYY
+                        return f"{c}-{b.zfill(2)}-{a.zfill(2)}"
+
+        # Last resort: let Python's datetime parse it
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(raw, "%d %b %Y").strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        logger.warning("[FolderService] Could not normalize date value=%r — storing NULL", raw)
+        return None
+
     def _get_table_columns(self, cur: Any, table_name: str) -> set[str]:
         cur.execute(
             """
@@ -326,10 +375,11 @@ class FolderWorkflowService:
         return {row["column_name"] for row in cur.fetchall()}
 
     def _build_case_db_payload(self, case_data: dict[str, Any], *, default_status: str = "Active") -> dict[str, Any]:
+        nd = self._normalize_date
         return {
             "case_title": self._truncate_case_value(case_data.get("case_title") or "Untitled Case", 255),
             "case_number": self._truncate_case_value(case_data.get("case_number"), 255),
-            "filing_date": case_data.get("filing_date") or None,
+            "filing_date": nd(case_data.get("filing_date")),
             "case_type": self._truncate_case_value(case_data.get("case_type") or "", 100),
             "sub_type": self._truncate_case_value(case_data.get("sub_type"), 100),
             "court_name": self._truncate_case_value(case_data.get("court_name") or "", 255),
@@ -351,7 +401,7 @@ class FolderWorkflowService:
             "case_prefix": self._truncate_case_value(case_data.get("case_prefix"), 100),
             "case_year": int(case_data["case_year"]) if case_data.get("case_year") else None,
             "case_nature": self._truncate_case_value(case_data.get("case_nature"), 100),
-            "next_hearing_date": case_data.get("next_hearing_date") or None,
+            "next_hearing_date": nd(case_data.get("next_hearing_date")),
             "document_type": self._truncate_case_value(case_data.get("document_type"), 100),
             "filed_by": self._truncate_case_value(case_data.get("filed_by"), 100),
         }

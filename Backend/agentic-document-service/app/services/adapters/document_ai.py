@@ -175,9 +175,9 @@ def _generation_config(
                     llm_params.get("code_execution", False),
                 )
                 return cfg.model_name, gen_kwargs, llm_params
-            logger.info(
+            logger.debug(
                 "[DocumentAI] generation_config  source=DEFAULT(no-db-row)  agent=%s  "
-                "model=%s  temperature=%.2f  — falling through to summarization_chat_config",
+                "model=%s  temperature=%.2f  — using summarization_chat_config",
                 agent_name, cfg.model_name, cfg.temperature,
             )
         except Exception as exc:

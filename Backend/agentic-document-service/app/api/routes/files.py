@@ -698,6 +698,9 @@ def create_case(
         return create_case_with_folder(user_id, request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[Route:create_case] user_id=%s error=%s", user_id, exc)
+        raise HTTPException(status_code=500, detail=f"Case creation failed: {exc}") from exc
 
 
 @router.get("/folders")
