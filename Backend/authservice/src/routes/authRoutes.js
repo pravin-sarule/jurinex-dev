@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/auth');
 
-const { register, registerSoloLawyer, registerFirm, login, verifyOtpAndLogin, updateProfile, deleteAccount, logout, fetchProfile, getUserById, updateRazorpayCustomerId , firebaseGoogleSignIn, getUserInfo, getProfessionalProfile, updateProfessionalProfile, changePassword, setPassword, getAllActiveUsers, getAllUsers, createFirmStaff, getFirmStaff, getFirmInfo } = require('../controllers/authController');
+const { register, registerSoloLawyer, registerFirm, login, verifyOtpAndLogin, updateProfile, deleteAccount, logout, fetchProfile, getUserById, updateRazorpayCustomerId , firebaseGoogleSignIn, getUserInfo, getProfessionalProfile, updateProfessionalProfile, changePassword, setPassword, getAllActiveUsers, getAllUsers, createFirmStaff, getFirmStaff, getFirmInfo, pingActivity } = require('../controllers/authController');
 const googleDriveRoutes = require('./googleDriveRoutes');
 
 // Registration routes
@@ -40,6 +40,7 @@ router.post('/google', firebaseGoogleSignIn);
 
 router.put('/change-password', protect, changePassword);
 router.post('/set-password', setPassword); // Public endpoint for first-time password setup
+router.post('/activity/ping', protect, pingActivity);
 
 // Firm admin routes
 router.post('/firm/staff', protect, createFirmStaff);

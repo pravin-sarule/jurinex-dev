@@ -29,7 +29,8 @@ class FirmUser {
 
   static async findByFirmId(firmId) {
     const result = await pool.query(
-      `SELECT fu.*, u.username, u.email, u.phone, u.is_active, u.auth_type, u.account_type
+      `SELECT fu.*, u.username, u.email, u.phone, u.is_active, u.auth_type, u.account_type,
+              u.is_blocked, u.first_login, u.created_at, u.updated_at, u.last_login_at, u.last_seen_at
        FROM firm_users fu
        JOIN users u ON fu.user_id = u.id
        WHERE fu.firm_id = $1
@@ -81,4 +82,3 @@ class FirmUser {
 }
 
 module.exports = FirmUser;
-

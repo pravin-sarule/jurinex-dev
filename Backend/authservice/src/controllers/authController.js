@@ -77,6 +77,16 @@ const admin = require('../config/firebase'); // Import Firebase Admin SDK
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+async function markUserActiveSession(userId) {
+  if (!userId) return null;
+  try {
+    return await User.touchLogin(userId);
+  } catch (error) {
+    console.error('[AuthController] Failed to update login activity:', error);
+    return null;
+  }
+}
+
 // Solo Lawyer Registration
 const registerSoloLawyer = async (req, res) => {
   const {
@@ -148,19 +158,20 @@ const registerSoloLawyer = async (req, res) => {
     });
 
     // Generate token and create session
-    const token = generateToken(user);
-    await Session.create({ user_id: user.id, token });
+    const activeUser = await markUserActiveSession(user.id) || user;
+    const token = generateToken(activeUser);
+    await Session.create({ user_id: activeUser.id, token });
 
     res.status(201).json({
       success: true,
       message: 'Solo lawyer registered successfully',
       token,
       user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        account_type: user.account_type,
-        approval_status: user.approval_status,
+        id: activeUser.id,
+        username: activeUser.username,
+        email: activeUser.email,
+        account_type: activeUser.account_type,
+        approval_status: activeUser.approval_status,
       },
     });
   } catch (error) {
@@ -492,9 +503,10 @@ const verifyOtpAndLogin = async (req, res) => {
     // Refresh user data after update
     const updatedUser = await User.findByEmail(email);
 
-    const token = generateToken(updatedUser);
+    const activeUser = await markUserActiveSession(updatedUser.id) || updatedUser;
+    const token = generateToken(activeUser);
 
-    await Session.create({ user_id: updatedUser.id, token });
+    await Session.create({ user_id: activeUser.id, token });
     console.log(`[AuthController] ✅ Session created for user: ${email}`);
 
     let professionalProfile;
@@ -510,14 +522,14 @@ const verifyOtpAndLogin = async (req, res) => {
       message: isFirstLogin ? 'Password changed successfully. Login successful.' : 'Login successful',
       token,
       user: {
-        id: updatedUser.id,
-        username: updatedUser.username,
-        email: updatedUser.email,
-        role: updatedUser.role,
-        is_blocked: updatedUser.is_blocked,
-        account_type: updatedUser.account_type,
-        approval_status: updatedUser.approval_status,
-        first_login: updatedUser.first_login,
+        id: activeUser.id,
+        username: activeUser.username,
+        email: activeUser.email,
+        role: activeUser.role,
+        is_blocked: activeUser.is_blocked,
+        account_type: activeUser.account_type,
+        approval_status: activeUser.approval_status,
+        first_login: activeUser.first_login,
       },
       professionalProfile: professionalProfile ? {
         is_profile_completed: professionalProfile.is_profile_completed
@@ -595,9 +607,10 @@ const firebaseGoogleSignIn = async (req, res) => {
       });
     }
 
-    const jwtToken = generateToken(user);
+    const activeUser = await markUserActiveSession(user.id) || user;
+    const jwtToken = generateToken(activeUser);
 
-    await Session.create({ user_id: user.id, token: jwtToken });
+    await Session.create({ user_id: activeUser.id, token: jwtToken });
     console.log(`[GoogleSignIn] ✅ Session created for: ${userEmail}`);
 
     let professionalProfile;
@@ -612,12 +625,12 @@ const firebaseGoogleSignIn = async (req, res) => {
       message: "Google Sign-In successful",
       token: jwtToken,  // ⚠️ CRITICAL: Token returned immediately (no OTP required)
       user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        is_blocked: user.is_blocked,
-        profile_image: user.profile_image,
+        id: activeUser.id,
+        username: activeUser.username,
+        email: activeUser.email,
+        role: activeUser.role,
+        is_blocked: activeUser.is_blocked,
+        profile_image: activeUser.profile_image,
       },
       professionalProfile: professionalProfile ? {
         is_profile_completed: professionalProfile.is_profile_completed
@@ -730,11 +743,58 @@ const fetchProfile = async (req, res) => {
         account_type: user.account_type || 'SOLO',
         created_at: user.created_at,
         updated_at: user.updated_at,
+        last_login_at: user.last_login_at,
+        last_seen_at: user.last_seen_at,
       },
     });
   } catch (error) {
     console.error('Error fetching profile:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+const pingActivity = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    console.log('[AuthController] Activity ping received', {
+      userId,
+      email: req.user?.email || null,
+      accountType: req.user?.account_type || null,
+      visibilityPingAt: new Date().toISOString(),
+    });
+
+    const updatedUser = await User.touchSeen(userId);
+
+    console.log('[AuthController] Activity ping updated', {
+      userId,
+      email: req.user?.email || null,
+      accountType: req.user?.account_type || null,
+      last_login_at: updatedUser?.last_login_at || null,
+      last_seen_at: updatedUser?.last_seen_at || null,
+      backfilledLastLogin: !!updatedUser?.last_login_at,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Activity updated successfully',
+      last_login_at: updatedUser?.last_login_at || null,
+      last_seen_at: updatedUser?.last_seen_at || null,
+    });
+  } catch (error) {
+    console.error('[AuthController] Error updating activity ping:', {
+      userId: req.user?.id || null,
+      email: req.user?.email || null,
+      accountType: req.user?.account_type || null,
+      message: error?.message,
+      code: error?.code,
+      detail: error?.detail,
+      stack: error?.stack,
+    });
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
@@ -1424,5 +1484,6 @@ module.exports = {
   getAllUsers,
   createFirmStaff,
   getFirmStaff,
-  getFirmInfo
+  getFirmInfo,
+  pingActivity
 };

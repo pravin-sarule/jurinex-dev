@@ -7,6 +7,7 @@ require('dotenv').config({ path: './.env' });
 const db = require('./src/config/db');
 const paymentRoutes = require('./src/routes/paymentRoutes');
 const userResourceRoutes = require('./src/routes/userResourcesRoutes');
+const { initializeFirmAnalyticsSchema } = require('./src/utils/firmAnalyticsDb');
 
 const app = express();
 
@@ -49,7 +50,8 @@ app.use((err, req, res, next) => {
   res.status(500).send('Something broke!');
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  await initializeFirmAnalyticsSchema();
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`Application accessible at http://localhost:${PORT}`);
 });

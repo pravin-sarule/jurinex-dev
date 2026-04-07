@@ -1,14 +1,20 @@
 
 require("dotenv").config();
 
+const axios = require("axios");
 const mime = require("mime-types");
 const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 
 const pool = require("../config/db");
+const {
+  getCaseAssignmentsMeta,
+  initializeCaseAssignmentsSchema,
+} = require("../utils/caseAssignmentsDb");
 
 const File = require("../models/File");
 const { getAllowedUserIds } = require("../utils/firmAccess");
+const { ensureUserPermission, isPermissionAllowed } = require("../utils/rbac");
 const FileChat = require("../models/FileChat");
 const FileChunk = require("../models/FileChunk");
 const ChunkVector = require("../models/ChunkVector");
@@ -49,6 +55,7 @@ const {
   fetchSecretManagerWithTemplates
 } = require("../services/secretPromptTemplateService"); // NEW: Import template service
 let secretClient; // NEW
+const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';
 
 if (!secretClient) { // NEW
   secretClient = new SecretManagerServiceClient(); // NEW
@@ -60,6 +67,457 @@ function sanitizeName(name) {
 
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+}
+
+function getDisplayCaseName(caseRow) {
+  if (caseRow?.case_title && String(caseRow.case_title).trim()) {
+    return String(caseRow.case_title).trim();
+  }
+  if (caseRow?.case_number && String(caseRow.case_number).trim()) {
+    return `Case ${String(caseRow.case_number).trim()}`;
+  }
+  return 'Untitled Case';
+}
+
+function logCaseAssignments(event, payload = {}) {
+  console.log(`[CaseAssignments] ${event}`, payload);
+}
+
+function normalizeCaseIdValue(rawValue, caseIdSqlType) {
+  if (caseIdSqlType === 'uuid') {
+    return String(rawValue).trim();
+  }
+
+  const parsed = parseInt(rawValue, 10);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`Invalid case id "${rawValue}" for SQL type ${caseIdSqlType}`);
+  }
+  return parsed;
+}
+
+async function getFirmMembersForUser(userId) {
+  const response = await axios.get(
+    `${AUTH_SERVICE_URL}/api/auth/internal/user/${userId}/firm-members`,
+    { timeout: 3000 }
+  );
+  return Array.isArray(response.data?.members) ? response.data.members : [];
+}
+
+async function getFirmPermissionsForUser(userId) {
+  const response = await axios.get(
+    `${AUTH_SERVICE_URL}/api/auth/internal/user/${userId}/permissions`,
+    { timeout: 3000 }
+  );
+  return response.data?.permissions || {};
+}
+
+async function getFirmAssignmentScope(req) {
+  const actorId = parseInt(req.user?.id, 10);
+  if (!actorId) {
+    return {
+      actorId: null,
+      isFirmAdmin: false,
+      canViewCaseInformation: false,
+      canManageAssignments: false,
+      permissions: {},
+      members: [],
+      memberIds: [],
+    };
+  }
+
+  const members = await getFirmMembersForUser(actorId);
+  const actorMember = members.find((member) => Number(member.user_id) === actorId);
+  const actorRole = String(actorMember?.role || req.user?.account_type || '').trim().toUpperCase();
+  const isFirmAdmin = actorRole === 'ADMIN' || actorRole === 'FIRM_ADMIN';
+  const permissions =
+    String(req.user?.account_type || '').trim().toUpperCase() === 'FIRM_USER'
+      ? await getFirmPermissionsForUser(actorId)
+      : {};
+  const canViewCaseInformation = isFirmAdmin || isPermissionAllowed(permissions, 'view_case_information');
+  const canManageAssignments =
+    isFirmAdmin
+    || (
+      isPermissionAllowed(permissions, 'manage_user_permissions')
+      && canViewCaseInformation
+    );
+  const memberIds = members
+    .map((member) => Number(member.user_id))
+    .filter((value) => !Number.isNaN(value));
+
+  return {
+    actorId,
+    actorRole,
+    isFirmAdmin,
+    canViewCaseInformation,
+    canManageAssignments,
+    permissions,
+    members,
+    memberIds,
+  };
+}
+
+async function getAssignedCaseIdsForUser(userId) {
+  const meta = await initializeCaseAssignmentsSchema({
+    throwOnError: true,
+    context: { action: 'getAssignedCaseIdsForUser', userId },
+  });
+  const result = await pool.query(
+    'SELECT case_id FROM case_assignments WHERE user_id = $1',
+    [userId]
+  );
+  return result.rows.map((row) => normalizeCaseIdValue(row.case_id, meta.caseIdSqlType));
+}
+
+async function getInternalUserAnalyticsMap(userIds = [], options = {}) {
+  const normalizedUserIds = Array.from(
+    new Set(
+      (userIds || [])
+        .map((value) => String(value).trim())
+        .filter(Boolean)
+    )
+  );
+
+  console.log('[InternalAnalytics] Dataflow start', {
+    requestedUserIds: userIds,
+    normalizedUserIds,
+    startDate: options.startDate || null,
+    endDate: options.endDate || null,
+  });
+
+  const analyticsMap = {};
+  normalizedUserIds.forEach((userId) => {
+    analyticsMap[userId] = {
+      documentsUploadedCount: 0,
+      uploadedBytes: 0,
+      latestUploadAt: null,
+      casesCreatedCount: 0,
+      assignedCasesCount: 0,
+      createdCases: [],
+    };
+  });
+
+  if (!normalizedUserIds.length) {
+    console.log('[InternalAnalytics] No valid user ids supplied. Returning empty analytics map.');
+    return analyticsMap;
+  }
+
+  const caseFilters = [];
+  const params = [normalizedUserIds];
+  let nextParamIndex = 2;
+
+  if (options.startDate) {
+    caseFilters.push(`c.created_at >= $${nextParamIndex}`);
+    params.push(options.startDate);
+    nextParamIndex += 1;
+  }
+
+  if (options.endDate) {
+    caseFilters.push(`c.created_at <= $${nextParamIndex}`);
+    params.push(options.endDate);
+    nextParamIndex += 1;
+  }
+
+  const caseCreatedAtFilter = caseFilters.length ? ` AND ${caseFilters.join(' AND ')}` : '';
+
+  console.log('[InternalAnalytics] Query configuration prepared', {
+    normalizedUserIds,
+    caseFilters,
+    paramsPreview: params,
+  });
+
+  const [createdCaseMetricsResult, assignedCasesResult] = await Promise.all([
+    pool.query(
+      `
+        WITH created_cases AS (
+          SELECT
+            c.id::text AS case_id,
+            c.user_id::text AS user_id,
+            c.case_title,
+            c.status,
+            c.created_at,
+            folder.originalname AS folder_name,
+            folder.folder_path AS parent_folder_path,
+            folder.gcs_path AS case_folder_gcs_path,
+            CASE
+              WHEN folder.id IS NULL THEN NULL
+              WHEN COALESCE(folder.folder_path, '') = '' THEN folder.originalname
+              WHEN RIGHT(folder.folder_path, LENGTH(folder.originalname)) = folder.originalname THEN folder.folder_path
+              ELSE folder.folder_path || '/' || folder.originalname
+            END AS case_folder_path
+          FROM cases c
+          LEFT JOIN user_files folder
+            ON folder.id = c.folder_id
+           AND folder.is_folder = TRUE
+          WHERE c.user_id::text = ANY($1::text[])
+            ${caseCreatedAtFilter}
+        ),
+        created_case_docs AS (
+          SELECT
+            cc.user_id,
+            cc.case_id,
+            cc.case_title,
+            cc.status,
+            cc.created_at,
+            cc.case_folder_path,
+            cc.case_folder_gcs_path,
+            COALESCE(case_docs.document_count, 0) AS document_count,
+            COALESCE(case_docs.uploaded_bytes, 0) AS uploaded_bytes,
+            case_docs.latest_upload_at
+          FROM created_cases cc
+          LEFT JOIN LATERAL (
+            SELECT
+              COUNT(*) AS document_count,
+              COALESCE(SUM(uf.size), 0) AS uploaded_bytes,
+              MAX(uf.created_at) AS latest_upload_at
+            FROM user_files uf
+            WHERE uf.is_folder = FALSE
+              AND (
+                (
+                  cc.case_folder_gcs_path IS NOT NULL
+                  AND uf.gcs_path LIKE cc.case_folder_gcs_path || '%'
+                )
+                OR (
+                  cc.case_folder_path IS NOT NULL
+                  AND (
+                    uf.folder_path = cc.case_folder_path
+                    OR uf.folder_path LIKE cc.case_folder_path || '/%'
+                  )
+                )
+              )
+          ) AS case_docs ON TRUE
+        )
+        SELECT
+          user_id,
+          COUNT(*) AS cases_created_count,
+          COALESCE(SUM(document_count), 0) AS document_count,
+          COALESCE(SUM(uploaded_bytes), 0) AS uploaded_bytes,
+          MAX(latest_upload_at) AS latest_upload_at,
+          COALESCE(
+            JSON_AGG(
+              JSON_BUILD_OBJECT(
+                'caseId', case_id,
+                'caseTitle', case_title,
+                'status', status,
+                'createdAt', created_at,
+                'caseFolderPath', case_folder_path,
+                'caseFolderGcsPath', case_folder_gcs_path,
+                'documentsCount', document_count,
+                'uploadedBytes', uploaded_bytes,
+                'latestUploadAt', latest_upload_at
+              )
+              ORDER BY created_at DESC
+            ),
+            '[]'::json
+          ) AS created_cases
+        FROM created_case_docs
+        GROUP BY user_id
+      `,
+      params
+    ).then((result) => {
+      console.log('[InternalAnalytics] Created case metrics query completed', {
+        normalizedUserIds,
+        rowCount: result.rows?.length || 0,
+      });
+      return result;
+    }).catch((error) => {
+      console.error('[InternalAnalytics] Created case metrics query failed', {
+        normalizedUserIds,
+        startDate: options.startDate || null,
+        endDate: options.endDate || null,
+        message: error.message,
+        code: error.code,
+        detail: error.detail,
+        position: error.position,
+        stack: error.stack,
+      });
+      throw error;
+    }),
+    pool.query(
+      `
+        SELECT
+          user_id::text AS user_id,
+          COUNT(*) AS assigned_cases_count
+        FROM case_assignments
+        WHERE user_id::text = ANY($1::text[])
+        GROUP BY user_id::text
+      `,
+      [normalizedUserIds]
+    ).catch((error) => {
+      console.warn('[InternalAnalytics] Could not query case_assignments table', {
+        normalizedUserIds,
+        message: error.message,
+        code: error.code,
+        detail: error.detail,
+        stack: error.stack,
+      });
+      return { rows: [] };
+    }),
+  ]);
+
+  console.log('[InternalAnalytics] Query results received', {
+    normalizedUserIds,
+    createdCaseMetricsRows: createdCaseMetricsResult.rows?.length || 0,
+    assignedCasesRows: assignedCasesResult.rows?.length || 0,
+  });
+
+  for (const row of createdCaseMetricsResult.rows || []) {
+    analyticsMap[row.user_id] = {
+      ...(analyticsMap[row.user_id] || {}),
+      documentsUploadedCount: parseInt(row.document_count, 10) || 0,
+      uploadedBytes: parseInt(row.uploaded_bytes, 10) || 0,
+      latestUploadAt: row.latest_upload_at || null,
+      casesCreatedCount: parseInt(row.cases_created_count, 10) || 0,
+      createdCases: Array.isArray(row.created_cases) ? row.created_cases : [],
+    };
+  }
+
+  for (const row of assignedCasesResult.rows || []) {
+    analyticsMap[row.user_id] = {
+      ...(analyticsMap[row.user_id] || {}),
+      assignedCasesCount: parseInt(row.assigned_cases_count, 10) || 0,
+    };
+  }
+
+  console.log('[InternalAnalytics] Dataflow completed', {
+    normalizedUserIds,
+    usersInAnalyticsMap: Object.keys(analyticsMap),
+    summary: Object.entries(analyticsMap).map(([userId, value]) => ({
+      userId,
+      documentsUploadedCount: value.documentsUploadedCount,
+      casesCreatedCount: value.casesCreatedCount,
+      assignedCasesCount: value.assignedCasesCount,
+      createdCasesCount: Array.isArray(value.createdCases) ? value.createdCases.length : 0,
+    })),
+  });
+
+  return analyticsMap;
+}
+
+function isFirmUserRequest(req) {
+  return String(req.user?.account_type || '').trim().toUpperCase() === 'FIRM_USER';
+}
+
+function buildFullFolderPath(folderRow) {
+  const storedPath = folderRow?.folder_path || '';
+  if (folderRow?.originalname && !storedPath.endsWith(folderRow.originalname)) {
+    return storedPath ? `${storedPath}/${folderRow.originalname}` : folderRow.originalname;
+  }
+  return storedPath || folderRow?.originalname || '';
+}
+
+async function findAccessibleCaseOwnership(req, caseId) {
+  const actorId = Number(req.user?.id);
+  if (!actorId || !caseId) {
+    return null;
+  }
+
+  if (isFirmUserRequest(req)) {
+    await initializeCaseAssignmentsSchema({
+      throwOnError: true,
+      context: { action: 'findAccessibleCaseOwnership', actorId, caseId },
+    });
+    const result = await pool.query(
+      `
+        SELECT c.id, c.user_id
+        FROM cases c
+        INNER JOIN case_assignments ca
+          ON ca.case_id = c.id
+         AND ca.user_id::text = $2::text
+        WHERE c.id = $1
+        LIMIT 1
+      `,
+      [caseId, actorId]
+    );
+    return result.rows[0] || null;
+  }
+
+  const allowedUserIds = await getAllowedUserIds(req);
+  if (!allowedUserIds.length) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT id, user_id
+      FROM cases
+      WHERE id = $1
+        AND user_id = ANY($2::int[])
+      LIMIT 1
+    `,
+    [caseId, allowedUserIds]
+  );
+  return result.rows[0] || null;
+}
+
+async function findAccessibleFolderRecord(req, folderName) {
+  const actorId = Number(req.user?.id);
+  if (!actorId || !folderName) {
+    return null;
+  }
+
+  if (isFirmUserRequest(req)) {
+    await initializeCaseAssignmentsSchema({
+      throwOnError: true,
+      context: { action: 'findAccessibleFolderRecord', actorId, folderName },
+    });
+    const result = await pool.query(
+      `
+        SELECT DISTINCT
+          uf.*,
+          c.id AS case_id,
+          c.user_id AS case_owner_id,
+          c.case_title
+        FROM user_files uf
+        INNER JOIN cases c ON c.folder_id = uf.id
+        INNER JOIN case_assignments ca
+          ON ca.case_id = c.id
+         AND ca.user_id::text = $1::text
+        WHERE uf.is_folder = true
+          AND uf.originalname = $2
+        ORDER BY uf.created_at DESC
+        LIMIT 1
+      `,
+      [actorId, folderName]
+    );
+    return result.rows[0] || null;
+  }
+
+  const allowedUserIds = await getAllowedUserIds(req);
+  if (!allowedUserIds.length) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT DISTINCT
+        uf.*,
+        c.id AS case_id,
+        c.user_id AS case_owner_id,
+        c.case_title
+      FROM user_files uf
+      LEFT JOIN cases c ON c.folder_id = uf.id
+      WHERE uf.is_folder = true
+        AND uf.originalname = $2
+        AND uf.user_id::text = ANY($1::text[])
+      ORDER BY uf.created_at DESC
+      LIMIT 1
+    `,
+    [allowedUserIds.map(String), folderName]
+  );
+  return result.rows[0] || null;
+}
+
+async function getAccessibleFolderContext(req, folderName) {
+  const folder = await findAccessibleFolderRecord(req, folderName);
+  if (!folder) {
+    return null;
+  }
+
+  return {
+    folder,
+    folderOwnerId: Number(folder.user_id),
+    fullFolderPath: buildFullFolderPath(folder),
+  };
 }
 
 async function ensureUniqueKey(key) {
@@ -594,6 +1052,52 @@ async function processDocumentWithAI(
       console.log(`[TEXT EXTRACTION METHOD] 💰 Cost: Document AI pricing applies`);
       console.log(`[TEXT EXTRACTION METHOD] ⏱️ Speed: Processing time depends on file size`);
       console.log(`${"🔵".repeat(40)}\n`);
+
+      const FILE_SIZE_LIMIT_INLINE = 20 * 1024 * 1024;
+      const fileSizeMB = (fileBuffer.length / 1024 / 1024).toFixed(2);
+      let useBatchProcessing = fileBuffer.length > FILE_SIZE_LIMIT_INLINE;
+
+      console.log(
+        `[Document AI] OCR strategy decision for file ${fileId}: ` +
+        `${useBatchProcessing ? "batch (file exceeds inline limit)" : "try inline first"} ` +
+        `(${fileSizeMB}MB)`
+      );
+
+      if (!useBatchProcessing) {
+        try {
+          await updateProgress(fileId, "processing", 16, "Initializing inline OCR");
+
+          extractedTexts = await extractTextFromDocument(fileBuffer, mimetype);
+
+          const extractedTextCount = Array.isArray(extractedTexts) ? extractedTexts.length : 0;
+          const hasMeaningfulText =
+            extractedTextCount > 0 &&
+            extractedTexts.some((item) => item?.text && String(item.text).trim());
+
+          if (!hasMeaningfulText) {
+            console.warn(
+              `[Document AI] Inline OCR returned insufficient text for file ${fileId}. Falling back to batch OCR.`
+            );
+            useBatchProcessing = true;
+          } else {
+            console.log(
+              `[Document AI] Inline OCR succeeded for file ${fileId}. ` +
+              `Extracted ${extractedTextCount} text segment(s).`
+            );
+
+            await updateProgress(fileId, "processing", 38, "Inline OCR completed");
+            await updateProgress(fileId, "processing", 42, "Text extraction successful");
+
+            await processDigitalNativePDF(fileId, extractedTexts, userId, secretId, jobId);
+            return;
+          }
+        } catch (inlineOcrError) {
+          console.warn(
+            `[Document AI] Inline OCR failed for file ${fileId}: ${inlineOcrError.message}. Falling back to batch OCR.`
+          );
+          useBatchProcessing = true;
+        }
+      }
 
       await updateProgress(fileId, "batch_queued", 6, "Uploading to cloud storage");
 
@@ -1578,6 +2082,17 @@ exports.createCase = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized user" });
     }
 
+    const permissionCheck = await ensureUserPermission(
+      req,
+      "create_new_cases",
+      "You do not have permission to create new cases."
+    );
+    if (!permissionCheck.allowed) {
+      return res.status(permissionCheck.status).json({ error: permissionCheck.message });
+    }
+
+    const accountType = String(req.user?.account_type || '').trim().toUpperCase();
+
     const {
       case_title,
       case_number,
@@ -1687,6 +2202,7 @@ exports.createCase = async (req, res) => {
     const safeCaseName = sanitizeName(finalCaseTitle || "Untitled Case");
     const parentPath = `${userId}/cases`;
     const folder = await createFolderInternal(userId, safeCaseName, parentPath);
+    const fullCaseFolderPath = buildFullFolderPath(folder);
 
     const updateQuery = `
       UPDATE cases
@@ -1700,9 +2216,39 @@ exports.createCase = async (req, res) => {
     ]);
     const updatedCase = updatedRows[0];
 
+    if (accountType === 'FIRM_USER') {
+      const assignmentMeta = await initializeCaseAssignmentsSchema({
+        throwOnError: true,
+        context: {
+          action: 'createCaseSelfAssignment',
+          actorId: userIdInt,
+          actorEmail: req.user?.email,
+          actorAccountType: accountType,
+          caseId: newCase.id,
+        },
+      });
+
+      await client.query(
+        `
+          INSERT INTO case_assignments (case_id, user_id, assigned_by)
+          VALUES ($1::${assignmentMeta.caseIdSqlType}, $2::int, $3::int)
+          ON CONFLICT (case_id, user_id) DO NOTHING
+        `,
+        [newCase.id, userIdInt, userIdInt]
+      );
+
+      logCaseAssignments('Self assignment created for firm user case', {
+        actorId: userIdInt,
+        actorEmail: req.user?.email,
+        actorAccountType: accountType,
+        caseId: newCase.id,
+        caseIdSqlType: assignmentMeta.caseIdSqlType,
+      });
+    }
+
     // Step 4: Move files from temp folder to case folder if temp_folder_name is provided
     if (temp_folder_name) {
-      console.log(`📁 Moving files from temp folder "${temp_folder_name}" to case folder "${folder.folder_path}"`);
+      console.log(`📁 Moving files from temp folder "${temp_folder_name}" to case folder "${fullCaseFolderPath}"`);
 
       try {
         // Find files by temp folder_path (no folder record exists, just find files by folder_path string)
@@ -1732,7 +2278,7 @@ exports.createCase = async (req, res) => {
                 // Update file record in database
                 await client.query(
                   `UPDATE user_files SET gcs_path = $1, folder_path = $2 WHERE id = $3::uuid AND user_id = $4`,
-                  [newGcsPath, folder.folder_path, doc.id, userId]
+                  [newGcsPath, fullCaseFolderPath, doc.id, userId]
                 );
                 console.log(`  ✅ Updated file record ${doc.id} with new folder_path`);
 
@@ -1801,20 +2347,30 @@ exports.deleteCase = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized user" });
     }
 
+    const permissionCheck = await ensureUserPermission(
+      req,
+      "delete_cases",
+      "You do not have permission to delete cases."
+    );
+    if (!permissionCheck.allowed) {
+      return res.status(permissionCheck.status).json({ error: permissionCheck.message });
+    }
+
     const { caseId } = req.params;
     if (!caseId) {
       return res.status(400).json({ error: "Case ID is required." });
     }
 
-    const allowedUserIds = await getAllowedUserIds(req);
-    if (allowedUserIds.length === 0) {
+    await client.query("BEGIN");
+
+    const accessibleCase = await findAccessibleCaseOwnership(req, caseId);
+    if (!accessibleCase) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Case not found or not authorized." });
     }
 
-    await client.query("BEGIN");
-
-    const getCaseQuery = `SELECT folder_id, user_id FROM cases WHERE id = $1 AND user_id = ANY($2::int[]);`;
-    const { rows: caseRows } = await client.query(getCaseQuery, [caseId, allowedUserIds]);
+    const getCaseQuery = `SELECT folder_id, user_id FROM cases WHERE id = $1 AND user_id = $2;`;
+    const { rows: caseRows } = await client.query(getCaseQuery, [caseId, accessibleCase.user_id]);
 
     if (caseRows.length === 0) {
       await client.query("ROLLBACK");
@@ -1875,23 +2431,25 @@ exports.updateCase = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized user" });
     }
 
+    const permissionCheck = await ensureUserPermission(
+      req,
+      "edit_case_information",
+      "You do not have permission to edit case information."
+    );
+    if (!permissionCheck.allowed) {
+      return res.status(permissionCheck.status).json({ error: permissionCheck.message });
+    }
+
     const { caseId } = req.params;
     if (!caseId) {
       return res.status(400).json({ error: "Case ID is required." });
     }
 
-    const allowedUserIds = await getAllowedUserIds(req);
-    if (allowedUserIds.length === 0) {
+    const accessibleCase = await findAccessibleCaseOwnership(req, caseId);
+    if (!accessibleCase) {
       return res.status(404).json({ error: "Case not found or not authorized." });
     }
-    const { rows: caseRows } = await pool.query(
-      "SELECT user_id FROM cases WHERE id = $1 AND user_id = ANY($2::int[])",
-      [caseId, allowedUserIds]
-    );
-    if (caseRows.length === 0) {
-      return res.status(404).json({ error: "Case not found or not authorized." });
-    }
-    const caseOwnerId = caseRows[0].user_id;
+    const caseOwnerId = accessibleCase.user_id;
 
     const {
       case_title,
@@ -1988,16 +2546,46 @@ exports.getCase = async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized user" });
     if (!caseId) return res.status(400).json({ error: "Case ID is required." });
 
-    const allowedUserIds = await getAllowedUserIds(req);
-    if (allowedUserIds.length === 0) {
-      return res.status(404).json({ error: "Case not found or not authorized." });
+    const permissionCheck = await ensureUserPermission(
+      req,
+      "view_case_information",
+      "You do not have permission to view case information."
+    );
+    if (!permissionCheck.allowed) {
+      return res.status(permissionCheck.status).json({ error: permissionCheck.message });
     }
 
-    const caseQuery = `
-      SELECT * FROM cases
-      WHERE id = $1 AND user_id = ANY($2::int[]);
-    `;
-    const { rows: caseRows } = await pool.query(caseQuery, [caseId, allowedUserIds]);
+    const accountType = String(req.user?.account_type || '').trim().toUpperCase();
+    let caseRows = [];
+
+    if (accountType === 'FIRM_USER') {
+      const assignedCaseQuery = `
+        SELECT *
+        FROM cases c
+        WHERE c.id = $1
+          AND EXISTS (
+            SELECT 1
+            FROM case_assignments ca
+            WHERE ca.case_id = c.id
+              AND ca.user_id::text = $2::text
+          );
+      `;
+      const result = await pool.query(assignedCaseQuery, [caseId, Number(userId)]);
+      caseRows = result.rows;
+    } else {
+      const allowedUserIds = await getAllowedUserIds(req);
+      if (allowedUserIds.length === 0) {
+        return res.status(404).json({ error: "Case not found or not authorized." });
+      }
+
+      const caseQuery = `
+        SELECT * FROM cases
+        WHERE id = $1 AND user_id = ANY($2::int[]);
+      `;
+      const result = await pool.query(caseQuery, [caseId, allowedUserIds]);
+      caseRows = result.rows;
+    }
+
     if (caseRows.length === 0) {
       return res.status(404).json({ error: "Case not found or not authorized." });
     }
@@ -2061,22 +2649,60 @@ exports.getCase = async (req, res) => {
 exports.getFolders = async (req, res) => {
   try {
     const userId = req.user.id;
-    const allowedUserIds = await getAllowedUserIds(req);
-    if (allowedUserIds.length === 0) {
-      return res.status(200).json({ folders: [], files: [] });
-    }
+    let files = [];
 
-    // JOIN with cases to get the case_title if available. For firm users, show folders from all firm members.
-    // user_files.user_id may be varchar in some DBs; compare as text to avoid "operator does not exist: character varying = integer"
-    const userIdsParam = allowedUserIds.map(String);
-    const query = `
-      SELECT uf.*, c.case_title 
-      FROM user_files uf 
-      LEFT JOIN cases c ON uf.id = c.folder_id 
-      WHERE uf.user_id::text = ANY($1::text[])
-      ORDER BY uf.is_folder DESC, uf.created_at DESC
-    `;
-    const { rows: files } = await pool.query(query, [userIdsParam]);
+    if (isFirmUserRequest(req)) {
+      await initializeCaseAssignmentsSchema({
+        throwOnError: true,
+        context: {
+          action: 'getFolders',
+          actorId: req.user?.id,
+          actorEmail: req.user?.email,
+          actorAccountType: req.user?.account_type,
+        },
+      });
+      const result = await pool.query(
+        `
+          SELECT DISTINCT
+            uf.*,
+            c.case_title
+          FROM user_files uf
+          INNER JOIN cases c ON uf.id = c.folder_id
+          INNER JOIN case_assignments ca
+            ON ca.case_id = c.id
+           AND ca.user_id::text = $1::text
+          WHERE uf.is_folder = true
+          ORDER BY uf.created_at DESC
+        `,
+        [Number(userId)]
+      );
+      files = result.rows;
+
+      logCaseAssignments('Projects folders resolved for firm user', {
+        actorId: req.user?.id,
+        actorEmail: req.user?.email,
+        actorAccountType: req.user?.account_type,
+        visibilityMode: 'assigned-only',
+        totalFolders: files.length,
+        folderNames: files.map((file) => file.originalname),
+      });
+    } else {
+      const allowedUserIds = await getAllowedUserIds(req);
+      if (allowedUserIds.length === 0) {
+        return res.status(200).json({ folders: [], files: [] });
+      }
+
+      const userIdsParam = allowedUserIds.map(String);
+      const query = `
+        SELECT uf.*, c.case_title 
+        FROM user_files uf 
+        LEFT JOIN cases c ON uf.id = c.folder_id 
+        WHERE uf.user_id::text = ANY($1::text[])
+        ORDER BY uf.is_folder DESC, uf.created_at DESC
+      `;
+      const result = await pool.query(query, [userIdsParam]);
+      files = result.rows;
+    }
 
     const folders = files
       .filter(file => file.is_folder)
@@ -2085,6 +2711,7 @@ exports.getFolders = async (req, res) => {
         name: folder.originalname,
         case_title: folder.case_title,
         folder_path: folder.folder_path,
+        gcs_path: folder.gcs_path,
         created_at: folder.created_at,
       }));
 
@@ -2150,7 +2777,15 @@ exports.getFolders = async (req, res) => {
 
     return res.status(200).json({ folders });
   } catch (error) {
-    console.error('Error fetching user files and folders:', error);
+    console.error('Error fetching user files and folders:', {
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack,
+    });
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
@@ -2208,23 +2843,14 @@ exports.generateUploadUrl = async (req, res) => {
 
     console.log(`✅ [generateUploadUrl] File size check passed: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
 
-    const folderQuery = `
-      SELECT * FROM user_files
-      WHERE user_id = $1
-        AND is_folder = true
-        AND originalname = $2
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
-
-    if (folderRows.length === 0) {
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folder) {
       return res.status(404).json({
-        error: `Folder "${folderName}" not found for this user.`,
+        error: `Folder "${folderName}" not found or not accessible.`,
       });
     }
 
-    const folderRow = folderRows[0];
+    const folderRow = folderContext.folder;
     const ext = path.extname(filename);
     const baseName = path.basename(filename, ext);
     const safeName = sanitizeName(baseName) + ext;
@@ -2263,23 +2889,14 @@ exports.completeSignedUpload = async (req, res) => {
       return res.status(400).json({ error: "gcsPath, filename, and size are required" });
     }
 
-    const folderQuery = `
-      SELECT * FROM user_files
-      WHERE user_id = $1
-        AND is_folder = true
-        AND originalname = $2
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
-
-    if (folderRows.length === 0) {
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folder) {
       return res.status(404).json({
-        error: `Folder "${folderName}" not found for this user.`,
+        error: `Folder "${folderName}" not found or not accessible.`,
       });
     }
 
-    const folderRow = folderRows[0];
+    const folderRow = folderContext.folder;
 
     const fileRef = bucket.file(gcsPath);
     const [exists] = await fileRef.exists();
@@ -2358,13 +2975,10 @@ exports.completeSignedUpload = async (req, res) => {
     let savedFile;
     try {
       // ✅ FIX: Construct the full folder path for files correctly
-      let fileFolderPath = folderRow.folder_path || '';
-      if (folderRow.originalname && !fileFolderPath.endsWith(folderRow.originalname)) {
-        fileFolderPath = fileFolderPath ? `${fileFolderPath}/${folderRow.originalname}` : folderRow.originalname;
-      }
+      const fileFolderPath = buildFullFolderPath(folderRow);
 
       savedFile = await File.create({
-        user_id: userId,
+        user_id: folderContext.folderOwnerId,
         originalname: filename,
         gcs_path: gcsPath,
         folder_path: fileFolderPath,
@@ -2441,34 +3055,20 @@ exports.uploadDocumentsToCaseByFolderName = async (req, res) => {
 
     console.log(`📁 Uploading to folder: ${folderName} for user: ${username}`);
 
-    const folderQuery = `
-      SELECT * FROM user_files
-      WHERE user_id = $1
-        AND is_folder = true
-        AND originalname = $2
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
-
-    if (folderRows.length === 0) {
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folder) {
       return res.status(404).json({
-        error: `Folder "${folderName}" not found for this user.`,
+        error: `Folder "${folderName}" not found or not accessible.`,
         debug: { userId, folderName }
       });
     }
 
-    const folderRow = folderRows[0];
+    const folderRow = folderContext.folder;
 
     // ✅ FIX: Construct the full folder path for files correctly
     // If the folderRow.folder_path already ends with the folderRow.originalname, 
     // it means it's already the full path. Otherwise we append it.
-    let folderPathForFiles = folderRow.folder_path || '';
-    if (folderRow.originalname && !folderPathForFiles.endsWith(folderRow.originalname)) {
-      folderPathForFiles = folderPathForFiles
-        ? `${folderPathForFiles}/${folderRow.originalname}`
-        : folderRow.originalname;
-    }
+    const folderPathForFiles = buildFullFolderPath(folderRow);
 
     console.log(`📁 Found folder: ${folderRow.originalname}`);
     console.log(`📁 Database folder_path (stored): ${folderRow.folder_path}`);
@@ -2526,7 +3126,7 @@ exports.uploadDocumentsToCaseByFolderName = async (req, res) => {
         let savedFile;
         try {
           savedFile = await File.create({
-            user_id: userId,
+            user_id: folderContext.folderOwnerId,
             originalname: safeName,
             gcs_path: uniqueKey,
             folder_path: folderPathForFiles, // Use the folder's folder_path
@@ -2679,7 +3279,12 @@ exports.getFolderSummary = async (req, res) => {
     const summaryCost = Math.ceil(combinedText.length / 200); // Rough estimate
 
     const requestedResources = { tokens: summaryCost, ai_analysis: 1 };
-    const { allowed, message } = await ({ allowed: true, message: "Unlimited" }) // TokenUsageService.enforceLimits(userId, usage, plan, requestedResources);
+    const { allowed, message } = await TokenUsageService.enforceLimits(
+      userId,
+      usage,
+      plan,
+      requestedResources
+    );
 
     if (!allowed) {
       return res.status(403).json({
@@ -3132,39 +3737,14 @@ exports.queryFolderDocuments = async (req, res) => {
       }
     }
 
-    let folder;
-    let fullFolderPath;
-    let storedFolderPath = '';
-
-    const folderQuery = `
-      SELECT id, originalname, folder_path, gcs_path
-      FROM user_files
-      WHERE user_id = $1
-        AND is_folder = true
-        AND originalname = $2
-      ORDER BY created_at DESC
-      LIMIT 1;
-    `;
-    const { rows: folderRows } = await pool.query(folderQuery, [userId, folderName]);
-
-    if (folderRows.length === 0) {
-      console.warn(`⚠️ Folder record "${folderName}" not found in queryFolderDocuments. Trying as direct path...`);
-      fullFolderPath = folderName;
-      folder = {
-        id: null,
-        name: folderName,
-        folder_path: folderName
-      };
-    } else {
-      folder = folderRows[0];
-      storedFolderPath = folder.folder_path || '';
-
-      // ✅ FIX: Calculate full path for robust matching
-      fullFolderPath = storedFolderPath;
-      if (folder.originalname && !fullFolderPath.endsWith(folder.originalname)) {
-        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folder.originalname}` : folder.originalname;
-      }
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folder) {
+      return res.status(404).json({ error: `Folder "${folderName}" not found or not accessible.` });
     }
+
+    const folder = folderContext.folder;
+    const fullFolderPath = folderContext.fullFolderPath;
+    const storedFolderPath = folder.folder_path || '';
 
     console.log(`📂 [queryFolderDocuments] Folder matched: ${folderName}`);
     console.log(`📂 [queryFolderDocuments] Paths: stored="${storedFolderPath}", full="${fullFolderPath}"`);
@@ -3184,7 +3764,7 @@ exports.queryFolderDocuments = async (req, res) => {
     `;
 
     const queryParams = [
-      userId,
+      folderContext.folderOwnerId,
       fullFolderPath,
       `${fullFolderPath}/%`,
       folder.gcs_path ? `${folder.gcs_path}%` : `impossible_path_fallback`
@@ -3933,7 +4513,12 @@ exports.queryFolderDocuments = async (req, res) => {
         chatCost = Math.ceil(question.length / 100) + Math.ceil(combinedContext.length / 200);
 
         const requestedResources = { tokens: chatCost, ai_analysis: 1 };
-        const { allowed, message } = await ({ allowed: true, message: "Unlimited" }) // TokenUsageService.enforceLimits(usage, plan, requestedResources);
+        const { allowed, message } = await TokenUsageService.enforceLimits(
+          userId,
+          usage,
+          plan,
+          requestedResources
+        );
         if (!allowed) {
           return res.status(403).json({
             error: `AI chat failed: ${message}`,
@@ -5242,7 +5827,10 @@ exports.getFolderChatSessionById = async (req, res) => {
       });
     }
 
-    const files = await File.findByUserIdAndFolderPath(userId, folderName);
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    const files = folderContext?.folderOwnerId
+      ? await File.findByUserIdAndFolderPath(folderContext.folderOwnerId, folderContext.fullFolderPath)
+      : [];
     const processedFiles = files.filter(f => !f.is_folder && f.status === "processed");
 
     const protocol = req.protocol || 'http';
@@ -5272,7 +5860,10 @@ exports.getFolderChatSessionById = async (req, res) => {
                 AND uf.user_id = $2
               ORDER BY uf.originalname ASC, fc.page_start ASC;
             `;
-            const { rows: chunks } = await pool.query(chunksQuery, [chunkIds, userId]);
+            const { rows: chunks } = await pool.query(
+              chunksQuery,
+              [chunkIds, folderContext?.folderOwnerId || userId]
+            );
 
             if (chunks.length > 0) {
               const formattedChunks = chunks.map(c => ({
@@ -5384,7 +5975,10 @@ exports.getFolderChatSessions = async (req, res) => {
       });
     });
 
-    const files = await File.findByUserIdAndFolderPath(userId, folderName);
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    const files = folderContext?.folderOwnerId
+      ? await File.findByUserIdAndFolderPath(folderContext.folderOwnerId, folderContext.fullFolderPath)
+      : [];
     const processedFiles = files.filter(f => !f.is_folder && f.status === "processed");
 
     return res.json({
@@ -5444,6 +6038,14 @@ exports.getChatCitations = async (req, res) => {
       });
     }
 
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folderOwnerId) {
+      return res.status(404).json({
+        error: "Folder not found or not accessible",
+        folderName
+      });
+    }
+
     const chat = chatRows[0];
 
     let citations = chat.citations || [];
@@ -5474,7 +6076,7 @@ exports.getChatCitations = async (req, res) => {
           AND uf.user_id::text = $2::text
         ORDER BY uf.originalname ASC, fc.page_start ASC;
       `;
-      const { rows: chunks } = await pool.query(chunksQuery, [chunkIds, String(userId)]);
+      const { rows: chunks } = await pool.query(chunksQuery, [chunkIds, String(folderContext.folderOwnerId)]);
 
       if (chunks.length > 0) {
         const formattedChunks = chunks.map(c => ({
@@ -5579,6 +6181,14 @@ exports.continueFolderChat = async (req, res) => {
       });
     }
 
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folderOwnerId) {
+      return res.status(404).json({
+        error: "Folder not found or not accessible.",
+        folderName
+      });
+    }
+
     const conversationContext = formatFolderConversationHistory(existingChats);
     const historyForStorage = simplifyFolderHistory(existingChats);
     if (historyForStorage.length > 0) {
@@ -5590,7 +6200,7 @@ exports.continueFolderChat = async (req, res) => {
       console.log('[continueFolderChat] No prior context for this session.');
     }
 
-    const files = await File.findByUserIdAndFolderPath(userId, folderName);
+    const files = await File.findByUserIdAndFolderPath(folderContext.folderOwnerId, folderContext.fullFolderPath);
     const processedFiles = files.filter(f => !f.is_folder && f.status === "processed");
 
     console.log(`[continueFolderChat] Found ${processedFiles.length} processed files in folder ${folderName}`);
@@ -5669,7 +6279,12 @@ exports.continueFolderChat = async (req, res) => {
     chatCost = Math.ceil(question.length / 100) + Math.ceil(allChunks.reduce((sum, c) => sum + c.content.length, 0) / 200) + Math.ceil(conversationContext.length / 200); // Question tokens + context tokens + history tokens
 
     const requestedResources = { tokens: chatCost, ai_analysis: 1 };
-    const { allowed, message } = await ({ allowed: true, message: "Unlimited" }) // TokenUsageService.enforceLimits(usage, plan, requestedResources);
+    const { allowed, message } = await TokenUsageService.enforceLimits(
+      userId,
+      usage,
+      plan,
+      requestedResources
+    );
 
     if (!allowed) {
       return res.status(403).json({
@@ -6105,36 +6720,21 @@ exports.getFolderChatsByFolder = async (req, res) => {
 exports.getDocumentsInFolder = async (req, res) => {
   try {
     const { folderName } = req.params;
-    const userId = req.user.id;
 
     if (!folderName) {
       return res.status(400).json({ error: "Folder name is required." });
     }
 
-    const allowedUserIds = await getAllowedUserIds(req);
+    const folderContext = await getAccessibleFolderContext(req, folderName);
     let files = [];
-    if (allowedUserIds.length === 1) {
-      files = await File.findByUserIdAndFolderPath(allowedUserIds[0], folderName);
-    } else if (allowedUserIds.length > 1) {
-      const folderRow = await pool.query(
-        `SELECT id, user_id, folder_path, originalname FROM user_files
-         WHERE user_id::text = ANY($1::text[]) AND is_folder = true AND originalname = $2
-         ORDER BY created_at DESC LIMIT 1`,
-        [allowedUserIds, folderName]
+
+    if (folderContext?.folderOwnerId) {
+      const fileRows = await pool.query(
+        `SELECT * FROM user_files WHERE user_id = $1 AND is_folder = false
+         AND (folder_path = $2 OR folder_path LIKE $3) ORDER BY originalname ASC`,
+        [folderContext.folderOwnerId, folderContext.fullFolderPath, `${folderContext.fullFolderPath}/%`]
       );
-      if (folderRow.rows.length > 0) {
-        const folder = folderRow.rows[0];
-        const storedPath = folder.folder_path || '';
-        const robustPath = folder.originalname && !storedPath.endsWith(folder.originalname)
-          ? (storedPath ? `${storedPath}/${folder.originalname}` : folder.originalname)
-          : storedPath;
-        const fileRows = await pool.query(
-          `SELECT * FROM user_files WHERE user_id = $1 AND is_folder = false
-           AND (folder_path = $2 OR folder_path LIKE $3) ORDER BY originalname ASC`,
-          [folder.user_id, robustPath, `${robustPath}/%`]
-        );
-        files = fileRows.rows || [];
-      }
+      files = fileRows.rows || [];
     }
 
     const documents = (files || [])
@@ -6165,6 +6765,345 @@ exports.getDocumentsInFolder = async (req, res) => {
   }
 };
 
+exports.getAssignableCases = async (req, res) => {
+  try {
+    const requestContext = {
+      action: 'getAssignableCases',
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+    };
+    logCaseAssignments('Request received', requestContext);
+
+    const meta = await initializeCaseAssignmentsSchema({
+      throwOnError: true,
+      context: requestContext,
+    });
+    const scope = await getFirmAssignmentScope(req);
+    logCaseAssignments('Scope resolved', {
+      ...requestContext,
+      actorRole: scope.actorRole,
+      isFirmAdmin: scope.isFirmAdmin,
+      canViewCaseInformation: scope.canViewCaseInformation,
+      canManageAssignments: scope.canManageAssignments,
+      memberIds: scope.memberIds,
+      caseIdSqlType: meta.caseIdSqlType,
+    });
+
+    if (!scope.canManageAssignments) {
+      return res.status(403).json({ error: 'You do not have permission to manage case assignments.' });
+    }
+
+    if (!scope.memberIds.length) {
+      return res.status(200).json({ cases: [] });
+    }
+
+    const result = await pool.query(
+      `
+        SELECT DISTINCT c.id, c.user_id, c.case_title, c.case_number, c.status, c.created_at
+        FROM cases c
+        WHERE c.user_id = ANY($1::int[])
+        ORDER BY c.created_at DESC
+      `,
+      [scope.memberIds]
+    );
+
+    const assignmentsResult = result.rows.length
+      ? await pool.query(
+          `
+            SELECT case_id, ARRAY_AGG(user_id ORDER BY user_id) AS assigned_user_ids
+            FROM case_assignments
+            WHERE case_id = ANY($1::${meta.caseIdSqlType}[])
+            GROUP BY case_id
+          `,
+          [result.rows.map((row) => row.id)]
+        )
+      : { rows: [] };
+
+    const assignmentsByCaseId = new Map(
+      assignmentsResult.rows.map((row) => [
+        row.case_id,
+        (row.assigned_user_ids || []).map((value) => Number(value)).filter((value) => !Number.isNaN(value)),
+      ])
+    );
+
+    const cases = result.rows.map((row) => ({
+      id: row.id,
+      user_id: row.user_id,
+      case_title: getDisplayCaseName(row),
+      case_number: row.case_number,
+      status: row.status,
+      assigned_user_ids: assignmentsByCaseId.get(row.id) || [],
+    }));
+
+    logCaseAssignments('Request succeeded', {
+      ...requestContext,
+      caseIdSqlType: meta.caseIdSqlType,
+      totalCases: cases.length,
+    });
+
+    return res.status(200).json({ cases });
+  } catch (error) {
+    console.error('[CaseAssignments] Error fetching assignable cases:', {
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack,
+    });
+    return res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+};
+
+exports.getInternalUserAnalytics = async (req, res) => {
+  try {
+    const { userIds = [], startDate, endDate } = req.body || {};
+    const normalizedUserIds = Array.from(
+      new Set(
+        (userIds || [])
+          .map((value) => Number(value))
+          .filter((value) => !Number.isNaN(value) && value > 0)
+      )
+    );
+
+    console.log('[InternalAnalytics] Request received', {
+      actorId: req.user?.id || null,
+      actorEmail: req.user?.email || null,
+      actorAccountType: req.user?.account_type || null,
+      requestedUserIds: userIds,
+      normalizedUserIds,
+      startDate: startDate || null,
+      endDate: endDate || null,
+    });
+
+    if (!normalizedUserIds.length) {
+      console.log('[InternalAnalytics] Request has no valid user ids. Returning empty payload.');
+      return res.status(200).json({
+        success: true,
+        data: {},
+      });
+    }
+
+    const analyticsMap = await getInternalUserAnalyticsMap(normalizedUserIds, {
+      startDate,
+      endDate,
+    });
+
+    console.log('[InternalAnalytics] Response ready', {
+      normalizedUserIds,
+      responseUsers: Object.keys(analyticsMap),
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: analyticsMap,
+    });
+  } catch (error) {
+    console.error('[InternalAnalytics] Error fetching user analytics', {
+      actorId: req.user?.id || null,
+      actorEmail: req.user?.email || null,
+      actorAccountType: req.user?.account_type || null,
+      requestedUserIds: req.body?.userIds || [],
+      startDate: req.body?.startDate || null,
+      endDate: req.body?.endDate || null,
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      position: error.position,
+      stack: error.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message,
+    });
+  }
+};
+
+exports.getUserCaseAssignments = async (req, res) => {
+  try {
+    const requestContext = {
+      action: 'getUserCaseAssignments',
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+      targetUserId: req.params.userId,
+    };
+    logCaseAssignments('Request received', requestContext);
+
+    const meta = await initializeCaseAssignmentsSchema({
+      throwOnError: true,
+      context: requestContext,
+    });
+    const scope = await getFirmAssignmentScope(req);
+    const targetUserId = parseInt(req.params.userId, 10);
+    logCaseAssignments('Scope resolved', {
+      ...requestContext,
+      actorRole: scope.actorRole,
+      isFirmAdmin: scope.isFirmAdmin,
+      canViewCaseInformation: scope.canViewCaseInformation,
+      canManageAssignments: scope.canManageAssignments,
+      memberIds: scope.memberIds,
+      caseIdSqlType: meta.caseIdSqlType,
+    });
+
+    if (!scope.canManageAssignments) {
+      return res.status(403).json({ error: 'You do not have permission to manage case assignments.' });
+    }
+
+    if (!targetUserId || !scope.memberIds.includes(targetUserId)) {
+      return res.status(404).json({ error: 'Target user not found in this firm.' });
+    }
+
+    const targetMember = scope.members.find((member) => Number(member.user_id) === targetUserId);
+    const targetRole = String(targetMember?.role || '').trim().toUpperCase();
+    const targetIsFirmAdmin = targetRole === 'ADMIN' || targetRole === 'FIRM_ADMIN';
+    if (targetIsFirmAdmin && !scope.isFirmAdmin) {
+      return res.status(403).json({ error: 'Only firm admins can manage case assignments for the firm admin.' });
+    }
+
+    const caseIds = await getAssignedCaseIdsForUser(targetUserId);
+    logCaseAssignments('Request succeeded', {
+      ...requestContext,
+      caseIdSqlType: meta.caseIdSqlType,
+      assignedCaseIds: caseIds,
+    });
+    return res.status(200).json({ userId: targetUserId, caseIds });
+  } catch (error) {
+    console.error('[CaseAssignments] Error fetching user assignments:', {
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+      targetUserId: req.params.userId,
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack,
+    });
+    return res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+};
+
+exports.updateUserCaseAssignments = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const requestContext = {
+      action: 'updateUserCaseAssignments',
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+      targetUserId: req.params.userId,
+      rawCaseIds: req.body?.caseIds,
+    };
+    logCaseAssignments('Request received', requestContext);
+
+    const meta = await initializeCaseAssignmentsSchema({
+      throwOnError: true,
+      context: requestContext,
+    });
+    const scope = await getFirmAssignmentScope(req);
+    const targetUserId = parseInt(req.params.userId, 10);
+    const requestedCaseIds = Array.isArray(req.body?.caseIds)
+      ? [...new Set(req.body.caseIds.map((value) => normalizeCaseIdValue(value, meta.caseIdSqlType)))]
+      : [];
+
+    logCaseAssignments('Scope resolved', {
+      ...requestContext,
+      actorRole: scope.actorRole,
+      isFirmAdmin: scope.isFirmAdmin,
+      canViewCaseInformation: scope.canViewCaseInformation,
+      canManageAssignments: scope.canManageAssignments,
+      memberIds: scope.memberIds,
+      caseIdSqlType: meta.caseIdSqlType,
+      normalizedCaseIds: requestedCaseIds,
+    });
+
+    if (!scope.canManageAssignments) {
+      return res.status(403).json({ error: 'You do not have permission to manage case assignments.' });
+    }
+
+    if (!targetUserId || !scope.memberIds.includes(targetUserId)) {
+      return res.status(404).json({ error: 'Target user not found in this firm.' });
+    }
+
+    const targetMember = scope.members.find((member) => Number(member.user_id) === targetUserId);
+    const targetRole = String(targetMember?.role || '').trim().toUpperCase();
+    const targetIsFirmAdmin = targetRole === 'ADMIN' || targetRole === 'FIRM_ADMIN';
+    if (targetIsFirmAdmin && !scope.isFirmAdmin) {
+      return res.status(403).json({ error: 'Only firm admins can manage case assignments for the firm admin.' });
+    }
+
+    if (requestedCaseIds.length > 0) {
+      const accessibleCasesResult = await client.query(
+        `
+          SELECT id
+          FROM cases
+          WHERE id = ANY($1::${meta.caseIdSqlType}[])
+            AND user_id = ANY($2::int[])
+        `,
+        [requestedCaseIds, scope.memberIds]
+      );
+
+      const accessibleCaseIds = accessibleCasesResult.rows.map((row) => row.id);
+      if (accessibleCaseIds.length !== requestedCaseIds.length) {
+        return res.status(400).json({ error: 'One or more selected cases are not assignable for this firm.' });
+      }
+    }
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM case_assignments WHERE user_id = $1', [targetUserId]);
+
+    if (requestedCaseIds.length > 0) {
+      const values = [];
+      const placeholders = requestedCaseIds.map((caseId, index) => {
+        const offset = index * 3;
+        values.push(caseId, targetUserId, scope.actorId);
+        return `($${offset + 1}::${meta.caseIdSqlType}, $${offset + 2}::int, $${offset + 3}::int)`;
+      });
+
+      await client.query(
+        `
+          INSERT INTO case_assignments (case_id, user_id, assigned_by)
+          VALUES ${placeholders.join(', ')}
+          ON CONFLICT (case_id, user_id) DO NOTHING
+        `,
+        values
+      );
+    }
+
+    await client.query('COMMIT');
+    logCaseAssignments('Request succeeded', {
+      ...requestContext,
+      caseIdSqlType: meta.caseIdSqlType,
+      savedCaseIds: requestedCaseIds,
+    });
+    return res.status(200).json({
+      success: true,
+      message: 'Case assignments updated successfully.',
+      userId: targetUserId,
+      caseIds: requestedCaseIds,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('[CaseAssignments] Error updating user assignments:', {
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      actorAccountType: req.user?.account_type,
+      targetUserId: req.params.userId,
+      rawCaseIds: req.body?.caseIds,
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack,
+    });
+    return res.status(500).json({ error: 'Internal server error', details: error.message });
+  } finally {
+    client.release();
+  }
+};
+
 
 
 exports.getAllCases = async (req, res) => {
@@ -6174,18 +7113,20 @@ exports.getAllCases = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized user" });
     }
 
-    // FIRM_USER sees only their own cases; FIRM_ADMIN and others see firm/own cases
-    const accountType = (req.user?.account_type || "").toUpperCase();
-    const allowedUserIds = accountType === "FIRM_USER"
-      ? [userId]
-      : await getAllowedUserIds(req);
-    if (allowedUserIds.length === 0) {
-      return res.status(200).json({ message: "Cases fetched successfully.", cases: [], totalCases: 0 });
+    const permissionCheck = await ensureUserPermission(
+      req,
+      "view_case_information",
+      "You do not have permission to view case information."
+    );
+    if (!permissionCheck.allowed) {
+      return res.status(permissionCheck.status).json({ error: permissionCheck.message });
     }
 
-    const getAllCasesQuery = `
+    const accountType = (req.user?.account_type || "").toUpperCase();
+
+    let getAllCasesQuery = `
       SELECT
-        c.*,
+        DISTINCT c.*,
         ct.name as case_type_name,
         st.name as sub_type_name,
         co.court_name as court_name_name
@@ -6208,7 +7149,55 @@ exports.getAllCases = async (req, res) => {
       WHERE c.user_id = ANY($1::int[])
       ORDER BY c.created_at DESC;
     `;
-    const { rows: cases } = await pool.query(getAllCasesQuery, [allowedUserIds]);
+    let cases = [];
+
+    if (accountType === "FIRM_USER") {
+      await initializeCaseAssignmentsSchema({
+        throwOnError: true,
+        context: {
+          action: 'getAllCases',
+          actorId: userId,
+          actorEmail: req.user?.email,
+          actorAccountType: accountType,
+        },
+      });
+      getAllCasesQuery = `
+        SELECT
+          DISTINCT c.*,
+          ct.name as case_type_name,
+          st.name as sub_type_name,
+          co.court_name as court_name_name
+        FROM cases c
+        INNER JOIN case_assignments ca
+          ON ca.case_id = c.id
+         AND ca.user_id::text = $1::text
+        LEFT JOIN case_types ct ON
+          CASE
+            WHEN c.case_type ~ '^[0-9]+$' THEN c.case_type::integer = ct.id
+            ELSE false
+          END
+        LEFT JOIN sub_types st ON
+          CASE
+            WHEN c.sub_type ~ '^[0-9]+$' THEN c.sub_type::integer = st.id
+            ELSE false
+          END
+        LEFT JOIN courts co ON
+          CASE
+            WHEN c.court_name ~ '^[0-9]+$' THEN c.court_name::integer = co.id
+            ELSE false
+          END
+        ORDER BY c.created_at DESC;
+      `;
+      const result = await pool.query(getAllCasesQuery, [userId]);
+      cases = result.rows;
+    } else {
+      const allowedUserIds = await getAllowedUserIds(req);
+      if (allowedUserIds.length === 0) {
+        return res.status(200).json({ message: "Cases fetched successfully.", cases: [], totalCases: 0 });
+      }
+      const result = await pool.query(getAllCasesQuery, [allowedUserIds]);
+      cases = result.rows;
+    }
 
     const formattedCases = cases.map(caseData => {
       caseData.case_type = caseData.case_type_name || caseData.case_type;
@@ -6276,8 +7265,8 @@ exports.getCaseFilesByFolderName = async (req, res) => {
       return res.status(400).json({ error: "Folder name is required" });
     }
 
-    const allowedUserIds = await getAllowedUserIds(req);
-    if (allowedUserIds.length === 0) {
+    const folderContext = await getAccessibleFolderContext(req, folderName);
+    if (!folderContext?.folder) {
       return res.status(200).json({
         message: "Folder files fetched successfully, but no documents found.",
         folder: null,
@@ -6288,47 +7277,15 @@ exports.getCaseFilesByFolderName = async (req, res) => {
 
     console.log(`📂 [getCaseFilesByFolderName] User: ${username}, Folder: ${folderName}`);
 
-    let folder;
-    let fullFolderPath;
-    let storedFolderPath = '';
-
-    const folderQuery = `
-      SELECT * FROM user_files
-      WHERE user_id::text = ANY($1::text[])
-        AND is_folder = true
-        AND originalname = $2
-      ORDER BY created_at DESC
-      LIMIT 1;
-    `;
-    const { rows: folderRows } = await pool.query(folderQuery, [allowedUserIds, folderName]);
-
-    if (folderRows.length === 0) {
-      console.warn(`⚠️ Folder record "${folderName}" not found for user ${userId}. Trying as direct path...`);
-      // Fallback: If no folder record exists, treat folderName as the fullFolderPath itself
-      // (This covers temporary uploads like temp-case-X)
-      fullFolderPath = folderName;
-      folder = {
-        id: null,
-        name: folderName,
-        folder_path: folderName,
-        gcs_path: null
-      };
-    } else {
-      folder = folderRows[0];
-      storedFolderPath = folder.folder_path || '';
-
-      // ✅ FIX: Construct the full folder path for files correctly
-      fullFolderPath = storedFolderPath;
-      if (folder.originalname && !fullFolderPath.endsWith(folder.originalname)) {
-        fullFolderPath = fullFolderPath ? `${fullFolderPath}/${folder.originalname}` : folder.originalname;
-      }
-    }
+    const folder = folderContext.folder;
+    const fullFolderPath = folderContext.fullFolderPath;
+    const storedFolderPath = folder.folder_path || '';
 
     console.log(`✅ Folder found: ${folderName}`);
     console.log(`✅ Stored path: ${storedFolderPath}`);
     console.log(`✅ Full path: ${fullFolderPath}`);
 
-    const folderOwnerId = folder && folder.user_id != null ? folder.user_id : userId;
+    const folderOwnerId = folderContext.folderOwnerId || userId;
 
     const filesQuery = `
       SELECT

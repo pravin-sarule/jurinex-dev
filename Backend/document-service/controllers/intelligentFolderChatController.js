@@ -29,6 +29,23 @@ const {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function estimateStreamingTokenRequest(questionText = '', options = {}) {
+  const normalizedQuestion = String(questionText || '').trim();
+  const questionChars = normalizedQuestion.length;
+  const estimatedInputTokens = Math.max(1, Math.ceil(questionChars / 4));
+  const contextReserveTokens = options.hasSecretPrompt ? 256 : 128;
+  const estimatedOutputTokens = Math.max(128, Math.ceil((estimatedInputTokens + contextReserveTokens) * 1.2));
+  const estimatedTotalTokens = estimatedInputTokens + contextReserveTokens + estimatedOutputTokens;
+
+  return {
+    questionChars,
+    estimatedInputTokens,
+    contextReserveTokens,
+    estimatedOutputTokens,
+    estimatedTotalTokens,
+  };
+}
+
 function applySecretPromptMetadataOverrides(jsonData, metadataOverrides = {}) {
   if (!jsonData || typeof jsonData !== 'object') {
     return jsonData;
@@ -2007,7 +2024,53 @@ exports.intelligentFolderChatStream = async (req, res) => {
     console.log(`   - Is existing session: ${hasExistingSession}`);
     console.log(`   - Final session_id: ${finalSessionId}`);
 
+    const tokenCapEstimate = estimateStreamingTokenRequest(actualQuestion, {
+      hasSecretPrompt: hasSecretId,
+    });
+
+    console.log('[STREAMING TOKEN CAP] Dataflow start', {
+      userId,
+      folderName,
+      hasSecretId,
+      hasExistingSession,
+      sessionId: finalSessionId,
+      estimate: tokenCapEstimate,
+    });
+
     sendStatus('analyzing', 'Analyzing query intent...');
+
+    const tokenCapEnforcement = await TokenUsageService.enforceLimits(
+      userId,
+      null,
+      null,
+      { tokens: tokenCapEstimate.estimatedTotalTokens }
+    );
+
+    console.log('[STREAMING TOKEN CAP] Enforcement result', {
+      userId,
+      folderName,
+      sessionId: finalSessionId,
+      requestedTokens: tokenCapEstimate.estimatedTotalTokens,
+      allowed: tokenCapEnforcement.allowed,
+      remainingTokens: tokenCapEnforcement.remainingTokens,
+      message: tokenCapEnforcement.message,
+      capStatus: tokenCapEnforcement.capStatus || null,
+    });
+
+    if (!tokenCapEnforcement.allowed) {
+      console.warn('[STREAMING TOKEN CAP] Request blocked before folder processing', {
+        userId,
+        folderName,
+        sessionId: finalSessionId,
+        requestedTokens: tokenCapEstimate.estimatedTotalTokens,
+        capStatus: tokenCapEnforcement.capStatus || null,
+      });
+      sendError(
+        tokenCapEnforcement.message || 'Your token quota has been exceeded. Please talk to your firm admin to extend your tokens or update your token quota.',
+        tokenCapEnforcement.details || ''
+      );
+      return;
+    }
 
     // Initialize user_usage record if missing; limits are not enforced for folder chat
     // Token limits disabled for all users
@@ -2845,7 +2908,12 @@ exports.intelligentFolderChatStream = async (req, res) => {
       }
     }
 
-    // Daily token limits disabled – no per-plan token enforcement for folder chat
+    console.log('[STREAMING TOKEN CAP] Folder-chat cap gate passed', {
+      userId,
+      folderName,
+      sessionId: finalSessionId,
+      requestedTokens: tokenCapEstimate.estimatedTotalTokens,
+    });
 
     let previousChats = [];
     if (hasExistingSession) {
@@ -3258,6 +3326,7 @@ exports.intelligentFolderChatStream = async (req, res) => {
         const provider = finalProvider || 'gemini';
         console.log(`🔍 [STREAMING RAG] Using provider: ${provider}`);
         const { streamLLM: streamLLMFunc, getModelMaxTokens, ALL_LLM_CONFIGS } = require('../services/folderAiService');
+        const streamUsageRequestId = uuidv4();
 
         const modelConfig = ALL_LLM_CONFIGS[provider];
         const modelName = modelConfig?.model || 'unknown';
@@ -3269,15 +3338,39 @@ exports.intelligentFolderChatStream = async (req, res) => {
 
         try {
           const llmQuestion = (used_secret_prompt && secretValue) ? secretValue : actualQuestion;
+          const streamUsageMetadata = {
+            userId,
+            endpoint: '/api/doc/folder-chat/stream',
+            requestId: streamUsageRequestId,
+            sessionId: finalSessionId,
+            fileId: null,
+          };
 
           console.log(`🔍 [STREAMING RAG] Starting LLM stream:`);
           console.log(`   - Provider: ${provider}`);
           console.log(`   - Prompt length: ${fullPrompt.length} chars`);
           console.log(`   - Chunks: ${topChunks.length}`);
+          console.log(`   - Usage metadata:`, {
+            ...streamUsageMetadata,
+            promptChars: fullPrompt.length,
+            modelName,
+            maxTokens,
+          });
+          console.log(`[STREAMING RAG][USAGE DATAFLOW] Prepared streaming usage metadata`, {
+            folderName,
+            provider,
+            modelName,
+            userId,
+            sessionId: finalSessionId,
+            requestId: streamUsageRequestId,
+            promptChars: fullPrompt.length,
+            chunkCount: topChunks.length,
+            processedFilesCount: processedFiles.length,
+          });
 
           let chunkCount = 0;
 
-          for await (const chunk of streamLLMFunc(provider, fullPrompt, '', topChunks, llmQuestion)) {
+          for await (const chunk of streamLLMFunc(provider, fullPrompt, '', topChunks, llmQuestion, streamUsageMetadata)) {
             chunkCount++;
 
             if (chunkCount % 50 === 0) {
@@ -3652,4 +3745,3 @@ exports.intelligentFolderChatStream = async (req, res) => {
     }
   }
 };
-

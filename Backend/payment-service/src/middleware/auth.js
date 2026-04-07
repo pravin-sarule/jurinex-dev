@@ -32,7 +32,8 @@ const authenticateToken = async (req, res, next) => {
     req.user = {
       id: decoded.id || decoded.userId,
       email: decoded.email,
-      role: decoded.role
+      role: decoded.role,
+      account_type: decoded.account_type || 'SOLO'
     };
     req.userId = decoded.id || decoded.userId;
     console.log("✅ User authenticated from token:", req.user.email);

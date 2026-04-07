@@ -104,6 +104,36 @@ class User {
     );
     return result.rows;
   }
+
+  static async touchLogin(id) {
+    const result = await pool.query(
+      `
+        UPDATE users
+        SET last_login_at = CURRENT_TIMESTAMP,
+            last_seen_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        RETURNING *
+      `,
+      [id]
+    );
+    return result.rows[0];
+  }
+
+  static async touchSeen(id) {
+    const result = await pool.query(
+      `
+        UPDATE users
+        SET last_seen_at = CURRENT_TIMESTAMP,
+            last_login_at = COALESCE(last_login_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        RETURNING *
+      `,
+      [id]
+    );
+    return result.rows[0];
+  }
 }
 
 module.exports = User;

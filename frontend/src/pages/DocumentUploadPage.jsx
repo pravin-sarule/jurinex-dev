@@ -2,9 +2,11 @@ import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2 } from 'lucide-react';
 import { FileManagerContext } from '../context/FileManagerContext';
+import { useAuth } from '../context/AuthContext';
 import CreateFolderModal from '../components/FolderBrowser/CreateFolderModal';
 import CaseCreationFlow from './CreateCase/CaseCreationFlow';
 import { CONTENT_SERVICE_DIRECT } from '../config/apiConfig';
+import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 
 const getUserIdFromToken = () => {
   try {
@@ -33,6 +35,7 @@ const getUserIdFromToken = () => {
 
 const DocumentUploadPage = () => {
   const { folders, loadFoldersAndFiles, createFolder, loading, error } = useContext(FileManagerContext);
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('activity');
   const [filterBy, setFilterBy] = useState('all');
@@ -41,10 +44,11 @@ const DocumentUploadPage = () => {
   const [caseData, setCaseData] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [draftData, setDraftData] = useState(null);
-  const [loadingDraft, setLoadingDraft] = useState(false);
+  const [_loadingDraft, setLoadingDraft] = useState(false);
   const [openDraftDirectly, setOpenDraftDirectly] = useState(false);
   const foldersPerPage = 6;
   const navigate = useNavigate();
+  const canCreateCases = canUsePermission(user, PERMISSION_KEYS.CREATE_CASE);
 
   useEffect(() => {
     loadFoldersAndFiles();
@@ -91,11 +95,13 @@ const DocumentUploadPage = () => {
   };
 
   const handleStartCaseFlow = () => {
+    if (!canCreateCases) return;
     setOpenDraftDirectly(false);
     setShowCaseFlow(true);
   };
 
   const handleDraftClick = () => {
+    if (!canCreateCases) return;
     setOpenDraftDirectly(true);
     setShowCaseFlow(true);
   };
@@ -246,10 +252,14 @@ const DocumentUploadPage = () => {
           </div>
           <button
             onClick={handleStartCaseFlow}
-            className="flex items-center gap-2 text-white font-semibold px-4 py-2 rounded-lg shadow-lg transition-all duration-200 hover:shadow-xl transform hover:-translate-y-0.5"
+            disabled={!canCreateCases}
+            className={`flex items-center gap-2 text-white font-semibold px-4 py-2 rounded-lg shadow-lg transition-all duration-200 ${canCreateCases ? 'hover:shadow-xl transform hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'}`}
             style={{ backgroundColor: '#21C1B6' }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1AA49B')}
+            onMouseEnter={(e) => {
+              if (canCreateCases) e.currentTarget.style.backgroundColor = '#1AA49B';
+            }}
             onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
+            title={!canCreateCases ? 'You do not have permission to create new cases' : undefined}
           >
             <Plus className="w-4 h-4" />
             Create New Case

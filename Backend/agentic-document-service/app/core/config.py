@@ -45,6 +45,8 @@ class Settings(BaseSettings):
             "https://jurinex.netlify.app",
             "https://jurinex-dev.netlify.app",
             "https://nexintel.netlify.app",
+            "https://auth.jurinex.ai",
+            "https://www.jurinex.ai",
             "https://ailearn.co.in",
             "https://www.ailearn.co.in",
         ]

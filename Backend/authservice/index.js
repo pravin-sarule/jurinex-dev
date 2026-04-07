@@ -48,8 +48,13 @@ app.get("/health", (req, res) => {
   res.json({ status: "Auth Service is running" });
 });
 
+const rbacRoutes = require("./src/Rbac_service/rbacRoutes");
+const { initializeRbacSchema } = require("./src/Rbac_service/rbacDb");
+const { initializeUserActivitySchema } = require("./src/utils/userActivityDb");
+
 app.use("/api/auth", authRoutes);
 app.use("/api/auth/internal", internalRoutes); // Internal service-to-service routes
+app.use("/api/rbac", rbacRoutes);
 
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
@@ -60,6 +65,8 @@ app.use((err, req, res, next) => {
   res.status(500).send("Something broke!");
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Auth Service running on port ${PORT}`);
+  await initializeUserActivitySchema();
+  await initializeRbacSchema();
 });

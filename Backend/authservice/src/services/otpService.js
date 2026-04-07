@@ -166,6 +166,80 @@ const createAndSendOTP = async (email) => {
     return otp;
 };
 
+const getFrontendUrl = () => (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+
+const getCreatePasswordEmailTemplate = ({ email, recipientName = '' }) => {
+    const safeName = recipientName || email;
+    const setPasswordUrl = `${getFrontendUrl()}/set-password?email=${encodeURIComponent(email)}`;
+
+    return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Create Your Password</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body style="margin: 0; padding: 0; font-family: 'Inter', sans-serif; background: #f5f7fa;">
+    <div style="padding: 24px 16px;">
+      <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 15px 50px rgba(33, 193, 182, 0.12), 0 5px 15px rgba(0, 0, 0, 0.08);">
+        <div style="background: linear-gradient(90deg, #21C1B6 0%, #1AA49B 100%); height: 6px;"></div>
+
+        <div style="padding: 32px 36px 20px; text-align: center; background: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);">
+          <div style="display: inline-block; background: linear-gradient(135deg, #21C1B6 0%, #1AA49B 100%); width: 52px; height: 52px; border-radius: 14px; margin-bottom: 16px; box-shadow: 0 8px 20px rgba(33, 193, 182, 0.35);">
+            <svg width="52" height="52" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform: scale(0.62);">
+              <path d="M12 15V17M8 21H16C17.1046 21 18 20.1046 18 19V11C18 9.89543 17.1046 9 16 9H8C6.89543 9 6 9.89543 6 11V19C6 20.1046 6.89543 21 8 21ZM12 5C10.3431 5 9 6.34315 9 8V9H15V8C15 6.34315 13.6569 5 12 5Z" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h1 style="margin: 0 0 8px; font-size: 24px; font-weight: 700; color: #111827;">Create Your Password</h1>
+          <p style="margin: 0; font-size: 14px; color: #6b7280;">Your Jurinex account is ready for activation</p>
+        </div>
+
+        <div style="padding: 8px 36px 28px;">
+          <p style="margin: 0 0 16px; font-size: 15px; color: #374151; line-height: 1.7;">
+            Hi ${safeName},
+          </p>
+          <p style="margin: 0 0 18px; font-size: 14px; color: #4b5563; line-height: 1.7;">
+            A Jurinex firm administrator has created your account. To start using Jurinex, please create your password using the button below.
+          </p>
+
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px 18px; margin-bottom: 20px;">
+            <p style="margin: 0 0 8px; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700;">Account Email</p>
+            <p style="margin: 0; font-size: 14px; color: #111827; font-weight: 600;">${email}</p>
+          </div>
+
+          <div style="text-align: center; margin: 0 0 24px;">
+            <a href="${setPasswordUrl}" style="display: inline-block; background: linear-gradient(135deg, #21C1B6 0%, #1AA49B 100%); color: #ffffff; padding: 16px 28px; border-radius: 10px; text-decoration: none; font-size: 16px; font-weight: 700; box-shadow: 0 6px 18px rgba(33, 193, 182, 0.28);">
+              Create Password
+            </a>
+          </div>
+
+          <p style="margin: 0 0 12px; font-size: 13px; color: #6b7280; line-height: 1.6;">
+            If the button does not open, copy and paste this link into your browser:
+          </p>
+          <p style="margin: 0 0 22px; word-break: break-all; font-size: 12px; color: #1AA49B;">${setPasswordUrl}</p>
+
+          <p style="margin: 0; font-size: 13px; color: #9ca3af; line-height: 1.6;">
+            If you were not expecting this invitation, please contact your firm administrator before creating a password.
+          </p>
+        </div>
+
+        <div style="background: #f9fafb; padding: 18px 36px; text-align: center; border-top: 1px solid #e5e7eb;">
+          <p style="margin: 0 0 6px; font-size: 12px; color: #6b7280;">
+            Need help? Contact <a href="mailto:support@jurinex.ai" style="color: #21C1B6; text-decoration: none; font-weight: 600;">support@jurinex.ai</a>
+          </p>
+          <p style="margin: 0; font-size: 11px; color: #9ca3af;">© 2026 Jurinex AI Assistant · All rights reserved</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>`;
+};
+
 const verifyOTP = async (email, otp) => {
     const storedOTP = await OTPModel.findOTP(email, otp);
     if (storedOTP) {
@@ -301,10 +375,28 @@ const sendPasswordSetEmail = async (email) => {
     }
 };
 
+const sendCreatePasswordEmail = async (email, recipientName = '') => {
+    try {
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: 'Create Your Password - Jurinex AI',
+            html: getCreatePasswordEmailTemplate({ email, recipientName }),
+        };
+
+        await transporter.sendMail(mailOptions);
+        console.log(`[EmailService] Create password email sent to: ${email}`);
+    } catch (error) {
+        console.error(`[EmailService] Error sending create password email to ${email}:`, error);
+        throw error;
+    }
+};
+
 module.exports = {
     generateOTP,
     sendOTPEmail,
     createAndSendOTP,
     verifyOTP,
     sendPasswordSetEmail,
+    sendCreatePasswordEmail,
 };

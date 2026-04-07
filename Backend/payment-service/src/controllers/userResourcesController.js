@@ -2,6 +2,7 @@ const pool = require('../config/db');
 const axios = require('axios'); // Import axios for HTTP requests
 const TokenUsageService = require('../services/tokenUsageService');
 const TokenUsageSyncService = require('../services/tokenUsageSyncService');
+const { resolveEffectivePlan } = require('../services/effectivePlanService');
 
 const DOCUMENT_SERVICE_URL = process.env.API_GATEWAY_URL || 'http://localhost:5000';
 
@@ -15,36 +16,7 @@ exports.getPlanAndResourceDetails = async (req, res) => {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        const { service } = req.query;
-
-        const subscriptionQuery = `
-            SELECT
-                sp.id AS plan_id,
-                sp.name AS plan_name,
-                sp.description,
-                sp.price,
-                sp.currency,
-                sp.interval,
-                sp.type,
-                sp.token_limit,
-                sp.carry_over_limit,
-                sp.document_limit,
-                sp.ai_analysis_limit,
-                sp.template_access,
-                sp.storage_limit_gb,
-                sp.drafting_type,
-                sp.limits,
-                us.start_date,
-                us.end_date,
-                us.status AS subscription_status
-            FROM user_subscriptions us
-            JOIN subscription_plans sp ON us.plan_id = sp.id
-            WHERE us.user_id = $1
-            ORDER BY us.start_date DESC
-            LIMIT 1;
-        `;
-        const subscriptionResult = await pool.query(subscriptionQuery, [userId]);
-        const activePlan = subscriptionResult.rows[0] || null;
+        const { activePlan } = await resolveEffectivePlan(userId);
 
         const allPlansResult = await pool.query(`SELECT * FROM subscription_plans ORDER BY price ASC;`);
         const allPlanConfigurations = allPlansResult.rows;
@@ -106,7 +78,7 @@ exports.getPlanAndResourceDetails = async (req, res) => {
             console.error('❌ Error fetching user usage and plan from Document Service:', err.message);
         }
 
-        const effectivePlan = userPlanFromDocumentService || activePlan;
+        const effectivePlan = activePlan;
         
         // Calculate total tokens and cost from llm_usage_logs (source of truth)
         let totalTokensFromLogs = 0;
@@ -174,7 +146,7 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         }));
 
         res.status(200).json({
-            activePlan,
+            activePlan: effectivePlan,
             resourceUtilization,
             allPlanConfigurations: allPlanConfigurationsWithActiveFlag,
             latestPayment
@@ -284,24 +256,7 @@ exports.getUserResourceUtilization = async (req, res) => {
             console.error('❌ Error fetching user usage and plan from Document Service:', err.message);
         }
 
-        let activePlanFromPaymentService = null;
-        if (!userPlanFromDocumentService) {
-            const subscriptionQuery = `
-                SELECT
-                    sp.*,
-                    us.start_date,
-                    us.end_date,
-                    us.status AS subscription_status
-                FROM user_subscriptions us
-                JOIN subscription_plans sp ON us.plan_id = sp.id
-                WHERE us.user_id = $1 AND us.status = 'active'
-                ORDER BY us.start_date DESC
-                LIMIT 1;
-            `;
-            const subscriptionResult = await pool.query(subscriptionQuery, [userId]);
-            activePlanFromPaymentService = subscriptionResult.rows[0] || null;
-        }
-        const effectivePlan = userPlanFromDocumentService || activePlanFromPaymentService;
+        const { activePlan: effectivePlan } = await resolveEffectivePlan(userId);
         
         // Calculate total tokens and cost from llm_usage_logs (source of truth)
         let totalTokensFromLogs = 0;
@@ -396,20 +351,7 @@ exports.getUserPlanById = async (req, res) => {
             return res.status(400).json({ message: 'User ID is required.' });
         }
 
-        const subscriptionQuery = `
-            SELECT
-                sp.*,
-                us.start_date,
-                us.end_date,
-                us.status AS subscription_status
-            FROM user_subscriptions us
-            JOIN subscription_plans sp ON us.plan_id = sp.id
-            WHERE us.user_id = $1 AND us.status = 'active'
-            ORDER BY us.start_date DESC
-            LIMIT 1;
-        `;
-        const subscriptionResult = await pool.query(subscriptionQuery, [userId]);
-        const activePlan = subscriptionResult.rows[0] || null;
+        const { activePlan } = await resolveEffectivePlan(userId);
 
         if (!activePlan) {
             return res.status(404).json({ success: false, message: 'No active plan found for this user.' });

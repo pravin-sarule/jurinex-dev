@@ -1,22 +1,97 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
+import UserManagementTable from '../components/Rbac_pages/UserManagementTable';
+import FirmAnalyticsTab from '../components/Rbac_pages/FirmAnalyticsTab';
+import SupportTicketsTab from '../components/Rbac_pages/SupportTicketsTab';
+import { useAuth } from '../context/AuthContext';
 
 const UserManagementPage = () => {
-  return (
-    <div className="min-h-[60vh] px-6 py-8 bg-gray-50">
-      <div className="max-w-5xl mx-auto">
-        <header className="mb-6">
-          <h1 className="text-2xl font-semibold text-gray-900">User Management</h1>
-          <p className="mt-1 text-sm text-gray-600">
-            Manage your firm users, roles, and access. This page is currently a placeholder and can be
-            extended with full user management features.
-          </p>
-        </header>
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState('Manage Permissions');
+  const accountType = String(user?.account_type || '').toUpperCase();
+  const role = String(user?.role || '').toUpperCase();
+  const isFirmUser = accountType === 'FIRM_USER';
+  const isFirmAdmin = accountType === 'FIRM_ADMIN';
+  const canManageSupport = isFirmAdmin || role === 'ADMIN' || role === 'SUPER_ADMIN';
+  const todayLabel = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-US', {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+      }).format(new Date()),
+    []
+  );
 
-        <div className="rounded-lg border border-dashed border-gray-300 bg-white p-8 text-center">
-          <p className="text-gray-700 font-medium mb-2">User management coming soon</p>
-          <p className="text-sm text-gray-500">
-            The navigation and routing are wired up. Implement the full user management UI here when ready.
-          </p>
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(33,193,182,0.08),_transparent_30%),linear-gradient(180deg,_#F8FAFC_0%,_#F5F7FB_100%)]">
+      <div className="w-full px-3 py-3 lg:px-4 lg:py-4">
+        <div className="overflow-hidden rounded-[32px] border border-white/70 bg-white/85 shadow-[0_28px_80px_rgba(15,23,42,0.08)] backdrop-blur-sm">
+          <div className="border-b border-slate-200/80 bg-[linear-gradient(135deg,rgba(33,193,182,0.1),rgba(255,255,255,0.92),rgba(15,23,42,0.02))] px-5 py-6 lg:px-6 lg:py-7">
+            <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+              <div className="max-w-3xl">
+              
+                {/* <h1 className="mt-3 text-4xl font-semibold text-[#0F172A]">User Management</h1> */}
+                <p className="mt-3 text-lg leading-8 text-slate-600">
+                  {isFirmUser
+                    ? 'Review your firm admin permissions and the access assigned to your account.'
+                    : 'Manage all users, roles, permissions, and firm invites from one polished control center.'}
+                </p>
+              </div>
+              <div className="self-start rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-sm font-medium text-slate-500 shadow-sm">
+                {todayLabel}
+              </div>
+            </div>
+          </div>
+
+          <div className="px-4 py-4 lg:px-5 lg:py-5">
+            <div className="mb-6 border-b border-slate-200">
+              <nav className="-mb-px flex space-x-8">
+                <button
+                  className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-semibold transition ${
+                    activeTab === 'Manage Permissions'
+                      ? 'border-[#0F172A] text-[#0F172A]'
+                      : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                  }`}
+                  onClick={() => setActiveTab('Manage Permissions')}
+                >
+                  Manage Permissions
+                </button>
+                {isFirmAdmin && (
+                  <button
+                    className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-semibold transition ${
+                      activeTab === 'Analytics'
+                        ? 'border-[#0F172A] text-[#0F172A]'
+                        : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                    }`}
+                    onClick={() => setActiveTab('Analytics')}
+                  >
+                    Analytics
+                  </button>
+                )}
+                {canManageSupport && (
+                  <button
+                    className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-semibold transition ${
+                      activeTab === 'Support Tickets'
+                        ? 'border-[#0F172A] text-[#0F172A]'
+                        : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                    }`}
+                    onClick={() => setActiveTab('Support Tickets')}
+                  >
+                    Support Tickets
+                  </button>
+                )}
+              </nav>
+            </div>
+
+            {activeTab === 'Analytics' && isFirmAdmin ? (
+              <FirmAnalyticsTab />
+            ) : activeTab === 'Support Tickets' && canManageSupport ? (
+              <SupportTicketsTab />
+            ) : (
+              <UserManagementTable />
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -24,4 +99,3 @@ const UserManagementPage = () => {
 };
 
 export default UserManagementPage;
-

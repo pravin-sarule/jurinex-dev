@@ -11,6 +11,7 @@ const authMiddleware = require("../middleware/auth"); // Import auth middleware
 const { checkDocumentUploadLimits } = require("../middleware/checkTokenLimits"); // Import the new middleware
 
 const upload = multer({ storage: multer.memoryStorage() });
+const MAX_CASE_UPLOAD_FILES = 50;
 
 // Same handlers as /api/doc/secrets — exposed here so gateway /files → /api/files/secrets works.
 router.get("/secrets", authMiddleware.protect, getAllSecrets);
@@ -65,6 +66,10 @@ router.get("/:fileId/view", authMiddleware.protect, async (req, res, next) => {
 
 router.post("/create-folder", authMiddleware.protect, fileController.createFolder);
 router.post("/create", authMiddleware.protect, fileController.createCase);
+router.post("/internal/analytics/users", fileController.getInternalUserAnalytics);
+router.get("/cases/assignable", authMiddleware.protect, fileController.getAssignableCases);
+router.get("/cases/assignments/:userId", authMiddleware.protect, fileController.getUserCaseAssignments);
+router.put("/cases/assignments/:userId", authMiddleware.protect, fileController.updateUserCaseAssignments);
 router.delete("/cases/:caseId", authMiddleware.protect, fileController.deleteCase);
 router.delete("/folder/:folderName", authMiddleware.protect, fileController.deleteFolderWithContents);
 router.put("/cases/:caseId", authMiddleware.protect, fileController.updateCase);
@@ -84,7 +89,13 @@ router.post("/:folderName/generate-upload-url", authMiddleware.protect, fileCont
 
 router.post("/:folderName/complete-upload", authMiddleware.protect, fileController.completeSignedUpload);
 
-router.post("/:folderName/upload", authMiddleware.protect, checkDocumentUploadLimits, upload.array("files", 10), fileController.uploadDocumentsToCaseByFolderName);
+router.post(
+  "/:folderName/upload",
+  authMiddleware.protect,
+  checkDocumentUploadLimits,
+  upload.array("files", MAX_CASE_UPLOAD_FILES),
+  fileController.uploadDocumentsToCaseByFolderName
+);
 
 router.get("/:folderName/summary", authMiddleware.protect, fileController.getFolderSummary);
 
@@ -101,10 +112,22 @@ router.post("/:folderName/query", authMiddleware.protect, fileController.queryFo
 
 router.post("/:folderName/query/stream", authMiddleware.protect, fileController.queryFolderDocumentsStream);
 
-router.post("/upload-and-extract-case-fields", authMiddleware.protect, checkDocumentUploadLimits, upload.array("files", 10), fileController.uploadAndExtractCaseFields);
+router.post(
+  "/upload-and-extract-case-fields",
+  authMiddleware.protect,
+  checkDocumentUploadLimits,
+  upload.array("files", MAX_CASE_UPLOAD_FILES),
+  fileController.uploadAndExtractCaseFields
+);
 
 // New separate endpoints for case creation workflow
-router.post("/upload-for-processing", authMiddleware.protect, checkDocumentUploadLimits, upload.array("files", 10), fileController.uploadForProcessing);
+router.post(
+  "/upload-for-processing",
+  authMiddleware.protect,
+  checkDocumentUploadLimits,
+  upload.array("files", MAX_CASE_UPLOAD_FILES),
+  fileController.uploadForProcessing
+);
 // Handle extract case fields - decode folderName to support paths with slashes
 router.post("/extract-case-fields/:folderName", authMiddleware.protect, (req, res, next) => {
   // Decode the folderName parameter to handle URL-encoded paths

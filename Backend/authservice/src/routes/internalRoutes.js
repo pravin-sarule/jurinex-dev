@@ -3,6 +3,45 @@ const router = express.Router();
 const User = require('../models/User');
 const Firm = require('../models/Firm');
 const FirmUser = require('../models/FirmUser');
+const { getPermissionsByUserId } = require('../Rbac_service/rbacUtils');
+
+function normalizeAccountType(user) {
+  const value = user?.account_type;
+  return (value && String(value).trim()) ? String(value).toUpperCase() : 'SOLO';
+}
+
+async function resolveFirmContext(userId) {
+  const user = await User.findById(userId);
+  if (!user) return null;
+
+  const accountType = normalizeAccountType(user);
+  let firmId = null;
+  let firmAdminUserId = null;
+  let isFirmAdmin = false;
+
+  const firmByAdmin = await Firm.findByAdminUserId(userId);
+  if (firmByAdmin) {
+    firmId = firmByAdmin.id;
+    firmAdminUserId = firmByAdmin.admin_user_id || userId;
+    isFirmAdmin = true;
+  } else {
+    const firmUserRow = await FirmUser.findByUserId(userId);
+    if (firmUserRow) {
+      firmId = firmUserRow.firm_id;
+      const firm = await Firm.findById(firmId);
+      firmAdminUserId = firm?.admin_user_id || null;
+    }
+  }
+
+  return {
+    user,
+    firmId,
+    firmAdminUserId,
+    accountType,
+    isFirmAdmin,
+    isFirmMember: !!firmId,
+  };
+}
 
 /**
  * Internal Routes for Service-to-Service Communication
@@ -71,6 +110,60 @@ router.get('/user/:userId/account-type', async (req, res) => {
 });
 
 /**
+ * GET /api/auth/internal/user/:userId/firm-context
+ * Returns firm scope metadata for cross-service inherited-plan and analytics logic.
+ */
+router.get('/user/:userId/firm-context', async (req, res) => {
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!userId || isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+
+    const context = await resolveFirmContext(userId);
+    if (!context) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    return res.status(200).json({
+      userId,
+      firmId: context.firmId,
+      firmAdminUserId: context.firmAdminUserId,
+      accountType: context.accountType,
+      isFirmAdmin: context.isFirmAdmin,
+      isFirmMember: context.isFirmMember,
+    });
+  } catch (error) {
+    console.error('[Internal] Error fetching user firm context:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/auth/internal/user/:userId/permissions
+ * Get granular RBAC permissions for a user (for other services).
+ */
+router.get('/user/:userId/permissions', async (req, res) => {
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!userId || isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const permissions = await getPermissionsByUserId(userId);
+    res.json({ permissions });
+  } catch (error) {
+    console.error('[Internal] Error fetching user permissions:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/auth/internal/user/:userId/firm-member-ids
  * Returns list of user_ids that belong to the same firm as this user (for document-service: show all firm cases).
  * For solo users returns [userId]. For firm users returns all member user_ids of their firm.
@@ -81,20 +174,11 @@ router.get('/user/:userId/firm-member-ids', async (req, res) => {
     if (!userId || isNaN(userId)) {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
-    let firmId = null;
-    let firmAdminUserId = null;
-    const firmByAdmin = await Firm.findByAdminUserId(userId);
-    if (firmByAdmin) {
-      firmId = firmByAdmin.id;
-      firmAdminUserId = firmByAdmin.admin_user_id || userId;
-    } else {
-      const firmUserRow = await FirmUser.findByUserId(userId);
-      if (firmUserRow) {
-        firmId = firmUserRow.firm_id;
-        const firm = await Firm.findById(firmId);
-        firmAdminUserId = firm?.admin_user_id || null;
-      }
+    const context = await resolveFirmContext(userId);
+    if (!context?.user) {
+      return res.status(404).json({ error: 'User not found' });
     }
+    const { firmId, firmAdminUserId } = context;
     if (!firmId) {
       return res.status(200).json({ user_ids: [userId] });
     }
@@ -161,31 +245,28 @@ router.get('/user/:userId/firm-members', async (req, res) => {
     if (!userId || isNaN(userId)) {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
-    let firmId = null;
-    let firmAdminUserId = null;
-    const firmByAdmin = await Firm.findByAdminUserId(userId);
-    if (firmByAdmin) {
-      firmId = firmByAdmin.id;
-      firmAdminUserId = firmByAdmin.admin_user_id || userId;
-    } else {
-      const firmUserRow = await FirmUser.findByUserId(userId);
-      if (firmUserRow) {
-        firmId = firmUserRow.firm_id;
-        const firm = await Firm.findById(firmId);
-        firmAdminUserId = firm?.admin_user_id || null;
-      }
+    const context = await resolveFirmContext(userId);
+    if (!context?.user) {
+      return res.status(404).json({ error: 'User not found' });
     }
+    const { firmId, firmAdminUserId, accountType } = context;
     if (!firmId) {
       // Solo user — return just this user's info
-      const user = await User.findById(userId);
-      if (!user) return res.status(200).json({ members: [] });
+      const user = context.user;
       return res.status(200).json({
+        firm_id: null,
         members: [{
           user_id: userId,
           email: user.email,
           username: user.username || user.email,
           auth_type: user.auth_type || 'manual',
-          role: user.account_type || 'SOLO',
+          role: accountType,
+          account_type: accountType,
+          is_blocked: user.is_blocked,
+          first_login: user.first_login,
+          created_at: user.created_at,
+          last_login_at: user.last_login_at,
+          last_seen_at: user.last_seen_at,
         }],
       });
     }
@@ -197,6 +278,12 @@ router.get('/user/:userId/firm-members', async (req, res) => {
       username: r.username || r.email,
       auth_type: r.auth_type || 'manual',
       role: r.account_type || r.role || 'STAFF',
+      account_type: normalizeAccountType(r),
+      is_blocked: r.is_blocked,
+      first_login: r.first_login,
+      created_at: r.created_at,
+      last_login_at: r.last_login_at,
+      last_seen_at: r.last_seen_at,
     }));
     // Ensure firm admin is included
     if (firmAdminUserId && !members.find(m => m.user_id === firmAdminUserId)) {
@@ -208,10 +295,16 @@ router.get('/user/:userId/firm-members', async (req, res) => {
           username: admin.username || admin.email,
           auth_type: admin.auth_type || 'manual',
           role: 'ADMIN',
+          account_type: normalizeAccountType(admin),
+          is_blocked: admin.is_blocked,
+          first_login: admin.first_login,
+          created_at: admin.created_at,
+          last_login_at: admin.last_login_at,
+          last_seen_at: admin.last_seen_at,
         });
       }
     }
-    res.status(200).json({ members });
+    res.status(200).json({ firm_id: firmId, members });
   } catch (error) {
     console.error('[Internal] Error fetching firm members:', error);
     res.status(500).json({ error: 'Internal server error' });

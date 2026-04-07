@@ -4,6 +4,7 @@ import html2pdf from 'html2pdf.js';
 
 import { USER_RESOURCES_SERVICE_URL, PAYMENT_SERVICE_URL, FILES_SERVICE_URL } from '../config/apiConfig';
 import LLMUsageComponent from '../components/LLMUsageComponent';
+import { getPlanDisplayName } from '../utils/planUtils';
 
 const api = {
  getUserPlanDetails: async () => {
@@ -66,7 +67,7 @@ const BillingAndUsagePage = () => {
  
  const activePlan = data.activePlan || data.userSubscription || data.subscription;
  if (activePlan) {
- const normalizedSubscription = {
+        const normalizedSubscription = {
  id: activePlan.id || activePlan.subscription_id,
  plan_name: activePlan.plan_name || activePlan.planName || activePlan.name,
  type: activePlan.type || activePlan.accountType || activePlan.subscription_type,
@@ -80,12 +81,13 @@ const BillingAndUsagePage = () => {
  ...activePlan
  };
  setUserSubscription(normalizedSubscription);
+        const planLabel = getPlanDisplayName(normalizedSubscription) || normalizedSubscription.plan_name || 'Free plan';
  
  try {
  const existingUserInfo = localStorage.getItem('userInfo');
  const userInfoData = existingUserInfo ? JSON.parse(existingUserInfo) : {};
  
- userInfoData.plan = normalizedSubscription.plan_name || 'Free plan';
+ userInfoData.plan = planLabel;
  
  localStorage.setItem('userInfo', JSON.stringify(userInfoData));
  console.log('✅ Updated localStorage["userInfo"] with plan:', userInfoData.plan);
@@ -230,7 +232,7 @@ const BillingAndUsagePage = () => {
         tokenLimit: planData?.token_limit || null,
         carryOverLimit: planData?.carry_over_limit || 0,
         carryOverTokens: (data.carry_over_tokens !== null && data.carry_over_tokens !== undefined) ? data.carry_over_tokens : 0,
-        planName: planData?.plan_name || planData?.name || 'Unknown',
+        planName: getPlanDisplayName(planData) || planData?.plan_name || planData?.name || 'Unknown',
         periodEnd: data.period_end || null,
         lastUpdated: data.updated_at || null,
       };
@@ -475,7 +477,7 @@ const BillingAndUsagePage = () => {
  <div className="grid md:grid-cols-4 gap-6">
  <div className="border border-gray-200 rounded-lg p-6">
  <div className="text-sm text-gray-900 font-medium mb-2">PLAN</div>
- <div className="text-2xl font-bold text-gray-900">{userSubscription.plan_name || 'Basic'}</div>
+ <div className="text-2xl font-bold text-gray-900">{getPlanDisplayName(userSubscription) || userSubscription.plan_name || 'Basic'}</div>
  </div>
  <div className="border border-gray-200 p-6">
  <div className="text-sm text-gray-900 font-medium mb-2">TYPE</div>

@@ -778,6 +778,111 @@ When answering:
 
 const LLMUsageLogService = require('./llmUsageLogService');
 
+async function logFolderAIStreamingUsage({
+  metadata = {},
+  provider,
+  modelName,
+  promptText = '',
+  systemPrompt = '',
+  responseText = '',
+}) {
+  const requestId = metadata?.requestId || null;
+  const userId = metadata?.userId || null;
+  const sessionId = metadata?.sessionId || null;
+  const endpoint = metadata?.endpoint || '/api/doc/folder-chat';
+
+  console.log('[FolderAI Stream Usage] Dataflow start', {
+    requestId,
+    userId,
+    sessionId,
+    endpoint,
+    provider,
+    modelName,
+    promptChars: promptText?.length || 0,
+    systemPromptChars: systemPrompt?.length || 0,
+    responseChars: responseText?.length || 0,
+  });
+
+  if (!userId || !modelName) {
+    console.warn('[FolderAI Stream Usage] Skipping usage log because required metadata is missing', {
+      requestId,
+      userId,
+      modelName,
+      provider,
+      sessionId,
+      endpoint,
+      metadata,
+    });
+    return null;
+  }
+
+  const inputTokens = estimateTokenCount(`${promptText || ''}${systemPrompt || ''}`);
+  const outputTokens = estimateTokenCount(responseText || '');
+
+  console.log('[FolderAI Stream Usage] Token estimate prepared', {
+    requestId,
+    userId,
+    sessionId,
+    endpoint,
+    provider,
+    modelName,
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+  });
+
+  try {
+    console.log('[FolderAI Stream Usage] Logging usage to payment service', {
+      requestId,
+      userId,
+      sessionId,
+      endpoint,
+      provider,
+      modelName,
+    });
+
+    const usageLog = await LLMUsageLogService.logUsage({
+      userId,
+      modelName,
+      inputTokens,
+      outputTokens,
+      endpoint,
+      requestId,
+      fileId: metadata?.fileId || null,
+      sessionId,
+    });
+
+    console.log('[FolderAI Stream Usage] Usage logging completed', {
+      requestId,
+      userId,
+      sessionId,
+      endpoint,
+      provider,
+      modelName,
+      logged: !!usageLog,
+      usageLogId: usageLog?.id || null,
+    });
+
+    return usageLog;
+  } catch (error) {
+    console.error('[FolderAI Stream Usage] Usage logging failed', {
+      requestId,
+      userId,
+      sessionId,
+      endpoint,
+      provider,
+      modelName,
+      message: error?.message,
+      code: error?.code,
+      detail: error?.detail,
+      status: error?.response?.status,
+      responseData: error?.response?.data,
+      stack: error?.stack,
+    });
+    return null;
+  }
+}
+
 async function askLLM(providerName, userMessage, context = '', relevant_chunks = null, originalQuestion = null, metadata = {}) {
   const provider = resolveProviderName(providerName);
   const config = ALL_LLM_CONFIGS[provider];
@@ -1354,7 +1459,7 @@ async function getSummaryFromChunks(chunks) {
   }
 }
 
-async function* streamLLM(providerName, userMessage, context = '', relevant_chunks = null, originalQuestion = null) {
+async function* streamLLM(providerName, userMessage, context = '', relevant_chunks = null, originalQuestion = null, metadata = {}) {
   const provider = resolveProviderName(providerName);
   const config = ALL_LLM_CONFIGS[provider];
   if (!config) throw new Error(`❌ Unsupported LLM provider: ${provider}`);
@@ -1412,6 +1517,20 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
 
   const isGemini = provider.startsWith('gemini');
   const isClaude = provider.startsWith('claude') || provider === 'anthropic';
+  const streamRequestId = metadata?.requestId || null;
+
+  console.log('[FolderAI Stream] Request received', {
+    requestId: streamRequestId,
+    userId: metadata?.userId || null,
+    sessionId: metadata?.sessionId || null,
+    endpoint: metadata?.endpoint || '/api/doc/folder-chat',
+    provider,
+    hasRelevantChunks: !!relevant_chunks,
+    promptChars: prompt?.length || 0,
+    systemPromptChars: enhancedSystemPrompt?.length || 0,
+    explicitWebRequest: isExplicitWebRequest,
+    webSearchTriggered: !!webSearchData,
+  });
 
   console.log(`[Stream] 🚀 Starting stream for provider: ${provider}`);
 
@@ -1427,6 +1546,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
         console.log(`[Stream] Attempting Gemini model: ${modelName}`);
 
         if (isGemini3Pro) {
+          let fullResponseText = '';
           const request = {
             model: modelName,
             contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -1443,14 +1563,24 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             chunkCount++;
             const text = chunk?.text || '';
             if (text) {
+              fullResponseText += text;
               yield text; // Yield text directly as string
             }
           }
 
           console.log(`[Gemini 3.0 Pro Stream] ✅ Stream completed (${chunkCount} chunks)`);
+          await logFolderAIStreamingUsage({
+            metadata,
+            provider,
+            modelName,
+            promptText: prompt,
+            systemPrompt: enhancedSystemPrompt,
+            responseText: fullResponseText,
+          });
           return; // Successfully streamed
 
         } else {
+          let fullResponseText = '';
           const model = genAI.getGenerativeModel(
             enhancedSystemPrompt ? { model: modelName, systemInstruction: enhancedSystemPrompt } : { model: modelName }
           );
@@ -1464,11 +1594,20 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
             chunkCount++;
             const text = chunk.text();
             if (text) {
+              fullResponseText += text;
               yield text; // Yield text directly as string
             }
           }
 
           console.log(`[Gemini Stream] ✅ Stream completed (${chunkCount} chunks)`);
+          await logFolderAIStreamingUsage({
+            metadata,
+            provider,
+            modelName,
+            promptText: prompt,
+            systemPrompt: enhancedSystemPrompt,
+            responseText: fullResponseText,
+          });
           return; // Successfully streamed
         }
       } catch (err) {
@@ -1538,6 +1677,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
   let lastChunkTime = Date.now();
   const CHUNK_TIMEOUT = 30000; // 30 seconds timeout between chunks
   let hasReceivedData = false;
+  let fullResponseText = '';
 
   try {
     for await (const chunk of response.data) {
@@ -1562,6 +1702,14 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
           const data = line.replace(/^data: /, '').trim();
           if (data === '[DONE]') {
             console.log(`[Stream] ✅ ${provider} stream completed (${chunkCount} chunks)`);
+            await logFolderAIStreamingUsage({
+              metadata,
+              provider,
+              modelName: resolvedModel,
+              promptText: prompt,
+              systemPrompt: enhancedSystemPrompt,
+              responseText: fullResponseText,
+            });
             return;
           }
 
@@ -1590,6 +1738,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
               hasReceivedData = true;
               lastChunkTime = now;
               chunkCount++;
+              fullResponseText += text;
               yield text; // Yield text directly as string
             }
           } catch (e) {
@@ -1614,7 +1763,17 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           const data = line.replace(/^data: /, '').trim();
-          if (data === '[DONE]') return;
+          if (data === '[DONE]') {
+            await logFolderAIStreamingUsage({
+              metadata,
+              provider,
+              modelName: resolvedModel,
+              promptText: prompt,
+              systemPrompt: enhancedSystemPrompt,
+              responseText: fullResponseText,
+            });
+            return;
+          }
           try {
             const json = JSON.parse(data);
             const text = isClaude
@@ -1622,6 +1781,7 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
               : json.choices?.[0]?.delta?.content || '';
             if (text) {
               chunkCount++;
+              fullResponseText += text;
               yield text;
             }
           } catch (e) {
@@ -1632,8 +1792,31 @@ async function* streamLLM(providerName, userMessage, context = '', relevant_chun
     }
 
     console.log(`[Stream] ✅ ${provider} stream completed (${chunkCount} chunks)`);
+    await logFolderAIStreamingUsage({
+      metadata,
+      provider,
+      modelName: resolvedModel,
+      promptText: prompt,
+      systemPrompt: enhancedSystemPrompt,
+      responseText: fullResponseText,
+    });
   } catch (error) {
-    console.error(`[Stream] Error during streaming:`, error.message);
+    console.error('[FolderAI Stream] Error during streaming', {
+      requestId: streamRequestId,
+      userId: metadata?.userId || null,
+      sessionId: metadata?.sessionId || null,
+      endpoint: metadata?.endpoint || '/api/doc/folder-chat',
+      provider,
+      modelName: resolvedModel,
+      message: error?.message,
+      code: error?.code,
+      detail: error?.detail,
+      status: error?.response?.status,
+      responseData: error?.response?.data,
+      chunkCount,
+      responseChars: fullResponseText.length,
+      stack: error?.stack,
+    });
     if (error.code === 'ECONNABORTED') {
       throw new Error('Request timeout: Claude API took too long to respond');
     }

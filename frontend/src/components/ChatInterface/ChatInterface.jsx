@@ -4186,6 +4186,32 @@ const ChatInterface = () => {
     };
   }, []);
 
+  const extractStreamErrorMessage = async (response) => {
+    const fallbackMessage = `HTTP error! status: ${response.status}`;
+
+    try {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const payload = await response.json();
+        return payload?.message || payload?.error || payload?.details || fallbackMessage;
+      }
+
+      const rawText = await response.text();
+      if (!rawText) {
+        return fallbackMessage;
+      }
+
+      try {
+        const parsed = JSON.parse(rawText);
+        return parsed?.message || parsed?.error || parsed?.details || rawText || fallbackMessage;
+      } catch (parseError) {
+        return rawText || fallbackMessage;
+      }
+    } catch (error) {
+      return fallbackMessage;
+    }
+  };
+
   const chatWithAI = async (folder, secretId, currentSessionId) => {
     setAnimatedResponseContent('');
     setThinkingContent('');
@@ -4261,11 +4287,18 @@ const ChatInterface = () => {
       let newSessionId = currentSessionId;
       let finalMetadata = null;
       let messageId = Date.now().toString();
+      let streamHadError = false;
+      let streamErrorMessage = '';
 
       while (true) {
         const { done, value } = await reader.read();
        
         if (done) {
+          if (streamHadError) {
+            console.warn('[ChatInterface] Secret prompt stream stopped after error:', streamErrorMessage);
+            setCurrentStatus(null);
+            break;
+          }
           setLoadingChat(false);
           const isStructured = isStructuredJsonResponse(streamBufferRef.current);
           let finalResponse = isStructured
@@ -4335,6 +4368,12 @@ const ChatInterface = () => {
           }
          
           if (data === '[DONE]') {
+            if (streamHadError) {
+              console.warn('[ChatInterface] Secret prompt stream received DONE after error:', streamErrorMessage);
+              setLoadingChat(false);
+              setCurrentStatus(null);
+              return;
+            }
             setLoadingChat(false);
             const isStructured = isStructuredJsonResponse(streamBufferRef.current);
             let finalResponse = isStructured
@@ -4481,11 +4520,15 @@ const ChatInterface = () => {
               setIsAnimatingResponse(false);
               setIsGenerating(false);
             } else if (parsed.type === 'error') {
+              streamHadError = true;
+              streamErrorMessage = parsed.message || parsed.error || 'An error occurred';
+              console.error('[ChatInterface] Secret prompt stream error payload:', parsed);
               setChatError(
                 stringToChatErrorDisplay(
-                  parsed.message || parsed.error || 'An error occurred'
+                  streamErrorMessage
                 )
               );
+              setCurrentStatus(null);
               setLoadingChat(false);
             }
           } catch (e) {
@@ -4597,11 +4640,20 @@ const ChatInterface = () => {
         let newSessionId = selectedChatSessionId;
         let finalMetadata = null;
         let messageId = Date.now().toString();
+        let streamHadError = false;
+        let streamErrorMessage = '';
 
         while (true) {
           const { done, value } = await reader.read();
          
           if (done) {
+            if (streamHadError) {
+              console.warn('[ChatInterface] Folder chat stream stopped after error:', streamErrorMessage);
+              setLoadingChat(false);
+              setCurrentStatus(null);
+              setChatInput(questionText);
+              break;
+            }
             setLoadingChat(false);
             const isStructured = isStructuredJsonResponse(streamBufferRef.current);
             let finalResponse = isStructured
@@ -4672,7 +4724,14 @@ const ChatInterface = () => {
               continue;
             }
            
-            if (data === '[DONE]') {
+          if (data === '[DONE]') {
+              if (streamHadError) {
+                console.warn('[ChatInterface] Folder chat stream received DONE after error:', streamErrorMessage);
+                setLoadingChat(false);
+                setCurrentStatus(null);
+                setChatInput(questionText);
+                return;
+              }
               setLoadingChat(false);
               const isStructured = isStructuredJsonResponse(streamBufferRef.current);
               let finalResponse = isStructured
@@ -4809,11 +4868,15 @@ const ChatInterface = () => {
                 setIsAnimatingResponse(false);
                 setIsGenerating(false);
               } else if (parsed.type === 'error') {
+                streamHadError = true;
+                streamErrorMessage = parsed.message || parsed.error || 'An error occurred';
+                console.error('[ChatInterface] Folder chat stream error payload:', parsed);
                 setChatError(
                   stringToChatErrorDisplay(
-                    parsed.message || parsed.error || 'An error occurred'
+                    streamErrorMessage
                   )
                 );
+                setCurrentStatus(null);
                 setLoadingChat(false);
               }
             } catch (e) {

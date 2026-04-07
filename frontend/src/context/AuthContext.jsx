@@ -1,14 +1,60 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../services/api';
-import { USER_RESOURCES_SERVICE_URL } from '../config/apiConfig';
+import { API_BASE_URL, USER_RESOURCES_SERVICE_URL } from '../config/apiConfig';
+import { shouldEnforceRbac } from '../utils/permissions';
+import { getPlanDisplayName } from '../utils/planUtils';
 
 const AuthContext = createContext(null);
+const ACTIVITY_PING_INTERVAL_MS = 15 * 1000;
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
   const [planInfo, setPlanInfo] = useState(null);
+
+  const persistUser = (userData) => {
+    setUser(userData);
+    if (userData) {
+      localStorage.setItem('user', JSON.stringify(userData));
+    } else {
+      localStorage.removeItem('user');
+    }
+  };
+
+  const fetchCurrentUserPermissions = async (authToken) => {
+    if (!authToken) return null;
+
+    const response = await fetch(`${API_BASE_URL}/api/rbac/permissions/me`, {
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch permissions: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.permissions || {};
+  };
+
+  const hydratePermissions = async (authToken, baseUser) => {
+    if (!authToken || !baseUser) return baseUser;
+    if (!shouldEnforceRbac(baseUser)) return baseUser;
+
+    try {
+      const permissions = await fetchCurrentUserPermissions(authToken);
+      const nextUser = { ...baseUser, permissions };
+      persistUser(nextUser);
+      return nextUser;
+    } catch (error) {
+      console.error('❌ AuthContext: Error fetching current user permissions:', error);
+      return baseUser;
+    }
+  };
 
   const fetchAndStorePlan = async (authToken) => {
     try {
@@ -35,10 +81,13 @@ export const AuthProvider = ({ children }) => {
       console.log('✅ AuthContext: Fetched plan data from API:', data);
 
       const activePlan = data.activePlan || data.userSubscription || data.subscription;
-      if (activePlan && activePlan.plan_name) {
+      if (activePlan && (activePlan.plan_name || activePlan.planName || activePlan.name)) {
         const planName = activePlan.plan_name || activePlan.planName || activePlan.name;
+        const planLabel = getPlanDisplayName(activePlan) || planName;
         const planData = {
-          plan: planName,
+          plan: planLabel,
+          planName,
+          isInheritedFromFirm: !!activePlan.is_inherited_from_firm,
           lastPayment: activePlan.lastPayment || data.lastPayment,
           subscription: activePlan
         };
@@ -48,16 +97,16 @@ export const AuthProvider = ({ children }) => {
         try {
           const existingUserInfo = localStorage.getItem('userInfo');
           const userInfoData = existingUserInfo ? JSON.parse(existingUserInfo) : {};
-          userInfoData.plan = planName;
+          userInfoData.plan = planLabel;
           userInfoData.lastPayment = planData.lastPayment;
           userInfoData.lastFetched = new Date().toISOString();
           localStorage.setItem('userInfo', JSON.stringify(userInfoData));
-          console.log('✅ AuthContext: Updated localStorage with plan:', planName);
+          console.log('✅ AuthContext: Updated localStorage with plan:', planLabel);
         } catch (storageError) {
           console.error('⚠️ AuthContext: Failed to update localStorage:', storageError);
         }
 
-        console.log('✅ AuthContext: Plan stored in RAM:', planName);
+        console.log('✅ AuthContext: Plan stored in RAM:', planLabel);
         return planData;
       }
 
@@ -82,8 +131,12 @@ export const AuthProvider = ({ children }) => {
         if (storedUser) {
           try {
             const parsedUser = JSON.parse(storedUser);
-            setUser(parsedUser);
+            persistUser(parsedUser);
             console.log('AuthContext: User restored from localStorage:', parsedUser.email);
+
+            hydratePermissions(storedToken, parsedUser).catch((err) => {
+              console.error('AuthContext: Background permission fetch failed:', err);
+            });
           } catch (e) {
             console.error('AuthContext: Failed to parse user from localStorage', e);
             localStorage.removeItem('user');
@@ -116,6 +169,44 @@ export const AuthProvider = ({ children }) => {
     initializeAuth();
   }, []);
 
+  useEffect(() => {
+    if (!token || loading) return undefined;
+
+    const pingActivity = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+
+      try {
+        await fetch(`${API_BASE_URL}/api/auth/activity/ping`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          credentials: 'include',
+        });
+      } catch (error) {
+        console.warn('AuthContext: Activity ping failed:', error.message);
+      }
+    };
+
+    pingActivity();
+    const intervalId = window.setInterval(pingActivity, ACTIVITY_PING_INTERVAL_MS);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        pingActivity();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [token, loading]);
+
   const login = async (email, password) => {
     try {
       const response = await api.login({ email, password });
@@ -133,12 +224,13 @@ export const AuthProvider = ({ children }) => {
       
       if (response.token) {
         setToken(response.token);
-        setUser(response.user);
+        persistUser(response.user);
         
         localStorage.setItem('token', response.token);
-        localStorage.setItem('user', JSON.stringify(response.user));
         
         console.log('AuthContext: Login successful, token stored:', response.token);
+
+        await hydratePermissions(response.token, response.user);
         
         fetchAndStorePlan(response.token).catch(err => {
           console.error('AuthContext: Plan fetch after login failed:', err);
@@ -160,12 +252,13 @@ export const AuthProvider = ({ children }) => {
       
       if (response.success && response.token) {
         setToken(response.token);
-        setUser(response.user);
+        persistUser(response.user);
         
         localStorage.setItem('token', response.token);
-        localStorage.setItem('user', JSON.stringify(response.user));
         
         console.log('AuthContext: OTP verification successful, token stored:', response.token);
+
+        await hydratePermissions(response.token, response.user);
         
         fetchAndStorePlan(response.token).catch(err => {
           console.error('AuthContext: Plan fetch after OTP verification failed:', err);
@@ -185,10 +278,13 @@ export const AuthProvider = ({ children }) => {
     console.log('AuthContext: Manually setting auth state for user:', userData.email);
     
     setToken(authToken);
-    setUser(userData);
+    persistUser(userData);
     
     localStorage.setItem('token', authToken);
-    localStorage.setItem('user', JSON.stringify(userData));
+
+    hydratePermissions(authToken, userData).catch(err => {
+      console.error('AuthContext: Permission fetch after setAuthState failed:', err);
+    });
     
     fetchAndStorePlan(authToken).catch(err => {
       console.error('AuthContext: Plan fetch after setAuthState failed:', err);
@@ -198,12 +294,11 @@ export const AuthProvider = ({ children }) => {
   };
 
   const logout = () => {
-    setUser(null);
+    persistUser(null);
     setToken(null);
     setPlanInfo(null);
     
     localStorage.removeItem('token');
-    localStorage.removeItem('user');
     
     console.log('AuthContext: User logged out, all data cleared.');
   };
@@ -220,7 +315,8 @@ export const AuthProvider = ({ children }) => {
     logout,
     verifyOtp,
     setAuthState,
-    fetchAndStorePlan
+    fetchAndStorePlan,
+    hydratePermissions,
   };
 
   return (

@@ -31,8 +31,7 @@ const templateAnalyzerProxy = require("./routes/templateAnalyzerProxy");
 
 const app = express();
 
-// ✅ Support JSON bodies for direct routes
-app.use(express.json({ limit: '10mb' }));
+// Global JSON parsing removed to prevent breaking proxies. Applied to specific direct routes.
 
 // Target URL for auth service
 const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
@@ -127,31 +126,41 @@ app.use(
   legacyCreateProxyMiddleware("/api/auth/google/drive/callback", googleOAuthProxyOpts)
 );
 
-// ✅ Direct Authentication route using axios
-// This handles POST /api/auth/login explicitly as requested
-app.post("/api/auth/login", async (req, res) => {
-  console.log(`[Gateway] Direct Login Route: ${req.method} ${req.url}`);
+// ✅ Universal auth forwarder using axios
+// Express 5's body parser consumes the request stream before http-proxy-middleware
+// can forward it, causing ALL POST/PUT/PATCH requests through the proxy to hang.
+app.use(["/api/auth", "/api/rbac"], express.json({ limit: '10mb' }), async (req, res) => {
+  // Google OAuth callback is already handled above via proxy (GET with no body — works fine)
+  const authPath = req.originalUrl; // e.g. /api/auth/login, /api/auth/professional-profile
+  const authUrl = `${targetAuth}${authPath}`;
+  const method = req.method.toLowerCase();
+
+  console.log(`[Gateway] Auth forwarder: ${req.method} ${authPath} → ${authUrl}`);
+
   try {
-    // Forward the request to the auth service
-    // targetAuth is process.env.AUTH_SERVICE_URL
-    const authUrl = `${targetAuth}/api/auth/login`;
-    console.log(`[Gateway] Forwarding login to: ${authUrl}`);
+    // Build headers to forward
+    const headers = { 'Content-Type': 'application/json' };
+    if (req.headers.authorization) {
+      headers['Authorization'] = req.headers.authorization;
+    }
+    if (req.headers['x-user-id']) {
+      headers['x-user-id'] = req.headers['x-user-id'];
+    }
 
-    const response = await axios.post(authUrl, req.body, {
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    const axiosConfig = { method, url: authUrl, headers };
 
-    // Return the response data and status code back to the client
+    // Forward body for methods that have one
+    if (['post', 'put', 'patch'].includes(method) && req.body && Object.keys(req.body).length > 0) {
+      axiosConfig.data = req.body;
+    }
+
+    const response = await axios(axiosConfig);
     res.status(response.status).json(response.data);
   } catch (error) {
-    console.error(`[Gateway] Login Error:`, error.message);
+    console.error(`[Gateway] Auth forwarder error (${req.method} ${authPath}):`, error.message);
     if (error.response) {
-      // The auth service returned an error response
       return res.status(error.response.status).json(error.response.data);
     }
-    // Network or other generic error
     res.status(502).json({
       success: false,
       error: "Authentication service unavailable",
@@ -160,8 +169,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// Mount proxies - authProxy handles other /api/auth/* routes
-app.use("/api", authProxy);
+// Note: authProxy is no longer needed — all /api/auth/* routes are handled above
 app.use(fileProxy);
 
 // Local dev: no payment microservice — answer /user-resources (and /api/user-resources for backends) on the gateway
