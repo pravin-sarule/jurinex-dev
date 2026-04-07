@@ -59,6 +59,8 @@ const allowedOrigins = (
         "https://nexintel.netlify.app", // production frontend
         "https://jurinex.netlify.app",
         "https://jurinex-dev.netlify.app",
+        "https://ailearn.co.in",
+        "https://www.ailearn.co.in",
       ]
 );
 
