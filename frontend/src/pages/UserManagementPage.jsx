@@ -69,7 +69,7 @@ const UserManagementPage = () => {
                     Analytics
                   </button>
                 )}
-                {/* {canManageSupport && (
+                {canManageSupport && (
                   <button
                     className={`whitespace-nowrap border-b-2 px-1 py-4 text-sm font-semibold transition ${
                       activeTab === 'Support Tickets'
@@ -78,9 +78,9 @@ const UserManagementPage = () => {
                     }`}
                     onClick={() => setActiveTab('Support Tickets')}
                   >
-                    Support Tickets
+                    
                   </button>
-                )} */}
+                )}
               </nav>
             </div>
 
