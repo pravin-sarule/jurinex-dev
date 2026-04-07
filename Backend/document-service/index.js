@@ -30,7 +30,9 @@ const allowedOrigins = [
     'http://localhost:5173',
     'https://jurinex-production.netlify.app',
     'https://microservicefrontend.netlify.app',
-    'https://jurinex-dev.netlify.app'
+    'https://jurinex-dev.netlify.app',
+    'https://ailearn.co.in',
+    'https://www.ailearn.co.in',
 ];
 
 app.use(cors({
