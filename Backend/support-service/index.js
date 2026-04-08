@@ -26,6 +26,8 @@ const allowedOrigins = (
         "http://localhost:5000",
         "https://jurinex-dev.netlify.app",
         "https://jurinex.netlify.app",
+        "https://ailearn.co.in",
+        "https://www.ailearn.co.in"
       ]
 );
 

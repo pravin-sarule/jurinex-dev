@@ -23,6 +23,8 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:5173',
+      "https://ailearn.co.in",
+      "https://www.ailearn.co.in",
       process.env.FRONTEND_URL
     ].filter(Boolean);
     
