@@ -12,6 +12,7 @@ function buildCandidateUrls() {
   const directServiceBases = [
     FILE_SERVICE_URL,
     DOCUMENT_SERVICE_URL,
+    'http://localhost:8092',
     'http://localhost:5002',
   ].filter(Boolean);
 

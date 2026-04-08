@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 import uuid
 
 from pathlib import PurePosixPath
@@ -42,6 +43,12 @@ from app.services.legal_system_prompt import build_document_qa_system_prompt, bu
 from app.services.llm_policy_service import assert_upload_allowed
 from app.services.secret_manager_api import get_secret_prompt_detail, list_secret_prompts
 from app.services.secret_prompt_display import resolve_query_and_display
+from app.services.token_usage import (
+    enforce_limits,
+    estimate_streaming_token_request,
+    estimate_tokens_from_text,
+    log_llm_usage,
+)
 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -97,6 +104,39 @@ async def _yield_text_as_streaming_chunks(
             await asyncio.sleep(delay_ms / 1000.0)
 
 
+@router.post("/internal/analytics/users")
+def get_internal_user_analytics(body: InternalAnalyticsRequest) -> dict[str, Any]:
+    normalized_user_ids = _normalize_internal_user_ids(body.userIds)
+    req_id = uuid.uuid4().hex[:8]
+    started_at = time.perf_counter()
+    logger.info(
+        "[InternalAnalytics][%s] START users=%s range=%s..%s",
+        req_id,
+        body.userIds,
+        body.startDate,
+        body.endDate,
+    )
+    if not normalized_user_ids:
+        logger.info("[InternalAnalytics][%s] DONE users=0 rows=0 elapsed_ms=0", req_id)
+        return {"success": True, "data": {}}
+
+    analytics_map = _get_internal_user_analytics_map(
+        normalized_user_ids,
+        start_date=body.startDate,
+        end_date=body.endDate,
+        req_id=req_id,
+    )
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "[InternalAnalytics][%s] DONE users=%s rows=%s elapsed_ms=%s",
+        req_id,
+        len(normalized_user_ids),
+        len(analytics_map),
+        elapsed_ms,
+    )
+    return {"success": True, "data": analytics_map}
+
+
 @router.get("/secrets")
 def list_secrets_endpoint(fetch: str | None = Query(None)) -> list[dict[str, Any]]:
     """List secret prompts from `secret_manager` (+ optional GCP values when fetch=true)."""
@@ -148,6 +188,21 @@ class CompleteUploadRequest(BaseModel):
 class DriveImportRequest(BaseModel):
     file_ids: list[str]
 
+class InternalAnalyticsRequest(BaseModel):
+    userIds: list[int | str] = []
+    startDate: str | None = None
+    endDate: str | None = None
+
+
+def _user_id_as_int(user_id: str | None) -> int | None:
+    """Numeric user id for payment-service token caps (mirrors Node userId)."""
+    if not user_id or user_id == "anonymous":
+        return None
+    try:
+        return int(user_id)
+    except (TypeError, ValueError):
+        return None
+
 
 def _resolve_user_id(x_user_id: str | None, authorization: str | None) -> str | None:
     if x_user_id:
@@ -166,6 +221,216 @@ def _resolve_user_id(x_user_id: str | None, authorization: str | None) -> str | 
         return str(user_id) if user_id is not None else None
     except Exception:
         return None
+
+
+def _normalize_internal_user_ids(values: list[int | str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            normalized.append(text)
+    return normalized
+
+
+def _get_internal_user_analytics_map(
+    normalized_user_ids: list[str],
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    req_id: str = "na",
+) -> dict[str, dict[str, Any]]:
+    logger.info(
+        "[InternalAnalytics][%s] PHASE=prepare normalized_user_ids=%s",
+        req_id,
+        normalized_user_ids,
+    )
+    analytics_map: dict[str, dict[str, Any]] = {
+        user_id: {
+            "documentsUploadedCount": 0,
+            "uploadedBytes": 0,
+            "latestUploadAt": None,
+            "casesCreatedCount": 0,
+            "assignedCasesCount": 0,
+            "createdCases": [],
+        }
+        for user_id in normalized_user_ids
+    }
+    if not normalized_user_ids:
+        logger.info("[InternalAnalytics][%s] PHASE=prepare empty_user_list", req_id)
+        return analytics_map
+
+    filters: list[str] = []
+    params: list[Any] = [normalized_user_ids]
+    if start_date:
+        filters.append("c.created_at >= %s")
+        params.append(start_date)
+    if end_date:
+        filters.append("c.created_at <= %s")
+        params.append(end_date)
+    created_filter = f" AND {' AND '.join(filters)}" if filters else ""
+
+    logger.info(
+        "[InternalAnalytics][%s] PHASE=query-build filters=%s",
+        req_id,
+        filters,
+    )
+
+    created_sql = f"""
+        WITH created_cases AS (
+          SELECT
+            c.id::text AS case_id,
+            c.user_id::text AS user_id,
+            c.case_title,
+            c.status,
+            c.created_at,
+            folder.originalname AS folder_name,
+            folder.folder_path AS parent_folder_path,
+            folder.gcs_path AS case_folder_gcs_path,
+            CASE
+              WHEN folder.id IS NULL THEN NULL
+              WHEN COALESCE(folder.folder_path, '') = '' THEN folder.originalname
+              WHEN RIGHT(folder.folder_path, LENGTH(folder.originalname)) = folder.originalname THEN folder.folder_path
+              ELSE folder.folder_path || '/' || folder.originalname
+            END AS case_folder_path
+          FROM cases c
+          LEFT JOIN user_files folder
+            ON folder.id = c.folder_id
+           AND folder.is_folder = TRUE
+          WHERE c.user_id::text = ANY(%s::text[])
+            {created_filter}
+        ),
+        created_case_docs AS (
+          SELECT
+            cc.user_id,
+            cc.case_id,
+            cc.case_title,
+            cc.status,
+            cc.created_at,
+            cc.case_folder_path,
+            cc.case_folder_gcs_path,
+            COALESCE(case_docs.document_count, 0) AS document_count,
+            COALESCE(case_docs.uploaded_bytes, 0) AS uploaded_bytes,
+            case_docs.latest_upload_at
+          FROM created_cases cc
+          LEFT JOIN LATERAL (
+            SELECT
+              COUNT(*) AS document_count,
+              COALESCE(SUM(uf.size), 0) AS uploaded_bytes,
+              MAX(uf.created_at) AS latest_upload_at
+            FROM user_files uf
+            WHERE uf.is_folder = FALSE
+              AND (
+                (
+                  cc.case_folder_gcs_path IS NOT NULL
+                  AND uf.gcs_path LIKE cc.case_folder_gcs_path || '%%'
+                )
+                OR (
+                  cc.case_folder_path IS NOT NULL
+                  AND (
+                    uf.folder_path = cc.case_folder_path
+                    OR uf.folder_path LIKE cc.case_folder_path || '/%%'
+                  )
+                )
+              )
+          ) AS case_docs ON TRUE
+        )
+        SELECT
+          user_id,
+          COUNT(*) AS cases_created_count,
+          COALESCE(SUM(document_count), 0) AS document_count,
+          COALESCE(SUM(uploaded_bytes), 0) AS uploaded_bytes,
+          MAX(latest_upload_at) AS latest_upload_at,
+          COALESCE(
+            JSON_AGG(
+              JSON_BUILD_OBJECT(
+                'caseId', case_id,
+                'caseTitle', case_title,
+                'status', status,
+                'createdAt', created_at,
+                'caseFolderPath', case_folder_path,
+                'caseFolderGcsPath', case_folder_gcs_path,
+                'documentsCount', document_count,
+                'uploadedBytes', uploaded_bytes,
+                'latestUploadAt', latest_upload_at
+              )
+              ORDER BY created_at DESC
+            ),
+            '[]'::json
+          ) AS created_cases
+        FROM created_case_docs
+        GROUP BY user_id
+    """
+    assigned_sql = """
+        SELECT
+          user_id::text AS user_id,
+          COUNT(*) AS assigned_cases_count
+        FROM case_assignments
+        WHERE user_id::text = ANY(%s::text[])
+        GROUP BY user_id::text
+    """
+
+    with get_db_connection() as conn:
+        try:
+            created_result = conn.execute(created_sql, tuple(params)).fetchall()
+            logger.info(
+                "[InternalAnalytics][%s] PHASE=query-created-cases rows=%s",
+                req_id,
+                len(created_result),
+            )
+        except Exception as exc:
+            logger.exception(
+                "[InternalAnalytics][%s] PHASE=query-created-cases ERROR users=%s start=%s end=%s error=%s",
+                req_id,
+                normalized_user_ids,
+                start_date,
+                end_date,
+                exc,
+            )
+            raise
+
+        try:
+            assigned_result = conn.execute(assigned_sql, (normalized_user_ids,)).fetchall()
+        except Exception as exc:
+            logger.warning(
+                "[InternalAnalytics][%s] PHASE=query-assigned-cases WARN users=%s error=%s",
+                req_id,
+                normalized_user_ids,
+                exc,
+            )
+            assigned_result = []
+
+    logger.info(
+        "[InternalAnalytics][%s] PHASE=query-merged created_rows=%s assigned_rows=%s",
+        req_id,
+        len(created_result),
+        len(assigned_result),
+    )
+
+    for row in created_result:
+        uid = str(row.get("user_id"))
+        analytics_map[uid] = {
+            **(analytics_map.get(uid) or {}),
+            "documentsUploadedCount": int(row.get("document_count") or 0),
+            "uploadedBytes": int(row.get("uploaded_bytes") or 0),
+            "latestUploadAt": row.get("latest_upload_at"),
+            "casesCreatedCount": int(row.get("cases_created_count") or 0),
+            "createdCases": row.get("created_cases") if isinstance(row.get("created_cases"), list) else [],
+        }
+    for row in assigned_result:
+        uid = str(row.get("user_id"))
+        analytics_map[uid] = {
+            **(analytics_map.get(uid) or {}),
+            "assignedCasesCount": int(row.get("assigned_cases_count") or 0),
+        }
+
+    logger.info(
+        "[InternalAnalytics][%s] PHASE=assemble users_in_map=%s",
+        req_id,
+        list(analytics_map.keys()),
+    )
+    return analytics_map
 
 
 def _read_inline_text(file_bytes: bytes, upload: UploadFile) -> str | None:
@@ -453,6 +718,51 @@ async def get_llm_limits_for_client(
             "max_document_pages": cfg.get("max_document_pages"),
         },
     }
+
+
+@router.get("/user-usage-and-plan/{user_id}")
+def get_user_usage_and_plan_for_payment(
+    user_id: int,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """
+    Backward-compatible contract for payment-service:
+    GET /api/files/user-usage-and-plan/:userId
+    """
+    actor_user_id = _resolve_user_id(x_user_id, authorization)
+    logger.info(
+        "[Route:user_usage_and_plan] request received actor_user_id=%s target_user_id=%s has_auth=%s",
+        actor_user_id,
+        user_id,
+        bool(authorization),
+    )
+
+    usage = {
+        "user_id": user_id,
+        "tokens_used": 0,
+        "documents_used": 0,
+        "ai_analysis_used": 0,
+        "storage_used_gb": 0,
+        "carry_over_tokens": 0,
+    }
+    plan = {
+        "name": "Unlimited",
+        "type": "firm",
+        "token_limit": 999999999,
+        "document_limit": 999999,
+        "ai_analysis_limit": 999999,
+        "storage_limit_gb": 100,
+        "token_renew_interval_hours": 24,
+    }
+    logger.info(
+        "[Route:user_usage_and_plan] response sent actor_user_id=%s target_user_id=%s tokens_used=%s documents_used=%s",
+        actor_user_id,
+        user_id,
+        usage["tokens_used"],
+        usage["documents_used"],
+    )
+    return {"success": True, "data": {"usage": usage, "plan": plan, "timeLeft": 0}}
 
 
 @router.get("/queue/status")
@@ -905,18 +1215,49 @@ def intelligent_chat(
     sid = (request.secret_id or "").strip()
     if not q and not sid:
         raise HTTPException(status_code=400, detail="question or secret_id is required")
+
+    uid_int = _user_id_as_int(user_id)
+    cap_est = estimate_streaming_token_request(q, has_secret_prompt=bool(sid))
+    cap_enf = enforce_limits(uid_int, {"tokens": cap_est["estimated_total_tokens"]})
+    logger.info(
+        "[FolderChat TOKEN CAP] Enforcement result userId=%s folder=%s requestedTokens=%s allowed=%s message=%s",
+        uid_int,
+        folder_name,
+        cap_est["estimated_total_tokens"],
+        cap_enf.get("allowed"),
+        cap_enf.get("message"),
+    )
+    if not cap_enf.get("allowed"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{cap_enf.get('message', '')} {cap_enf.get('details', '')}".strip(),
+        )
+
     logger.info(
         "[Route:intelligent_chat] status=received folder=%s session_id=%s",
         folder_name,
         request.session_id,
     )
     try:
-        return answer_case_folder_chat(
+        result = answer_case_folder_chat(
             user_id=user_id,
             folder_name=folder_name,
             request=request,
             authorization=authorization,
         )
+        model_name = str((get_llm_chat_config(user_id=user_id, force_refresh=False) or {}).get("llm_model") or "unknown")
+        answer_text = str(result.get("answer") or "")
+        request_id = uuid.uuid4().hex[:12]
+        log_llm_usage(
+            user_id=uid_int,
+            model_name=model_name,
+            input_tokens=estimate_tokens_from_text(q),
+            output_tokens=estimate_tokens_from_text(answer_text),
+            endpoint="/api/files/{folder}/intelligent-chat",
+            request_id=request_id,
+            session_id=str(result.get("session_id") or request.session_id or ""),
+        )
+        return result
     except ValueError as exc:
         logger.exception("[Route:intelligent_chat] folder=%s validation_error=%s", folder_name, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1007,6 +1348,48 @@ async def intelligent_chat_stream(
         if not query_text:
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
+
+        uid_int = _user_id_as_int(user_id)
+        has_secret_id = bool((request.secret_id or "").strip())
+        cap_est = estimate_streaming_token_request(
+            query_text,
+            has_secret_prompt=has_secret_id,
+        )
+        cap_enf = enforce_limits(uid_int, {"tokens": cap_est["estimated_total_tokens"]})
+        logger.info(
+            "[STREAMING TOKEN CAP] Dataflow start userId=%s folder=%s hasSecretId=%s estimate=%s",
+            uid_int,
+            folder_name,
+            has_secret_id,
+            cap_est,
+        )
+        logger.info(
+            "[STREAMING TOKEN CAP] Enforcement result userId=%s folder=%s requestedTokens=%s "
+            "allowed=%s remainingTokens=%s message=%s capStatus=%s",
+            uid_int,
+            folder_name,
+            cap_est["estimated_total_tokens"],
+            cap_enf.get("allowed"),
+            cap_enf.get("remainingTokens"),
+            cap_enf.get("message"),
+            cap_enf.get("capStatus"),
+        )
+        if not cap_enf.get("allowed"):
+            logger.warning(
+                "[STREAMING TOKEN CAP] Request blocked before folder processing userId=%s folder=%s",
+                uid_int,
+                folder_name,
+            )
+            yield _sse(
+                {
+                    "type": "error",
+                    "message": cap_enf.get("message")
+                    or "Your token quota has been exceeded. Please talk to your firm admin.",
+                    "details": cap_enf.get("details") or "",
+                }
+            )
+            return
+
         resolved_chat_request = request.model_copy(
             update={
                 "question": query_text,
@@ -1078,6 +1461,18 @@ async def intelligent_chat_stream(
                     ).strip()
                 else:
                     vector_answer_text = (full_answer or "").strip()
+
+                request_id = uuid.uuid4().hex[:12]
+                model_name = str((llm_config or {}).get("llm_model") or "unknown")
+                log_llm_usage(
+                    user_id=uid_int,
+                    model_name=model_name,
+                    input_tokens=estimate_tokens_from_text(query_text),
+                    output_tokens=estimate_tokens_from_text(vector_answer_text),
+                    endpoint="/api/files/{folder}/intelligent-chat/stream",
+                    request_id=request_id,
+                    session_id=str(session_id or ""),
+                )
 
                 # Pipeline often returns one large segment; split into many SSE chunks for real-time UI.
                 stream_delay_ms = get_streaming_delay_ms(llm_config)
@@ -1352,6 +1747,17 @@ async def intelligent_chat_stream(
                 "prompt_label": display_question if (request.secret_id or "").strip() else None,
                 "used_secret_prompt": bool((request.secret_id or "").strip()),
             })
+            request_id = uuid.uuid4().hex[:12]
+            model_name = str((llm_config or {}).get("llm_model") or "unknown")
+            log_llm_usage(
+                user_id=uid_int,
+                model_name=model_name,
+                input_tokens=estimate_tokens_from_text(query_text),
+                output_tokens=estimate_tokens_from_text(answer),
+                endpoint="/api/files/{folder}/intelligent-chat/stream",
+                request_id=request_id,
+                session_id=str(session_id or ""),
+            )
             yield _sse({
                 "type": "done",
                 "session_id": session_id,

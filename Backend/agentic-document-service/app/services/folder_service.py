@@ -1466,6 +1466,7 @@ class FolderWorkflowService:
         accessible_user_ids = self._get_accessible_user_ids(user_id)
         if not accessible_user_ids:
             return []
+        limited_firm_user = self._is_limited_firm_user(str(user_id))
 
         # Fetch only folder records joined with cases — same logic as document-service
         folder_query = """
@@ -1481,6 +1482,17 @@ class FolderWorkflowService:
             LEFT JOIN cases c ON uf.id = c.folder_id
             WHERE uf.user_id::text = ANY(%s::text[])
               AND uf.is_folder = true
+              AND (
+                    %s = FALSE
+                    OR EXISTS (
+                        SELECT 1
+                        FROM cases c2
+                        INNER JOIN case_assignments ca
+                          ON ca.case_id = c2.id
+                        WHERE c2.folder_id = uf.id
+                          AND ca.user_id::text = %s::text
+                    )
+                  )
             ORDER BY uf.created_at DESC
         """
         # Fetch all files (non-folders) in one query for children matching
@@ -1494,7 +1506,7 @@ class FolderWorkflowService:
             ORDER BY originalname ASC
         """
         with get_db_connection() as conn, conn.cursor() as cur:
-            cur.execute(folder_query, [accessible_user_ids])
+            cur.execute(folder_query, [accessible_user_ids, limited_firm_user, str(user_id)])
             folder_rows = list(cur.fetchall())
             cur.execute(files_query, [accessible_user_ids])
             file_rows = list(cur.fetchall())
@@ -1539,6 +1551,12 @@ class FolderWorkflowService:
                     "document_count": len(folder_children),
                 }
             )
+        logger.info(
+            "[FolderService] task=list_folders_db user_id=%s limited_firm_user=%s folder_count=%s",
+            user_id,
+            limited_firm_user,
+            len(folders),
+        )
         return folders
 
     def _get_documents_in_folder_from_db(self, folder_name: str, user_id: str | None) -> list[dict[str, Any]] | None:
@@ -1547,6 +1565,7 @@ class FolderWorkflowService:
         accessible_user_ids = self._get_accessible_user_ids(user_id)
         if not accessible_user_ids:
             return []
+        limited_firm_user = self._is_limited_firm_user(str(user_id))
 
         # Select gcs_path too so we can use it for GCS-based file matching below
         folder_query = """
@@ -1555,13 +1574,31 @@ class FolderWorkflowService:
             WHERE user_id::text = ANY(%s::text[])
               AND is_folder = true
               AND originalname = %s
+              AND (
+                    %s = FALSE
+                    OR EXISTS (
+                        SELECT 1
+                        FROM cases c2
+                        INNER JOIN case_assignments ca
+                          ON ca.case_id = c2.id
+                        WHERE c2.folder_id = user_files.id
+                          AND ca.user_id::text = %s::text
+                    )
+                  )
             ORDER BY created_at DESC
             LIMIT 1
         """
         with get_db_connection() as conn, conn.cursor() as cur:
-            cur.execute(folder_query, [accessible_user_ids, folder_name])
+            cur.execute(folder_query, [accessible_user_ids, folder_name, limited_firm_user, str(user_id)])
             folder = cur.fetchone()
             if not folder:
+                if limited_firm_user:
+                    logger.info(
+                        "[FolderService] task=get_documents_in_folder status=restricted_no_folder user_id=%s folder=%s",
+                        user_id,
+                        folder_name,
+                    )
+                    return []
                 # No folder record found — try matching files directly by folder_path or folder path pattern
                 # (mirrors document-service File.js findByUserIdAndFolderPath fallback)
                 fallback_query = """
@@ -1647,6 +1684,7 @@ class FolderWorkflowService:
         text_user_ids = [str(value) for value in accessible_user_ids if value is not None]
         if not text_user_ids:
             return []
+        limited_firm_user = self._is_limited_firm_user(str(user_id))
 
         query = """
             SELECT
@@ -1660,10 +1698,16 @@ class FolderWorkflowService:
             FROM cases c
             LEFT JOIN user_files uf ON uf.id = c.folder_id
             WHERE c.user_id::text = ANY(%s::text[])
+              AND (%s = FALSE OR EXISTS (
+                    SELECT 1
+                    FROM case_assignments ca
+                    WHERE ca.case_id = c.id
+                      AND ca.user_id::text = %s::text
+                  ))
             ORDER BY c.created_at DESC
         """
         with get_db_connection() as conn, conn.cursor() as cur:
-            cur.execute(query, [text_user_ids])
+            cur.execute(query, [text_user_ids, limited_firm_user, str(user_id)])
             rows = list(cur.fetchall())
 
         folders: list[dict[str, Any]] = []
@@ -1682,6 +1726,12 @@ class FolderWorkflowService:
                     "children": [],
                 }
             )
+        logger.info(
+            "[FolderService] task=list_folders_from_cases_db user_id=%s limited_firm_user=%s folder_count=%s",
+            user_id,
+            limited_firm_user,
+            len(folders),
+        )
         return folders
 
     def _get_accessible_user_ids(self, user_id: str) -> list[str]:
@@ -1723,12 +1773,92 @@ class FolderWorkflowService:
         )
         return [normalized_user_id]
 
+    def _get_firm_context(self, user_id: str) -> dict[str, Any] | None:
+        normalized_user_id = str(user_id)
+        candidate_bases = [settings.auth_service_url, settings.api_gateway_url]
+        attempted_sources: list[str] = []
+        for base_url in candidate_bases:
+            normalized_base = str(base_url or "").rstrip("/")
+            if not normalized_base or normalized_base in attempted_sources:
+                continue
+            attempted_sources.append(normalized_base)
+            try:
+                response = httpx.get(
+                    f"{normalized_base}/api/auth/internal/user/{normalized_user_id}/firm-context",
+                    timeout=3.0,
+                )
+                response.raise_for_status()
+                payload = response.json() if isinstance(response.json(), dict) else {}
+                logger.info(
+                    "[FolderService] task=resolve_firm_context user_id=%s source=%s accountType=%s isFirmAdmin=%s",
+                    normalized_user_id,
+                    normalized_base,
+                    payload.get("accountType"),
+                    payload.get("isFirmAdmin"),
+                )
+                return payload
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] task=resolve_firm_context status=retry user_id=%s source=%s error=%s",
+                    normalized_user_id,
+                    normalized_base,
+                    exc,
+                )
+        logger.warning(
+            "[FolderService] task=resolve_firm_context status=fallback user_id=%s",
+            normalized_user_id,
+        )
+        return None
+
+    def _is_limited_firm_user(self, user_id: str) -> bool:
+        context = self._get_firm_context(user_id) or {}
+        account_type = str(context.get("accountType") or "").strip().upper()
+        is_firm_admin = bool(context.get("isFirmAdmin"))
+        return account_type == "FIRM_USER" and not is_firm_admin
+
+    def _get_assigned_case_ids_for_user(self, user_id: str) -> list[str]:
+        if not is_db_available():
+            return []
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT case_id::text AS case_id
+                    FROM case_assignments
+                    WHERE user_id::text = %s::text
+                    """,
+                    [str(user_id)],
+                )
+                rows = list(cur.fetchall())
+            case_ids = [str(row.get("case_id")) for row in rows if row.get("case_id") is not None]
+            logger.info(
+                "[FolderService] task=resolve_assigned_cases user_id=%s assigned_case_ids=%s",
+                user_id,
+                case_ids,
+            )
+            return case_ids
+        except Exception as exc:
+            logger.warning(
+                "[FolderService] task=resolve_assigned_cases status=warning user_id=%s error=%s",
+                user_id,
+                exc,
+            )
+            return []
+
     def _list_cases_from_db(self, user_id: str | None) -> list[dict[str, Any]]:
         if not user_id:
             return []
         accessible_user_ids = self._get_accessible_user_ids(user_id)
         text_user_ids = [str(value) for value in accessible_user_ids if value is not None]
         if not text_user_ids:
+            return []
+        limited_firm_user = self._is_limited_firm_user(str(user_id))
+        assigned_case_ids = self._get_assigned_case_ids_for_user(str(user_id)) if limited_firm_user else []
+        if limited_firm_user and not assigned_case_ids:
+            logger.info(
+                "[FolderService] task=list_cases status=restricted_empty user_id=%s reason=no_assigned_cases",
+                user_id,
+            )
             return []
         query = """
             SELECT
@@ -1755,11 +1885,20 @@ class FolderWorkflowService:
                 END
             LEFT JOIN user_files uf ON uf.id = c.folder_id
             WHERE c.user_id::text = ANY(%s::text[])
+              AND (%s = FALSE OR c.id::text = ANY(%s::text[]))
             ORDER BY c.created_at DESC
         """
         with get_db_connection() as conn, conn.cursor() as cur:
-            cur.execute(query, [text_user_ids])
+            cur.execute(query, [text_user_ids, limited_firm_user, assigned_case_ids])
             rows = list(cur.fetchall())
+        logger.info(
+            "[FolderService] task=list_cases source=db user_id=%s limited_firm_user=%s accessible_user_ids=%s assigned_case_ids=%s result_count=%s",
+            user_id,
+            limited_firm_user,
+            text_user_ids,
+            assigned_case_ids,
+            len(rows),
+        )
         return [self._serialize_case_row(row) for row in rows]
 
     def _get_case_from_db(self, case_id: str, user_id: str | None) -> dict[str, Any] | None:
@@ -1772,6 +1911,25 @@ class FolderWorkflowService:
                 return None
             conditions.append("c.user_id::text = ANY(%s::text[])")
             params.append(text_user_ids)
+            limited_firm_user = self._is_limited_firm_user(str(user_id))
+            if limited_firm_user:
+                assigned_case_ids = self._get_assigned_case_ids_for_user(str(user_id))
+                if not assigned_case_ids:
+                    logger.info(
+                        "[FolderService] task=get_case status=restricted_denied user_id=%s case_id=%s reason=no_assigned_cases",
+                        user_id,
+                        case_id,
+                    )
+                    return None
+                conditions.append("c.id::text = ANY(%s::text[])")
+                params.append(assigned_case_ids)
+                logger.info(
+                    "[FolderService] task=get_case scope user_id=%s case_id=%s limited_firm_user=%s assigned_case_ids=%s",
+                    user_id,
+                    case_id,
+                    limited_firm_user,
+                    assigned_case_ids,
+                )
         where_clause = " AND ".join(conditions)
         query = f"""
             SELECT
