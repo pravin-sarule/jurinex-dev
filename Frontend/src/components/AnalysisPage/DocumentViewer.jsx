@@ -7,12 +7,53 @@ import { Bot, Copy, MessageSquare } from 'lucide-react';
 import DownloadPdf from '../DownloadPdf/DownloadPdf';
 import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
 
+const PAGE_BREAK_TOKEN = '__JURINEX_PAGE_BREAK__';
+
+const normalizeForPagination = (text) =>
+  convertJsonToPlainText(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]*[-=]{0,5}\s*PAGE[\s_/-]*BREAK\s*[-=]{0,5}[ \t]*/gi, `\n\n${PAGE_BREAK_TOKEN}\n\n`)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const splitLargeBlockSafely = (block, maxWeight) => {
+  if (!block || block.length <= maxWeight) return [block];
+
+  const sentenceParts = block
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9*"'-])/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (sentenceParts.length <= 1) {
+    return [block];
+  }
+
+  const output = [];
+  let current = '';
+
+  sentenceParts.forEach((sentence) => {
+    const candidate = current ? `${current} ${sentence}` : sentence;
+    if (current && candidate.length > maxWeight) {
+      output.push(current);
+      current = sentence;
+      return;
+    }
+    current = candidate;
+  });
+
+  if (current) {
+    output.push(current);
+  }
+
+  return output.length ? output : [block];
+};
+
 const paginateMarkdownContent = (text) => {
-  const normalized = convertJsonToPlainText(text || '').replace(/\r\n/g, '\n').trim();
+  const normalized = normalizeForPagination(text);
   if (!normalized) return [];
 
   const explicitPages = normalized
-    .split(/\n\s*(?:\f|---\s*PAGE BREAK\s*---|PAGE_BREAK|PAGE BREAK)\s*\n/gi)
+    .split(new RegExp(`\\n\\s*(?:\\f|${PAGE_BREAK_TOKEN})\\s*\\n`, 'g'))
     .map((chunk) => chunk.trim())
     .filter(Boolean);
 
@@ -28,21 +69,25 @@ const paginateMarkdownContent = (text) => {
   const pages = [];
   let currentBlocks = [];
   let currentWeight = 0;
-  const maxWeight = 2900;
+  const maxWeight = 3400;
 
-  blocks.forEach((block) => {
-    const isHeading = /^#{1,6}\s/.test(block) || /^<h[1-6][\s>]/i.test(block);
-    const isCode = /^```/.test(block) || /^<pre/i.test(block);
-    const weight = Math.max(180, block.length + (isHeading ? 240 : 0) + (isCode ? 280 : 0));
+  blocks.forEach((rawBlock) => {
+    const candidateBlocks = splitLargeBlockSafely(rawBlock, maxWeight);
 
-    if (currentBlocks.length && currentWeight + weight > maxWeight) {
-      pages.push(currentBlocks.join('\n\n'));
-      currentBlocks = [];
-      currentWeight = 0;
-    }
+    candidateBlocks.forEach((block) => {
+      const isHeading = /^#{1,6}\s/.test(block) || /^<h[1-6][\s>]/i.test(block);
+      const isCode = /^```/.test(block) || /^<pre/i.test(block);
+      const weight = Math.max(180, block.length + (isHeading ? 240 : 0) + (isCode ? 280 : 0));
 
-    currentBlocks.push(block);
-    currentWeight += weight;
+      if (currentBlocks.length && currentWeight + weight > maxWeight) {
+        pages.push(currentBlocks.join('\n\n'));
+        currentBlocks = [];
+        currentWeight = 0;
+      }
+
+      currentBlocks.push(block);
+      currentWeight += weight;
+    });
   });
 
   if (currentBlocks.length) {
@@ -64,6 +109,7 @@ const DocumentViewer = ({
   formatDate,
   markdownComponents,
   responseContainerRef,
+  exportContentRef,
   suggestedQuestions = [],
   onSuggestedQuestionClick,
 }) => {
@@ -131,16 +177,14 @@ const DocumentViewer = ({
   }, [needsHorizontalScroll]);
 
   useEffect(() => {
-    if (responseContainerRef?.current && (currentResponse || animatedResponseContent)) {
-      const timeout = setTimeout(() => {
-        if (responseContainerRef.current) {
-          responseContainerRef.current.scrollTop = 0;
-        }
-      }, 100);
-      return () => clearTimeout(timeout);
-    }
-    return undefined;
-  }, [currentResponse, animatedResponseContent, responseContainerRef]);
+    if (!responseContainerRef?.current) return undefined;
+    const timeout = setTimeout(() => {
+      if (responseContainerRef.current) {
+        responseContainerRef.current.scrollTop = 0;
+      }
+    }, 100);
+    return () => clearTimeout(timeout);
+  }, [selectedMessageId, responseContainerRef]);
 
   const selectedMessage = messages.find((msg) => msg.id === selectedMessageId);
   const hasContent = currentResponse || animatedResponseContent;
@@ -148,9 +192,14 @@ const DocumentViewer = ({
   const responseText = isAnimatingResponse
     ? animatedResponseContent
     : animatedResponseContent || currentResponse || '';
+  const displayMessage = selectedMessage || {
+    display_text_left_panel: 'Streaming response',
+    question: 'Streaming response',
+    timestamp: new Date().toISOString(),
+  };
   const pages = useMemo(() => paginateMarkdownContent(responseText), [responseText]);
 
-  if (!selectedMessageId || (!hasContent && !isStreaming)) {
+  if ((!selectedMessageId && !hasContent) || (!hasContent && !isStreaming)) {
     return (
       <div className="flex items-center justify-center h-full rounded-[22px] bg-white/80 border border-[#e5dfd4]">
         <div className="text-center text-[#807868] px-6">
@@ -169,7 +218,7 @@ const DocumentViewer = ({
             <div className="min-w-0">
               <h2 className="text-[18px] sm:text-[20px] font-medium text-[#2b3528] flex items-center gap-2 truncate">
                 <Bot className="h-4 w-4 text-[#1f6b5f] shrink-0" />
-                {selectedMessage?.display_text_left_panel || selectedMessage?.question || 'Response'}
+                {displayMessage.display_text_left_panel || displayMessage.question || 'Response'}
               </h2>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -183,15 +232,15 @@ const DocumentViewer = ({
               </button>
               <DownloadPdf
                 markdownOutputRef={markdownOutputRef}
-                questionTitle={selectedMessage?.question || selectedMessage?.display_text_left_panel || 'AI_Analysis'}
+                contentRef={exportContentRef}
+                questionTitle={displayMessage.question || displayMessage.display_text_left_panel || 'AI_Analysis'}
               />
             </div>
           </div>
-          <div className="flex items-center justify-between text-xs text-[#807868] gap-3">
+          <div className="flex items-center text-xs text-[#807868]">
             <span className="truncate">
-              {selectedMessage?.timestamp ? formatDate(selectedMessage.timestamp) : 'Preparing response'}
+              {displayMessage.timestamp ? formatDate(displayMessage.timestamp) : 'Preparing response'}
             </span>
-            <span>{pages.length || 1} page{pages.length === 1 ? '' : 's'}</span>
           </div>
         </div>
       </div>
@@ -211,52 +260,51 @@ const DocumentViewer = ({
           }
         `}</style>
         <div className="space-y-5">
-          {pages.length ? pages.map((pageContent, index) => (
-            <article
-              key={`response-page-${index + 1}`}
-              className="mx-auto w-full max-w-[780px] min-h-[1040px] bg-white border border-[#d9d2c6] rounded-[8px] shadow-[0_16px_34px_rgba(15,23,42,0.12)] px-8 sm:px-10 py-7"
-            >
-              <div className="flex items-center justify-between border-b border-[#e4ddd2] pb-3 text-[11px] uppercase tracking-[0.12em] text-[#807868]">
-                <span className="truncate max-w-[68%]">JuriNex Analysis</span>
-                <span>Page {index + 1}</span>
-              </div>
-              <div className="pt-6">
-                <div
-                  className="document-viewer-horizontal-container"
-                  ref={index === 0 ? horizontalScrollRef : undefined}
-                >
+          <div ref={exportContentRef ?? null} className="space-y-5">
+            {pages.length ? pages.map((pageContent, index) => (
+              <article
+                key={`response-page-${index + 1}`}
+                className="export-page mx-auto w-full max-w-[794px] min-h-[1123px] bg-white border border-[#d9d2c6] rounded-[8px] shadow-[0_16px_34px_rgba(15,23,42,0.12)] px-8 sm:px-10 py-7"
+                style={{ width: '100%' }}
+              >
+                <div className="flex items-center border-b border-[#e4ddd2] pb-3 text-[11px] uppercase tracking-[0.12em] text-[#807868]">
+                  <span>JuriNex Analysis</span>
+                </div>
+                <div className="pt-6">
                   <div
-                    className="prose prose-gray max-w-none"
-                    ref={index === 0 ? markdownOutputRef : undefined}
-                    style={{
-                      width: '100%',
-                      minWidth: 0,
-                      overflowWrap: 'anywhere',
-                      wordBreak: 'break-word',
-                    }}
+                    className="document-viewer-horizontal-container"
+                    ref={index === 0 ? horizontalScrollRef : undefined}
                   >
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                      components={markdownComponents}
+                    <div
+                      className="prose prose-gray max-w-none"
+                      ref={index === 0 ? markdownOutputRef : undefined}
+                      style={{
+                        width: '100%',
+                        minWidth: 0,
+                        overflowWrap: 'anywhere',
+                        wordBreak: 'break-word',
+                      }}
                     >
-                      {pageContent}
-                    </ReactMarkdown>
-                    {index === pages.length - 1 && (isAnimatingResponse || isStreaming) && (
-                      <span className="inline-flex items-center ml-1">
-                        <span className="inline-block w-1.5 h-4 bg-[#1f6b5f] animate-pulse"></span>
-                      </span>
-                    )}
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                        components={markdownComponents}
+                      >
+                        {pageContent}
+                      </ReactMarkdown>
+                      {index === pages.length - 1 && (isAnimatingResponse || isStreaming) && (
+                        <span className="inline-flex items-center ml-1">
+                          <span className="inline-block w-1.5 h-4 bg-[#1f6b5f] animate-pulse"></span>
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="mt-10 pt-4 border-t border-[#e7e1d7] text-right text-[11px] text-[#807868]">
-                Page {index + 1} / {pages.length}
-              </div>
-            </article>
-          )) : (
-            <div className="mx-auto w-full max-w-[780px] min-h-[1040px] bg-white border border-[#d9d2c6] rounded-[8px] shadow-[0_16px_34px_rgba(15,23,42,0.12)] px-8 py-7" />
-          )}
+              </article>
+            )) : (
+              <div className="mx-auto w-full max-w-[794px] min-h-[1123px] bg-white border border-[#d9d2c6] rounded-[8px] shadow-[0_16px_34px_rgba(15,23,42,0.12)] px-8 py-7" style={{ width: '100%' }} />
+            )}
+          </div>
           {!isStreaming && !isAnimatingResponse && suggestedQuestions.length > 0 && (
             <section className="mx-auto w-full max-w-[780px] bg-[#f8fbfa] border border-[#d7e8e1] rounded-[16px] px-5 py-4">
               <div className="mb-3">

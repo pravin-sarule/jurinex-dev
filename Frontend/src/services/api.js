@@ -676,7 +676,7 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  });
  }
 
- async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null, extraFetchParams = null, fileIds = null) {
+ async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null, extraFetchParams = null, fileIds = null, onThought = null) {
  const token = this.getAuthToken();
  
  const body = { question, file_id: fileId };
@@ -784,6 +784,9 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
            onStatus(parsed.status, parsed.message);
          } else if (parsed.type === 'metadata' && onMetadata) {
            onMetadata(parsed);
+         } else if (parsed.type === 'thought' && onThought) {
+           const thoughtPiece = typeof parsed.text === 'string' ? parsed.text : '';
+           if (thoughtPiece) onThought(thoughtPiece);
          } else if (parsed.type === 'chunk' && onChunk) {
            const piece = typeof parsed.text === 'string' ? parsed.text : '';
            accumulatedAnswer += piece;
@@ -844,7 +847,7 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
    return this.chatModelRequest('/api/chat/general/sessions');
  }
 
- async askGeneralChatStream(question, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, extraFetchParams = null) {
+ async askGeneralChatStream(question, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, extraFetchParams = null, onThought = null) {
    const token = this.getAuthToken();
 
    const body = { question };
@@ -927,7 +930,10 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
            const parsed = JSON.parse(data);
            if (parsed.type === 'status' && onStatus) onStatus(parsed.status, parsed.message);
            else if (parsed.type === 'metadata' && onMetadata) onMetadata(parsed);
-           else if (parsed.type === 'chunk' && onChunk) {
+           else if (parsed.type === 'thought' && onThought) {
+             const thoughtPiece = typeof parsed.text === 'string' ? parsed.text : '';
+             if (thoughtPiece) onThought(thoughtPiece);
+           } else if (parsed.type === 'chunk' && onChunk) {
              const piece = typeof parsed.text === 'string' ? parsed.text : '';
              accumulatedAnswer += piece;
              onChunk(piece);

@@ -1,7 +1,16 @@
-const { VertexAI } = require('@google-cloud/vertexai');
+const { GoogleGenAI, createPartFromUri } = require('@google/genai');
 const path = require('path');
+const { PDFDocument } = require('pdf-lib');
 const { logLLMUsage } = require('./llmUsageService');
 const { resolveVertexModelId } = require('./llmConfigService');
+const {
+  getObjectMetadata,
+  downloadObjectBuffer,
+  uploadBufferViaSignedUrl,
+} = require('./gcsService');
+
+const VERTEX_FILE_SIZE_LIMIT_BYTES = 50 * 1024 * 1024;
+const PDF_CHUNK_TARGET_BYTES = 48 * 1024 * 1024;
 
 const MODEL_MAX_OUTPUT_TOKENS = {
   'gemini-2.0-flash-lite': 8192,
@@ -108,6 +117,22 @@ function getGCSProjectId() {
 }
 
 let vertexAI;
+function getGoogleAuthOptions() {
+  if (!process.env.GCS_KEY_BASE64) return undefined;
+
+  try {
+    const jsonString = Buffer.from(process.env.GCS_KEY_BASE64, 'base64').toString('utf-8');
+    const credentials = JSON.parse(jsonString);
+    if (credentials?.client_email && credentials?.private_key) {
+      return { credentials };
+    }
+  } catch (error) {
+    console.warn(`[LLM] Failed to parse GCS_KEY_BASE64 for Vertex auth: ${error.message}`);
+  }
+
+  return undefined;
+}
+
 function initializeVertexAI() {
   if (vertexAI) return vertexAI;
 
@@ -117,9 +142,11 @@ function initializeVertexAI() {
 
     console.log(`Initializing Vertex AI for project: ${projectId}, location: ${location}`);
 
-    vertexAI = new VertexAI({
+    vertexAI = new GoogleGenAI({
+      vertexai: true,
       project: projectId,
       location,
+      googleAuthOptions: getGoogleAuthOptions(),
     });
 
     return vertexAI;
@@ -140,16 +167,205 @@ function normalizeGcsUris(gcsUriOrUris) {
 }
 
 function buildFilePartsFromGcsUris(uris) {
-  return uris.map((uri) => ({
-    fileData: { mimeType: getMimeTypeFromPath(uri), fileUri: uri },
-  }));
+  return uris.map((uri) => createPartFromUri(uri, getMimeTypeFromPath(uri)));
+}
+
+function parseGcsUri(uri) {
+  const match = /^gs:\/\/([^/]+)\/(.+)$/.exec(String(uri || '').trim());
+  if (!match) return null;
+  return { bucketName: match[1], objectPath: match[2] };
+}
+
+function buildTempSessionPrefix(sessionId, sourcePath) {
+  const safeSessionId = String(sessionId || `adhoc-${Date.now()}`).replace(/[^a-zA-Z0-9-_]/g, '_');
+  const baseName = path.basename(sourcePath, path.extname(sourcePath))
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .slice(0, 80) || 'document';
+  return `tmp/${safeSessionId}/${baseName}`;
+}
+
+function buildUnifiedDocumentNotice(segmentGroups) {
+  if (!Array.isArray(segmentGroups) || !segmentGroups.length) {
+    return '';
+  }
+
+  const lines = [
+    'Context header: some attached files are sequential segments of one larger source document.',
+    'Treat every segment from the same source as one unified document, not as separate sources.',
+    'Synthesize information across all segments before answering.',
+  ];
+
+  for (const group of segmentGroups) {
+    lines.push(
+      `Source "${group.sourceName}" is split into ${group.partCount} parts covering pages 1-${group.pageCount}.`
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function buildPreparedFileDescriptor(sourceUri, expandedUris, wasSplit) {
+  return {
+    source_gcs_uri: sourceUri,
+    was_split: !!wasSplit,
+    active_gcs_uris: expandedUris,
+    split_gcs_uris: wasSplit ? expandedUris : [],
+  };
+}
+
+async function splitPdfIntoGcsParts(sourceUri, sessionId) {
+  const parsed = parseGcsUri(sourceUri);
+  if (!parsed) {
+    throw new Error(`Invalid GCS URI: ${sourceUri}`);
+  }
+
+  const metadata = await getObjectMetadata(parsed.bucketName, parsed.objectPath);
+  const totalSize = Number(metadata?.size || 0);
+  if (!Number.isFinite(totalSize) || totalSize <= VERTEX_FILE_SIZE_LIMIT_BYTES) {
+    return {
+      uris: [sourceUri],
+      split: false,
+      segmentGroup: null,
+      preparedFile: buildPreparedFileDescriptor(sourceUri, [sourceUri], false),
+    };
+  }
+
+  if (getMimeTypeFromPath(parsed.objectPath) !== 'application/pdf') {
+    throw new Error(
+      `File ${path.basename(parsed.objectPath)} exceeds 50 MB and is not a PDF, so it cannot be page-split for Vertex AI.`
+    );
+  }
+
+  console.log(`[LLM] Splitting oversized PDF for Vertex AI: ${sourceUri} (${totalSize} bytes)`);
+  const buffer = await downloadObjectBuffer(parsed.bucketName, parsed.objectPath);
+  const sourcePdf = await PDFDocument.load(buffer);
+  const totalPages = sourcePdf.getPageCount();
+  if (!totalPages) {
+    throw new Error(`PDF ${path.basename(parsed.objectPath)} contains no pages.`);
+  }
+
+  const estimatedChunkCount = Math.max(2, Math.ceil(totalSize / PDF_CHUNK_TARGET_BYTES));
+  const estimatedPagesPerChunk = Math.max(1, Math.ceil(totalPages / estimatedChunkCount));
+  const tempPrefix = buildTempSessionPrefix(sessionId, parsed.objectPath);
+  const partUris = [];
+  const pageRanges = [];
+
+  let startPage = 0;
+  let partIndex = 1;
+
+  while (startPage < totalPages) {
+    let endPage = Math.min(totalPages, startPage + estimatedPagesPerChunk);
+    let chunkBuffer = null;
+
+    while (endPage > startPage) {
+      const chunkDoc = await PDFDocument.create();
+      const pageIndexes = Array.from({ length: endPage - startPage }, (_, idx) => startPage + idx);
+      const copiedPages = await chunkDoc.copyPages(sourcePdf, pageIndexes);
+      copiedPages.forEach((page) => chunkDoc.addPage(page));
+      chunkBuffer = Buffer.from(await chunkDoc.save());
+
+      if (chunkBuffer.length <= PDF_CHUNK_TARGET_BYTES || endPage - startPage === 1) {
+        if (endPage - startPage === 1 && chunkBuffer.length > VERTEX_FILE_SIZE_LIMIT_BYTES) {
+          throw new Error(
+            `Page ${startPage + 1} of ${path.basename(parsed.objectPath)} is larger than the Vertex AI file limit even by itself, so the PDF cannot be split safely.`
+          );
+        }
+        break;
+      }
+
+      endPage -= 1;
+    }
+
+    if (!chunkBuffer || !chunkBuffer.length) {
+      throw new Error(`Failed to generate PDF chunk for ${sourceUri}`);
+    }
+
+    const objectPath = `${tempPrefix}/part_${partIndex}.pdf`;
+    const partUri = await uploadBufferViaSignedUrl(parsed.bucketName, objectPath, chunkBuffer, 'application/pdf');
+    partUris.push(partUri);
+    pageRanges.push(`pages ${startPage + 1}-${endPage}`);
+    startPage = endPage;
+    partIndex += 1;
+  }
+
+  console.log(
+    `[LLM] Created ${partUris.length} PDF part(s) for ${path.basename(parsed.objectPath)}: ${pageRanges.join(', ')}`
+  );
+
+  return {
+    uris: partUris,
+    split: true,
+    segmentGroup: {
+      sourceName: path.basename(parsed.objectPath),
+      partCount: partUris.length,
+      pageCount: totalPages,
+    },
+    preparedFile: buildPreparedFileDescriptor(sourceUri, partUris, true),
+  };
+}
+
+async function prepareGcsUrisForVertex(gcsUris, metadata = {}) {
+  const normalizedUris = normalizeGcsUris(gcsUris);
+  if (!normalizedUris.length) {
+    throw new Error('Invalid GCS URI(s)');
+  }
+
+  const expandedUris = [];
+  const segmentGroups = [];
+  const preparedFiles = [];
+
+  for (const uri of normalizedUris) {
+    const parsed = parseGcsUri(uri);
+    if (!parsed) {
+      throw new Error(`Invalid GCS URI: ${uri}`);
+    }
+
+    const objectMetadata = await getObjectMetadata(parsed.bucketName, parsed.objectPath);
+    const totalSize = Number(objectMetadata?.size || 0);
+    const isPdf = getMimeTypeFromPath(parsed.objectPath) === 'application/pdf';
+
+    if (Number.isFinite(totalSize) && totalSize > VERTEX_FILE_SIZE_LIMIT_BYTES && !isPdf) {
+      throw new Error(
+        `File ${path.basename(parsed.objectPath)} exceeds 50 MB and only PDF files can be split automatically for Vertex AI requests.`
+      );
+    }
+
+    if (isPdf && Number.isFinite(totalSize) && totalSize > VERTEX_FILE_SIZE_LIMIT_BYTES) {
+      const splitResult = await splitPdfIntoGcsParts(uri, metadata.sessionId);
+      expandedUris.push(...splitResult.uris);
+      if (splitResult.segmentGroup) {
+        segmentGroups.push(splitResult.segmentGroup);
+      }
+      if (splitResult.preparedFile) {
+        preparedFiles.push(splitResult.preparedFile);
+      }
+      continue;
+    }
+
+    expandedUris.push(uri);
+    preparedFiles.push(buildPreparedFileDescriptor(uri, [uri], false));
+  }
+
+  if (typeof metadata.onPreparedFiles === 'function') {
+    try {
+      metadata.onPreparedFiles(preparedFiles);
+    } catch (error) {
+      console.warn(`[LLM] Failed to publish prepared file metadata: ${error.message}`);
+    }
+  }
+
+  return {
+    uris: expandedUris,
+    contextHeader: buildUnifiedDocumentNotice(segmentGroups),
+    preparedFiles,
+  };
 }
 
 function aggregateCandidateText(candidate) {
   if (!candidate?.content?.parts?.length) return '';
   let out = '';
   for (const part of candidate.content.parts) {
-    if (part.text) out += part.text;
+    if (!part?.thought && part.text) out += part.text;
   }
   return out;
 }
@@ -278,37 +494,68 @@ function buildGenerationConfig(llmConfig, modelName = '') {
   if (!Number.isFinite(temperature)) temperature = 1;
   temperature = Math.min(tMax, Math.max(tMin, temperature));
 
-  return { maxOutputTokens, temperature };
+  const config = { maxOutputTokens, temperature };
+  if (/^gemini-2\.5-/i.test(normalizeModelName(modelName))) {
+    config.thinkingConfig = { includeThoughts: true };
+  }
+  return config;
+}
+
+function extractVertexThoughtTextFromCandidate(candidate) {
+  if (!candidate?.content?.parts?.length) return '';
+  let out = '';
+  for (const part of candidate.content.parts) {
+    if (part?.thought && part?.text) out += part.text;
+  }
+  return out;
+}
+
+function extractVertexAnswerTextFromCandidate(candidate) {
+  if (!candidate?.content?.parts?.length) return '';
+  let out = '';
+  for (const part of candidate.content.parts) {
+    if (!part?.thought && part?.text) out += part.text;
+  }
+  return out;
+}
+
+function extractVertexStreamChunkPayload(chunk) {
+  if (!chunk) return { answerText: '', thoughtText: '' };
+  let answerText = '';
+  let thoughtText = '';
+
+  const collectParts = (parts = []) => {
+    for (const part of parts) {
+      if (!part?.text) continue;
+      if (part.thought) thoughtText += part.text;
+      else answerText += part.text;
+    }
+  };
+
+  const candidate = chunk.candidates?.[0];
+  if (candidate?.content?.parts) collectParts(candidate.content.parts);
+  else if (candidate?.delta?.content?.parts) collectParts(candidate.delta.content.parts);
+
+  if (!answerText) {
+    try {
+      const t = chunk.text;
+      if (typeof t === 'function') {
+        const out = t.call(chunk);
+        if (out) answerText += String(out);
+      } else if (t) {
+        answerText += String(t);
+      }
+    } catch {
+      // ignore SDK text() errors
+    }
+  }
+
+  return { answerText, thoughtText };
 }
 
 /** Normalize one Vertex stream chunk to text (handles parts + delta + text getter). */
 function extractVertexStreamChunkText(chunk) {
-  if (!chunk) return '';
-  let chunkText = '';
-  try {
-    const t = chunk.text;
-    if (typeof t === 'function') {
-      const out = t.call(chunk);
-      if (out) chunkText += String(out);
-    } else if (t) {
-      chunkText += String(t);
-    }
-  } catch {
-    // ignore SDK text() errors
-  }
-  if (chunkText) return chunkText;
-  const candidate = chunk.candidates?.[0];
-  if (!candidate) return '';
-  if (candidate.content?.parts) {
-    for (const part of candidate.content.parts) {
-      if (part.text) chunkText += part.text;
-    }
-  } else if (candidate.delta?.content?.parts) {
-    for (const part of candidate.delta.content.parts) {
-      if (part.text) chunkText += part.text;
-    }
-  }
-  return chunkText;
+  return extractVertexStreamChunkPayload(chunk).answerText;
 }
 
 /**
@@ -351,12 +598,16 @@ function normalizeVertexUsageForLog(agg, streamedCharCount = 0) {
   return { inputTokens: prompt, outputTokens: candidates, totalTokens: total };
 }
 
+function buildSystemInstructionPart(systemInstruction = '') {
+  if (!systemInstruction) return undefined;
+  return { role: 'system', parts: [{ text: systemInstruction }] };
+}
+
 async function askLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata = {}) {
   try {
     const vertex_ai = initializeVertexAI();
-
-    const uris = normalizeGcsUris(gcsUriOrUris);
-    if (!uris.length) throw new Error('Invalid GCS URI(s)');
+    const preparedContext = await prepareGcsUrisForVertex(gcsUriOrUris, metadata);
+    const uris = preparedContext.uris;
 
     let promptText = question;
     if (userContext) {
@@ -386,29 +637,36 @@ async function askLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata 
         const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
         const chatModelSys = metadata.chatModelSystemInstruction || '';
         const mergedSystem = [chatModelSys, sysBudget].filter(Boolean).join('\n\n');
-        const model = vertex_ai.getGenerativeModel({
-          model: modelName,
-          ...(mergedSystem ? { systemInstruction: { parts: [{ text: mergedSystem }] } } : {}),
-        });
         const fileParts = buildFilePartsFromGcsUris(uris);
+        const contextualParts = preparedContext.contextHeader
+          ? [{ text: preparedContext.contextHeader }, ...fileParts]
+          : fileParts;
 
-        const result = await model.generateContent({
-          contents: [{ role: 'user', parts: [...fileParts, { text: userText }] }],
-          generationConfig,
+        const result = await vertex_ai.models.generateContent({
+          model: modelName,
+          contents: [{ role: 'user', parts: [...contextualParts, { text: userText }] }],
+          config: {
+            ...generationConfig,
+            ...(mergedSystem ? { systemInstruction: buildSystemInstructionPart(mergedSystem) } : {}),
+          },
         });
 
-        if (!result.response?.candidates?.length) {
+        if (!result?.candidates?.length) {
           throw new Error('Empty response from Vertex AI');
         }
 
-        const cand0 = result.response.candidates[0];
-        let text = aggregateCandidateText(cand0);
+        const cand0 = result.candidates[0];
+        let text = extractVertexAnswerTextFromCandidate(cand0) || result.text || aggregateCandidateText(cand0);
         if (!text && cand0.content?.parts?.[0]?.text) {
           text = cand0.content.parts[0].text;
         }
+        const thoughts = extractVertexThoughtTextFromCandidate(cand0);
+        if (typeof metadata.onThoughts === 'function' && thoughts) {
+          metadata.onThoughts(thoughts);
+        }
 
-        if (result.response.usageMetadata) {
-          const um = result.response.usageMetadata;
+        if (result.usageMetadata) {
+          const um = result.usageMetadata;
           const p = um.promptTokenCount || 0;
           const c = um.candidatesTokenCount || 0;
           const t = um.totalTokenCount || 0;
@@ -455,9 +713,8 @@ async function askLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata 
 async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata = {}) {
   try {
     const vertex_ai = initializeVertexAI();
-
-    const uris = normalizeGcsUris(gcsUriOrUris);
-    if (!uris.length) throw new Error('Invalid GCS URI(s)');
+    const preparedContext = await prepareGcsUrisForVertex(gcsUriOrUris, metadata);
+    const uris = preparedContext.uris;
 
     let promptText = question;
     if (userContext) {
@@ -486,49 +743,43 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
         const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
         const chatModelSys = metadata.chatModelSystemInstruction || '';
         const mergedSystem = [chatModelSys, sysBudget].filter(Boolean).join('\n\n');
-        const model = vertex_ai.getGenerativeModel({
-          model: modelName,
-          ...(mergedSystem ? { systemInstruction: { parts: [{ text: mergedSystem }] } } : {}),
-        });
         const fileParts = buildFilePartsFromGcsUris(uris);
+        const contextualParts = preparedContext.contextHeader
+          ? [{ text: preparedContext.contextHeader }, ...fileParts]
+          : fileParts;
 
-        const streamingResp = await model.generateContentStream({
-          contents: [{ role: 'user', parts: [...fileParts, { text: userText }] }],
-          generationConfig,
+        const streamingResp = await vertex_ai.models.generateContentStream({
+          model: modelName,
+          contents: [{ role: 'user', parts: [...contextualParts, { text: userText }] }],
+          config: {
+            ...generationConfig,
+            ...(mergedSystem ? { systemInstruction: buildSystemInstructionPart(mergedSystem) } : {}),
+          },
         });
 
         let totalChunks = 0;
         let streamedLen = 0;
-        for await (const chunk of streamingResp.stream) {
-          const chunkText = extractVertexStreamChunkText(chunk);
-          if (chunkText.length > 0) {
+        let agg = null;
+        for await (const chunk of streamingResp) {
+          agg = chunk;
+          const { answerText, thoughtText } = extractVertexStreamChunkPayload(chunk);
+          if (thoughtText.length > 0) {
+            yield { type: 'thought', text: thoughtText };
+          }
+          if (answerText.length > 0) {
             totalChunks++;
-            streamedLen += chunkText.length;
-            yield chunkText;
+            streamedLen += answerText.length;
+            yield { type: 'chunk', text: answerText };
           }
         }
 
-        let agg = null;
-        try {
-          agg = await streamingResp.response;
-          const cand = agg?.candidates?.[0];
-          const finishReason = cand?.finishReason;
-          if (finishReason === 'MAX_TOKENS') {
+        const cand = agg?.candidates?.[0];
+        const finishReason = cand?.finishReason;
+        if (finishReason === 'MAX_TOKENS') {
             console.warn(
               `[LLM streamLLMWithGCS] finishReason=MAX_TOKENS — model hit output cap (${generationConfig.maxOutputTokens}). Increase max_output_tokens in llm_chat_config if answers should be longer.`
             );
           }
-          const fullText = aggregateCandidateText(cand);
-          if (fullText && fullText.length > streamedLen) {
-            const tail = fullText.slice(streamedLen);
-            if (tail.length > 0) {
-              console.warn(`[LLM streamLLMWithGCS] Appending ${tail.length} chars from aggregated response (stream delta gap).`);
-              yield tail;
-            }
-          }
-        } catch (e) {
-          console.warn('[LLM streamLLMWithGCS] Could not read final aggregated response:', e?.message || e);
-        }
 
         let textLenForUsage = streamedLen;
         if (agg?.candidates?.[0]) {
@@ -588,32 +839,29 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
         const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
         const mergedSystem = [systemInstruction, sysBudget].filter(Boolean).join('\n\n');
 
-        const model = vertex_ai.getGenerativeModel({
+        const streamingResp = await vertex_ai.models.generateContentStream({
           model: modelName,
-          ...(mergedSystem ? { systemInstruction: { parts: [{ text: mergedSystem }] } } : {}),
-        });
-
-        const streamingResp = await model.generateContentStream({
           contents: [{ role: 'user', parts: [{ text: userText }] }],
-          generationConfig,
+          config: {
+            ...generationConfig,
+            ...(mergedSystem ? { systemInstruction: buildSystemInstructionPart(mergedSystem) } : {}),
+          },
         });
 
         let totalChunks = 0;
         let streamedChars = 0;
-        for await (const chunk of streamingResp.stream) {
-          const chunkText = extractVertexStreamChunkText(chunk);
-          if (chunkText.length > 0) {
-            totalChunks++;
-            streamedChars += chunkText.length;
-            yield chunkText;
-          }
-        }
-
         let agg = null;
-        try {
-          agg = await streamingResp.response;
-        } catch (e) {
-          console.warn('[LLM streamLLMGeneral] Could not read aggregate response:', e?.message || e);
+        for await (const chunk of streamingResp) {
+          agg = chunk;
+          const { answerText, thoughtText } = extractVertexStreamChunkPayload(chunk);
+          if (thoughtText.length > 0) {
+            yield { type: 'thought', text: thoughtText };
+          }
+          if (answerText.length > 0) {
+            totalChunks++;
+            streamedChars += answerText.length;
+            yield { type: 'chunk', text: answerText };
+          }
         }
 
         let textLenForUsage = streamedChars;

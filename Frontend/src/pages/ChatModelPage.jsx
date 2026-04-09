@@ -334,6 +334,10 @@ const ChatModelPage = () => {
   const [streamingStatus, setStreamingStatus] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [pendingQuestion, setPendingQuestion] = useState(null);
+  const [processingTimeline, setProcessingTimeline] = useState([]);
+  const [showProcessingTimeline, setShowProcessingTimeline] = useState(true);
+  const [reasoningText, setReasoningText] = useState('');
+  const [showReasoning, setShowReasoning] = useState(true);
  
   const [chatModelFiles, setChatModelFiles] = useState([]);
   const [chatModelHistory, setChatModelHistory] = useState([]);
@@ -360,6 +364,7 @@ const ChatModelPage = () => {
   const dropdownRef = useRef(null);
   const responseRef = useRef(null);
   const markdownOutputRef = useRef(null);
+  const exportContentRef = useRef(null);
   const animationFrameRef = useRef(null);
   const streamBufferRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
@@ -602,6 +607,71 @@ const ChatModelPage = () => {
     return statusMessages[status] || 'Working…';
   };
 
+  const getProcessingStepTitle = (status, message = '') => {
+    if (status === 'initializing') return 'Starting the Request';
+    if (status === 'validating') return 'Validating Access';
+    if (status === 'fetching') {
+      if (/secret prompt/i.test(message)) return 'Loading the Analysis Prompt';
+      if (/professional profile/i.test(message)) return 'Loading Profile Context';
+      if (/previous conversation/i.test(message)) return 'Loading Conversation Context';
+      if (/gcp/i.test(message)) return 'Retrieving Prompt Instructions';
+      return 'Gathering Context';
+    }
+    if (status === 'analyzing') return 'Analyzing the Document';
+    if (status === 'generating') return 'Drafting the Answer';
+    if (status === 'saving') return 'Saving the Conversation';
+    return 'Processing';
+  };
+
+  const pushProcessingStep = (status, message = '') => {
+    const stepId = `${status}:${message || ''}`;
+    setProcessingTimeline((prev) => {
+      const next = prev.map((step) => ({ ...step, state: 'done' }));
+      const existingIndex = next.findIndex((step) => step.id === stepId);
+      const newStep = {
+        id: stepId,
+        status,
+        title: getProcessingStepTitle(status, message),
+        description: message || getStatusMessage(status) || 'Working...',
+        state: 'active',
+      };
+      if (existingIndex >= 0) {
+        next[existingIndex] = newStep;
+        return next;
+      }
+      return [...next, newStep];
+    });
+  };
+
+  const startProcessingTimeline = (questionLabel, initialStatus, initialMessage) => {
+    setPendingQuestion(questionLabel || null);
+    setShowProcessingTimeline(true);
+    setShowReasoning(true);
+    setReasoningText('');
+    setProcessingTimeline([]);
+    if (initialStatus) {
+      pushProcessingStep(initialStatus, initialMessage);
+    }
+  };
+
+  const clearProcessingTimeline = () => {
+    setProcessingTimeline([]);
+    setPendingQuestion(null);
+    setShowProcessingTimeline(true);
+    setReasoningText('');
+    setShowReasoning(true);
+  };
+
+  const normalizedReasoningText = useMemo(() => {
+    if (!reasoningText) return '';
+
+    return reasoningText
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/([^\n])(\*\*[^*\n]+?\*\*)/g, '$1\n\n$2')
+      .trim();
+  }, [reasoningText]);
+
   const fetchChatModelFiles = async () => {
     try {
       const response = await apiService.getChatModelFiles();
@@ -784,9 +854,9 @@ const ChatModelPage = () => {
       streamBufferRef.current = '';
       setStreamingStatus('initializing');
       setStreamingMessage('Starting legal chat...');
+      startProcessingTimeline(question.trim(), 'initializing', 'Starting legal chat...');
 
       const messageId = Date.now();
-      setPendingQuestion(question.trim());
       setHasResponse(true);
       setShowSplitView(true);
       setChatInput('');
@@ -823,6 +893,7 @@ const ChatModelPage = () => {
           setStreamingMessage(
             status === 'generating' ? 'Model thinking' : message || getStatusMessage(status)
           );
+          pushProcessingStep(status, message || getStatusMessage(status));
           console.log('[General Chat] Status:', status, message);
         },
         (metadata) => {
@@ -847,6 +918,7 @@ const ChatModelPage = () => {
 
           setStreamingStatus(null);
           setStreamingMessage('');
+          clearProcessingTimeline();
           const newChat = {
             id: messageId,
             file_id: null,
@@ -883,9 +955,14 @@ const ChatModelPage = () => {
           setIsGeneratingInsights(false);
           setStreamingStatus(null);
           setStreamingMessage('');
-          setPendingQuestion(null);
+          clearProcessingTimeline();
         },
-        Object.keys(generalStreamOpts).length ? generalStreamOpts : null
+        Object.keys(generalStreamOpts).length ? generalStreamOpts : null,
+        (thoughtText) => {
+          if (typeof thoughtText === 'string' && thoughtText) {
+            setReasoningText((prev) => `${prev}${thoughtText}`);
+          }
+        }
       );
     } catch (error) {
       console.error('[General Chat] Error:', error);
@@ -894,7 +971,7 @@ const ChatModelPage = () => {
       setIsGeneratingInsights(false);
       setStreamingStatus(null);
       setStreamingMessage('');
-      setPendingQuestion(null);
+      clearProcessingTimeline();
       throw error;
     }
   };
@@ -908,6 +985,7 @@ const ChatModelPage = () => {
       streamBufferRef.current = '';
       setStreamingStatus('initializing');
       setStreamingMessage('Starting chat request...');
+      startProcessingTimeline(question.trim(), 'initializing', 'Starting chat request...');
 
       if (streamReaderRef.current) {
         try {
@@ -989,6 +1067,7 @@ const ChatModelPage = () => {
           setStreamingMessage(
             status === 'generating' ? 'Model thinking' : message || getStatusMessage(status)
           );
+          pushProcessingStep(status, message || getStatusMessage(status));
           console.log('[askQuestionToChat] Status:', status, message);
         },
         (metadata) => {
@@ -1045,6 +1124,7 @@ const ChatModelPage = () => {
          
           setStreamingStatus(null);
           setStreamingMessage('');
+          clearProcessingTimeline();
          
           if (responseRef.current) {
             setTimeout(() => {
@@ -1065,6 +1145,7 @@ const ChatModelPage = () => {
           setIsGeneratingInsights(false);
           setStreamingStatus(null);
           setStreamingMessage('');
+          clearProcessingTimeline();
          
           setMessages((prev) => {
             return prev.filter((msg) => msg.id !== messageId);
@@ -1076,7 +1157,12 @@ const ChatModelPage = () => {
         null,
         selectedLlmName,
         chatModelStreamFetchParams,
-        ids.length > 1 ? ids : null
+        ids.length > 1 ? ids : null,
+        (thoughtText) => {
+          if (typeof thoughtText === 'string' && thoughtText) {
+            setReasoningText((prev) => `${prev}${thoughtText}`);
+          }
+        }
       );
      
       return finalMetadata;
@@ -1087,6 +1173,7 @@ const ChatModelPage = () => {
       setIsGeneratingInsights(false);
       setStreamingStatus(null);
       setStreamingMessage('');
+      clearProcessingTimeline();
       throw error;
     }
   };
@@ -1809,6 +1896,10 @@ const ChatModelPage = () => {
               newSessionId = parsed.session_id || newSessionId;
             } else if (parsed.type === 'chunk') {
               streamBufferRef.current += parsed.text || '';
+              const liveResponse = streamBufferRef.current;
+              setCurrentResponse(liveResponse);
+              setAnimatedResponseContent(liveResponse);
+              setHasResponse(true);
             } else if (parsed.type === 'done') {
               finalMetadata = parsed;
               const fd = typeof parsed.answer === 'string' ? parsed.answer : '';
@@ -2241,6 +2332,9 @@ const ChatModelPage = () => {
        
         setCurrentResponse('');
         streamBufferRef.current = '';
+        setStreamingStatus('initializing');
+        setStreamingMessage('Starting chat request...');
+        startProcessingTimeline(`Analysis: ${promptLabel}`, 'initializing', 'Starting chat request...');
        
         if (streamReaderRef.current) {
           try {
@@ -2290,10 +2384,18 @@ const ChatModelPage = () => {
           (text) => {
             if (typeof text === 'string') {
               streamBufferRef.current += text;
+              setCurrentResponse(streamBufferRef.current);
+              setAnimatedResponseContent(streamBufferRef.current);
+              setHasResponse(true);
             }
           },
           (status, message) => {
             console.log('[Secret Prompt] Status:', status, message);
+            setStreamingStatus(status);
+            setStreamingMessage(
+              status === 'generating' ? 'Model thinking' : message || getStatusMessage(status)
+            );
+            pushProcessingStep(status, message || getStatusMessage(status));
           },
           (metadata) => {
             console.log('[Secret Prompt] Metadata:', metadata);
@@ -2319,6 +2421,9 @@ const ChatModelPage = () => {
               console.error('[Secret Prompt] Empty response received!');
               setError('Received empty response from server. Please try again.');
               setIsGeneratingInsights(false);
+              setStreamingStatus(null);
+              setStreamingMessage('');
+              clearProcessingTimeline();
               return;
             }
            
@@ -2392,6 +2497,9 @@ const ChatModelPage = () => {
             setHasResponse(true);
             setSuccess('Analysis completed successfully!');
             setIsGeneratingInsights(false);
+            setStreamingStatus(null);
+            setStreamingMessage('');
+            clearProcessingTimeline();
             setIsSecretPromptSelected(false);
             setActiveDropdown('Custom Query');
           },
@@ -2399,6 +2507,9 @@ const ChatModelPage = () => {
             console.error('[Secret Prompt] Error:', error);
             setError(`Analysis failed: ${error}`);
             setIsGeneratingInsights(false);
+            setStreamingStatus(null);
+            setStreamingMessage('');
+            clearProcessingTimeline();
           },
           selectedSecretId,
           true,
@@ -2406,7 +2517,12 @@ const ChatModelPage = () => {
           chatInput.trim() || '',
           selectedLlmName,
           chatModelStreamFetchParams,
-          secretAttachmentIds.length > 1 ? secretAttachmentIds : null
+          secretAttachmentIds.length > 1 ? secretAttachmentIds : null,
+          (thoughtText) => {
+            if (typeof thoughtText === 'string' && thoughtText) {
+              setReasoningText((prev) => `${prev}${thoughtText}`);
+            }
+          }
         );
       } catch (error) {
         console.error('[handleSend] Analysis error:', error);
@@ -2415,6 +2531,9 @@ const ChatModelPage = () => {
         } else {
           setError(getChatModelQuotaUserMessage(error) || `Analysis failed: ${error.message}`);
         }
+        setStreamingStatus(null);
+        setStreamingMessage('');
+        clearProcessingTimeline();
       } finally {
         setIsGeneratingInsights(false);
         streamReaderRef.current = null;
@@ -3140,24 +3259,33 @@ const ChatModelPage = () => {
   const markdownComponents = {
     h1: ({ node, ...props }) => (
       <h1
-        className="text-[26px] font-bold mb-5 mt-7 text-[#243124] border-b border-[#d8d1c5] pb-3 analysis-page-ai-response break-words"
+        className="text-[24px] font-bold mb-5 mt-7 text-[#1a3d2b] bg-[#e8f4ee] border-l-4 border-[#1f6b5f] px-4 py-2 rounded-r-md analysis-page-ai-response break-words"
         {...props}
       />
     ),
     h2: ({ node, ...props }) => (
-      <h2 className="text-[22px] font-bold mb-4 mt-6 text-[#243124] border-b border-[#e4ddd2] pb-2 analysis-page-ai-response break-words" {...props} />
+      <h2
+        className="text-[20px] font-bold mb-4 mt-6 text-[#1a3d2b] bg-[#eef7f2] border-l-4 border-[#2d8c72] px-4 py-2 rounded-r-md analysis-page-ai-response break-words"
+        {...props}
+      />
     ),
     h3: ({ node, ...props }) => (
-      <h3 className="text-[18px] font-semibold mb-3 mt-5 text-[#243124] analysis-page-ai-response break-words" {...props} />
+      <h3
+        className="text-[17px] font-semibold mb-3 mt-5 text-[#1f3d30] bg-[#f3faf6] border-l-3 border-[#4aab87] px-3 py-1.5 rounded-r analysis-page-ai-response break-words"
+        {...props}
+      />
     ),
     h4: ({ node, ...props }) => (
-      <h4 className="text-sm sm:text-base lg:text-lg font-semibold mb-2 sm:mb-3 mt-3 sm:mt-5 text-gray-800 analysis-page-ai-response break-words" {...props} />
+      <h4
+        className="text-[15px] font-semibold mb-2 mt-4 text-[#2a4a38] bg-[#f7fcf9] border-l-2 border-[#6bbfa0] px-3 py-1 rounded-r analysis-page-ai-response break-words"
+        {...props}
+      />
     ),
     h5: ({ node, ...props }) => (
-      <h5 className="text-sm sm:text-base font-semibold mb-2 mt-3 sm:mt-4 text-gray-700 analysis-page-ai-response break-words" {...props} />
+      <h5 className="text-[14px] font-semibold mb-2 mt-3 text-gray-700 px-2 py-1 analysis-page-ai-response break-words" {...props} />
     ),
     h6: ({ node, ...props }) => (
-      <h6 className="text-xs sm:text-sm font-semibold mb-2 mt-2 sm:mt-3 text-gray-700 analysis-page-ai-response break-words" {...props} />
+      <h6 className="text-[13px] font-semibold mb-2 mt-2 text-gray-600 px-2 py-1 analysis-page-ai-response break-words" {...props} />
     ),
     p: ({ node, ...props }) => (
       <p className="mb-4 leading-[1.9] text-[#2f2a22] text-[17px] analysis-page-ai-response break-words" {...props} />
@@ -3657,14 +3785,63 @@ const ChatModelPage = () => {
                 Recent Questions
               </p>
               {pendingQuestion && (
-                <div className="mb-2 p-3 rounded-xl border border-[#cfe1db] bg-[#eef5f2] animate-pulse">
-                  <p className="text-xs font-medium text-[#2b3528] line-clamp-2 mb-2">{pendingQuestion}</p>
-                  <div className="flex items-center space-x-1.5">
-                    <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
-                    <span className="text-xs text-[#1f6b5f] font-medium">
-                      {streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}
-                    </span>
-                  </div>
+                <div className="mb-2 p-3 rounded-xl border border-[#cfe1db] bg-[#f6fbf9]">
+                  <p className="text-xs font-medium text-[#2b3528] line-clamp-2 mb-3">{pendingQuestion}</p>
+                  <button
+                    type="button"
+                    onClick={() => setShowProcessingTimeline((prev) => !prev)}
+                    className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
+                  >
+                    <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                    <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
+                    <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showProcessingTimeline && processingTimeline.length > 0 && (
+                    <div className="border-l border-[#c9ddd5] pl-3 space-y-3">
+                      {processingTimeline.map((step) => (
+                        <div key={step.id}>
+                          <div className="flex items-center gap-2 mb-1">
+                            {step.state === 'active' ? (
+                              <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
+                            ) : (
+                              <CheckCircle className="h-3 w-3 text-[#1f6b5f] flex-shrink-0" />
+                            )}
+                            <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
+                          </div>
+                          <p className="text-xs text-[#4f5b56] leading-5">{step.description}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {normalizedReasoningText && (
+                    <div className="mt-3 pt-3 border-t border-[#dbe9e3]">
+                      <button
+                        type="button"
+                        onClick={() => setShowReasoning((prev) => !prev)}
+                        className="flex items-center gap-2 text-xs font-medium text-[#6f7f79] mb-2"
+                      >
+                        <span>Show AI Reasoning</span>
+                        <ChevronDown className={`h-3 w-3 transition-transform ${showReasoning ? 'rotate-180' : ''}`} />
+                      </button>
+                      {showReasoning && (
+                        <div className="border-l border-[#d6e4de] pl-3 max-h-80 overflow-y-auto pr-2">
+                          <div className="prose prose-sm max-w-none text-[#67756f] prose-p:my-2 prose-headings:my-2 prose-strong:text-[#42504a] prose-em:text-[#67756f]">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {normalizedReasoningText}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {(!showProcessingTimeline || processingTimeline.length === 0) && (
+                    <div className="flex items-center space-x-1.5">
+                      <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
+                      <span className="text-xs text-[#1f6b5f] font-medium">
+                        {streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
@@ -3894,6 +4071,7 @@ const ChatModelPage = () => {
                   formatDate={formatDate}
                   markdownComponents={markdownComponents}
                   responseContainerRef={responseRef}
+                  exportContentRef={exportContentRef}
                   suggestedQuestions={suggestedQuestions}
                   onSuggestedQuestionClick={handleSuggestedQuestionClick}
                 />

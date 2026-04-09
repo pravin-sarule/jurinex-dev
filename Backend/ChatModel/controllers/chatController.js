@@ -255,15 +255,32 @@ function verifyUploadToken(token) {
 }
 
 /** Persisted on each Chat Model turn: all attached files + gs:// URI for session restore. */
-function buildAttachedFilesSnapshot(files, bucketName) {
+function buildAttachedFilesSnapshot(files, bucketName, preparedFiles = []) {
   if (!Array.isArray(files) || !files.length || !bucketName) return null;
-  return files.map((f) => ({
-    file_id: f.id,
-    filename: f.originalname || f.filename || 'document',
-    mimetype: f.mimetype || null,
-    size: f.size != null ? Number(f.size) : null,
-    gcs_uri: f.gcs_path ? `gs://${bucketName}/${f.gcs_path}` : null,
-  }));
+  const preparedBySourceUri = new Map();
+  if (Array.isArray(preparedFiles)) {
+    for (const item of preparedFiles) {
+      if (item?.source_gcs_uri) {
+        preparedBySourceUri.set(item.source_gcs_uri, item);
+      }
+    }
+  }
+  return files.map((f) => {
+    const sourceUri = f.gcs_path ? `gs://${bucketName}/${f.gcs_path}` : null;
+    const prepared = sourceUri ? preparedBySourceUri.get(sourceUri) : null;
+    return {
+      file_id: f.id,
+      filename: f.originalname || f.filename || 'document',
+      mimetype: f.mimetype || null,
+      size: f.size != null ? Number(f.size) : null,
+      gcs_uri: sourceUri,
+      active_gcs_uris: Array.isArray(prepared?.active_gcs_uris) && prepared.active_gcs_uris.length
+        ? prepared.active_gcs_uris
+        : (sourceUri ? [sourceUri] : []),
+      split_gcs_uris: Array.isArray(prepared?.split_gcs_uris) ? prepared.split_gcs_uris : [],
+      was_split: !!prepared?.was_split,
+    };
+  });
 }
 
 function parseAttachedFilesCell(raw) {
@@ -296,10 +313,32 @@ function resolveAttachedFilesForSession(historyRows, file, primaryFileId, bucket
         mimetype: file.mimetype || null,
         size: file.size != null ? Number(file.size) : null,
         gcs_uri: `gs://${bucketName}/${file.gcs_path}`,
+        active_gcs_uris: [`gs://${bucketName}/${file.gcs_path}`],
+        split_gcs_uris: [],
+        was_split: false,
       },
     ];
   }
   return null;
+}
+
+function buildActiveGcsUrisFromAttachedFiles(attachedFiles) {
+  if (!Array.isArray(attachedFiles) || !attachedFiles.length) return [];
+  const uris = [];
+  for (const file of attachedFiles) {
+    if (Array.isArray(file?.active_gcs_uris) && file.active_gcs_uris.length) {
+      uris.push(...file.active_gcs_uris.filter((uri) => typeof uri === 'string' && uri.startsWith('gs://')));
+      continue;
+    }
+    if (Array.isArray(file?.split_gcs_uris) && file.split_gcs_uris.length) {
+      uris.push(...file.split_gcs_uris.filter((uri) => typeof uri === 'string' && uri.startsWith('gs://')));
+      continue;
+    }
+    if (typeof file?.gcs_uri === 'string' && file.gcs_uri.startsWith('gs://')) {
+      uris.push(file.gcs_uri);
+    }
+  }
+  return [...new Set(uris)];
 }
 
 /**
@@ -1084,10 +1123,6 @@ exports.askQuestion = async (req, res) => {
       files.push(file);
     }
 
-    console.log('✅ Permission granted for all attached file(s)');
-
-    const gcsUris = files.map((f) => `gs://${bucketName}/${f.gcs_path}`);
-
     let previousChats = [];
     if (hasExistingSession) {
       previousChats = await FileChat.getChatHistory(sanitizedFileId, finalSessionId);
@@ -1097,6 +1132,19 @@ exports.askQuestion = async (req, res) => {
       previousChats = allChats.slice(-5); // Get last 5 chats for context
       console.log(`📜 Loaded ${previousChats.length} recent messages from file for context (new session)`);
     }
+
+    console.log('✅ Permission granted for all attached file(s)');
+
+    const restoredAttachedFiles = resolveAttachedFilesForSession(
+      previousChats,
+      files[0],
+      sanitizedFileId,
+      bucketName
+    );
+    const gcsUris = buildActiveGcsUrisFromAttachedFiles(restoredAttachedFiles);
+    const activeGcsUris = gcsUris.length
+      ? gcsUris
+      : files.map((f) => `gs://${bucketName}/${f.gcs_path}`);
 
     const conversationContext = formatConversationHistory(previousChats);
     const historyForStorage = simplifyHistory(previousChats);
@@ -1272,7 +1320,8 @@ exports.askQuestion = async (req, res) => {
       env_default: process.env.GEMINI_MODEL_NAME || null
     });
     const chatModelSystemInstruction = await buildChatModelSystemInstruction(fullProfile);
-    const answer = await askLLMWithGCS(promptText, gcsUris, '', {
+    let preparedFilesForSnapshot = [];
+    const answer = await askLLMWithGCS(promptText, activeGcsUris, '', {
       userId: userId,
       endpoint: '/api/chat/ask',
       fileId: sanitizedFileId,
@@ -1280,6 +1329,9 @@ exports.askQuestion = async (req, res) => {
       modelName: resolvedModelName,
       llmConfig: llmConfigForRequest,
       chatModelSystemInstruction,
+      onPreparedFiles: (preparedFiles) => {
+        preparedFilesForSnapshot = Array.isArray(preparedFiles) ? preparedFiles : [];
+      },
     }); // userContext already in promptText; system instruction from DB prompt_type=chat_model
 
     let savedChat;
@@ -1292,7 +1344,7 @@ exports.askQuestion = async (req, res) => {
       console.log(`   - Question length: ${questionToSave.length} chars`);
       console.log(`   - Answer length: ${answer.length} chars`);
 
-      const attachedSnapshot = buildAttachedFilesSnapshot(files, bucketName);
+      const attachedSnapshot = buildAttachedFilesSnapshot(files, bucketName, preparedFilesForSnapshot);
       
       savedChat = await FileChat.saveChat(
         sanitizedFileId,
@@ -1497,8 +1549,6 @@ exports.askQuestionStream = async (req, res) => {
       files.push(file);
     }
 
-    const gcsUris = files.map((f) => `gs://${bucketName}/${f.gcs_path}`);
-
     sendStatus('fetching', 'Fetching previous conversation context...');
 
     let previousChats = [];
@@ -1518,6 +1568,17 @@ exports.askQuestionStream = async (req, res) => {
         console.log(`   [${i + 1}] id=${chat.id} | session=${chat.session_id} | Q="${(chat.question||'').substring(0,60)}..."`);
       });
     }
+
+    const restoredAttachedFiles = resolveAttachedFilesForSession(
+      previousChats,
+      files[0],
+      sanitizedFileId,
+      bucketName
+    );
+    const gcsUris = buildActiveGcsUrisFromAttachedFiles(restoredAttachedFiles);
+    const activeGcsUris = gcsUris.length
+      ? gcsUris
+      : files.map((f) => `gs://${bucketName}/${f.gcs_path}`);
 
     const conversationContext = formatConversationHistory(previousChats);
     const historyForStorage = simplifyHistory(previousChats);
@@ -1697,10 +1758,11 @@ exports.askQuestionStream = async (req, res) => {
     let chunkCount = 0;
     const streamingDelayMs = getStreamingDelayMs(llmChatConfig);
     const chatModelSystemInstruction = await buildChatModelSystemInstruction(fullProfile);
+    let preparedFilesForSnapshot = [];
     try {
       console.log('🔄 Starting to stream LLM response...');
       
-      for await (const chunk of streamLLMWithGCS(promptText, gcsUris, '', {
+      for await (const chunk of streamLLMWithGCS(promptText, activeGcsUris, '', {
         modelName: resolvedModelName,
         llmConfig: llmConfigForRequest,
         userId,
@@ -1708,12 +1770,24 @@ exports.askQuestionStream = async (req, res) => {
         sessionId: finalSessionId,
         endpoint: '/api/chat/ask/stream',
         chatModelSystemInstruction,
+        onPreparedFiles: (preparedFiles) => {
+          preparedFilesForSnapshot = Array.isArray(preparedFiles) ? preparedFiles : [];
+        },
       })) {
-        if (typeof chunk === 'string' && chunk.length > 0) {
-          fullAnswer += chunk;
+        if (chunk?.type === 'thought' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+          const thoughtData = JSON.stringify({ type: 'thought', text: chunk.text });
+          res.write(`data: ${thoughtData}\n\n`);
+          if (res.flush && typeof res.flush === 'function') {
+            res.flush();
+          }
+          continue;
+        }
+
+        if (chunk?.type === 'chunk' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+          fullAnswer += chunk.text;
           chunkCount++;
           
-          const chunkData = JSON.stringify({ type: 'chunk', text: chunk });
+          const chunkData = JSON.stringify({ type: 'chunk', text: chunk.text });
           res.write(`data: ${chunkData}\n\n`);
           
           if (res.flush && typeof res.flush === 'function') {
@@ -1755,7 +1829,7 @@ exports.askQuestionStream = async (req, res) => {
       console.log(`   - Question length: ${questionToSave.length} chars`);
       console.log(`   - Answer length: ${fullAnswer.length} chars`);
 
-      const attachedSnapshot = buildAttachedFilesSnapshot(files, bucketName);
+      const attachedSnapshot = buildAttachedFilesSnapshot(files, bucketName, preparedFilesForSnapshot);
       
       savedChat = await FileChat.saveChat(
         sanitizedFileId,
@@ -2182,10 +2256,21 @@ exports.askGeneralQuestionStream = async (req, res) => {
         sessionId: finalSessionId,
         endpoint: '/api/chat/ask/general/stream',
       })) {
-        if (typeof chunk === 'string' && chunk.length > 0) {
-          fullAnswer += chunk;
+        if (chunk && typeof chunk === 'object' && chunk.type === 'thought' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+          res.write(`data: ${JSON.stringify({ type: 'thought', text: chunk.text })}\n\n`);
+          if (res.flush) res.flush();
+          continue;
+        }
+        const chunkText =
+          typeof chunk === 'string'
+            ? chunk
+            : (chunk && typeof chunk === 'object' && chunk.type === 'chunk' && typeof chunk.text === 'string'
+                ? chunk.text
+                : '');
+        if (chunkText.length > 0) {
+          fullAnswer += chunkText;
           chunkCount++;
-          res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunkText })}\n\n`);
           if (res.flush) res.flush();
           if (streamingDelayMs > 0) {
             await sleep(streamingDelayMs);

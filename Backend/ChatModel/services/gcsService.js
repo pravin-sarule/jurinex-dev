@@ -1,5 +1,6 @@
 const { getBucket } = require('../config/gcs');
 const path = require('path');
+const axios = require('axios');
 
 async function uploadFileToGCS(bucketName, gcsFilePath, fileBuffer, mimeType) {
     if (!bucketName || !gcsFilePath || !fileBuffer) {
@@ -88,6 +89,33 @@ async function createSignedUploadUrl(bucketName, gcsFilePath, mimeType, expiresI
     };
 }
 
+async function uploadBufferViaSignedUrl(bucketName, gcsFilePath, fileBuffer, mimeType, expiresInSeconds = 15 * 60) {
+    if (!bucketName || !gcsFilePath || !fileBuffer) {
+        throw new Error("Missing required params. Required: bucketName, gcsFilePath, fileBuffer");
+    }
+    if (!Buffer.isBuffer(fileBuffer)) {
+        throw new Error('fileBuffer must be a Buffer object');
+    }
+
+    const signed = await createSignedUploadUrl(
+        bucketName,
+        gcsFilePath,
+        mimeType || 'application/octet-stream',
+        expiresInSeconds
+    );
+
+    await axios.put(signed.signedUrl, fileBuffer, {
+        headers: {
+            'Content-Type': signed.contentType,
+            'Content-Length': fileBuffer.length,
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+    });
+
+    return `gs://${bucketName}/${gcsFilePath}`;
+}
+
 async function getObjectMetadata(bucketName, gcsFilePath) {
     const bucket = getBucket(bucketName);
     const file = bucket.file(gcsFilePath);
@@ -116,10 +144,28 @@ async function deleteObjectIfExists(bucketName, gcsFilePath) {
     }
 }
 
+async function deletePrefix(bucketName, prefix) {
+    if (!bucketName || !prefix) {
+        return;
+    }
+
+    try {
+        const bucket = getBucket(bucketName);
+        await bucket.deleteFiles({
+            prefix,
+            force: true,
+        });
+    } catch (error) {
+        console.warn(`[GCS] Could not delete prefix ${bucketName}/${prefix}: ${error.message}`);
+    }
+}
+
 module.exports = {
     uploadFileToGCS,
     createSignedUploadUrl,
+    uploadBufferViaSignedUrl,
     getObjectMetadata,
     downloadObjectBuffer,
     deleteObjectIfExists,
+    deletePrefix,
 };
