@@ -592,7 +592,8 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  }
  }
 
- async uploadChatModelDocument(file) {
+ async uploadChatModelDocument(file, options = {}) {
+  const { onProgress } = options;
   const mimeType = file?.type || "application/octet-stream";
   const initiate = await this.chatModelRequest("/api/chat/upload-document/initiate", {
     method: "POST",
@@ -608,16 +609,46 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
     throw new Error("Signed upload response missing upload_url or upload_token");
   }
 
-  const uploadRes = await fetch(uploadData.upload_url, {
-    method: uploadData.method || "PUT",
-    headers: uploadData.headers || { "Content-Type": mimeType },
-    body: file,
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable || typeof onProgress !== "function") {
+        return;
+      }
+      const percentComplete = Math.min(95, Math.round((event.loaded / event.total) * 95));
+      onProgress(percentComplete);
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Signed upload failed with status ${xhr.status}`));
+      }
+    });
+
+    xhr.addEventListener("error", () => {
+      reject(new Error("Network error during signed upload"));
+    });
+
+    xhr.addEventListener("abort", () => {
+      reject(new Error("Signed upload cancelled"));
+    });
+
+    xhr.open(uploadData.method || "PUT", uploadData.upload_url);
+    const uploadHeaders = uploadData.headers || { "Content-Type": mimeType };
+    Object.keys(uploadHeaders).forEach((key) => {
+      xhr.setRequestHeader(key, uploadHeaders[key]);
+    });
+    xhr.send(file);
   });
-  if (!uploadRes.ok) {
-    throw new Error(`Signed upload failed with status ${uploadRes.status}`);
+
+  if (typeof onProgress === "function") {
+    onProgress(97);
   }
 
-  return this.chatModelRequest("/api/chat/upload-document/complete", {
+  const response = await this.chatModelRequest("/api/chat/upload-document/complete", {
     method: "POST",
     body: JSON.stringify({
       upload_token: uploadData.upload_token,
@@ -626,6 +657,12 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
       size: Number(file?.size || 0),
     }),
   });
+
+  if (typeof onProgress === "function") {
+    onProgress(100);
+  }
+
+  return response;
  }
 
  async askChatModelQuestion(question, fileId, sessionId = null) {

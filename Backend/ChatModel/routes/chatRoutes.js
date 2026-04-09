@@ -1,28 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const multer = require('multer');
 const chatController = require('../controllers/chatController');
 const { protect } = require('../middleware/auth');
 const { enforceLLMChatPolicy } = require('../middleware/llmChatPolicy');
-const { enforceDashboardUploadPolicy } = require('../middleware/dashboardUploadPolicy');
-const { getLLMConfig, getMulterUploadCeilingMb } = require('../services/llmConfigService');
-
-/** Multer limit bytes from `llm_chat_config.multer_upload_ceiling_mb` + `max_document_size_mb` */
-function dynamicUploadSingle(fieldName) {
-  return (req, res, next) => {
-    const userId = req.user?.id ?? req.userId ?? null;
-    getLLMConfig(userId)
-      .then((cfg) => {
-        const mb = getMulterUploadCeilingMb(cfg);
-        const upload = multer({
-          storage: multer.memoryStorage(),
-          limits: { fileSize: mb * 1024 * 1024 },
-        });
-        upload.single(fieldName)(req, res, next);
-      })
-      .catch(next);
-  };
-}
 
 /** Limits from DB (`llm_chat_config`) for client-side validation — no quota side effect */
 router.get('/limits', protect, chatController.getChatLlmLimits);
@@ -46,9 +26,13 @@ router.post(
 router.post(
   '/upload-document',
   protect,
-  dynamicUploadSingle('document'),
-  enforceDashboardUploadPolicy,
-  chatController.uploadDocumentAndGetURI
+  (req, res) => {
+    res.status(410).json({
+      success: false,
+      message: 'Direct multipart upload is disabled for ChatModel. Use /upload-document/initiate and /upload-document/complete.',
+      code: 'SIGNED_UPLOAD_REQUIRED',
+    });
+  }
 );
 
 router.post(

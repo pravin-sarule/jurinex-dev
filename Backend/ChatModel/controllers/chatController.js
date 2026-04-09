@@ -197,6 +197,10 @@ function sleep(ms) {
 
 const UUID_FILE_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SIGNED_UPLOAD_TOKEN_TTL_SECONDS = 15 * 60;
+const INLINE_PAGE_CHECK_MAX_MB = Math.max(
+  1,
+  Number(process.env.SIGNED_UPLOAD_PAGE_CHECK_MAX_MB) || 20
+);
 
 function sanitizeOneFileId(raw) {
   if (raw == null || raw === '') return null;
@@ -496,7 +500,15 @@ exports.completeSignedUpload = async (req, res) => {
     const maxPages = Number(llmCfg?.max_document_pages) || 0;
     const isPdf = finalMime.toLowerCase() === 'application/pdf' || finalName.toLowerCase().endsWith('.pdf');
     if (maxPages > 0 && isPdf) {
-      uploadBuffer = await downloadObjectBuffer(bucketName, gcsFilePath);
+      const inlinePageCheckMaxBytes = INLINE_PAGE_CHECK_MAX_MB * 1024 * 1024;
+      if (objectSize <= inlinePageCheckMaxBytes) {
+        uploadBuffer = await downloadObjectBuffer(bucketName, gcsFilePath);
+      } else {
+        console.warn(
+          `⚠️ Skipping inline PDF page-count validation for ${finalName} (${objectSize} bytes). ` +
+          `File exceeds SIGNED_UPLOAD_PAGE_CHECK_MAX_MB=${INLINE_PAGE_CHECK_MAX_MB}.`
+        );
+      }
     }
 
     const uploadPolicy = await assertUploadAllowed(userId, llmCfg, {

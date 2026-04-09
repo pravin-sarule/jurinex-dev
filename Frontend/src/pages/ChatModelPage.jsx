@@ -548,103 +548,12 @@ const ChatModelPage = () => {
       setIsChatUploading(true);
       setUploadProgress(0);
       setError(null);
-
-      const token = getAuthToken();
-      const authHeaders = {
-        'Content-Type': 'application/json',
-      };
-      if (token) {
-        authHeaders.Authorization = `Bearer ${token}`;
-      }
-
-      const initiateRes = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/upload-document/initiate`, {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({
-          filename: file.name,
-          mimetype: file.type || 'application/octet-stream',
-          size: file.size,
-        }),
+      const response = await apiService.uploadChatModelDocument(file, {
+        onProgress: (percentComplete) => {
+          setUploadProgress(percentComplete);
+          console.log(`[uploadDocumentToChat] Signed upload progress: ${percentComplete}%`);
+        },
       });
-
-      const initiateData = await initiateRes.json().catch(() => ({}));
-      if (!initiateRes.ok) {
-        const quotaErr = new Error(
-          initiateData?.message ||
-          initiateData?.error ||
-          `Failed to initiate upload (${initiateRes.status})`
-        );
-        quotaErr.code = initiateData?.code;
-        quotaErr.details = initiateData?.details;
-        throw quotaErr;
-      }
-
-      const signedData = initiateData?.data || {};
-      const uploadUrl = signedData.upload_url;
-      const uploadToken = signedData.upload_token;
-      if (!uploadUrl || !uploadToken) {
-        throw new Error('Signed upload data missing from server response');
-      }
-
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-
-        xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-            const percentComplete = Math.min(95, Math.round((e.loaded / e.total) * 95));
-            setUploadProgress(percentComplete);
-            console.log(`[uploadDocumentToChat] Signed upload progress: ${percentComplete}%`);
-          }
-        });
-
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Signed upload failed with status ${xhr.status}`));
-          }
-        });
-
-        xhr.addEventListener('error', () => {
-          reject(new Error('Network error during signed upload'));
-        });
-
-        xhr.addEventListener('abort', () => {
-          reject(new Error('Signed upload cancelled'));
-        });
-
-        xhr.open(signedData.method || 'PUT', uploadUrl);
-        const uploadHeaders = signedData.headers || {};
-        Object.keys(uploadHeaders).forEach((key) => {
-          xhr.setRequestHeader(key, uploadHeaders[key]);
-        });
-        xhr.send(file);
-      });
-
-      setUploadProgress(97);
-
-      const completeRes = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/upload-document/complete`, {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({
-          upload_token: uploadToken,
-          filename: file.name,
-          mimetype: file.type || 'application/octet-stream',
-          size: file.size,
-        }),
-      });
-
-      const response = await completeRes.json().catch(() => ({}));
-      if (!completeRes.ok) {
-        const quotaErr = new Error(
-          response?.message ||
-          response?.error ||
-          `Failed to finalize upload (${completeRes.status})`
-        );
-        quotaErr.code = response?.code;
-        quotaErr.details = response?.details;
-        throw quotaErr;
-      }
 
       const fileId = response.data?.file_id || response.file_id;
       if (!fileId) {
