@@ -298,11 +298,11 @@ def enqueue_case_documents(
         raise
 
 
-def get_case_processing_status(folder_name: str) -> dict[str, Any]:
+def get_case_processing_status(folder_name: str, user_id: str | None = None) -> dict[str, Any]:
     task = "processing_status_lookup"
     _log_agent_start("document_processing_agent", task, folder_name=folder_name)
     try:
-        payload = FOLDER_SERVICE.get_processing_status(folder_name).model_dump(mode="json")
+        payload = FOLDER_SERVICE.get_processing_status(folder_name, user_id=user_id).model_dump(mode="json")
         _log_agent_success(
             "document_processing_agent",
             task,

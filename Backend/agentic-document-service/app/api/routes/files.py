@@ -1220,11 +1220,38 @@ def get_documents_in_folder(
 
 
 @router.get("/{folder_name}/status")
-def get_folder_status(folder_name: str) -> dict:
+def get_folder_status(
+    folder_name: str,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _resolve_user_id(x_user_id, authorization)
     try:
-        return get_case_processing_status(folder_name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return get_case_processing_status(folder_name, user_id=user_id)
+    except ValueError:
+        return {
+            "folderName": folder_name,
+            "case_id": folder_name,
+            "job_id": None,
+            "status": "queued",
+            "progress": 0.0,
+            "total_documents": 0,
+            "processed_documents": 0,
+            "failed_documents": 0,
+            "documents": [],
+        }
+    except Exception:
+        return {
+            "folderName": folder_name,
+            "case_id": folder_name,
+            "job_id": None,
+            "status": "queued",
+            "progress": 0.0,
+            "total_documents": 0,
+            "processed_documents": 0,
+            "failed_documents": 0,
+            "documents": [],
+        }
 
 
 @router.post("/{folder_name}/extract-case-fields")

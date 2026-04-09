@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import random
+import re
 import threading
 import time
 from typing import Any
@@ -473,6 +474,35 @@ def _transcript_from_response(response: Any) -> str:
         if alts and (alts[0].transcript or "").strip():
             chunks.append(alts[0].transcript.strip())
     return "\n\n".join(chunks)
+
+
+_SPEAKER_LINE_RE = re.compile(
+    r"^\s*(?:\[\s*)?(speaker)\s*([0-9A-Za-z_-]+)(?:\s*\])?\s*[:\-]\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_speaker_labels(text: str) -> str:
+    """
+    Normalize common speaker label variants into:
+    ``[Speaker N]: utterance``.
+
+    This keeps downstream retrieval and QA speaker-diarization behavior stable
+    across STT and Gemini transcription paths.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    out_lines: list[str] = []
+    for line in raw.splitlines():
+        match = _SPEAKER_LINE_RE.match(line)
+        if not match:
+            out_lines.append(line.rstrip())
+            continue
+        speaker_id = match.group(2).strip()
+        utterance = match.group(3).strip()
+        out_lines.append(f"[Speaker {speaker_id}]: {utterance}")
+    return "\n".join(out_lines).strip()
 
 
 # ── Core transcription functions ─────────────────────────────────────────────
@@ -1324,7 +1354,7 @@ def transcribe(
                     "[SpeechToText] Gemini 2.5 Flash (GCS URI) primary — %d chars (STT skipped)",
                     len(gp),
                 )
-                return gp
+                return _normalize_speaker_labels(gp)
             logger.info(
                 "[SpeechToText] Gemini 2.5 Flash (GCS URI) returned empty — using Speech-to-Text",
             )
@@ -1346,7 +1376,7 @@ def transcribe(
                     alternative_language_codes=alts,
                 )
                 if text and not _is_low_quality(text):
-                    return text
+                    return _normalize_speaker_labels(text)
                 if text:
                     stt_text = stt_text or text  # keep as fallback
             except Exception as exc:
@@ -1368,7 +1398,7 @@ def transcribe(
             progress_callback=progress_callback,
         )
         if text and not _is_low_quality(text):
-            return text
+            return _normalize_speaker_labels(text)
         if text:
             stt_text = stt_text or text  # keep as fallback
 
@@ -1397,7 +1427,7 @@ def transcribe(
             logger.info(
                 "[SpeechToText] Gemini GCS-URI path succeeded — %d chars", len(gemini_text)
             )
-            return gemini_text
+            return _normalize_speaker_labels(gemini_text)
 
         # Stage 2: Inline bytes via API key — fallback for ≤ 20 MB files.
         if not gemini_text or _is_low_quality(gemini_text):
@@ -1408,9 +1438,9 @@ def transcribe(
                     gemini_text = inline_text
 
         if gemini_text and not _is_low_quality(gemini_text):
-            return gemini_text
+            return _normalize_speaker_labels(gemini_text)
         # Return whatever Gemini produced (even low quality) over STT noise.
         if gemini_text:
-            return gemini_text
+            return _normalize_speaker_labels(gemini_text)
 
-    return stt_text
+    return _normalize_speaker_labels(stt_text)

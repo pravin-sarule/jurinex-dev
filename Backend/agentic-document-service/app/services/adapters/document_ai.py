@@ -12,6 +12,7 @@ from app.services.llm_chat_config import get_llm_chat_config, resolve_model_name
 logger = logging.getLogger("agentic_document_service.document_ai")
 _gemini_extract_unavailable_logged = False
 _gemini_qa_unavailable_logged = False
+_SPEAKER_LINE_RE = re.compile(r"\[\s*Speaker\s+([^\]]+?)\s*\]\s*:\s*(.+)", re.IGNORECASE)
 
 # Internal agent names used for document AI operations
 _AGENT_EXTRACTION = "form_population_agent"
@@ -661,6 +662,69 @@ def _call_gemini_for_extraction(text: str) -> dict:
         return {}
 
 
+def _is_audio_source_name(name: str) -> bool:
+    lowered = str(name or "").strip().lower()
+    if not lowered:
+        return False
+    return lowered.endswith((".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".webm", ".mp4", ".opus", ".amr"))
+
+
+def _extract_speaker_turns(document_texts: list[dict[str, str]], *, max_turns: int = 140) -> list[tuple[str, str]]:
+    turns: list[tuple[str, str]] = []
+    for doc in document_texts:
+        text = str(doc.get("text") or "")
+        if not text:
+            continue
+        for line in text.splitlines():
+            match = _SPEAKER_LINE_RE.search(line)
+            if not match:
+                continue
+            speaker = match.group(1).strip()
+            utterance = " ".join(match.group(2).split()).strip()
+            if not utterance:
+                continue
+            turns.append((speaker, utterance))
+            if len(turns) >= max_turns:
+                return turns
+    return turns
+
+
+def _build_speaker_diarization_suffix(document_texts: list[dict[str, str]]) -> str:
+    turns = _extract_speaker_turns(document_texts)
+    if not turns:
+        return ""
+
+    snippets_by_speaker: dict[str, list[str]] = {}
+    for speaker, utterance in turns:
+        snippets_by_speaker.setdefault(speaker, [])
+        if len(snippets_by_speaker[speaker]) < 2:
+            snippets_by_speaker[speaker].append(utterance[:220])
+
+    ordered_speakers = sorted(snippets_by_speaker.keys(), key=lambda x: (len(x), x))
+    speaker_lines: list[str] = []
+    for speaker in ordered_speakers[:8]:
+        snippets = "; ".join(snippets_by_speaker[speaker])
+        speaker_lines.append(f"- Speaker {speaker}: {snippets}")
+
+    transitions: list[str] = []
+    previous_speaker = turns[0][0]
+    for speaker, _utterance in turns[1:]:
+        if speaker == previous_speaker:
+            continue
+        transitions.append(f"Speaker {previous_speaker} -> Speaker {speaker}")
+        previous_speaker = speaker
+        if len(transitions) >= 8:
+            break
+    transition_lines = [f"- {item}" for item in transitions] if transitions else ["- Single-speaker sequence in retrieved context."]
+
+    return (
+        "Speaker Diarization:\n"
+        + "\n".join(speaker_lines)
+        + "\n\nWho Talks To Whom (turn sequence):\n"
+        + "\n".join(transition_lines)
+    )
+
+
 def _call_gemini_for_qa(
     question: str,
     document_texts: list[dict[str, str]],
@@ -712,6 +776,9 @@ def _call_gemini_for_qa(
         context = "\n\n---\n\n".join(context_parts)
         intent_hint = (query_intent or "general").strip().lower()
         format_hint = (output_format or "plain").strip().lower()
+        has_audio_source = any(_is_audio_source_name(name) for name in source_names)
+        has_speaker_labels = bool(_extract_speaker_turns(document_texts, max_turns=1))
+        require_speaker_diarization = has_audio_source or has_speaker_labels
         instruction_parts = [
             "You are a legal expert assistant.",
             "Answer the user's question based ONLY on the following case materials (PDFs, images, text files, AND transcripts from audio — treat transcript excerpts as valid sources).",
@@ -721,6 +788,11 @@ def _call_gemini_for_qa(
             "Cite the source file name inline when materially helpful.",
             "Never say there are no audio files in the folder if the excerpts below include content from an audio filename — that transcript represents the audio.",
         ]
+        if require_speaker_diarization:
+            instruction_parts.append(
+                "Because this query uses audio transcript context, include a 'Speaker Diarization' section and a "
+                "'Who Talks To Whom (turn sequence)' section using only speaker labels found in the transcript."
+            )
         if intent_hint == "timeline":
             instruction_parts.append("Organize the answer chronologically and focus on procedural sequence and dates.")
         elif intent_hint == "risk":
@@ -749,6 +821,10 @@ def _call_gemini_for_qa(
             user_id=user_id,
             summarization_llm_config=summarization_llm_config,
         )
+        if require_speaker_diarization:
+            diarization_suffix = _build_speaker_diarization_suffix(document_texts)
+            if diarization_suffix and "speaker diarization" not in (answer or "").lower():
+                answer = f"{(answer or '').strip()}\n\n{diarization_suffix}".strip()
         return {
             "answer": answer,
             "source_documents": ", ".join(source_names),

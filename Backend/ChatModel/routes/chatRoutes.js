@@ -32,6 +32,18 @@ router.get('/secrets', protect, chatController.listSecretPrompts);
 router.get('/secrets/:id', protect, chatController.getSecretPromptById);
 
 router.post(
+  '/upload-document/initiate',
+  protect,
+  chatController.initiateSignedUpload
+);
+
+router.post(
+  '/upload-document/complete',
+  protect,
+  chatController.completeSignedUpload
+);
+
+router.post(
   '/upload-document',
   protect,
   dynamicUploadSingle('document'),

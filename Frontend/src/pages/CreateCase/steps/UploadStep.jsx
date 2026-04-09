@@ -232,11 +232,12 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
             f.status === 'processing' || f.status === 'queued' || f.status === 'embedding_pending'
           ).length;
           
-          // Calculate progress: 20% (upload) + 70% (processing) based on completion
-          const processingProgressPercent = totalFiles > 0 && filesInFolder.length > 0
-            ? Math.round((processedCount / totalFiles) * 70)
-            : 0;
-          const newProgress = 20 + processingProgressPercent;
+          // Real-time progress from backend per-file processing_progress (0-100 per file),
+          // mapped to UI processing phase 20-90%.
+          const avgBackendProgress = filesInFolder.length > 0
+            ? filesInFolder.reduce((sum, f) => sum + (Number(f.processing_progress) || 0), 0) / filesInFolder.length
+            : Number(statusResult.progress) || 0;
+          const newProgress = Math.max(20, Math.min(90, Math.round(20 + (avgBackendProgress * 0.7))));
           
           // Force state update with explicit value
           setProcessingProgress(newProgress);
@@ -789,27 +790,14 @@ const UploadStep = ({ caseData, setCaseData, onComplete, onUploadStatusChange })
             </span>
           </div>
           {/* Progress Bar with Percentage */}
-          <div className="relative w-full bg-blue-200 rounded-full h-5 overflow-hidden shadow-inner">
+          <div className="relative w-full bg-blue-200 rounded-full h-2 overflow-hidden shadow-inner">
             <div
-              className="bg-gradient-to-r from-[#21C1B6] to-[#1AA89E] h-5 rounded-full transition-all duration-500 ease-out shadow-sm relative flex items-center justify-center"
+              className="bg-gradient-to-r from-[#21C1B6] to-[#1AA89E] h-2 rounded-full transition-all duration-500 ease-out shadow-sm"
               style={{ 
                 width: `${Math.max(0, Math.min(100, Math.round(processingProgress)))}%`,
                 minWidth: processingProgress > 0 ? '2%' : '0%'
               }}
-            >
-              {/* Percentage text inside progress bar - always show when there's progress */}
-              {Math.round(processingProgress) > 8 && (
-                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow-sm">
-                  {Math.round(processingProgress)}%
-                </span>
-              )}
-            </div>
-            {/* Percentage text outside progress bar (when percentage is low) */}
-            {Math.round(processingProgress) <= 8 && Math.round(processingProgress) > 0 && (
-              <span className="absolute inset-0 flex items-center justify-start pl-3 text-xs font-bold text-[#21C1B6]">
-                {Math.round(processingProgress)}%
-              </span>
-            )}
+            />
           </div>
         </div>
       )}

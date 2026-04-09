@@ -733,6 +733,20 @@ const documentApi = {
       console.error('[getFolderProcessingStatus] ❌ Error:', error);
       console.error('[getFolderProcessingStatus] Error details:', error.response?.data);
       console.error('[getFolderProcessingStatus] Folder name:', folderName);
+      const detail = String(error.response?.data?.detail || '');
+      if (detail.includes('No processing job found for folder')) {
+        return {
+          folderName,
+          case_id: folderName,
+          job_id: null,
+          status: 'queued',
+          progress: 0,
+          total_documents: 0,
+          processed_documents: 0,
+          failed_documents: 0,
+          documents: [],
+        };
+      }
       
       // Don't throw for timeout errors - let the caller handle retries
       if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {

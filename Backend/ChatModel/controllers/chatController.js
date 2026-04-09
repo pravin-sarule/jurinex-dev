@@ -142,7 +142,13 @@
 
 const File = require('../models/File');
 const FileChat = require('../models/FileChat');
-const { uploadFileToGCS } = require('../services/gcsService');
+const {
+  uploadFileToGCS,
+  createSignedUploadUrl,
+  getObjectMetadata,
+  downloadObjectBuffer,
+  deleteObjectIfExists,
+} = require('../services/gcsService');
 const { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral } = require('../services/llmService');
 const {
   getLLMConfig,
@@ -160,6 +166,7 @@ const UserProfileService = require('../services/userProfileService');
 const pool = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
+const jwt = require('jsonwebtoken');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const { 
   fetchTemplateFilesData, 
@@ -189,6 +196,7 @@ function sleep(ms) {
 }
 
 const UUID_FILE_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SIGNED_UPLOAD_TOKEN_TTL_SECONDS = 15 * 60;
 
 function sanitizeOneFileId(raw) {
   if (raw == null || raw === '') return null;
@@ -209,6 +217,37 @@ function parseFileIdsFromBody(body) {
     if (id) ids.push(id);
   }
   return [...new Set(ids)];
+}
+
+function sanitizeFilename(name) {
+  return String(name || 'document')
+    .replace(/[^\w.\- ]+/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 180);
+}
+
+function buildChatUploadPath(userId, filename) {
+  const ts = Date.now();
+  return `chat-uploads/${userId}/${ts}_${uuidv4()}_${sanitizeFilename(filename)}`;
+}
+
+function signUploadToken(payload) {
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET is not configured');
+  }
+  return jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: SIGNED_UPLOAD_TOKEN_TTL_SECONDS,
+  });
+}
+
+function verifyUploadToken(token) {
+  if (!token) return null;
+  try {
+    return jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return null;
+  }
 }
 
 /** Persisted on each Chat Model turn: all attached files + gs:// URI for session restore. */
@@ -312,6 +351,202 @@ exports.getChatLlmLimits = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: err.message || 'Failed to load LLM config',
+    });
+  }
+};
+
+exports.initiateSignedUpload = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { filename, mimetype, size } = req.body || {};
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    if (!filename || typeof filename !== 'string') {
+      return res.status(400).json({ success: false, message: 'filename is required' });
+    }
+
+    const parsedSize = Number(size);
+    if (!Number.isFinite(parsedSize) || parsedSize <= 0) {
+      return res.status(400).json({ success: false, message: 'size must be a positive number' });
+    }
+
+    const bucketName = process.env.GCS_BUCKET_NAME;
+    if (!bucketName) {
+      return res.status(500).json({
+        success: false,
+        message: 'GCS configuration missing. Please set GCS_BUCKET_NAME in .env',
+      });
+    }
+
+    const llmCfg = await getLLMConfig(userId);
+    const uploadPolicy = await assertUploadAllowed(userId, llmCfg, {
+      sizeBytes: parsedSize,
+      buffer: null,
+      mimetype: mimetype || '',
+      originalname: filename,
+    });
+    if (!uploadPolicy.ok) {
+      const st =
+        uploadPolicy.code === 'DAILY_UPLOAD_LIMIT'
+          ? 429
+          : uploadPolicy.code === 'FILE_TOO_LARGE' || uploadPolicy.code === 'DOCUMENT_TOO_MANY_PAGES'
+            ? 413
+            : 400;
+      return res.status(st).json({
+        success: false,
+        code: uploadPolicy.code,
+        message: uploadPolicy.message,
+        details: uploadPolicy.details,
+      });
+    }
+
+    const gcsFilePath = buildChatUploadPath(userId, filename);
+    const signed = await createSignedUploadUrl(bucketName, gcsFilePath, mimetype || 'application/octet-stream');
+    const uploadToken = signUploadToken({
+      user_id: String(userId),
+      bucket: bucketName,
+      gcs_path: gcsFilePath,
+      filename: filename,
+      mimetype: mimetype || 'application/octet-stream',
+      size: parsedSize,
+      kind: 'chat_signed_upload',
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        upload_url: signed.signedUrl,
+        method: 'PUT',
+        headers: {
+          'Content-Type': signed.contentType,
+        },
+        upload_token: uploadToken,
+        gcs_path: gcsFilePath,
+        gcs_uri: `gs://${bucketName}/${gcsFilePath}`,
+        expires_at: signed.expiresAt,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error creating signed upload URL:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create signed upload URL',
+      error: error.message,
+    });
+  }
+};
+
+exports.completeSignedUpload = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { upload_token, filename, mimetype, size } = req.body || {};
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    if (!upload_token) {
+      return res.status(400).json({ success: false, message: 'upload_token is required' });
+    }
+
+    const tokenPayload = verifyUploadToken(upload_token);
+    if (!tokenPayload || tokenPayload.kind !== 'chat_signed_upload') {
+      return res.status(400).json({ success: false, message: 'Invalid or expired upload token' });
+    }
+    if (String(tokenPayload.user_id) !== String(userId)) {
+      return res.status(403).json({ success: false, message: 'Upload token does not belong to this user' });
+    }
+
+    const bucketName = process.env.GCS_BUCKET_NAME;
+    if (!bucketName) {
+      return res.status(500).json({
+        success: false,
+        message: 'GCS configuration missing. Please set GCS_BUCKET_NAME in .env',
+      });
+    }
+    if (tokenPayload.bucket && tokenPayload.bucket !== bucketName) {
+      return res.status(400).json({ success: false, message: 'Upload token bucket mismatch' });
+    }
+
+    const gcsFilePath = tokenPayload.gcs_path;
+    const objectMetadata = await getObjectMetadata(bucketName, gcsFilePath);
+    if (!objectMetadata) {
+      return res.status(400).json({
+        success: false,
+        message: 'Uploaded object not found in bucket. Upload may have failed or expired.',
+      });
+    }
+
+    const objectSize = Number(objectMetadata.size || 0);
+    const expectedSize = Number(size || tokenPayload.size || 0);
+    if (expectedSize > 0 && objectSize !== expectedSize) {
+      await deleteObjectIfExists(bucketName, gcsFilePath);
+      return res.status(400).json({
+        success: false,
+        message: `Uploaded size mismatch. Expected ${expectedSize} bytes, got ${objectSize} bytes.`,
+      });
+    }
+
+    const finalName = String(filename || tokenPayload.filename || path.basename(gcsFilePath));
+    const finalMime = String(mimetype || objectMetadata.contentType || tokenPayload.mimetype || 'application/octet-stream');
+
+    const llmCfg = await getLLMConfig(userId);
+    let uploadBuffer = null;
+    const maxPages = Number(llmCfg?.max_document_pages) || 0;
+    const isPdf = finalMime.toLowerCase() === 'application/pdf' || finalName.toLowerCase().endsWith('.pdf');
+    if (maxPages > 0 && isPdf) {
+      uploadBuffer = await downloadObjectBuffer(bucketName, gcsFilePath);
+    }
+
+    const uploadPolicy = await assertUploadAllowed(userId, llmCfg, {
+      sizeBytes: objectSize,
+      buffer: uploadBuffer,
+      mimetype: finalMime,
+      originalname: finalName,
+    });
+    if (!uploadPolicy.ok) {
+      await deleteObjectIfExists(bucketName, gcsFilePath);
+      const st =
+        uploadPolicy.code === 'DAILY_UPLOAD_LIMIT'
+          ? 429
+          : uploadPolicy.code === 'FILE_TOO_LARGE' || uploadPolicy.code === 'DOCUMENT_TOO_MANY_PAGES'
+            ? 413
+            : 400;
+      return res.status(st).json({
+        success: false,
+        code: uploadPolicy.code,
+        message: uploadPolicy.message,
+        details: uploadPolicy.details,
+      });
+    }
+
+    const savedFile = await File.create({
+      user_id: userId,
+      originalname: finalName,
+      gcs_path: gcsFilePath,
+      mimetype: finalMime,
+      size: objectSize,
+      status: 'uploaded',
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'File uploaded successfully',
+      data: {
+        file_id: savedFile.id,
+        filename: finalName,
+        gcs_uri: `gs://${bucketName}/${gcsFilePath}`,
+        size: objectSize,
+        mimetype: finalMime,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error finalizing signed upload:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to finalize uploaded document',
+      error: error.message,
     });
   }
 };

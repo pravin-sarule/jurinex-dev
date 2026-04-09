@@ -64,6 +64,62 @@ async function uploadFileToGCS(bucketName, gcsFilePath, fileBuffer, mimeType) {
     }
 }
 
+async function createSignedUploadUrl(bucketName, gcsFilePath, mimeType, expiresInSeconds = 15 * 60) {
+    if (!bucketName || !gcsFilePath) {
+        throw new Error("Missing required params. Required: bucketName, gcsFilePath");
+    }
+
+    const bucket = getBucket(bucketName);
+    const file = bucket.file(gcsFilePath);
+    const contentType = mimeType || 'application/octet-stream';
+    const expires = Date.now() + Math.max(60, Number(expiresInSeconds) || 900) * 1000;
+
+    const [signedUrl] = await file.getSignedUrl({
+        version: 'v4',
+        action: 'write',
+        expires,
+        contentType,
+    });
+
+    return {
+        signedUrl,
+        expiresAt: new Date(expires).toISOString(),
+        contentType,
+    };
+}
+
+async function getObjectMetadata(bucketName, gcsFilePath) {
+    const bucket = getBucket(bucketName);
+    const file = bucket.file(gcsFilePath);
+    const [exists] = await file.exists();
+    if (!exists) {
+        return null;
+    }
+    const [metadata] = await file.getMetadata();
+    return metadata;
+}
+
+async function downloadObjectBuffer(bucketName, gcsFilePath) {
+    const bucket = getBucket(bucketName);
+    const file = bucket.file(gcsFilePath);
+    const [buffer] = await file.download();
+    return buffer;
+}
+
+async function deleteObjectIfExists(bucketName, gcsFilePath) {
+    try {
+        const bucket = getBucket(bucketName);
+        const file = bucket.file(gcsFilePath);
+        await file.delete({ ignoreNotFound: true });
+    } catch (error) {
+        console.warn(`[GCS] Could not delete object ${bucketName}/${gcsFilePath}: ${error.message}`);
+    }
+}
+
 module.exports = {
-    uploadFileToGCS
+    uploadFileToGCS,
+    createSignedUploadUrl,
+    getObjectMetadata,
+    downloadObjectBuffer,
+    deleteObjectIfExists,
 };

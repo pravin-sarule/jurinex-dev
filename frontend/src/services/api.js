@@ -593,12 +593,39 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  }
 
  async uploadChatModelDocument(file) {
- const formData = new FormData();
- formData.append("document", file);
- return this.chatModelRequest("/api/chat/upload-document", {
-   method: "POST",
-   body: formData,
- });
+  const mimeType = file?.type || "application/octet-stream";
+  const initiate = await this.chatModelRequest("/api/chat/upload-document/initiate", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: file?.name || "document",
+      mimetype: mimeType,
+      size: Number(file?.size || 0),
+    }),
+  });
+
+  const uploadData = initiate?.data || {};
+  if (!uploadData.upload_url || !uploadData.upload_token) {
+    throw new Error("Signed upload response missing upload_url or upload_token");
+  }
+
+  const uploadRes = await fetch(uploadData.upload_url, {
+    method: uploadData.method || "PUT",
+    headers: uploadData.headers || { "Content-Type": mimeType },
+    body: file,
+  });
+  if (!uploadRes.ok) {
+    throw new Error(`Signed upload failed with status ${uploadRes.status}`);
+  }
+
+  return this.chatModelRequest("/api/chat/upload-document/complete", {
+    method: "POST",
+    body: JSON.stringify({
+      upload_token: uploadData.upload_token,
+      filename: file?.name || "document",
+      mimetype: mimeType,
+      size: Number(file?.size || 0),
+    }),
+  });
  }
 
  async askChatModelQuestion(question, fileId, sessionId = null) {

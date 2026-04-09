@@ -986,13 +986,100 @@ class FolderWorkflowService:
             "folder_name": resolved_folder_name,
         }
 
-    def get_processing_status(self, folder_name: str) -> FolderProcessingStatusResponse:
+    @staticmethod
+    def _parse_dt(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=UTC)
+        text = str(value or "").strip()
+        if not text:
+            return datetime.now(tz=UTC)
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return datetime.now(tz=UTC)
+
+    def _build_processing_status_from_db(
+        self,
+        folder_name: str,
+        user_id: str | None = None,
+    ) -> FolderProcessingStatusResponse | None:
+        if not is_db_available():
+            return None
+        rows = self._get_documents_in_folder_from_db(folder_name, user_id)
+        if rows is None:
+            return None
+
+        documents: list[QueuedDocumentStatus] = []
+        for row in rows:
+            raw_status = str(row.get("status") or ProcessingState.queued.value).strip().lower()
+            try:
+                status = ProcessingState(raw_status)
+            except Exception:
+                status = ProcessingState.queued
+            documents.append(
+                QueuedDocumentStatus(
+                    document_id=str(row.get("id") or ""),
+                    document_name=str(row.get("originalname") or row.get("name") or "document"),
+                    status=status,
+                    processing_progress=float(row.get("processing_progress") or 0.0),
+                    current_operation=None,
+                    metadata={},
+                    updated_at=self._parse_dt(row.get("updated_at") or row.get("created_at")),
+                )
+            )
+
+        documents = sorted(documents, key=lambda item: item.document_name.lower())
+        total = len(documents)
+        processed = sum(1 for item in documents if item.status == ProcessingState.processed)
+        failed = sum(1 for item in documents if item.status == ProcessingState.error)
+        processing = sum(1 for item in documents if item.status in {ProcessingState.processing, ProcessingState.embedding_pending})
+        queued = sum(1 for item in documents if item.status == ProcessingState.queued)
+        progress = round(sum(item.processing_progress for item in documents) / total, 2) if total else 0.0
+
+        if processing > 0 or queued > 0:
+            folder_status: ProcessingState | str = ProcessingState.processing
+        elif total > 0 and processed > 0:
+            folder_status = ProcessingState.processed
+        elif total > 0 and failed == total:
+            folder_status = ProcessingState.error
+        else:
+            folder_status = ProcessingState.queued
+
+        updated_at = max((item.updated_at for item in documents), default=datetime.now(tz=UTC))
+        return FolderProcessingStatusResponse(
+            folderName=folder_name,
+            case_id=folder_name,
+            job_id=None,
+            status=folder_status,
+            progress=progress,
+            total_documents=total,
+            processed_documents=processed,
+            failed_documents=failed,
+            documents=documents,
+            updated_at=updated_at,
+        )
+
+    def get_processing_status(self, folder_name: str, user_id: str | None = None) -> FolderProcessingStatusResponse:
         case_id = folder_name
         with self._lock:
             job_id = self._latest_job_by_case.get(case_id)
             job = self._jobs.get(job_id) if job_id else None
         if not job:
-            raise ValueError(f"No processing job found for folder '{folder_name}'.")
+            db_status = self._build_processing_status_from_db(folder_name, user_id=user_id)
+            if db_status is not None:
+                return db_status
+            return FolderProcessingStatusResponse(
+                folderName=folder_name,
+                case_id=case_id,
+                job_id=None,
+                status=ProcessingState.queued,
+                progress=0.0,
+                total_documents=0,
+                processed_documents=0,
+                failed_documents=0,
+                documents=[],
+                updated_at=datetime.now(tz=UTC),
+            )
 
         documents = sorted(job.documents.values(), key=lambda item: item.document_name.lower())
         total = len(documents)
@@ -1545,7 +1632,8 @@ class FolderWorkflowService:
                         len(persisted_chunks),
                     )
                     stored_case.documents.append(bundle.stored_document)
-                    self._merge_extracted_case_data(case_id, bundle.process_result.metadata, bundle.stored_document.text)
+                    if self._should_collect_autofill(case_id):
+                        self._merge_extracted_case_data(case_id, bundle.process_result.metadata, bundle.stored_document.text)
                     self._update_db_file_processing_state(
                         file_id=db_file_id,
                         status=ProcessingState.processed.value,
@@ -1604,6 +1692,12 @@ class FolderWorkflowService:
         self._pipeline._cases[case_id] = stored_case
         self._extracted_by_case.setdefault(case_id, {})
         return stored_case
+
+    @staticmethod
+    def _should_collect_autofill(case_id: str) -> bool:
+        # Auto-population is only needed during create-case intake flow.
+        # Intake folders are created via /upload-for-processing as temp-xxxx.
+        return str(case_id or "").strip().startswith("temp-")
 
     def _merge_extracted_case_data(self, case_id: str, metadata: dict[str, Any], text: str) -> None:
         extraction = self._pipeline._document_ai.extract(
@@ -1914,6 +2008,7 @@ class FolderWorkflowService:
                 "processing_progress": float(row.get("processing_progress") or 0),
                 "folder_path": row.get("folder_path"),
                 "gcs_path": row.get("gcs_path"),
+                "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else "",
                 "summary": row.get("summary"),
                 "full_text_content": row.get("full_text_content"),
             }

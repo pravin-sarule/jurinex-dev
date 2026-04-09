@@ -550,120 +550,129 @@ const ChatModelPage = () => {
       setError(null);
 
       const token = getAuthToken();
-      const formData = new FormData();
-      formData.append('document', file);
-
-      const headers = {};
+      const authHeaders = {
+        'Content-Type': 'application/json',
+      };
       if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
+        authHeaders.Authorization = `Bearer ${token}`;
       }
 
-      return new Promise((resolve, reject) => {
+      const initiateRes = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/upload-document/initiate`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          filename: file.name,
+          mimetype: file.type || 'application/octet-stream',
+          size: file.size,
+        }),
+      });
+
+      const initiateData = await initiateRes.json().catch(() => ({}));
+      if (!initiateRes.ok) {
+        const quotaErr = new Error(
+          initiateData?.message ||
+          initiateData?.error ||
+          `Failed to initiate upload (${initiateRes.status})`
+        );
+        quotaErr.code = initiateData?.code;
+        quotaErr.details = initiateData?.details;
+        throw quotaErr;
+      }
+
+      const signedData = initiateData?.data || {};
+      const uploadUrl = signedData.upload_url;
+      const uploadToken = signedData.upload_token;
+      if (!uploadUrl || !uploadToken) {
+        throw new Error('Signed upload data missing from server response');
+      }
+
+      await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
 
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
-            const percentComplete = Math.round((e.loaded / e.total) * 100);
+            const percentComplete = Math.min(95, Math.round((e.loaded / e.total) * 95));
             setUploadProgress(percentComplete);
-            console.log(`[uploadDocumentToChat] Upload progress: ${percentComplete}%`);
+            console.log(`[uploadDocumentToChat] Signed upload progress: ${percentComplete}%`);
           }
         });
 
         xhr.addEventListener('load', () => {
           if (xhr.status >= 200 && xhr.status < 300) {
-            try {
-              const response = JSON.parse(xhr.responseText);
-              console.log('[uploadDocumentToChat] Upload response:', response);
-             
-              let fileId = response.data?.file_id || response.file_id;
-             
-              if (!fileId) {
-                console.error('[uploadDocumentToChat] No file_id found in response:', response);
-                setError('No file_id returned from upload');
-                setIsChatUploading(false);
-                reject(new Error('No file_id returned from upload'));
-                return;
-              }
-             
-              console.log('[uploadDocumentToChat] Extracted file_id:', fileId);
-
-              chatAttachmentFileIdsRef.current = [...new Set([...chatAttachmentFileIdsRef.current, fileId])];
-
-              setUploadedFileId(fileId);
-              setFileId(fileId);
-              setUploadProgress(100);
-
-              if (!skipFinalize) {
-                setTimeout(() => {
-                  setIsChatUploading(false);
-                  setSuccess('Document uploaded successfully! You can now ask questions about it.');
-
-                  setShowSplitView(true);
-                  setHasResponse(true);
-
-                  setStreamingStatus('ready');
-                  setStreamingMessage('Document ready. You can now ask questions about it.');
-                }, 500);
-
-                fetchChatModelFiles();
-              }
-
-              resolve({ file_id: fileId, ...response });
-            } catch (error) {
-              console.error('[uploadDocumentToChat] Error parsing upload response:', error);
-              console.error('[uploadDocumentToChat] Response text:', xhr.responseText);
-              setError(`Failed to parse upload response: ${error.message}`);
-              setIsChatUploading(false);
-              reject(new Error(`Failed to parse upload response: ${error.message}`));
-            }
+            resolve();
           } else {
-            let errorMessage = 'Upload failed';
-            let errorData = {};
-            try {
-              errorData = JSON.parse(xhr.responseText);
-              errorMessage = errorData.error || errorData.message || errorMessage;
-            } catch (e) {
-              if (xhr.status === 404) {
-                errorMessage = `Endpoint not found (404). Please check if the server is running and the endpoint '/api/chat/upload-document' exists.`;
-              } else {
-                errorMessage = `Upload failed with status ${xhr.status}`;
-              }
-            }
-            console.error('[uploadDocumentToChat] Upload failed:', {
-              status: xhr.status,
-              statusText: xhr.statusText,
-              responseText: xhr.responseText,
-              url: `${CHAT_MODEL_BASE_URL}/api/chat/upload-document`,
-            });
-            const quotaErr = new Error(errorMessage);
-            quotaErr.code = errorData.code;
-            quotaErr.details = errorData.details;
-            const friendly = getChatModelQuotaUserMessage(quotaErr) || errorMessage;
-            setError(friendly);
-            setIsChatUploading(false);
-            reject(quotaErr);
+            reject(new Error(`Signed upload failed with status ${xhr.status}`));
           }
         });
 
         xhr.addEventListener('error', () => {
-          setError('Network error during upload');
-          setIsChatUploading(false);
-          reject(new Error('Network error during upload'));
+          reject(new Error('Network error during signed upload'));
         });
 
         xhr.addEventListener('abort', () => {
-          setError('Upload cancelled');
-          setIsChatUploading(false);
-          reject(new Error('Upload cancelled'));
+          reject(new Error('Signed upload cancelled'));
         });
 
-        xhr.open('POST', `${CHAT_MODEL_BASE_URL}/api/chat/upload-document`);
-        console.log('[uploadDocumentToChat] Uploading to:', `${CHAT_MODEL_BASE_URL}/api/chat/upload-document`);
-        Object.keys(headers).forEach((key) => {
-          xhr.setRequestHeader(key, headers[key]);
+        xhr.open(signedData.method || 'PUT', uploadUrl);
+        const uploadHeaders = signedData.headers || {};
+        Object.keys(uploadHeaders).forEach((key) => {
+          xhr.setRequestHeader(key, uploadHeaders[key]);
         });
-        xhr.send(formData);
+        xhr.send(file);
       });
+
+      setUploadProgress(97);
+
+      const completeRes = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/upload-document/complete`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          upload_token: uploadToken,
+          filename: file.name,
+          mimetype: file.type || 'application/octet-stream',
+          size: file.size,
+        }),
+      });
+
+      const response = await completeRes.json().catch(() => ({}));
+      if (!completeRes.ok) {
+        const quotaErr = new Error(
+          response?.message ||
+          response?.error ||
+          `Failed to finalize upload (${completeRes.status})`
+        );
+        quotaErr.code = response?.code;
+        quotaErr.details = response?.details;
+        throw quotaErr;
+      }
+
+      const fileId = response.data?.file_id || response.file_id;
+      if (!fileId) {
+        throw new Error('No file_id returned from upload');
+      }
+
+      chatAttachmentFileIdsRef.current = [...new Set([...chatAttachmentFileIdsRef.current, fileId])];
+
+      setUploadedFileId(fileId);
+      setFileId(fileId);
+      setUploadProgress(100);
+
+      if (!skipFinalize) {
+        setTimeout(() => {
+          setIsChatUploading(false);
+          setSuccess('Document uploaded successfully! You can now ask questions about it.');
+
+          setShowSplitView(true);
+          setHasResponse(true);
+
+          setStreamingStatus('ready');
+          setStreamingMessage('Document ready. You can now ask questions about it.');
+        }, 500);
+
+        fetchChatModelFiles();
+      }
+
+      return { file_id: fileId, ...response };
     } catch (error) {
       console.error('[uploadDocumentToChat] Error:', error);
       setError(getChatModelQuotaUserMessage(error) || `Upload failed: ${error.message}`);
