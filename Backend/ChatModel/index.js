@@ -26,25 +26,47 @@ const app = express();
 const PORT = process.env.PORT || 5003;
 
 // Must not use Access-Control-Allow-Origin: * with credentialed requests.
-// origin: true reflects the request Origin so fetch/XHR with credentials works in dev (e.g. 5173 → 8088).
-const corsOrigins = process.env.CORS_ORIGINS
+// Keep known production and local origins enabled even if Cloud Run env vars drift.
+const defaultCorsOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://localhost:5173',
+  'https://ailearn.co.in',
+  'https://www.ailearn.co.in',
+  'https://nexintelagent.netlify.app',
+];
+
+const envCorsOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
-  : null;
+  : [];
+
+const corsOrigins = [...new Set([...defaultCorsOrigins, ...envCorsOrigins])];
 app.use(
   cors({
-    origin:
-      corsOrigins && corsOrigins.length
-        ? (origin, callback) => {
-            if (!origin || corsOrigins.includes(origin)) {
-              callback(null, true);
-            } else {
-              callback(null, false);
-            }
-          }
-        : true,
+    origin: (origin, callback) => {
+      if (!origin || corsOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   })
 );
+app.options(/.*/, cors({
+  origin: (origin, callback) => {
+    if (!origin || corsOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
