@@ -155,6 +155,8 @@ class PresetExecutionResponse(BaseModel):
 
 
 class QueuedDocumentStatus(BaseModel):
+    id: str | None = None
+    file_id: str | None = None
     document_id: str
     document_name: str
     status: ProcessingState

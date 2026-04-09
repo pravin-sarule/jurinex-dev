@@ -30,9 +30,8 @@ _embedding_cache: dict[str, list[float]] = {}
 _gemini_unavailable_logged = False
 
 EMBEDDING_DIMS = 768
-# text-embedding-004 is tried first; if it returns 404 (not found / quota issue),
-# it is added to _bad_models so subsequent calls skip it without wasting retries.
-EMBEDDING_MODELS = ("text-embedding-004", "gemini-embedding-001")
+# Gemini 001 is the preferred embedding model for ingestion.
+EMBEDDING_MODELS = ("gemini-embedding-001", "text-embedding-004")
 
 # Process-level set of model names that have returned a permanent 404/not-found
 # error.  Entries are added lazily on first failure and persist for the process

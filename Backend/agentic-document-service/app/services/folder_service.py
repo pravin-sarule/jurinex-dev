@@ -35,7 +35,7 @@ from app.services.llm_chat_config import get_llm_chat_config
 from app.services.legal_system_prompt import build_document_qa_system_prompt, build_legal_system_prompt, fetch_full_profile
 from app.services.pipeline_service import LegalCasePipelineService, StoredCase
 from app.services.secret_prompt_display import post_process_secret_prompt_response, resolve_query_and_display
-from app.services.adapters.speech_to_text import is_audio_mime
+from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime
 
 
 logger = logging.getLogger("agentic_document_service.folder")
@@ -194,13 +194,22 @@ class FolderWorkflowService:
 
         for document in db_ready_documents:
             document_id = f"doc-{uuid.uuid4().hex[:12]}"
+            metadata = dict(document.metadata)
+            persisted_file_id = str(
+                metadata.get("db_file_id")
+                or metadata.get("file_id")
+                or metadata.get("id")
+                or document_id
+            )
             status = QueuedDocumentStatus(
+                id=persisted_file_id,
+                file_id=persisted_file_id,
                 document_id=document_id,
                 document_name=document.document_name,
                 status=ProcessingState.queued,
                 processing_progress=0.0,
                 current_operation="queued",
-                metadata=dict(document.metadata),
+                metadata=metadata,
                 updated_at=now,
             )
             statuses[document_id] = status
@@ -1018,6 +1027,8 @@ class FolderWorkflowService:
                 status = ProcessingState.queued
             documents.append(
                 QueuedDocumentStatus(
+                    id=str(row.get("id") or ""),
+                    file_id=str(row.get("id") or ""),
                     document_id=str(row.get("id") or ""),
                     document_name=str(row.get("originalname") or row.get("name") or "document"),
                     status=status,
@@ -1566,7 +1577,7 @@ class FolderWorkflowService:
                 db_file_id = document.metadata.get("db_file_id") if isinstance(document.metadata, dict) else None
                 step1_op = (
                     "transcribing_audio"
-                    if is_audio_mime(document.mime_type or "")
+                    if is_audio_mime(document.mime_type or "") or is_audio_filename(document.document_name or "")
                     else "ocr_and_validation"
                 )
                 self._update_db_file_processing_state(

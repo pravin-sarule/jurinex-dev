@@ -44,6 +44,11 @@ AUDIO_MIME_TYPES: dict[str, str] = {
     "audio/x-m4a": "MP4_AUDIO",
     "audio/m4a": "MP4_AUDIO",
     "video/mp4": "MP4_AUDIO",
+    "video/webm": "WEBM_OPUS",
+    "video/quicktime": "MP4_AUDIO",
+    "video/x-msvideo": "MP3",
+    "video/mpeg": "MP3",
+    "video/mp2t": "MP3",
     "audio/aac": "MP3",
     "audio/amr": "AMR",
     "audio/amr-wb": "AMR_WB",
@@ -51,7 +56,16 @@ AUDIO_MIME_TYPES: dict[str, str] = {
 
 AUDIO_EXTENSIONS: set[str] = {
     ".wav", ".wave", ".flac", ".mp3", ".ogg", ".opus",
-    ".webm", ".mp4", ".m4a", ".aac", ".amr",
+    ".webm", ".mp4", ".m4a", ".aac", ".amr", ".mov", ".avi", ".mpeg", ".mpg", ".ts",
+}
+
+GEMINI_PRIMARY_AUDIO_MIME_TYPES: set[str] = {
+    "audio/wav",
+    "audio/mp3",
+    "audio/aac",
+    "audio/flac",
+    "audio/ogg",
+    "audio/mpeg",
 }
 
 _SYNC_SIZE_LIMIT = 10 * 1024 * 1024  # 10 MB
@@ -73,6 +87,40 @@ def is_audio_filename(filename: str) -> bool:
 def _encoding_for_mime(mime_type: str) -> str:
     raw = mime_type.lower().split(";")[0].strip()
     return AUDIO_MIME_TYPES.get(raw, "ENCODING_UNSPECIFIED")
+
+
+def resolve_media_mime_type(mime_type: str | None, filename: str | None = None) -> str:
+    raw = str(mime_type or "").lower().split(";")[0].strip()
+    if raw in AUDIO_MIME_TYPES:
+        return raw
+
+    import os
+
+    ext = os.path.splitext(str(filename or "").lower())[1]
+    by_ext = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".wave": "audio/wav",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".webm": "video/webm",
+        ".mp4": "video/mp4",
+        ".m4a": "audio/m4a",
+        ".aac": "audio/aac",
+        ".amr": "audio/amr",
+        ".mov": "video/quicktime",
+        ".avi": "video/x-msvideo",
+        ".mpeg": "video/mpeg",
+        ".mpg": "video/mpeg",
+        ".ts": "video/mp2t",
+    }
+    return by_ext.get(ext, raw or "application/octet-stream")
+
+
+def is_gemini_primary_audio_mime(mime_type: str | None, filename: str | None = None) -> bool:
+    raw = resolve_media_mime_type(mime_type, filename)
+    return raw in GEMINI_PRIMARY_AUDIO_MIME_TYPES
 
 
 # ── Rate-limit guard ─────────────────────────────────────────────────────────
@@ -1339,7 +1387,9 @@ def transcribe(
         ("hi-IN", ["en-IN", "en-US"]),
     ]
 
-    if not skip_gemini_primary:
+    prefer_gemini_primary = is_gemini_primary_audio_mime(mime_type, filename)
+
+    if not skip_gemini_primary and prefer_gemini_primary:
         # ── Primary: Gemini 2.5 Flash + gs:// URI — STT only if this returns empty or errors ──
         try:
             gemini_primary = _transcribe_gcs_with_gemini(
@@ -1363,6 +1413,12 @@ def transcribe(
                 "[SpeechToText] Gemini 2.5 Flash (GCS URI) primary failed — Speech-to-Text next: %s",
                 exc,
             )
+    elif not skip_gemini_primary:
+        logger.info(
+            "[SpeechToText] Gemini primary disabled for mime=%s file=%s; using Speech-to-Text first",
+            mime_type,
+            filename,
+        )
 
     stt_text = ""
 

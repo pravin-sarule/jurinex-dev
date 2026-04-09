@@ -315,7 +315,12 @@ class LegalCasePipelineService:
                     document.document_uri,
                     mime_type,
                 )
-                ocr_result = ocr.extract_text_from_gcs(document.document_uri, mime_type, progress_callback=progress_callback)
+                ocr_result = ocr.extract_text_from_gcs(
+                    document.document_uri,
+                    mime_type,
+                    filename=document.document_name,
+                    progress_callback=progress_callback,
+                )
             else:
                 logger.info("[Pipeline] Step 1/4: OCR / text extraction — no GCS URI, empty text")
                 ocr_result = ocr.OcrResult(text="", page_count=0, quality_score=0.0)
@@ -330,7 +335,7 @@ class LegalCasePipelineService:
             )
         else:
             quality_score = 0.97 if len(text) > 100 else 0.55
-            page_count = 1
+            page_count = max(1, int(document.metadata.get("page_count") or 1))
             logger.info(
                 "[Pipeline] Step 1/4: inline text (OCR skipped) — chars=%d",
                 len(text),
@@ -361,9 +366,9 @@ class LegalCasePipelineService:
         doc_type = self._document_ai.classify(document, text)
         logger.info("[Pipeline] Document classified as %s", doc_type.value)
 
-        from app.services.adapters.speech_to_text import is_audio_mime
+        from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime
 
-        is_audio = is_audio_mime(mime_type)
+        is_audio = is_audio_mime(mime_type) or is_audio_filename(document.document_name or "")
 
         from app.services.adapters.chunking import ChunkSection
 

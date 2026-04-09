@@ -46,6 +46,22 @@ function isReplaceableMetadataDate(value) {
     || /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
 }
 
+/**
+ * Strips inline source citation markers inserted by the agentic document service,
+ * e.g. "[SOME DOCUMENT-FILED IN WP 2121-2024 (1).pdf]"
+ */
+export function stripAgenticCitations(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    // Remove [... .pdf] citation markers (with optional leading space/dot)
+    .replace(/\.?\s*\[[^\]]*\.pdf[^\]]*\]/gi, '')
+    // Collapse any "  |" left after stripping citations at line end
+    .replace(/\s{2,}\|/g, ' |')
+    // Collapse multiple consecutive spaces
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
 export function convertJsonToPlainText(text) {
   if (!text) {
     return '';

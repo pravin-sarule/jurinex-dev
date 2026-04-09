@@ -323,9 +323,9 @@ const FolderContent = ({ onDocumentClick }) => {
  arr.forEach(({ id, name }) => startIndividualPolling(id, name));
  };
 
- const handleUploadDocuments = async (files) => {
- if (!files?.length) return alert("Please select at least one file.");
- if (!selectedFolder) return alert("Please select a folder first.");
+  const handleUploadDocuments = async (files) => {
+  if (!files?.length) return alert("Please select at least one file.");
+  if (!selectedFolder) return alert("Please select a folder first.");
 
  const MAX_FILE_SIZE = 100 * 1024 * 1024;
  const oversizedFiles = Array.from(files).filter(file => file.size > MAX_FILE_SIZE);
@@ -337,16 +337,26 @@ const FolderContent = ({ onDocumentClick }) => {
    return;
  }
 
- setUploading(true);
- try {
- const res = await documentApi.uploadDocuments(selectedFolder, files);
- const uploaded = res.documents || res.files || [];
- const newDocs = uploaded
-   .map((doc) => ({
- id: doc.id || doc._id || doc.metadata?.db_file_id || null,
- name:
-   doc.document_name ||
-   doc.originalname ||
+  setUploading(true);
+  try {
+  const res = await documentApi.uploadDocuments(selectedFolder, files);
+  const uploaded = res.documents || res.files || [];
+  const getTrackedFileId = (doc) =>
+    doc?.id ||
+    doc?._id ||
+    doc?.file_id ||
+    doc?.fileId ||
+    doc?.document_id ||
+    doc?.metadata?.db_file_id ||
+    doc?.metadata?.file_id ||
+    doc?.metadata?.id ||
+    null;
+  const newDocs = uploaded
+    .map((doc) => ({
+  id: getTrackedFileId(doc),
+  name:
+    doc.document_name ||
+    doc.originalname ||
    doc.name ||
    doc.filename ||
    "Unnamed",

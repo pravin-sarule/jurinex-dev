@@ -434,25 +434,9 @@ def _get_internal_user_analytics_map(
 
 
 def _read_inline_text(file_bytes: bytes, upload: UploadFile) -> str | None:
-    mime_type = upload.content_type or "application/octet-stream"
-
-    # Audio files must return None so the pipeline downloads from GCS and
-    # calls Speech-to-Text instead of treating the filename as document text.
-    from app.services.adapters.speech_to_text import is_audio_mime, is_audio_filename
-    if is_audio_mime(mime_type) or is_audio_filename(upload.filename or ""):
-        return None
-
-    # IMPORTANT: PDF must go through Document AI OCR in the processing pipeline.
-    # Returning inline text here would bypass OCR and skip Document AI.
-    if mime_type == "application/pdf" or (upload.filename or "").lower().endswith(".pdf"):
-        return None
-
-    if mime_type.startswith("text/") or mime_type in {
-        "application/json",
-        "application/xml",
-        "application/javascript",
-    }:
-        return file_bytes.decode("utf-8", errors="ignore")
+    # Uploaded files should always be fed into the extraction stage first.
+    # That keeps OCR/text extraction, semantic chunking, embedding, and DB
+    # persistence on one consistent ingestion path.
     return None
 
 

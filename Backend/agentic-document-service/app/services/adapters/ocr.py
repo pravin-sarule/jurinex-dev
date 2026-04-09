@@ -242,6 +242,7 @@ def extract_text_from_audio_gcs(
     gs_uri: str,
     mime_type: str,
     *,
+    filename: str | None = None,
     progress_callback=None,
 ) -> OcrResult:
     """
@@ -261,22 +262,24 @@ def extract_text_from_audio_gcs(
     from app.services.audio_processing import AudioProcessingError
 
     # Extract filename from GCS URI for Gemini context
-    filename = os.path.basename(gs_uri.rstrip("/"))
+    filename = filename or os.path.basename(gs_uri.rstrip("/"))
+    mime_type = stt.resolve_media_mime_type(mime_type, filename)
 
     logger.info("[SpeechToText] transcribing audio uri=%s mime=%s", gs_uri, mime_type)
     try:
         # ── Primary (audio): Gemini 2.5 Flash directly from GCS URI ─────────────
         # Do NOT download the audio file unless we need to fall back to STT/inline.
         gemini_primary = ""
-        try:
-            gemini_primary = (stt._transcribe_gcs_with_gemini(  # type: ignore[attr-defined]
-                gs_uri,
-                mime_type,
-                filename=filename or "",
-                model_names=[getattr(stt, "_GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")],
-            ) or "").strip()
-        except Exception:
-            gemini_primary = ""
+        if stt.is_gemini_primary_audio_mime(mime_type, filename):
+            try:
+                gemini_primary = (stt._transcribe_gcs_with_gemini(  # type: ignore[attr-defined]
+                    gs_uri,
+                    mime_type,
+                    filename=filename or "",
+                    model_names=[getattr(stt, "_GEMINI_PRIMARY_MODEL", "gemini-2.5-flash")],
+                ) or "").strip()
+            except Exception:
+                gemini_primary = ""
 
         if gemini_primary:
             text = gemini_primary
@@ -317,6 +320,7 @@ def extract_text_from_gcs(
     gs_uri: str,
     mime_type: str = "application/pdf",
     *,
+    filename: str | None = None,
     progress_callback=None,
 ) -> OcrResult:
     """
@@ -330,14 +334,20 @@ def extract_text_from_gcs(
         progress_callback: Optional callable(pct: float) for real-time progress.
     """
     # Route audio files to Speech-to-Text instead of Document AI OCR
-    from app.services.adapters.speech_to_text import is_audio_mime
-    if is_audio_mime(mime_type):
+    from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime, resolve_media_mime_type
+    resolved_mime_type = resolve_media_mime_type(mime_type, filename)
+    if is_audio_mime(resolved_mime_type) or is_audio_filename(filename or ""):
         logger.info(
             "[Extractor] route=audio method=gemini_gcs_uri_then_stt uri=%s mime=%s",
             gs_uri,
-            mime_type,
+            resolved_mime_type,
         )
-        return extract_text_from_audio_gcs(gs_uri, mime_type, progress_callback=progress_callback)
+        return extract_text_from_audio_gcs(
+            gs_uri,
+            resolved_mime_type,
+            filename=filename,
+            progress_callback=progress_callback,
+        )
 
     from app.core.config import get_settings
     settings = get_settings()
@@ -358,7 +368,7 @@ def extract_text_from_gcs(
         logger.info(
             "[Extractor] route=document method=document_ai_ocr uri=%s mime=%s project=%s location=%s processor_id=%s",
             gs_uri,
-            mime_type,
+            resolved_mime_type,
             project_id,
             location,
             processor_id,
@@ -366,7 +376,7 @@ def extract_text_from_gcs(
         from app.services.adapters.gcs import download_bytes
         raw_bytes = download_bytes(gs_uri)
         client, processor_name = _build_document_ai_client(location, project_id, processor_id)
-        result = _parallel_ocr_bytes(raw_bytes, mime_type, client, processor_name)
+        result = _parallel_ocr_bytes(raw_bytes, resolved_mime_type, client, processor_name)
         logger.info(
             "[DocumentAI OCR] Processed %s pages=%d chars=%d quality=%.2f",
             gs_uri, result.page_count, len(result.text), result.quality_score,
@@ -374,7 +384,7 @@ def extract_text_from_gcs(
         return result
     except Exception as exc:
         logger.warning("[DocumentAI OCR] Failed for %s: %s — falling back", gs_uri, exc)
-        return _fallback_extract_from_gcs(gs_uri, mime_type)
+        return _fallback_extract_from_gcs(gs_uri, resolved_mime_type)
 
 
 def extract_text_from_bytes(

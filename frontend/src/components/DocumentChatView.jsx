@@ -3,7 +3,7 @@ import { FileManagerContext } from '../context/FileManagerContext';
 import ChatSessionList from './ChatInterface/ChatSessionList';
 import ChatMessage from './ChatInterface/ChatMessage';
 import ChatInput from './ChatInterface/ChatInput';
-import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import { convertJsonToPlainText, stripAgenticCitations } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { getUserFriendlyApiErrorMessage } from '../utils/llmQuotaMessages';
 import ApiService from '../services/api';
@@ -471,13 +471,13 @@ const DocumentChatView = () => {
                     }
                     
                     if (!rawResponse) return '';
-                    
+
                     const isStructured = isStructuredJsonResponse(rawResponse);
                     if (isStructured) {
-                      return renderSecretPromptResponse(rawResponse);
+                      return stripAgenticCitations(renderSecretPromptResponse(rawResponse));
                     }
-                    
-                    return convertJsonToPlainText(rawResponse);
+
+                    return stripAgenticCitations(convertJsonToPlainText(rawResponse));
                   })()}
                   components={{
                     h1: ({node, ...props}) => <h1 className="text-2xl font-bold mb-6 mt-8 text-black border-b-2 border-gray-300 pb-2" {...props} />,
