@@ -547,6 +547,16 @@ const ChatModelPage = () => {
     }
   };
 
+  const getProcessingStatus = async (file_id) => {
+    try {
+      const data = await apiRequest(`/files/${file_id}/status`);
+      return data;
+    } catch (error) {
+      console.error(`[getProcessingStatus] Error getting status for ${file_id}:`, error);
+      return null;
+    }
+  };
+
   const uploadDocumentToChat = async (file, options = {}) => {
     const { skipFinalize = false } = options;
     try {
@@ -1126,11 +1136,11 @@ const ChatModelPage = () => {
           setStreamingMessage('');
           clearProcessingTimeline();
          
-          if (responseRef.current) {
-            setTimeout(() => {
+          setTimeout(() => {
+            if (responseRef.current) {
               responseRef.current.scrollTop = responseRef.current.scrollHeight;
-            }, 100);
-          }
+            }
+          }, 100);
         },
         (errorMessage, details, code) => {
           console.error('[askQuestionToChat] Stream error:', errorMessage, { code, details });
