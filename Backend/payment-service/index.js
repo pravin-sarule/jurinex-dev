@@ -18,11 +18,12 @@ app.use(morgan('dev'));
 // Routes must be after body parsing middleware
 app.use('/api/user-resources', userResourceRoutes);
 
-<<<<<<< Updated upstream
-const allowedOrigins = ['https://nexintelagent.netlify.app', "https://ailearn.co.in","https://www.ailearn.co.in",'http://localhost:5173'];
-=======
-const allowedOrigins = ['', 'http://localhost:5173'];
->>>>>>> Stashed changes
+const allowedOrigins = [
+  'https://nexintelagent.netlify.app',
+  'https://ailearn.co.in',
+  'https://www.ailearn.co.in',
+  'http://localhost:5173',
+];
 
 app.use(cors({
   origin: function(origin, callback) {
