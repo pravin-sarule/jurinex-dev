@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext.jsx';
 import api from '../services/api';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import ProfileSetupForm from '../components/ProfileSetupForm';
+import { canUsePermission, PERMISSION_KEYS, shouldEnforceRbac } from '../utils/permissions';
 
 const PasswordInput = React.memo(({ id, placeholder, value, onChange, showPassword, onToggle, autoComplete, disabled }) => {
  const inputRef = useRef(null);
@@ -119,6 +122,8 @@ const ToggleSwitch = React.memo(({ enabled, onChange, label, description }) => (
 ToggleSwitch.displayName = 'ToggleSwitch';
 
 const SettingsPage = () => {
+ const navigate = useNavigate();
+ const { user: authUser, loading: authLoading } = useAuth();
  const { theme, toggleTheme } = useTheme();
  const [language, setLanguage] = useState('English');
  const [notifications, setNotifications] = useState({
@@ -153,6 +158,7 @@ const SettingsPage = () => {
  new: '',
  confirm: ''
  });
+ const canViewAccountSettings = canUsePermission(authUser, PERMISSION_KEYS.VIEW_ACCOUNT_SETTINGS);
 
  const handleCurrentPasswordChange = useCallback((value) => {
  setPasswordValues(prev => ({ ...prev, current: value }));
@@ -340,6 +346,12 @@ const SettingsPage = () => {
  };
 
  useEffect(() => {
+ const isBlockedFirmUser = shouldEnforceRbac(authUser) && !canViewAccountSettings;
+
+ if (authLoading || !authUser || isBlockedFirmUser) {
+ return;
+ }
+
  const fetchUserProfile = async () => {
  try {
  setLoading(true);
@@ -367,7 +379,23 @@ const SettingsPage = () => {
  };
 
  fetchUserProfile();
- }, []);
+ }, [authLoading, authUser, canViewAccountSettings]);
+
+ useEffect(() => {
+ const isBlockedFirmUser = shouldEnforceRbac(authUser) && !canViewAccountSettings;
+
+ if (authLoading) {
+ return;
+ }
+
+ if (isBlockedFirmUser) {
+ navigate('/dashboard', { replace: true });
+ }
+ }, [authLoading, authUser, canViewAccountSettings, navigate]);
+
+ if (authLoading || (shouldEnforceRbac(authUser) && !canViewAccountSettings)) {
+ return null;
+ }
 
  if (loading) {
  return (

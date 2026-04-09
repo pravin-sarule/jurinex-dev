@@ -1,291 +1,154 @@
-import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import React, { useEffect, useState } from "react";
 import { toast } from "react-toastify";
+import { MessageSquarePlus } from "lucide-react";
 import apiService from "../services/api";
-import {
-  Loader2,
-  Paperclip,
-  ChevronDown,
-  ChevronUp,
-  MessageSquare,
-  Search,
-  X,
-} from "lucide-react";
+
+import GetHelpDashboard from "../components/GetHelp/GetHelpDashboard";
+import RaiseTicketModal from "../components/GetHelp/RaiseTicketModal";
 
 const GetHelpPage = () => {
+  const [showForm, setShowForm] = useState(false);
+  const [loadingTickets, setLoadingTickets] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [tickets, setTickets] = useState([]);
   const [formData, setFormData] = useState({
-    subject: "",
-    priority: "",
+    subject: "Technical issue",
+    priority: "medium",
     message: "",
-    attachment: null,
+    attachments: [],
   });
 
-  const [loading, setLoading] = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  const [openFAQ, setOpenFAQ] = useState(null);
-  const [search, setSearch] = useState("");
-
-  const faqs = [
-    {
-      question: "How long does it take to get a response?",
-      answer:
-        "Our support team usually responds within 24-48 hours depending on the query priority.",
-    },
-    {
-      question: "Can I track my support requests?",
-      answer:
-        "Yes. Once submitted, you will receive an email with a ticket ID to track your request.",
-    },
-    {
-      question: "What file types can I attach?",
-      answer:
-        "You can attach images (JPG, PNG), PDFs, and documents (DOCX). Max size: 10MB.",
-    },
-    {
-      question: "How do I update my account details?",
-      answer:
-        "You can update your details by visiting the Settings page in your dashboard.",
-    },
-    {
-      question: "How can I reset my password?",
-      answer:
-        "Go to the login page and click on 'Forgot Password' to reset your password.",
-    },
-  ];
-
-  const filteredFaqs = faqs.filter((faq) =>
-    faq.question.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const handleChange = (e) => {
-    const { name, value, files } = e.target;
-    if (name === "attachment") {
-      setFormData((prev) => ({ ...prev, [name]: files[0] }));
-    } else {
-      setFormData((prev) => ({ ...prev, [name]: value }));
+  const loadTickets = async () => {
+    setLoadingTickets(true);
+    try {
+      console.log("[GetHelpPage] loadTickets:start", {
+        endpoint: "/support/tickets/my",
+      });
+      const response = await apiService.getMySupportTickets();
+      console.log("[GetHelpPage] loadTickets:success", {
+        ticketCount: response.tickets?.length || 0,
+        tickets: response.tickets || [],
+      });
+      setTickets(response.tickets || []);
+    } catch (error) {
+      console.error("[GetHelpPage] Failed to load tickets:", error);
+      console.error("[GetHelpPage] loadTickets:error_payload", {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+      toast.error(error.response?.data?.message || "Failed to load support history.");
+    } finally {
+      setLoadingTickets(false);
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+  useEffect(() => {
+    loadTickets();
+  }, []);
+
+  const handleChange = (event) => {
+    const { name, value, files } = event.target;
+
+    if (name === "attachments") {
+      const newFiles = Array.from(files || []);
+      setFormData((prev) => {
+        const existing = prev.attachments;
+        const existingKeys = new Set(existing.map((f) => `${f.name}-${f.size}`));
+        const deduplicated = newFiles.filter((f) => !existingKeys.has(`${f.name}-${f.size}`));
+        const merged = [...existing, ...deduplicated].slice(0, 30);
+        return { ...prev, attachments: merged };
+      });
+      return;
+    }
+
+    setFormData((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setSubmitting(true);
 
     try {
-      const queryData = {
+      const payload = new FormData();
+      payload.append("subject", formData.subject);
+      payload.append("priority", formData.priority);
+      payload.append("message", formData.message.trim());
+      formData.attachments.forEach((file) => {
+        payload.append("attachments", file);
+      });
+
+      console.log("[GetHelpPage] handleSubmit:start", {
         subject: formData.subject,
         priority: formData.priority,
-        message: formData.message,
-      };
+        messageLength: formData.message.trim().length,
+        attachmentCount: formData.attachments.length,
+        attachments: formData.attachments.map((file) => ({
+          name: file.name,
+          type: file.type,
+          size: file.size,
+        })),
+      });
 
-      if (formData.attachment) {
-        const formPayload = new FormData();
-        Object.entries(queryData).forEach(([key, val]) =>
-          formPayload.append(key, val)
-        );
-        formPayload.append("attachment", formData.attachment);
-        await apiService.submitSupportQuery(formPayload);
-      } else {
-        await apiService.submitSupportQuery(queryData);
-      }
-
-      toast.success("Your query has been sent successfully!");
-      setFormData({ subject: "", priority: "", message: "", attachment: null });
+      const response = await apiService.submitSupportQuery(payload);
+      console.log("[GetHelpPage] handleSubmit:success", {
+        ticketNumber: response.ticket?.ticket_number,
+        ticketId: response.ticket?.id,
+        status: response.ticket?.status,
+        attachmentCount: response.ticket?.attachments?.length || 0,
+      });
+      setTickets((prev) => [response.ticket, ...prev]);
+      setFormData({
+        subject: "Technical issue",
+        priority: "medium",
+        message: "",
+        attachments: [],
+      });
       setShowForm(false);
+      toast.success(`Ticket ${response.ticket.ticket_number} raised successfully.`);
     } catch (error) {
-      console.error("Error submitting query:", error);
-      toast.error("Something went wrong. Please try again.");
+      console.error("[GetHelpPage] Failed to submit ticket:", error);
+      console.error("[GetHelpPage] handleSubmit:error_payload", {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+      toast.error(error.response?.data?.message || "Failed to raise support ticket.");
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 px-4 py-10 flex justify-center">
-      <div className="w-full max-w-3xl">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">Help Center</h1>
-            <p className="text-gray-600 text-base">
-              Browse FAQs or raise a support query if you still need help.
-            </p>
-          </div>
-          <button
-            onClick={() => setShowForm(!showForm)}
-            className="hidden sm:inline-flex items-center gap-2 bg-[#21C1B6] hover:bg-[#1AA49B] text-white font-semibold py-2.5 px-5 rounded-lg shadow-md transition-all duration-200"
-          >
-            <MessageSquare className="h-5 w-5" />
-            Raise a Query
-          </button>
-        </div>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(33,193,182,0.1),_transparent_32%),linear-gradient(180deg,_#F8FAFC_0%,_#EEF2FF_100%)] px-4 py-8 sm:px-6 lg:px-8">
+      <GetHelpDashboard 
+        tickets={tickets} 
+        loadingTickets={loadingTickets} 
+        loadTickets={loadTickets} 
+      />
 
-        {showForm && (
-          <div className="bg-white rounded-xl shadow-md p-6 mb-8 border border-[#21C1B6]">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold text-gray-800">
-                Submit Your Query
-              </h2>
-              <button
-                onClick={() => setShowForm(false)}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <X className="h-6 w-6" />
-              </button>
-            </div>
+      <button
+        type="button"
+        onClick={() => setShowForm(true)}
+        className="fixed bottom-6 right-6 z-40 inline-flex items-center rounded-full bg-[#21C1B6] px-5 py-3.5 text-sm font-semibold text-white shadow-[0_20px_40px_rgba(33,193,182,0.35)] transition hover:bg-[#169D95] sm:bottom-8 sm:right-8"
+      >
+        <MessageSquarePlus className="mr-2 h-5 w-5" />
+        Raise Ticket
+      </button>
 
-            <form onSubmit={handleSubmit} className="space-y-5">
-              <div>
-                <label className="block text-gray-700 text-sm font-medium mb-2">
-                  Subject
-                </label>
-                <select
-                  name="subject"
-                  className="w-full rounded-lg border border-[#21C1B6] px-3 py-2 bg-white text-black focus:outline-none focus:ring-2 focus:ring-[#21C1B6]"
-                  value={formData.subject}
-                  onChange={handleChange}
-                  required
-                >
-                  <option value="">Select a subject</option>
-                  <option value="billing">Billing</option>
-                  <option value="technical">Technical Support</option>
-                  <option value="account">Account Issue</option>
-                  <option value="general">General Inquiry</option>
-                  <option value="feedback">Feedback</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-gray-700 text-sm font-medium mb-2">
-                  Priority
-                </label>
-                <select
-                  name="priority"
-                  className="w-full rounded-lg border border-[#21C1B6] px-3 py-2 bg-white text-black focus:outline-none focus:ring-2 focus:ring-[#21C1B6]"
-                  value={formData.priority}
-                  onChange={handleChange}
-                  required
-                >
-                  <option value="">Select priority</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="urgent">Urgent</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-gray-700 text-sm font-medium mb-2">
-                  Message
-                </label>
-                <textarea
-                  name="message"
-                  rows="5"
-                  className="w-full rounded-lg border border-[#21C1B6] px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-[#21C1B6]"
-                  value={formData.message}
-                  onChange={handleChange}
-                  placeholder="Please provide details about your query..."
-                  required
-                ></textarea>
-              </div>
-
-              <div>
-                <label className="block text-gray-700 text-sm font-medium mb-2">
-                  Attachment (optional)
-                </label>
-                <div className="flex items-center border border-[#21C1B6] rounded-lg px-3 py-2 bg-gray-50">
-                  <Paperclip className="h-5 w-5 text-[#21C1B6] mr-2" />
-                  <input
-                    type="file"
-                    name="attachment"
-                    onChange={handleChange}
-                    className="w-full text-sm text-black"
-                  />
-                </div>
-                {formData.attachment && (
-                  <p className="mt-2 text-sm text-gray-500">
-                    Selected: {formData.attachment.name}
-                  </p>
-                )}
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full flex items-center justify-center bg-[#21C1B6] hover:bg-[#1AA49B] text-white font-semibold py-3 px-4 rounded-lg shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? (
-                  <>
-                    <Loader2 className="animate-spin mr-2 h-5 w-5" /> Sending...
-                  </>
-                ) : (
-                  "Send Query"
-                )}
-              </button>
-            </form>
-          </div>
-        )}
-
-        <div className="relative mb-6">
-          <Search className="absolute left-3 top-3 h-5 w-5 text-[#21C1B6]" />
-          <input
-            type="text"
-            placeholder="Search FAQs..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 border border-[#21C1B6] rounded-lg text-black focus:outline-none focus:ring-2 focus:ring-[#21C1B6]"
-          />
-        </div>
-
-        <div className="bg-white rounded-xl shadow-md p-6 mb-8 border border-[#21C1B6]">
-          <h2 className="text-xl font-semibold text-gray-800 mb-4">
-            Frequently Asked Questions
-          </h2>
-          <div className="space-y-3">
-            {filteredFaqs.length > 0 ? (
-              filteredFaqs.map((faq, index) => (
-                <div
-                  key={index}
-                  className="border border-[#21C1B6] rounded-lg transition"
-                >
-                  <button
-                    type="button"
-                    className="flex items-center justify-between w-full p-4 text-left hover:bg-gray-50 transition"
-                    onClick={() =>
-                      setOpenFAQ(openFAQ === index ? null : index)
-                    }
-                  >
-                    <span className="text-gray-800 font-medium">
-                      {faq.question}
-                    </span>
-                    {openFAQ === index ? (
-                      <ChevronUp className="h-5 w-5 text-[#21C1B6]" />
-                    ) : (
-                      <ChevronDown className="h-5 w-5 text-[#21C1B6]" />
-                    )}
-                  </button>
-                  {openFAQ === index && (
-                    <div className="px-4 pb-4 text-sm text-gray-600">
-                      {faq.answer}
-                    </div>
-                  )}
-                </div>
-              ))
-            ) : (
-              <p className="text-gray-500 text-sm text-center py-4">
-                No FAQs found for your search.
-              </p>
-            )}
-          </div>
-        </div>
-
-        <div className="mt-8 text-center">
-          <Link
-            to="/settings"
-            className="text-[#21C1B6] hover:text-[#1AA49B] text-sm font-medium"
-          >
-            ← Back to Settings
-          </Link>
-        </div>
-      </div>
+      {showForm && (
+        <RaiseTicketModal
+          setShowForm={setShowForm}
+          formData={formData}
+          setFormData={setFormData}
+          submitting={submitting}
+          handleSubmit={handleSubmit}
+          handleChange={handleChange}
+        />
+      )}
     </div>
   );
 };

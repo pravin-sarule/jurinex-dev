@@ -3,16 +3,20 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save, Edit2, X } from 'lucide-react';
 import documentApi from '../../services/documentApi';
 import { toast } from 'react-toastify';
+import { useAuth } from '../../context/AuthContext';
+import { canUsePermission, PERMISSION_KEYS } from '../../utils/permissions';
 
 const CaseDetailView = () => {
  const { id } = useParams();
  const navigate = useNavigate();
+ const { user } = useAuth();
  const [caseData, setCaseData] = useState(null);
  const [loading, setLoading] = useState(true);
  const [error, setError] = useState(null);
  const [isEditing, setIsEditing] = useState(false);
  const [formData, setFormData] = useState({});
  const [saving, setSaving] = useState(false);
+ const canEditCase = canUsePermission(user, PERMISSION_KEYS.EDIT_CASE);
 
  useEffect(() => {
  fetchCaseDetails();
@@ -117,6 +121,11 @@ const CaseDetailView = () => {
  };
 
  const handleSave = async () => {
+ if (!canEditCase) {
+ toast.error('You do not have permission to edit case information.');
+ return;
+ }
+
  try {
  setSaving(true);
  await documentApi.updateCase(id, formData);
@@ -216,7 +225,7 @@ const CaseDetailView = () => {
  <span>{saving ? 'Saving...' : 'Save'}</span>
  </button>
  </>
- ) : (
+ ) : canEditCase ? (
  <button
  onClick={() => {
  setFormData(caseData);
@@ -227,7 +236,7 @@ const CaseDetailView = () => {
  <Edit2 size={16} className="sm:w-[18px] sm:h-[18px]" />
  <span>Edit Case</span>
  </button>
- )}
+ ) : null}
  </div>
  </div>
 

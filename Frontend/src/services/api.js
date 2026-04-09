@@ -52,9 +52,20 @@ class ApiService {
 
  try {
  const response = await fetch(url, config);
+ console.log("[ApiService] Response received:", {
+   url,
+   status: response.status,
+   ok: response.ok,
+   contentType: response.headers.get("content-type"),
+ });
 
  if (!response.ok) {
  const errorData = await response.json().catch(() => ({}));
+ console.error("[ApiService] Response error payload:", {
+   url,
+   status: response.status,
+   errorData,
+ });
  const error = new Error(
  errorData.message || errorData.error || `HTTP error! status: ${response.status}`
  );
@@ -70,7 +81,13 @@ class ApiService {
  if (responseType === "arrayBuffer") {
  return await response.arrayBuffer();
  }
- return await response.json();
+ const json = await response.json();
+ console.log("[ApiService] Response JSON payload:", {
+   url,
+   status: response.status,
+   dataPreview: json,
+ });
+ return json;
  } catch (error) {
  console.error("API request failed:", error);
  throw error;
@@ -464,9 +481,42 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  }
 
  async submitSupportQuery(queryData) {
- return this.request("/support", {
+ return this.request("/support/tickets", {
  method: "POST",
- body: JSON.stringify(queryData),
+ body: queryData instanceof FormData ? queryData : JSON.stringify(queryData),
+ });
+ }
+
+ async getMySupportTickets() {
+ return this.request("/support/tickets/my");
+ }
+
+ async getSupportTicket(ticketId) {
+ return this.request(`/support/tickets/${ticketId}`);
+ }
+
+ async getAdminSupportTickets(params = {}) {
+ const searchParams = new URLSearchParams();
+ if (params.status) {
+   searchParams.set("status", params.status);
+ }
+ if (params.search) {
+   searchParams.set("search", params.search);
+ }
+ const suffix = searchParams.toString() ? `?${searchParams.toString()}` : "";
+ return this.request(`/support/tickets/admin/all${suffix}`);
+ }
+
+ async markSupportTicketSeen(ticketId) {
+ return this.request(`/support/tickets/${ticketId}/seen`, {
+ method: "POST",
+ });
+ }
+
+ async updateSupportTicketStatus(ticketId, payload) {
+ return this.request(`/support/tickets/${ticketId}/status`, {
+ method: "PATCH",
+ body: JSON.stringify(payload),
  });
  }
 

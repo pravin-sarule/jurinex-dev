@@ -357,6 +357,7 @@
 
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../../context/AuthContext";
 import {
   CheckCircle,
   FolderOpen,
@@ -372,15 +373,18 @@ import {
   FileText,
 } from "lucide-react";
 import { DOCS_BASE_URL, CONTENT_SERVICE_DIRECT } from "../../../config/apiConfig";
+import { canUsePermission, PERMISSION_KEYS } from "../../../utils/permissions";
 
 const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditStep, creationMode }) => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [isCreating, setIsCreating] = useState(false);
   const [isCreated, setIsCreated] = useState(false);
   const [createdCase, setCreatedCase] = useState(null);
   const [error, setError] = useState(null);
   const [generatedCaseTitle, setGeneratedCaseTitle] = useState(null); // Store the generated case title
   const [disclaimerAccepted, setDisclaimerAccepted] = useState(false); // Disclaimer checkbox state
+  const canCreateCases = canUsePermission(user, PERMISSION_KEYS.CREATE_CASE);
 
   // Format date helper function
   const formatDate = (dateString) => {
@@ -399,7 +403,7 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
         month: "short",
         year: "numeric",
       });
-    } catch (e) {
+    } catch {
       return dateString;
     }
   };
@@ -433,6 +437,11 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
     // Prevent duplicate case creation
     if (isCreated || isCreating) {
       console.warn('Case creation already in progress or completed');
+      return;
+    }
+
+    if (!canCreateCases) {
+      setError('You do not have permission to create new cases.');
       return;
     }
 
@@ -1265,8 +1274,9 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
           </button>
           <button
             onClick={handleCreateCase}
-            disabled={isCreating || isCreated || !disclaimerAccepted}
+            disabled={isCreating || isCreated || !disclaimerAccepted || !canCreateCases}
             className="flex-1 px-4 py-3 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA89E] transition-colors flex items-center justify-center text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            title={!canCreateCases ? 'You do not have permission to create new cases' : undefined}
           >
             {isCreating ? (
               <>
@@ -1398,11 +1408,11 @@ const ReviewStep = ({ caseData, onBack, onResetToFirstStep, onComplete, onEditSt
             { icon: Upload, label: "Upload Documents" },
             { icon: Calendar, label: "Schedule Events" },
             { icon: Sparkles, label: "AI Analysis" },
-          ].map(({ icon: Icon, label }) => (
+          ].map(({ icon: FeatureIcon, label }) => (
             <div key={label} className="text-center">
               <div className="flex justify-center mb-3">
                 <div className="w-12 h-12 bg-white border border-gray-200 rounded-lg flex items-center justify-center shadow-sm">
-                  <Icon className="w-6 h-6 text-[#9CDFE1]" />
+                  {React.createElement(FeatureIcon, { className: "w-6 h-6 text-[#9CDFE1]" })}
                 </div>
               </div>
               <p className="text-sm font-medium text-gray-900">{label}</p>

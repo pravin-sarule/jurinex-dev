@@ -23,6 +23,23 @@ export const isFreeTier = (plan) => {
   return true;
 };
 
+export const getPlanDisplayName = (plan) => {
+  if (!plan) return null;
+
+  const planName = typeof plan === 'object'
+    ? (plan.plan_name || plan.plan || plan.name)
+    : plan;
+
+  if (!planName || typeof planName !== 'string') {
+    return null;
+  }
+
+  const isInherited = typeof plan === 'object'
+    && (plan.is_inherited_from_firm || plan.isInheritedFromFirm);
+
+  return isInherited ? `${planName} (Inherited from firm)` : planName;
+};
+
 export const getUserPlan = () => {
   try {
     const userInfo = localStorage.getItem('userInfo');
@@ -50,6 +67,5 @@ export const formatFileSize = (bytes) => {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 };
-
 
 

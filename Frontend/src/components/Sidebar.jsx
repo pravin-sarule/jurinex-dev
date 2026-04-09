@@ -582,6 +582,7 @@ import QuickTools from './QuickTools';
 import { useFileManager } from '../context/FileManagerContext';
 import { useAuth } from '../context/AuthContext';
 import { useSidebar } from '../context/SidebarContext';
+import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 import { createPortal } from 'react-dom';
 import JuriNexLogoImg from '/src/assets/JuriNex_gavel_logo.png';
 
@@ -795,6 +796,9 @@ const Sidebar = () => {
 
   const accountType = (user?.account_type || userData?.account_type || '').toUpperCase();
   const isFirmAdmin = accountType === 'FIRM_ADMIN';
+  const isFirmMember = isFirmAdmin || accountType === 'FIRM_USER';
+  const permissionUser = user || userData;
+  const canCreateCases = canUsePermission(permissionUser, PERMISSION_KEYS.CREATE_CASE);
 
   const navigationItems = [
     { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
@@ -804,7 +808,7 @@ const Sidebar = () => {
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
     { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
     { name: 'Billing & Usage', path: '/billing-usage', icon: CreditCardIcon },
-    { name: 'User Management', path: '/user-management', icon: UserGroupIcon, firmAdminOnly: true },
+    { name: 'User Management', path: '/user-management', icon: UserGroupIcon, firmMemberOnly: true },
   ];
 
   const JuriNexLogo = ({ collapsed = false }) => (
@@ -864,13 +868,27 @@ const Sidebar = () => {
 
       <div className="px-4 pt-6 pb-4">
         <button
-          onClick={() => navigate('/analysis', { state: { newChat: true } })}
-          className={`w-full text-white rounded-xl py-3 text-sm font-bold flex items-center justify-center transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 ${isSidebarCollapsed && !isMobileView ? 'px-2' : ''
+          onClick={() => {
+            if (!canCreateCases) return;
+            navigate('/analysis', { state: { newChat: true } });
+          }}
+          disabled={!canCreateCases}
+          className={`w-full text-white rounded-xl py-3 text-sm font-bold flex items-center justify-center transition-all duration-200 shadow-lg ${canCreateCases ? 'hover:shadow-xl transform hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'} ${isSidebarCollapsed && !isMobileView ? 'px-2' : ''
             }`}
           style={{ backgroundColor: '#21C1B6' }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1AA49B')}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
-          title={isSidebarCollapsed && !isMobileView ? 'New Case Analysis' : undefined}
+          onMouseEnter={(e) => {
+            if (canCreateCases) e.currentTarget.style.backgroundColor = '#1AA49B';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = '#21C1B6';
+          }}
+          title={
+            !canCreateCases
+              ? 'You do not have permission to create new cases'
+              : isSidebarCollapsed && !isMobileView
+                ? 'New Case Analysis'
+                : undefined
+          }
         >
           <PlusIcon className={`h-5 w-5 ${isSidebarCollapsed && !isMobileView ? '' : ''}`} />
           <span className={`${isSidebarCollapsed && !isMobileView ? 'hidden' : 'inline ml-2'}`}>New Case Analysis</span>
@@ -882,6 +900,7 @@ const Sidebar = () => {
           <nav className="space-y-1">
             {navigationItems.map((item) => {
               if (item.firmAdminOnly && !isFirmAdmin) return null;
+              if (item.firmMemberOnly && !isFirmMember) return null;
               const Icon = item.icon;
               const active = isActive(item.path);
               const isChats = item.name === 'Chats';

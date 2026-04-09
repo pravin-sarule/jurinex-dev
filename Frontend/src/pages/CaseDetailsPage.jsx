@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { FileManagerContext } from '../context/FileManagerContext';
 import { DOCS_BASE_URL } from '../config/apiConfig';
+import { useAuth } from '../context/AuthContext';
+import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 import {
   ArrowLeft,
   Scale,
@@ -20,11 +21,13 @@ const CaseDetailsPage = () => {
   const { caseId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useContext(FileManagerContext);
+  const { user, token } = useAuth();
 
   const [caseData, setCaseData] = useState(location.state?.case || null);
   const [loading, setLoading] = useState(!caseData);
   const [error, setError] = useState(null);
+  const canEditCase = canUsePermission(user, PERMISSION_KEYS.EDIT_CASE);
+  const canDeleteCase = canUsePermission(user, PERMISSION_KEYS.DELETE_CASE);
 
   useEffect(() => {
     if (!caseData && caseId) {
@@ -37,15 +40,15 @@ const CaseDetailsPage = () => {
     setError(null);
 
     try {
-      const token = user?.token;
-      if (!token) {
+      const authToken = token || localStorage.getItem('token');
+      if (!authToken) {
         throw new Error('Authentication required');
       }
 
       const response = await fetch(`${DOCS_BASE_URL}/cases/${caseId}`, {
         method: 'GET',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${authToken}`,
           'Content-Type': 'application/json',
         },
       });
@@ -174,22 +177,28 @@ const CaseDetailsPage = () => {
               </div>
             </div>
 
-            <div className="flex items-center space-x-2 ml-4">
-              <button
-                onClick={() => alert('Edit functionality coming soon')}
-                className="p-2 text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
-                title="Edit Case"
-              >
-                <Edit className="w-5 h-5" />
-              </button>
-              <button
-                onClick={() => alert('Delete functionality coming soon')}
-                className="p-2 text-red-600 hover:bg-red-50 rounded-md transition-colors"
-                title="Delete Case"
-              >
-                <Trash2 className="w-5 h-5" />
-              </button>
-            </div>
+            {(canEditCase || canDeleteCase) && (
+              <div className="flex items-center space-x-2 ml-4">
+                {canEditCase && (
+                  <button
+                    onClick={() => alert('Edit functionality coming soon')}
+                    className="p-2 text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+                    title="Edit Case"
+                  >
+                    <Edit className="w-5 h-5" />
+                  </button>
+                )}
+                {canDeleteCase && (
+                  <button
+                    onClick={() => alert('Delete functionality coming soon')}
+                    className="p-2 text-red-600 hover:bg-red-50 rounded-md transition-colors"
+                    title="Delete Case"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
