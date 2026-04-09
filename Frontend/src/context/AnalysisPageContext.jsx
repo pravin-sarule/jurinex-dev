@@ -129,7 +129,7 @@ export const AnalysisPageProvider = ({
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=false`, { method: 'GET', headers });
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, { method: 'GET', headers });
       if (!response.ok) throw new Error(`Failed to fetch secrets: ${response.status}`);
 
       const secretsData = await response.json();
@@ -675,4 +675,5 @@ export const AnalysisPageProvider = ({
     </AnalysisPageContext.Provider>
   );
 };
+
 

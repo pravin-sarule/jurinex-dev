@@ -1180,7 +1180,7 @@ const ChatModelPage = () => {
       const token = getAuthToken();
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=false`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, {
         method: 'GET',
         headers,
       });
@@ -3990,3 +3990,4 @@ const ChatModelPage = () => {
 };
 
 export default ChatModelPage;
+

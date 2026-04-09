@@ -117,7 +117,7 @@ const HeroSection = ({ onRequestDemo, onLogin } = {}) => {
               type="button"
               className="rounded-full border border-white/40 bg-white/10 px-8 py-3 text-center text-sm font-semibold text-white shadow-sm backdrop-blur-sm"
               aria-label="Log in to your JuriNex account"
-              onClick={onLogin}
+              onClick={() => onLogin?.()}
               whileHover={{ scale: 1.05, backgroundColor: "rgba(255,255,255,0.2)" }}
               whileTap={{ scale: 0.97 }}
               transition={{ type: "spring", stiffness: 400, damping: 20 }}

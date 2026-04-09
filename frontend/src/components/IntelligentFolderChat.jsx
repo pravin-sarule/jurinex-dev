@@ -136,7 +136,7 @@ export default function IntelligentFolderChat({
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=true`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=true`, {
         method: 'GET',
         headers,
       });
@@ -775,5 +775,6 @@ export default function IntelligentFolderChat({
     </div>
   );
 }
+
 
 

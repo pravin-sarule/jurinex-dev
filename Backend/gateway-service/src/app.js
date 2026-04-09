@@ -29,14 +29,7 @@ const templateAnalyzerProxy = require("./routes/templateAnalyzerProxy");
 
 const app = express();
 
-<<<<<<< Updated upstream
 // Global JSON parsing removed to prevent breaking proxies. Applied to specific direct routes.
-=======
-// ✅ Support larger bodies for direct routes and proxies
-app.use(express.json({ limit: '200mb' }));
-app.use(express.urlencoded({ limit: '200mb', extended: true }));
->>>>>>> Stashed changes
-
 // Target URL for auth service
 const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
 
@@ -251,3 +244,5 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = app;
+
+

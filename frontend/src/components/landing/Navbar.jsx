@@ -141,7 +141,7 @@ const Navbar = ({ onRequestDemo, onLogin, onSectionNav } = {}) => {
                 ? "border border-gray-300 bg-transparent text-gray-800 hover:bg-gray-100"
                 : "border border-white/40 bg-white/10 text-white hover:bg-white/20"
             }`}
-            onClick={onLogin}
+            onClick={() => onLogin?.()}
             aria-label="Log in to JuriNex"
           >
             Login

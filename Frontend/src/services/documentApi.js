@@ -885,14 +885,14 @@ const documentApi = {
   },
 
   getSecrets: async () => {
-    const response = await axios.get(`${SECRETS_API_BASE}/api/chat/secrets?fetch=true`, {
+    const response = await axios.get(`${SECRETS_API_BASE}/secrets?fetch=true`, {
       headers: getAuthHeader(),
     });
     return response.data;
   },
 
   getSecretById: async (secretId) => {
-    const response = await axios.get(`${SECRETS_API_BASE}/api/chat/secrets/${secretId}`, {
+    const response = await axios.get(`${SECRETS_API_BASE}/secrets/${secretId}`, {
       headers: getAuthHeader(),
     });
     return response.data;
@@ -988,3 +988,4 @@ const documentApi = {
 };
 
 export default documentApi;
+

@@ -3792,7 +3792,7 @@ const ChatInterface = () => {
       const token = getAuthToken();
       const headers = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets?fetch=true`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=true`, {
         method: "GET",
         headers,
       });
@@ -3818,7 +3818,7 @@ const ChatInterface = () => {
       const token = getAuthToken();
       const headers = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/api/chat/secrets/${secretId}`, {
+      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets/${secretId}`, {
         method: "GET",
         headers,
       });
@@ -6386,3 +6386,4 @@ const ChatInterface = () => {
 };
 
 export default ChatInterface;
+

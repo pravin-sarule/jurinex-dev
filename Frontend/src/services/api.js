@@ -63,18 +63,16 @@ class ApiService {
 
  if (!response.ok) {
  const errorData = await response.json().catch(() => ({}));
-<<<<<<< Updated upstream
- console.error("[ApiService] Response error payload:", {
-   url,
-   status: response.status,
-   errorData,
- });
-=======
  const normalizedErrorData =
  errorData && typeof errorData === "object" && errorData.detail && typeof errorData.detail === "object"
  ? errorData.detail
  : errorData;
->>>>>>> Stashed changes
+ console.error("[ApiService] Response error payload:", {
+   url,
+   status: response.status,
+   errorData,
+   normalizedErrorData,
+ });
  const error = new Error(
  normalizedErrorData.message || normalizedErrorData.error || `HTTP error! status: ${response.status}`
  );
@@ -483,12 +481,12 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
 
  async getSecrets() {
  const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
- return this.request(`${base}/api/chat/secrets?fetch=true`);
+ return this.request(`${base}/secrets?fetch=true`);
  }
 
  async getSecretById(secretId) {
  const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
- return this.request(`${base}/api/chat/secrets/${secretId}`);
+ return this.request(`${base}/secrets/${secretId}`);
  }
 
  async triggerLLMWithSecret(secretId, fileId, additionalInput = "") {
@@ -940,3 +938,4 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
 }
 
 export default new ApiService();
+
