@@ -3506,7 +3506,7 @@ const ChatModelPage = () => {
                   ref={fileInputRef}
                   type="file"
                   className="hidden"
-                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
+                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aac,.mp4"
                   onChange={handleFileUpload}
                   disabled={isUploading || isChatUploading}
                   multiple
@@ -3815,7 +3815,7 @@ const ChatModelPage = () => {
                     ref={fileInputRef}
                     type="file"
                     className="hidden"
-                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
+                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aac,.mp4"
                     onChange={handleFileUpload}
                     disabled={isUploading || isChatUploading}
                     multiple

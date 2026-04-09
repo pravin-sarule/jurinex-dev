@@ -3,7 +3,7 @@ import documentApi from "../../services/documentApi";
 import { FileManagerContext } from "../../context/FileManagerContext";
 import DocumentCard from "./DocumentCard";
 import { toast } from 'react-toastify';
-import { API_BASE_URL } from "../../config/apiConfig";
+import { DOCS_BASE_URL, getUserIdForDrafting } from "../../config/apiConfig";
 import GoogleDrivePicker from "../GoogleDrivePicker";
 
 const FolderContent = ({ onDocumentClick }) => {
@@ -13,7 +13,6 @@ const FolderContent = ({ onDocumentClick }) => {
  setDocuments,
  setChatSessions,
  setSelectedChatSessionId,
- loading: contextLoading,
  error: contextError,
  } = useContext(FileManagerContext);
 
@@ -135,13 +134,12 @@ const FolderContent = ({ onDocumentClick }) => {
 
  const checkProcessingStatus = async (documentId) => {
  try {
- const headers = getAuthHeaders();
- const response = await fetch(`${API_BASE_URL}/docs/status/${documentId}`, {
+ const headers = { ...getAuthHeaders(), "Content-Type": "application/json" };
+ const uid = getUserIdForDrafting();
+ if (uid) headers["X-User-Id"] = uid;
+ const response = await fetch(`${DOCS_BASE_URL}/status/${encodeURIComponent(documentId)}`, {
  method: "GET",
- headers: {
- "Content-Type": "application/json",
- ...headers,
- },
+ headers,
  cache: "no-store",
  });
 
@@ -152,6 +150,19 @@ const FolderContent = ({ onDocumentClick }) => {
  console.error(`❌ Error fetching status for ${documentId}:`, err.message);
  return null;
  }
+ };
+
+ const formatOperationLabel = (raw) => {
+ if (!raw || typeof raw !== "string") return "";
+ const key = raw.trim().toLowerCase();
+ const map = {
+ transcribing_audio: "Transcribing audio (Speech-to-Text)…",
+ vector_indexing: "Saving chunks and building search index…",
+ ocr_and_validation: "Extracting text from document…",
+ completed: "Completed",
+ failed: "Processing failed",
+ };
+ return map[key] || raw;
  };
 
  const extractStatusData = (data) => {
@@ -174,10 +185,9 @@ const FolderContent = ({ onDocumentClick }) => {
  if (isNaN(progress)) progress = 0;
  progress = Math.min(100, Math.max(0, progress));
 
+ const fromApi = data.current_operation || data.message || data.stage || "";
  const currentOperation =
- data.current_operation ||
- data.message ||
- data.stage ||
+ formatOperationLabel(fromApi) ||
  inferCurrentOperation(progress, status);
 
  return { status, progress, currentOperation };
@@ -236,11 +246,13 @@ const FolderContent = ({ onDocumentClick }) => {
  const last = lastProgressRef.current.get(documentId) || 0;
  const lastStatus = lastProgressRef.current.get(`${documentId}_status`);
 
- if (progress < last && status === lastStatus) return;
- if (progress === last && status === lastStatus) return;
+ const lastOp = lastProgressRef.current.get(`${documentId}_op`) || "";
+ if (progress < last && status === lastStatus && operation === lastOp) return;
+ if (progress === last && status === lastStatus && operation === lastOp) return;
 
  lastProgressRef.current.set(documentId, progress);
  lastProgressRef.current.set(`${documentId}_status`, status);
+ lastProgressRef.current.set(`${documentId}_op`, operation || "");
 
  setProcessingDocuments((prev) => {
  const newMap = new Map(prev);
@@ -282,6 +294,11 @@ const FolderContent = ({ onDocumentClick }) => {
  pollingIntervalsRef.current.delete(documentId);
  console.log(`${success ? "✅" : "❌"} Stopped polling ${documentName}`);
  }
+  if (success) {
+    // Re-fetch folder file metadata once processing completes so fresh
+    // preview/view URLs are available immediately without manual refresh.
+    fetchFolderContent(true);
+  }
  };
 
  const startIndividualPolling = (documentId, documentName) => {
@@ -291,6 +308,10 @@ const FolderContent = ({ onDocumentClick }) => {
  if (doc) {
  lastProgressRef.current.set(documentId, doc.processing_progress || 0);
  lastProgressRef.current.set(`${documentId}_status`, doc.status || "queued");
+ lastProgressRef.current.set(
+ `${documentId}_op`,
+ doc.current_operation || ""
+ );
  }
 
  pollDocument(documentId, documentName);
@@ -320,17 +341,27 @@ const FolderContent = ({ onDocumentClick }) => {
  try {
  const res = await documentApi.uploadDocuments(selectedFolder, files);
  const uploaded = res.documents || res.files || [];
- const newDocs = uploaded.map((doc) => ({
- id: doc.id || doc._id,
- name: doc.originalname || doc.name || doc.filename || "Unnamed",
- originalname: doc.originalname || doc.name,
- size: doc.size || 0,
- created_at: doc.created_at || new Date().toISOString(),
+ const newDocs = uploaded
+   .map((doc) => ({
+ id: doc.id || doc._id || doc.metadata?.db_file_id || null,
+ name:
+   doc.document_name ||
+   doc.originalname ||
+   doc.name ||
+   doc.filename ||
+   "Unnamed",
+ originalname: doc.originalname || doc.name || doc.document_name,
+ size: doc.size || doc.metadata?.size || 0,
+ created_at: doc.created_at || doc.updated_at || new Date().toISOString(),
  status: doc.status || "queued",
  processing_progress: parseFloat(doc.processing_progress || 0),
  current_operation: doc.current_operation || "Starting...",
  mimetype: doc.mimetype || doc.mimeType,
- }));
+ }))
+   .filter((d) => d.id);
+ if (uploaded.length > 0 && newDocs.length === 0) {
+   toast.error("Upload returned no file id — cannot track status. Try refreshing the folder.");
+ }
  setDocuments((prev) => [...prev, ...newDocs]);
  const info = newDocs.map((d) => ({ id: d.id, name: d.name }));
  setTimeout(() => startStatusPolling(info), 800);
@@ -401,7 +432,7 @@ const FolderContent = ({ onDocumentClick }) => {
  );
 
  return (
- <div className="flex-1 flex flex-col text-gray-800 h-full overflow-hidden">
+ <div className="flex-1 flex flex-col min-h-0 text-gray-800 h-full overflow-hidden">
  <style
  dangerouslySetInnerHTML={{
  __html: `
@@ -498,17 +529,14 @@ showIconOnly={true}
  </div>
  )}
 
- <div
- className="flex-1 overflow-y-auto space-y-2 min-h-0 custom-scrollbar"
- style={{ maxHeight: "calc(100vh - 300px)", overflowY: "scroll" }}
- >
- {loading || contextLoading ? (
+ <div className="flex-1 overflow-y-auto space-y-2 min-h-0 custom-scrollbar overscroll-contain">
+ {loading ? (
  <div className="flex items-center justify-center p-8">
- <div className="text-gray-500 text-sm">Loading documents...</div>
+ <div className="text-gray-500 text-sm">Loading files...</div>
  </div>
  ) : documents.length === 0 ? (
  <p className="text-gray-400 text-center p-8 text-sm">
- No documents in this folder. Upload some to get started!
+ No files in this folder yet. Upload documents or audio to get started.
  </p>
  ) : (
  documents.map((doc) => (

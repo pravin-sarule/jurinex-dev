@@ -206,7 +206,7 @@ const FolderDetailPage = () => {
                     onClose={handleClosePreview}
                   />
                 ) : (
-                  <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
+                  <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                     <FolderContent onDocumentClick={handleDocumentClick} />
                   </div>
                 )}

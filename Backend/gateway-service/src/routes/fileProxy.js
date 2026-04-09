@@ -14,6 +14,7 @@ router.use("/files", (req, res, next) => {
 router.use("/files", authMiddleware);
 router.use("/docs", authMiddleware);
 router.use("/mindmap", authMiddleware);
+
 // Proxy: /files/* → File Service /api/files/*
 router.use(
   "/files",
@@ -30,8 +31,8 @@ router.use(
       }
     },
     logLevel: "debug", // shows proxy details
-    proxyTimeout: 60000,
-    timeout: 60000,
+    proxyTimeout: 120000, // 2 minutes for file uploads
+    timeout: 120000,
     onError: (err, req, res) => {
       console.error("File service proxy error:", err.message);
       res.status(500).json({ error: "File Service is unavailable" });

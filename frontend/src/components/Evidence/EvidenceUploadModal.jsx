@@ -3,8 +3,8 @@ import { XMarkIcon, DocumentArrowUpIcon } from '@heroicons/react/24/outline';
 import { formatFileSize, validateFileSize, isAllowedEvidenceFile } from '../../utils/fileHelpers';
 import './evidence.css';
 
-const MAX_SIZE_MB = 20;
-const ALLOWED_TYPES = 'PDF, DOCX, TXT, Images (Max 20MB)';
+const MAX_SIZE_MB = 200;
+const ALLOWED_TYPES = 'PDF, DOCX, TXT, Images (Max 200MB)';
 
 export default function EvidenceUploadModal({ isOpen, onClose, onUpload, draftId }) {
   const [selectedFile, setSelectedFile] = useState(null);

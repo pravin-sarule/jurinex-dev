@@ -85,9 +85,9 @@ const FeatureCard = ({ feature, index }) => {
       className={[
         "group relative w-full overflow-hidden rounded-3xl bg-white md:max-w-[60%]",
         "border border-slate-100",
-        "shadow-[0_4px_24px_rgba(0,0,0,0.06)]",
+        "shadow-[0_4px_24px_rgba(13,148,136,0.10)]",
         "transition-shadow duration-300",
-        "hover:shadow-[0_16px_56px_rgba(0,0,0,0.10),0_2px_12px_rgba(13,148,136,0.10)]",
+        "hover:shadow-[0_16px_56px_rgba(13,148,136,0.20),0_2px_12px_rgba(13,148,136,0.10)]",
         isLeft ? "md:mr-auto md:ml-0" : "md:ml-auto md:mr-0",
       ].join(" ")}
     >
@@ -116,7 +116,7 @@ const FeatureCard = ({ feature, index }) => {
             aria-hidden="true"
           />
 
-          <h3 className="font-playfair text-2xl font-semibold leading-snug text-juri-ink">
+          <h3 className="font-playfair text-2xl font-semibold leading-snug text-teal-700">
             {feature.title}
           </h3>
           <p className="mt-3 font-dmSans text-sm leading-relaxed text-juri-muted">
@@ -132,7 +132,7 @@ const FeatureCard = ({ feature, index }) => {
                 initial="hidden"
                 whileInView="visible"
                 viewport={{ once: true }}
-                className="flex items-center gap-3 font-dmSans text-sm text-juri-ink"
+                className="flex items-center gap-3 font-dmSans text-sm text-teal-700"
               >
                 <GoldCheck />
                 {bullet}
@@ -198,7 +198,7 @@ const FeaturesSection = () => (
       className="pointer-events-none absolute inset-0 opacity-[0.018]"
       style={{
         backgroundImage:
-          "radial-gradient(circle, #1a1a2e 1px, transparent 1px)",
+          "radial-gradient(circle, #0f766e 1px, transparent 1px)",
         backgroundSize: "28px 28px",
       }}
       aria-hidden="true"
@@ -223,7 +223,7 @@ const FeaturesSection = () => (
 
         <h2
           id="features-heading"
-          className="font-playfair text-3xl font-semibold text-juri-ink sm:text-4xl lg:text-[2.75rem] lg:leading-tight"
+          className="font-playfair text-3xl font-semibold text-teal-700 sm:text-4xl lg:text-[2.75rem] lg:leading-tight"
         >
           Everything your legal practice{" "}
           <em className="not-italic text-teal-600">needs to move faster</em>

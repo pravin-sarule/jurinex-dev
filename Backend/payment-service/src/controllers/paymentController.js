@@ -20,11 +20,92 @@ const getCircularReplacer = () => {
   };
 };
 
+const createOneTimeOrder = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.headers['x-user-id'];
+    const { amount, currency = "INR", plan_name = "Plan Purchase" } = req.body || {};
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized: User ID missing." });
+    }
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid amount." });
+    }
+
+    const order = await razorpay.orders.create({
+      amount: Number(amount), // paise
+      currency,
+      receipt: `ord_${userId}_${Date.now()}`,
+      notes: {
+        app_user_id: String(userId),
+        plan_name: String(plan_name),
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Order created successfully",
+      order: {
+        id: order.id,
+        amount: order.amount,
+        currency: order.currency,
+      },
+      key: process.env.RAZORPAY_KEY_ID,
+    });
+  } catch (err) {
+    console.error("🔥 createOneTimeOrder error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create payment order",
+      error: err?.error?.description || err?.message || "Unknown Razorpay error",
+    });
+  }
+};
+
+const verifyOneTimePayment = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan_name } = req.body || {};
+
+    if (!userId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, message: "Missing verification data" });
+    }
+
+    const generatedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    if (generatedSignature !== razorpay_signature) {
+      return res.status(400).json({ success: false, message: "Invalid payment signature" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment verified successfully",
+      payment: {
+        order_id: razorpay_order_id,
+        payment_id: razorpay_payment_id,
+        plan_name: plan_name || null,
+      },
+    });
+  } catch (err) {
+    console.error("🔥 verifyOneTimePayment error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Payment verification failed",
+      error: err?.message || "Unknown verification error",
+    });
+  }
+};
+
 
 
 const startSubscription = async (req, res) => {
   try {
-    const userId = req.headers['x-user-id'];
+    // Prefer authenticated user id from JWT middleware.
+    // Fallback to header for backward compatibility.
+    const userId = req.user?.id || req.headers['x-user-id'];
     const { plan_id } = req.body;
 
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized: User ID missing.' });
@@ -67,15 +148,85 @@ const startSubscription = async (req, res) => {
       );
     }
 
+    // Validate that the configured Razorpay plan exists and is usable.
+    let razorpayPlan;
+    try {
+      razorpayPlan = await razorpay.plans.fetch(plan.razorpay_plan_id);
+    } catch (planFetchErr) {
+      console.error("❌ Razorpay plan fetch failed:", {
+        statusCode: planFetchErr?.statusCode,
+        code: planFetchErr?.error?.code,
+        description: planFetchErr?.error?.description || planFetchErr?.message,
+        razorpay_plan_id: plan.razorpay_plan_id,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "Configured Razorpay plan is invalid or not accessible.",
+        error:
+          planFetchErr?.error?.description ||
+          planFetchErr?.error?.code ||
+          planFetchErr?.message ||
+          "Unable to fetch Razorpay plan",
+      });
+    }
+
+    const normalizedInterval = String(plan.interval || "").toLowerCase();
+    const totalCount =
+      normalizedInterval === "lifetime"
+        ? 1
+        : normalizedInterval === "year" || normalizedInterval === "yearly" || normalizedInterval === "annual"
+        ? 1
+        : normalizedInterval === "quarter" || normalizedInterval === "quarterly"
+        ? 4
+        : 12;
+
+    // Keep payload minimal and Razorpay-compatible.
     const subscriptionData = {
       plan_id: plan.razorpay_plan_id,
       customer_notify: 1,
       quantity: 1,
-      customer_id: String(customerId),
-      total_count: plan.interval === 'lifetime' ? 1 : 12,
+      total_count: totalCount,
+      notes: {
+        app_user_id: String(userId),
+        app_plan_id: String(plan.id),
+      },
     };
 
-    const subscription = await razorpay.subscriptions.create(subscriptionData);
+    let subscription;
+    try {
+      subscription = await razorpay.subscriptions.create(subscriptionData);
+    } catch (createErr) {
+      console.error("❌ Razorpay create subscription failed (primary attempt):", {
+        statusCode: createErr?.statusCode,
+        code: createErr?.error?.code,
+        description: createErr?.error?.description || createErr?.message,
+        payload: subscriptionData,
+      });
+
+      // Retry once with ultra-minimal payload for provider-side validation edge cases.
+      const fallbackPayload = {
+        plan_id: plan.razorpay_plan_id,
+        total_count: totalCount,
+      };
+      try {
+        subscription = await razorpay.subscriptions.create(fallbackPayload);
+      } catch (fallbackErr) {
+        console.error("❌ Razorpay create subscription failed (fallback attempt):", {
+          statusCode: fallbackErr?.statusCode,
+          code: fallbackErr?.error?.code,
+          description: fallbackErr?.error?.description || fallbackErr?.message,
+          fallbackPayload,
+          razorpayPlanMeta: {
+            id: razorpayPlan?.id,
+            period: razorpayPlan?.period,
+            interval: razorpayPlan?.interval,
+            status: razorpayPlan?.status,
+            item: razorpayPlan?.item,
+          },
+        });
+        throw fallbackErr;
+      }
+    }
     if (!subscription?.id) throw new Error('Invalid subscription response');
 
     await db.query(
@@ -110,7 +261,15 @@ const startSubscription = async (req, res) => {
 
   } catch (err) {
     console.error('🔥 startSubscription error:', err);
-    return res.status(500).json({ success: false, message: 'Subscription initiation failed', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Subscription initiation failed',
+      error:
+        err?.error?.description ||
+        err?.error?.code ||
+        err?.message ||
+        'Unknown Razorpay error',
+    });
   }
 };
 
@@ -683,6 +842,8 @@ const rollbackTokensApi = async (req, res) => {
 };
 
 module.exports = {
+  createOneTimeOrder,
+  verifyOneTimePayment,
   startSubscription,
   verifySubscription,
   testPlans,

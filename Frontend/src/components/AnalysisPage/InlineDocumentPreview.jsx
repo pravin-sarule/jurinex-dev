@@ -3,16 +3,20 @@ import { Download, ExternalLink, FileText, Loader2 } from 'lucide-react';
 import documentApi from '../../services/documentApi';
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'];
+const AUDIO_EXTENSIONS = ['mp3', 'wav', 'wave', 'flac', 'ogg', 'opus', 'webm', 'mp4', 'm4a', 'aac', 'amr'];
+const AUDIO_MIME_PREFIXES = ['audio/', 'video/mp4'];
 
 const detectFileType = (url = '', mime = '') => {
   const normalizedMime = mime?.toLowerCase() || '';
   if (normalizedMime.includes('pdf')) return 'pdf';
   if (normalizedMime.startsWith('text/')) return 'text';
   if (normalizedMime.includes('json')) return 'text';
+  if (AUDIO_MIME_PREFIXES.some((prefix) => normalizedMime.startsWith(prefix))) return 'audio';
 
-  const extension = url.split('.').pop()?.toLowerCase();
+  const extension = url.split('?')[0].split('.').pop()?.toLowerCase();
   if (extension) {
     if (IMAGE_EXTENSIONS.includes(extension)) return 'image';
+    if (AUDIO_EXTENSIONS.includes(extension)) return 'audio';
     if (extension === 'pdf') return 'pdf';
     if (['txt', 'md', 'json', 'csv', 'log'].includes(extension)) return 'text';
   }
@@ -263,6 +267,32 @@ const InlineDocumentPreview = ({ document: file }) => {
       );
     }
 
+    if (fileType === 'audio' && fileUrl) {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center p-8 gap-6">
+          <div className="w-24 h-24 rounded-full bg-[#21C1B6]/10 flex items-center justify-center">
+            <svg className="w-12 h-12 text-[#21C1B6]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+            </svg>
+          </div>
+          <p className="text-[#2b3528] font-medium text-center truncate max-w-[80%]">
+            {file?.originalName || file?.name || 'Audio Recording'}
+          </p>
+          <audio
+            controls
+            className="w-full max-w-xl rounded-lg shadow-md"
+            src={fileUrl}
+            preload="metadata"
+          >
+            Your browser does not support the audio element.
+          </audio>
+          <p className="text-xs text-[#7c7469]">
+            This audio has been transcribed and indexed — you can ask questions about its content in the chat.
+          </p>
+        </div>
+      );
+    }
+
     if ((fileType === 'pdf' || fileUrl) && fileUrl && fileType !== 'text') {
       return (
         <div className="flex-1 p-4">
@@ -282,7 +312,7 @@ const InlineDocumentPreview = ({ document: file }) => {
     <section className="h-full min-h-0 flex flex-col bg-[#ece8df]">
       <div className="flex items-center justify-between px-5 py-3 border-b border-[#d6d0c4] bg-[#f7f4ee]">
         <div className="min-w-0">
-          <p className="text-[12px] uppercase tracking-[0.16em] text-[#7c7469]">Document Preview</p>
+          <p className="text-[12px] uppercase tracking-[0.16em] text-[#7c7469]">{fileType === 'audio' ? 'Audio Recording' : 'Document Preview'}</p>
           <h3 className="text-[18px] font-medium text-[#2b3528] truncate">
             {file?.originalName || file?.name || 'Select a document'}
           </h3>

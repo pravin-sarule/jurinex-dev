@@ -9,7 +9,9 @@ const LandingPage = () => {
 
   return (
     <HomePage
-      onNavigateLogin={() => navigate('/login')}
+      onNavigateLogin={(loginState) =>
+        navigate('/login', loginState ? { state: loginState } : undefined)
+      }
       onNavigateContact={() => navigate('/contact')}
       pendingSection={pendingSection}
       onPendingSectionConsumed={() => setPendingSection(null)}

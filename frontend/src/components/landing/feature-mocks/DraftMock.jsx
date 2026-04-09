@@ -4,7 +4,7 @@ import { motion as Motion } from "framer-motion"
 const CODE_LINES = [
   { text: `const agreement = {`, cls: "text-juri-muted" },
   { text: `  parties: ["Client", "Firm"],`, cls: "rounded bg-teal-500/10 px-2 text-teal-600" },
-  { text: `  jurisdiction: "India",`, cls: "pl-2 text-juri-ink" },
+  { text: `  jurisdiction: "India",`, cls: "rounded bg-teal-500/10 px-2 text-teal-600" },
   { text: `  governing_law: "ICA 1872",`, cls: "rounded bg-teal-500/10 px-2 text-teal-600" },
   { text: `}`, cls: "text-juri-muted" },
 ]
@@ -21,13 +21,13 @@ const DraftMock = () => {
     <div aria-hidden="true" className="w-full max-w-[280px]">
       <Motion.div
         key={cycle}
-        className="overflow-hidden rounded-xl border border-juri-line bg-white shadow-sm font-mono text-[11px]"
+        className="overflow-hidden rounded-xl border border-teal-500/40 bg-white shadow-sm font-mono text-[11px]"
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3 }}
       >
         {/* Window chrome */}
-        <div className="flex items-center gap-1.5 border-b border-juri-line bg-juri-canvas px-4 py-3">
+        <div className="flex items-center gap-1.5 border-b border-teal-500/30 bg-teal-50/50 px-4 py-3">
           <div className="h-2.5 w-2.5 rounded-full bg-[#FF5F57]" />
           <div className="h-2.5 w-2.5 rounded-full bg-[#FFBD2E]" />
           <div className="h-2.5 w-2.5 rounded-full bg-[#28C840]" />
@@ -54,7 +54,7 @@ const DraftMock = () => {
                 {/* blinking cursor on the last line */}
                 {i === CODE_LINES.length - 1 && (
                   <Motion.span
-                    className="inline-block text-juri-ink"
+                    className="inline-block text-teal-700"
                     animate={{ opacity: [1, 0, 1] }}
                     transition={{ duration: 0.8, repeat: Infinity }}
                   >
@@ -92,7 +92,7 @@ const DraftMock = () => {
             </span>
           </div>
           <Motion.p
-            className="font-dmSans text-[11px] text-juri-ink"
+            className="font-dmSans text-[11px] text-teal-700"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: CODE_LINES.length * 0.32 + 0.75, duration: 0.3 }}

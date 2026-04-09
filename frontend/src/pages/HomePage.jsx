@@ -54,8 +54,8 @@ const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendin
 
   const openDemo = () => setDemoOpen(true)
 
-  const handleLogin = () => {
-    onNavigateLogin?.()
+  const handleLogin = (loginState) => {
+    onNavigateLogin?.(loginState)
   }
 
   return (
@@ -65,7 +65,10 @@ const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendin
         <HeroSection onRequestDemo={openDemo} onLogin={handleLogin} />
         <FeaturesSection />
         <TestimonialsSection />
-        <PricingSection />
+        <PricingSection
+          onNavigateLogin={onNavigateLogin}
+          onNavigateContact={onNavigateContact}
+        />
         <CTASection onBookDemo={openDemo} />
       </main>
       <Footer onOpenPolicy={setPolicyKey} onGetInTouch={onNavigateContact} />

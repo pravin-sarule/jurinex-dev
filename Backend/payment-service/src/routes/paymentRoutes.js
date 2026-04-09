@@ -1,5 +1,7 @@
 const express = require('express');
 const {
+  createOneTimeOrder,
+  verifyOneTimePayment,
   startSubscription,
   verifySubscription,
   testPlans,
@@ -53,6 +55,8 @@ router.get('/test-razorpay-connection', testRazorpayConnection); // Razorpay API
 
 router.post('/subscription/start', protect, startSubscription);
 router.post('/subscription/verify', protect, verifySubscription);
+router.post('/order/create', protect, createOneTimeOrder);
+router.post('/order/verify', protect, verifyOneTimePayment);
 
 router.get('/history', protect, getUserPaymentHistory);
 

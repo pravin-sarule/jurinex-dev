@@ -1,7 +1,8 @@
 import '../styles/AnalysisPage.css';
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
+import { FileManagerContext } from '../context/FileManagerContext';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -17,9 +18,16 @@ import UploadOptionsMenu from '../components/UploadOptionsMenu';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { formatFileSize } from '../utils/planUtils';
+import { getLlmPolicyErrorUserText } from '../utils/llmQuotaMessages';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
-import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCS_BASE_URL } from '../config/apiConfig';
+import {
+  API_BASE_URL,
+  CHAT_MODEL_BASE_URL,
+  SECRET_PROMPTS_API_BASE,
+  DOCS_BASE_URL,
+  getUserIdForDrafting,
+} from '../config/apiConfig';
 import {
   Search,
   Send,
@@ -92,6 +100,47 @@ const getStageStatus = (stageKey, progress) => {
   if (progress >= stage.range[1]) return 'completed';
   if (progress >= stage.range[0] && progress < stage.range[1]) return 'active';
   return 'pending';
+};
+
+/** Map folder API file to the shape expected by DocumentList (matches FolderContent fields). */
+const normalizeApiFileToUploadedDoc = (file) => {
+  const id = file?.id || file?._id;
+  if (!id) return null;
+  return {
+    id,
+    fileName:
+      file.originalname ||
+      file.name ||
+      file.filename ||
+      file.original_name ||
+      'Unnamed Document',
+    fileSize: file.size || file.fileSize || 0,
+    uploadedAt:
+      file.created_at ||
+      file.createdAt ||
+      file.uploadedAt ||
+      new Date().toISOString(),
+    status: file.status || file.processing_status || 'unknown',
+    processingProgress: parseFloat(file.processing_progress || file.progress || 0),
+    currentOperation: file.current_operation || file.message || '',
+    chunkCount: file.chunk_count,
+    mimetype: file.mimetype || file.mimeType || file.type,
+  };
+};
+
+/** Keep optimistic in-flight rows if the server list has not caught up yet. */
+const mergeUploadedWithServer = (prev, serverDocs) => {
+  const byId = new Map();
+  for (const d of serverDocs) {
+    if (d?.id) byId.set(d.id, d);
+  }
+  for (const p of prev) {
+    if (!p?.id) continue;
+    if (byId.has(p.id)) continue;
+    const transient = ['uploading', 'pending', 'batch_processing', 'processing', 'queued'].includes(p.status);
+    if (transient) byId.set(p.id, p);
+  }
+  return Array.from(byId.values());
 };
 
 const RealTimeProgressPanel = ({ processingStatus }) => {
@@ -248,6 +297,12 @@ const AnalysisPage = () => {
 
   const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError } = useLlmChatLimits();
 
+  // Get the currently selected case folder so uploads land in the right place
+  const { selectedFolder, setDocuments, loadFoldersAndFiles } = React.useContext(FileManagerContext) || {};
+  const activeFolderName = typeof selectedFolder === 'string'
+    ? selectedFolder
+    : (selectedFolder?.originalname || selectedFolder?.name || null);
+
   const [activeDropdown, setActiveDropdown] = useState('Custom Query');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false);
@@ -283,6 +338,61 @@ const AnalysisPage = () => {
 
   const [batchUploads, setBatchUploads] = useState([]);
   const [uploadedDocuments, setUploadedDocuments] = useState([]);
+  const prevFolderForSidebarRef = useRef(null);
+
+  // After upload: merge with server. DocumentList reads uploadedDocuments, not context.documents.
+  const refreshFileList = useCallback(() => {
+    if (!activeFolderName) return;
+    import('../services/documentApi').then(({ default: documentApi }) => {
+      documentApi
+        .getDocumentsInFolder(activeFolderName)
+        .then((data) => {
+          let filesList = [];
+          if (Array.isArray(data)) filesList = data;
+          else if (data?.files) filesList = data.files;
+          else if (data?.documents) filesList = data.documents;
+          else if (data?.data) filesList = data.data;
+          const normalized = filesList.map(normalizeApiFileToUploadedDoc).filter(Boolean);
+          if (setDocuments) setDocuments(filesList);
+          setUploadedDocuments((prev) => mergeUploadedWithServer(prev, normalized));
+        })
+        .catch(() => {});
+    });
+  }, [activeFolderName, setDocuments]);
+
+  useEffect(() => {
+    if (!activeFolderName) {
+      prevFolderForSidebarRef.current = null;
+      return;
+    }
+    const folderChanged = prevFolderForSidebarRef.current !== activeFolderName;
+    prevFolderForSidebarRef.current = activeFolderName;
+    let cancelled = false;
+    import('../services/documentApi').then(({ default: documentApi }) => {
+      documentApi
+        .getDocumentsInFolder(activeFolderName)
+        .then((data) => {
+          if (cancelled) return;
+          let filesList = [];
+          if (Array.isArray(data)) filesList = data;
+          else if (data?.files) filesList = data.files;
+          else if (data?.documents) filesList = data.documents;
+          else if (data?.data) filesList = data.data;
+          const normalized = filesList.map(normalizeApiFileToUploadedDoc).filter(Boolean);
+          if (setDocuments) setDocuments(filesList);
+          if (folderChanged) {
+            setUploadedDocuments(normalized);
+          } else {
+            setUploadedDocuments((prev) => mergeUploadedWithServer(prev, normalized));
+          }
+        })
+        .catch(() => {});
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeFolderName, setDocuments]);
+
   const [overallUploadProgress, setOverallUploadProgress] = useState(0);
   const [overallBatchProcessingProgress, setOverallBatchProcessingProgress] = useState(0);
   const [activePollingFiles, setActivePollingFiles] = useState(new Set());
@@ -394,6 +504,19 @@ const AnalysisPage = () => {
     return null;
   };
 
+  /** Agentic service uses `/{folder}/intelligent-chat/stream` (DOCS_BASE_URL), not gateway `/files/chat/stream`. */
+  const getIntelligentChatStreamHeaders = () => {
+    const token = getAuthToken();
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: token ? `Bearer ${token}` : '',
+      Accept: 'text/event-stream',
+    };
+    const uid = getUserIdForDrafting();
+    if (uid) headers['X-User-Id'] = uid;
+    return headers;
+  };
+
   const apiRequest = async (url, options = {}) => {
     try {
       const token = getAuthToken();
@@ -428,7 +551,7 @@ const AnalysisPage = () => {
           case 415:
             throw new Error('Unsupported file type.');
           case 429:
-            throw new Error('Too many requests.');
+            throw new Error(getLlmPolicyErrorUserText(429, errorData));
           default:
             throw new Error(errorData.error || errorData.message || `Request failed with status ${response.status}`);
         }
@@ -711,7 +834,9 @@ const AnalysisPage = () => {
             )
           );
          
-          const generateUrlEndpoint = `${DOCS_BASE_URL}/generate-upload-url`;
+          const generateUrlEndpoint = activeFolderName
+            ? `${DOCS_BASE_URL}/${encodeURIComponent(activeFolderName)}/generate-upload-url`
+            : `${DOCS_BASE_URL}/generate-upload-url`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 1/3: Requesting signed URL from: ${generateUrlEndpoint}`);
          
           const urlResponse = await fetch(generateUrlEndpoint, {
@@ -807,7 +932,9 @@ const AnalysisPage = () => {
             xhr.send(file);
           });
          
-          const completeEndpoint = `${DOCS_BASE_URL}/complete-upload`;
+          const completeEndpoint = activeFolderName
+            ? `${DOCS_BASE_URL}/${encodeURIComponent(activeFolderName)}/complete-upload`
+            : `${DOCS_BASE_URL}/complete-upload`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 3/3: Notifying backend to process file: ${completeEndpoint}`);
          
           const completeResponse = await fetch(completeEndpoint, {
@@ -883,6 +1010,8 @@ const AnalysisPage = () => {
               processingProgress: 0,
             });
             startProcessingStatusPolling(fileId);
+            // Refresh the Files panel immediately after each large file is registered
+            refreshFileList();
           }
         } catch (error) {
           console.error(`[📤 SIGNED URL UPLOAD] ❌ Upload failed for ${matchingUpload.fileName}:`, error);
@@ -898,13 +1027,18 @@ const AnalysisPage = () => {
       }
      
       if (smallFiles.length > 0) {
+        const smallUploadEndpoint = activeFolderName
+          ? `${DOCS_BASE_URL}/${encodeURIComponent(activeFolderName)}/upload`
+          : `${API_BASE_URL}/files/batch-upload`;
         console.log(`\n[📦 REGULAR UPLOAD] Starting batch upload for ${smallFiles.length} small file(s)`);
         console.log(`[📦 REGULAR UPLOAD] Environment: ${environment}`);
-        console.log(`[📦 REGULAR UPLOAD] Endpoint: ${API_BASE_URL}/files/batch-upload`);
+        console.log(`[📦 REGULAR UPLOAD] Endpoint: ${smallUploadEndpoint}`);
        
         const formData = new FormData();
+        // Folder-specific endpoint expects 'files'; gateway batch-upload expects 'document'
+        const fileFieldName = activeFolderName ? 'files' : 'document';
         smallFiles.forEach((file) => {
-          formData.append('document', file);
+          formData.append(fileFieldName, file);
         });
         if (secretId) {
           formData.append('secret_id', secretId);
@@ -991,21 +1125,31 @@ const AnalysisPage = () => {
             reject(new Error('Upload aborted'));
           });
          
-          xhr.open('POST', `${API_BASE_URL}/files/batch-upload`);
+          xhr.open('POST', smallUploadEndpoint);
           Object.keys(headers).forEach((key) => {
             xhr.setRequestHeader(key, headers[key]);
           });
           xhr.send(formData);
         });
         console.log('[batchUploadDocuments] Batch upload response:', data);
-       
-        if (data.uploaded_files && Array.isArray(data.uploaded_files)) {
-          data.uploaded_files.forEach((uploadedFile, index) => {
+
+        // Normalize response: gateway returns { uploaded_files: [...] },
+        // folder-specific endpoint returns { uploadedFiles: [...] }
+        const rawList = data.uploaded_files || data.uploadedFiles || [];
+        const normalizedFiles = rawList.map((f) => ({
+          file_id: f.file_id || f.metadata?.db_file_id || null,
+          filename: f.filename || f.document_name || f.name || null,
+          error: f.error || null,
+          operation_name: f.operation_name || null,
+        }));
+
+        if (normalizedFiles.length > 0) {
+          normalizedFiles.forEach((uploadedFile, index) => {
             const matchingUpload = initialBatchUploads.find(u => smallFiles.includes(u.file) &&
               initialBatchUploads.filter(up => smallFiles.includes(up.file)).indexOf(u) === index);
-           
+
             if (!matchingUpload) return;
-           
+
             if (uploadedFile.error) {
               console.error(`[batchUploadDocuments] Upload failed for ${matchingUpload.fileName}:`, uploadedFile.error);
               setBatchUploads((prev) =>
@@ -1037,8 +1181,8 @@ const AnalysisPage = () => {
                   processingProgress: 0,
                 },
               ]);
-              uploadedFileIds.push(fileId);
-             
+              if (fileId) uploadedFileIds.push(fileId);
+
               if (uploadedFileIds.length === largeFiles.length + 1) {
                 setFileId(fileId);
                 setDocumentData({
@@ -1060,8 +1204,10 @@ const AnalysisPage = () => {
      
       if (uploadedFileIds.length > 0) {
         startBatchProcessingPolling(uploadedFileIds);
+        // Refresh the Files panel so the newly uploaded file appears immediately
+        refreshFileList();
       }
-     
+
       const successCount = uploadedFileIds.length;
       const failCount = initialBatchUploads.length - successCount;
      
@@ -1304,25 +1450,28 @@ const AnalysisPage = () => {
 
     try {
       console.log('[chatWithDocument] Sending custom query with streaming. LLM:', llm_name || 'default (backend)');
-      const token = getAuthToken();
-      const body = {
-        file_id: file_id,
-        question: questionText,
-        used_secret_prompt: false,
-        prompt_label: null,
-        session_id: currentSessionId,
-      };
-      if (llm_name) {
-        body.llm_name = llm_name;
-      }
+      const useFolderChat = Boolean(activeFolderName);
+      const streamUrl = useFolderChat
+        ? `${DOCS_BASE_URL}/${encodeURIComponent(activeFolderName)}/intelligent-chat/stream`
+        : `${API_BASE_URL}/files/chat/stream`;
+      const body = useFolderChat
+        ? {
+            question: questionText,
+            session_id: currentSessionId,
+            llm_name: llm_name || 'gemini',
+          }
+        : {
+            file_id: file_id,
+            question: questionText,
+            used_secret_prompt: false,
+            prompt_label: null,
+            session_id: currentSessionId,
+            ...(llm_name ? { llm_name } : {}),
+          };
 
-      const response = await fetch(`${API_BASE_URL}/files/chat/stream`, {
+      const response = await fetch(streamUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': token ? `Bearer ${token}` : '',
-          'Accept': 'text/event-stream',
-        },
+        headers: getIntelligentChatStreamHeaders(),
         body: JSON.stringify(body),
       });
 
@@ -1583,11 +1732,32 @@ const AnalysisPage = () => {
       'image/png',
       'image/jpeg',
       'image/tiff',
+      // Audio formats — transcribed via Google Cloud Speech-to-Text
+      'audio/wav',
+      'audio/x-wav',
+      'audio/wave',
+      'audio/flac',
+      'audio/x-flac',
+      'audio/mp3',
+      'audio/mpeg',
+      'audio/ogg',
+      'audio/webm',
+      'audio/mp4',
+      'audio/m4a',
+      'audio/x-m4a',
+      'audio/aac',
     ];
     
+    const audioExtensions = new Set(['.mp3', '.wav', '.wave', '.flac', '.ogg', '.opus', '.webm', '.m4a', '.aac', '.amr']);
+    const isAudioByExtension = (name) => {
+      const ext = name.toLowerCase().slice(name.lastIndexOf('.'));
+      return audioExtensions.has(ext);
+    };
+
     let hasFileSizeError = false;
     const validFiles = files.filter((file) => {
-      if (!allowedTypes.includes(file.type)) {
+      const effectiveType = file.type || (isAudioByExtension(file.name) ? 'audio/mpeg' : '');
+      if (!allowedTypes.includes(effectiveType)) {
         setError(`File "${file.name}" has an unsupported type.`);
         return false;
       }
@@ -1782,17 +1952,19 @@ const AnalysisPage = () => {
       !currentStatus || currentStatus === 'processed' || currentProgress >= 100;
 
     if (isSecretPromptSelected) {
-      if (!hasFile) {
-        setError('Please upload a document before running an analysis prompt.');
+      if (!hasFile && !activeFolderName) {
+        setError('Please upload a document or select a case folder before running an analysis prompt.');
         return;
       }
-      if (currentStatus === 'error') {
-        setError('Document processing failed. Please upload a new document.');
-        return;
-      }
-      if (isActivelyProcessing && !isProcessingComplete) {
-        setError('Document is still being processed. Please wait until processing is complete.');
-        return;
+      if (hasFile) {
+        if (currentStatus === 'error') {
+          setError('Document processing failed. Please upload a new document.');
+          return;
+        }
+        if (isActivelyProcessing && !isProcessingComplete) {
+          setError('Document is still being processed. Please wait until processing is complete.');
+          return;
+        }
       }
       if (!selectedSecretId) {
         setError('Please select an analysis type.');
@@ -1873,23 +2045,32 @@ const AnalysisPage = () => {
           streamUpdateTimeoutRef.current = null;
         }
 
-        const token = getAuthToken();
-        const response = await fetch(`${API_BASE_URL}/files/chat/stream`, {
+        const useFolderChat = Boolean(activeFolderName);
+        const streamUrl = useFolderChat
+          ? `${DOCS_BASE_URL}/${encodeURIComponent(activeFolderName)}/intelligent-chat/stream`
+          : `${API_BASE_URL}/files/chat/stream`;
+        const streamBody = useFolderChat
+          ? {
+              question: chatInput.trim() || '',
+              secret_id: currentSecretId,
+              prompt_label: currentPromptLabel,
+              session_id: sessionId,
+              llm_name: currentLlmName || 'gemini',
+            }
+          : {
+              file_id: fileId,
+              secret_id: currentSecretId,
+              used_secret_prompt: true,
+              prompt_label: currentPromptLabel,
+              session_id: sessionId,
+              llm_name: currentLlmName,
+              additional_input: chatInput.trim() || '',
+            };
+
+        const response = await fetch(streamUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : '',
-            'Accept': 'text/event-stream',
-          },
-          body: JSON.stringify({
-            file_id: fileId,
-            secret_id: currentSecretId,
-            used_secret_prompt: true,
-            prompt_label: currentPromptLabel,
-            session_id: sessionId,
-            llm_name: currentLlmName,
-            additional_input: chatInput.trim() || '',
-          }),
+          headers: getIntelligentChatStreamHeaders(),
+          body: JSON.stringify(streamBody),
         });
 
         if (!response.ok) {
@@ -2145,6 +2326,11 @@ const AnalysisPage = () => {
     } else {
       if (!chatInput.trim()) {
         setError('Please enter a question.');
+        return;
+      }
+
+      if (!hasFile && !activeFolderName) {
+        setError('Select a case folder or a file in the list, or upload a document.');
         return;
       }
 
@@ -3115,7 +3301,7 @@ const AnalysisPage = () => {
                   ref={fileInputRef}
                   type="file"
                   className="hidden"
-                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
+                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.flac,.ogg,.webm,.mp4,.m4a,.aac"
                   onChange={handleFileUpload}
                   disabled={isUploading}
                   multiple
@@ -3397,7 +3583,7 @@ const AnalysisPage = () => {
                     ref={fileInputRef}
                     type="file"
                     className="hidden"
-                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff"
+                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.flac,.ogg,.webm,.mp4,.m4a,.aac"
                     onChange={handleFileUpload}
                     disabled={isUploading}
                     multiple
@@ -3518,4 +3704,3 @@ const AnalysisPage = () => {
 };
 
 export default AnalysisPage;
-

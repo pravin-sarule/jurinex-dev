@@ -14,13 +14,13 @@ const SummaryMock = () => {
     <div aria-hidden="true" className="w-full max-w-[280px]">
       <Motion.div
         key={cycle}
-        className="overflow-hidden rounded-xl border border-juri-line bg-white shadow-sm"
+        className="overflow-hidden rounded-xl border border-teal-500/40 bg-white shadow-sm"
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35 }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-juri-line bg-juri-canvas px-4 py-3">
+        <div className="flex items-center justify-between border-b border-teal-500/30 bg-teal-50/50 px-4 py-3">
           <div className="flex items-center gap-2">
             <div className="h-3 w-3 rounded-sm bg-teal-500/50" />
             <span className="font-dmSans text-[11px] text-juri-muted">
@@ -33,7 +33,7 @@ const SummaryMock = () => {
         </div>
 
         {/* Scanning progress bar */}
-        <div className="h-0.5 bg-juri-line">
+        <div className="h-0.5 bg-teal-200/70">
           <Motion.div
             className="h-full bg-gradient-to-r from-teal-500/70 to-teal-600"
             initial={{ width: "0%" }}
@@ -48,7 +48,7 @@ const SummaryMock = () => {
           {[1, 0.8].map((w, i) => (
             <Motion.div
               key={i}
-              className="h-2 rounded bg-juri-line"
+              className="h-2 rounded bg-teal-200/80"
               style={{ width: `${w * 100}%`, originX: 0 }}
               initial={{ scaleX: 0, opacity: 0 }}
               animate={{ scaleX: 1, opacity: 1 }}
@@ -81,7 +81,7 @@ const SummaryMock = () => {
 
           {/* Middle plain line */}
           <Motion.div
-            className="h-2 w-3/4 rounded bg-juri-line"
+            className="h-2 w-3/4 rounded bg-teal-200/80"
             style={{ originX: 0 }}
             initial={{ scaleX: 0, opacity: 0 }}
             animate={{ scaleX: 1, opacity: 1 }}
@@ -95,9 +95,9 @@ const SummaryMock = () => {
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: 2.0, duration: 0.35 }}
           >
-            <div className="h-2 flex-1 rounded bg-cyan-400/20" />
+            <div className="h-2 flex-1 rounded bg-teal-500/20" />
             <Motion.span
-              className="whitespace-nowrap rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 font-dmSans text-[9px] text-cyan-700"
+              className="whitespace-nowrap rounded-full border border-teal-400/35 bg-teal-500/10 px-2 py-1 font-dmSans text-[9px] text-teal-600"
               initial={{ scale: 0, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{
@@ -115,7 +115,7 @@ const SummaryMock = () => {
           {[1, 0.65].map((w, i) => (
             <Motion.div
               key={i}
-              className="h-2 rounded bg-juri-line"
+              className="h-2 rounded bg-teal-200/80"
               style={{ width: `${w * 100}%`, originX: 0 }}
               initial={{ scaleX: 0, opacity: 0 }}
               animate={{ scaleX: 1, opacity: 1 }}

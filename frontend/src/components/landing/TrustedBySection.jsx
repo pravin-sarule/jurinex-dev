@@ -10,7 +10,7 @@ const TrustedBySection = () => {
   return (
     <section
       id="security"
-      className="border-y border-juri-line bg-juri-canvas py-14"
+      className="border-y border-teal-300/60 bg-juri-canvas py-14"
       aria-labelledby="trusted-heading"
     >
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">

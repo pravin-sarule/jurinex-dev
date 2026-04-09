@@ -31,11 +31,21 @@ const LoginPage = () => {
  const navigate = useNavigate();
  const location = useLocation();
  const { login, verifyOtp, isAuthenticated, setAuthState } = useAuth();
+ const getPostLoginDestination = () => {
+  const from = location.state?.from
+  return typeof from === "string" && from.trim() ? from : "/dashboard"
+ };
+ const getPostLoginState = () => {
+  if (location.state?.pendingUpgradePlan) {
+    return { pendingUpgradePlan: location.state.pendingUpgradePlan }
+  }
+  return undefined
+ };
 
  useEffect(() => {
  if (isAuthenticated && !isLoading) {
  console.log('LoginPage: User already authenticated, redirecting to dashboard');
- navigate('/dashboard', { replace: true });
+ navigate(getPostLoginDestination(), { replace: true, state: getPostLoginState() });
  }
  }, [isAuthenticated, navigate, isLoading]);
 
@@ -141,7 +151,7 @@ const LoginPage = () => {
  
  setTimeout(() => {
  setIsLoading(false);
- navigate('/dashboard', { replace: true });
+ navigate(getPostLoginDestination(), { replace: true, state: getPostLoginState() });
  }, 500);
  } else {
  setServerMessage(data.message || 'Google Sign-In failed. Please try again.');
@@ -188,7 +198,7 @@ const LoginPage = () => {
     } else if (result.success) {
  setSuccessMessage('Login successful! Redirecting...');
  setTimeout(() => {
- navigate('/dashboard', { replace: true });
+ navigate(getPostLoginDestination(), { replace: true, state: getPostLoginState() });
  }, 1500);
  } else {
  setServerMessage(result.message || "Login failed. Please try again.");
@@ -240,7 +250,7 @@ const handleVerifyOTP = async (e) => {
       setServerMessage('');
       
       setTimeout(() => {
-        navigate('/dashboard', { replace: true });
+        navigate(getPostLoginDestination(), { replace: true, state: getPostLoginState() });
       }, 1500);
     } else {
       setServerMessage(result.message || "Invalid OTP. Please try again.");

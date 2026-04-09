@@ -2,7 +2,7 @@
  * File helper utilities for evidence upload and display
  */
 
-const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024; // 200MB
 const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.doc', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.webp'];
 
 /**
@@ -28,7 +28,7 @@ export function validateFileSize(file) {
   if (file.size > MAX_FILE_SIZE_BYTES) {
     return {
       valid: false,
-      error: `File must be under 20MB (current: ${formatFileSize(file.size)})`,
+      error: `File must be under 200MB (current: ${formatFileSize(file.size)})`,
     };
   }
   return { valid: true };

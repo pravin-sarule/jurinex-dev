@@ -392,6 +392,11 @@ const normalizeFolderFilesResponse = (data, folderName = '') => {
   };
 };
 
+/** Encode case/folder name for a single URL path segment (special characters, spaces, unicode). */
+function folderPathSegment(folderName) {
+  return encodeURIComponent(String(folderName ?? '').trim());
+}
+
 const getAuthHeader = () => {
   const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
   const userId = getUserIdForDrafting();
@@ -423,8 +428,8 @@ const documentApi = {
 
   getDocumentsInFolder: async (folderName) => {
     const response = await axios.get(
-      `${API_BASE_URL}/${folderName}/files`,
-      { headers: getAuthHeader(), timeout: 8000 }
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/files`,
+      { headers: getAuthHeader(), timeout: 30000 }
     );
     return normalizeFolderFilesResponse(response.data, folderName);
   },
@@ -449,7 +454,7 @@ const documentApi = {
           console.log(`[📤 SIGNED URL UPLOAD] Environment: ${environment}`);
           console.log(`[📤 SIGNED URL UPLOAD] Folder: ${folderName}`);
           
-          const generateUrlEndpoint = `${API_BASE_URL}/${folderName}/generate-upload-url`;
+          const generateUrlEndpoint = `${API_BASE_URL}/${folderPathSegment(folderName)}/generate-upload-url`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 1/3: Requesting signed URL from: ${generateUrlEndpoint}`);
           
           const urlResponse = await axios.post(
@@ -482,7 +487,7 @@ const documentApi = {
 
           console.log(`[📤 SIGNED URL UPLOAD] ✅ File uploaded to GCS successfully`);
 
-          const completeEndpoint = `${API_BASE_URL}/${folderName}/complete-upload`;
+          const completeEndpoint = `${API_BASE_URL}/${folderPathSegment(folderName)}/complete-upload`;
           console.log(`[📤 SIGNED URL UPLOAD] Step 3/3: Notifying backend to process file: ${completeEndpoint}`);
           
           const completeResponse = await axios.post(
@@ -504,7 +509,7 @@ const documentApi = {
         } else {
           console.log(`[📦 REGULAR UPLOAD] Uploading small file: ${file.name} (${fileSizeMB}MB)`);
           console.log(`[📦 REGULAR UPLOAD] Environment: ${environment}`);
-          console.log(`[📦 REGULAR UPLOAD] Endpoint: ${API_BASE_URL}/${folderName}/upload`);
+          console.log(`[📦 REGULAR UPLOAD] Endpoint: ${API_BASE_URL}/${folderPathSegment(folderName)}/upload`);
           
           const formData = new FormData();
           formData.append('files', file);
@@ -513,7 +518,7 @@ const documentApi = {
           }
 
           const response = await axios.post(
-            `${API_BASE_URL}/${folderName}/upload`,
+            `${API_BASE_URL}/${folderPathSegment(folderName)}/upload`,
             formData,
             {
               headers: {
@@ -525,7 +530,11 @@ const documentApi = {
 
           console.log(`[📦 REGULAR UPLOAD] ✅ Upload completed successfully!`);
 
-          const docs = response.data.documents || [];
+          const docs =
+            response.data.documents ||
+            response.data.uploadedFiles ||
+            response.data.uploaded_files ||
+            [];
           uploadedDocuments.push(...docs);
         }
       } catch (error) {
@@ -554,7 +563,7 @@ const documentApi = {
 
   getFolderSummary: async (folderName) => {
     const response = await axios.get(
-      `${API_BASE_URL}/${folderName}/summary`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/summary`,
       { headers: getAuthHeader() }
     );
     return response.data;
@@ -564,14 +573,6 @@ const documentApi = {
     const response = await axios.get(`${API_BASE_URL}/status/${fileId}`, {
       headers: getAuthHeader(),
     });
-    return response.data;
-  },
-
-  getFolderProcessingStatus: async (folderName) => {
-    const response = await axios.get(
-      `${API_BASE_URL}/${folderName}/status`,
-      { headers: getAuthHeader() }
-    );
     return response.data;
   },
 
@@ -603,7 +604,7 @@ const documentApi = {
     };
     console.log('[documentApi] Sending request to intelligent-chat:', { folderName, payload });
     const response = await axios.post(
-      `${API_BASE_URL}/${folderName}/intelligent-chat`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/intelligent-chat`,
       payload,
       { headers: getAuthHeader() }
     );
@@ -843,7 +844,7 @@ const documentApi = {
       llm_name: 'gemini',
     };
     const response = await axios.post(
-      `${API_BASE_URL}/${folderName}/intelligent-chat`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/intelligent-chat`,
       payload,
       { headers: getAuthHeader() }
     );
@@ -852,7 +853,7 @@ const documentApi = {
 
   getFolderChatSessions: async (folderName) => {
     const response = await axios.get(
-      `${API_BASE_URL}/${folderName}/sessions`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/sessions`,
       { headers: getAuthHeader() }
     );
     return response.data;
@@ -860,7 +861,7 @@ const documentApi = {
 
   getFolderChatSessionById: async (folderName, sessionId) => {
     const response = await axios.get(
-      `${API_BASE_URL}/${folderName}/sessions/${sessionId}`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/sessions/${sessionId}`,
       { headers: getAuthHeader() }
     );
     return response.data;
@@ -868,7 +869,7 @@ const documentApi = {
 
   continueFolderChat: async (folderName, sessionId, question) => {
     const response = await axios.post(
-      `${API_BASE_URL}/${folderName}/sessions/${sessionId}/continue`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/sessions/${sessionId}/continue`,
       { question },
       { headers: getAuthHeader() }
     );
@@ -877,7 +878,7 @@ const documentApi = {
 
   deleteFolderChatSession: async (folderName, sessionId) => {
     const response = await axios.delete(
-      `${API_BASE_URL}/${folderName}/sessions/${sessionId}`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/sessions/${sessionId}`,
       { headers: getAuthHeader() }
     );
     return response.data;
@@ -899,7 +900,7 @@ const documentApi = {
 
   getFolderChats: async (folderName) => {
     const response = await axios.get(
-      `${API_BASE_URL}/${folderName}/chats`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/chats`,
       { headers: getAuthHeader() }
     );
     return response.data;
@@ -907,7 +908,7 @@ const documentApi = {
 
   deleteSingleFolderChat: async (folderName, chatId) => {
     const response = await axios.delete(
-      `${API_BASE_URL}/${folderName}/chat/${chatId}`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/chat/${chatId}`,
       { headers: getAuthHeader() }
     );
     return response.data;
@@ -915,7 +916,7 @@ const documentApi = {
 
   deleteAllFolderChats: async (folderName) => {
     const response = await axios.delete(
-      `${API_BASE_URL}/${folderName}/chats`,
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/chats`,
       { headers: getAuthHeader() }
     );
     return response.data;

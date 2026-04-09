@@ -1,5 +1,11 @@
 import React from 'react';
-import { FileText } from 'lucide-react';
+import { FileText, Music } from 'lucide-react';
+
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.wave', '.flac', '.ogg', '.opus', '.webm', '.m4a', '.aac', '.amr']);
+const isAudioFile = (name = '') => {
+  const ext = name.toLowerCase().slice(name.lastIndexOf('.'));
+  return AUDIO_EXTENSIONS.has(ext);
+};
 
 const DocumentList = ({
   uploadedDocuments,
@@ -22,7 +28,7 @@ const DocumentList = ({
     <div className="px-3 py-2 border-b border-gray-200 bg-[#E0F7F6]">
       <h3 className="text-xs font-semibold text-gray-700 mb-1.5 flex items-center">
         <FileText className="h-3 w-3 mr-1" />
-        Uploaded Documents ({uploadedDocuments.length})
+        Files ({uploadedDocuments.length})
       </h3>
       <div className="space-y-1.5 max-h-24 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300">
         {uploadedDocuments.map((doc) => (
@@ -60,6 +66,12 @@ const DocumentList = ({
             }`}
           >
             <div className="flex items-center justify-between">
+              <div className="flex-1 min-w-0 flex items-start gap-1.5">
+                {isAudioFile(doc.fileName) ? (
+                  <Music className="h-3 w-3 mt-0.5 text-[#21C1B6] flex-shrink-0" />
+                ) : (
+                  <FileText className="h-3 w-3 mt-0.5 text-gray-400 flex-shrink-0" />
+                )}
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-gray-900 truncate">{doc.fileName}</p>
                 <p className="text-xs text-gray-500">{formatFileSize(doc.fileSize)}</p>
@@ -90,8 +102,9 @@ const DocumentList = ({
                   </>
                 )}
               </div>
+              </div>
               <div
-                className={`ml-1.5 px-1 py-0.5 rounded text-xs font-medium ${
+                className={`ml-1.5 px-1 py-0.5 rounded text-xs font-medium flex-shrink-0 ${
                   doc.status === 'processed' && (doc.processingProgress || 0) >= 100
                     ? 'bg-green-100 text-green-800'
                     : doc.status === 'processing' || doc.status === 'batch_processing'

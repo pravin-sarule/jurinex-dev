@@ -1,5 +1,4 @@
 
-
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -26,24 +25,20 @@ const chatProxy = require("./routes/chatProxy");
 const zohodraftingproxy = require("./routes/zohodraftingproxy");
 const draftingTemplateProxy = require("./routes/draftingTemplateProxy");
 const draftingAiProxy = require("./routes/draftingAiProxy");
-// const userResourcesProxy = require("./routes/userResourcesProxy");
 const templateAnalyzerProxy = require("./routes/templateAnalyzerProxy");
 
 const app = express();
 
+<<<<<<< Updated upstream
 // Global JSON parsing removed to prevent breaking proxies. Applied to specific direct routes.
+=======
+// ✅ Support larger bodies for direct routes and proxies
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
+>>>>>>> Stashed changes
 
 // Target URL for auth service
 const targetAuth = process.env.AUTH_SERVICE_URL || "http://localhost:5001";
-
-// const allowedOrigins = ["http://localhost:5173", "http://localhost:5000"];
-
-// app.use(cors({
-//   origin: allowedOrigins,
-//   credentials: true,
-//   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-//   allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-user-id"]
-// }));
 
 // ✅ Update allowed origins for frontend + local dev
 const allowedOrigins = (
@@ -216,7 +211,7 @@ app.use("/api/drafts", authMiddleware, createProxyMiddleware({
     if (req.headers.authorization) {
       proxyReq.setHeader("Authorization", req.headers.authorization);
     }
-    // Inject user ID from JWT into header
+    // Inject user ID from JWT into header if available
     if (req.user && req.user.id) {
       proxyReq.setHeader("x-user-id", req.user.id);
     }
@@ -256,4 +251,3 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = app;
-

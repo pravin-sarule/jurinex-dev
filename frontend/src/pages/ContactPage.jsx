@@ -70,7 +70,7 @@ const ContactPage = ({ onBackToHome, onNavigateLogin, onOpenDemo, onSectionNav }
         <Motion.button
           type="button"
           onClick={onBackToHome}
-          className="mb-10 inline-flex items-center gap-1.5 font-dmSans text-sm text-juri-muted transition hover:text-juri-ink"
+          className="mb-10 inline-flex items-center gap-1.5 font-dmSans text-sm text-juri-muted transition hover:text-teal-700"
           initial={{ opacity: 0, x: -10 }}
           animate={{ opacity: 1, x: 0, transition: { duration: 0.3 } }}
         >
@@ -88,7 +88,7 @@ const ContactPage = ({ onBackToHome, onNavigateLogin, onOpenDemo, onSectionNav }
           initial="hidden"
           animate="show"
         >
-          <h1 className="font-playfair text-4xl font-bold text-juri-ink sm:text-5xl">
+          <h1 className="font-playfair text-4xl font-bold text-teal-700 sm:text-5xl">
             Contact Us
           </h1>
           <p className="mt-3 font-dmSans text-base text-juri-muted">
@@ -105,17 +105,17 @@ const ContactPage = ({ onBackToHome, onNavigateLogin, onOpenDemo, onSectionNav }
               variants={fadeUp}
               initial="hidden"
               animate="show"
-              className="flex flex-col items-center rounded-2xl bg-gray-50 px-6 py-8 text-center"
+              className="flex flex-col items-center rounded-2xl border border-teal-300/60 bg-teal-50/50 px-6 py-8 text-center shadow-[0_8px_24px_rgba(13,148,136,0.10)]"
             >
               {/* Icon */}
               <div
                 className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl shadow-md"
-                style={{ backgroundColor: "#E0334A" }}
+                style={{ backgroundColor: "#0D9488" }}
               >
                 {card.icon}
               </div>
 
-              <p className="mb-3 font-dmSans text-base font-semibold text-juri-ink">
+              <p className="mb-3 font-dmSans text-base font-semibold text-teal-700">
                 {card.title}
               </p>
 
@@ -127,10 +127,10 @@ const ContactPage = ({ onBackToHome, onNavigateLogin, onOpenDemo, onSectionNav }
                       line.highlight
                         ? "font-semibold"
                         : line.bold
-                        ? "font-medium text-juri-ink"
+                        ? "font-medium text-teal-700"
                         : "text-juri-muted"
                     }`}
-                    style={line.highlight ? { color: "#E0334A" } : {}}
+                    style={line.highlight ? { color: "#0D9488" } : {}}
                   >
                     {line.text}
                   </p>

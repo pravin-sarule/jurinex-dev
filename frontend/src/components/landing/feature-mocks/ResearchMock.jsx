@@ -48,7 +48,7 @@ const ResearchMock = () => {
       transition={{ duration: 0.3 }}
     >
       {/* Search bar */}
-      <div className="flex items-center gap-2 rounded-lg border border-juri-line bg-white px-3 py-2.5 shadow-sm">
+      <div className="flex items-center gap-2 rounded-lg border border-teal-500/40 bg-white px-3 py-2.5 shadow-sm">
         <svg
           className="h-3.5 w-3.5 flex-shrink-0 text-juri-muted"
           fill="none"
@@ -63,7 +63,7 @@ const ResearchMock = () => {
           />
         </svg>
 
-        <span className="min-w-0 flex-1 overflow-hidden font-dmSans text-[11px] text-juri-ink">
+        <span className="min-w-0 flex-1 overflow-hidden font-dmSans text-[11px] text-teal-700">
           {typed}
           {/* blinking cursor while typing */}
           <Motion.span
@@ -78,7 +78,7 @@ const ResearchMock = () => {
 
       {/* Searching indicator */}
       <Motion.div
-        className="overflow-hidden rounded-lg border border-juri-line bg-white px-3 py-2 shadow-sm"
+        className="overflow-hidden rounded-lg border border-teal-500/40 bg-white px-3 py-2 shadow-sm"
         initial={{ opacity: 0 }}
         animate={{ opacity: doneTyping ? 1 : 0 }}
         transition={{ duration: 0.3 }}
@@ -94,7 +94,7 @@ const ResearchMock = () => {
           </span>
         </div>
         {/* Progress bar */}
-        <div className="mt-2 h-1 w-full overflow-hidden rounded bg-juri-line">
+        <div className="mt-2 h-1 w-full overflow-hidden rounded bg-teal-200/80">
           <Motion.div
             className="h-full rounded bg-teal-500/60"
             initial={{ width: "0%" }}
@@ -108,7 +108,7 @@ const ResearchMock = () => {
       {RESULTS.map(({ court, year, relevance }, i) => (
         <Motion.div
           key={`${court}-${year}`}
-          className="rounded-lg border border-juri-line bg-white p-3 shadow-sm"
+          className="rounded-lg border border-teal-500/40 bg-white p-3 shadow-sm"
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{
@@ -119,17 +119,17 @@ const ResearchMock = () => {
         >
           <div className="mb-2 flex items-start justify-between gap-2">
             <div>
-              <div className="font-dmSans text-[11px] font-semibold text-juri-ink">
+              <div className="font-dmSans text-[11px] font-semibold text-teal-700">
                 {court}
               </div>
               <div className="font-dmSans text-[10px] text-juri-muted">{year}</div>
             </div>
-            <span className="flex-shrink-0 rounded border border-juri-line px-1.5 py-0.5 font-dmSans text-[9px] text-juri-muted">
+            <span className="flex-shrink-0 rounded border border-teal-400/35 bg-teal-500/10 px-1.5 py-0.5 font-dmSans text-[9px] text-teal-600">
               Judgment
             </span>
           </div>
 
-          <div className="mb-2 h-1.5 w-full rounded bg-juri-line" />
+          <div className="mb-2 h-1.5 w-full rounded bg-teal-200/80" />
 
           {/* Relevance dots fill in one by one */}
           <div className="flex items-center gap-1">
@@ -141,7 +141,7 @@ const ResearchMock = () => {
                 key={dotIndex}
                 className={[
                   "h-2 w-2 rounded-full",
-                  dotIndex < relevance ? "bg-teal-600" : "bg-juri-line",
+                  dotIndex < relevance ? "bg-teal-600" : "bg-teal-200/80",
                 ].join(" ")}
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}

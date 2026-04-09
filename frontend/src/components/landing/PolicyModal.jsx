@@ -140,23 +140,23 @@ export const POLICIES = {
 
 const PolicyBody = ({ policy }) => (
   <div className="space-y-5">
-    <div className="pb-4 border-b border-juri-line">
-      <h3 className="font-playfair text-xl font-bold text-juri-ink">{policy.companyName}</h3>
-      {policy.subtitle && <p className="mt-0.5 font-dmSans text-sm font-semibold text-juri-ink">{policy.subtitle}</p>}
-      <p className="mt-2 font-dmSans text-sm font-bold text-juri-ink">{policy.docTitle}</p>
+    <div className="pb-4 border-b border-teal-300/60">
+      <h3 className="font-playfair text-xl font-bold text-teal-700">{policy.companyName}</h3>
+      {policy.subtitle && <p className="mt-0.5 font-dmSans text-sm font-semibold text-teal-700">{policy.subtitle}</p>}
+      <p className="mt-2 font-dmSans text-sm font-bold text-teal-700">{policy.docTitle}</p>
       {policy.docSubtitle && <p className="font-dmSans text-sm text-juri-muted">{policy.docSubtitle}</p>}
       <p className="mt-1 font-dmSans text-sm text-juri-muted">
-        <span className="font-semibold text-juri-ink">Last Updated:</span> {policy.lastUpdated}
+        <span className="font-semibold text-teal-700">Last Updated:</span> {policy.lastUpdated}
       </p>
     </div>
 
     {policy.sections.map((sec) => (
       <div key={sec.heading} className="space-y-2">
-        <p className="font-dmSans text-sm font-bold text-juri-ink">{sec.heading}</p>
+        <p className="font-dmSans text-sm font-bold text-teal-700">{sec.heading}</p>
 
         {sec.subSections?.map((sub) => (
           <div key={sub.subHeading} className="space-y-1.5 pl-1">
-            <p className="font-dmSans text-sm font-semibold text-juri-ink">{sub.subHeading}</p>
+            <p className="font-dmSans text-sm font-semibold text-teal-700">{sub.subHeading}</p>
             {sub.paragraphs?.filter(Boolean).map((p, i) => (
               <p key={i} className="font-dmSans text-sm leading-relaxed text-juri-muted">{p}</p>
             ))}
@@ -170,7 +170,7 @@ const PolicyBody = ({ policy }) => (
             ))}
             {sub.infoLines?.map(({ label, value }) => (
               <p key={label} className="font-dmSans text-sm text-juri-muted">
-                <span className="font-semibold text-juri-ink">{label}</span> {value}
+                <span className="font-semibold text-teal-700">{label}</span> {value}
               </p>
             ))}
           </div>
@@ -210,7 +210,7 @@ const PolicyModal = ({ policyKey, onClose, onAccept }) => {
   return (
     <>
       <Motion.div
-        className="fixed inset-0 z-50 bg-black/40"
+        className="fixed inset-0 z-50 bg-teal-900/35"
         initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
         onClick={onClose}
       />
@@ -223,8 +223,8 @@ const PolicyModal = ({ policyKey, onClose, onAccept }) => {
           exit={{ opacity: 0, y: 20, scale: 0.97 }}
         >
           {/* Header */}
-          <div className="flex shrink-0 items-center justify-between border-b border-juri-line px-6 py-4">
-            <h2 className="font-playfair text-lg font-bold text-juri-ink">{policy.title}</h2>
+          <div className="flex shrink-0 items-center justify-between border-b border-teal-300/60 px-6 py-4">
+            <h2 className="font-playfair text-lg font-bold text-teal-700">{policy.title}</h2>
             <button
               type="button"
               onClick={onClose}
@@ -242,7 +242,7 @@ const PolicyModal = ({ policyKey, onClose, onAccept }) => {
           </div>
 
           {/* Footer */}
-          <div className="shrink-0 border-t border-juri-line px-6 py-4 flex justify-end">
+          <div className="shrink-0 border-t border-teal-300/60 px-6 py-4 flex justify-end">
             <Motion.button
               type="button"
               onClick={onAccept ?? onClose}

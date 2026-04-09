@@ -35,7 +35,7 @@ const CTASection = ({ onBookDemo } = {}) => {
 
         {/* Top / bottom edge lines */}
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/20" aria-hidden="true" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-black/10" aria-hidden="true" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-teal-300/40" aria-hidden="true" />
 
         {/* Content */}
         <div className="relative z-10">

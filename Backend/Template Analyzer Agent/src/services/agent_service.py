@@ -224,6 +224,18 @@ class AntigravityAgent:
         if text.count(":") > 1:
             return False
 
+        # Exclude lines that are clearly part of a header block and not a structural section
+        upper_text = text.upper()
+        exclude_phrases = [
+            "IN THE HIGH COURT", "IN THE SUPREME COURT", "IN THE MATTER OF",
+            "UNDER ARTICLE", "ORIGINAL JURISDICTION", "CIVIL JURISDICTION",
+            "WRIT PETITION NO", "APPLICATION NO", "SUIT NO", "VERSUS", "BETWEEN",
+            "AND IN THE MATTER", "PETITION UNDER", "AFFIDAVIT ON BEHALF", 
+            "DATED THIS", "PRESENTED ON"
+        ]
+        if any(phrase in upper_text for phrase in exclude_phrases):
+            return False
+
         numbered = re.match(r"^(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s+[A-Z]", text)
         uppercase = bool(re.match(r"^[A-Z][A-Z0-9\s,&/\-\(\)]{3,}$", text)) and not re.search(r"[a-z]", text)
         titled_legal = bool(
@@ -334,6 +346,7 @@ class AntigravityAgent:
                     "order": section.get("order", index),
                     "page_break_before": bool(section.get("page_break_before", False)),
                     "estimated_words": section.get("estimated_words", 150),
+                    "source_clauses": section.get("source_clauses", ""),
                     "depends_on": section.get("depends_on") or [],
                     "drafting_prompt": section.get("drafting_prompt", ""),
                     "format_blueprint": section.get("format_blueprint") or {},
@@ -366,92 +379,97 @@ class AntigravityAgent:
         word_count = len(template_text.split())
         metrics = self._compute_page_metrics(template_text)
         blueprint = self._extract_layout_blueprint(template_text, metrics)
-        blueprint_display = self._blueprint_to_display(blueprint, max_lines=500)
+        blueprint_display = self._blueprint_to_display(blueprint, max_lines=700)
 
         url_context = ""
         if template_file_signed_url:
             url_context = f"""
-TEMPLATE DOCUMENT URL (uploaded template for reference; use the extracted text below as the primary source):
+TEMPLATE DOCUMENT URL (Visual Reference):
 {template_file_signed_url}
-When extracting fields, consider that the template PDF may contain visual blanks, form fields, or empty lines. Capture every fillable spot as a field.
+Use this URL to understand the visual layout, tables, and signature blocks that might be hard to parse from raw text.
 """
 
         prompt = f"""
-You are analyzing a legal document template for a template analyzer agent.
+You are an Advanced Legal Document Engineer and Template Architect.
+Your task is to perform an INTELLIGENT and DEEP analysis of the provided legal template to extract its structural DNA.
 
-Your job is to identify the real structural sections of the template using BOTH:
-1. the raw extracted text
-2. the layout blueprint built from the template formatting
-
-Document stats:
-- words: {word_count}
-- characters: {char_count}
-
+DOCUMENT CONTEXT:
+- Word Count: {word_count}
+- Character Count: {char_count}
 {url_context}
 
-PAGE METRICS:
+PAGE METRICS & LAYOUT:
 {json.dumps(metrics, indent=2)}
 
-LAYOUT BLUEPRINT:
+LAYOUT BLUEPRINT (Line-by-line classification):
 {blueprint_display}
 
-RAW TEMPLATE TEXT:
+RAW TEMPLATE CONTENT:
 \"\"\"{template_text}\"\"\"
 
-RULES:
-1. A section means one major structural block with a genuine heading or well-defined role, such as Case Title, Index, Synopsis, Facts, Grounds, Prayer, Affidavit, Parties, Recitals, Terms, Signatures.
-2. Do not create sections for isolated boilerplate sentences, fill-in fragments, or micro-blocks.
-3. Usually produce 5 to 12 sections unless the source document clearly requires fewer.
-4. Every {{field_name}} placeholder is a field and its key must match the name inside braces.
-5. Also treat blanks, names, dates, amounts, addresses, party names, numbered fill-ins, and signature lines as fields.
-6. Every section must include a drafting_prompt explaining heading, layout, boilerplate, where fields go, and alignment/formatting expectations.
-7. Return strict JSON only.
+=== CORE ANALYSIS REQUIREMENTS ===
 
-JSON CONTRACT:
+1. STRUCTURAL SECTIONS:
+   - Identify MAJOR logical sections (e.g., Court Header, Parties, Recitals, Definitions, Operative Clauses, Covenants, Representations, Boilerplate, Schedules, Signature Block).
+   - DO NOT create sections for single sentences or fragments. A section must be a meaningful block of legal content.
+   - GROUP THE HEADER: For court documents, group lines like "IN THE HIGH COURT...", "WRIT PETITION...", "IN THE MATTER OF..." into a SINGLE "COURT HEADER" or "CAUSE TITLE" section. NEVER split these into separate sections.
+   - For each section, identify the EXACT text range or the CORE CLAUSES found in it.
+   - Assign a clear 'section_category' (header, parties, recitals, facts, grounds, prayer, terms, signatures, schedules, other).
+
+2. INTELLIGENT FIELD EXTRACTION:
+   - Extract EVERY fillable field including:
+     - Placeholder tags: {{name}}, __date__, [amount], etc.
+     - Blanks: "I, _______", "Dated this ___ day of ___".
+     - Implied fields: Even if there are no underscores, if a specific piece of data is required (e.g., the name of the Court in a Petition), mark it as a field.
+   - Format fields PRECISELY:
+     - 'key': snake_case_unique_identifier
+     - 'label': Human-readable Title (e.g., "Monthly Rent Amount", "Petitioner Age")
+     - 'type': string|date|number|currency|address|text_long|boolean
+     - 'description': Clear instruction on what the user should provide.
+
+3. DRAFTING BLUEPRINT:
+   - For every section, provide a 'drafting_prompt' that is EXTREMELY detailed. It should describe:
+     - The legal tone and intent.
+     - How the placeholders are integrated into the boilerplate.
+     - Specific formatting rules (ALL CAPS, Centered, Numbered lists).
+     - Any conditional logic found (e.g., "if Party B is a company, add GSTIN").
+
+4. JSON OUTPUT CONTRACT:
 {{
-  "template_name": "Inferred template name",
-  "document_type": "writ_petition|rent_deed|agreement|notice|petition|other",
+  "template_name": "Accurate, formal name of the template",
+  "document_type": "The specific legal document type",
   "total_sections": 0,
-  "estimated_draft_length": "Short estimate",
-  "page_metrics": {{"page_width": 0, "std_indent": 0, "deep_indent": 0, "right_zone_start": 0}},
+  "estimated_draft_length": "e.g., 5-8 Pages",
   "all_fields": [
     {{
       "key": "field_key",
       "type": "string|date|number|currency|address|text_long|boolean",
-      "label": "Human label",
+      "label": "Proper Label",
       "required": true,
-      "default_value": "",
-      "validation_rules": "",
-      "description": "",
+      "description": "Intelligent description of the field's purpose",
       "section_id": "section_001"
     }}
   ],
   "sections": [
     {{
       "section_id": "section_001",
-      "section_name": "Section name",
-      "section_purpose": "Purpose",
-      "section_category": "header|index|facts|grounds|prayer|affidavit|parties|recitals|terms|signatures|other",
+      "section_name": "Formal Section Heading",
+      "section_purpose": "Briefly explains the legal role of this section",
+      "section_category": "header|parties|recitals|facts|grounds|prayer|terms|signatures|schedules|other",
       "order": 0,
-      "page_break_before": false,
-      "estimated_words": 150,
-      "depends_on": [],
-      "drafting_prompt": "How to draft the section, with layout and field placement guidance",
-      "format_blueprint": {{"alignment": "LEFT|CENTER|RIGHT", "notes": ""}},
-      "fields": [
-        {{
-          "key": "field_key",
-          "type": "string|date|number|currency|address|text_long|boolean",
-          "label": "Human label",
-          "required": true,
-          "default_value": "",
-          "validation_rules": "",
-          "description": ""
-        }}
-      ]
+      "source_clauses": "THE ACTUAL CORE TEXT OR CLAUSES FROM THE TEMPLATE FOR THIS SECTION",
+      "drafting_prompt": "PERFECT instructions for reproducing this section's legal intent and formatting",
+      "format_blueprint": {{"alignment": "LEFT|CENTER|RIGHT", "is_bold": true, "has_border": false}},
+      "fields": []
     }}
   ]
 }}
+
+STRICT RULES:
+- Return ONLY valid JSON.
+- Ensure every field is tied to its correct section.
+- Be thorough. Do not skip any part of the template.
+- Identify at least 5-15 sections for complex documents.
 """
 
         result = await self._call_gemini(prompt)
@@ -460,25 +478,48 @@ JSON CONTRACT:
         return result
 
     async def generate_section_prompts(self, section_data: dict):
+        # We now use the 'source_clauses' and 'drafting_prompt' from the analysis phase
+        # to generate a PERECT, comprehensive prompt for the draft generator.
+        
+        section_name = section_data.get("section_name", "Untitled Section")
+        source_text = section_data.get("source_clauses", "")
+        base_prompt = section_data.get("drafting_prompt", "")
+        fields = section_data.get("fields", [])
+        
         prompt = f"""
-Analyze this section of a legal document and generate a single comprehensive set of drafting instructions.
+You are creating a PERFECT DRAFTING INSTRUCTION for a legal document section: "{section_name}".
 
-SECTION DATA:
-{json.dumps(section_data, indent=2)}
+INPUT DATA:
+- Source Template Clauses:
+\"\"\"{source_text}\"\"\"
+
+- Intermediate Drafting Blueprint:
+{base_prompt}
+
+- Associated Fields:
+{json.dumps(fields, indent=2)}
+
+YOUR TASK:
+Generate a comprehensive, expert-level master instruction that will guide an AI to draft this section PERFECTLY.
+The instruction must ensure:
+1. Legal precision: Maintain the exact legal tone and binding language found in the source clauses.
+2. Perfect Placeholder Integration: Explain exactly how each field should be woven into the text.
+3. Formatting Fidelity: Specify alignment, numbering, bolding, and spacing to match the template.
+4. Completeness: Ensure no boilerplate or critical legal proviso is omitted.
 
 Return strict JSON:
 {{
-    "section_intro": "Conversational intro explaining what this section is for",
+    "section_intro": "A high-level conversational summary of how this section will be drafted professionally.",
     "drafting_complexity": "simple|moderate|complex",
-    "estimated_output_words": 250,
+    "estimated_output_words": 300,
     "field_prompts": [
         {{
             "field_id": "master_instruction",
-            "prompt": "Master drafting instruction for the full section"
+            "prompt": "THE PERFECT MASTER PROMPT: A detailed, step-by-step drafting guide for the entire section, incorporating legal nuances and field placement."
         }}
     ],
-    "dependencies": ["List any sections this should reference or depend on"],
-    "legal_references": ["Any relevant laws, regulations, or standard practices to cite"]
+    "dependencies": ["List any preceding sections whose context is needed"],
+    "legal_references": ["Relevant Acts or standard legal practices identified in this section"]
 }}
 """
         return await self._call_gemini(prompt)
@@ -498,17 +539,100 @@ OR
         return await self._call_gemini(prompt)
 
     async def generate_section_content(self, section_data: dict, field_values: dict):
+        # This function is used when drafting the actual document
         prompt = f"""
-You are a legal document drafting AI. Generate professional, detailed content for this section.
+You are a Senior Legal Drafting Engine specialized in Indian court pleadings and legal templates.
 
-SECTION INFORMATION:
-{json.dumps(section_data, indent=2)}
+Your role is NOT to generate new content.
+Your role is to STRICTLY COMPILE a legal section from a template blueprint using provided values.
 
-USER PROVIDED VALUES:
+=====================================
+SECTION METADATA
+=====================================
+{json.dumps({
+  "section_name": section_data.get("section_name"),
+  "section_category": section_data.get("section_category"),
+  "format_blueprint": section_data.get("format_blueprint")
+}, indent=2)}
+
+=====================================
+SOURCE TEMPLATE (AUTHORITATIVE)
+=====================================
+\"\"\"{section_data.get("source_clauses", "")}\"\"\"
+
+=====================================
+DRAFTING INSTRUCTIONS (STRICT)
+=====================================
+{section_data.get("drafting_prompt", "")}
+
+=====================================
+FIELDS (STRICT MAPPING REQUIRED)
+=====================================
+{json.dumps(section_data.get("fields", []), indent=2)}
+
+=====================================
+USER VALUES (FINAL DATA)
+=====================================
 {json.dumps(field_values, indent=2)}
 
-OUTPUT FORMAT:
-{{"content": "Drafted section text"}}
+=====================================
+COMPILATION RULES (CRITICAL)
+=====================================
+
+1. ZERO HALLUCINATION:
+   - Do NOT invent legal clauses.
+   - Do NOT add new sentences unless required for grammar.
+   - Stay максимально faithful to SOURCE TEMPLATE.
+
+2. TEMPLATE COMPILATION MODE:
+   - Treat SOURCE TEMPLATE as base code.
+   - Replace placeholders using USER VALUES.
+   - Preserve original legal language, tone, and structure.
+
+3. PLACEHOLDER RESOLUTION:
+   - Replace ALL placeholders like:
+     - __field__
+     - {{field}}
+     - blanks
+   - If value is missing:
+     - KEEP placeholder AS-IS (do NOT guess)
+
+4. FORMATTING STRICTNESS:
+   - Maintain:
+     - line breaks
+     - indentation
+     - numbering (1., 1.1, a), etc.)
+     - ALL CAPS sections
+   - Follow:
+     {json.dumps(section_data.get("format_blueprint", {}), indent=2)}
+
+5. LEGAL STYLE ENFORCEMENT:
+   - Maintain court language like:
+     - "MOST RESPECTFULLY SHOWETH"
+     - "It is most respectfully prayed"
+   - Do NOT simplify or paraphrase legal phrases
+
+6. SECTION BOUNDARY:
+   - Generate ONLY this section
+   - Do NOT include next/previous sections
+
+7. OUTPUT PURITY:
+   - No explanations
+   - No JSON inside content
+   - No markdown
+
+=====================================
+FINAL OUTPUT FORMAT
+=====================================
+
+Return STRICT JSON ONLY:
+
+{{
+  "section_name": "{section_data.get("section_name")}",
+  "content": "FULLY COMPILED LEGAL SECTION TEXT"
+}}
 """
         response = await self._call_gemini(prompt)
         return response.get("content", "")
+
+

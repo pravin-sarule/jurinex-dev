@@ -30,7 +30,14 @@ _embedding_cache: dict[str, list[float]] = {}
 _gemini_unavailable_logged = False
 
 EMBEDDING_DIMS = 768
+# text-embedding-004 is tried first; if it returns 404 (not found / quota issue),
+# it is added to _bad_models so subsequent calls skip it without wasting retries.
 EMBEDDING_MODELS = ("text-embedding-004", "gemini-embedding-001")
+
+# Process-level set of model names that have returned a permanent 404/not-found
+# error.  Entries are added lazily on first failure and persist for the process
+# lifetime so retries do not hammer an unavailable model.
+_bad_models: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +142,12 @@ def _get_rate_limiter() -> _TokenBucket:
 def _is_rate_limit_error(msg: str) -> bool:
     lower = msg.lower()
     return any(kw in lower for kw in ("429", "quota", "rate limit", "resource exhausted", "too many requests"))
+
+
+def _is_model_not_found_error(msg: str) -> bool:
+    """Return True for 404 / model-not-found errors that are permanent, not transient."""
+    lower = msg.lower()
+    return any(kw in lower for kw in ("404", "not found", "is not found", "does not exist", "model not found"))
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +292,9 @@ def _gemini_embed_batch_with_retry(texts: list[str], dims: int) -> list[list[flo
             rate_limited = False
 
             for model_name in _embedding_models():
+                # Skip models that have previously returned a permanent 404.
+                if model_name in _bad_models:
+                    continue
                 try:
                     result = client.models.embed_content(
                         model=model_name,
@@ -299,10 +315,24 @@ def _gemini_embed_batch_with_retry(texts: list[str], dims: int) -> list[list[flo
                     # Partial result — try next model
                     continue
                 except Exception as model_exc:
-                    if _is_rate_limit_error(str(model_exc)):
+                    exc_str = str(model_exc)
+                    if _is_rate_limit_error(exc_str):
                         rate_limited = True
                         break   # don't try other models; let outer loop retry
-                    continue    # non-rate-limit error — try next model
+                    if _is_model_not_found_error(exc_str):
+                        # Permanent failure: blacklist this model for the process lifetime
+                        # and immediately fall through to the next model (e.g. gemini-embedding-001).
+                        if model_name not in _bad_models:
+                            _bad_models.add(model_name)
+                            logger.warning(
+                                "[Embeddings] Model '%s' returned 404/not-found — "
+                                "blacklisting for this process; falling back to next model. "
+                                "Error: %s",
+                                model_name,
+                                exc_str[:200],
+                            )
+                        continue
+                    continue    # non-rate-limit, non-404 error — try next model
 
             if rate_limited and attempt < max_retries:
                 continue        # outer loop will sleep then retry
@@ -340,6 +370,8 @@ def _gemini_embed(text: str, *, dims: int | None = None) -> list[float] | None:
         _get_rate_limiter().acquire()
         client = genai.Client(api_key=api_key)
         for model_name in _embedding_models():
+            if model_name in _bad_models:
+                continue
             try:
                 result = client.models.embed_content(
                     model=model_name,
@@ -362,7 +394,14 @@ def _gemini_embed(text: str, *, dims: int | None = None) -> list[float] | None:
                             target_dims,
                         )
                     return _fit_embedding_dims(vec, target_dims)
-            except Exception:
+            except Exception as exc:
+                if _is_model_not_found_error(str(exc)) and model_name not in _bad_models:
+                    _bad_models.add(model_name)
+                    logger.warning(
+                        "[Embeddings] Model '%s' returned 404/not-found in embed_text — "
+                        "blacklisting; will use next model. Error: %s",
+                        model_name, str(exc)[:200],
+                    )
                 continue
         return None
     except Exception as exc:

@@ -43,7 +43,7 @@ const CiteMock = () => {
       {CITATIONS.map(({ num, title, source, variant }, i) => (
         <Motion.div
           key={num}
-          className="flex items-start gap-3 rounded-lg border border-juri-line bg-white p-3 shadow-sm"
+          className="flex items-start gap-3 rounded-lg border border-teal-500/40 bg-white p-3 shadow-sm"
           initial={{ opacity: 0, x: 30 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{
@@ -71,14 +71,14 @@ const CiteMock = () => {
 
           {/* Content */}
           <div className="min-w-0 flex-1">
-            <div className="truncate font-dmSans text-[11px] font-semibold text-juri-ink">
+            <div className="truncate font-dmSans text-[11px] font-semibold text-teal-700">
               {title}
             </div>
 
             {/* Skeleton line → fills to full */}
-            <div className="relative mt-1.5 h-1.5 w-5/6 overflow-hidden rounded bg-juri-line">
+            <div className="relative mt-1.5 h-1.5 w-5/6 overflow-hidden rounded bg-teal-200/80">
               <Motion.div
-                className="absolute inset-y-0 left-0 rounded bg-juri-muted/20"
+                className="absolute inset-y-0 left-0 rounded bg-teal-500/25"
                 initial={{ width: "0%" }}
                 animate={{ width: "100%" }}
                 transition={{ delay: i * 0.45 + 0.6, duration: 0.5 }}
@@ -90,7 +90,7 @@ const CiteMock = () => {
               className={[
                 "mt-2 inline-block rounded px-1.5 py-0.5 font-dmSans text-[9px]",
                 variant === "blue"
-                  ? "border border-cyan-500/30 bg-cyan-500/10 text-cyan-700"
+                  ? "border border-teal-400/35 bg-teal-500/10 text-teal-600"
                   : "border border-teal-400/35 bg-teal-500/10 text-teal-600",
               ].join(" ")}
               initial={{ scale: 0, opacity: 0 }}

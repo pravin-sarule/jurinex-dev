@@ -184,6 +184,47 @@ def _max_tokens_from_summarization_config(config: dict, *, for_summary: bool) ->
     return max(min_tokens, min(max_tokens, max_cap))
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        n = int(value)
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _max_tokens_from_agent_prompt(cfg: Any, llm_params: dict, *, for_summary: bool) -> int:
+    """
+    Resolve max_output_tokens strictly from agent_prompts row data.
+    Priority:
+      1) llm_parameters.max_summarization_output_tokens (summary calls only)
+      2) llm_parameters.max_output_tokens
+      3) llm_parameters.max_tokens
+      4) defaults (summary: 10000, non-summary: 10000)
+    """
+    default_tokens = 10000 if for_summary else 10000
+    cap = _int_or_default(llm_params.get("max_output_tokens_cap"), 65536)
+    min_tokens = _int_or_default(llm_params.get("min_output_tokens"), 1)
+    if min_tokens > cap:
+        min_tokens, cap = cap, min_tokens
+
+    candidates: list[Any] = []
+    if for_summary:
+        candidates.append(llm_params.get("max_summarization_output_tokens"))
+    candidates.extend(
+        [
+            llm_params.get("max_output_tokens"),
+            llm_params.get("max_tokens"),
+        ]
+    )
+    resolved = default_tokens
+    for value in candidates:
+        n = _int_or_default(value, 0)
+        if n > 0:
+            resolved = n
+            break
+    return max(min_tokens, min(resolved, cap))
+
+
 def _describe_agent_prompts_origin(cfg: Any) -> str:
     """Log line: whether the agent row was loaded from public.agent_prompts."""
     if getattr(cfg, "source", None) == "db" and getattr(cfg, "db_id", None) is not None:
@@ -246,10 +287,10 @@ def _generation_config(
 
     When `agent_name` is set:
       - Model, temperature, and llm_parameters (tools, thinking, etc.) come from agent_prompts
-        (or agent defaults when no DB row). Summarization's llm_model / model_temperature are not used.
-      - max_output_tokens follows summarization_chat_config in full (merged row + min/cap).
-        Use `summarization_llm_config` when the caller already has the effective dict (e.g. request
-        overrides); otherwise `user_id` selects the per-user merge from the DB.
+        (or agent defaults when no DB row).
+      - max_output_tokens comes from agent_prompts.llm_parameters (with safe defaults).
+      - prompt from agent_prompts.prompt is injected as system_instructions unless
+        llm_parameters.system_instructions is explicitly set.
 
     When `agent_name` is None (no agent context):
       - Model, temperature, and max_output_tokens all come from summarization_chat_config.
@@ -264,25 +305,23 @@ def _generation_config(
             from app.services.agent_config_service import get_agent_config
 
             cfg = get_agent_config(agent_name)
-            llm_params = cfg.llm_parameters
-            token_cfg = summarization_llm_config or get_llm_chat_config(user_id=user_id)
-            max_tokens = _max_tokens_from_summarization_config(
-                token_cfg,
-                for_summary=for_summary,
-            )
+            llm_params = dict(cfg.llm_parameters or {})
+            # Always honor agent_prompts.prompt as system instruction when llm_parameters does not override it.
+            if not str(llm_params.get("system_instructions") or "").strip():
+                prompt_text = str(getattr(cfg, "prompt", "") or "").strip()
+                if prompt_text:
+                    llm_params["system_instructions"] = prompt_text
+
+            max_tokens = _max_tokens_from_agent_prompt(cfg, llm_params, for_summary=for_summary)
             gen_kwargs: dict = {
                 "temperature": float(cfg.temperature),
                 "max_output_tokens": max_tokens,
             }
             logger.info(
-                "[DocumentAI] generation_config  agent_prompts=%s  summarization_tokens=%s  "
+                "[DocumentAI] generation_config  agent_prompts=%s  tokens=from_agent_prompts  "
                 "agent=%s  model=%s  temperature=%.2f  max_output_tokens=%s  "
                 "url_context=%s  grounding_search=%s  code_execution=%s",
                 _describe_agent_prompts_origin(cfg),
-                _describe_summarization_token_origin(
-                    token_cfg,
-                    caller_supplied=summarization_llm_config is not None,
-                ),
                 agent_name,
                 cfg.model_name,
                 gen_kwargs["temperature"],
@@ -654,7 +693,7 @@ def _call_gemini_for_qa(
             text = (doc.get("text") or "").strip()
             if not text:
                 continue
-            block = f"[Document: {name}]\n{text}"
+            block = f"[Source file: {name}]\n{text}"
             if running_chars + len(block) > char_limit:
                 block = block[: char_limit - running_chars]
                 context_parts.append(block)
@@ -666,7 +705,7 @@ def _call_gemini_for_qa(
 
         if not context_parts:
             return {
-                "answer": "No document text is available to answer this question.",
+                "answer": "No case material text is available to answer this question.",
                 "source_documents": "",
             }
 
@@ -675,11 +714,12 @@ def _call_gemini_for_qa(
         format_hint = (output_format or "plain").strip().lower()
         instruction_parts = [
             "You are a legal expert assistant.",
-            "Answer the user's question based ONLY on the following legal documents.",
+            "Answer the user's question based ONLY on the following case materials (PDFs, images, text files, AND transcripts from audio — treat transcript excerpts as valid sources).",
             "Do not invent facts, dates, names, holdings, or procedural history.",
-            "If the answer is not supported by the documents, say so clearly.",
+            "If the answer is not supported by the provided text, say so clearly.",
             "Prefer precise legal writing over generic filler.",
-            "Cite the document name inline when materially helpful.",
+            "Cite the source file name inline when materially helpful.",
+            "Never say there are no audio files in the folder if the excerpts below include content from an audio filename — that transcript represents the audio.",
         ]
         if intent_hint == "timeline":
             instruction_parts.append("Organize the answer chronologically and focus on procedural sequence and dates.")
@@ -696,7 +736,7 @@ def _call_gemini_for_qa(
 
         prompt = (
             f"{' '.join(instruction_parts)}\n\n"
-            f"=== DOCUMENTS ===\n{context}\n\n"
+            f"=== CASE MATERIALS (documents and/or audio transcripts) ===\n{context}\n\n"
             f"=== QUESTION ===\n{question}\n\n"
             "=== ANSWER ==="
         )
@@ -791,6 +831,24 @@ class DocumentAIAdapter:
         )
 
     def classify(self, document: DocumentReference, text: str) -> DocumentType:
+        from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime
+
+        if is_audio_mime(document.mime_type) or is_audio_filename(document.document_name or ""):
+            tl = text.lower()
+            if any(k in tl for k in ("witness", "deposition", "testimony", "examination")):
+                return DocumentType.evidence
+            if any(k in tl for k in ("hearing", "courtroom", "proceedings", "oral arguments")):
+                return DocumentType.order
+            if any(k in tl for k in ("consultation", "client interview", "interview")):
+                return DocumentType.correspondence
+            if any(k in tl for k in ("phone call", "voicemail", "telephone")):
+                return DocumentType.correspondence
+            if any(k in tl for k in ("recording", "audio", "tape")):
+                return DocumentType.evidence
+            if "pleading" in tl or "plaint" in tl:
+                return DocumentType.pleading
+            return DocumentType.audio_recording
+
         candidate = f"{document.document_name} {text}".lower()
         if "pleading" in candidate or "plaint" in candidate or "written statement" in candidate:
             return DocumentType.pleading

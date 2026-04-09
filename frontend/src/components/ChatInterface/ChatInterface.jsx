@@ -2545,6 +2545,7 @@ import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../util
 import {
   parseLlmPolicyErrorForUi,
   stringToChatErrorDisplay,
+  getUserFriendlyApiErrorMessage,
 } from "../../utils/llmQuotaMessages";
 import ChatQuotaErrorModal from "../ChatQuotaErrorModal";
 import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
@@ -3517,6 +3518,7 @@ const ChatInterface = () => {
   const chatMenuRefs = useRef({});
   const panelStatesSetRef = useRef(false);
   const fetchedFoldersRef = useRef(new Set());
+  const folderFilesCacheRef = useRef(new Map());
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -3535,6 +3537,57 @@ const ChatInterface = () => {
       if (token) return token;
     }
     return null;
+  };
+
+  const _normalizeFolderName = (folder) =>
+    typeof folder === 'string' ? folder : (folder?.originalname || folder?.name || null);
+
+  const _citationFileId = (citation) =>
+    citation?.fileId || citation?.file_id || citation?.document_id || null;
+
+  const _citationFilename = (citation) =>
+    citation?.filename || citation?.document_name || citation?.documentName || null;
+
+  const resolveCitationFileId = async (citation) => {
+    const direct = _citationFileId(citation);
+    if (direct) return direct;
+
+    const folderName = _normalizeFolderName(selectedFolder);
+    const citationName = String(_citationFilename(citation) || '').trim().toLowerCase();
+    if (!folderName || !citationName) return null;
+
+    let folderFiles = folderFilesCacheRef.current.get(folderName);
+    if (!Array.isArray(folderFiles)) {
+      try {
+        const resp = await documentApi.getDocumentsInFolder(folderName);
+        folderFiles = Array.isArray(resp?.files)
+          ? resp.files
+          : (Array.isArray(resp?.documents) ? resp.documents : []);
+        folderFilesCacheRef.current.set(folderName, folderFiles);
+      } catch (err) {
+        console.warn('[Citations] Failed to fetch folder files for citation resolution:', err);
+        return null;
+      }
+    }
+
+    const nameOf = (f) =>
+      String(
+        f?.originalname ||
+        f?.filename ||
+        f?.document_name ||
+        f?.name ||
+        ''
+      ).trim().toLowerCase();
+    const idOf = (f) => f?.id || f?.file_id || f?.fileId || null;
+
+    const exact = folderFiles.find((f) => nameOf(f) === citationName);
+    if (exact) return idOf(exact);
+
+    const contains = folderFiles.find((f) => {
+      const n = nameOf(f);
+      return n && (n.includes(citationName) || citationName.includes(n));
+    });
+    return contains ? idOf(contains) : null;
   };
 
   const fetchDocumentUrl = async (fileId, pageNumber = null, token) => {
@@ -3965,11 +4018,11 @@ const ChatInterface = () => {
             pageEnd: pageEnd,
             pageLabel: pageLabel,
             source: source,
-            filename: citation.filename || 'document.pdf',
-            fileId: citation.fileId || citation.file_id,
-            text: toPlainText(citation.text || citation.content || citation.text_preview || ''),
-            link: `${citation.filename || 'document.pdf'}#page=${page || pageStart || 1}`,
-            viewUrl: citation.viewUrl || ((citation.fileId || citation.file_id) ? `${DOCS_BASE_URL}/file/${citation.fileId || citation.file_id}/view?page=${page || pageStart || 1}` : null)
+            filename: citation.filename || citation.document_name || 'document.pdf',
+            fileId: citation.fileId || citation.file_id || citation.document_id,
+            text: toPlainText(citation.text || citation.content || citation.text_preview || citation.quote || ''),
+            link: `${citation.filename || citation.document_name || 'document.pdf'}#page=${page || pageStart || 1}`,
+            viewUrl: citation.viewUrl || ((citation.fileId || citation.file_id || citation.document_id) ? `${DOCS_BASE_URL}/file/${citation.fileId || citation.file_id || citation.document_id}/view?page=${page || pageStart || 1}` : null)
           };
         });
         console.log('[Citations] Formatted citations from metadata:', formattedCitations);
@@ -4539,7 +4592,7 @@ const ChatInterface = () => {
       console.error("Chat error:", error);
       setChatError(
         stringToChatErrorDisplay(
-          error.message || 'Analysis could not complete. Please try again.'
+          getUserFriendlyApiErrorMessage(error, 'Analysis could not complete. Please try again.')
         )
       );
       setHasResponse(false);
@@ -5281,8 +5334,8 @@ const ChatInterface = () => {
               <p className="text-gray-400 text-sm">Ask a question about this case</p>
             </div>
           ) : (
-            currentChatHistory.map((chat) => (
-              <div key={chat.id} className="flex flex-col gap-3">
+            currentChatHistory.map((chat, idx) => (
+              <div key={chat.id != null ? `${String(chat.id)}-${idx}` : `chat-${idx}`} className="flex flex-col gap-3">
                 {/* user bubble */}
                 <div className="flex justify-flex-start">
                   <div
@@ -5596,11 +5649,11 @@ const ChatInterface = () => {
                   const pages = paginateContent(formattedResponseContent || '');
                   const totalPages = pages.length || 1;
 
-                  const openCitationByIndex = (n) => {
+                  const openCitationByIndex = async (n) => {
                     if (!Number.isFinite(n) || n < 1) return;
                     const cite = citations?.[n - 1];
                     if (!cite) return;
-                    const fid = cite.fileId || cite.file_id;
+                    const fid = await resolveCitationFileId(cite);
                     const pageNum = cite.page ?? cite.pageStart ?? 1;
                     const token = getAuthToken();
                     if (!token) {
@@ -5769,6 +5822,72 @@ const ChatInterface = () => {
                     </article>
                   ));
                 })()}
+                {Array.isArray(citations) && citations.length > 0 && (
+                  <section
+                    style={{
+                      margin: '0 auto',
+                      width: '210mm',
+                      background: '#f7fbff',
+                      border: '1px solid #d6e8ff',
+                      borderRadius: '12px',
+                      padding: '12px 14px',
+                      boxSizing: 'border-box',
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.12em',
+                        color: '#335b8a',
+                        marginBottom: '8px',
+                        fontWeight: 700,
+                      }}
+                    >
+                      Paragraph Sources
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {citations.map((cite, idx) => {
+                        const n = idx + 1;
+                        const pageLabel = cite.pageLabel || (cite.page || cite.pageStart ? `Page ${cite.page || cite.pageStart}` : '');
+                        const label = `${n}. ${cite.filename || 'Document'}${pageLabel ? ` - ${pageLabel}` : ''}`;
+                        return (
+                          <button
+                            key={`visible-source-${n}-${cite.fileId || cite.document_id || cite.filename || 'doc'}`}
+                            type="button"
+                            onClick={async () => {
+                              const token = getAuthToken();
+                              if (!token) {
+                                toast.error('Please sign in to open the document.');
+                                return;
+                              }
+                              const fid = await resolveCitationFileId(cite);
+                              if (!fid) {
+                                toast.error('Document link is not available for this citation.');
+                                return;
+                              }
+                              const pageNum = cite.page ?? cite.pageStart ?? 1;
+                              openDocumentAtPage(fid, pageNum, cite.filename, token);
+                            }}
+                            style={{
+                              textAlign: 'left',
+                              padding: '6px 8px',
+                              borderRadius: '8px',
+                              border: '1px solid #d6e8ff',
+                              background: '#ffffff',
+                              color: '#1d4ed8',
+                              fontSize: '13px',
+                              textDecoration: 'underline',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
                 {!loadingChat && !isGenerating && suggestedQuestions.length > 0 && (
                   <div
                     style={{
@@ -5901,10 +6020,11 @@ const ChatInterface = () => {
             onClose={() => setShowCitations(false)}
             onCitationClick={async (citation) => {
               const page = citation.page || citation.pageStart || 1;
-              const fileId = citation.fileId || citation.file_id;
+              const fileId = await resolveCitationFileId(citation);
              
               if (!fileId) {
                 console.error('[Citations] Invalid citation: missing fileId', citation);
+                toast.error('Document link is not available for this citation.');
                 return;
               }
              

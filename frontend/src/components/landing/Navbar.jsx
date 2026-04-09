@@ -51,7 +51,7 @@ const JurinexLogo = ({ scrolled }) => (
     <img src={gavelIcon} alt="" aria-hidden="true" className="h-10 w-10 flex-shrink-0 rounded-xl" />
     <span
       className={`flex items-start gap-0.5 font-playfair text-2xl font-extrabold leading-none tracking-tight transition-colors duration-500 ${
-        scrolled ? "text-juri-ink" : "text-white"
+        scrolled ? "text-teal-700" : "text-white"
       }`}
     >
       JuriNex
@@ -211,7 +211,7 @@ const Navbar = ({ onRequestDemo, onLogin, onSectionNav } = {}) => {
                     className={`rounded-xl px-4 py-3 font-dmSans text-sm font-semibold uppercase tracking-wider transition-colors ${
                       isActive
                         ? "bg-teal-500/10 text-teal-600"
-                        : "text-juri-ink hover:bg-gray-50 hover:text-teal-600"
+                        : "text-teal-700 hover:bg-gray-50 hover:text-teal-600"
                     }`}
                   >
                     {link.label}
@@ -222,7 +222,7 @@ const Navbar = ({ onRequestDemo, onLogin, onSectionNav } = {}) => {
               <div className="mt-4 flex flex-col gap-3 border-t border-gray-100 pt-4">
                 <button
                   type="button"
-                  className="w-full rounded-full border border-gray-300 py-2.5 font-dmSans text-sm font-medium text-juri-ink transition-colors hover:bg-gray-50"
+                  className="w-full rounded-full border border-gray-300 py-2.5 font-dmSans text-sm font-medium text-teal-700 transition-colors hover:bg-gray-50"
                   onClick={() => { onLogin?.(); setMenuOpen(false) }}
                 >
                   Login

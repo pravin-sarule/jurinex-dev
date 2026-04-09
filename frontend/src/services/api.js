@@ -3,6 +3,8 @@ import {
   CHAT_MODEL_BASE_URL,
   AUTH_SERVICE_URL,
   SECRET_PROMPTS_API_BASE,
+  DOCS_BASE_URL,
+  getUserIdForDrafting,
 } from '../config/apiConfig';
 
 class ApiService {
@@ -61,19 +63,27 @@ class ApiService {
 
  if (!response.ok) {
  const errorData = await response.json().catch(() => ({}));
+<<<<<<< Updated upstream
  console.error("[ApiService] Response error payload:", {
    url,
    status: response.status,
    errorData,
  });
+=======
+ const normalizedErrorData =
+ errorData && typeof errorData === "object" && errorData.detail && typeof errorData.detail === "object"
+ ? errorData.detail
+ : errorData;
+>>>>>>> Stashed changes
  const error = new Error(
- errorData.message || errorData.error || `HTTP error! status: ${response.status}`
+ normalizedErrorData.message || normalizedErrorData.error || `HTTP error! status: ${response.status}`
  );
- error.code = errorData.code;
- error.details = errorData.details;
+ error.code = normalizedErrorData.code;
+ error.details = normalizedErrorData.details;
  error.response = {
  status: response.status,
- data: errorData
+ data: normalizedErrorData,
+ rawData: errorData,
  };
  throw error;
  }
@@ -384,16 +394,24 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  }
 
  async queryFolderDocuments(folderName, question) {
- return this.request(`/docs/${folderName}/intelligent-chat`, {
+ const seg = encodeURIComponent(String(folderName ?? "").trim());
+ const url = `${String(DOCS_BASE_URL || "").replace(/\/$/, "")}/${seg}/intelligent-chat`;
+ const uid = getUserIdForDrafting();
+ return this.request(url, {
  method: "POST",
  body: JSON.stringify({ question }),
+ headers: uid ? { "X-User-Id": uid } : {},
  });
  }
 
  async continueFolderChat(folderName, sessionId, question) {
- return this.request(`/docs/${folderName}/intelligent-chat`, {
+ const seg = encodeURIComponent(String(folderName ?? "").trim());
+ const url = `${String(DOCS_BASE_URL || "").replace(/\/$/, "")}/${seg}/intelligent-chat`;
+ const uid = getUserIdForDrafting();
+ return this.request(url, {
  method: "POST",
  body: JSON.stringify({ question, session_id: sessionId }),
+ headers: uid ? { "X-User-Id": uid } : {},
  });
  }
 
@@ -411,9 +429,13 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  }
 
  async queryFolderDocumentsWithSecret(folderName, question, promptLabel, sessionId) {
- return this.request(`/docs/${folderName}/intelligent-chat`, {
+ const seg = encodeURIComponent(String(folderName ?? "").trim());
+ const url = `${String(DOCS_BASE_URL || "").replace(/\/$/, "")}/${seg}/intelligent-chat`;
+ const uid = getUserIdForDrafting();
+ return this.request(url, {
  method: "POST",
  body: JSON.stringify({ question, prompt_label: promptLabel, session_id: sessionId, llm_name: 'gemini' }),
+ headers: uid ? { "X-User-Id": uid } : {},
  });
  }
 

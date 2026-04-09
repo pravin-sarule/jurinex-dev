@@ -435,28 +435,25 @@ def _get_internal_user_analytics_map(
 
 def _read_inline_text(file_bytes: bytes, upload: UploadFile) -> str | None:
     mime_type = upload.content_type or "application/octet-stream"
+
+    # Audio files must return None so the pipeline downloads from GCS and
+    # calls Speech-to-Text instead of treating the filename as document text.
+    from app.services.adapters.speech_to_text import is_audio_mime, is_audio_filename
+    if is_audio_mime(mime_type) or is_audio_filename(upload.filename or ""):
+        return None
+
+    # IMPORTANT: PDF must go through Document AI OCR in the processing pipeline.
+    # Returning inline text here would bypass OCR and skip Document AI.
+    if mime_type == "application/pdf" or (upload.filename or "").lower().endswith(".pdf"):
+        return None
+
     if mime_type.startswith("text/") or mime_type in {
         "application/json",
         "application/xml",
         "application/javascript",
     }:
         return file_bytes.decode("utf-8", errors="ignore")
-    if mime_type == "application/pdf" or (upload.filename or "").lower().endswith(".pdf"):
-        try:
-            import io
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(file_bytes))
-            pages_text = []
-            for page in reader.pages:
-                page_text = page.extract_text() or ""
-                if page_text.strip():
-                    pages_text.append(page_text)
-            extracted = "\n\n".join(pages_text).strip()
-            if extracted:
-                return extracted
-        except Exception:
-            pass
-    return upload.filename or ""
+    return None
 
 
 def _build_gcs_object_path(user_id: str, folder_name: str, filename: str) -> str:
@@ -465,14 +462,34 @@ def _build_gcs_object_path(user_id: str, folder_name: str, filename: str) -> str
 
 
 def _normalize_gs_uri_from_record(gcs_path: str | None) -> str | None:
+    import re as _re
     raw = str(gcs_path or "").strip()
     if not raw:
         return None
-    if raw.startswith("gs://"):
-        return raw
+
+    # Strip gs://bucket/ prefix to work on the object path only
     settings = get_settings()
     bucket_name = settings.gcs_input_bucket_name or settings.gcs_bucket_name or "fileinputbucket"
-    return f"gs://{bucket_name}/{raw.lstrip('/')}"
+    if raw.startswith("gs://"):
+        object_path = raw[len(f"gs://{bucket_name}/"):]
+    else:
+        object_path = raw.lstrip("/")
+
+    # Heal doubled prefix: "{uid}/documents/{uid}/cases/{rest}"
+    # → "{uid}/documents/{rest}"
+    fixed = _re.sub(
+        r"^(\d+/documents/)\d+/cases/",
+        r"\1",
+        object_path,
+    )
+    # Also heal "{uid}/documents/{uid}/documents/{rest}" → "{uid}/documents/{rest}"
+    fixed = _re.sub(
+        r"^(\d+/documents/)\d+/documents/",
+        r"\1",
+        fixed,
+    )
+
+    return f"gs://{bucket_name}/{fixed}"
 
 
 def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | None:
@@ -1176,6 +1193,21 @@ def delete_case(
     return delete_case_tool(case_id, user_id)
 
 
+@router.delete("/{file_id}")
+def delete_file(
+    file_id: str,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Delete a single file by its DB UUID — removes DB rows, chunks, vectors, and GCS object."""
+    user_id = _resolve_user_id(x_user_id, authorization)
+    logger.info("[Route:delete_file] file_id=%s user_id=%s", file_id, user_id)
+    try:
+        return get_folder_service().delete_file(file_id, user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/{folder_name}/files")
 def get_documents_in_folder(
     folder_name: str,
@@ -1397,6 +1429,22 @@ async def intelligent_chat_stream(
             }
         )
 
+        # Conversation continuity: include last N Q/A pairs (case-wise) when configured.
+        # The vector path (answer_case_folder_chat → FolderService.answer_folder_chat) already
+        # applies this. The DB+Gemini fallback path below must do it explicitly too.
+        folder_service = get_folder_service()
+        effective_query_text = query_text
+        try:
+            effective_query_text = folder_service._build_query_with_recent_history(  # noqa: SLF001
+                user_id=user_id,
+                folder_name=folder_name,
+                session_id=request.session_id,
+                query_text=query_text,
+                max_history=int(llm_config.get("max_conversation_history") or 0),
+            )
+        except Exception:
+            effective_query_text = query_text
+
         # ── Step 1: emit status so the frontend shows "Analyzing..." ──
         yield _sse({"type": "status", "status": "analyzing", "message": "Analyzing query intent..."})
         yield _sse({"type": "thinking", "text": "Understanding your question and selecting the best answer path...\n"})
@@ -1518,8 +1566,6 @@ async def intelligent_chat_stream(
         yield _sse({"type": "thinking", "text": "Reading available document text from this case...\n"})
 
         try:
-            folder_service = get_folder_service()
-
             # Fetch all documents for this folder (DB path)
             docs_result = await _run_blocking(
                 lambda: folder_service.get_documents_in_folder(folder_name, user_id),
@@ -1531,8 +1577,11 @@ async def intelligent_chat_stream(
             # Build list of {name, text} for Gemini
             max_context_documents = max(1, int(llm_config.get("max_context_documents") or 8))
             doc_texts = [
-                {"name": d.get("name") or d.get("originalname") or "document",
-                 "text": d.get("full_text_content") or d.get("summary") or ""}
+                {
+                    "name": d.get("name") or d.get("originalname") or "document",
+                    "text": d.get("full_text_content") or d.get("summary") or "",
+                    "file_id": d.get("id"),
+                }
                 for d in documents
                 if d.get("full_text_content") or d.get("summary")
             ][:max_context_documents]
@@ -1565,6 +1614,7 @@ async def intelligent_chat_stream(
             # Real-time Gemini streaming: emit chunk events as text is generated.
             answer_parts: list[str] = []
             source_names: list[str] = [str(d.get("name") or "document").strip() for d in doc_texts if d.get("name")]
+            citations_payload: list[dict[str, Any]] = []
             streamed = False
             stream_delay_ms = get_streaming_delay_ms(llm_config)
             try:
@@ -1596,7 +1646,7 @@ async def intelligent_chat_stream(
                         "following legal documents. Be concise and factual. If the answer is not in the "
                         "documents, say so clearly.\n\n"
                         f"=== DOCUMENTS ===\n{context}\n\n"
-                        f"=== QUESTION ===\n{query_text}\n\n"
+                        f"=== QUESTION ===\n{effective_query_text}\n\n"
                         "=== ANSWER ==="
                     )
                     client = genai.Client(api_key=settings.gemini_api_key)
@@ -1674,7 +1724,7 @@ async def intelligent_chat_stream(
                 )
                 qa_result = await _run_blocking(
                     lambda: _call_gemini_for_qa(
-                        query_text,
+                        effective_query_text,
                         doc_texts,
                         query_intent="summary",
                         output_format="structured",
@@ -1722,6 +1772,28 @@ async def intelligent_chat_stream(
                 ) if folder_service._sessions.get(folder_name, {}).get(session_id) else None)
                 sec_id = (request.secret_id or "").strip() or None
 
+                # Build stable citations payload for persistence + UI.
+                source_by_name: dict[str, dict[str, Any]] = {}
+                for d in doc_texts:
+                    nm = str(d.get("name") or "").strip()
+                    if not nm:
+                        continue
+                    source_by_name[nm.lower()] = {
+                        "document_name": nm,
+                        "filename": nm,
+                        "file_id": str(d.get("file_id")) if d.get("file_id") else None,
+                        "document_id": str(d.get("file_id")) if d.get("file_id") else None,
+                    }
+                ordered_names = [s for s in source_names if s]
+                seen_keys: set[str] = set()
+                for nm in ordered_names:
+                    key = nm.strip().lower()
+                    if not key or key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    base = source_by_name.get(key, {"document_name": nm, "filename": nm})
+                    citations_payload.append(base)
+
                 def _persist_stream_chat() -> None:
                     folder_service._save_folder_chat_to_db(
                         user_id=user_id,
@@ -1729,7 +1801,7 @@ async def intelligent_chat_stream(
                         question=display_question,
                         answer=answer,
                         session_id=session_id,
-                        citations=[],
+                        citations=citations_payload,
                         used_secret_prompt=bool(sec_id),
                         prompt_label=display_question if sec_id else None,
                         secret_id=sec_id,
@@ -1764,7 +1836,7 @@ async def intelligent_chat_stream(
                 "method": "gemini_direct",
                 "routing_decision": "db_text_fallback",
                 "answer": answer,
-                "citations": [{"document_name": s} for s in source_names if s],
+                "citations": citations_payload,
                 "used_chunk_ids": [],
                 "prompt_label": display_question if (request.secret_id or "").strip() else None,
                 "used_secret_prompt": bool((request.secret_id or "").strip()),

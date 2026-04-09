@@ -6,6 +6,8 @@ from typing import Any
 
 from pypdf import PdfReader
 
+from app.core.config import get_settings
+from app.core.upload_constants import SUPPORTED_AUDIO_MIME_TYPES
 from app.services.db import get_db_connection, is_db_available
 
 logger = logging.getLogger("agentic_document_service.llm_policy")
@@ -212,4 +214,23 @@ def assert_upload_allowed(
                 {"pages": pages, "max_pages": max_pages},
             )
 
+    # Optional stricter cap for audio (e.g. long court recordings)
+    try:
+        settings = get_settings()
+        audio_cap_mb = max(0, _as_int(getattr(settings, "max_audio_file_size_mb", 0)))
+    except Exception:
+        audio_cap_mb = 0
+    mime_l = (mimetype or "").lower().split(";")[0].strip()
+    if audio_cap_mb > 0 and mime_l.startswith("audio/") and size_bytes > audio_cap_mb * 1024 * 1024:
+        return _policy_error(
+            "AUDIO_FILE_TOO_LARGE",
+            f"Audio exceeds the maximum allowed size of {audio_cap_mb} MB.",
+            {"size_bytes": size_bytes, "max_mb": audio_cap_mb},
+        )
+
     return {"ok": True}
+
+
+def supported_audio_mime_types() -> frozenset[str]:
+    """MIME types treated as legal audio uploads (see Speech-to-Text adapter)."""
+    return SUPPORTED_AUDIO_MIME_TYPES

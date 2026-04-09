@@ -29,6 +29,7 @@ import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -135,6 +136,47 @@ def _coerce_model_id_list(raw: Any) -> list[int]:
     return []
 
 
+@contextmanager
+def _get_agent_prompts_connection():
+    """
+    Connection used specifically for public.agent_prompts lookup.
+
+    Default: same DATABASE_URL as the service.
+    Optional override: AGENT_PROMPTS_DATABASE_URL / DRAFT_DATABASE_URL
+    (useful when agent prompts are stored in Draft_DB).
+    """
+    from app.core.config import get_settings
+    from app.services.db import get_db_connection
+
+    settings = get_settings()
+    override_url = str(getattr(settings, "agent_prompts_database_url", "") or "").strip()
+    default_url = str(getattr(settings, "database_url", "") or "").strip()
+
+    # No override (or same URL): keep existing DB path.
+    if not override_url or override_url == default_url:
+        with get_db_connection() as conn:
+            yield conn
+        return
+
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+    except Exception:
+        logger.warning(
+            "[AgentConfig] AGENT_PROMPTS_DATABASE_URL set but psycopg is unavailable; "
+            "falling back to DATABASE_URL"
+        )
+        with get_db_connection() as conn:
+            yield conn
+        return
+
+    conn = psycopg.connect(override_url, row_factory=dict_row)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _resolve_model_ids(model_ids: Any) -> str | None:
     """
     Resolve first model_id in the array to a model name string by querying llm_models.
@@ -231,6 +273,80 @@ def _is_table_missing_error(exc: Exception) -> bool:
     )
 
 
+def _normalize_name_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _pick_row_from_agents_payload(agents: list[dict[str, Any]], name_variants: list[str]) -> dict[str, Any] | None:
+    if not agents:
+        return None
+    if not name_variants:
+        return dict(agents[0])
+    wanted = {_normalize_name_text(x) for x in name_variants if str(x or "").strip()}
+    for row in agents:
+        if _normalize_name_text(row.get("name")) in wanted:
+            return dict(row)
+    return None
+
+
+def _fetch_agent_row_via_http(
+    *,
+    agent_name: str,
+    name_variants: list[str],
+    agent_types: list[str],
+) -> dict[str, Any] | None:
+    """
+    Fallback path: read agent rows from agent-draft-service API.
+    Useful when this service cannot directly access Draft_DB.
+    """
+    try:
+        import httpx
+        from app.core.config import get_settings
+    except Exception:
+        return None
+
+    settings = get_settings()
+    base = str(getattr(settings, "agent_draft_service_url", "") or "").strip().rstrip("/")
+    if not base:
+        return None
+
+    # Try likely buckets first. Summarization is where grounded_retrieval_agent is commonly stored.
+    type_candidates: list[str] = []
+    for t in ["summarization", "summary", *agent_types]:
+        v = str(t or "").strip().lower()
+        if v and v not in type_candidates:
+            type_candidates.append(v)
+
+    with httpx.Client(timeout=3.0) as client:
+        for atype in type_candidates:
+            try:
+                resp = client.get(
+                    f"{base}/api/agents/list",
+                    params={"agent_type": atype},
+                )
+                if resp.status_code != 200:
+                    continue
+                payload = resp.json() if resp.content else {}
+                agents = payload.get("agents")
+                if not isinstance(agents, list):
+                    continue
+                row = _pick_row_from_agents_payload(agents, name_variants)
+                if row:
+                    logger.info(
+                        "[AgentConfig] fallback source=HTTP  agent=%s  via=%s/api/agents/list  "
+                        "agent_type=%s  id=%s  name=%s",
+                        agent_name,
+                        base,
+                        atype,
+                        row.get("id"),
+                        row.get("name"),
+                    )
+                    return row
+            except Exception:
+                continue
+    return None
+
+
 def _internal_name_variants(agent_name: str) -> list[str]:
     """
     DB rows may use internal ids (grounded_retrieval_agent) or omit the _agent suffix.
@@ -266,12 +382,27 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
     (e.g. 'form_population_agent'), so pass 1 handles all standard rows.
     """
     global _table_missing, _table_missing_logged
-    from app.services.db import get_db_connection, is_db_available
+    from app.services.db import is_db_available
 
     if _table_missing:
+        # DB table missing in this service context; try HTTP fallback.
+        row = _fetch_agent_row_via_http(
+            agent_name=agent_name,
+            name_variants=_internal_name_variants(agent_name),
+            agent_types=_AGENT_TYPE_SEARCH.get(agent_name, []),
+        )
+        if row:
+            return row
         return None
 
     if not is_db_available():
+        row = _fetch_agent_row_via_http(
+            agent_name=agent_name,
+            name_variants=_internal_name_variants(agent_name),
+            agent_types=_AGENT_TYPE_SEARCH.get(agent_name, []),
+        )
+        if row:
+            return row
         return None
 
     agent_types = _AGENT_TYPE_SEARCH.get(agent_name, [])
@@ -279,7 +410,7 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
     name_variants = _internal_name_variants(agent_name)
 
     try:
-        with get_db_connection() as conn, conn.cursor() as cur:
+        with _get_agent_prompts_connection() as conn, conn.cursor() as cur:
             # ── Pass 1: exact name match (internal id + common variants) ─────
             if name_variants:
                 cur.execute(
@@ -371,6 +502,15 @@ def _fetch_agent_row(agent_name: str) -> dict[str, Any] | None:
         else:
             logger.warning("[AgentConfig] DB lookup failed for agent=%s: %s", agent_name, exc)
 
+    # Final fallback: query agent-draft-service over HTTP.
+    row = _fetch_agent_row_via_http(
+        agent_name=agent_name,
+        name_variants=name_variants,
+        agent_types=agent_types,
+    )
+    if row:
+        return row
+
     return None
 
 
@@ -438,6 +578,15 @@ def get_agent_config(agent_name: str, *, default_prompt: str = "") -> AgentConfi
         resolved_model = _resolve_model_ids(row.get("model_ids"))
         if not resolved_model:
             resolved_model = _resolve_model_from_llm_parameters_model_id(llm_params)
+        if not resolved_model:
+            # HTTP fallback rows from agent-draft-service may already include a resolved model string.
+            v = str(row.get("resolved_model") or "").strip()
+            resolved_model = v or None
+        if not resolved_model:
+            names = row.get("model_names")
+            if isinstance(names, list) and names:
+                v = str(names[0] or "").strip()
+                resolved_model = v or None
         if not resolved_model:
             resolved_model = _model_name_from_llm_parameters(llm_params)
 

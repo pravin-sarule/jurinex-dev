@@ -15,6 +15,7 @@ class DocumentType(str, Enum):
     order = "order"
     contract = "contract"
     affidavit = "affidavit"
+    audio_recording = "audio_recording"
     unknown = "unknown"
 
 

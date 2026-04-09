@@ -58,7 +58,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
           {/* Backdrop */}
           <Motion.div
             key="backdrop"
-            className="fixed inset-0 z-50 bg-black/40"
+            className="fixed inset-0 z-50 bg-teal-900/35"
             variants={overlayVariants}
             initial="hidden"
             animate="visible"
@@ -117,7 +117,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                 >
                   <h2
                     id="demo-modal-heading"
-                    className="font-playfair text-2xl font-bold text-juri-ink"
+                    className="font-playfair text-2xl font-bold text-teal-700"
                   >
                     Book a Demo
                   </h2>
@@ -135,7 +135,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                 >
                   {/* Full Name */}
                   <div>
-                    <label className="mb-1 block text-xs font-semibold text-juri-ink font-dmSans" htmlFor="demo-name">
+                    <label className="mb-1 block text-xs font-semibold text-teal-700 font-dmSans" htmlFor="demo-name">
                       Full Name
                     </label>
                     <input
@@ -145,13 +145,13 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                       placeholder="Enter your full name"
                       value={form.fullName}
                       onChange={handleChange("fullName")}
-                      className="w-full rounded-xl border border-juri-line bg-white px-4 py-2.5 text-sm text-juri-ink placeholder-juri-subtle outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 font-dmSans"
+                      className="w-full rounded-xl border border-teal-300/60 bg-white px-4 py-2.5 text-sm text-teal-700 placeholder-juri-subtle outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 font-dmSans"
                     />
                   </div>
 
                   {/* Email */}
                   <div>
-                    <label className="mb-1 block text-xs font-semibold text-juri-ink font-dmSans" htmlFor="demo-email">
+                    <label className="mb-1 block text-xs font-semibold text-teal-700 font-dmSans" htmlFor="demo-email">
                       Email Address
                     </label>
                     <input
@@ -161,21 +161,21 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                       placeholder="Enter your email address"
                       value={form.email}
                       onChange={handleChange("email")}
-                      className="w-full rounded-xl border border-juri-line bg-white px-4 py-2.5 text-sm text-juri-ink placeholder-juri-subtle outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 font-dmSans"
+                      className="w-full rounded-xl border border-teal-300/60 bg-white px-4 py-2.5 text-sm text-teal-700 placeholder-juri-subtle outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 font-dmSans"
                     />
                   </div>
 
                   {/* Phone */}
                   <div>
-                    <label className="mb-1 block text-xs font-semibold text-juri-ink font-dmSans" htmlFor="demo-phone">
+                    <label className="mb-1 block text-xs font-semibold text-teal-700 font-dmSans" htmlFor="demo-phone">
                       Phone Number
                     </label>
-                    <div className="flex rounded-xl border border-juri-line bg-white focus-within:border-teal-500 focus-within:ring-2 focus-within:ring-teal-500/20 transition overflow-hidden">
+                    <div className="flex rounded-xl border border-teal-300/60 bg-white focus-within:border-teal-500 focus-within:ring-2 focus-within:ring-teal-500/20 transition overflow-hidden">
                       {/* Country selector */}
                       <div className="relative">
                         <button
                           type="button"
-                          className="flex h-full items-center gap-1.5 border-r border-juri-line px-3 text-sm text-juri-ink hover:bg-gray-50 transition font-dmSans"
+                          className="flex h-full items-center gap-1.5 border-r border-teal-300/60 px-3 text-sm text-teal-700 hover:bg-gray-50 transition font-dmSans"
                           onClick={() => setShowCountryList((v) => !v)}
                           aria-label="Select country code"
                         >
@@ -187,7 +187,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                         <AnimatePresence>
                           {showCountryList && (
                             <Motion.ul
-                              className="absolute top-full left-0 z-10 mt-1 min-w-[130px] rounded-xl border border-juri-line bg-white shadow-lg text-sm font-dmSans overflow-hidden"
+                              className="absolute top-full left-0 z-10 mt-1 min-w-[130px] rounded-xl border border-teal-300/60 bg-white shadow-lg text-sm font-dmSans overflow-hidden"
                               initial={{ opacity: 0, y: -6 }}
                               animate={{ opacity: 1, y: 0, transition: { duration: 0.15 } }}
                               exit={{ opacity: 0, y: -4, transition: { duration: 0.1 } }}
@@ -196,7 +196,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                                 <li key={c.iso}>
                                   <button
                                     type="button"
-                                    className="flex w-full items-center gap-2 px-3 py-2 hover:bg-gray-50 transition text-juri-ink"
+                                    className="flex w-full items-center gap-2 px-3 py-2 hover:bg-gray-50 transition text-teal-700"
                                     onClick={() => {
                                       setCountryCode(c)
                                       setShowCountryList(false)
@@ -213,14 +213,14 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                         </AnimatePresence>
                       </div>
                       <div className="flex flex-1 items-center gap-2 px-3">
-                        <span className="text-sm text-juri-ink font-dmSans whitespace-nowrap">{countryCode.code}</span>
+                        <span className="text-sm text-teal-700 font-dmSans whitespace-nowrap">{countryCode.code}</span>
                         <input
                           id="demo-phone"
                           type="tel"
                           placeholder="Phone number"
                           value={form.phone}
                           onChange={handleChange("phone")}
-                          className="flex-1 bg-transparent py-2.5 text-sm text-juri-ink placeholder-juri-subtle outline-none font-dmSans"
+                          className="flex-1 bg-transparent py-2.5 text-sm text-teal-700 placeholder-juri-subtle outline-none font-dmSans"
                         />
                       </div>
                     </div>
@@ -228,7 +228,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
 
                   {/* Organization */}
                   <div>
-                    <label className="mb-1 block text-xs font-semibold text-juri-ink font-dmSans" htmlFor="demo-org">
+                    <label className="mb-1 block text-xs font-semibold text-teal-700 font-dmSans" htmlFor="demo-org">
                       Organization Name <span className="font-normal text-juri-muted">(optional)</span>
                     </label>
                     <input
@@ -237,7 +237,7 @@ const BookDemoModal = ({ isOpen, onClose }) => {
                       placeholder="Enter your organization name"
                       value={form.org}
                       onChange={handleChange("org")}
-                      className="w-full rounded-xl border border-juri-line bg-white px-4 py-2.5 text-sm text-juri-ink placeholder-juri-subtle outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 font-dmSans"
+                      className="w-full rounded-xl border border-teal-300/60 bg-white px-4 py-2.5 text-sm text-teal-700 placeholder-juri-subtle outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 font-dmSans"
                     />
                   </div>
 

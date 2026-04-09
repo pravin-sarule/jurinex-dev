@@ -24,7 +24,7 @@ from app.schemas.contracts import (
     QueryRequest,
     QueryResponse,
 )
-from app.services.adapters import chunking, embeddings, ocr
+from app.services.adapters import chunking, embeddings, gcs, ocr
 from app.services.adapters.document_ai import DocumentAIAdapter, _call_gemini_for_qa
 from app.services.adapters.vector_store import ChunkRecord, InMemoryVectorStore
 from app.services.db import get_db_connection, is_db_available
@@ -293,7 +293,7 @@ class LegalCasePipelineService:
             completed_at=datetime.now(tz=UTC),
         )
 
-    def _process_single_document(self, case_id: str, document: DocumentReference) -> ProcessedDocumentBundle:
+    def _process_single_document(self, case_id: str, document: DocumentReference, *, progress_callback=None) -> ProcessedDocumentBundle:
         db_file_id = str(document.metadata.get("db_file_id") or "").strip()
         document_id = db_file_id if db_file_id else str(uuid.uuid4())
         mime_type = document.mime_type or "application/pdf"
@@ -311,10 +311,11 @@ class LegalCasePipelineService:
         if not text:
             if document.document_uri and document.document_uri.startswith("gs://"):
                 logger.info(
-                    "[Pipeline] Step 1/4: OCR / text extraction (GCS) uri=%s",
+                    "[Pipeline] Step 1/4: OCR / text extraction (GCS) uri=%s mime=%s",
                     document.document_uri,
+                    mime_type,
                 )
-                ocr_result = ocr.extract_text_from_gcs(document.document_uri, mime_type)
+                ocr_result = ocr.extract_text_from_gcs(document.document_uri, mime_type, progress_callback=progress_callback)
             else:
                 logger.info("[Pipeline] Step 1/4: OCR / text extraction — no GCS URI, empty text")
                 ocr_result = ocr.OcrResult(text="", page_count=0, quality_score=0.0)
@@ -335,18 +336,72 @@ class LegalCasePipelineService:
                 len(text),
             )
 
+        extracted_text_uri = ""
+        if text and document.document_uri and document.document_uri.startswith("gs://"):
+            try:
+                output_text_path = self._build_output_text_path(document)
+                extracted_text_uri = gcs.upload_bytes(
+                    text.encode("utf-8"),
+                    output_text_path,
+                    content_type="text/plain; charset=utf-8",
+                    bucket_type="output",
+                )
+                logger.info(
+                    "[Pipeline] Step 1.5/4: Extracted text uploaded to output bucket uri=%s chars=%d",
+                    extracted_text_uri,
+                    len(text),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Pipeline] Step 1.5/4: failed to upload extracted text to output bucket document=%s error=%s",
+                    document.document_name,
+                    exc,
+                )
+
         doc_type = self._document_ai.classify(document, text)
         logger.info("[Pipeline] Document classified as %s", doc_type.value)
 
-        logger.info("[Pipeline] Step 2/4: Chunking — semantic split")
-        sections = self._chunker.chunk(text)
-        chunk_rows: list[ChunkRecord] = []
-        logger.info("[Pipeline] Step 2/4: done — %d raw sections", len(sections))
+        from app.services.adapters.speech_to_text import is_audio_mime
 
-        # Collect non-empty sections for batch embedding
-        non_empty_sections: list[tuple[int, Any]] = [
-            (idx, s) for idx, s in enumerate(sections) if (s.text or "").strip()
-        ]
+        is_audio = is_audio_mime(mime_type)
+
+        from app.services.adapters.chunking import ChunkSection
+
+        chunk_rows: list[ChunkRecord] = []
+
+        if is_audio and text.strip():
+            # ── Audio-specific chunking: sliding-window RAG strategy ─────────
+            # AudioProcessor uses a 750-char window with 10% overlap (75 chars)
+            # which maps to 500–1 000 tokens at typical speech cadence.
+            # Identical adjacent windows are deduplicated to suppress noise runs.
+            logger.info("[Pipeline] Step 2/4: Chunking — audio sliding-window (750 chars / 10% overlap)")
+            from app.services.adapters.audio_processor import AudioProcessor
+            audio_proc = AudioProcessor()
+            audio_chunks = audio_proc.chunk(text)
+
+            if audio_chunks:
+                non_empty_sections = [
+                    (ac.index, ChunkSection(text=ac.text, heading=ac.heading))
+                    for ac in audio_chunks
+                ]
+            else:
+                non_empty_sections = [(0, ChunkSection(text=text.strip(), heading="Audio Transcript"))]
+
+            logger.info("[Pipeline] Step 2/4: done — %d audio sliding-window chunks", len(non_empty_sections))
+        else:
+            # ── Standard semantic chunking for documents ─────────────────────
+            logger.info("[Pipeline] Step 2/4: Chunking — semantic split")
+            sections = self._chunker.chunk(text)
+            non_empty_sections = [
+                (idx, s) for idx, s in enumerate(sections) if (s.text or "").strip()
+            ]
+            logger.info("[Pipeline] Step 2/4: done — %d raw sections", len(sections))
+
+            # Fallback: very short text that didn't meet min_tokens threshold
+            if not non_empty_sections and text.strip():
+                non_empty_sections = [(0, ChunkSection(text=text.strip(), heading="Full Text"))]
+                logger.info("[Pipeline] Step 2/4: short-text fallback — single chunk %d chars", len(text))
+
         non_empty = len(non_empty_sections)
         logger.info(
             "[Pipeline] Step 3/4: Embedding — %d non-empty chunks (batch mode, size=%s)",
@@ -364,6 +419,15 @@ class LegalCasePipelineService:
                 non_empty_sections, chunk_texts, chunk_embeddings
             ):
                 chunk_id = str(uuid.uuid4())
+                chunk_meta: dict[str, str] = {
+                    "heading": section.heading or "",
+                    "chunk_index": str(section_idx),
+                }
+                if is_audio:
+                    chunk_meta["source_type"] = "audio"
+                    chunk_meta["mime_type"] = mime_type
+                    chunk_meta["audio_file"] = document.document_name
+                    chunk_meta["total_segments"] = str(non_empty)
                 chunk_rows.append(
                     ChunkRecord(
                         chunk_id=chunk_id,
@@ -373,7 +437,7 @@ class LegalCasePipelineService:
                         doc_type=doc_type,
                         text=chunk_text,
                         embedding=chunk_embedding,
-                        metadata={"heading": section.heading or "", "chunk_index": str(section_idx)},
+                        metadata=chunk_meta,
                     )
                 )
 
@@ -383,10 +447,26 @@ class LegalCasePipelineService:
             document_id=document_id,
             document_name=document.document_name,
             doc_type=doc_type,
+            # Keep original document URI as the primary storage URI for previews/view.
+            # Extracted OCR text is tracked separately via metadata.extracted_text_uri.
             stored_document_uri=document.document_uri or document.metadata.get("gcs_path") or "",
             text=text,
-            metadata=dict(document.metadata),
+            metadata={
+                **dict(document.metadata),
+                **({"extracted_text_uri": extracted_text_uri} if extracted_text_uri else {}),
+            },
         )
+        pr_meta: dict[str, Any] = {
+            **dict(document.metadata),
+            "original_name": document.metadata.get("original_name") or document.document_name,
+            "page_count": page_count,
+            "heading_count": len([s for _, s in non_empty_sections if s.heading]),
+            **({"extracted_text_uri": extracted_text_uri} if extracted_text_uri else {}),
+        }
+        if is_audio:
+            pr_meta["source_type"] = "audio"
+            pr_meta["mime_type"] = mime_type
+
         process_result = DocumentProcessResult(
             document_id=document_id,
             document_name=document.document_name,
@@ -395,14 +475,22 @@ class LegalCasePipelineService:
             extracted_text_chars=len(text),
             chunk_count=len(chunk_rows),
             quality_score=quality_score,
-            metadata={
-                **dict(document.metadata),
-                "original_name": document.metadata.get("original_name") or document.document_name,
-                "page_count": page_count,
-                "heading_count": len([s for s in sections if s.heading]),
-            },
+            metadata=pr_meta,
         )
         return ProcessedDocumentBundle(process_result=process_result, stored_document=stored_document, chunks=chunk_rows)
+
+    def _build_output_text_path(self, document: DocumentReference) -> str:
+        source_uri = str(document.document_uri or "").strip()
+        if source_uri.startswith("gs://"):
+            object_path = source_uri[5:].split("/", 1)[1] if "/" in source_uri[5:] else ""
+            if object_path:
+                if "." in object_path:
+                    object_path = object_path.rsplit(".", 1)[0]
+                return f"{object_path}.extracted.txt"
+        fallback_name = (document.document_name or "document").replace("\\", "_").replace("/", "_")
+        if "." in fallback_name:
+            fallback_name = fallback_name.rsplit(".", 1)[0]
+        return f"extracted-text/{uuid.uuid4().hex[:10]}_{fallback_name}.txt"
 
     def persist_chunks_to_db(self, file_id: str | None, chunks: list[ChunkRecord]) -> list[ChunkRecord]:
         if not file_id or not chunks or not is_db_available():

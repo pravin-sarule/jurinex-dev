@@ -30,6 +30,17 @@ class InMemoryVectorStore:
         self._chunks.setdefault(case_id, [])
         self._chunks[case_id].extend(chunks)
 
+    def delete_document(self, document_id: str) -> int:
+        """Remove all chunks for a document_id across all cases. Returns count removed."""
+        removed = 0
+        for case_id in list(self._chunks.keys()):
+            before = len(self._chunks[case_id])
+            self._chunks[case_id] = [
+                c for c in self._chunks[case_id] if c.document_id != document_id
+            ]
+            removed += before - len(self._chunks[case_id])
+        return removed
+
     def search(
         self,
         case_id: str,

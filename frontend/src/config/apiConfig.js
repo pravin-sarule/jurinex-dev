@@ -47,7 +47,7 @@ export const SECRET_PROMPTS_API_BASE =
 
 export const PAYMENT_SERVICE_URL =
   import.meta.env.VITE_APP_PAYMENT_SERVICE_URL ||
-  'https://payment-service-120280829617.asia-south1.run.app';
+  'http://localhost:5003';
 export const VISUAL_SERVICE_URL =
   import.meta.env.VITE_APP_VISUAL_SERVICE_URL ||
   'https://visual-service-120280829617.asia-south1.run.app';
@@ -94,7 +94,7 @@ export const DRAFTING_SERVICE_URL =
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'https://all-drafting-agent-120280829617.asia-south1.run.app';
+  'http://localhost:8000';
 
 export const CHAT_DRAFT_BACKEND_URL =
   import.meta.env.VITE_APP_CHAT_DRAFT_BACKEND_URL ||
@@ -103,7 +103,7 @@ export const CHAT_DRAFT_BACKEND_URL =
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE = ensureLocalhostPort(
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-    'https://drafting-agents-120280829617.asia-south1.run.app',
+    'http://localhost:8002',
   5017
 );
 

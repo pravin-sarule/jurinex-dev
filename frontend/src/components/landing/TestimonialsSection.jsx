@@ -77,7 +77,7 @@ const StarIcon = () => (
 
 const TestimonialCard = ({ testimonial, width }) => (
     <article
-        className="flex flex-shrink-0 flex-col rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_6px_28px_rgba(0,0,0,0.14)]"
+        className="flex flex-shrink-0 flex-col rounded-2xl border border-teal-300/60 bg-white p-6 shadow-[0_6px_28px_rgba(13,148,136,0.22)]"
         style={{ width }}
     >
         <div className="mb-4 flex gap-0.5">
@@ -87,11 +87,11 @@ const TestimonialCard = ({ testimonial, width }) => (
             &ldquo;{testimonial.quote}&rdquo;
         </blockquote>
         <footer className="mt-5 flex items-center gap-3">
-            <div className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${testimonial.color} border border-juri-line`}>
+            <div className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${testimonial.color} border border-teal-300/60`}>
                 <span className="font-playfair text-xs font-bold text-teal-600">{testimonial.initials}</span>
             </div>
             <div>
-                <p className="font-dmSans text-sm font-semibold text-juri-ink">{testimonial.name}</p>
+                <p className="font-dmSans text-sm font-semibold text-teal-700">{testimonial.name}</p>
                 <p className="font-dmSans text-xs text-juri-muted">{testimonial.title}, {testimonial.firm}</p>
             </div>
         </footer>
@@ -102,7 +102,7 @@ const ArrowBtn = ({ onClick, disabled, children }) => (
     <button
         onClick={onClick}
         disabled={disabled}
-        className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-white p-3 shadow-[0_2px_14px_rgba(0,0,0,0.18)] transition-all hover:scale-105 hover:shadow-[0_4px_22px_rgba(0,0,0,0.24)] active:scale-95 disabled:opacity-40"
+        className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-white p-3 shadow-[0_2px_14px_rgba(13,148,136,0.22)] transition-all hover:scale-105 hover:shadow-[0_4px_22px_rgba(13,148,136,0.32)] active:scale-95 disabled:opacity-40"
         aria-label={typeof children === "string" ? children : undefined}
     >
         {children}
@@ -183,7 +183,7 @@ const TestimonialsCarousel = () => {
             {/* Carousel row: arrow + track + arrow */}
             <div className="flex items-center gap-4">
                 <ArrowBtn onClick={() => go(-1)} disabled={busy}>
-                    <svg className="h-5 w-5 text-juri-ink" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <svg className="h-5 w-5 text-teal-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
                     </svg>
                 </ArrowBtn>
@@ -207,7 +207,7 @@ const TestimonialsCarousel = () => {
                 </div>
 
                 <ArrowBtn onClick={() => go(1)} disabled={busy}>
-                    <svg className="h-5 w-5 text-juri-ink" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <svg className="h-5 w-5 text-teal-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
                 </ArrowBtn>
@@ -234,7 +234,7 @@ const TestimonialsCarousel = () => {
                             "rounded-full transition-all duration-300",
                             i === activeIdx
                                 ? "w-6 h-2.5 bg-teal-600"
-                                : "w-2.5 h-2.5 bg-juri-line hover:bg-teal-500/40",
+                                : "w-2.5 h-2.5 bg-teal-200/80 hover:bg-teal-500/40",
                         ].join(" ")}
                         aria-label={`Go to testimonial ${i + 1}`}
                     />
@@ -256,8 +256,8 @@ const TestimonialsSection = () => (
             backgroundAttachment: "fixed",
         }}
     >
-        {/* Dark overlay so text is clearly readable over the image */}
-        <div className="pointer-events-none absolute inset-0 bg-black/50" aria-hidden="true" />
+        {/* Teal overlay so text remains readable over the image */}
+        <div className="pointer-events-none absolute inset-0 bg-teal-900/45" aria-hidden="true" />
 
         <div className="relative mx-auto max-w-7xl px-6 sm:px-10 lg:px-14">
             {/* Header */}

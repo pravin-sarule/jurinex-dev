@@ -8,7 +8,7 @@ const Footer = ({ onOpenPolicy, onGetInTouch }) => {
       {/* "Get in touch" banner */}
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex flex-col items-center justify-between gap-4 rounded-2xl bg-gray-100 px-8 py-6 sm:flex-row">
-          <p className="font-dmSans text-lg font-medium text-juri-ink">
+          <p className="font-dmSans text-lg font-medium text-teal-700">
             Have a question or a use case in mind?
           </p>
           <button
@@ -28,7 +28,7 @@ const Footer = ({ onOpenPolicy, onGetInTouch }) => {
           <div className="max-w-xs">
             <a href="#platform" className="inline-flex items-center gap-2">
               <img src={gavelIcon} alt="" aria-hidden="true" className="h-8 w-8 rounded-lg" />
-              <span className="font-playfair text-lg font-bold text-juri-ink">
+              <span className="font-playfair text-lg font-bold text-teal-700">
                 JuriNex by NextIntel AI
               </span>
             </a>
@@ -41,7 +41,7 @@ const Footer = ({ onOpenPolicy, onGetInTouch }) => {
           <div className="flex gap-16">
             {/* Contact Us */}
             <div>
-              <p className="font-dmSans text-sm font-semibold text-juri-ink">Contact Us</p>
+              <p className="font-dmSans text-sm font-semibold text-teal-700">Contact Us</p>
               <address className="mt-3 space-y-1 font-dmSans text-sm not-italic text-juri-muted">
                 <p>B-11, Near Railway Station Road,</p>
                 <p>MIDC, Chhatrapati Sambhaji Nagar,</p>
@@ -58,7 +58,7 @@ const Footer = ({ onOpenPolicy, onGetInTouch }) => {
 
             {/* Legal */}
             <div>
-              <p className="font-dmSans text-sm font-semibold text-juri-ink">Legal</p>
+              <p className="font-dmSans text-sm font-semibold text-teal-700">Legal</p>
               <ul className="mt-3 space-y-2">
                 <li>
                   <button
@@ -84,7 +84,7 @@ const Footer = ({ onOpenPolicy, onGetInTouch }) => {
         </div>
 
         {/* Bottom bar */}
-        <div className="mt-10 border-t border-juri-line pt-6 text-center">
+        <div className="mt-10 border-t border-teal-300/60 pt-6 text-center">
           <p className="font-dmSans text-sm text-juri-muted">
             © {year} NexIntelAI. All rights reserved.
           </p>

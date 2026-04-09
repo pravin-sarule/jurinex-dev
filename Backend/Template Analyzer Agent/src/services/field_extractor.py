@@ -27,10 +27,11 @@ class HybridFieldExtractor:
         self._round_pattern = re.compile(r"\(\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\)")
         self._underscore_pattern = re.compile(r"([A-Z][A-Z\s]{2,})_{3,}([A-Z][A-Z\s]{2,})")
         self._dots_pattern = re.compile(r"\.{3,}\s*([A-Za-z][A-Za-z\s]+)")
-        self._blank_pattern = re.compile(r"([A-Z][A-Za-z\s]+?)\s+_{3,}\s+([A-Z][A-Za-z\s]+)")
+        self._blank_pattern = re.compile(r"([A-Z][A-Za-z\s]{1,40}?)\s+_{3,}\s+([A-Z][A-Za-z\s]{1,40})")
         self._dash_blank_pattern = re.compile(r"([A-Za-z][A-Za-z\s]{1,60})\s*[:\-]?\s*[-_]{3,}")
-        self._date_label_pattern = re.compile(r"(FILED ON|DATED|DATE)\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
-        self._section_heading_pattern = re.compile(r"^(\d+)\.\s+([A-Za-z][A-Za-z\s]+)$", re.MULTILINE)
+        self._date_label_pattern = re.compile(r"(FILED ON|DATED|DATE OF [A-Z\s]+|TIME)\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
+        self._id_label_pattern = re.compile(r"(PAN|AADHAR|GSTIN|ENROLLMENT NO|UID|VOTER ID)\s*[:\-]?\s*_{3,}", re.IGNORECASE)
+        self._section_heading_pattern = re.compile(r"^((?:\d+|[IVXLCM]+)\.\s+[A-Z][A-Z\s]{3,})$", re.MULTILINE)
 
     def extract_from_text(self, template_text: str) -> Dict[str, Any]:
         pattern_fields = self._extract_fields_by_pattern(template_text)
@@ -107,8 +108,16 @@ class HybridFieldExtractor:
             seen_keys.add("date")
             fields.append(self._make_field("date", "date", "Date", ["date_label"], 0.8))
 
-        for _, heading in self._section_heading_pattern.findall(template_text):
-            normalized = heading.strip().lower()
+        for match in self._id_label_pattern.finditer(template_text):
+            key = self._normalize_key(match.group(1))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            fields.append(self._make_field(key, "string", self._humanize_label(key), ["id_label"], 0.85))
+
+        for heading_match in self._section_heading_pattern.finditer(template_text):
+            heading = heading_match.group(1)
+            normalized = re.sub(r"^\d+\.\s+", "", heading).strip().lower()
             if normalized not in BODY_SECTIONS_HINT:
                 continue
             key, label = BODY_SECTIONS_HINT[normalized]
@@ -237,16 +246,18 @@ class HybridFieldExtractor:
         return any(h in lowered for h in hints)
 
     def _infer_type_from_key(self, key: str) -> str:
-        if any(token in key for token in ("date", "filed_on", "filing_date")):
+        if any(token in key for token in ("date", "filed_on", "filing_date", "dated", "time")):
             return "date"
-        if any(token in key for token in ("amount", "fee", "rent", "price", "cost")):
+        if any(token in key for token in ("amount", "fee", "rent", "price", "cost", "consideration", "salary")):
             return "currency"
-        if any(token in key for token in ("number", "count", "year", "age")):
+        if any(token in key for token in ("number", "count", "year", "age", "quantity", "valuable")):
             return "number"
-        if "address" in key:
+        if "address" in key or "place" in key or "location" in key:
             return "address"
-        if any(token in key for token in ("grounds", "facts", "prayer", "recitals", "verification", "declaration")):
+        if any(token in key for token in ("grounds", "facts", "prayer", "recitals", "verification", "declaration", "description", "clause")):
             return "text_long"
+        if any(token in key for token in ("pan", "aadhar", "gstin", "uid", "voter_id", "enrollment")):
+            return "string"
         return "string"
 
     def _pick_best_key(self, candidates: List[str], fallback: str) -> str:

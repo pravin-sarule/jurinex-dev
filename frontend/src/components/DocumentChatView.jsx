@@ -5,6 +5,7 @@ import ChatMessage from './ChatInterface/ChatMessage';
 import ChatInput from './ChatInterface/ChatInput';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
+import { getUserFriendlyApiErrorMessage } from '../utils/llmQuotaMessages';
 import ApiService from '../services/api';
 import { BookOpen, ChevronDown, MessageSquare, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -313,7 +314,8 @@ const DocumentChatView = () => {
         fetchChatSessions();
       }
     } catch (err) {
-      setChatError(`Failed to send message: ${err.response?.data?.details || err.message}`);
+      const msg = getUserFriendlyApiErrorMessage(err, 'Failed to send message.');
+      setChatError(`Failed to send message: ${msg}`);
     } finally {
       setLoadingChat(false);
       setIsSecretPromptSelected(false);

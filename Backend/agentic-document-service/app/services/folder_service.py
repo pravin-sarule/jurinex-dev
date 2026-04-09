@@ -35,6 +35,7 @@ from app.services.llm_chat_config import get_llm_chat_config
 from app.services.legal_system_prompt import build_document_qa_system_prompt, build_legal_system_prompt, fetch_full_profile
 from app.services.pipeline_service import LegalCasePipelineService, StoredCase
 from app.services.secret_prompt_display import post_process_secret_prompt_response, resolve_query_and_display
+from app.services.adapters.speech_to_text import is_audio_mime
 
 
 logger = logging.getLogger("agentic_document_service.folder")
@@ -462,6 +463,18 @@ class FolderWorkflowService:
     def _build_file_storage_key(self, user_id: str, folder_name: str, document_name: str) -> str:
         safe_file_name = document_name.replace("\\", "_").replace("/", "_")
         clean_folder_name = (folder_name or "").strip().strip("/")
+
+        # Strip leading "{user_id}/" if folder_name already includes it
+        if clean_folder_name.startswith(f"{user_id}/"):
+            clean_folder_name = clean_folder_name[len(user_id) + 1:]
+
+        # Strip leading "cases/" or "documents/" prefix — the builder adds
+        # "documents/" itself; "cases/" is a Node.js-service internal prefix
+        for prefix in ("cases/", "documents/"):
+            if clean_folder_name.startswith(prefix):
+                clean_folder_name = clean_folder_name[len(prefix):]
+                break
+
         return f"{user_id}/documents/{clean_folder_name}/{safe_file_name}"
 
     def _build_text_summary(self, text: str | None, limit: int = 500) -> str | None:
@@ -521,6 +534,7 @@ class FolderWorkflowService:
         extracted_text: str | None = None,
         summary: str | None = None,
         metadata: dict[str, Any] | None = None,
+        current_operation: str | None = None,
     ) -> None:
         if not file_id or not is_db_available():
             return
@@ -532,6 +546,8 @@ class FolderWorkflowService:
                     "status": status,
                     "processing_progress": processing_progress,
                 }
+                if current_operation is not None and "current_operation" in file_columns:
+                    update_payload["current_operation"] = current_operation
                 if stored_document_uri and "gcs_path" in file_columns:
                     update_payload["gcs_path"] = stored_document_uri
                 if extracted_text is not None and "full_text_content" in file_columns:
@@ -1038,6 +1054,66 @@ class FolderWorkflowService:
             message="Extracted case fields generated from processed folder documents.",
         )
 
+    def _resolve_file_ids_for_folder_case(self, folder_name: str, user_id: str | None) -> list[str]:
+        """
+        When get_documents_in_folder returns no file ids, recover UUIDs so vector
+        search still includes all indexed materials (PDFs, audio transcripts, etc.).
+        """
+        merged: list[str] = []
+
+        stored_case = self._pipeline._cases.get(folder_name)
+        if stored_case:
+            for doc in stored_case.documents:
+                did = str(getattr(doc, "document_id", "") or "").strip()
+                if did and len(did) >= 32:
+                    merged.append(did)
+
+        if is_db_available() and user_id:
+            accessible = self._get_accessible_user_ids(user_id)
+            if accessible:
+                try:
+                    with get_db_connection() as conn, conn.cursor() as cur:
+                        api_fn = ((folder_name or "").strip().strip("/") or None)
+                        gcs_seg = f"/{api_fn}/" if api_fn else None
+                        extra = ""
+                        extra_vals: list[Any] = []
+                        if api_fn and gcs_seg:
+                            extra = """
+                                  OR uf.folder_path = %s::text
+                                  OR strpos(COALESCE(uf.gcs_path, ''), %s::text) > 0
+                            """
+                            extra_vals = [api_fn, gcs_seg]
+                        cur.execute(
+                            f"""
+                            SELECT DISTINCT ON (uf.id) uf.id::text
+                            FROM user_files uf
+                            WHERE uf.user_id::text = ANY(%s::text[])
+                              AND uf.is_folder = false
+                              AND (
+                                  uf.folder_path = %s
+                                  OR uf.folder_path LIKE %s
+                                  {extra}
+                              )
+                            ORDER BY uf.id ASC, uf.originalname ASC
+                            """,
+                            [
+                                accessible,
+                                folder_name,
+                                f"{folder_name}/%",
+                                *extra_vals,
+                            ],
+                        )
+                        merged.extend([str(r["id"]) for r in cur.fetchall() if r.get("id")])
+                except Exception as exc:
+                    logger.warning(
+                        "[FolderService] task=_resolve_file_ids_for_folder_case db_error folder=%s error=%s",
+                        folder_name,
+                        exc,
+                    )
+
+        # Stable de-dupe
+        return list(dict.fromkeys([x for x in merged if x]))
+
     def get_documents_in_folder(self, folder_name: str, user_id: str | None = None) -> dict[str, Any]:
         if is_db_available():
             documents = self._get_documents_in_folder_from_db(folder_name, user_id)
@@ -1132,8 +1208,18 @@ class FolderWorkflowService:
             file_ids = [str(item.get("id")) for item in records if item.get("id")]
         except Exception as exc:
             logger.warning("[FolderService] task=answer_folder_chat status=file_list_fallback folder=%s error=%s", folder_name, exc)
+        if not file_ids:
+            file_ids = self._resolve_file_ids_for_folder_case(folder_name, user_id)
+            if file_ids:
+                logger.info(
+                    "[FolderService] task=answer_folder_chat recovered file_ids=%s folder=%s",
+                    len(file_ids),
+                    folder_name,
+                )
         query_response = self._pipeline.answer_query_for_files(
-            QueryRequest(user_id=user_id, case_id=case_id, query=query_text),
+            # IMPORTANT: use the history-augmented query text when configured,
+            # so the assistant can correctly follow up on previous turns.
+            QueryRequest(user_id=user_id, case_id=case_id, query=effective_query_text),
             file_ids,
             system_instruction=system_instruction,
         )
@@ -1217,21 +1303,39 @@ class FolderWorkflowService:
         if max_history <= 0:
             return []
         history: list[dict[str, Any]] = []
-        if is_db_available() and session_id:
+        if is_db_available():
             try:
                 with get_db_connection() as conn, conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT question, answer, created_at
-                        FROM folder_chats
-                        WHERE folder_name = %s
-                          AND user_id::text = %s
-                          AND session_id::text = %s
-                        ORDER BY created_at DESC
-                        LIMIT %s
-                        """,
-                        [folder_name, str(user_id), str(session_id), max_history],
-                    )
+                    # If the UI did not send a session_id (or a new chat was started),
+                    # we still want *case-wise* conversational continuity. Fetch the most
+                    # recent Q/A pairs for this folder (case) and user.
+                    #
+                    # When session_id is provided we prefer session-scoped history.
+                    if session_id:
+                        cur.execute(
+                            """
+                            SELECT question, answer, created_at
+                            FROM folder_chats
+                            WHERE folder_name = %s
+                              AND user_id::text = %s
+                              AND session_id::text = %s
+                            ORDER BY created_at DESC
+                            LIMIT %s
+                            """,
+                            [folder_name, str(user_id), str(session_id), max_history],
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT question, answer, created_at
+                            FROM folder_chats
+                            WHERE folder_name = %s
+                              AND user_id::text = %s
+                            ORDER BY created_at DESC
+                            LIMIT %s
+                            """,
+                            [folder_name, str(user_id), max_history],
+                        )
                     rows = list(cur.fetchall())
                 history = [{"question": row.get("question"), "answer": row.get("answer")} for row in reversed(rows)]
             except Exception as exc:
@@ -1267,6 +1371,72 @@ class FolderWorkflowService:
         if not session:
             raise ValueError(f"Session '{session_id}' was not found for folder '{folder_name}'.")
         return self._to_session_model(session)
+
+    def delete_file(self, file_id: str, user_id: str | None = None) -> dict[str, Any]:
+        """
+        Delete a single file by its DB id.
+
+        Steps:
+        1. Fetch the file record (auth check via user_id / firm members).
+        2. Delete chunk_vectors + file_chunks rows.
+        3. Delete the user_files row.
+        4. Delete the GCS object (best-effort).
+        5. Remove from in-memory vector store.
+        """
+        from app.services.adapters.gcs import delete_blob
+
+        if not is_db_available():
+            raise ValueError("Database unavailable — cannot delete file.")
+
+        accessible_user_ids = self._get_accessible_user_ids(user_id) if user_id else []
+
+        with get_db_connection() as conn, conn.cursor() as cur:
+            # Fetch file record
+            if accessible_user_ids:
+                cur.execute(
+                    """
+                    SELECT id, originalname, gcs_path, folder_path, user_id
+                    FROM user_files
+                    WHERE id::text = %s AND is_folder = false
+                      AND user_id::text = ANY(%s::text[])
+                    LIMIT 1
+                    """,
+                    [str(file_id), [str(u) for u in accessible_user_ids]],
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, originalname, gcs_path, folder_path, user_id
+                    FROM user_files
+                    WHERE id::text = %s AND is_folder = false
+                    LIMIT 1
+                    """,
+                    [str(file_id)],
+                )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"File '{file_id}' not found or access denied.")
+
+            gcs_path = row.get("gcs_path") or ""
+            file_name = row.get("originalname") or file_id
+
+            # Delete vectors + chunks
+            cur.execute("DELETE FROM chunk_vectors WHERE file_id::text = %s", [str(file_id)])
+            cur.execute("DELETE FROM file_chunks WHERE file_id::text = %s", [str(file_id)])
+            cur.execute("DELETE FROM user_files WHERE id::text = %s", [str(file_id)])
+            conn.commit()
+
+        # Delete GCS object (best-effort — don't fail if missing)
+        if gcs_path:
+            gcs_uri = gcs_path if gcs_path.startswith("gs://") else None
+            if gcs_uri:
+                delete_blob(gcs_uri)
+
+        # Remove from in-memory vector store across all cases
+        self._pipeline._vector_store.delete_document(file_id)
+
+        logger.info("[FolderService] file deleted file_id=%s name=%s", file_id, file_name)
+        return {"success": True, "deleted": file_id, "name": file_name}
 
     def delete_session(self, folder_name: str, session_id: str) -> dict[str, Any]:
         with self._lock:
@@ -1307,13 +1477,47 @@ class FolderWorkflowService:
             future_map = {}
             for document, document_id in zip(documents, document_ids, strict=False):
                 db_file_id = document.metadata.get("db_file_id") if isinstance(document.metadata, dict) else None
+                step1_op = (
+                    "transcribing_audio"
+                    if is_audio_mime(document.mime_type or "")
+                    else "ocr_and_validation"
+                )
                 self._update_db_file_processing_state(
                     file_id=db_file_id,
                     status=ProcessingState.processing.value,
                     processing_progress=20.0,
+                    current_operation=step1_op,
                 )
-                self._update_document(job_id, document_id, ProcessingState.processing, 20.0, "ocr_and_validation")
-                future_map[executor.submit(self._pipeline._process_single_document, case_id, document)] = {
+                self._update_document(job_id, document_id, ProcessingState.processing, 20.0, step1_op)
+
+                # Build a real-time progress callback for audio STT polling.
+                # Captures db_file_id / document_id / job_id by closure.
+                def _make_progress_callback(_db_file_id=db_file_id, _doc_id=document_id, _job_id=job_id):
+                    def _cb(pct: float) -> None:
+                        try:
+                            self._update_db_file_processing_state(
+                                file_id=_db_file_id,
+                                status=ProcessingState.processing.value,
+                                processing_progress=round(pct, 1),
+                                current_operation="transcribing_audio",
+                            )
+                            self._update_document(
+                                _job_id,
+                                _doc_id,
+                                ProcessingState.processing,
+                                round(pct, 1),
+                                "transcribing_audio",
+                            )
+                        except Exception:
+                            pass  # progress update is best-effort
+                    return _cb
+
+                future_map[executor.submit(
+                    self._pipeline._process_single_document,
+                    case_id,
+                    document,
+                    progress_callback=_make_progress_callback(),
+                )] = {
                     "document_id": document_id,
                     "source_document": document,
                 }
@@ -1329,6 +1533,7 @@ class FolderWorkflowService:
                         file_id=db_file_id,
                         status=ProcessingState.embedding_pending.value,
                         processing_progress=80.0,
+                        current_operation="vector_indexing",
                     )
                     self._update_document(job_id, document_id, ProcessingState.embedding_pending, 80.0, "vector_indexing")
                     persisted_chunks = self._pipeline.persist_chunks_to_db(db_file_id, bundle.chunks)
@@ -1354,6 +1559,7 @@ class FolderWorkflowService:
                             "chunk_count": bundle.process_result.chunk_count,
                             "quality_score": bundle.process_result.quality_score,
                         },
+                        current_operation="completed",
                     )
                     self._update_document(
                         job_id,
@@ -1378,6 +1584,7 @@ class FolderWorkflowService:
                         file_id=db_file_id,
                         status=ProcessingState.error.value,
                         processing_progress=100.0,
+                        current_operation="failed",
                     )
                     self._update_document(job_id, document_id, ProcessingState.error, 100.0, "failed", error=str(exc))
 
@@ -1627,11 +1834,29 @@ class FolderWorkflowService:
                 else:
                     robust_path = stored_path or folder.get("originalname") or folder_name
 
+                # queue_documents / _create_db_file_record store folder_path as the API case name only
+                # (e.g. PETITIONER_vs_...), while robust_path may be user_id/cases/PETITIONER_vs_...
+                # Include both so PDFs (legacy paths / gcs prefix) and agentic uploads (short folder_path) match.
+                # API folder name (agentic uploads store folder_path as this string only).
+                api_folder_name = ((folder_name or "").strip().strip("/") or None)
+                gcs_folder_segment = f"/{api_folder_name}/" if api_folder_name else None
+
                 # Use ANY(%s::text[]) for firm/multi-user support — NOT a single user_id
                 gcs_prefix = f"{folder.get('gcs_path')}%" if folder.get("gcs_path") else None
+                # Avoid `(%s IS NOT NULL AND ...)` with NULL binds — PostgreSQL reports
+                # IndeterminateDatatype for untyped NULL parameters (psycopg3).
+                extra_api_match = ""
+                extra_params: list[Any] = []
+                if api_folder_name and gcs_folder_segment:
+                    extra_api_match = """
+                              OR folder_path = %s::text
+                              OR strpos(COALESCE(gcs_path, ''), %s::text) > 0
+                    """
+                    extra_params = [api_folder_name, gcs_folder_segment]
+
                 if gcs_prefix:
-                    file_query = """
-                        SELECT *
+                    file_query = f"""
+                        SELECT DISTINCT ON (id) *
                         FROM user_files
                         WHERE user_id::text = ANY(%s::text[])
                           AND is_folder = false
@@ -1639,23 +1864,42 @@ class FolderWorkflowService:
                               folder_path = %s
                               OR folder_path LIKE %s
                               OR gcs_path LIKE %s
+                              {extra_api_match}
                           )
-                        ORDER BY originalname ASC
+                        ORDER BY id ASC, originalname ASC
                     """
-                    cur.execute(file_query, [accessible_user_ids, robust_path, f"{robust_path}/%", gcs_prefix])
+                    cur.execute(
+                        file_query,
+                        [
+                            accessible_user_ids,
+                            robust_path,
+                            f"{robust_path}/%",
+                            gcs_prefix,
+                            *extra_params,
+                        ],
+                    )
                 else:
-                    file_query = """
-                        SELECT *
+                    file_query = f"""
+                        SELECT DISTINCT ON (id) *
                         FROM user_files
                         WHERE user_id::text = ANY(%s::text[])
                           AND is_folder = false
                           AND (
                               folder_path = %s
                               OR folder_path LIKE %s
+                              {extra_api_match}
                           )
-                        ORDER BY originalname ASC
+                        ORDER BY id ASC, originalname ASC
                     """
-                    cur.execute(file_query, [accessible_user_ids, robust_path, f"{robust_path}/%"])
+                    cur.execute(
+                        file_query,
+                        [
+                            accessible_user_ids,
+                            robust_path,
+                            f"{robust_path}/%",
+                            *extra_params,
+                        ],
+                    )
                 rows = list(cur.fetchall())
 
         return [

@@ -90,7 +90,10 @@ export function buildPerHourQuotaMessage(details) {
  * @returns {{ title: string, body: string, isLimit: true, limitType: string } | null}
  */
 export function getChatModelQuotaUserMessage(error) {
-  const data = error?.response?.data || {};
+  const raw = error?.response?.data || {};
+  const data = (raw && typeof raw === 'object' && raw.detail && typeof raw.detail === 'object')
+    ? raw.detail
+    : raw;
   const code = error?.code || data.code;
   const details = error?.details ?? data.details;
 
@@ -127,15 +130,18 @@ export function getChatModelQuotaUserMessage(error) {
  * @returns {string}
  */
 export function getLlmPolicyErrorUserText(status, body) {
-  if (body && typeof body === 'object') {
+  const data = (body && typeof body === 'object' && body.detail && typeof body.detail === 'object')
+    ? body.detail
+    : body;
+  if (data && typeof data === 'object') {
     const quota = getChatModelQuotaUserMessage({
-      response: { data: body },
-      code: body.code,
-      details: body.details,
+      response: { data },
+      code: data.code,
+      details: data.details,
     });
     if (quota?.body) return quota.body;
-    if (typeof body.message === 'string' && body.message.trim()) return body.message.trim();
-    if (typeof body.error === 'string' && body.error.trim()) return body.error.trim();
+    if (typeof data.message === 'string' && data.message.trim()) return data.message.trim();
+    if (typeof data.error === 'string' && data.error.trim()) return data.error.trim();
   }
   if (status === 429) {
     return "You've reached a usage limit (too many messages or chats in this period). Please wait a bit and try again.";
@@ -167,18 +173,21 @@ export function stringToChatErrorDisplay(body, title = 'Something went wrong') {
  * @returns {{ title: string, body: string, isLimit: boolean, limitType: string }}
  */
 export function parseLlmPolicyErrorForUi(status, body) {
-  if (body && typeof body === 'object') {
+  const data = (body && typeof body === 'object' && body.detail && typeof body.detail === 'object')
+    ? body.detail
+    : body;
+  if (data && typeof data === 'object') {
     const quota = getChatModelQuotaUserMessage({
-      response: { data: body },
-      code: body.code,
-      details: body.details,
+      response: { data },
+      code: data.code,
+      details: data.details,
     });
     if (quota) return quota;
   }
-  let text = getLlmPolicyErrorUserText(status, body);
-  if (!text && body && typeof body === 'object') {
-    if (typeof body.message === 'string' && body.message.trim()) text = body.message.trim();
-    else if (typeof body.error === 'string' && body.error.trim()) text = body.error.trim();
+  let text = getLlmPolicyErrorUserText(status, data);
+  if (!text && data && typeof data === 'object') {
+    if (typeof data.message === 'string' && data.message.trim()) text = data.message.trim();
+    else if (typeof data.error === 'string' && data.error.trim()) text = data.error.trim();
   }
   if (!text) text = `Something went wrong (${status}).`;
 
@@ -206,4 +215,51 @@ export function coerceChatErrorDisplay(input) {
     return stringToChatErrorDisplay(input);
   }
   return stringToChatErrorDisplay(String(input));
+}
+
+function _unwrapErrorBody(body) {
+  if (body && typeof body === 'object' && body.detail && typeof body.detail === 'object') {
+    return body.detail;
+  }
+  return body || {};
+}
+
+/**
+ * Generic user-friendly message for API/network errors.
+ * Distinguishes quota/token failures from file/upload failures.
+ */
+export function getUserFriendlyApiErrorMessage(error, fallback = 'Something went wrong. Please try again.') {
+  const status = Number(error?.response?.status || error?.status || 0);
+  const body = _unwrapErrorBody(error?.response?.data || {});
+  const rawMessage = String(
+    body?.message ||
+    body?.error ||
+    error?.message ||
+    ''
+  ).trim();
+
+  if (status === 429 || /status code 429/i.test(rawMessage)) {
+    return getLlmPolicyErrorUserText(429, body) ||
+      "You've reached a usage limit. Please wait a bit and try again.";
+  }
+
+  if (status === 413) {
+    return 'The file is too large for your current upload limits. Please upload a smaller file.';
+  }
+  if (status === 415) {
+    return 'This file type is not supported. Please upload a supported document format.';
+  }
+  if (status === 404) {
+    return 'The requested file or resource was not found.';
+  }
+
+  const m = rawMessage.toLowerCase();
+  if (m.includes('token') && (m.includes('limit') || m.includes('quota') || m.includes('exhaust'))) {
+    return "Your token limit has been reached. Please try again later or upgrade your plan.";
+  }
+  if (m.includes('file') || m.includes('upload') || m.includes('document')) {
+    return rawMessage || 'There was a problem with the file. Please check the file and try again.';
+  }
+
+  return rawMessage || fallback;
 }

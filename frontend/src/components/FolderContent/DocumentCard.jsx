@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MoreVertical, Trash2, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+import { MoreVertical, Trash2, CheckCircle, AlertCircle, Loader, Music, Play, Pause } from 'lucide-react';
 import { toast } from 'react-toastify';
 import DocumentProcessingProgress from './DocumentProcessingProgress';
+import documentApi from '../../services/documentApi';
 
 const PdfIcon = ({ className = "w-6 h-6", isProcessing = false }) => (
   <svg
@@ -45,6 +46,12 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onDelete })
   const menuRef = useRef(null);
   const [animatedProgress, setAnimatedProgress] = useState(0);
   const animationFrameRef = useRef();
+  const audioRef = useRef(null);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [isResolvingAudio, setIsResolvingAudio] = useState(false);
+  const [resolvedAudioUrl, setResolvedAudioUrl] = useState(null);
+  const generatedBlobUrlRef = useRef(null);
+  const pendingPlayRef = useRef(false);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -160,6 +167,15 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onDelete })
                       document.filename ||
                       document.original_name ||
                       "Unnamed Document";
+  const normalizedName = displayName.toLowerCase();
+  const normalizedMime = (document.mimetype || document.mimeType || document.type || '').toLowerCase();
+  const isAudioFile =
+    normalizedMime.startsWith('audio/') ||
+    ['.mp3', '.wav', '.wave', '.flac', '.ogg', '.opus', '.webm', '.m4a', '.aac', '.amr'].some((ext) =>
+      normalizedName.endsWith(ext)
+    );
+  const directAudioUrl = document.previewUrl || document.viewUrl || document.url || null;
+  const audioUrl = resolvedAudioUrl || directAudioUrl;
 
   const currentStatus = individualStatus?.status || document.status || 'unknown';
   const progress = animatedProgress;
@@ -188,15 +204,213 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onDelete })
     setShowMenu(!showMenu);
   };
 
+  useEffect(() => {
+    if (generatedBlobUrlRef.current) {
+      URL.revokeObjectURL(generatedBlobUrlRef.current);
+      generatedBlobUrlRef.current = null;
+    }
+    setResolvedAudioUrl(null);
+    setIsAudioPlaying(false);
+    pendingPlayRef.current = false;
+  }, [document.id]);
+
+  useEffect(() => {
+    return () => {
+      if (generatedBlobUrlRef.current) {
+        URL.revokeObjectURL(generatedBlobUrlRef.current);
+        generatedBlobUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  const resolveAudioUrl = async () => {
+    if (audioUrl) return audioUrl;
+    if (!document?.id) return null;
+
+    setIsResolvingAudio(true);
+    try {
+      try {
+        const viewData = await documentApi.getDocumentViewInfo(document.id, 1);
+        const viewUrl = viewData?.viewUrlWithPage || viewData?.viewUrl || viewData?.signedUrl;
+        if (viewUrl) {
+          setResolvedAudioUrl(viewUrl);
+          return viewUrl;
+        }
+      } catch (error) {
+        console.warn('Audio view URL fetch failed:', error);
+      }
+
+      const content = await documentApi.getDocumentContent(document.id);
+      const fallbackUrl = content?.previewUrl || content?.viewUrl || content?.url || null;
+      if (fallbackUrl) {
+        setResolvedAudioUrl(fallbackUrl);
+        return fallbackUrl;
+      }
+      return null;
+    } finally {
+      setIsResolvingAudio(false);
+    }
+  };
+
+  const waitForPlayableAudioUrl = async ({ attempts = 6, delayMs = 1000 } = {}) => {
+    for (let i = 0; i < attempts; i += 1) {
+      const url = await resolveAudioUrl();
+      if (url) return url;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
+  };
+
+  const waitForAudioReady = (audioEl, timeoutMs = 8000) =>
+    new Promise((resolve, reject) => {
+      if (!audioEl) {
+        reject(new Error('Audio element not found.'));
+        return;
+      }
+
+      const cleanup = () => {
+        audioEl.removeEventListener('loadedmetadata', onReady);
+        audioEl.removeEventListener('canplay', onReady);
+        audioEl.removeEventListener('error', onError);
+        clearTimeout(timer);
+      };
+
+      const onReady = () => {
+        cleanup();
+        resolve(true);
+      };
+
+      const onError = () => {
+        cleanup();
+        reject(new Error('Audio source could not be loaded.'));
+      };
+
+      if (audioEl.readyState >= 2) {
+        resolve(true);
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Audio loading timed out.'));
+      }, timeoutMs);
+
+      audioEl.addEventListener('loadedmetadata', onReady);
+      audioEl.addEventListener('canplay', onReady);
+      audioEl.addEventListener('error', onError);
+    });
+
+  const tryPlayWithPreparedSource = async (audioEl, primaryUrl, secondaryUrl = null) => {
+    const candidates = [primaryUrl, secondaryUrl].filter(Boolean);
+    let lastError = null;
+
+    for (const url of candidates) {
+      try {
+        if (audioEl.src !== url) {
+          audioEl.src = url;
+          audioEl.load();
+        }
+        await waitForAudioReady(audioEl, 8000);
+        await audioEl.play();
+        return true;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    throw lastError || new Error('Audio playback failed.');
+  };
+
+  useEffect(() => {
+    if (!isAudioFile || isProcessing || audioUrl || isResolvingAudio) return;
+    resolveAudioUrl().catch((error) => {
+      console.warn('Background audio URL resolve failed:', error);
+    });
+  }, [isAudioFile, isProcessing, audioUrl, isResolvingAudio]);
+
+  useEffect(() => {
+    if (!audioRef.current || !audioUrl || !pendingPlayRef.current) return;
+    const audioEl = audioRef.current;
+
+    const playWhenReady = async () => {
+      try {
+        if (audioEl.src !== audioUrl) {
+          audioEl.src = audioUrl;
+          audioEl.load();
+        }
+        await audioEl.play();
+        setIsAudioPlaying(true);
+        pendingPlayRef.current = false;
+      } catch (error) {
+        console.warn('Deferred autoplay blocked, waiting for manual play:', error);
+      }
+    };
+
+    playWhenReady();
+  }, [audioUrl]);
+
+  const handleToggleAudio = async (e) => {
+    e.stopPropagation();
+    if (!audioRef.current) return;
+
+    try {
+      if (!audioUrl) {
+        pendingPlayRef.current = true;
+      }
+      const playableUrl = await waitForPlayableAudioUrl({ attempts: 6, delayMs: 1000 });
+      if (!playableUrl) {
+        // Keep pending state; user can keep using same top play button while backend finalizes.
+        toast.info('Audio is still preparing. It will be available shortly.');
+        return;
+      }
+
+      if (audioRef.current.paused) {
+        await tryPlayWithPreparedSource(audioRef.current, playableUrl, directAudioUrl);
+        setIsAudioPlaying(true);
+        pendingPlayRef.current = false;
+      } else {
+        audioRef.current.pause();
+        setIsAudioPlaying(false);
+        pendingPlayRef.current = false;
+      }
+    } catch (error) {
+      console.error('Audio playback failed:', error);
+      if (error?.name === 'AbortError' || error?.name === 'NotAllowedError') {
+        // Transient browser/media timing issues should not show a hard failure toast.
+        return;
+      }
+      const message = String(error?.message || '').toLowerCase();
+      if (message.includes('404') || message.includes('not found') || message.includes('not available')) {
+        toast.info('Audio is still processing. Please try again in a few seconds.');
+        return;
+      }
+      if (message.includes('timed out') || message.includes('could not be loaded')) {
+        toast.info('Audio is loading. Please try once more.');
+        return;
+      }
+      pendingPlayRef.current = false;
+      toast.error('Unable to play this audio file.');
+      setIsAudioPlaying(false);
+    }
+  };
+
   return (
     <div
       className="group bg-white px-4 py-3 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer border border-gray-100 hover:border-gray-200 relative"
-      onClick={() => !isProcessing && onDocumentClick(document)}
+      onClick={() => !isProcessing && !isAudioFile && onDocumentClick(document)}
       style={{ opacity: isProcessing ? 0.95 : 1 }}
     >
       <div className="flex items-center gap-3">
         <div className="flex-shrink-0">
-          <PdfIcon className="w-7 h-7" isProcessing={isProcessing} />
+          {isAudioFile ? (
+            <div className="w-7 h-7 rounded-full bg-[#E0F7F6] text-[#21C1B6] flex items-center justify-center">
+              <Music className="w-4 h-4" />
+            </div>
+          ) : (
+            <PdfIcon className="w-7 h-7" isProcessing={isProcessing} />
+          )}
         </div>
 
         <div className="flex-1 min-w-0">
@@ -213,6 +427,16 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onDelete })
             </div>
 
             <div className="flex items-center gap-2 flex-shrink-0">
+              {isAudioFile && !isProcessing && (
+                <button
+                  onClick={handleToggleAudio}
+                  disabled={isResolvingAudio}
+                  className="p-1.5 rounded-lg text-[#1f6b5f] hover:bg-[#E0F7F6] disabled:opacity-40 disabled:cursor-not-allowed transition-colors duration-200"
+                  title={isAudioPlaying ? 'Pause audio' : 'Play audio'}
+                >
+                  {isResolvingAudio ? <Loader className="w-4 h-4 animate-spin" /> : isAudioPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                </button>
+              )}
               <span
                 className={`px-2 py-1 rounded-md text-xs font-medium whitespace-nowrap flex items-center gap-1.5 ${getStatusBadgeColor(currentStatus)}`}
               >
@@ -254,6 +478,23 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onDelete })
                 progress={progress}
                 currentOperation={currentOperation}
               />
+            </div>
+          )}
+          {isAudioFile && !isProcessing && (
+            <div className="mt-2.5">
+              <audio
+                ref={audioRef}
+                src={audioUrl || undefined}
+                controls
+                preload="metadata"
+                onPlay={() => setIsAudioPlaying(true)}
+                onPause={() => setIsAudioPlaying(false)}
+                onEnded={() => setIsAudioPlaying(false)}
+                onError={() => setIsAudioPlaying(false)}
+                className="w-full h-9"
+              >
+                Your browser does not support the audio element.
+              </audio>
             </div>
           )}
         </div>

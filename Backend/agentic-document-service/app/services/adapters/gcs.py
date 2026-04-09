@@ -98,6 +98,30 @@ def download_bytes(gs_uri: str) -> bytes:
     return data
 
 
+def delete_blob(gs_uri: str) -> bool:
+    """
+    Delete a file from GCS by its gs:// URI.
+
+    Returns True if deleted, False if it did not exist.
+    """
+    if not gs_uri or not gs_uri.startswith("gs://"):
+        return False
+    without_scheme = gs_uri[5:]
+    bucket_name, _, object_path = without_scheme.partition("/")
+    if not bucket_name or not object_path:
+        return False
+    try:
+        client = _get_gcs_client()
+        bucket_obj = client.bucket(bucket_name)
+        blob = bucket_obj.blob(object_path)
+        blob.delete()
+        logger.info("[GCS] Deleted %s", gs_uri)
+        return True
+    except Exception as exc:
+        logger.warning("[GCS] delete_blob failed for %s: %s", gs_uri, exc)
+        return False
+
+
 def signed_upload_url(
     destination_path: str,
     content_type: str = "application/octet-stream",

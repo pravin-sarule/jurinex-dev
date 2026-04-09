@@ -199,7 +199,7 @@ const PricingPage = () => {
  console.log('Token being sent for subscription:', storedToken?.substring(0, 20) + '...');
  console.log('User ID from localStorage:', currentUser.id);
 
- const response = await fetch(`${BACKEND_BASE_URL}/subscription/start`, {
+ const response = await fetch(`${BACKEND_BASE_URL}/api/payments/subscription/start`, {
  method: 'POST',
  headers: {
  'Content-Type': 'application/json',
@@ -258,7 +258,7 @@ const PricingPage = () => {
  setProcessingPayment(true);
  
  try {
- const verificationResponse = await fetch(`${BACKEND_BASE_URL}/subscription/verify`, {
+ const verificationResponse = await fetch(`${BACKEND_BASE_URL}/api/payments/subscription/verify`, {
  method: 'POST',
  headers: {
  'Content-Type': 'application/json',

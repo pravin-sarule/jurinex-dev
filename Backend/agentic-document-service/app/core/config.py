@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     enable_legacy_proxy: bool = False
 
     database_url: str = Field(default="", validation_alias=AliasChoices("DATABASE_URL"))
+    # Optional DB override for reading public.agent_prompts.
+    # Use this when agent prompts live in Draft_DB while runtime tables stay in Document_DB.
+    agent_prompts_database_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("AGENT_PROMPTS_DATABASE_URL", "DRAFT_DATABASE_URL"),
+    )
     google_cloud_project: str = Field(
         default="",
         validation_alias=AliasChoices("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT_ID"),
@@ -62,6 +68,14 @@ class Settings(BaseSettings):
     google_cloud_location: str = Field(
         default="us-central1",
         validation_alias=AliasChoices("GOOGLE_CLOUD_LOCATION", "DOCUMENT_AI_LOCATION"),
+    )
+    document_ai_processor_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOCUMENT_AI_PROCESSOR_ID"),
+    )
+    document_ai_ocr_processor_version_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOCUMENT_AI_OCR_PROCESSOR_VERSION_ID"),
     )
     google_application_credentials: str = Field(
         default="",
@@ -98,6 +112,10 @@ class Settings(BaseSettings):
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
+    cloud_speech_to_text_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("CLOUD_SPEECH_TO_TEXT_API_KEY"),
+    )
     jwt_secret: str = Field(default="", validation_alias=AliasChoices("JWT_SECRET"))
     redis_url: str = Field(default="", validation_alias=AliasChoices("REDIS_URL"))
     auth_service_url: str = Field(
@@ -111,6 +129,11 @@ class Settings(BaseSettings):
     payment_service_url: str = Field(
         default="http://localhost:5003",
         validation_alias=AliasChoices("PAYMENT_SERVICE_URL"),
+    )
+    # Optional HTTP fallback for agent prompts when DB lookup is unavailable.
+    agent_draft_service_url: str = Field(
+        default="http://localhost:8000",
+        validation_alias=AliasChoices("AGENT_DRAFT_SERVICE_URL", "DRAFTING_SERVICE_URL"),
     )
     retrieval_top_k: int = 8
     chunk_size: int = 750
@@ -166,6 +189,51 @@ class Settings(BaseSettings):
     summarization_config_admin_key: str = Field(
         default="",
         validation_alias=AliasChoices("SUMMARIZATION_CONFIG_ADMIN_KEY"),
+    )
+    # 0 = use the same max as documents (max_document_size_mb / multer_upload_ceiling_mb from chat config)
+    max_audio_file_size_mb: int = Field(
+        default=0,
+        validation_alias=AliasChoices("MAX_AUDIO_FILE_SIZE_MB"),
+    )
+    # BatchRecognize / long audio: allow up to ~8h; sync calls finish sooner.
+    speech_to_text_timeout_seconds: int = Field(
+        default=28800,
+        validation_alias=AliasChoices("SPEECH_TO_TEXT_TIMEOUT", "SPEECH_TO_TEXT_TIMEOUT_SECONDS"),
+    )
+    speech_to_text_language_code: str = Field(
+        default="en-IN",
+        validation_alias=AliasChoices("SPEECH_TO_TEXT_LANGUAGE", "SPEECH_TO_TEXT_LANGUAGE_CODE"),
+    )
+    speech_to_text_alternative_language_code: str = Field(
+        default="hi-IN",
+        validation_alias=AliasChoices("SPEECH_TO_TEXT_ALTERNATIVE_LANGUAGE", "SPEECH_TO_TEXT_ALT_LANGUAGE"),
+    )
+    # Speech-to-Text v2: Chirp + batch_recognize for gs:// (long audio); v1 fallback if disabled.
+    speech_use_v2: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("SPEECH_USE_V2"),
+    )
+    speech_v2_model: str = Field(
+        default="chirp_2",
+        validation_alias=AliasChoices("SPEECH_V2_MODEL"),
+    )
+    # Chirp 2/3 are regional — use us-central1 unless your model docs specify another region.
+    speech_recognizer_location: str = Field(
+        default="us-central1",
+        validation_alias=AliasChoices("SPEECH_RECOGNIZER_LOCATION", "SPEECH_V2_LOCATION"),
+    )
+    # Named recognizer ID created in GCP Console / gcloud.
+    # Set to the ID of your pre-created recognizer (e.g. "chirp-transcriber").
+    # Full path: projects/{project}/locations/{location}/recognizers/{id}
+    # Leave empty ("") to use the implicit wildcard recognizer "_" (auto-provisioned).
+    speech_v2_recognizer_id: str = Field(
+        default="chirp-transcriber",
+        validation_alias=AliasChoices("SPEECH_V2_RECOGNIZER_ID"),
+    )
+    # Max concurrent STT submissions to avoid hitting GCP rate limits.
+    stt_max_concurrent: int = Field(
+        default=3,
+        validation_alias=AliasChoices("STT_MAX_CONCURRENT"),
     )
 
     @field_validator("cors_origins", mode="before")

@@ -18,7 +18,11 @@ app.use(morgan('dev'));
 // Routes must be after body parsing middleware
 app.use('/api/user-resources', userResourceRoutes);
 
+<<<<<<< Updated upstream
 const allowedOrigins = ['https://nexintelagent.netlify.app', "https://ailearn.co.in","https://www.ailearn.co.in",'http://localhost:5173'];
+=======
+const allowedOrigins = ['', 'http://localhost:5173'];
+>>>>>>> Stashed changes
 
 app.use(cors({
   origin: function(origin, callback) {
@@ -30,8 +34,18 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization"]
+  allowedHeaders: [
+    "Origin",
+    "X-Requested-With",
+    "Content-Type",
+    "Accept",
+    "Authorization",
+    "X-User-ID",
+  ]
 }));
+// Express/path-to-regexp in this setup rejects "*" route tokens.
+// Use a regex matcher for global preflight handling.
+app.options(/.*/, cors());
 
 app.use('/api/payments', paymentRoutes);
 
