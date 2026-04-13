@@ -42,7 +42,14 @@
       "Bash(ls c:/Users/ADMIN/jurinex-dev/Backend/authservice/*.js)",
       "Bash(grep -n \"DOCUMENT_SERVICE_URL\" /c/Users/ADMIN/jurinex-dev/frontend/src/services/*.js)",
       "Bash(grep -l \"DOCUMENT_SERVICE_URL\\\\|DOCS_BASE_URL\\\\|AGENTIC\\\\|/api/files\\\\|/files\\\\|/docs\" /c/Users/ADMIN/jurinex-dev/frontend/src/services/*.js)",
-      "Bash(find /c/Users/ADMIN/jurinex-dev/Backend -type f -name \"*.py\" -exec grep -l \"requests.get\\\\|requests.post\\\\|httpx\\\\|aiohttp\" {} \\\\;)"
+      "Bash(find /c/Users/ADMIN/jurinex-dev/Backend -type f -name \"*.py\" -exec grep -l \"requests.get\\\\|requests.post\\\\|httpx\\\\|aiohttp\" {} \\\\;)",
+      "Bash(awk 'NR>=5680 && NR<=5720' \"c:/Users/ADMIN/jurinex-dev/frontend/src/components/ChatInterface/ChatInterface.jsx\")",
+      "Bash(awk 'NR>=5660 && NR<=5690' \"c:/Users/ADMIN/jurinex-dev/frontend/src/components/ChatInterface/ChatInterface.jsx\")",
+      "Bash(awk 'NR>=5640 && NR<=5665' \"c:/Users/ADMIN/jurinex-dev/frontend/src/components/ChatInterface/ChatInterface.jsx\")",
+      "Bash(grep -v \"//\")",
+      "Bash(python -c \"from agents.root_agent import LegalDimensionExtractor, CitationRootAgent, AgentContext, KeywordExtractorAgent; print\\('OK — LegalDimensionExtractor:', LegalDimensionExtractor.name\\); print\\('alias KeywordExtractorAgent is same class:', KeywordExtractorAgent is LegalDimensionExtractor\\)\")",
+      "Bash(python -c ':*)",
+      "Bash(awk '{print $9, $5}')"
     ]
   }
 }

@@ -1,5 +1,60 @@
 @import url('https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=Inter:wght@100..900&display=swap');
 
+.learning-card {
+  background: #ffffff;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.learning-feedback {
+  font-size: 13px;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.learning-hint {
+  font-size: 12px;
+  color: #475569;
+  background: #f8fafc;
+  border-left: 3px solid #21c1b6;
+  padding: 8px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.learning-question {
+  font-size: 13px;
+  color: #111827;
+  margin-bottom: 8px;
+}
+
+.learning-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.learning-option-btn {
+  border: 1px solid #99f6e4;
+  background: #f0fdfa;
+  color: #0f766e;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.learning-option-btn:hover:not(:disabled) {
+  background: #ccfbf1;
+}
+
+.learning-option-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+
 /* Word Document Style for Legal Documents */
 .word-document-style {
   font-family: 'Times New Roman', serif;
@@ -112,7 +167,7 @@
 }
 
 .analysis-page-ai-response {
-  font-family: Georgia, "Times New Roman", serif !important;
+  font-family: "Times New Roman", Times, serif !important;
   font-size: 17px !important;
   line-height: 1.75 !important;
   color: #1a1a1a !important;
@@ -269,7 +324,7 @@
 .response-content ol {
   margin: 12px 0 !important;
   padding-left: 28px !important;
-  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-family: "Times New Roman", Times, serif !important;
   font-size: 22px !important;
 }
 

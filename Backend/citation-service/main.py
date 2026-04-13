@@ -912,18 +912,18 @@ async def generate_citation_report(
 
     if not query and case_file_context:
         try:
-            from agents.root_agent import KeywordExtractorAgent, AgentContext
+            from agents.root_agent import LegalDimensionExtractor, AgentContext
             ctx = AgentContext(
                 query="",
                 user_id=user_id,
                 case_id=case_id,
                 metadata={"case_file_context": case_file_context or []},
             )
-            ke = KeywordExtractorAgent()
-            res = ke.run(ctx)
+            lde = LegalDimensionExtractor()
+            lde.run(ctx)
             query = (ctx.metadata.get("search_query") or "").strip()
         except Exception as e:
-            logger.warning("Keyword extraction failed for empty query: %s", e)
+            logger.warning("Legal dimension extraction failed for empty query: %s", e)
     if not query:
         raise HTTPException(status_code=400, detail="query is required and must be non-empty")
 

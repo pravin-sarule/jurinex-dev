@@ -101,6 +101,7 @@ const FolderDetailPage = () => {
     selectedFolder,
     loadFoldersAndFiles,
     hasAiResponse,
+    selectedChatSessionId,
   } = useContext(FileManagerContext);
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [isStarred, setIsStarred] = useState(false);
@@ -150,7 +151,7 @@ const FolderDetailPage = () => {
   };
 
   return (
-    <div className="h-screen bg-[#FDFCFB] text-gray-800 overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent" style={{marginLeft: '0px', marginRight: '0px'}}>
+    <div className="h-screen bg-white text-gray-800 overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent" style={{marginLeft: '0px', marginRight: '0px'}}>
       <div className="h-full flex flex-col mx-auto">
         <div className="flex-shrink-0 p-0">
           <button
@@ -173,15 +174,15 @@ const FolderDetailPage = () => {
             </div>
           )}
         </div>
-        <div className="flex-shrink-0 flex justify-between items-start p-0 gap-3">
-          <h1 className="text-xl font-bold min-w-0 flex-1 break-words pr-2">
+        <div className="flex-shrink-0 relative flex items-start justify-center px-10 py-1 min-h-[2.25rem]">
+          <h1 className="text-xl font-bold text-center text-[#0f172a] max-w-[min(100%,42rem)] break-words">
             {selectedFolder || "Document Upload"}
           </h1>
-          <div className="flex items-center space-x-2 flex-shrink-0">
-            <button onClick={() => setShowMoreMenu((prev) => !prev)}>
+          <div className="absolute right-0 top-0 flex items-center space-x-2 flex-shrink-0">
+            <button type="button" onClick={() => setShowMoreMenu((prev) => !prev)} aria-label="Case menu">
               <MoreVertical className="w-4 h-4 text-gray-600" />
             </button>
-            <button onClick={handleToggleStar}>
+            <button type="button" onClick={handleToggleStar} aria-label="Star case">
               <Star
                 className={`w-4 h-4 ${
                   isStarred ? "text-yellow-400 fill-yellow-400" : "text-gray-400"
@@ -190,12 +191,12 @@ const FolderDetailPage = () => {
             </button>
           </div>
         </div>
-        <div className={`flex-1 flex ${!hasAiResponse ? 'space-x-2' : ''} overflow-hidden`}>
-          <div className={`${hasAiResponse ? 'w-full h-full' : 'flex-1 h-full'} flex flex-col scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent`}>
+        <div className={`flex-1 flex ${(!hasAiResponse && !selectedChatSessionId) ? 'space-x-2' : ''} overflow-hidden bg-white`}>
+          <div className="flex-1 h-full flex flex-col scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent min-w-0 bg-white">
             <ChatInterface />
           </div>
-          {!hasAiResponse && (
-            <div className="w-1/3 flex flex-col h-full overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
+          {!selectedChatSessionId && !hasAiResponse && (
+            <div className="w-1/3 flex flex-col h-full overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent flex-shrink-0">
               <div className="bg-white p-2 rounded border border-gray-200 flex-1 flex flex-col overflow-hidden">
                 <div className="flex justify-between items-center mb-1 flex-shrink-0">
                   <h3 className="text-sm font-semibold">Files</h3>

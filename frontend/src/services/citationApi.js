@@ -151,11 +151,18 @@ export const citationApi = {
     if (caseId) body.case_id = caseId;
     if (caseFileContext?.length) body.case_file_context = caseFileContext;
     if (perspective && perspective !== 'all') body.perspective = perspective;
-    const res = await fetch(`${CITATION_SERVICE_URL}/citation/report/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-      body: JSON.stringify(body),
-    });
+    const endpoint = `${CITATION_SERVICE_URL}/citation/report/start`;
+    let res;
+    try {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      const msg = err?.message || 'Network request failed';
+      throw new Error(`Citation service unreachable at ${CITATION_SERVICE_URL}. ${msg}`);
+    }
     if (!res.ok) throw new Error('Failed to start pipeline');
     return res.json(); // { run_id, status: 'running' }
   },

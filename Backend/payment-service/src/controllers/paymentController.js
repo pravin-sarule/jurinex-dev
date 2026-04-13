@@ -2,6 +2,7 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const db = require("../config/db");
 const TokenUsageService = require("../services/tokenUsageService");
+const { sendPurchaseConfirmationEmail } = require("../services/purchaseEmailService");
 const axios = require('axios'); // Import axios for HTTP requests
 
 const razorpay = new Razorpay({
@@ -359,11 +360,12 @@ const verifySubscription = async (req, res) => {
     const userSubscription = updateResult.rows[0];
 
     const planQuery = await db.query(
-      "SELECT token_limit FROM subscription_plans WHERE id = $1", 
+      "SELECT token_limit, name, price, currency FROM subscription_plans WHERE id = $1", 
       [userSubscription.plan_id]
     );
 
     const tokenLimit = planQuery.rows.length > 0 ? planQuery.rows[0].token_limit : 0;
+    const subscribedPlan = planQuery.rows.length > 0 ? planQuery.rows[0] : null;
 
     try {
       await db.query(
@@ -414,6 +416,21 @@ const verifySubscription = async (req, res) => {
     }
 
     await db.query('COMMIT');
+
+    sendPurchaseConfirmationEmail({
+      to: req.user?.email,
+      customerName: req.user?.email ? req.user.email.split('@')[0] : `User ${userId}`,
+      customerEmail: req.user?.email,
+      planName: subscribedPlan?.name || 'Subscription Plan',
+      amount: paymentDetails.amount ? paymentDetails.amount / 100 : Number(subscribedPlan?.price || 0),
+      currency: paymentDetails.currency || subscribedPlan?.currency || 'INR',
+      paymentId: paymentDetails.id,
+      orderId: paymentDetails.order_id || razorpay_order_id,
+      purchaseDate: new Date(),
+      transactionType: 'Plan Upgrade',
+    }).catch((mailError) => {
+      console.error("[verifySubscription] purchase email failed:", mailError.message);
+    });
 
     console.log(`[verifySubscription] Subscription verified successfully for user ${userId}`);
 
@@ -841,9 +858,200 @@ const rollbackTokensApi = async (req, res) => {
   }
 };
 
+const verifyPersistedOneTimePayment = async (req, res) => {
+  try {
+    await db.query('BEGIN');
+
+    const userId = req.user?.id;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan_name, plan_id } = req.body || {};
+
+    if (!userId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      await db.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: "Missing verification data" });
+    }
+
+    const existingPayment = await db.query(
+      `SELECT id FROM payments WHERE razorpay_payment_id = $1`,
+      [razorpay_payment_id]
+    );
+
+    if (existingPayment.rows.length > 0) {
+      await db.query('COMMIT');
+      return res.status(200).json({
+        success: true,
+        message: "Payment already verified successfully",
+        payment: {
+          order_id: razorpay_order_id,
+          payment_id: razorpay_payment_id,
+          plan_name: plan_name || null,
+        },
+      });
+    }
+
+    const generatedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    if (generatedSignature !== razorpay_signature) {
+      await db.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: "Invalid payment signature" });
+    }
+
+    let planQuery;
+    if (plan_id) {
+      planQuery = await db.query(
+        `SELECT * FROM subscription_plans WHERE id = $1 AND is_active = true LIMIT 1`,
+        [plan_id]
+      );
+    } else if (plan_name) {
+      planQuery = await db.query(
+        `SELECT * FROM subscription_plans
+         WHERE LOWER(name) = LOWER($1) AND is_active = true
+         ORDER BY price DESC
+         LIMIT 1`,
+        [plan_name]
+      );
+    } else {
+      planQuery = { rows: [] };
+    }
+
+    if (planQuery.rows.length === 0) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: "Purchased plan not found" });
+    }
+
+    const resolvedPlan = planQuery.rows[0];
+
+    let paymentDetails;
+    try {
+      paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
+    } catch (fetchError) {
+      console.error("[verifyPersistedOneTimePayment] Failed to fetch payment details from Razorpay:", fetchError.message);
+      paymentDetails = {
+        id: razorpay_payment_id,
+        order_id: razorpay_order_id,
+        amount: resolvedPlan.price ? Number(resolvedPlan.price) * 100 : 0,
+        currency: resolvedPlan.currency || "INR",
+        status: "captured",
+        method: "unknown",
+      };
+    }
+
+    const subscriptionEndDate = new Date();
+    const normalizedInterval = String(resolvedPlan.interval || '').toLowerCase();
+    if (['year', 'yearly', 'annual'].includes(normalizedInterval)) {
+      subscriptionEndDate.setFullYear(subscriptionEndDate.getFullYear() + 1);
+    } else if (['quarter', 'quarterly'].includes(normalizedInterval)) {
+      subscriptionEndDate.setMonth(subscriptionEndDate.getMonth() + 3);
+    } else if (['month', 'monthly'].includes(normalizedInterval)) {
+      subscriptionEndDate.setMonth(subscriptionEndDate.getMonth() + 1);
+    }
+
+    const subscriptionResult = await db.query(
+      `INSERT INTO user_subscriptions (
+        user_id,
+        plan_id,
+        razorpay_subscription_id,
+        razorpay_payment_id,
+        status,
+        current_token_balance,
+        start_date,
+        end_date,
+        activated_at,
+        last_reset_date,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, NULL, $3, 'active', $4, CURRENT_DATE, $5, CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT (user_id) DO UPDATE SET
+        plan_id = EXCLUDED.plan_id,
+        razorpay_payment_id = EXCLUDED.razorpay_payment_id,
+        status = EXCLUDED.status,
+        current_token_balance = EXCLUDED.current_token_balance,
+        start_date = EXCLUDED.start_date,
+        end_date = EXCLUDED.end_date,
+        activated_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *`,
+      [userId, resolvedPlan.id, razorpay_payment_id, resolvedPlan.token_limit || 0, subscriptionEndDate]
+    );
+
+    const userSubscription = subscriptionResult.rows[0];
+
+    await db.query(
+      `INSERT INTO payments (
+        user_id,
+        subscription_id,
+        razorpay_payment_id,
+        razorpay_order_id,
+        razorpay_signature,
+        amount,
+        currency,
+        status,
+        payment_method,
+        created_at,
+        transaction_date
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_DATE)`,
+      [
+        userId,
+        userSubscription.id,
+        paymentDetails.id,
+        paymentDetails.order_id || razorpay_order_id,
+        razorpay_signature,
+        paymentDetails.amount ? paymentDetails.amount / 100 : Number(resolvedPlan.price || 0),
+        paymentDetails.currency || resolvedPlan.currency || "INR",
+        paymentDetails.status || "captured",
+        paymentDetails.method || "unknown",
+      ]
+    );
+
+    if (resolvedPlan.token_limit) {
+      await TokenUsageService.resetUserUsage(userId, resolvedPlan.token_limit, 'One-time plan purchase activation');
+    }
+
+    await db.query('COMMIT');
+
+    sendPurchaseConfirmationEmail({
+      to: req.user?.email,
+      customerName: req.user?.email ? req.user.email.split('@')[0] : `User ${userId}`,
+      customerEmail: req.user?.email,
+      planName: resolvedPlan.name || plan_name || null,
+      amount: paymentDetails.amount ? paymentDetails.amount / 100 : Number(resolvedPlan.price || 0),
+      currency: paymentDetails.currency || resolvedPlan.currency || "INR",
+      paymentId: paymentDetails.id,
+      orderId: paymentDetails.order_id || razorpay_order_id,
+      purchaseDate: new Date(),
+      transactionType: 'Plan Purchase',
+    }).catch((mailError) => {
+      console.error("[verifyPersistedOneTimePayment] purchase email failed:", mailError.message);
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment verified successfully",
+      payment: {
+        order_id: razorpay_order_id,
+        payment_id: razorpay_payment_id,
+        plan_id: resolvedPlan.id,
+        plan_name: resolvedPlan.name || plan_name || null,
+      },
+      subscription: userSubscription,
+    });
+  } catch (err) {
+    await db.query('ROLLBACK');
+    console.error("[verifyPersistedOneTimePayment] error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Payment verification failed",
+      error: err?.message || "Unknown verification error",
+    });
+  }
+};
+
 module.exports = {
   createOneTimeOrder,
-  verifyOneTimePayment,
+  verifyOneTimePayment: verifyPersistedOneTimePayment,
   startSubscription,
   verifySubscription,
   testPlans,
@@ -855,4 +1063,3 @@ module.exports = {
   commitTokensApi,
   rollbackTokensApi,
 };
-

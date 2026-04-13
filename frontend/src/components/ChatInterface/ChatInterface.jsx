@@ -2529,6 +2529,9 @@ import {
   X,
   Mic,
   MicOff,
+  Sparkles,
+  PanelRight,
+  ChevronLeft,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -2549,17 +2552,74 @@ import {
 } from "../../utils/llmQuotaMessages";
 import ChatQuotaErrorModal from "../ChatQuotaErrorModal";
 import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
+import LearningChatBubble from "./LearningChatBubble";
+import LearningDetailPanel from "./LearningDetailPanel";
+import AgentStepsPanel from "./AgentStepsPanel";
+import ChatSessionList from "./ChatSessionList";
 
 /** Full plain text for chat list preview (not a single 120-char line). */
 function plainTextPreviewFromResponse(raw) {
   if (raw == null || raw === "") return "";
   try {
+    // If it looks like a learning payload JSON, extract only the feedback text
+    const trimmed = String(raw).trim();
+    const cleaned = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    if (cleaned.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(cleaned);
+        if (parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed)) {
+          const parts = [];
+          if (parsed.feedback) parts.push(String(parsed.feedback).trim());
+          if (parsed.content_hint) parts.push(`💡 ${String(parsed.content_hint).trim()}`);
+          if (parsed.question) parts.push(String(parsed.question).trim());
+          return parts.join('\n\n');
+        }
+      } catch { /* not valid JSON */ }
+    }
     let t = convertJsonToPlainText(raw);
     t = t.replace(/^#+\s*/gm, "").replace(/\*\*/g, "").trim();
     return t;
   } catch {
     return String(raw).slice(0, 2000);
   }
+}
+
+/** Extracts a learning payload object from raw LLM output (JSON or code-fenced JSON). */
+function extractLearningPayloadFromRaw(raw) {
+  if (!raw) return null;
+  try {
+    const cleaned = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    if (!cleaned.startsWith('{')) return null;
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed)) {
+      return parsed;
+    }
+  } catch { /* not JSON */ }
+  return null;
+}
+
+/**
+ * Same as extractLearningPayloadFromRaw but tolerates leading/trailing noise (e.g. streamed
+ * whitespace or a prefix) by parsing the outermost {...} block. Needed so Learning Mode
+ * keeps the structured UI instead of flashing raw markdown during SSE.
+ */
+function extractLearningPayloadLenient(raw) {
+  if (!raw) return null;
+  const strict = extractLearningPayloadFromRaw(raw);
+  if (strict) return strict;
+  try {
+    let t = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const start = t.indexOf('{');
+    const end = t.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    const parsed = JSON.parse(t.slice(start, end + 1));
+    if (parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed)) {
+      return parsed;
+    }
+  } catch {
+    /* not JSON */
+  }
+  return null;
 }
 
 function sourcePassagesStorageKey(folderName, messageId) {
@@ -3348,6 +3408,7 @@ function injectCitationMarkersIntoParagraphs(text, maxCitations) {
 const ChatInterface = () => {
   const {
     selectedFolder,
+    chatSessions,
     setChatSessions,
     selectedChatSessionId,
     setSelectedChatSessionId,
@@ -3370,6 +3431,13 @@ const ChatInterface = () => {
   const [selectedLlmName, setSelectedLlmName] = useState(null);
   const [activeDropdown, setActiveDropdown] = useState("Custom Query");
   const [showDropdown, setShowDropdown] = useState(false);
+  const [showStyleDropdown, setShowStyleDropdown] = useState(false);
+  const [learningModeActive, setLearningModeActive] = useState(false);
+  // Panel state — mirrors Claude's artifact panel
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelType, setPanelType] = useState(null); // 'learning' | 'response' | 'agentic'
+  const [panelData, setPanelData] = useState(null);
+  const [newChatMode, setNewChatMode] = useState(false);
   const [isSecretPromptSelected, setIsSecretPromptSelected] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -3385,6 +3453,11 @@ const ChatInterface = () => {
     return window.innerWidth < 1024;
   });
   const [openChatMenuId, setOpenChatMenuId] = useState(null);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [sessionsError, setSessionsError] = useState(null);
+  const [chatHistorySidebarOpen, setChatHistorySidebarOpen] = useState(true);
+  // Tracks the option key the user last picked (resets when a new pending question starts)
+  const [pickedOption, setPickedOption] = useState(null);
 
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
@@ -3491,6 +3564,20 @@ const ChatInterface = () => {
     [currentChatHistory, selectedMessageId]
   );
 
+  const selectedMessageIsLearning = useMemo(() => {
+    if (!selectedMessage) return false;
+    if (selectedMessage.learning_mode || selectedMessage.learningPayload) return true;
+
+    try {
+      const raw = String(selectedMessage.response || '').trim();
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const parsed = JSON.parse(cleaned);
+      return !!(parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed));
+    } catch {
+      return false;
+    }
+  }, [selectedMessage]);
+
   const suggestedQuestions = useMemo(
     () =>
       buildSuggestedQuestions({
@@ -3506,6 +3593,7 @@ const ChatInterface = () => {
   }, [isSmallScreen, responseHasTable, needsHorizontalScroll]);
   const responseRef = useRef(null);
   const dropdownRef = useRef(null);
+  const styleDropdownRef = useRef(null);
   const completeResponseRef = useRef(null);
   const animationFrameRef = useRef(null);
   const markdownOutputRef = useRef(null);
@@ -3850,14 +3938,53 @@ const ChatInterface = () => {
       console.log('[ChatInterface] fetchChatHistory: No folder to fetch, returning early. selectedFolder:', selectedFolder);
       return;
     }
+    if (!sessionId) {
+      setCurrentChatHistory([]);
+      setSelectedMessageId(null);
+      setAnimatedResponseContent("");
+      setIsAnimatingResponse(false);
+      setIsGenerating(false);
+      setHasResponse(false);
+      setHasAiResponse(false);
+      setForceSidebarCollapsed(false);
+      return;
+    }
     console.log('[ChatInterface] fetchChatHistory: Starting fetch for folder:', folderToFetch, 'sessionId:', sessionId);
     setLoadingChat(true);
     setChatError(null);
     try {
-      console.log('[ChatInterface] fetchChatHistory: Calling API...');
-      const data = await documentApi.getFolderChats(folderToFetch);
+      console.log('[ChatInterface] fetchChatHistory: Calling session API...');
+      const data = await documentApi.getFolderChatSessionById(folderToFetch, sessionId);
       console.log('[ChatInterface] fetchChatHistory: API response:', data);
-      const chats = Array.isArray(data.chats) ? data.chats : [];
+      let chats = Array.isArray(data?.chatHistory)
+        ? data.chatHistory
+        : Array.isArray(data?.session?.messages)
+          ? data.session.messages
+          : Array.isArray(data?.messages)
+            ? data.messages
+            : [];
+
+      // If messages are in raw in-memory format {role, content}, convert to {question, answer}
+      if (chats.length > 0 && chats[0]?.role) {
+        const pairs = [];
+        for (let i = 0; i < chats.length; i++) {
+          if (chats[i].role === 'user') {
+            const userMsg = chats[i];
+            const aiMsg = chats[i + 1]?.role === 'assistant' ? chats[i + 1] : null;
+            pairs.push({
+              id: userMsg.id || String(Date.now() + i),
+              question: userMsg.content,
+              response: aiMsg?.content || '',
+              answer: aiMsg?.content || '',
+              created_at: userMsg.created_at,
+              citations: [],
+              used_chunk_ids: [],
+            });
+            if (aiMsg) i++;
+          }
+        }
+        chats = pairs;
+      }
       console.log('[ChatInterface] fetchChatHistory: Parsed chats array:', chats);
       console.log('[ChatInterface] fetchChatHistory: Number of chats:', chats.length);
      
@@ -3872,46 +3999,20 @@ const ChatInterface = () => {
         prompt_label: chat.prompt_label || chat.promptLabel || null
       }));
       console.log('[ChatInterface] fetchChatHistory: Setting currentChatHistory with', chatsWithChunks.length, 'chats');
-      setCurrentChatHistory(prev => {
-        if (chatsWithChunks.length > 0) {
-          return chatsWithChunks;
-        }
-        return prev.length > 0 ? prev : chatsWithChunks;
-      });
-     
-      if (sessionId) {
-        setSelectedChatSessionId(sessionId);
-        const selectedChat = chatsWithChunks.find((c) => c.id === sessionId);
-        if (selectedChat) {
-          const responseText = selectedChat.response || selectedChat.answer || selectedChat.message || "";
-          setSelectedMessageId(selectedChat.id);
-          const isStructured = isStructuredJsonResponse(responseText);
-          const formattedResponse = isStructured
-            ? renderSecretPromptResponse(responseText)
-            : convertJsonToPlainText(responseText);
-          setAnimatedResponseContent(formattedResponse);
-          setIsAnimatingResponse(false);
-          setIsGenerating(false);
-          setHasResponse(true);
-          setHasAiResponse(true);
-          setForceSidebarCollapsed(true);
-          console.log('[ChatInterface] Selected chat has used_chunk_ids:', selectedChat.used_chunk_ids);
-          console.log('[ChatInterface] Selected chat has citations:', selectedChat.citations);
-          setCitations([]);
-          setShowCitations(false);
-        }
-      } else if (chatsWithChunks.length > 0) {
-        // Keep all historical questions visible on the left when opening a folder.
-        // Do not auto-select any response; show folder files panel on the right
-        // until the user explicitly clicks a question.
-        setSelectedChatSessionId(null);
-        setSelectedMessageId(null);
-        setAnimatedResponseContent("");
-        setIsAnimatingResponse(false);
-        setIsGenerating(false);
-        setHasResponse(false);
-        setHasAiResponse(false);
-        setForceSidebarCollapsed(false);
+      setCurrentChatHistory(chatsWithChunks);
+      setSelectedChatSessionId(sessionId);
+      // Show all messages inline in main panel — no auto-open of split panel
+      setIsAnimatingResponse(false);
+      setIsGenerating(false);
+      setCitations([]);
+      setShowCitations(false);
+      if (chatsWithChunks.length > 0) {
+        const selectedChat = chatsWithChunks[chatsWithChunks.length - 1];
+        setSelectedMessageId(selectedChat.id);
+        setHasResponse(true);
+        setHasAiResponse(true); // Hide files sidebar when loading sessions
+        setForceSidebarCollapsed(true);
+        setAnimatedResponseContent(''); 
       } else {
         setHasResponse(false);
         setHasAiResponse(false);
@@ -4273,6 +4374,7 @@ const ChatInterface = () => {
     streamThinkingRef.current = '';
     setChatError(null);
     setLoadingChat(true);
+    setIsGenerating(true);
     setIsAnimatingResponse(false);
    
     if (streamReaderRef.current) {
@@ -4289,7 +4391,7 @@ const ChatInterface = () => {
     }
 
     try {
-      const isContinuingSession = !!currentSessionId && currentChatHistory.length > 0;
+      const isContinuingSession = currentChatHistory.length > 0;
       if (!isContinuingSession && !panelStatesSetRef.current) {
         setHasResponse(true);
         setHasAiResponse(true);
@@ -4299,6 +4401,7 @@ const ChatInterface = () => {
       const selectedSecret = secrets.find((s) => s.id === secretId);
       if (!selectedSecret) throw new Error("No prompt found for selected analysis type");
       const promptLabel = selectedSecret.name;
+      setPendingQuestion(`Analysis: ${promptLabel}`);
       // Server loads the secret body from document-service (same as SecretManager flow).
       // Do not send the full preset text in `question` — DB and UI store the prompt name only.
 
@@ -4316,6 +4419,7 @@ const ChatInterface = () => {
           secret_id: secretId,
           session_id: currentSessionId,
           llm_name: 'gemini',
+          learning_mode: learningModeActive,
         }),
       });
 
@@ -4379,12 +4483,18 @@ const ChatInterface = () => {
             used_chunk_ids: usedChunkIds,
             citations: finalMetadata?.citations || null,
             chunk_details: finalMetadata?.chunk_details || null,
+            learning_mode: !!learningModeActive,
+            learningPayload: learningModeActive
+              ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
+              : null,
           };
           const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
           setCurrentChatHistory(history);
+          setPendingQuestion('');
          
           if (newSessionId) {
             setSelectedChatSessionId(newSessionId);
+            fetchChatSessions().catch(() => {});
           }
          
           if (finalResponse && finalResponse.trim()) {
@@ -4454,12 +4564,18 @@ const ChatInterface = () => {
               used_chunk_ids: usedChunkIds,
               citations: finalMetadata?.citations || null,
               chunk_details: finalMetadata?.chunk_details || null,
+              learning_mode: !!learningModeActive,
+              learningPayload: learningModeActive
+                ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
+                : null,
             };
             const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
             setCurrentChatHistory(history);
-           
+            setPendingQuestion('');
+
             if (newSessionId) {
               setSelectedChatSessionId(newSessionId);
+              fetchChatSessions().catch(() => {});
             }
            
             if (finalResponse && finalResponse.trim()) {
@@ -4487,17 +4603,21 @@ const ChatInterface = () => {
            
             if (parsed.type === 'metadata') {
               console.log('Stream metadata:', parsed);
-              newSessionId = parsed.session_id || parsed.sessionId || newSessionId;
+              const metaSid = parsed.session_id || parsed.sessionId;
+              if (metaSid) {
+                newSessionId = metaSid;
+                setSelectedChatSessionId(metaSid);
+              }
               messageId = parsed.message_id || parsed.id || messageId;
               if (!finalMetadata) finalMetadata = {};
               finalMetadata = { ...finalMetadata, ...parsed };
-              } else if (parsed.type === 'status') {
+            } else if (parsed.type === 'status') {
                 setCurrentStatus({
                   status: parsed.status,
                   message: parsed.message || parsed.status,
                 });
                 console.log('Status:', parsed.status, parsed.message);
-              } else if (parsed.type === 'thinking') {
+            } else if (parsed.type === 'thinking') {
               const thinkingText = parsed.text || '';
               if (thinkingText) {
                 streamThinkingRef.current += thinkingText;
@@ -4532,6 +4652,11 @@ const ChatInterface = () => {
               }
             } else if (parsed.type === 'done') {
               finalMetadata = { ...finalMetadata, ...parsed };
+              const doneSid = finalMetadata.session_id || finalMetadata.sessionId;
+              if (doneSid) {
+                newSessionId = doneSid;
+                setSelectedChatSessionId(doneSid);
+              }
               console.log('[ChatInterface] Done metadata (secret prompt):', finalMetadata);
               console.log('[ChatInterface] used_chunk_ids:', finalMetadata?.used_chunk_ids);
               console.log('[ChatInterface] citations:', finalMetadata?.citations);
@@ -4552,9 +4677,9 @@ const ChatInterface = () => {
                   setThinkingContent(streamThinkingRef.current);
                 }
 
-              const messageId = finalMetadata?.message_id || finalMetadata?.id || Date.now().toString();
+              const resolvedMsgId = finalMetadata?.message_id || finalMetadata?.id || messageId;
               const newMessage = {
-                id: messageId,
+                id: resolvedMsgId,
                 question: promptLabel,
                 prompt_label: promptLabel,
                 response: finalResponse,
@@ -4565,13 +4690,22 @@ const ChatInterface = () => {
                 used_chunk_ids: usedChunkIds,
                 citations: finalMetadata?.citations || null,
                 chunk_details: finalMetadata?.chunk_details || null,
+                learning_mode: !!learningModeActive,
+                learningPayload: learningModeActive
+                ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
+                : null,
               };
               const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
               setCurrentChatHistory(history);
+              setPendingQuestion('');
               setSelectedMessageId(newMessage.id);
               setAnimatedResponseContent(finalResponse);
               setIsAnimatingResponse(false);
               setIsGenerating(false);
+              // No auto-open panel - user manually opens split view if needed
+              if (newSessionId) {
+                fetchChatSessions().catch(() => {});
+              }
             } else if (parsed.type === 'error') {
               streamHadError = true;
               streamErrorMessage = parsed.message || parsed.error || 'An error occurred';
@@ -4601,11 +4735,13 @@ const ChatInterface = () => {
       throw error;
     } finally {
       setLoadingChat(false);
+      setIsGenerating(false);
+      setPendingQuestion('');
       streamReaderRef.current = null;
     }
   };
 
-  const handleNewMessage = async () => {
+  const handleNewMessage = async (forcedQuestion = null) => {
     if (!selectedFolder) return;
     if (isSecretPromptSelected) {
       if (!selectedSecretId) {
@@ -4619,8 +4755,8 @@ const ChatInterface = () => {
       setSelectedSecretId(null);
       setSelectedLlmName(null);
     } else {
-      if (!chatInput.trim()) return;
-      const questionText = chatInput.trim();
+      const questionText = String(forcedQuestion ?? chatInput).trim();
+      if (!questionText) return;
 
       setAnimatedResponseContent('');
       setThinkingContent('');
@@ -4630,6 +4766,7 @@ const ChatInterface = () => {
       setLoadingChat(true);
       setIsGenerating(true);
       setPendingQuestion(questionText);
+      setPickedOption(null);
       setIsAnimatingResponse(false);
       panelStatesSetRef.current = false;
      
@@ -4646,7 +4783,7 @@ const ChatInterface = () => {
         streamUpdateTimeoutRef.current = null;
       }
 
-      const isContinuingSession = !!selectedChatSessionId && currentChatHistory.length > 0;
+      const isContinuingSession = currentChatHistory.length > 0;
       if (!isContinuingSession && !panelStatesSetRef.current) {
         setHasResponse(true);
         setHasAiResponse(true);
@@ -4655,8 +4792,16 @@ const ChatInterface = () => {
       }
      
       try {
+        const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+        if (!folderName) {
+           setChatError("Missing folder information.");
+           setLoadingChat(false);
+           setIsGenerating(false);
+           return;
+        }
+
         const token = getAuthToken();
-        const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(selectedFolder)}/intelligent-chat/stream`, {
+        const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folderName)}/intelligent-chat/stream`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -4665,8 +4810,9 @@ const ChatInterface = () => {
           },
           body: JSON.stringify({
             question: questionText,
-            session_id: selectedChatSessionId,
+            session_id: selectedChatSessionId || undefined,
             llm_name: 'gemini',
+            learning_mode: learningModeActive,
           }),
         });
 
@@ -4734,6 +4880,10 @@ const ChatInterface = () => {
               isSecretPrompt: false,
               used_chunk_ids: usedChunkIds,
               citations: finalMetadata?.citations || null,
+              learning_mode: !!learningModeActive,
+              learningPayload: learningModeActive
+                ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
+                : null,
             };
             const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
             setCurrentChatHistory(history);
@@ -4741,6 +4891,7 @@ const ChatInterface = () => {
 
             if (newSessionId) {
               setSelectedChatSessionId(newSessionId);
+              fetchChatSessions().catch(() => {});
             }
 
             if (finalResponse && finalResponse.trim()) {
@@ -4814,6 +4965,10 @@ const ChatInterface = () => {
               used_chunk_ids: usedChunkIds,
               citations: finalMetadata?.citations || null,
               chunk_details: finalMetadata?.chunk_details || null,
+              learning_mode: !!learningModeActive,
+              learningPayload: learningModeActive
+                ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
+                : null,
             };
               const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
               setCurrentChatHistory(history);
@@ -4821,6 +4976,7 @@ const ChatInterface = () => {
 
               if (newSessionId) {
                 setSelectedChatSessionId(newSessionId);
+                fetchChatSessions(); // Update session list with new session
               }
 
               if (finalResponse && finalResponse.trim()) {
@@ -4841,7 +4997,11 @@ const ChatInterface = () => {
              
               if (parsed.type === 'metadata') {
                 console.log('Stream metadata:', parsed);
-                newSessionId = parsed.session_id || parsed.sessionId || newSessionId;
+                const metaSid = parsed.session_id || parsed.sessionId;
+                if (metaSid) {
+                  newSessionId = metaSid;
+                  setSelectedChatSessionId(metaSid);
+                }
                 messageId = parsed.message_id || parsed.id || messageId;
               } else if (parsed.type === 'status') {
                 setCurrentStatus({
@@ -4873,6 +5033,11 @@ const ChatInterface = () => {
                 }
               } else if (parsed.type === 'done') {
                 finalMetadata = parsed;
+                const doneSessionId = finalMetadata.session_id || finalMetadata.sessionId;
+                if (doneSessionId) {
+                  newSessionId = doneSessionId;
+                  setSelectedChatSessionId(doneSessionId);
+                }
                 console.log('[ChatInterface] Final metadata received:', finalMetadata);
                 console.log('[ChatInterface] used_chunk_ids:', finalMetadata?.used_chunk_ids);
                 console.log('[ChatInterface] citations:', finalMetadata?.citations);
@@ -4912,6 +5077,10 @@ const ChatInterface = () => {
                   used_chunk_ids: usedChunkIds,
                   citations: finalMetadata?.citations || null,
                   chunk_details: finalMetadata?.chunk_details || null,
+                  learning_mode: !!learningModeActive,
+                  learningPayload: learningModeActive
+                ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
+                : null,
                 };
                 const history = isContinuingSession ? [...currentChatHistory, newMessage] : [newMessage];
                 setCurrentChatHistory(history);
@@ -4920,6 +5089,9 @@ const ChatInterface = () => {
                 setAnimatedResponseContent(finalResponse);
                 setIsAnimatingResponse(false);
                 setIsGenerating(false);
+                if (doneSessionId) {
+                  fetchChatSessions();
+                }
               } else if (parsed.type === 'error') {
                 streamHadError = true;
                 streamErrorMessage = parsed.message || parsed.error || 'An error occurred';
@@ -4955,6 +5127,27 @@ const ChatInterface = () => {
     }
   };
 
+  const handleLearningOptionSelect = useCallback(async (optionText) => {
+    if (!optionText || loadingChat || isGenerating) return;
+    setIsSecretPromptSelected(false);
+    setSelectedSecretId(null);
+    setSelectedLlmName(null);
+    setActiveDropdown("Custom Query");
+    await handleNewMessage(String(optionText));
+  }, [loadingChat, isGenerating, handleNewMessage]);
+
+  const openPanel = useCallback((type, data) => {
+    setPanelType(type);
+    setPanelData(data);
+    setPanelOpen(true);
+  }, []);
+
+  const closePanel = useCallback(() => {
+    setPanelOpen(false);
+    setPanelData(null);
+    setPanelType(null);
+  }, []);
+
   const handleSelectChat = (chat) => {
     console.log('[ChatInterface] handleSelectChat called with chat:', chat);
     console.log('[ChatInterface] Chat has chunk_details:', chat?.chunk_details);
@@ -4970,18 +5163,21 @@ const ChatInterface = () => {
     const formattedResponse = isStructured
       ? renderSecretPromptResponse(responseText)
       : convertJsonToPlainText(responseText);
+    const chatIsLearning = !!(chat?.learning_mode || chat?.learningPayload);
     startTransition(() => {
       setSelectedMessageId(chat.id);
       setAnimatedResponseContent(formattedResponse);
       setIsAnimatingResponse(false);
       setIsGenerating(false);
       setHasResponse(true);
-      setHasAiResponse(true);
-      setForceSidebarCollapsed(true);
+      // Don't force sidebar collapsed - only collapse if panel is already open
     });
     setCitations([]);
     setShowCitations(false);
     setLoadingCitations(true);
+    if (chatIsLearning) {
+      closePanel();
+    }
   };
 
   const handleDeleteChat = async (chatId, e) => {
@@ -5071,12 +5267,77 @@ const ChatInterface = () => {
     setSelectedSecretId(null);
     setSelectedLlmName(null);
     setActiveDropdown("Custom Query");
+    setNewChatMode(true);
+    closePanel();
   };
+
+  const handleSelectChatSession = useCallback((sessionId) => {
+    setSelectedChatSessionId(sessionId);
+    setHasAiResponse(true);
+    setNewChatMode(false);
+  }, [setSelectedChatSessionId, setHasAiResponse]);
+
+  const handleDeleteSession = useCallback(async (sessionId) => {
+    const folderName = typeof selectedFolder === 'string'
+      ? selectedFolder
+      : (selectedFolder?.originalname || selectedFolder?.name || null);
+
+    if (!folderName || !sessionId) return;
+    if (!window.confirm('Are you sure you want to delete this session? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      setLoadingSessions(true);
+      setSessionsError(null);
+
+      const deletePromise = documentApi.deleteFolderChatSession(folderName, sessionId);
+
+      toast.promise(deletePromise, {
+        pending: 'Deleting session...',
+        success: 'Session deleted successfully!',
+        error: {
+          render({ data }) {
+            const errorMessage = data?.response?.data?.error || data?.message || 'Failed to delete session';
+            return errorMessage;
+          },
+        },
+      });
+
+      await deletePromise;
+
+      setChatSessions((prev) => prev.filter((session) => session.sessionId !== sessionId));
+
+      if (selectedChatSessionId === sessionId) {
+        setSelectedChatSessionId(null);
+        setCurrentChatHistory([]);
+        setSelectedMessageId(null);
+        setAnimatedResponseContent("");
+        setHasResponse(false);
+        setHasAiResponse(false);
+        setForceSidebarCollapsed(false);
+        closePanel();
+      }
+    } catch (err) {
+      console.error('[ChatInterface] Error deleting session:', err);
+      setSessionsError('Failed to delete session.');
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [
+    selectedFolder,
+    selectedChatSessionId,
+    setChatSessions,
+    setSelectedChatSessionId,
+    setHasAiResponse,
+    setForceSidebarCollapsed,
+    closePanel,
+  ]);
 
   const handleDeleteAllChats = async () => {
     if (!selectedFolder) return;
    
-    const chatCount = currentChatHistory.length;
+    const chatCount = selectedChatSessionId ? currentChatHistory.length : chatSessions.length;
     if (chatCount === 0) {
       toast.info("No chats to delete.");
       return;
@@ -5115,10 +5376,12 @@ const ChatInterface = () => {
       setAnimatedResponseContent("");
       setIsAnimatingResponse(false);
       setIsGenerating(false);
+      setChatSessions([]);
+      closePanel();
      
       const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
       if (folderName) {
-        await fetchChatHistory(null, folderName);
+        await fetchChatSessions(folderName);
       }
     } catch (err) {
       console.error("❌ Error deleting all chats:", err);
@@ -5173,10 +5436,265 @@ const ChatInterface = () => {
     }
   };
 
+  const getSessionIdFromSummary = (session) =>
+    session?.sessionId || session?.session_id || session?.id || null;
+
+  // Helper: extract raw text from rehype node children (used for option detection)
+  const extractNodeText = (nodeChildren = []) => {
+    return nodeChildren.map(n => {
+      if (n.type === 'text') return n.value || '';
+      if (n.children) return extractNodeText(n.children);
+      return '';
+    }).join('');
+  };
+
+  // Shared ReactMarkdown component overrides — clean serif style matching the site theme.
+  // • Option paragraphs (A) … D)) → interactive clickable choice cards
+  // • Bold text → site teal, no chip
+  // • Questions (ending with ?) → bold body text (no callout box)
+  const aiMarkdownComponents = {
+    p: ({ node, children, ...props }) => {
+      const rawText = extractNodeText(node?.children || []);
+
+      // ── Option card detection: "A) …", "B) …", "C) …", "D) …" (or A. B. C. D.)
+      const optionMatch = rawText.match(/^([A-Da-d])[).]\s+/);
+      if (optionMatch) {
+        const letter = optionMatch[1].toUpperCase();
+        const optKey = `opt-${letter}`;
+        const isPicked = pickedOption === optKey;
+        const disabled = loadingChat || isGenerating;
+
+        return (
+          <div
+            onClick={() => {
+              if (disabled) return;
+              setPickedOption(optKey);
+              handleLearningOptionSelect(rawText);
+            }}
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '12px',
+              padding: '13px 18px',
+              margin: '8px 0',
+              background: isPicked ? '#f0fdfa' : '#fafafa',
+              border: `1.5px solid ${isPicked ? '#21C1B6' : '#e2e8f0'}`,
+              borderRadius: '12px',
+              cursor: disabled ? 'default' : 'pointer',
+              transition: 'all 0.18s ease',
+              boxShadow: isPicked ? '0 0 0 3px rgba(33,193,182,0.15)' : 'none',
+              opacity: disabled ? 0.7 : 1,
+            }}
+            onMouseEnter={e => { if (!disabled && !isPicked) e.currentTarget.style.borderColor = '#21C1B6'; }}
+            onMouseLeave={e => { if (!disabled && !isPicked) e.currentTarget.style.borderColor = '#e2e8f0'; }}
+          >
+            {/* Letter badge */}
+            <span style={{
+              minWidth: '32px', height: '32px',
+              borderRadius: '50%',
+              background: isPicked ? '#21C1B6' : '#fff',
+              border: `2px solid ${isPicked ? '#21C1B6' : '#cbd5e1'}`,
+              color: isPicked ? '#fff' : '#64748b',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontWeight: 700, fontSize: '14px', flexShrink: 0,
+              transition: 'all 0.18s ease',
+            }}>
+              {isPicked ? '✓' : letter}
+            </span>
+            {/* Option content */}
+            <span style={{
+              flex: 1, fontSize: '18px', lineHeight: '1.65',
+              fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+              color: isPicked ? '#0f766e' : '#1a1a1a',
+              fontWeight: isPicked ? 600 : 400,
+            }}>
+              {children}
+            </span>
+          </div>
+        );
+      }
+
+      // ── Question paragraph (ends with ?)
+      const isQuestion = (() => {
+        const last = node?.children?.[node.children.length - 1];
+        const text = last?.value || extractNodeText(last?.children || []);
+        return text.trimEnd().endsWith('?');
+      })();
+      if (isQuestion) {
+        return (
+          <p style={{
+            margin: '0 0 16px',
+            fontWeight: 700,
+            color: '#1a1a1a',
+            fontSize: '19px',
+            lineHeight: '1.82',
+            fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+          }} {...props}>
+            {children}
+          </p>
+        );
+      }
+
+      // ── Normal paragraph
+      return (
+        <p style={{
+          margin: '0 0 16px',
+          fontSize: '19px',
+          lineHeight: '1.82',
+          color: '#232323',
+          fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+        }} {...props}>
+          {children}
+        </p>
+      );
+    },
+
+    strong: ({ children, ...props }) => (
+      <strong style={{ fontWeight: 700, color: '#0f766e' }} {...props}>{children}</strong>
+    ),
+    h1: (p) => <h1 style={{ fontSize: '24px', fontWeight: 700, margin: '24px 0 10px', color: '#111', fontFamily: '"Crimson Text", serif' }} {...p} />,
+    h2: (p) => <h2 style={{ fontSize: '21px', fontWeight: 700, margin: '20px 0 8px', color: '#111', fontFamily: '"Crimson Text", serif' }} {...p} />,
+    blockquote: (p) => (
+      <blockquote style={{
+        margin: '18px 0 22px', padding: '6px 0 6px 18px',
+        borderLeft: '4px solid #21C1B6', background: '#f0fdfa',
+        color: '#134e4a', fontStyle: 'italic', borderRadius: '0 6px 6px 0',
+        fontSize: '19px', lineHeight: '1.72', fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+      }} {...p} />
+    ),
+    ul: (p) => <ul style={{ margin: '0 0 18px', paddingLeft: '28px' }} {...p} />,
+    ol: (p) => <ol style={{ margin: '0 0 18px', paddingLeft: '28px' }} {...p} />,
+    li: (p) => <li style={{ marginBottom: '8px', fontSize: '19px', lineHeight: '1.72', fontFamily: '"Crimson Text", "Times New Roman", Times, serif' }} {...p} />,
+    hr: (p) => <hr style={{ border: 0, borderTop: '1px solid #d9d1c5', margin: '24px 0' }} {...p} />,
+    table: ({ children, ...props }) => (
+      <div style={{ overflowX: 'auto', margin: '18px 0', WebkitOverflowScrolling: 'touch' }}>
+        <table
+          style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            fontSize: '17px',
+            lineHeight: '1.5',
+            fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+          }}
+          {...props}
+        >
+          {children}
+        </table>
+      </div>
+    ),
+    thead: (p) => <thead style={{ background: '#f8fafc' }} {...p} />,
+    tbody: (p) => <tbody {...p} />,
+    tr: (p) => <tr style={{ borderBottom: '1px solid #e2e8f0' }} {...p} />,
+    th: (p) => (
+      <th
+        style={{
+          border: '1px solid #cbd5e1',
+          padding: '10px 12px',
+          textAlign: 'left',
+          fontWeight: 700,
+          color: '#0f172a',
+        }}
+        {...p}
+      />
+    ),
+    td: (p) => (
+      <td
+        style={{
+          border: '1px solid #e2e8f0',
+          padding: '10px 12px',
+          verticalAlign: 'top',
+          color: '#1e293b',
+        }}
+        {...p}
+      />
+    ),
+    code: ({ node, inline, children, ...props }) =>
+      inline ? (
+        <code style={{
+          background: '#f0fdfa', border: '1px solid #99f6e4',
+          borderRadius: '5px', padding: '2px 6px', fontSize: '14px',
+          color: '#0f766e', fontFamily: '"IBM Plex Mono", "Courier New", monospace',
+        }} {...props}>{children}</code>
+      ) : (
+        <code {...props}>{children}</code>
+      ),
+  };
+
+  const normalizeSessionSummary = (session) => {
+    const messages = Array.isArray(session?.messages)
+      ? session.messages
+      : Array.isArray(session?.chatHistory)
+        ? session.chatHistory
+        : [];
+    const firstMessage = messages[0] || {};
+    const lastMessage = messages[messages.length - 1] || {};
+    const derivedTitle =
+      session?.title ||
+      session?.name ||
+      session?.question ||
+      firstMessage?.question ||
+      firstMessage?.prompt_label ||
+      firstMessage?.query ||
+      "Untitled session";
+
+    return {
+      ...session,
+      sessionId: getSessionIdFromSummary(session),
+      messages,
+      title: String(derivedTitle).trim(),
+      lastMessageAt:
+        session?.updated_at ||
+        session?.updatedAt ||
+        lastMessage?.updated_at ||
+        lastMessage?.created_at ||
+        lastMessage?.timestamp ||
+        firstMessage?.created_at ||
+        session?.created_at ||
+        null,
+    };
+  };
+
+  const fetchChatSessions = useCallback(async (folderName = null) => {
+    let folderToFetch = folderName;
+    if (!folderToFetch) {
+      if (typeof selectedFolder === 'string') {
+        folderToFetch = selectedFolder;
+      } else if (selectedFolder) {
+        folderToFetch = selectedFolder.originalname || selectedFolder.name || null;
+      }
+    }
+    if (!folderToFetch) {
+      setChatSessions([]);
+      return;
+    }
+
+    setLoadingSessions(true);
+    setSessionsError(null);
+    try {
+      // Use getFolderChats which returns persisted history from the database
+      const data = await documentApi.getFolderChats(folderToFetch);
+      const sessions = Array.isArray(data?.chats) 
+        ? data.chats.map(normalizeSessionSummary) 
+        : Array.isArray(data) 
+          ? data.map(normalizeSessionSummary) 
+          : [];
+      setChatSessions(sessions);
+    } catch (err) {
+      console.error('[ChatInterface] Failed to fetch chat sessions:', err);
+      setSessionsError('Failed to fetch chat sessions.');
+      setChatSessions([]);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [selectedFolder, setChatSessions]);
+
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setShowDropdown(false);
+      }
+      if (styleDropdownRef.current && !styleDropdownRef.current.contains(event.target)) {
+        setShowStyleDropdown(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -5204,12 +5722,26 @@ const ChatInterface = () => {
     fetchSecrets();
   }, []);
 
-  // Auto-scroll only when a new prompt starts, not on every chunk.
+  // Auto-scroll when a new prompt starts or when chat history updates with a response.
   useEffect(() => {
     if (responseRef.current && pendingQuestion) {
-      responseRef.current.scrollTop = responseRef.current.scrollHeight;
+      setTimeout(() => {
+        if (responseRef.current) {
+          responseRef.current.scrollTop = responseRef.current.scrollHeight;
+        }
+      }, 50);
     }
   }, [pendingQuestion]);
+
+  useEffect(() => {
+    if (responseRef.current && currentChatHistory.length > 0) {
+      setTimeout(() => {
+        if (responseRef.current) {
+          responseRef.current.scrollTop = responseRef.current.scrollHeight;
+        }
+      }, 50);
+    }
+  }, [currentChatHistory.length]);
 
   useEffect(() => {
     console.log('[ChatInterface] useEffect triggered, selectedFolder:', selectedFolder);
@@ -5237,29 +5769,54 @@ const ChatInterface = () => {
     if (folderName) {
       const folderKey = `${folderName}`;
       fetchedFoldersRef.current.delete(folderKey);
-      console.log('[ChatInterface] Calling fetchChatHistory for folder:', folderName);
       fetchedFoldersRef.current.add(folderKey);
-      fetchChatHistory(null, folderName).then(() => {
-        console.log('[ChatInterface] fetchChatHistory completed successfully');
-      }).catch(err => {
-        console.error('[ChatInterface] Error in fetchChatHistory:', err);
+      fetchChatSessions(folderName).catch(err => {
+        console.error('[ChatInterface] Error in fetchChatSessions:', err);
         fetchedFoldersRef.current.delete(folderKey);
-        setCurrentChatHistory([]);
+        setChatSessions([]);
       });
     } else {
-      console.log('[ChatInterface] Skipping fetchChatHistory - folder is:', selectedFolder);
+      console.log('[ChatInterface] Skipping fetchChatSessions - folder is:', selectedFolder);
       if (selectedFolder === null || selectedFolder === undefined) {
-        console.log('[ChatInterface] selectedFolder is null/undefined - will fetch when folder is set');
+        console.log('[ChatInterface] selectedFolder is null/undefined - will fetch sessions when folder is set');
       } else {
         fetchedFoldersRef.current.clear();
         setCurrentChatHistory([]);
       }
     }
-  }, [selectedFolder, fetchChatHistory]);
+  }, [selectedFolder, fetchChatSessions, setChatSessions]);
+
+  useEffect(() => {
+    const folderName = typeof selectedFolder === 'string' ? selectedFolder : (selectedFolder?.originalname || selectedFolder?.name || null);
+    if (!folderName || !selectedChatSessionId) {
+      setCurrentChatHistory([]);
+      return;
+    }
+    fetchChatHistory(selectedChatSessionId, folderName).catch((err) => {
+      console.error('[ChatInterface] Error loading selected session:', err);
+    });
+  }, [selectedFolder, selectedChatSessionId, fetchChatHistory]);
+
+  useEffect(() => {
+    setHasAiResponse(panelOpen);
+  }, [panelOpen, setHasAiResponse]);
+
+  // Clear newChatMode once a session becomes active
+  useEffect(() => {
+    if (selectedChatSessionId) setNewChatMode(false);
+  }, [selectedChatSessionId]);
+
+  // Must run before any conditional return — same hook order when folder is null vs set.
+  const threadUsesLearningLayout = useMemo(
+    () =>
+      learningModeActive ||
+      (Array.isArray(currentChatHistory) && currentChatHistory.some((c) => !!c.learning_mode)),
+    [learningModeActive, currentChatHistory]
+  );
 
   if (!selectedFolder) {
     return (
-      <div className="flex items-center justify-center h-full text-gray-400 text-lg bg-[#FDFCFB]">
+      <div className="flex items-center justify-center h-full text-gray-400 text-lg bg-white">
         Select a folder to start chatting.
       </div>
     );
@@ -5302,258 +5859,428 @@ const ChatInterface = () => {
   };
 
   // ────────────────────────────────────────────────────────────────────────────
+  // showMainArea: show the messages+input panel only when actively chatting
+  const hasSessions = chatSessions && chatSessions.length > 0;
+  const showMainArea = !!(selectedChatSessionId || pendingQuestion || hasResponse || loadingChat || !hasSessions || newChatMode);
+
+  /** Normal mode: wider reading column; learning mode stays compact. */
+  const messagesColumnMaxWidth = panelOpen ? '100%' : threadUsesLearningLayout ? '620px' : 'min(100%, 1180px)';
 
   return (
     <div className="flex h-full min-h-0 w-full overflow-hidden relative" style={{ background: '#fff' }}>
       <ChatQuotaErrorModal error={chatError} onDismiss={() => setChatError(null)} />
-      {/* LEFT — conversation panel */}
-      <div className={`${hasResponse ? 'flex-[0.42]' : 'flex-1'} flex flex-col h-full border-r border-gray-200 min-w-0 transition-all duration-300`} style={{ background: '#fff' }}>
 
-        {/* top bar */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-shrink-0">
-          <span className="text-sm font-medium text-gray-700">Chat</span>
-          <div className="flex items-center gap-2">
-            {currentChatHistory.length > 0 && (
-              <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all" className="p-1 text-gray-400 hover:text-red-500 transition-colors">
-                <Trash2 className="w-4 h-4" />
-              </button>
-            )}
-            <button onClick={handleNewChat} className="px-3 py-1 text-xs font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] rounded-full transition-colors">
-              New Chat
-            </button>
-          </div>
-        </div>
-
-        {/* conversation messages */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 scrollbar-custom" ref={responseRef} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {loadingChat && currentChatHistory.length === 0 ? (
-            <div className="flex justify-center py-16"><Loader2 className="h-7 w-7 animate-spin text-[#21C1B6]" /></div>
-          ) : currentChatHistory.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center pt-20">
-              <MessageSquare className="h-10 w-10 mb-3 text-gray-200" />
-              <p className="text-gray-400 text-sm">Ask a question about this case</p>
-            </div>
-          ) : (
-            currentChatHistory.map((chat, idx) => (
-              <div key={chat.id != null ? `${String(chat.id)}-${idx}` : `chat-${idx}`} className="flex flex-col gap-3">
-                {/* user bubble */}
-                <div className="flex justify-flex-start">
-                  <div
-                    style={{ background: '#f0f0f0', borderRadius: '18px', padding: '12px 16px', maxWidth: '88%', fontSize: '15px', color: '#1a1a1a', lineHeight: '1.6', fontFamily: 'Georgia, serif', cursor: 'pointer' }}
-                    onClick={() => handleSelectChat(chat)}
-                  >
-                    {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
-                      ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
-                      : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
-                  </div>
-                </div>
-
-                {/* AI response preview bubble — click to see full response in right panel */}
-                {chat.response && (
-                  <div
-                    onClick={() => handleSelectChat(chat)}
-                    style={{ cursor: 'pointer', paddingLeft: '4px' }}
-                  >
-                    <div
-                      style={{
-                        background: selectedMessageId === chat.id ? '#e8f4f3' : '#f8f8f8',
-                        border: selectedMessageId === chat.id ? '1px solid #21C1B6' : '1px solid #e5e7eb',
-                        borderRadius: '12px',
-                        padding: '10px 14px',
-                        maxWidth: '92%',
-                        fontSize: '13px',
-                        color: '#555',
-                        lineHeight: '1.5',
-                        fontFamily: 'Inter, sans-serif',
-                        transition: 'background 0.15s, border-color 0.15s',
-                      }}
-                    >
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', fontSize: '11px', fontWeight: 600, color: '#21C1B6', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                        <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="5"/></svg>
-                        JuriNex Response
-                      </span>
-                      <div
-                        style={{
-                          color: '#374151',
-                          display: '-webkit-box',
-                          WebkitLineClamp: 8,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
-                          wordBreak: 'break-word',
-                          whiteSpace: 'pre-wrap',
-                          lineHeight: '1.45',
-                          maxHeight: '11.5rem',
-                        }}
-                      >
-                        {plainTextPreviewFromResponse(chat.response || '') || 'View full response →'}
-                      </div>
-                      <span style={{ display: 'block', marginTop: '6px', fontSize: '11px', color: '#9ca3af' }}>Click to view full response in the panel →</span>
-                    </div>
-                  </div>
-                )}
-
-
-                {/* delete option */}
-                <div className="mt-1 flex justify-end">
-                  <div className="relative" ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
-                    <button onClick={(e) => handleChatMenuToggle(chat.id, e)} className="p-1 text-gray-300 hover:text-gray-500 transition-colors" type="button">
-                      <MoreVertical className="h-3.5 w-3.5" />
-                    </button>
-                    {openChatMenuId === chat.id && (
-                      <div className="absolute right-0 bottom-6 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-                        <button
-                          onClick={(e) => handleDeleteChat(chat.id, e)}
-                          className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg transition-colors"
-                          type="button"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Delete
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-
-
-          {/* Pending/streaming message — shown while waiting for response */}
-          {pendingQuestion && (
-            <div className="flex flex-col gap-3">
-              {/* user bubble */}
-              <div className="flex justify-start">
-                <div style={{ background: '#f0f0f0', borderRadius: '18px', padding: '12px 16px', maxWidth: '88%', fontSize: '15px', color: '#1a1a1a', lineHeight: '1.6', fontFamily: 'Georgia, serif' }}>
-                  {pendingQuestion}
-                </div>
-              </div>
-              {/* streaming AI response */}
-              <div style={{ fontFamily: 'Georgia, serif', fontSize: '16px', lineHeight: '1.75', color: '#1a1a1a', paddingLeft: '4px' }}>
-                {animatedResponseContent ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                    components={{
-                      p: ({node,...p}) => <p style={{marginBottom:'10px',lineHeight:'1.75',fontFamily:'Georgia,serif',fontSize:'16px'}} {...p}/>,
-                      strong: ({node,...p}) => <strong style={{fontWeight:700}} {...p}/>,
-                      ul: ({node,...p}) => <ul style={{paddingLeft:'22px',marginBottom:'10px',listStyleType:'disc'}} {...p}/>,
-                      ol: ({node,...p}) => <ol style={{paddingLeft:'22px',marginBottom:'10px',listStyleType:'decimal'}} {...p}/>,
-                      li: ({node,...p}) => <li style={{marginBottom:'4px',fontFamily:'Georgia,serif',fontSize:'16px'}} {...p}/>,
-                      h1: ({node,...p}) => <h1 style={{fontSize:'18px',fontWeight:700,margin:'14px 0 6px',fontFamily:'Georgia,serif'}} {...p}/>,
-                      h2: ({node,...p}) => <h2 style={{fontSize:'17px',fontWeight:700,margin:'12px 0 6px',fontFamily:'Georgia,serif'}} {...p}/>,
-                      h3: ({node,...p}) => <h3 style={{fontSize:'16px',fontWeight:700,margin:'10px 0 4px',fontFamily:'Georgia,serif'}} {...p}/>,
-                    }}
-                  >
-                    {animatedResponseContent}
-                  </ReactMarkdown>
-                ) : (
-                  <div className="flex items-center gap-2 text-gray-400">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span style={{fontSize:'14px'}}>Thinking...</span>
-                  </div>
-                )}
-                {isGenerating && (
-                  <span style={{display:'inline-block',width:'2px',height:'16px',background:'#555',marginLeft:'2px',verticalAlign:'middle',animation:'blink 1s step-end infinite'}}/>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-        <div className="border-t border-gray-200 p-2 bg-white flex-shrink-0">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (isGenerating) {
-                handleStopGeneration();
-              } else {
-                handleNewMessage().catch((err) => {
-                  console.error("[ChatInterface] submit failed:", err);
-                });
-              }
-            }}
-            className="flex items-center space-x-3 bg-white rounded-xl border border-[#21C1B6] px-4 py-4 focus-within:ring-[#21C1B6] focus-within:shadow-sm"
-          >
-            <div className="relative flex-shrink-0" ref={dropdownRef}>
+      {/* ── Chat Session Sidebar (Left) — full list or collapsed rail ── */}
+      {hasSessions && chatHistorySidebarOpen && (
+        <div
+          className={`flex-shrink-0 flex flex-col border-r border-gray-100 bg-white ${!showMainArea ? 'flex-1' : ''}`}
+          style={{ width: showMainArea ? '280px' : undefined, height: '100%' }}
+        >
+          <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2 min-w-0">
+              <MessageSquare className="w-4 h-4 text-[#21C1B6] flex-shrink-0" />
+              <span className="truncate">Chat History</span>
+            </h3>
+            <div className="flex items-center gap-1 flex-shrink-0">
               <button
                 type="button"
-                onClick={() => setShowDropdown(!showDropdown)}
-                disabled={isLoadingSecrets || loadingChat}
-                className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={handleNewChat}
+                className="p-1.5 bg-white border border-gray-200 rounded-lg hover:border-[#21C1B6] hover:text-[#21C1B6] transition-all"
+                title="Start New Chat"
               >
-                <BookOpen className="h-3.5 w-3.5" />
-                <span>{isLoadingSecrets ? "Loading..." : activeDropdown}</span>
-                <ChevronDown className="h-3.5 w-3.5" />
+                <Plus className="w-4 h-4" />
               </button>
-              {showDropdown && !isLoadingSecrets && (
-                <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                  {secrets.length > 0 ? (
-                    secrets.map((secret) => (
-                      <button
-                        key={secret.id}
-                        type="button"
-                        onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                      >
-                        {secret.name}
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-4 py-2.5 text-sm text-gray-500">
-                      No analysis prompts available
-                    </div>
-                  )}
-                </div>
+              {showMainArea && (
+                <button
+                  type="button"
+                  onClick={() => setChatHistorySidebarOpen(false)}
+                  className="p-1.5 bg-white border border-gray-200 rounded-lg hover:border-gray-300 text-gray-500 hover:text-gray-800 transition-all"
+                  title="Hide chat history"
+                  aria-label="Hide chat history"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
               )}
             </div>
-
-            <input
-              type="text"
-              placeholder={isSecretPromptSelected ? `Analysis: ${activeDropdown}` : "How can I help you today?"}
-              value={chatInput}
-              onChange={handleChatInputChange}
-              className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
-              disabled={loadingChat}
-            />
-            
-            <button
-              type="button"
-              onClick={toggleListening}
-              className={`p-2 rounded-full transition-all duration-300 flex-shrink-0 ${
-                isListening 
-                  ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
-                  : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
-              }`}
-              disabled={loadingChat || isSecretPromptSelected}
-              title={isListening ? "Stop listening" : "Start voice input"}
-            >
-              {isListening ? (
-                <MicOff className="h-4 w-4" />
-              ) : (
-                <Mic className="h-4 w-4" />
-              )}
-            </button>
-
-            <button
-              type="submit"
-              className={`p-1.5 text-white rounded-lg transition-colors flex-shrink-0 ${
-                isGenerating
-                  ? "bg-gray-500 hover:bg-gray-600"
-                  : "bg-[#21C1B6] hover:bg-[#1AA49B]"
-              } disabled:bg-gray-300`}
-              disabled={loadingChat || (!chatInput.trim() && !isSecretPromptSelected && !isGenerating)}
-            >
-              {loadingChat && !isGenerating ? (
-                <Loader2 className="h-4 w-4 text-white animate-spin" />
-              ) : isGenerating ? (
-                <Square className="h-4 w-4 text-white" />
-              ) : (
-                <Send className="h-4 w-4 text-white" />
-              )}
-            </button>
-          </form>
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 scrollbar-custom">
+            {loadingSessions ? (
+              <div className="flex justify-center py-10">
+                <Loader2 className="h-6 w-6 animate-spin text-[#21C1B6]" />
+              </div>
+            ) : sessionsError ? (
+              <div className="px-3 py-4 text-xs text-red-500 text-center">{sessionsError}</div>
+            ) : (
+              <ChatSessionList
+                sessions={chatSessions}
+                selectedSessionId={selectedChatSessionId}
+                onSelectSession={handleSelectChatSession}
+                onDeleteSession={handleDeleteSession}
+              />
+            )}
+          </div>
         </div>
-      </div>
-      {hasResponse && (
-        <div className="flex-[0.6] flex flex-col h-full min-w-0 relative" style={{ background: '#ffffff', overflow: 'hidden' }}>
-          {/* Toolbar */}
+      )}
+      {hasSessions && !chatHistorySidebarOpen && showMainArea && (
+        <div className="flex-shrink-0 flex flex-col items-center border-r border-gray-100 bg-white w-11 py-3 gap-2">
+          <button
+            type="button"
+            onClick={() => setChatHistorySidebarOpen(true)}
+            className="p-2 rounded-lg border border-gray-200 hover:border-[#21C1B6] text-gray-600 hover:text-[#11766f] transition-colors"
+            title="Show chat history"
+            aria-label="Show chat history"
+          >
+            <MessageSquare className="w-4 h-4 text-[#21C1B6]" />
+          </button>
+        </div>
+      )}
+
+      {/* ── MAIN CONTENT AREA (messages + input) — only when actively chatting ── */}
+      {showMainArea && <div className="flex flex-1 min-w-0 h-full overflow-hidden relative bg-white">
+        {/* Chat message panel (60% or 100% of available space) */}
+        <div style={{ 
+          width: panelOpen ? '40%' : '100%', 
+          transition: 'width 0.3s ease', 
+          display: 'flex', 
+          flexDirection: 'column', 
+          height: '100%', 
+          borderRight: panelOpen ? '1px solid #e5e7eb' : 'none', 
+          overflow: 'hidden', 
+          background: '#ffffff' 
+        }}>
+
+          {/* top bar */}
+          <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-shrink-0 bg-white">
+            <span className="text-sm font-medium text-gray-700">
+              {selectedChatSessionId ? (chatSessions.find(s => s.sessionId === selectedChatSessionId)?.title || "Active Chat") : "New Conversation"}
+            </span>
+            <div className="flex items-center gap-2">
+              {(chatSessions.length > 0 || currentChatHistory.length > 0) && (
+                <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all" className="p-1 text-gray-400 hover:text-red-500 transition-colors">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
+              {hasResponse && !selectedMessageIsLearning && (
+                <button
+                  type="button"
+                  onClick={() => panelOpen ? closePanel() : openPanel('response', { response: animatedResponseContent, messageId: selectedMessageId })}
+                  title={panelOpen ? 'Close split view' : 'Open split view'}
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors inline-flex items-center gap-1.5 ${
+                    panelOpen
+                      ? 'text-[#11766f] bg-[#E0F7F6] border border-[#21C1B6]'
+                      : 'text-[#11766f] bg-white border border-[#21C1B6] hover:bg-[#f0fdfa]'
+                  }`}
+                >
+                  <PanelRight className="w-3.5 h-3.5" />
+                  <span>{panelOpen ? 'Close Split' : 'Split View'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Messages Area */}
+          <div
+            className={`flex-1 overflow-y-auto py-8 scrollbar-custom bg-white ${threadUsesLearningLayout ? 'px-5 sm:px-6' : 'px-8'}`}
+            ref={responseRef}
+          >
+            <div style={{
+              maxWidth: messagesColumnMaxWidth,
+              margin: '0 auto',
+              width: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '32px',
+            }}
+            >
+              {!selectedChatSessionId && !pendingQuestion ? (
+                <div className="flex flex-col items-center justify-center h-full text-center pt-20">
+                  <div className="w-16 h-16 bg-[#F0FDF9] rounded-2xl flex items-center justify-center mb-4">
+                    <MessageSquare className="h-8 w-8 text-[#21C1B6]" />
+                  </div>
+                  <h2 className="text-xl font-bold text-gray-800 mb-2">How can I help you today?</h2>
+                  <p className="text-gray-500 text-sm max-w-sm mx-auto">
+                    Ask a question above to start a new analysis session or select an existing one from the history.
+                  </p>
+                </div>
+              ) : (loadingChat && currentChatHistory.length === 0) ? (
+                <div className="flex justify-center py-16">
+                  <Loader2 className="h-7 w-7 animate-spin text-[#21C1B6]" />
+                </div>
+              ) : (currentChatHistory.length === 0 && !pendingQuestion) ? (
+                <div className="flex flex-col items-center justify-center h-full text-center pt-20">
+                  <MessageSquare className="h-10 w-10 mb-3 text-gray-200" />
+                  <p className="text-gray-400 text-sm">This session has no messages yet</p>
+                </div>
+              ) : (
+                <>
+                  {currentChatHistory.map((chat, idx) => {
+                    let resolvedPayload = chat.learningPayload || null;
+                    if (!resolvedPayload && (learningModeActive || chat.learning_mode)) {
+                      const raw = String(chat.response || '').trim();
+                      resolvedPayload =
+                        extractLearningPayloadLenient(raw) ||
+                        extractLearningPayloadFromRaw(raw) ||
+                        null;
+                      if (!resolvedPayload) {
+                        try {
+                          const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+                          const parsed = JSON.parse(cleaned);
+                          if (parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed)) {
+                            resolvedPayload = parsed;
+                          }
+                        } catch { /* not JSON */ }
+                      }
+                    }
+                    const isLearning = !!(learningModeActive || chat.learning_mode);
+
+                    return (
+                      <div key={chat.id != null ? `${String(chat.id)}-${idx}` : `chat-${idx}`} className="flex flex-col gap-3">
+                        {/* User question bubble — same teal style as Learning reference */}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                          <div style={{
+                            background: '#f0fdfa',
+                            color: '#1a1a1a',
+                            borderRadius: '18px 18px 4px 18px',
+                            border: '1px solid #21C1B6',
+                            padding: '10px 16px',
+                            maxWidth: '72%',
+                            fontSize: '17px',
+                            fontWeight: '500',
+                            lineHeight: '1.55',
+                            fontFamily: 'Inter, sans-serif',
+                            wordBreak: 'break-word',
+                            boxShadow: '0 2px 4px rgba(33, 193, 182, 0.05)'
+                          }}>
+                            {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
+                              ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
+                              : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
+                          </div>
+                        </div>
+
+                        {/* AI response */}
+                        {(chat.response || ((loadingChat || isGenerating) && !pendingQuestion && idx === currentChatHistory.length - 1)) && (
+                          isLearning ? (
+                            <div style={{ display: 'flex', justifyContent: 'flex-start', width: '100%' }}>
+                              <div style={{ width: '100%', padding: '4px 0' }}>
+                                {(loadingChat || isGenerating) && idx === currentChatHistory.length - 1 && !resolvedPayload && !pendingQuestion ? (
+                                  <div className="flex items-center gap-2 text-gray-500 text-sm">
+                                    <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                                    <span>Thinking...</span>
+                                  </div>
+                                ) : resolvedPayload ? (
+                                  <LearningChatBubble
+                                    data={resolvedPayload}
+                                    isStreaming={(loadingChat || isGenerating) && idx === currentChatHistory.length - 1 && !pendingQuestion}
+                                    optionsInteractionLocked={idx !== currentChatHistory.length - 1}
+                                    onOptionClick={handleLearningOptionSelect}
+                                    onViewFull={null}
+                                  />
+                                ) : (
+                                  <div style={{ maxWidth: '560px', width: '100%', margin: '0 auto', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>
+                                      {chat.response}
+                                    </ReactMarkdown>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                              {!chat.response ? (
+                                <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                  <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                                  <span>Thinking...</span>
+                                </div>
+                              ) : (
+                                <>
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>
+                                    {chat.response}
+                                  </ReactMarkdown>
+                                  <div className="flex items-center gap-2 mt-2">
+                                    <button onClick={() => navigator.clipboard.writeText(chat.response)} className="p-1 px-2 text-[10px] text-gray-400 border border-gray-200 rounded hover:bg-gray-50">Copy</button>
+                                    <button onClick={() => { handleSelectChat(chat); openPanel('response', { response: chat.response, messageId: chat.id }); }} className="p-1 px-2 text-[10px] text-gray-400 border border-gray-200 rounded hover:bg-gray-50">Open in Panel</button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )
+                        )}
+
+                        {/* Menu */}
+                        <div className="mt-1 flex justify-end">
+                          <div className="relative" ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
+                            <button onClick={(e) => handleChatMenuToggle(chat.id, e)} className="p-1 text-gray-300 hover:text-gray-500 transition-colors">
+                              <MoreVertical className="h-3.5 w-3.5" />
+                            </button>
+                            {openChatMenuId === chat.id && (
+                              <div className="absolute right-0 bottom-6 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                                <button onClick={(e) => handleDeleteChat(chat.id, e)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg">
+                                  <Trash2 className="w-4 h-4" /> Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Pending Question */}
+                  {pendingQuestion && (
+                    <div className="flex flex-col gap-3">
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        <div style={{ background: '#f0fdfa', border: '1px solid #21C1B6', borderRadius: '18px 18px 4px 18px', padding: '10px 16px', maxWidth: '72%', fontSize: '17px', color: '#1a1a1a', fontFamily: 'Inter, sans-serif' }}>
+                          {pendingQuestion}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                        {learningModeActive ? (
+                          <div style={{ width: '100%', maxWidth: '560px', margin: '0 auto' }}>
+                            {(() => {
+                              const livePayload =
+                                extractLearningPayloadLenient(animatedResponseContent) ||
+                                extractLearningPayloadFromRaw(animatedResponseContent);
+                              if (livePayload) {
+                                return (
+                                  <LearningChatBubble
+                                    data={livePayload}
+                                    isStreaming={loadingChat || isGenerating}
+                                    optionsInteractionLocked={false}
+                                    onOptionClick={handleLearningOptionSelect}
+                                    onViewFull={null}
+                                  />
+                                );
+                              }
+                              if (loadingChat || isGenerating) {
+                                return (
+                                  <div className="flex items-center gap-2 text-gray-500 text-sm">
+                                    <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                                    <span>Thinking...</span>
+                                  </div>
+                                );
+                              }
+                              if (animatedResponseContent) {
+                                return (
+                                  <div style={{ fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>{animatedResponseContent}</ReactMarkdown>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div className="flex items-center gap-2 text-gray-500 text-sm">
+                                  <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                                  <span>Thinking...</span>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        ) : (
+                          <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                            {animatedResponseContent ? (
+                              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>{animatedResponseContent}</ReactMarkdown>
+                            ) : (
+                              <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                                <span>Thinking...</span>
+                              </div>
+                            )}
+                            {isGenerating && <span className="inline-block w-0.5 h-4 bg-gray-500 ml-1 animate-pulse" />}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Input Area */}
+          <div className="flex-shrink-0 border-t border-gray-200 p-2 bg-white">
+            <form 
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (isGenerating) handleStopGeneration();
+                else handleNewMessage().catch(console.error);
+              }}
+              className="flex items-center space-x-3 bg-white rounded-xl border border-[#21C1B6] px-4 py-4 focus-within:ring-[#21C1B6]"
+            >
+              <div className="relative flex-shrink-0" ref={dropdownRef}>
+                <button type="button" onClick={() => setShowDropdown(!showDropdown)} className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg">
+                  <BookOpen className="h-3.5 w-3.5" />
+                  <span>{isLoadingSecrets ? "Loading..." : activeDropdown}</span>
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+                {showDropdown && !isLoadingSecrets && (
+                  <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
+                    {secrets.map((s) => (
+                      <button key={s.id} type="button" onClick={() => handleDropdownSelect(s.name, s.id, s.llm_name)} className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50">{s.name}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+                <button type="button" onClick={() => setShowStyleDropdown(!showStyleDropdown)} className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+                {showStyleDropdown && (
+                  <div className="absolute bottom-full left-0 mb-2 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                    <button type="button" onClick={() => { setLearningModeActive(false); setShowStyleDropdown(false); closePanel(); }} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">Normal</button>
+                    <button type="button" onClick={() => { setLearningModeActive(true); setShowStyleDropdown(false); }} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">Learning</button>
+                  </div>
+                )}
+              </div>
+              <input
+                type="text"
+                value={chatInput}
+                onChange={handleChatInputChange}
+                placeholder={isSecretPromptSelected ? `Analysis: ${activeDropdown}` : "How can I help you today?"}
+                className="flex-grow bg-transparent border-none outline-none text-gray-900 text-sm font-medium py-2 min-w-0"
+                disabled={loadingChat}
+              />
+              <button
+                type="submit"
+                disabled={!isGenerating && (loadingChat || (!chatInput.trim() && !isSecretPromptSelected))}
+                className="p-2 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex-shrink-0"
+                title={isGenerating ? "Stop" : loadingChat ? "Sending…" : "Send"}
+              >
+                {isGenerating ? (
+                  <X className="h-4 w-4" />
+                ) : loadingChat ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+        {/* PANEL CLOSED ABOVE, MAIN REMAINS OPEN FOR ARTIFACT PANEL */}
+        {panelOpen && (
+        <div className="chat-artifact-panel flex flex-col h-full min-w-0 relative" style={{ width: '60%', background: '#ffffff', overflow: 'hidden' }}>
+          {/* ── Learning panel ── */}
+          {panelType === 'learning' && panelData && (
+            <LearningDetailPanel
+              data={panelData}
+              onOptionClick={handleLearningOptionSelect}
+              onClose={closePanel}
+              isStreaming={isGenerating || loadingChat}
+            />
+          )}
+
+          {/* ── Agentic steps panel ── */}
+          {panelType === 'agentic' && (
+            <AgentStepsPanel
+              steps={panelData?.steps || []}
+              onClose={closePanel}
+            />
+          )}
+
+          {/* ── Response / A4 viewer panel ── */}
+          {(panelType === 'response' || (!panelType && hasResponse)) && (
+          <>{/* Toolbar */}
           {selectedMessageId && animatedResponseContent && (
             <div className="flex-shrink-0 px-4 py-2 flex items-center justify-between" style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb' }}>
               <div className="flex items-center gap-2">
@@ -5646,8 +6373,11 @@ const ChatInterface = () => {
                 )}
                 {/* Paginated content */}
                 {(() => {
-                  const pages = paginateContent(formattedResponseContent || '');
+                  const pages = selectedMessageIsLearning
+                    ? [formattedResponseContent || '']
+                    : paginateContent(formattedResponseContent || '');
                   const totalPages = pages.length || 1;
+                  const useContinuousPanelLayout = selectedMessageIsLearning;
 
                   const openCitationByIndex = async (n) => {
                     if (!Number.isFinite(n) || n < 1) return;
@@ -5674,20 +6404,20 @@ const ChatInterface = () => {
                   };
 
                   const mdComponents = {
-                    h1: ({node, ...props}) => <h1 style={{ fontFamily: 'Georgia, serif', fontSize: '22px', fontWeight: 700, margin: '24px 0 12px', color: '#111', lineHeight: 1.3 }} {...props} />,
-                    h2: ({node, ...props}) => <h2 style={{ fontFamily: 'Georgia, serif', fontSize: '19px', fontWeight: 700, margin: '20px 0 10px', color: '#111', lineHeight: 1.3 }} {...props} />,
-                    h3: ({node, ...props}) => <h3 style={{ fontFamily: 'Georgia, serif', fontSize: '17px', fontWeight: 700, margin: '16px 0 8px', color: '#111' }} {...props} />,
-                    h4: ({node, ...props}) => <h4 style={{ fontFamily: 'Georgia, serif', fontSize: '17px', fontWeight: 700, margin: '14px 0 6px', color: '#222' }} {...props} />,
-                    h5: ({node, ...props}) => <h5 style={{ fontFamily: 'Georgia, serif', fontSize: '16px', fontWeight: 700, margin: '12px 0 4px', color: '#333' }} {...props} />,
-                    h6: ({node, ...props}) => <h6 style={{ fontFamily: 'Georgia, serif', fontSize: '16px', fontWeight: 700, margin: '10px 0 4px', color: '#444' }} {...props} />,
-                    p: ({node, ...props}) => <p style={{ fontFamily: 'Georgia, serif', marginBottom: '14px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '17px' }} {...props} />,
+                    h1: ({node, ...props}) => <h1 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '24px', fontWeight: 700, margin: '24px 0 12px', color: '#111', lineHeight: 1.3 }} {...props} />,
+                    h2: ({node, ...props}) => <h2 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '21px', fontWeight: 700, margin: '20px 0 10px', color: '#111', lineHeight: 1.3 }} {...props} />,
+                    h3: ({node, ...props}) => <h3 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '19px', fontWeight: 700, margin: '16px 0 8px', color: '#111' }} {...props} />,
+                    h4: ({node, ...props}) => <h4 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '19px', fontWeight: 700, margin: '14px 0 6px', color: '#222' }} {...props} />,
+                    h5: ({node, ...props}) => <h5 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '17px', fontWeight: 700, margin: '12px 0 4px', color: '#333' }} {...props} />,
+                    h6: ({node, ...props}) => <h6 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '17px', fontWeight: 700, margin: '10px 0 4px', color: '#444' }} {...props} />,
+                    p: ({node, ...props}) => <p style={{ fontFamily: '"Times New Roman", Times, serif', marginBottom: '14px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '19px' }} {...props} />,
                     strong: ({node, ...props}) => <strong style={{ fontWeight: 700, color: '#111' }} {...props} />,
                     em: ({node, ...props}) => <em style={{ fontStyle: 'italic' }} {...props} />,
                     ul: ({node, ...props}) => <ul style={{ listStyleType: 'disc', paddingLeft: '28px', marginBottom: '14px', marginTop: '6px' }} {...props} />,
                     ol: ({node, ...props}) => <ol style={{ listStyleType: 'decimal', paddingLeft: '28px', marginBottom: '14px', marginTop: '6px' }} {...props} />,
-                    li: ({node, ...props}) => <li style={{ fontFamily: 'Georgia, serif', marginBottom: '6px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '17px' }} {...props} />,
+                    li: ({node, ...props}) => <li style={{ fontFamily: '"Times New Roman", Times, serif', marginBottom: '6px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '19px' }} {...props} />,
                     a: ({node, ...props}) => <a {...props} style={{ color: '#1a6db5', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" />,
-                    blockquote: ({node, ...props}) => <blockquote style={{ borderLeft: '3px solid #ccc', paddingLeft: '16px', margin: '16px 0', color: '#555', fontStyle: 'italic' }} {...props} />,
+                    blockquote: ({node, ...props}) => <blockquote style={{ borderLeft: '3px solid #ccc', paddingLeft: '16px', margin: '16px 0', color: '#555', fontStyle: 'italic', fontSize: '19px', lineHeight: 1.75 }} {...props} />,
                     code: ({node, inline, className, children, ...props}) => {
                       const match = /language-(\w+)/.exec(className || '');
                       const language = match ? match[1] : '';
@@ -5770,21 +6500,23 @@ const ChatInterface = () => {
                       key={`ci-page-${idx}`}
                       style={{
                         margin: '0 auto',
-                        width: '210mm',
-                        minHeight: '297mm',
+                        width: useContinuousPanelLayout ? 'min(920px, calc(100% - 48px))' : '210mm',
+                        minHeight: useContinuousPanelLayout ? 'auto' : '297mm',
                         background: '#ffffff',
-                        boxShadow: '0 16px 34px rgba(15,23,42,0.12)',
-                        padding: '20mm 18mm',
+                        boxShadow: useContinuousPanelLayout ? 'none' : '0 16px 34px rgba(15,23,42,0.12)',
+                        padding: useContinuousPanelLayout ? '8px 6px 20px' : '20mm 18mm',
                         boxSizing: 'border-box',
-                        borderRadius: '8px',
-                        border: '1px solid #d9d2c6',
+                        borderRadius: useContinuousPanelLayout ? '0' : '8px',
+                        border: useContinuousPanelLayout ? 'none' : '1px solid #d9d2c6',
+                        fontFamily: '"Times New Roman", Times, serif',
                       }}
                     >
-                      {/* Page header */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e4ddd2', paddingBottom: '10px', marginBottom: '24px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.12em', color: '#807868' }}>
-                        <span>JuriNex Analysis</span>
-                        <span>Page {idx + 1}</span>
-                      </div>
+                      {!useContinuousPanelLayout && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e4ddd2', paddingBottom: '10px', marginBottom: '24px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.12em', color: '#807868' }}>
+                          <span>JuriNex Analysis</span>
+                          <span>Page {idx + 1}</span>
+                        </div>
+                      )}
                       {/* Content */}
                       <div
                         ref={idx === 0 ? markdownOutputRef : undefined}
@@ -5815,10 +6547,11 @@ const ChatInterface = () => {
                           <span style={{ display: 'inline-block', width: '2px', height: '18px', background: '#555', marginLeft: '2px', verticalAlign: 'middle', animation: 'blink 1s step-end infinite' }} />
                         )}
                       </div>
-                      {/* Page footer */}
-                      <div style={{ marginTop: '32px', paddingTop: '12px', borderTop: '1px solid #e7e1d7', textAlign: 'right', fontSize: '11px', color: '#807868' }}>
-                        Page {idx + 1} / {totalPages}
-                      </div>
+                      {!useContinuousPanelLayout && (
+                        <div style={{ marginTop: '32px', paddingTop: '12px', borderTop: '1px solid #e7e1d7', textAlign: 'right', fontSize: '11px', color: '#807868' }}>
+                          Page {idx + 1} / {totalPages}
+                        </div>
+                      )}
                     </article>
                   ));
                 })()}
@@ -6010,8 +6743,10 @@ const ChatInterface = () => {
               </div>
             </div>
           )}
-        </div>
-      )}
+          </>
+        )}
+      </div>
+    )}
       {hasResponse && showCitations && (
           <div className="absolute" style={{ right: '16px', top: '16px', bottom: '16px', width: '380px', zIndex: 50 }}>
           <CitationsPanel
@@ -6121,7 +6856,7 @@ const ChatInterface = () => {
             </div>
           </div>
         </div>
-      )}
+        )}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=Inter:wght@100..900&display=swap');
 
@@ -6381,9 +7116,9 @@ const ChatInterface = () => {
           margin-left: 2px;
         }
       `}</style>
+      </div>}
     </div>
   );
 };
 
 export default ChatInterface;
-

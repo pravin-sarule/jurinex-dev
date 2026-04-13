@@ -39,6 +39,25 @@ from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mim
 
 
 logger = logging.getLogger("agentic_document_service.folder")
+
+# folder_chats.session_id is PostgreSQL uuid — must be dashed RFC form for INSERT.
+_UUID_DASHED = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_UUID_HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def normalize_folder_chat_session_uuid(session_id: str | None) -> str:
+    """Return a valid dashed lowercase UUID for folder_chats.session_id."""
+    s = (session_id or "").strip()
+    if _UUID_DASHED.match(s):
+        return s.lower()
+    if _UUID_HEX32.match(s):
+        h = s.lower()
+        return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+    return str(uuid.uuid4())
+
+
 settings = get_settings()
 
 
@@ -2410,13 +2429,19 @@ class FolderWorkflowService:
         session_id: str | None,
         question: str,
     ) -> ChatSessionRecord:
+        key = (session_id or "").strip() or None
+        if key and _UUID_HEX32.match(key):
+            h = key.lower()
+            key = f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+        elif key and _UUID_DASHED.match(key):
+            key = key.lower()
         with self._lock:
             folder_sessions = self._sessions.setdefault(folder_name, {})
-            if session_id and session_id in folder_sessions:
-                return folder_sessions[session_id]
+            if key and key in folder_sessions:
+                return folder_sessions[key]
             now = datetime.now(tz=UTC)
             session = ChatSessionRecord(
-                id=session_id or str(uuid.uuid4()),
+                id=key or str(uuid.uuid4()),
                 case_id=folder_name,
                 user_id=user_id,
                 folder_name=folder_name,
@@ -2477,7 +2502,7 @@ class FolderWorkflowService:
                         answer,
                         [item for item in summarized_file_ids if item],
                         [item for item in chunk_ids if item],
-                        session_id if re.match(r"^[0-9a-fA-F-]{36}$", session_id or "") else str(uuid.uuid4()),
+                        normalize_folder_chat_session_uuid(session_id),
                         used_secret_prompt,
                         prompt_label if used_secret_prompt else None,
                         secret_uuid,

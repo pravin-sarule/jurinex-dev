@@ -6,11 +6,41 @@ Used for template gallery and preview images. Connection from DRAFT_DATABASE_URL
 from __future__ import annotations
 
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
+
+
+def _clean_section_title(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip(" \t:-.")
+
+
+def _section_title_from_marker(marker: str) -> str:
+    title = _clean_section_title(marker)
+    if not title:
+        return ""
+    title = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s*", "", title, flags=re.IGNORECASE).strip()
+    return _clean_section_title(title)
+
+
+def _normalize_section_title(section_name: str, section_prompts: Any, index: int) -> str:
+    name = _clean_section_title(section_name)
+    marker_title = ""
+    if isinstance(section_prompts, list) and section_prompts:
+        first = section_prompts[0]
+        if isinstance(first, dict):
+            marker_title = _section_title_from_marker(first.get("start_marker", ""))
+    noisy = (
+        not name
+        or len(name) > 90
+        or len(name.split()) > 10
+        or "," in name
+        or ";" in name
+    )
+    return marker_title if marker_title and noisy else (name or marker_title or f"Section {index + 1}")
 
 
 def get_draft_connection_string() -> str:
@@ -1215,6 +1245,12 @@ def get_template_sections(template_id: str) -> List[Dict[str, Any]]:
     results = []
     for r in rows:
         row = dict(r)
+        row["section_name"] = _normalize_section_title(
+            row.get("section_name", ""),
+            row.get("section_prompts", []),
+            len(results),
+        )
+        row["section_key"] = row["section_name"].lower().replace(" ", "_")
         # Extract default_prompt from section_prompts JSONB array
         # Each element has {"prompt": "...", "field_id": "master_instruction"}
         prompts = row.get("section_prompts", [])

@@ -1,7 +1,6 @@
 const pool = require('../config/db');
 const axios = require('axios');
-
-const API_GATEWAY_URL = process.env.API_GATEWAY_URL || 'http://localhost:5000';
+const { getUserUsageAndPlanUrl, usageRequestHeaders } = require('../utils/documentUsageUrl');
 
 /**
  * Sync token usage from document service to payment service
@@ -16,12 +15,11 @@ class TokenUsageSyncService {
    */
   static async fetchTokenUsageFromDocumentService(userId, authorizationHeader) {
     try {
-      // Use gateway URL - /files maps to document service /api/doc/
-      const url = `${API_GATEWAY_URL}/files/user-usage-and-plan/${userId}`;
+      const url = getUserUsageAndPlanUrl(userId);
       console.log(`📊 [TokenUsageSync] Fetching token usage from: ${url}`);
       
       const response = await axios.get(url, {
-        headers: { Authorization: authorizationHeader },
+        headers: usageRequestHeaders(authorizationHeader, userId),
         timeout: 10000
       });
 

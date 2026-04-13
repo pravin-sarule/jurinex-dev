@@ -48,6 +48,7 @@ _AGENT_TYPE_SEARCH: dict[str, list[str]] = {
     "document_processing_agent":  ["document_processing", "document processing", "processing"],
     "grounded_retrieval_agent":   ["retrieval", "grounded_retrieval", "grounded retrieval", "qa"],
     "preset_execution_agent":     ["preset", "preset_execution", "preset execution"],
+    "learning_mode_agent":        ["learning", "learning_mode", "learning mode", "socratic"],
 }
 
 # Fallback: search by ILIKE on name when agent_type has no match (more specific phrases first).
@@ -57,6 +58,7 @@ _AGENT_NAME_KEYWORDS: dict[str, list[str]] = {
     "document_processing_agent":  ["document processing", "classification"],
     "grounded_retrieval_agent":   ["grounded_retrieval", "grounded retrieval", "grounded", "retrieval"],
     "preset_execution_agent":     ["preset"],
+    "learning_mode_agent":        ["learning mode", "socratic", "learning"],
 }
 
 

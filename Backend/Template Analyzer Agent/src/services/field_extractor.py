@@ -22,6 +22,8 @@ class HybridFieldExtractor:
     def __init__(self) -> None:
         self._double_curly_pattern = re.compile(r"\{\{\s*([^{}\n]{1,80})\s*\}\}")
         self._double_underscore_pattern = re.compile(r"__\s*([^_\n]{1,80}?)\s*__")
+        # Single underscore placeholders: _field_name_ (exclude __double__)
+        self._single_underscore_pattern = re.compile(r"(?<!_)_([A-Za-z][A-Za-z0-9_]{1,80})_(?!_)")
         self._single_curly_pattern = re.compile(r"\{\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\}")
         self._square_pattern = re.compile(r"\[\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\]")
         self._round_pattern = re.compile(r"\(\s*([A-Za-z][A-Za-z0-9_\-\s]{1,80})\s*\)")
@@ -59,6 +61,9 @@ class HybridFieldExtractor:
 
         for match in self._double_underscore_pattern.finditer(template_text):
             _add_field(match.group(1), "double_underscore_placeholder", 0.96)
+
+        for match in self._single_underscore_pattern.finditer(template_text):
+            _add_field(match.group(1), "single_underscore_placeholder", 0.98)
 
         for pattern, method, confidence in [
             (self._single_curly_pattern, "single_curly_placeholder", 0.9),

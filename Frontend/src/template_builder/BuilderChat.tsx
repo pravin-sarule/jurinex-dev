@@ -14,6 +14,156 @@ function preservePlaceholderTokens(markdown: string): string {
   return markdown.replace(/__([a-zA-Z][a-zA-Z0-9_]*)__/g, '\\_\\_$1\\_\\_');
 }
 
+// ── Shared legal-document page renderer (same logic as GeneratedTemplateView) ──
+
+function paginateMarkdownForPreview(markdown: string): string[] {
+  const text = (markdown || '').trim();
+  if (!text) return [''];
+  const blocks = text.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean);
+  const estimateBlockCost = (block: string): number => {
+    const lines = block.split('\n').filter(Boolean);
+    const isTable = lines.some((l) => /^\s*\|.*\|\s*$/.test(l));
+    if (isTable) return Math.max(4, Math.ceil(lines.length * 1.6));
+    return Math.max(2, Math.ceil(block.length / 90));
+  };
+  const pageBudget = 34;
+  const pages: string[] = [];
+  let currentBlocks: string[] = [];
+  let currentCost = 0;
+  for (const block of blocks) {
+    const cost = estimateBlockCost(block);
+    if (currentBlocks.length > 0 && currentCost + cost > pageBudget) {
+      pages.push(currentBlocks.join('\n\n'));
+      currentBlocks = [];
+      currentCost = 0;
+    }
+    currentBlocks.push(block);
+    currentCost += cost;
+  }
+  if (currentBlocks.length > 0) pages.push(currentBlocks.join('\n\n'));
+  return pages.length > 0 ? pages : [text];
+}
+
+function extractTextFromChildren(children: any): string {
+  if (typeof children === 'string' || typeof children === 'number') return String(children);
+  if (Array.isArray(children)) return children.map(extractTextFromChildren).join('');
+  if (children && typeof children === 'object' && 'props' in children) {
+    return extractTextFromChildren((children as any).props?.children);
+  }
+  return '';
+}
+
+const LEGAL_DOC_MD_COMPONENTS: any = {
+  h1: ({ children }: any) => (
+    <h1 style={{ textAlign: 'center', textTransform: 'uppercase', fontSize: '13pt', margin: '10pt 0 12pt', fontWeight: 700, letterSpacing: '0.03em' }}>
+      {children}
+    </h1>
+  ),
+  h2: ({ children }: any) => (
+    <h2 style={{ fontSize: '12pt', margin: '14pt 0 8pt', fontWeight: 700, textTransform: 'uppercase' }}>
+      {children}
+    </h2>
+  ),
+  h3: ({ children }: any) => (
+    <h3 style={{ fontSize: '11pt', margin: '10pt 0 6pt', fontWeight: 700 }}>
+      {children}
+    </h3>
+  ),
+  p: ({ children }: any) => {
+    const text = extractTextFromChildren(children);
+    const hasPlaceholder = /\\?_\\?_[\w]+\\?_\\?_/.test(text) || /__[\w]+__/.test(text);
+    return (
+      <p style={{ margin: '0 0 8pt', textAlign: hasPlaceholder ? 'left' : 'justify', lineHeight: 1.78, wordSpacing: 'normal', fontSize: '12pt' }}>
+        {children}
+      </p>
+    );
+  },
+  hr: () => <hr style={{ border: 0, borderTop: '1px solid #d1d5db', margin: '12pt 0' }} />,
+  table: ({ children }: any) => (
+    <div style={{ overflowX: 'auto', margin: '10pt 0 14pt' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11pt' }}>{children}</table>
+    </div>
+  ),
+  thead: ({ children }: any) => <thead style={{ background: '#f3f4f6' }}>{children}</thead>,
+  th: ({ children }: any) => (
+    <th style={{ border: '1px solid #9ca3af', padding: '8px 10px', textAlign: 'left', verticalAlign: 'top', fontWeight: 700, fontSize: '11pt' }}>
+      {children}
+    </th>
+  ),
+  td: ({ children }: any) => (
+    <td style={{ border: '1px solid #9ca3af', padding: '8px 10px', textAlign: 'left', verticalAlign: 'top', fontSize: '11pt' }}>
+      {children}
+    </td>
+  ),
+  ul: ({ children }: any) => <ul style={{ listStyle: 'disc', paddingLeft: '1.6em', margin: '0.45em 0' }}>{children}</ul>,
+  ol: ({ children }: any) => <ol style={{ listStyle: 'decimal', paddingLeft: '1.6em', margin: '0.45em 0' }}>{children}</ol>,
+  li: ({ children }: any) => <li style={{ margin: '0.25em 0', lineHeight: 1.72, fontSize: '12pt' }}>{children}</li>,
+  code: ({ inline, children }: any) =>
+    inline ? (
+      <code style={{ fontFamily: 'ui-monospace, monospace', background: '#f3f4f6', borderRadius: '4px', padding: '1px 4px', color: '#111827' }}>
+        {children}
+      </code>
+    ) : (
+      <pre style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '6px', padding: '10px 12px', overflowX: 'auto' }}>
+        <code>{children}</code>
+      </pre>
+    ),
+};
+
+interface LegalDocPagesProps {
+  markdownPages: string[];
+  isStreaming?: boolean;
+}
+
+const LegalDocPages: React.FC<LegalDocPagesProps> = ({ markdownPages, isStreaming }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
+    {markdownPages.map((pageContent, pageIdx) => (
+      <div key={pageIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <div style={{ color: '#ccc', fontSize: '11px', marginBottom: '6px', userSelect: 'none' }}>
+          Page {pageIdx + 1} of {markdownPages.length}{isStreaming ? ' (generating…)' : ''}
+        </div>
+        <div
+          style={{
+            width: '794px',
+            minHeight: '1123px',
+            background: '#ffffff',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+            boxSizing: 'border-box',
+            fontFamily: '"Times New Roman", Times, serif',
+            fontSize: '12pt',
+            lineHeight: '1.6',
+            color: '#000',
+            // Court-standard: 1.5in left (binding), 1in top/right/bottom
+            padding: '96px 96px 96px 144px',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div style={{ flex: 1 }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={LEGAL_DOC_MD_COMPONENTS}>
+              {pageContent}
+            </ReactMarkdown>
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              fontSize: '9pt',
+              color: '#444',
+              borderTop: '1px solid #cfcfcf',
+              paddingTop: '8pt',
+              marginTop: '14pt',
+            }}
+          >
+            <div>Page {pageIdx + 1} of {markdownPages.length}</div>
+          </div>
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
 type CategoryKey = 'Property' | 'Agreement' | 'Court' | 'Criminal' | 'Arbitration' | 'Trust' | 'Family' | 'Employment' | 'General';
 
 type SubjectGroup = {
@@ -1135,57 +1285,89 @@ const Step6Review: React.FC = () => {
 
 const GeneratingState: React.FC = () => {
   const { generationStreamText, requirements } = useTemplateBuilderStore();
+
   const renderedStreamText = useMemo(
-    () => preservePlaceholderTokens(generationStreamText || 'Waiting for draft output...'),
+    () => preservePlaceholderTokens(generationStreamText || ''),
     [generationStreamText],
   );
-  const streamingMarkdownComponents: any = {
-    h1: ({ children }: any) => <h1 style={{ textAlign: 'center', textTransform: 'uppercase', fontSize: '1.25em', fontWeight: 700, margin: '0 0 0.9em', letterSpacing: '.05em', lineHeight: 1.4 }}>{children}</h1>,
-    h2: ({ children }: any) => <h2 style={{ fontSize: '1.05em', fontWeight: 700, margin: '1.3em 0 .45em', textTransform: 'uppercase', letterSpacing: '.03em' }}>{children}</h2>,
-    h3: ({ children }: any) => <h3 style={{ fontSize: '.98em', fontWeight: 700, margin: '1em 0 .35em' }}>{children}</h3>,
-    p: ({ children }: any) => {
-      const text = Array.isArray(children) ? children.map((c) => (typeof c === 'string' ? c : '')).join('') : (typeof children === 'string' ? children : '');
-      const hasPlaceholder = /__[\w]+__/.test(text);
-      return <p style={{ margin: '.55em 0', lineHeight: 1.85, textAlign: hasPlaceholder ? 'left' : 'justify' }}>{children}</p>;
-    },
-    table: ({ children }: any) => <table style={{ width: '100%', borderCollapse: 'collapse', margin: '1em 0', fontSize: '.92em' }}>{children}</table>,
-    th: ({ children }: any) => <th style={{ background: '#f9fafb', fontWeight: 700, padding: '.5em .7em', border: '1px solid #e5e7eb', textAlign: 'left' }}>{children}</th>,
-    td: ({ children }: any) => <td style={{ padding: '.45em .7em', border: '1px solid #e5e7eb', verticalAlign: 'top' }}>{children}</td>,
-  };
+
+  const markdownPages = useMemo(
+    () => paginateMarkdownForPreview(renderedStreamText),
+    [renderedStreamText],
+  );
+
+  const hasContent = generationStreamText && generationStreamText.trim().length > 0;
+
   return (
-    <div className="px-6 py-10 max-w-5xl">
-      <SectionCard title="Generating your custom template...">
-        <div className="space-y-5">
-          <div className="flex items-center gap-3">
-            <div className="flex gap-2">
-              {[0, 150, 300].map((delay) => (
-                <div
-                  key={delay}
-                  className="w-3 h-3 rounded-full animate-bounce"
-                  style={{ backgroundColor: BRAND, animationDelay: `${delay}ms` }}
-                />
-              ))}
-            </div>
-            <p className="text-sm text-gray-600">
-              Template generation in progress for <span className="font-semibold text-gray-800">{requirements.subjectLabel || 'your template'}</span>.
-            </p>
+    <div className="flex flex-col h-screen overflow-hidden bg-gray-100">
+      {/* Header bar — same style as GeneratedTemplateView */}
+      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between sticky top-0 z-10">
+        <div>
+          <h2 className="text-base font-bold text-gray-800">
+            {requirements.subjectLabel || 'Generating Template'}
+          </h2>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="inline-flex items-center gap-1.5 text-xs text-[#21C1B6] font-medium">
+              <span className="inline-block w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: '#21C1B6' }} />
+              AI is drafting your template…
+            </span>
           </div>
-          <div className="rounded-2xl border border-gray-200 bg-[#f5f5f5] p-5">
-            <div className="max-h-[65vh] overflow-y-auto rounded-xl border border-gray-200 bg-[#f5f5f5] p-6">
-              <div className="mx-auto max-w-[820px] bg-white rounded-lg shadow-md overflow-hidden">
-                <div className="doc-paper px-[72px] py-[56px] font-serif text-[14px] leading-[1.85] text-gray-900">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={streamingMarkdownComponents}>
-                  {renderedStreamText}
-                  </ReactMarkdown>
+        </div>
+        <div className="flex items-center gap-2">
+          {[0, 150, 300].map((delay) => (
+            <div
+              key={delay}
+              className="w-2.5 h-2.5 rounded-full animate-bounce"
+              style={{ backgroundColor: '#21C1B6', animationDelay: `${delay}ms` }}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Tab bar */}
+      <div className="bg-white border-b border-gray-200 px-6 py-2.5 shrink-0">
+        <span className="text-sm font-medium text-[#21C1B6]">Document Preview</span>
+        {hasContent && (
+          <span className="ml-3 text-xs text-gray-400">{markdownPages.length} page{markdownPages.length !== 1 ? 's' : ''} so far</span>
+        )}
+      </div>
+
+      {/* Page-by-page live preview — identical layout to GeneratedTemplateView */}
+      <div className="flex-1 overflow-auto" style={{ background: '#525659', padding: '32px 0' }}>
+        {hasContent ? (
+          <LegalDocPages markdownPages={markdownPages} isStreaming />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <div style={{ color: '#ccc', fontSize: '11px', marginBottom: '6px' }}>Page 1 of —</div>
+            <div
+              style={{
+                width: '794px',
+                minHeight: '1123px',
+                background: '#ffffff',
+                boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+                padding: '96px 96px 96px 144px',
+                boxSizing: 'border-box',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <div style={{ textAlign: 'center', color: '#9ca3af' }}>
+                <div style={{ fontSize: '14pt', fontFamily: '"Times New Roman", serif', marginBottom: '8px' }}>
+                  Preparing template…
+                </div>
+                <div style={{ fontSize: '10pt', fontFamily: '"Times New Roman", serif' }}>
+                  {requirements.subjectLabel || 'Your legal template'} will appear here
                 </div>
               </div>
             </div>
           </div>
-          <p className="text-xs text-gray-500">
-            Generating template content. Final field and section parsing is applied when generation completes.
-          </p>
-        </div>
-      </SectionCard>
+        )}
+      </div>
+
+      <div className="bg-white border-t border-gray-200 px-6 py-3 text-xs text-gray-400 sticky bottom-0 z-10">
+        Generating template — field and section parsing will be applied when generation completes.
+      </div>
     </div>
   );
 };

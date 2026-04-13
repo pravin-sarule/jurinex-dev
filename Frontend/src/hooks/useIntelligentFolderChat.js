@@ -343,6 +343,8 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
   const [routingDecision, setRoutingDecision] = useState(null);
   const [status, setStatus] = useState(null);
   const [finalMetadata, setFinalMetadata] = useState(null);
+  const [learningPayload, setLearningPayload] = useState(null);
+  const [learningPopupQuestion, setLearningPopupQuestion] = useState(null);
 
   const abortControllerRef = useRef(null);
   const updateTimeoutRef = useRef(null);
@@ -374,6 +376,8 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     setMethodUsed(null);
     setRoutingDecision(null);
     setStatus(null);
+    setLearningPayload(null);
+    setLearningPopupQuestion(null);
 
     if (updateTimeoutRef.current) {
       clearTimeout(updateTimeoutRef.current);
@@ -389,6 +393,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         llm_name: 'gemini',
       };
       if (streamOpts && typeof streamOpts === 'object') {
+        if (streamOpts.session_id) requestBody.session_id = streamOpts.session_id;
         if (streamOpts.llm_name) requestBody.llm_name = streamOpts.llm_name;
         if (streamOpts.max_output_tokens != null && streamOpts.max_output_tokens !== '') {
           const n = Number(streamOpts.max_output_tokens);
@@ -398,12 +403,32 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
           const t = Number(streamOpts.model_temperature);
           if (Number.isFinite(t)) requestBody.model_temperature = t;
         }
+        if (streamOpts.learning_mode != null) {
+          requestBody.learning_mode = !!streamOpts.learning_mode;
+        }
+        if (streamOpts.adversarial_mode != null) {
+          requestBody.adversarial_mode = !!streamOpts.adversarial_mode;
+        }
+        if (streamOpts.context_page != null && streamOpts.context_page !== '') {
+          const p = Number(streamOpts.context_page);
+          if (Number.isFinite(p)) requestBody.context_page = p;
+        }
+        if (streamOpts.context_selection) {
+          requestBody.context_selection = String(streamOpts.context_selection);
+        }
+        if (streamOpts.document_context) {
+          requestBody.document_context = String(streamOpts.document_context);
+        }
       }
 
       if (secretId) {
         requestBody.secret_id = secretId;
       } else if (question && question.trim()) {
-        requestBody.question = question.trim();
+        const rawQuestion = question.trim();
+        const learningModeOn = !!requestBody.learning_mode;
+        const englishOnlySuffix =
+          '\n\nRespond in clear professional English only. Do not switch language.';
+        requestBody.question = learningModeOn ? `${rawQuestion}${englishOnlySuffix}` : rawQuestion;
       } else {
         setError(stringToChatErrorDisplay('Please enter a question or select an analysis prompt.'));
         setIsStreaming(false);
@@ -563,6 +588,14 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                   setRoutingDecision(parsed.routing_decision);
                 }
                 setFinalMetadata(parsed);
+                if (parsed.learning_payload) {
+                  setLearningPayload(parsed.learning_payload);
+                }
+                if (parsed.learning_popup_question && typeof parsed.learning_popup_question === 'object') {
+                  setLearningPopupQuestion(parsed.learning_popup_question);
+                } else {
+                  setLearningPopupQuestion(null);
+                }
                 console.log('[useIntelligentFolderChat] Done metadata:', parsed);
                 console.log('[useIntelligentFolderChat] used_chunk_ids:', parsed.used_chunk_ids);
                 console.log('[useIntelligentFolderChat] citations:', parsed.citations);
@@ -641,8 +674,14 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     setMethodUsed(null);
     setRoutingDecision(null);
     setStatus(null);
+    setLearningPayload(null);
+    setLearningPopupQuestion(null);
     stopStreaming();
   }, [stopStreaming]);
+
+  const dismissLearningPopup = useCallback(() => {
+    setLearningPopupQuestion(null);
+  }, []);
 
   const clearError = useCallback(() => {
     setError(null);
@@ -672,6 +711,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     routingDecision,
     status,
     finalMetadata,
+    learningPayload,
+    learningPopupQuestion,
+    dismissLearningPopup,
     sendMessage,
     stopStreaming,
     clear,

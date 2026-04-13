@@ -162,6 +162,32 @@ Quality bar:
 {common_tool_instructions}
 """.strip()
 
+LEARNING_MODE_INSTRUCTION = """
+You are the Learning Mode Socratic Teacher Agent for document-grounded legal learning.
+
+Mission:
+- Guide the user to discover answers through strategic questioning.
+- Avoid directly giving the final answer in the first 3-4 exchanges.
+- Use only uploaded case materials as factual grounding.
+
+Output contract:
+- When asked for learning output, produce strict structured JSON only:
+  {{
+    "feedback": "...",
+    "content_hint": "...",
+    "question": "...",
+    "ui_type": "text|options",
+    "options": ["...", "...", "..."] | null
+  }}
+- Provide warm reinforcement, one subtle contextual hint, and one follow-up question.
+
+Safety:
+- Never use facts outside provided documents.
+- If evidence is weak or missing, ask the learner to locate the relevant section first.
+
+{common_tool_instructions}
+""".strip()
+
 
 def _log_agent_start(agent_name: str, task: str, **context: Any) -> None:
     logger.info("[Agent:%s] START task=%s context=%s", agent_name, task, context)
@@ -656,17 +682,25 @@ if SequentialAgent and LlmAgent:
             common_tool_instructions=COMMON_TOOL_INSTRUCTIONS
         ),
     )
+    _learning_cfg = get_agent_config(
+        "learning_mode_agent",
+        default_prompt=LEARNING_MODE_INSTRUCTION.format(
+            common_tool_instructions=COMMON_TOOL_INSTRUCTIONS
+        ),
+    )
 
     logger.info(
         "[AgentInit] legal_case_management_root  sub-agents initialized:\n"
         "  form_population_agent     source=%-8s  model=%s  temperature=%.2f\n"
         "  document_processing_agent source=%-8s  model=%s  temperature=%.2f\n"
         "  grounded_retrieval_agent  source=%-8s  model=%s  temperature=%.2f\n"
-        "  preset_execution_agent    source=%-8s  model=%s  temperature=%.2f",
+        "  preset_execution_agent    source=%-8s  model=%s  temperature=%.2f\n"
+        "  learning_mode_agent       source=%-8s  model=%s  temperature=%.2f",
         _intake_cfg.source,     _intake_cfg.model_name,     _intake_cfg.temperature,
         _processing_cfg.source, _processing_cfg.model_name, _processing_cfg.temperature,
         _retrieval_cfg.source,  _retrieval_cfg.model_name,  _retrieval_cfg.temperature,
         _preset_cfg.source,     _preset_cfg.model_name,     _preset_cfg.temperature,
+        _learning_cfg.source,   _learning_cfg.model_name,   _learning_cfg.temperature,
     )
 
     # ── Build ADK LlmAgent instances ──────────────────────────────────────────
@@ -714,6 +748,16 @@ if SequentialAgent and LlmAgent:
         tools=shared_tools,
     )
 
+    learning_agent = LlmAgent(
+        name="learning_mode_agent",
+        model=_learning_cfg.model_name,
+        description=(
+            "Socratic teaching agent for guided, document-grounded learning conversations."
+        ),
+        instruction=_learning_cfg.prompt,
+        tools=shared_tools,
+    )
+
     _root_cfg = get_agent_config(
         "legal_case_management_root",
         default_prompt="Multi-phase legal case management workflow powered by Google ADK.",
@@ -726,7 +770,7 @@ if SequentialAgent and LlmAgent:
     root_agent = SequentialAgent(
         name="legal_case_management_root",
         description=_root_cfg.prompt,
-        sub_agents=[intake_agent, processing_agent, retrieval_agent, preset_agent],
+        sub_agents=[intake_agent, processing_agent, retrieval_agent, preset_agent, learning_agent],
     )
 else:  # pragma: no cover
     root_agent = None

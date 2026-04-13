@@ -19,7 +19,7 @@ from ..config import settings
 class AntigravityAgent:
     def __init__(self):
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        self.model_name = "gemini-2.0-flash"
+        self.model_name = "gemini-2.5-pro"
 
     def _attempt_json_repair(self, text: str) -> str:
         open_braces = 0
@@ -196,17 +196,214 @@ class AntigravityAgent:
             )
         return "\n".join(rendered)
 
-    def _normalize_field(self, field: Dict[str, Any], section_id: str) -> Dict[str, Any]:
-        key = re.sub(r"[^a-zA-Z0-9_]+", "_", str(field.get("key", "")).strip().lower()).strip("_") or "unnamed_field"
+    def _extract_segment_by_markers(self, template_text: str, start_marker: str, end_marker: str) -> str:
+        text = str(template_text or "")
+        start = str(start_marker or "").strip()
+        end = str(end_marker or "").strip()
+        if not text or not start:
+            return ""
+        lower_text = text.lower()
+        start_idx = lower_text.find(start.lower())
+        if start_idx == -1:
+            return ""
+        if end:
+            end_idx = lower_text.find(end.lower(), start_idx + len(start))
+            if end_idx > start_idx:
+                return text[start_idx:end_idx].strip()
+        return text[start_idx:].strip()
+
+    def _line_number_for_marker(self, template_text: str, marker: str) -> int:
+        marker_text = str(marker or "").strip().lower()
+        if not marker_text:
+            return 0
+        for idx, line in enumerate(str(template_text or "").splitlines(), start=1):
+            if marker_text in line.strip().lower():
+                return idx
+        return 0
+
+    async def _identify_section_anchors(self, template_text: str) -> List[Dict[str, Any]]:
+        prompt = f"""
+You are doing PASS 1: Anchor Identification for a legal template.
+
+Goal:
+- Do NOT draft or summarize.
+- Identify exact section boundaries using explicit markers from the source text.
+- Return section anchors only.
+
+Return strict JSON with this shape:
+{{
+  "sections": [
+    {{
+      "section_id": "2",
+      "title": "BRIEF FACTS AND BACKGROUND",
+      "start_marker": "2. BRIEF FACTS",
+      "end_marker": "3. GROUNDS",
+      "start_line": 42,
+      "end_line": 79,
+      "fields_found": ["petitioner_brief_description", "initial_event_date"]
+    }}
+  ]
+}}
+
+Rules:
+- start_marker must be an exact phrase that exists in the source text.
+- end_marker should be the next section's heading phrase when possible.
+- If final section has no next heading, use empty string for end_marker.
+- fields_found should list likely field keys inferred from that section context.
+- start_line/end_line should be best-effort line numbers for the section bounds.
+- Cover the ENTIRE template from first page to last page; do not skip middle sections.
+- Include every major heading in sequence from top to bottom.
+- Return ONLY valid JSON.
+
+SOURCE TEMPLATE:
+\"\"\"{template_text}\"\"\"
+"""
+        result = await self._call_gemini(prompt)
+        sections = result.get("sections") if isinstance(result, dict) else []
+        return sections if isinstance(sections, list) else []
+
+    def _extract_deterministic_anchors(self, template_text: str) -> List[Dict[str, Any]]:
+        anchors: List[Dict[str, Any]] = []
+        seen = set()
+        lines = str(template_text or "").splitlines()
+        for idx, raw in enumerate(lines, start=1):
+            line = self._clean_heading_text(raw)
+            if not line:
+                continue
+            # Prefer numbered headings and all-caps legal headings for stable section boundaries.
+            if not (
+                re.match(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s+[A-Z]", line)
+                or bool(re.match(r"^[A-Z][A-Z0-9\s,&/\-\(\)]{3,}$", line))
+            ):
+                continue
+            key = re.sub(r"[^a-z0-9]+", "_", line.lower()).strip("_")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            anchors.append(
+                {
+                    "section_id": f"det_{len(anchors) + 1:03d}",
+                    "title": self._section_name_from_marker(line) or line,
+                    "start_marker": line,
+                    "start_line": idx,
+                    "end_marker": "",
+                    "end_line": 0,
+                    "fields_found": [],
+                }
+            )
+        return anchors
+
+    def _merge_and_finalize_anchors(self, llm_anchors: List[Dict[str, Any]], template_text: str) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        by_marker = set()
+
+        def _push(anchor: Dict[str, Any]) -> None:
+            marker = self._clean_heading_text(anchor.get("start_marker", ""))
+            if not marker:
+                return
+            key = marker.lower()
+            if key in by_marker:
+                return
+            line = int(anchor.get("start_line") or 0)
+            if line <= 0:
+                line = self._line_number_for_marker(template_text, marker)
+            merged.append(
+                {
+                    "section_id": anchor.get("section_id") or f"section_{len(merged) + 1:03d}",
+                    "title": anchor.get("title") or self._section_name_from_marker(marker) or marker,
+                    "start_marker": marker,
+                    "start_line": line,
+                    "end_marker": self._clean_heading_text(anchor.get("end_marker", "")),
+                    "end_line": int(anchor.get("end_line") or 0),
+                    "fields_found": anchor.get("fields_found") or [],
+                }
+            )
+            by_marker.add(key)
+
+        for anchor in llm_anchors or []:
+            if isinstance(anchor, dict):
+                _push(anchor)
+        for anchor in self._extract_deterministic_anchors(template_text):
+            _push(anchor)
+
+        merged.sort(key=lambda item: item.get("start_line") or 10**9)
+        for i, item in enumerate(merged):
+            nxt = merged[i + 1] if i + 1 < len(merged) else None
+            if nxt:
+                item["end_marker"] = nxt.get("start_marker", "")
+                item["end_line"] = int(nxt.get("start_line") or 0)
+            else:
+                item["end_marker"] = ""
+                item["end_line"] = 0
+        return merged
+
+    async def contextualize_fields(self, template_text: str, fields: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        keys = []
+        for f in fields or []:
+            key = str((f or {}).get("key") or "").strip()
+            if key:
+                keys.append(key)
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return {}
+
+        prompt = f"""
+You are a legal field classifier for template drafting.
+
+Given template text and field keys, assign contextual legal meaning.
+Return strict JSON object:
+{{
+  "field_context": {{
+    "field_key": {{
+      "legal_type": "Date|PartyName|MonetaryAmount|Address|StatuteReference|CaseReference|Relief|Prayer|Ground|GeneralText|Identifier",
+      "description": "what user should provide",
+      "ui_hint": "date_picker|text_input|textarea|number_input|currency_input|multi_select",
+      "validation_hint": "short rule"
+    }}
+  }}
+}}
+
+FIELD KEYS:
+{json.dumps(keys, indent=2)}
+
+TEMPLATE TEXT:
+\"\"\"{template_text}\"\"\"
+"""
+        result = await self._call_gemini(prompt)
+        payload = result.get("field_context") if isinstance(result, dict) else {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _normalize_field(self, field: Any, section_id: str) -> Dict[str, Any]:
+        # Gemini sometimes emits string items in fields/all_fields. Coerce them safely.
+        if isinstance(field, dict):
+            raw_key = field.get("key", "")
+            field_type = field.get("type", "string")
+            label = field.get("label")
+            required = bool(field.get("required", False))
+            default_value = field.get("default_value", "")
+            validation_rules = field.get("validation_rules", "")
+            description = field.get("description")
+            source_section_id = field.get("section_id")
+        else:
+            raw_key = str(field or "")
+            field_type = "string"
+            label = None
+            required = False
+            default_value = ""
+            validation_rules = ""
+            description = None
+            source_section_id = None
+
+        key = re.sub(r"[^a-zA-Z0-9_]+", "_", str(raw_key).strip().lower()).strip("_") or "unnamed_field"
         return {
             "key": key,
-            "type": field.get("type", "string"),
-            "label": field.get("label") or key.replace("_", " ").title(),
-            "required": bool(field.get("required", False)),
-            "default_value": field.get("default_value", ""),
-            "validation_rules": field.get("validation_rules", ""),
-            "description": field.get("description") or f"Field for {key.replace('_', ' ')}",
-            "section_id": section_id,
+            "type": field_type,
+            "label": label or key.replace("_", " ").title(),
+            "required": required,
+            "default_value": default_value,
+            "validation_rules": validation_rules,
+            "description": description or f"Field for {key.replace('_', ' ')}",
+            "section_id": source_section_id or section_id,
         }
 
     def _clean_heading_text(self, text: str) -> str:
@@ -214,6 +411,27 @@ class AntigravityAgent:
         cleaned = re.sub(r"^[\(\[]+", "", cleaned).strip()
         cleaned = re.sub(r"[\)\]]+$", "", cleaned).strip()
         return cleaned
+
+    def _section_name_from_marker(self, marker: str) -> str:
+        text = self._clean_heading_text(marker)
+        if not text:
+            return ""
+        text = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s*", "", text, flags=re.IGNORECASE).strip()
+        return self._clean_heading_text(text)
+
+    def _normalize_section_name(self, section_name: str, start_marker: str, index: int) -> str:
+        name = self._clean_heading_text(section_name)
+        marker_name = self._section_name_from_marker(start_marker)
+        noisy = (
+            not name
+            or len(name) > 90
+            or len(name.split()) > 10
+            or "," in name
+            or ";" in name
+        )
+        if marker_name and (noisy or name.lower().startswith("section ")):
+            return marker_name
+        return name or marker_name or f"Section {index + 1}"
 
     def _looks_like_heading(self, line: str) -> bool:
         text = self._clean_heading_text(line)
@@ -245,8 +463,8 @@ class AntigravityAgent:
                 re.IGNORECASE,
             )
         )
-        title_case = bool(re.match(r"^[A-Z][A-Za-z0-9/&,\-\(\)\s]{3,70}$", text)) and text == text.title()
-        return bool(numbered or uppercase or titled_legal or title_case)
+        # Avoid broad title-case matching; it over-captures long clause sentences.
+        return bool(numbered or uppercase or titled_legal)
 
     def _extract_heading_candidates(self, template_text: str, max_candidates: int = 18) -> List[str]:
         candidates: List[str] = []
@@ -340,31 +558,55 @@ class AntigravityAgent:
             normalized_sections.append(
                 {
                     "section_id": section_id,
-                    "section_name": section.get("section_name") or f"Section {index + 1}",
+                    "section_name": self._normalize_section_name(
+                        section.get("section_name", ""),
+                        section.get("start_marker", ""),
+                        index,
+                    ),
                     "section_purpose": section.get("section_purpose", ""),
                     "section_category": section.get("section_category", "other"),
                     "order": section.get("order", index),
                     "page_break_before": bool(section.get("page_break_before", False)),
                     "estimated_words": section.get("estimated_words", 150),
                     "source_clauses": section.get("source_clauses", ""),
+                    "start_marker": section.get("start_marker", ""),
+                    "end_marker": section.get("end_marker", ""),
+                    "start_line": section.get("start_line", 0),
+                    "end_line": section.get("end_line", 0),
                     "depends_on": section.get("depends_on") or [],
                     "drafting_prompt": section.get("drafting_prompt", ""),
                     "format_blueprint": section.get("format_blueprint") or {},
+                    "template_logic": section.get("template_logic", ""),
+                    "required_fields": section.get("required_fields") or [],
+                    "ai_drafting_instruction": section.get("ai_drafting_instruction", ""),
                     "is_subsection": bool(section.get("is_subsection", False)),
                     "parent_section_id": section.get("parent_section_id"),
                     "fields": normalized_fields,
                 }
             )
 
+            if not normalized_sections[-1]["source_clauses"]:
+                extracted = self._extract_segment_by_markers(
+                    template_text,
+                    normalized_sections[-1].get("start_marker", ""),
+                    normalized_sections[-1].get("end_marker", ""),
+                )
+                if extracted:
+                    normalized_sections[-1]["source_clauses"] = extracted
+            if not normalized_sections[-1]["required_fields"]:
+                normalized_sections[-1]["required_fields"] = [f.get("key") for f in normalized_sections[-1]["fields"] if isinstance(f, dict) and f.get("key")]
+
         if result.get("all_fields"):
             for field in result["all_fields"]:
-                normalized = self._normalize_field(field, field.get("section_id", ""))
+                default_section_id = field.get("section_id", "") if isinstance(field, dict) else ""
+                normalized = self._normalize_field(field, default_section_id)
                 if normalized["key"] not in seen_field_keys:
                     seen_field_keys.add(normalized["key"])
                     all_fields.append(normalized)
 
         normalized_sections.sort(key=lambda item: item.get("order", 0))
-        normalized_sections = self._build_missing_sections_from_headings(normalized_sections, template_text)
+        # Do not auto-append heuristic "missing sections" here; this can create
+        # noisy subsection-like titles from long numbered clause lines.
         result["sections"] = normalized_sections
         result["all_fields"] = all_fields
         result["total_sections"] = len(normalized_sections)
@@ -389,9 +631,19 @@ TEMPLATE DOCUMENT URL (Visual Reference):
 Use this URL to understand the visual layout, tables, and signature blocks that might be hard to parse from raw text.
 """
 
+        anchor_sections = await self._identify_section_anchors(template_text)
+        for sec in anchor_sections:
+            if not isinstance(sec, dict):
+                continue
+            if not sec.get("start_line"):
+                sec["start_line"] = self._line_number_for_marker(template_text, sec.get("start_marker", ""))
+            if not sec.get("end_line") and sec.get("end_marker"):
+                sec["end_line"] = self._line_number_for_marker(template_text, sec.get("end_marker", ""))
+        anchor_sections = self._merge_and_finalize_anchors(anchor_sections, template_text)
+
         prompt = f"""
 You are an Advanced Legal Document Engineer and Template Architect.
-Your task is to perform an INTELLIGENT and DEEP analysis of the provided legal template to extract its structural DNA.
+Your task is to perform PASS 2 analysis using PASS 1 anchor map.
 
 DOCUMENT CONTEXT:
 - Word Count: {word_count}
@@ -407,18 +659,20 @@ LAYOUT BLUEPRINT (Line-by-line classification):
 RAW TEMPLATE CONTENT:
 \"\"\"{template_text}\"\"\"
 
+PASS 1 ANCHOR MAP (authoritative boundaries):
+{json.dumps(anchor_sections, indent=2)}
+
 === CORE ANALYSIS REQUIREMENTS ===
 
-1. STRUCTURAL SECTIONS:
-   - Identify MAJOR logical sections (e.g., Court Header, Parties, Recitals, Definitions, Operative Clauses, Covenants, Representations, Boilerplate, Schedules, Signature Block).
-   - DO NOT create sections for single sentences or fragments. A section must be a meaningful block of legal content.
-   - GROUP THE HEADER: For court documents, group lines like "IN THE HIGH COURT...", "WRIT PETITION...", "IN THE MATTER OF..." into a SINGLE "COURT HEADER" or "CAUSE TITLE" section. NEVER split these into separate sections.
-   - For each section, identify the EXACT text range or the CORE CLAUSES found in it.
-   - Assign a clear 'section_category' (header, parties, recitals, facts, grounds, prayer, terms, signatures, schedules, other).
+1. STRUCTURAL SECTIONS (ANCHOR-DRIVEN):
+   - Use PASS 1 start_marker/end_marker boundaries as primary section segmentation.
+   - Do NOT invent arbitrary boundaries that conflict with markers.
+   - For each section, return start_marker and end_marker, and extract source_clauses from that exact segment.
+   - Assign clear section_category (header, parties, recitals, facts, grounds, prayer, terms, signatures, schedules, other).
 
-2. INTELLIGENT FIELD EXTRACTION:
+2. INTELLIGENT FIELD EXTRACTION (ENTITY MAPPING):
    - Extract EVERY fillable field including:
-     - Placeholder tags: {{name}}, __date__, [amount], etc.
+     - Placeholder tags: _name_, __date__, {{name}}, [amount], etc.
      - Blanks: "I, _______", "Dated this ___ day of ___".
      - Implied fields: Even if there are no underscores, if a specific piece of data is required (e.g., the name of the Court in a Petition), mark it as a field.
    - Format fields PRECISELY:
@@ -427,8 +681,11 @@ RAW TEMPLATE CONTENT:
      - 'type': string|date|number|currency|address|text_long|boolean
      - 'description': Clear instruction on what the user should provide.
 
-3. DRAFTING BLUEPRINT:
-   - For every section, provide a 'drafting_prompt' that is EXTREMELY detailed. It should describe:
+3. DRAFTING BLUEPRINT (INSTRUCTION SYNTHESIS):
+   - For every section, provide a 'drafting_prompt' that is EXTREMELY detailed and must include:
+     - "Draft based on this structure: [Extracted Template Segment]"
+     - A legal terminology constraint (e.g., use terms like "mala fide", "ultra vires" when relevant to section context)
+   - It should also describe:
      - The legal tone and intent.
      - How the placeholders are integrated into the boilerplate.
      - Specific formatting rules (ALL CAPS, Centered, Numbered lists).
@@ -457,8 +714,15 @@ RAW TEMPLATE CONTENT:
       "section_purpose": "Briefly explains the legal role of this section",
       "section_category": "header|parties|recitals|facts|grounds|prayer|terms|signatures|schedules|other",
       "order": 0,
+      "start_marker": "2. BRIEF FACTS",
+      "end_marker": "3. GROUNDS",
+      "start_line": 42,
+      "end_line": 79,
       "source_clauses": "THE ACTUAL CORE TEXT OR CLAUSES FROM THE TEMPLATE FOR THIS SECTION",
-      "drafting_prompt": "PERFECT instructions for reproducing this section's legal intent and formatting",
+      "drafting_prompt": "Draft based on this structure: [Extracted Template Segment]. Ensure legal terminology like 'mala fide' or 'ultra vires' is used where relevant.",
+      "template_logic": "One-line legal logic summary for this section",
+      "required_fields": ["field_one", "field_two"],
+      "ai_drafting_instruction": "A precise production-grade drafting instruction for this section",
       "format_blueprint": {{"alignment": "LEFT|CENTER|RIGHT", "is_bold": true, "has_border": false}},
       "fields": []
     }}
@@ -485,6 +749,8 @@ STRICT RULES:
         source_text = section_data.get("source_clauses", "")
         base_prompt = section_data.get("drafting_prompt", "")
         fields = section_data.get("fields", [])
+        start_marker = section_data.get("start_marker", "")
+        end_marker = section_data.get("end_marker", "")
         
         prompt = f"""
 You are creating a PERFECT DRAFTING INSTRUCTION for a legal document section: "{section_name}".
@@ -492,6 +758,10 @@ You are creating a PERFECT DRAFTING INSTRUCTION for a legal document section: "{
 INPUT DATA:
 - Source Template Clauses:
 \"\"\"{source_text}\"\"\"
+
+- Section Anchors:
+  start_marker: "{start_marker}"
+  end_marker: "{end_marker}"
 
 - Intermediate Drafting Blueprint:
 {base_prompt}
@@ -506,12 +776,18 @@ The instruction must ensure:
 2. Perfect Placeholder Integration: Explain exactly how each field should be woven into the text.
 3. Formatting Fidelity: Specify alignment, numbering, bolding, and spacing to match the template.
 4. Completeness: Ensure no boilerplate or critical legal proviso is omitted.
+5. Constraint Set: Include explicit drafting constraints and terminology guardrails.
 
 Return strict JSON:
 {{
     "section_intro": "A high-level conversational summary of how this section will be drafted professionally.",
     "drafting_complexity": "simple|moderate|complex",
     "estimated_output_words": 300,
+    "constraint_set": [
+        "Draft based on this structure: [Extracted Template Segment]",
+        "Use legal terminology like mala fide or ultra vires where contextually relevant",
+        "Do not add facts not inferable from the template segment"
+    ],
     "field_prompts": [
         {{
             "field_id": "master_instruction",

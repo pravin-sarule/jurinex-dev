@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff } from 'lucide-react';
+import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff, CreditCard } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext.jsx';
 import api from '../services/api';
@@ -123,7 +123,7 @@ ToggleSwitch.displayName = 'ToggleSwitch';
 
 const SettingsPage = () => {
  const navigate = useNavigate();
- const { user: authUser, loading: authLoading } = useAuth();
+ const { user: authUser, loading: authLoading, planInfo, token, fetchAndStorePlan } = useAuth();
  const { theme, toggleTheme } = useTheme();
  const [language, setLanguage] = useState('English');
  const [notifications, setNotifications] = useState({
@@ -159,6 +159,7 @@ const SettingsPage = () => {
  confirm: ''
  });
  const canViewAccountSettings = canUsePermission(authUser, PERMISSION_KEYS.VIEW_ACCOUNT_SETTINGS);
+ const currentPlanName = planInfo?.plan || planInfo?.planName || 'No active plan';
 
  const handleCurrentPasswordChange = useCallback((value) => {
  setPasswordValues(prev => ({ ...prev, current: value }));
@@ -382,6 +383,16 @@ const SettingsPage = () => {
  }, [authLoading, authUser, canViewAccountSettings]);
 
  useEffect(() => {
+ if (!token || planInfo?.plan || typeof fetchAndStorePlan !== 'function') {
+ return;
+ }
+
+ fetchAndStorePlan(token).catch((err) => {
+ console.error('Error refreshing current plan on settings page:', err);
+ });
+ }, [token, planInfo, fetchAndStorePlan]);
+
+ useEffect(() => {
  const isBlockedFirmUser = shouldEnforceRbac(authUser) && !canViewAccountSettings;
 
  if (authLoading) {
@@ -465,6 +476,10 @@ const SettingsPage = () => {
  <div>
  <div className="font-medium text-gray-900">{userData.fullName}</div>
  <div className="text-sm text-gray-500">Joined {userData.joinDate}</div>
+ <div className="mt-2 inline-flex items-center gap-2 rounded-full bg-[#E8F7F5] px-3 py-1 text-xs font-semibold text-[#0F766E]">
+ <CreditCard className="w-3.5 h-3.5" />
+ <span>Current Plan: {currentPlanName}</span>
+ </div>
  </div>
  </div>
  <button
@@ -568,6 +583,10 @@ const SettingsPage = () => {
                 <div className="flex items-center text-sm">
                   <Phone className="w-4 h-4 text-gray-400 mr-3" />
                   <span className="text-gray-600">{userData.phone || 'Not provided'}</span>
+                </div>
+                <div className="flex items-center text-sm">
+                  <CreditCard className="w-4 h-4 text-gray-400 mr-3" />
+                  <span className="text-gray-600">{currentPlanName}</span>
                 </div>
  </div>
  )}

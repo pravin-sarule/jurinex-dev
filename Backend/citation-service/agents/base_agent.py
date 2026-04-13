@@ -25,6 +25,8 @@ class AgentContext:
     raw_docs:     List[Dict[str,Any]]   = field(default_factory=list)
     judgement_ids:List[str]             = field(default_factory=list)
     metadata:     Dict[str, Any]        = field(default_factory=dict)
+    # Legal Dimension Intelligence — populated by LegalDimensionExtractor
+    dimensions:   List[Dict[str,Any]]   = field(default_factory=list)
 
 
 @dataclass

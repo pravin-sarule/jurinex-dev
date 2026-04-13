@@ -379,9 +379,32 @@ def _resolve_thinking_budget(llm_params: dict, provider: str) -> int:
     return budget_map.get(level, list(budget_map.values())[0])
 
 
+def _gemini_model_supports_thinking_config(model_name: str | None) -> bool:
+    """
+    Native Gemini ThinkingConfig is only accepted on certain models; others return 400
+    INVALID_ARGUMENT ("thinking is not supported by this model"), e.g. gemini-2.0-flash.
+    """
+    raw = (model_name or "").strip().lower()
+    if not raw:
+        return False
+    m = raw.rsplit("/", 1)[-1]
+    if "gemini-2.0" in m or "gemini-1." in m or "gemini-1-" in m:
+        return False
+    if "2.5" in m or "2-5" in m:
+        return True
+    if "gemini-3" in m:
+        return True
+    return False
+
+
 # ── Gemini config builder ─────────────────────────────────────────────────────
 
-def _build_gemini_config(gen_kwargs: dict, llm_params: dict):
+def _build_gemini_config(
+    gen_kwargs: dict,
+    llm_params: dict,
+    *,
+    model_name: str | None = None,
+):
     """
     Build a GenerateContentConfig from gen_kwargs + every flag in llm_parameters.
 
@@ -424,11 +447,18 @@ def _build_gemini_config(gen_kwargs: dict, llm_params: dict):
         if tools:
             config_kwargs["tools"] = tools
 
-        # ── Thinking (Gemini 2.5+) ───────────────────────────────────────────
+        # ── Thinking (Gemini 2.5+ only; 2.0 etc. reject ThinkingConfig) ─────────
         if llm_params.get("thinking_mode"):
-            budget = _resolve_thinking_budget(llm_params, "gemini")
-            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
-            active_flags.append(f"thinking(budget={budget})")
+            if _gemini_model_supports_thinking_config(model_name):
+                budget = _resolve_thinking_budget(llm_params, "gemini")
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+                active_flags.append(f"thinking(budget={budget})")
+            else:
+                logger.info(
+                    "[DocumentAI] thinking_mode set in llm_parameters but model=%s "
+                    "does not support Gemini ThinkingConfig — omitting",
+                    model_name or "(unknown)",
+                )
 
         # ── Media resolution ─────────────────────────────────────────────────
         media_res = str(llm_params.get("media_resolution") or "default").lower()
@@ -496,6 +526,7 @@ def gemini_stream_config_for_folder_chat(
     for_summary: bool = True,
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
+    agent_name: str | None = None,
 ) -> tuple[str, Any] | None:
     """
     Model + Gemini config for folder intelligent-chat SSE streaming.
@@ -505,13 +536,95 @@ def gemini_stream_config_for_folder_chat(
     """
     model_name, gen_kwargs, llm_params = _generation_config(
         for_summary=for_summary,
-        agent_name=GROUNDED_RETRIEVAL_AGENT_NAME,
+        agent_name=agent_name or GROUNDED_RETRIEVAL_AGENT_NAME,
         user_id=user_id,
         summarization_llm_config=summarization_llm_config,
     )
     if _detect_provider(model_name) != "gemini":
         return None
-    return model_name, _build_gemini_config(gen_kwargs, llm_params)
+    return model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
+
+
+def stream_config_for_folder_chat(
+    *,
+    for_summary: bool = True,
+    user_id: str | int | None = None,
+    summarization_llm_config: dict | None = None,
+    agent_name: str | None = None,
+) -> tuple[str, str, Any]:
+    """
+    Unified streaming config for folder intelligent-chat SSE.
+
+    Returns (provider, model_name, config) where:
+      provider   — "gemini" or "claude"
+      model_name — resolved model string from agent_prompts (or summarization_chat_config fallback)
+      config     — for gemini: GenerateContentConfig object
+                   for claude: (gen_kwargs dict, llm_params dict) tuple
+
+    Always uses agent_prompts for model + all llm_parameters when agent_name is given.
+    Falls back to summarization_chat_config only when agent_name is None or DB lookup fails.
+    """
+    model_name, gen_kwargs, llm_params = _generation_config(
+        for_summary=for_summary,
+        agent_name=agent_name or GROUNDED_RETRIEVAL_AGENT_NAME,
+        user_id=user_id,
+        summarization_llm_config=summarization_llm_config,
+    )
+    provider = _detect_provider(model_name)
+    if provider == "claude":
+        return "claude", model_name, (gen_kwargs, llm_params)
+    return "gemini", model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
+
+
+def claude_stream_generator(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+):
+    """
+    Yield text chunks from Claude streaming API using all agent llm_parameters flags.
+
+    Handled flags: thinking_mode, thinking_level, thinking_budget, system_instructions,
+    max_output_tokens (→ max_tokens).
+    """
+    from typing import Iterator  # local import to avoid circular issues
+
+    client = _anthropic_client()
+    if client is None:
+        logger.warning("[DocumentAI] Claude stream skipped — Anthropic client unavailable")
+        return
+
+    max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
+    temperature = float(gen_kwargs.get("temperature") or 1.0)
+    api_model = _anthropic_messages_model_id(model_name)
+
+    create_kwargs: dict = {
+        "model": api_model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    sys_instr = str(llm_params.get("system_instructions") or "").strip()
+    if sys_instr:
+        create_kwargs["system"] = sys_instr
+
+    if llm_params.get("thinking_mode"):
+        budget = _resolve_thinking_budget(llm_params, "claude")
+        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        temperature = 1.0
+
+    create_kwargs["temperature"] = temperature
+
+    logger.info(
+        "[DocumentAI] ▶ Claude stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
+        api_model, model_name, temperature, max_tokens,
+    )
+
+    with client.messages.stream(**create_kwargs) as stream:
+        for text_chunk in stream.text_stream:
+            yield text_chunk
 
 
 # ── Claude (Anthropic) generation ─────────────────────────────────────────────
@@ -632,7 +745,7 @@ def _generate_text(
     if client is None:
         logger.warning("[DocumentAI] Gemini client unavailable — check GEMINI_API_KEY")
         return ""
-    gemini_config = _build_gemini_config(gen_kwargs, llm_params)
+    gemini_config = _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
     response = client.models.generate_content(
         model=model_name,
         contents=prompt,
@@ -735,6 +848,7 @@ def _call_gemini_for_qa(
     system_instruction: str | None = None,
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, str]:
     """
     Ask Gemini a question grounded in the provided document texts.
@@ -779,30 +893,39 @@ def _call_gemini_for_qa(
         has_audio_source = any(_is_audio_source_name(name) for name in source_names)
         has_speaker_labels = bool(_extract_speaker_turns(document_texts, max_turns=1))
         require_speaker_diarization = has_audio_source or has_speaker_labels
-        instruction_parts = [
-            "You are a legal expert assistant.",
-            "Answer the user's question based ONLY on the following case materials (PDFs, images, text files, AND transcripts from audio — treat transcript excerpts as valid sources).",
-            "Do not invent facts, dates, names, holdings, or procedural history.",
-            "If the answer is not supported by the provided text, say so clearly.",
-            "Prefer precise legal writing over generic filler.",
-            "Cite the source file name inline when materially helpful.",
-            "Never say there are no audio files in the folder if the excerpts below include content from an audio filename — that transcript represents the audio.",
-        ]
-        if require_speaker_diarization:
-            instruction_parts.append(
-                "Because this query uses audio transcript context, include a 'Speaker Diarization' section and a "
-                "'Who Talks To Whom (turn sequence)' section using only speaker labels found in the transcript."
-            )
-        if intent_hint == "timeline":
-            instruction_parts.append("Organize the answer chronologically and focus on procedural sequence and dates.")
-        elif intent_hint == "risk":
-            instruction_parts.append("Focus on legal, procedural, evidentiary, and strategic risks supported by the record.")
-        elif intent_hint == "evidence":
-            instruction_parts.append("Focus on exhibits, proof, contradictions, admissions, and evidentiary support in the record.")
-        elif intent_hint == "summary":
-            instruction_parts.append("Provide a structured summary that captures the most material facts and issues from the record.")
-        if format_hint == "structured":
-            instruction_parts.append("Use a structured format with short headings and bullet points where useful.")
+        is_learning_agent = str(agent_name or "").strip() == "learning_mode_agent"
+        if is_learning_agent:
+            instruction_parts = [
+                "You are in Learning Mode. Follow the system instructions (from agent configuration) for how to teach the case and prepare the learner.",
+                "Use ONLY the case materials below. Honor the runtime instructions prepended to this prompt (JSON shape, turn rules, grounding).",
+                "Do not invent facts, dates, names, holdings, or procedural history.",
+            ]
+        else:
+            instruction_parts = [
+                "You are a legal expert assistant.",
+                "Answer the user's question based ONLY on the following case materials (PDFs, images, text files, AND transcripts from audio — treat transcript excerpts as valid sources).",
+                "Do not invent facts, dates, names, holdings, or procedural history.",
+                "If the answer is not supported by the provided text, say so clearly.",
+                "Prefer precise legal writing over generic filler.",
+                "Cite the source file name inline when materially helpful.",
+                "Never say there are no audio files in the folder if the excerpts below include content from an audio filename — that transcript represents the audio.",
+            ]
+        if not is_learning_agent:
+            if require_speaker_diarization:
+                instruction_parts.append(
+                    "Because this query uses audio transcript context, include a 'Speaker Diarization' section and a "
+                    "'Who Talks To Whom (turn sequence)' section using only speaker labels found in the transcript."
+                )
+            if intent_hint == "timeline":
+                instruction_parts.append("Organize the answer chronologically and focus on procedural sequence and dates.")
+            elif intent_hint == "risk":
+                instruction_parts.append("Focus on legal, procedural, evidentiary, and strategic risks supported by the record.")
+            elif intent_hint == "evidence":
+                instruction_parts.append("Focus on exhibits, proof, contradictions, admissions, and evidentiary support in the record.")
+            elif intent_hint == "summary":
+                instruction_parts.append("Provide a structured summary that captures the most material facts and issues from the record.")
+            if format_hint == "structured":
+                instruction_parts.append("Use a structured format with short headings and bullet points where useful.")
         if extra_instructions:
             instruction_parts.append(extra_instructions.strip())
 
@@ -817,7 +940,7 @@ def _call_gemini_for_qa(
         answer = _generate_text(
             prompt,
             for_summary=intent_hint == "summary",
-            agent_name=_AGENT_QA,
+            agent_name=agent_name or _AGENT_QA,
             user_id=user_id,
             summarization_llm_config=summarization_llm_config,
         )

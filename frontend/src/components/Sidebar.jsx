@@ -870,7 +870,7 @@ const Sidebar = () => {
         <button
           onClick={() => {
             if (!canCreateCases) return;
-            navigate('/analysis', { state: { newChat: true } });
+            navigate('/chatmodel', { state: { newChat: true } });
           }}
           disabled={!canCreateCases}
           className={`w-full text-white rounded-xl py-3 text-sm font-bold flex items-center justify-center transition-all duration-200 shadow-lg ${canCreateCases ? 'hover:shadow-xl transform hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'} ${isSidebarCollapsed && !isMobileView ? 'px-2' : ''

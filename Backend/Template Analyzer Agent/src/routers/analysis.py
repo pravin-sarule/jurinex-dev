@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Header, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from ..database import get_db, AsyncSessionLocal
 from ..models.db_models import UserTemplate, UserTemplateField, UserTemplateAnalysisSection, UserTemplateReferenceDocument
 from ..services.agent_service import AntigravityAgent
@@ -12,6 +12,7 @@ import logging
 import re
 import io
 import zipfile
+import asyncio
 from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree
 
@@ -24,6 +25,56 @@ router = APIRouter(prefix="/analysis", tags=["Analysis"])
 agent = AntigravityAgent()
 doc_ai = DocumentAIService()
 field_extractor = HybridFieldExtractor()
+
+_UNDERSCORE_PLACEHOLDER_RE = re.compile(r"(?<!_)_([A-Za-z][A-Za-z0-9_]{1,80})_(?!_)")
+
+
+def _build_validation_gate(analysis_result: Dict[str, Any], template_text: str) -> Dict[str, Any]:
+    sections = analysis_result.get("sections", []) or []
+    all_fields = analysis_result.get("all_fields", []) or []
+    warnings: List[str] = []
+
+    section_names = [str(s.get("section_name") or "").strip().lower() for s in sections if isinstance(s, dict)]
+    has_prayer = any("prayer" in n for n in section_names)
+    has_verification = any("verification" in n for n in section_names)
+    if not has_prayer:
+        warnings.append("Mandatory section missing: Prayer")
+    if not has_verification:
+        warnings.append("Mandatory section missing: Verification")
+
+    section_field_counts = [
+        len((s.get("fields") or [])) for s in sections if isinstance(s, dict)
+    ]
+    empty_sections = sum(1 for c in section_field_counts if c == 0)
+    if empty_sections:
+        warnings.append(f"{empty_sections} section(s) have no mapped fields; consider manual field tagging.")
+
+    mapped_keys = {
+        str(f.get("key") or "").strip().lower()
+        for f in all_fields
+        if isinstance(f, dict) and str(f.get("key") or "").strip()
+    }
+    raw_underscore_keys = {m.group(1).strip().lower() for m in _UNDERSCORE_PLACEHOLDER_RE.finditer(str(template_text or ""))}
+    orphan_keys = sorted(k for k in raw_underscore_keys if k and k not in mapped_keys)
+    if orphan_keys:
+        warnings.append(f"Orphan placeholders not mapped to fields: {', '.join(orphan_keys[:20])}")
+
+    passed = len(warnings) == 0
+    return {
+        "passed": passed,
+        "warnings": warnings,
+        "checks": {
+            "mandatory_sections": {
+                "prayer_present": has_prayer,
+                "verification_present": has_verification,
+            },
+            "section_field_coverage": {
+                "total_sections": len(sections),
+                "sections_without_fields": empty_sections,
+            },
+            "orphan_placeholder_count": len(orphan_keys),
+        },
+    }
 
 
 def _extract_docx_text(file_content: bytes) -> str:
@@ -279,6 +330,30 @@ async def _run_analysis_background(
             analysis_result["all_fields"] = _dedupe_fields((analysis_result.get("all_fields", []) or []) + hybrid_fields_list)
             _sync_all_fields_into_sections(analysis_result)
 
+            # Contextual legal typing/enrichment for extracted fields
+            try:
+                field_context = await agent.contextualize_fields(template_text, analysis_result.get("all_fields", []))
+                if isinstance(field_context, dict):
+                    for field in analysis_result.get("all_fields", []) or []:
+                        if not isinstance(field, dict):
+                            continue
+                        key = str(field.get("key") or "").strip()
+                        if not key:
+                            continue
+                        ctx = field_context.get(key) or field_context.get(key.lower())
+                        if isinstance(ctx, dict):
+                            field["legal_type"] = ctx.get("legal_type") or field.get("type")
+                            field["ui_hint"] = ctx.get("ui_hint") or field.get("ui_hint")
+                            if ctx.get("description"):
+                                field["description"] = ctx["description"]
+                            if ctx.get("validation_hint"):
+                                field["validation_rules"] = ctx["validation_hint"]
+            except Exception as context_err:
+                logger.warning("[BackgroundAnalysis] Contextual field labeling failed: %s", context_err)
+
+            validation_gate = _build_validation_gate(analysis_result, template_text)
+            analysis_result["validation_gate"] = validation_gate
+
             await db.execute(delete(UserTemplateAnalysisSection).where(UserTemplateAnalysisSection.template_id == template_id))
 
             field_result = await db.execute(select(UserTemplateField).where(UserTemplateField.template_id == template_id))
@@ -289,15 +364,45 @@ async def _run_analysis_background(
                 db.add(UserTemplateField(template_id=template_id, template_fields=analysis_result))
 
             sections = analysis_result.get("sections", []) or []
+
+            # Generate section prompts concurrently to reduce end-to-end analysis time.
+            semaphore = asyncio.Semaphore(3)
+
+            async def _generate_prompt_for_section(section: Dict[str, Any]) -> Dict[str, Any]:
+                async with semaphore:
+                    return await agent.generate_section_prompts(section)
+
+            prompt_payloads: List[Dict[str, Any]] = []
+            if sections:
+                prompt_payloads = await asyncio.gather(
+                    *[_generate_prompt_for_section(section) for section in sections]
+                )
+
             for index, section in enumerate(sections):
-                prompt_data = await agent.generate_section_prompts(section)
+                prompt_data = prompt_payloads[index] if index < len(prompt_payloads) else {}
+                section_schema = {
+                    "section_name": section.get("section_name", "Untitled"),
+                    "template_logic": section.get("template_logic", ""),
+                    "required_fields": section.get("required_fields") or [f.get("key") for f in section.get("fields", []) if isinstance(f, dict) and f.get("key")],
+                    "ai_drafting_instruction": section.get("ai_drafting_instruction") or (
+                        (
+                            ((prompt_data.get("field_prompts") or [{}])[0] or {}).get("prompt")
+                            if isinstance(prompt_data, dict) else ""
+                        ) or section.get("drafting_prompt", "")
+                    ),
+                    "constraint_set": (prompt_data.get("constraint_set") or []) if isinstance(prompt_data, dict) else [],
+                    "start_marker": section.get("start_marker", ""),
+                    "end_marker": section.get("end_marker", ""),
+                    "start_line": section.get("start_line", 0),
+                    "end_line": section.get("end_line", 0),
+                }
                 db.add(
                     UserTemplateAnalysisSection(
                         template_id=template_id,
                         section_name=section.get("section_name", "Untitled"),
                         section_purpose=section.get("section_purpose", ""),
                         section_intro=prompt_data.get("section_intro", ""),
-                        section_prompts=prompt_data.get("field_prompts", []),
+                        section_prompts=[section_schema],
                         order_index=section.get("order", index),
                     )
                 )
@@ -308,6 +413,12 @@ async def _run_analysis_background(
                 template.status = "active"
 
             await db.commit()
+            if not validation_gate.get("passed", True):
+                logger.warning(
+                    "[BackgroundAnalysis][ValidationGate] template %s completed with warnings: %s",
+                    template_id,
+                    validation_gate.get("warnings", []),
+                )
             logger.info(f"[BackgroundAnalysis] Completed for template {template_id}")
         except Exception as err:
             await db.rollback()
@@ -698,9 +809,11 @@ async def get_template_status(
         raise HTTPException(status_code=404, detail="Template not found")
 
     sections_count_result = await db.execute(
-        select(UserTemplateAnalysisSection).where(UserTemplateAnalysisSection.template_id == template_id)
+        select(func.count(UserTemplateAnalysisSection.id)).where(
+            UserTemplateAnalysisSection.template_id == template_id
+        )
     )
-    sections_ready = len(sections_count_result.scalars().all())
+    sections_ready = int(sections_count_result.scalar() or 0)
     return {
         "template_id": str(template_id),
         "status": template.status,

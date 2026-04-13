@@ -391,24 +391,24 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  return this.request(`/files/${folderName}/chat/sessions/${sessionId}`);
  }
 
- async queryFolderDocuments(folderName, question) {
+ async queryFolderDocuments(folderName, question, options = {}) {
  const seg = encodeURIComponent(String(folderName ?? "").trim());
  const url = `${String(DOCS_BASE_URL || "").replace(/\/$/, "")}/${seg}/intelligent-chat`;
  const uid = getUserIdForDrafting();
  return this.request(url, {
  method: "POST",
- body: JSON.stringify({ question }),
+ body: JSON.stringify({ question, ...options }),
  headers: uid ? { "X-User-Id": uid } : {},
  });
  }
 
- async continueFolderChat(folderName, sessionId, question) {
+ async continueFolderChat(folderName, sessionId, question, options = {}) {
  const seg = encodeURIComponent(String(folderName ?? "").trim());
  const url = `${String(DOCS_BASE_URL || "").replace(/\/$/, "")}/${seg}/intelligent-chat`;
  const uid = getUserIdForDrafting();
  return this.request(url, {
  method: "POST",
- body: JSON.stringify({ question, session_id: sessionId }),
+ body: JSON.stringify({ question, session_id: sessionId, ...options }),
  headers: uid ? { "X-User-Id": uid } : {},
  });
  }
@@ -426,13 +426,13 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  });
  }
 
- async queryFolderDocumentsWithSecret(folderName, question, promptLabel, sessionId) {
+ async queryFolderDocumentsWithSecret(folderName, question, promptLabel, sessionId, options = {}) {
  const seg = encodeURIComponent(String(folderName ?? "").trim());
  const url = `${String(DOCS_BASE_URL || "").replace(/\/$/, "")}/${seg}/intelligent-chat`;
  const uid = getUserIdForDrafting();
  return this.request(url, {
  method: "POST",
- body: JSON.stringify({ question, prompt_label: promptLabel, session_id: sessionId, llm_name: 'gemini' }),
+ body: JSON.stringify({ question, prompt_label: promptLabel, session_id: sessionId, llm_name: 'gemini', ...options }),
  headers: uid ? { "X-User-Id": uid } : {},
  });
  }
@@ -714,6 +714,19 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
      const t = Number(rawTemp);
      if (Number.isFinite(t)) body.model_temperature = t;
    }
+    if (typeof extraFetchParams.learning_mode === 'boolean') {
+      body.learning_mode = extraFetchParams.learning_mode;
+    }
+    if (typeof extraFetchParams.document_context === 'string') {
+      body.document_context = extraFetchParams.document_context;
+    }
+    if (extraFetchParams.context_page != null && extraFetchParams.context_page !== '') {
+      const p = Number(extraFetchParams.context_page);
+      if (Number.isFinite(p)) body.context_page = p;
+    }
+    if (typeof extraFetchParams.context_selection === 'string') {
+      body.context_selection = extraFetchParams.context_selection;
+    }
  }
 
  const headers = {

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { CheckIcon } from '@heroicons/react/20/solid';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { useNavigate, useLocation } from 'react-router-dom';
 import apiService from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { getPlanDisplayName } from '../utils/planUtils';
 
 import { PAYMENT_SERVICE_URL } from '../config/apiConfig';
 const BACKEND_BASE_URL = PAYMENT_SERVICE_URL;
@@ -22,6 +23,25 @@ const PLAN_NAME_HINTS = {
  'law-firm': ['law firm', 'lawfirm', 'team', 'business'],
  free: ['sololite', 'solo lite', 'free', 'starter', 'basic'],
  'solo-lawyer': ['solo lawyer', 'solo'],
+};
+
+const normalizePlanLabel = (value) => String(value || '').toLowerCase().trim();
+
+const getEffectivePlanLabel = (planInfo) => {
+  if (!planInfo) return '';
+  return getPlanDisplayName(planInfo.subscription || planInfo) || planInfo.plan || planInfo.planName || '';
+};
+
+const isSamePlanFamily = (userPlanName, uiPlan) => {
+  const normalizedUserPlan = normalizePlanLabel(userPlanName);
+  if (!normalizedUserPlan) return false;
+
+  if (normalizePlanLabel(uiPlan.name) === normalizedUserPlan) {
+    return true;
+  }
+
+  const hints = PLAN_NAME_HINTS[uiPlan.id] || [];
+  return hints.some((hint) => normalizedUserPlan.includes(hint));
 };
 
 const priceStringToPaise = (price) => {
@@ -66,7 +86,7 @@ const resolveBackendPlanForUi = (backendPlans, uiPlanId, cycle, uiPlanType) => {
 const SubscriptionPlanPage = () => {
  const navigate = useNavigate();
  const location = useLocation();
- const { user, token, loading: authLoading } = useAuth();
+ const { user, token, loading: authLoading, planInfo, fetchAndStorePlan } = useAuth();
  
  const [billingCycle, setBillingCycle] = useState('yearly');
  const [plans, setPlans] = useState([]);
@@ -76,6 +96,15 @@ const SubscriptionPlanPage = () => {
  const [processingPayment, setProcessingPayment] = useState(false);
  const [selectedPlanId, setSelectedPlanId] = useState(null);
  const [pendingCheckout, setPendingCheckout] = useState(null);
+
+ const currentPlanName = useMemo(() => getEffectivePlanLabel(planInfo), [planInfo]);
+
+ useEffect(() => {
+ if (!token || currentPlanName || typeof fetchAndStorePlan !== 'function') return;
+ fetchAndStorePlan(token).catch((fetchError) => {
+ console.error('Failed to refresh current plan on subscription page:', fetchError);
+ });
+ }, [token, currentPlanName, fetchAndStorePlan]);
 
  useEffect(() => {
  const statePending = location.state?.pendingUpgradePlan;
@@ -194,6 +223,12 @@ const SubscriptionPlanPage = () => {
  date: new Date().toISOString()
  };
  localStorage.setItem('userInfo', JSON.stringify(userInfo));
+ 
+ if (token && typeof fetchAndStorePlan === 'function') {
+ await fetchAndStorePlan(token).catch((planError) => {
+ console.error('Failed to refresh plan after payment success:', planError);
+ });
+ }
  
  window.dispatchEvent(new CustomEvent('userInfoUpdated', { detail: userInfo }));
  
@@ -327,6 +362,7 @@ const SubscriptionPlanPage = () => {
  amount: amountInPaise,
  currency: 'INR',
  plan_name: plan.name,
+ plan_id: plan.backendPlan?.id || null,
  }),
  });
 
@@ -401,6 +437,7 @@ const SubscriptionPlanPage = () => {
  razorpay_payment_id: response.razorpay_payment_id,
  razorpay_signature: response.razorpay_signature,
  plan_name: plan.name,
+ plan_id: plan.backendPlan?.id || null,
  }),
  });
 
@@ -608,23 +645,30 @@ const SubscriptionPlanPage = () => {
  </div>
  )}
 
- {!loading && !error && plans.length > 0 && (
+{!loading && !error && plans.length > 0 && (
  <div className="mt-12 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
  {plans.map((plan) => {
 const displayPrice = billingCycle === 'yearly' ? plan.annualPrice : plan.monthlyPrice;
 const displayPeriod = billingCycle === 'yearly' ? plan.annualPeriod : plan.monthlyPeriod;
-const isPriceZero = !plan.backendPlan?.price || plan.backendPlan.price === 0;
  const isCurrentlyProcessing = processingPayment && selectedPlanId === plan.id;
-const isDisabled = processingPayment;
-const ctaLabel = billingCycle === 'monthly' ? plan.ctaMonthly : plan.ctaAnnual;
+ const isCurrentPlan = isSamePlanFamily(currentPlanName, plan);
+const isDisabled = processingPayment || isCurrentPlan;
+const ctaLabel = isCurrentPlan ? 'Current Plan' : (billingCycle === 'monthly' ? plan.ctaMonthly : plan.ctaAnnual);
 
  return (
  <div
  key={plan.id}
  className={`group flex flex-col rounded-2xl border border-teal-300/60 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-2 hover:border-teal-500 hover:shadow-[0_8px_32px_rgba(13,148,136,0.2)] ${
- isCurrentlyProcessing ? 'ring-2 ring-teal-500 shadow-[0_8px_32px_rgba(13,148,136,0.28)]' : ''
+ isCurrentlyProcessing || isCurrentPlan ? 'ring-2 ring-teal-500 shadow-[0_8px_32px_rgba(13,148,136,0.28)]' : ''
  }`}
  >
+ <div className="mb-3 flex min-h-[1.75rem] justify-end">
+ {isCurrentPlan ? (
+ <span className="inline-flex items-center rounded-full bg-[#E8F7F5] px-3 py-1 text-xs font-semibold text-[#0F766E]">
+ Current Plan
+ </span>
+ ) : null}
+ </div>
  <h2 className="text-center font-playfair text-lg font-semibold text-teal-700 transition-colors duration-300 group-hover:text-teal-600">
  {plan.name}
  </h2>
@@ -654,7 +698,9 @@ const ctaLabel = billingCycle === 'monthly' ? plan.ctaMonthly : plan.ctaAnnual;
  disabled={isDisabled}
  className={`mt-5 mb-6 w-full rounded-lg border border-teal-300/60 bg-white py-2.5 font-dmSans text-sm font-medium transition-all duration-300 active:scale-[0.98] ${
  isDisabled
- ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+ ? isCurrentPlan
+ ? 'border-[#99F6E4] bg-[#E8F7F5] text-[#0F766E] cursor-not-allowed'
+ : 'bg-gray-300 text-gray-500 cursor-not-allowed'
  : 'text-teal-700 group-hover:border-teal-500 group-hover:bg-teal-600 group-hover:text-white'
  }`}
  style={isDisabled ? {} : { backgroundColor: '#FFFFFF' }}

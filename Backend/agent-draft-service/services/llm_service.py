@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import threading
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -22,6 +23,7 @@ _gemini_min_interval_seconds = max(
 )
 _gemini_max_retry_attempts = max(0, int(os.environ.get("GEMINI_MAX_RETRY_ATTEMPTS", "3")))
 _gemini_retry_backoff_seconds = max(1, int(os.environ.get("GEMINI_RETRY_INITIAL_BACKOFF_SECONDS", "2")))
+_gemini_fallback_models_csv = os.environ.get("GEMINI_FALLBACK_MODELS", "").strip()
 
 def call_llm(
     prompt: str,
@@ -120,36 +122,60 @@ def _call_gemini(
     )
 
     try:
-        attempt = 0
-        while True:
-            _wait_for_gemini_rate_slot()
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=[prompt],
-                    config=types.GenerateContentConfig(**config_args),
-                )
-                if not response or not response.text:
-                    logger.warning("[LLM] Gemini returned empty response for model=%r", model)
-                    return ""
-                return response.text
-            except Exception as e:
-                attempt += 1
-                if _is_retryable_gemini_error(e) and attempt <= _gemini_max_retry_attempts:
-                    sleep_seconds = _gemini_retry_backoff_seconds * (2 ** (attempt - 1))
-                    logger.warning(
-                        "[LLM] Gemini retryable error on attempt %s/%s for model=%r; sleeping %ss: %s",
-                        attempt,
-                        _gemini_max_retry_attempts,
-                        model,
-                        sleep_seconds,
-                        e,
-                    )
-                    time.sleep(sleep_seconds)
-                    continue
+        model_chain = _build_gemini_model_chain(model)
+        last_error: Optional[Exception] = None
 
-                logger.exception("Gemini call failed: %s", e)
-                raise RuntimeError(f"Gemini API error (model={model!r}): {e}") from e
+        for model_index, active_model in enumerate(model_chain):
+            attempt = 0
+            while True:
+                _wait_for_gemini_rate_slot()
+                try:
+                    response = client.models.generate_content(
+                        model=active_model,
+                        contents=[prompt],
+                        config=types.GenerateContentConfig(**config_args),
+                    )
+                    if not response or not response.text:
+                        logger.warning("[LLM] Gemini returned empty response for model=%r", active_model)
+                        return ""
+                    if active_model != model:
+                        logger.info("[LLM] Gemini fallback model succeeded: %r -> %r", model, active_model)
+                    return response.text
+                except Exception as e:
+                    last_error = e
+                    attempt += 1
+                    retryable = _is_retryable_gemini_error(e)
+                    if retryable and attempt <= _gemini_max_retry_attempts:
+                        # Exponential backoff + jitter to reduce thundering herd on 503 spikes.
+                        base_sleep = _gemini_retry_backoff_seconds * (2 ** (attempt - 1))
+                        sleep_seconds = base_sleep + random.uniform(0.0, 0.5)
+                        logger.warning(
+                            "[LLM] Gemini retryable error on attempt %s/%s for model=%r; sleeping %.2fs: %s",
+                            attempt,
+                            _gemini_max_retry_attempts,
+                            active_model,
+                            sleep_seconds,
+                            e,
+                        )
+                        time.sleep(sleep_seconds)
+                        continue
+
+                    has_next_model = model_index + 1 < len(model_chain)
+                    if retryable and has_next_model:
+                        next_model = model_chain[model_index + 1]
+                        logger.warning(
+                            "[LLM] Gemini model=%r exhausted retries due to retryable error; switching to fallback model=%r",
+                            active_model,
+                            next_model,
+                        )
+                        break
+
+                    logger.exception("Gemini call failed: %s", e)
+                    raise RuntimeError(f"Gemini API error (model={active_model!r}): {e}") from e
+
+        if last_error is not None:
+            raise RuntimeError(f"Gemini API error after fallback chain (start={model!r}): {last_error}") from last_error
+        raise RuntimeError(f"Gemini API error: no model attempted for start model={model!r}")
     except Exception:
         raise
 
@@ -181,3 +207,27 @@ def _is_retryable_gemini_error(error: Exception) -> bool:
         "resource exhausted",
     )
     return any(marker in message for marker in retryable_markers)
+
+
+def _build_gemini_model_chain(primary_model: str) -> List[str]:
+    chain: List[str] = []
+
+    def _add(model_name: str) -> None:
+        name = str(model_name or "").strip()
+        if name and name not in chain:
+            chain.append(name)
+
+    _add(primary_model)
+
+    # Optional explicit chain from env:
+    # GEMINI_FALLBACK_MODELS=gemini-2.5-flash,gemini-2.0-flash
+    if _gemini_fallback_models_csv:
+        for candidate in _gemini_fallback_models_csv.split(","):
+            _add(candidate)
+    else:
+        # Sensible defaults when primary model is Pro and capacity spikes.
+        if str(primary_model).strip().lower() == "gemini-2.5-pro":
+            _add("gemini-2.5-flash")
+            _add("gemini-2.0-flash")
+
+    return chain

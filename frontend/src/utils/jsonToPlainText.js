@@ -62,12 +62,43 @@ export function stripAgenticCitations(text) {
     .trim();
 }
 
+/**
+ * True only for Learning Mode Socratic payloads — not generic JSON that happens
+ * to include a "question" or "feedback" field (e.g. secret-prompt tabular output).
+ */
+function isLearningPayload(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  const hasUi = 'ui_type' in obj && typeof obj.ui_type === 'string';
+  const hasOptions = Array.isArray(obj.options) && obj.options.length > 0;
+  const hasFeedback = 'feedback' in obj;
+  const hasHint = 'content_hint' in obj;
+  const hasQuestion = 'question' in obj;
+  return (
+    hasUi ||
+    hasOptions ||
+    (hasFeedback && (hasHint || hasQuestion || hasOptions))
+  );
+}
+
+/** Converts a learning payload object into natural prose (no JSON key labels). */
+function learningPayloadToPlainText(obj) {
+  const parts = [];
+  if (obj.feedback && String(obj.feedback).trim()) parts.push(String(obj.feedback).trim());
+  if (obj.content_hint && String(obj.content_hint).trim()) parts.push(`💡 ${String(obj.content_hint).trim()}`);
+  if (obj.question && String(obj.question).trim()) parts.push(String(obj.question).trim());
+  if (obj.ui_type === 'options' && Array.isArray(obj.options) && obj.options.length > 0) {
+    parts.push(obj.options.map((o, i) => `${String.fromCharCode(65 + i)}) ${o}`).join('  '));
+  }
+  return parts.join('\n\n');
+}
+
 export function convertJsonToPlainText(text) {
   if (!text) {
     return '';
   }
 
   if (typeof text === 'object' && text !== null) {
+    if (isLearningPayload(text)) return learningPayloadToPlainText(text);
     return formatJsonAsPlainText(text);
   }
 
@@ -75,16 +106,33 @@ export function convertJsonToPlainText(text) {
     text = String(text);
   }
 
-  const trimmed = text.trim();
+  // Strip markdown code fences before attempting JSON parse
+  const stripped = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  const trimmed = stripped;
   let jsonData = null;
   try {
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       jsonData = JSON.parse(trimmed);
     }
   } catch (e) {
-    jsonData = tryParsePartialJson(text);
+    jsonData = tryParsePartialJson(trimmed);
     if (!jsonData) {
       if (trimmed.startsWith('{')) {
+        // Before using the regex label fallback, check if it looks like a learning payload
+        const hasLearningKey =
+          trimmed.includes('"ui_type"') ||
+          (trimmed.includes('"feedback"') &&
+            (trimmed.includes('"content_hint"') || trimmed.includes('"question"') || trimmed.includes('"options"')));
+        if (hasLearningKey) {
+          // Extract values without showing keys as labels
+          const valRegex = /"(?:feedback|content_hint|question)":\s*"([^"]*)"/g;
+          const vals = [];
+          let vm;
+          while ((vm = valRegex.exec(trimmed)) !== null) {
+            if (vm[1] && vm[1].trim()) vals.push(vm[1].trim());
+          }
+          if (vals.length > 0) return vals.join('\n\n');
+        }
         const keyValuePairs = [];
         const regex = /"([^"]+)":\s*"([^"]*)"/g;
         let match;
@@ -100,6 +148,7 @@ export function convertJsonToPlainText(text) {
   }
 
   if (jsonData) {
+    if (isLearningPayload(jsonData)) return learningPayloadToPlainText(jsonData);
     return formatJsonAsPlainText(jsonData);
   }
 
@@ -209,9 +258,11 @@ function extractTextFromJson(obj, depth = 0) {
     });
   } else if (obj && typeof obj === 'object') {
     const skipKeys = [
-      'format', 'version', 'description', 'instructions', 'extraction_metadata', 
+      'format', 'version', 'description', 'instructions', 'extraction_metadata',
       'required_summary_type', 'type', 'id', 'timestamp', 'created_at', 'updated_at',
-      'schema', 'schemas', 'metadata', 'status', 'error', 'code'
+      'schema', 'schemas', 'metadata', 'status', 'error', 'code',
+      // Learning payload fields — never render these as section headers
+      'feedback', 'content_hint', 'question', 'ui_type', 'options',
     ];
     
     const keys = Object.keys(obj);

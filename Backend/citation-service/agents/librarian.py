@@ -23,10 +23,116 @@ import re
 import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 LIBRARIAN_WORKERS = max(1, min(12, int(os.environ.get("CITATION_LIBRARIAN_WORKERS", "6"))))
+
+# ── Hierarchy constants ───────────────────────────────────────────────────────
+
+# Keywords that identify low-hierarchy courts (District, Tribunals, Consumer fora).
+# Any judgment whose court string contains one of these → hierarchy_rank=99 → reject.
+_LOW_HIERARCHY_COURT_KWS: frozenset = frozenset({
+    "district court", "sessions court", "munsiff", "civil judge",
+    "judicial magistrate", "executive magistrate", "metropolitan magistrate",
+    "motor accident claims tribunal", "mact",
+    "family court",
+    "debt recovery tribunal", "drt",
+    "income tax appellate tribunal", "itat",
+    "customs excise and service tax appellate tribunal", "cestat",
+    "central administrative tribunal", "cat",
+    "armed forces tribunal", "aft",
+    "company law board",
+    "national green tribunal", "ngt",
+    "competition commission of india", "cci",
+    "securities appellate tribunal", "sat",
+    "consumer forum", "consumer court",
+    "national consumer disputes redressal commission", "ncdrc",
+    "state consumer disputes", "district consumer",
+    "railway claims tribunal",
+    "telecom disputes settlement", "tdsat",
+    "intellectual property appellate board", "ipab",
+    "real estate regulatory", "rera",
+})
+
+# State → lower-case HC name (mirrors watchdog._STATE_TO_HC_LOWER)
+_STATE_TO_HC_LOWER: Dict[str, str] = {
+    "andhra pradesh":   "andhra pradesh high court",
+    "telangana":        "telangana high court",
+    "delhi":            "delhi high court",
+    "gujarat":          "gujarat high court",
+    "karnataka":        "karnataka high court",
+    "kerala":           "kerala high court",
+    "madhya pradesh":   "madhya pradesh high court",
+    "maharashtra":      "bombay high court",
+    "goa":              "bombay high court",
+    "punjab":           "punjab and haryana high court",
+    "haryana":          "punjab and haryana high court",
+    "rajasthan":        "rajasthan high court",
+    "tamil nadu":       "madras high court",
+    "uttar pradesh":    "allahabad high court",
+    "west bengal":      "calcutta high court",
+    "odisha":           "orissa high court",
+    "assam":            "gauhati high court",
+    "meghalaya":        "meghalaya high court",
+    "manipur":          "manipur high court",
+    "tripura":          "tripura high court",
+    "himachal pradesh": "himachal pradesh high court",
+    "uttarakhand":      "uttarakhand high court",
+    "chhattisgarh":     "chhattisgarh high court",
+    "jharkhand":        "jharkhand high court",
+    "jammu":            "jammu and kashmir high court",
+    "kashmir":          "jammu and kashmir high court",
+    "sikkim":           "sikkim high court",
+}
+
+
+def _court_hierarchy_rank(court: str, case_state: str = "") -> Tuple[int, bool]:
+    """
+    Compute a hierarchy rank for the court string.
+
+    Returns (rank, should_reject):
+      rank 1  — Supreme Court of India
+      rank 2  — same-state High Court (based on case_state)
+      rank 3  — other High Court
+      rank 4  — appellate tribunals (NCLAT, NCDRC, NCLT in appellate mode)
+      rank 5  — unknown / unrecognised (pass through with low priority)
+      rank 99 — District Court / lower tribunal → should_reject=True
+
+    should_reject=True means the judgment should be discarded early by the Librarian.
+    """
+    if not court:
+        return (5, False)
+
+    cl = court.lower()
+
+    # Supreme Court → rank 1
+    if "supreme court" in cl:
+        return (1, False)
+
+    # Known low-hierarchy courts → reject
+    for kw in _LOW_HIERARCHY_COURT_KWS:
+        if kw in cl:
+            return (99, True)
+
+    # High Courts
+    if "high court" in cl:
+        state = (case_state or "").lower().strip()
+        if state:
+            # Direct substring: "delhi" in "delhi high court"
+            if state in cl:
+                return (2, False)
+            # Mapped: "maharashtra" → "bombay high court"
+            mapped_hc = _STATE_TO_HC_LOWER.get(state, "")
+            if mapped_hc and mapped_hc in cl:
+                return (2, False)
+        return (3, False)
+
+    # Appellate tribunals (NCLAT, NCDRC): keep but lower priority
+    if any(t in cl for t in ("nclat", "ncdrc", "nclt", "appellate tribunal")):
+        return (4, False)
+
+    return (5, False)
 
 # ── Citation format patterns (Indian legal citations) ─────────────────────────
 _CITATION_PATTERNS: List[tuple] = [
@@ -134,15 +240,26 @@ def _validate_court(court: str) -> bool:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
+def run_librarian(
+    judgement_ids: List[str],
+    case_state: str = "",
+    dimensions: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Validate and enrich each judgement in the DB.
 
+    Args:
+        judgement_ids — IDs to validate
+        case_state    — state/jurisdiction string (e.g. "Maharashtra") used for same-state HC
+                        priority scoring and to reject unrelated low-hierarchy courts.
+        dimensions    — Legal Dimensions from LegalDimensionExtractor (reserved for future use).
+
     Returns:
-        validated_ids  — passed all / most checks (goes to Auditor)
-        flagged_ids    — has ≥3 warnings (Auditor will apply stricter scrutiny)
-        rejected_ids   — critical issues (missing citation + no content; not worth auditing)
-        details        — per-ID result dict
+        validated_ids      — passed all / most checks (goes to Auditor)
+        flagged_ids        — has ≥3 warnings (Auditor will apply stricter scrutiny)
+        rejected_ids       — critical issues or low-hierarchy courts
+        details            — per-ID result dict (includes hierarchy_rank)
+        hierarchy_rankings — {jid: rank} sorted map for ReportBuilder ordering
     """
     from db.client import judgement_update_validation
     from db.connections import get_pg_conn
@@ -200,7 +317,7 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
         j = judgement_map.get(jid)
         if not j:
             logger.warning("[LIBRARIAN] ✗ ID not found in DB — skipping: %s", jid)
-            return jid, {"source": "unknown", "status": "rejected", "issues": ["not_in_db"], "warnings": [], "enrichments": {}}
+            return jid, {"source": "unknown", "status": "rejected", "issues": ["not_in_db"], "warnings": [], "enrichments": {}, "hierarchy_rank": 99}
 
         source       = j.get("source", "unknown")
         title        = (j.get("title") or "")
@@ -213,6 +330,24 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
         issues:      List[str] = []
         warnings:    List[str] = []
         enrichments: Dict[str, Any] = {}
+
+        # ── 0. Hierarchy check (early reject for low-level courts) ────────────
+        h_rank, h_reject = _court_hierarchy_rank(court, case_state)
+        enrichments["hierarchy_rank"] = h_rank
+        if h_reject:
+            rank_label = {1: "SC", 2: "same-HC", 3: "HC", 4: "Appellate Tribunal"}.get(h_rank, f"rank-{h_rank}")
+            logger.warning(
+                "[LIBRARIAN] ✗ HIERARCHY REJECT (rank=%d) — %s | court=%s",
+                h_rank, title[:60], court[:60],
+            )
+            return jid, {
+                "source": source,
+                "status": "rejected",
+                "issues": ["low_hierarchy_court"],
+                "warnings": [],
+                "enrichments": enrichments,
+                "hierarchy_rank": h_rank,
+            }
 
         source_icon = {"local": "🏛", "indian_kanoon": "📚", "google": "🌐"}.get(source, "❓")
         logger.info(
@@ -297,11 +432,12 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
             logger.warning("  [LIBRARIAN] DB update failed for %s: %s", jid, exc)
 
         return jid, {
-            "source":      source,
-            "status":      status,
-            "warnings":    warnings,
-            "issues":      issues,
-            "enrichments": enrichments,
+            "source":         source,
+            "status":         status,
+            "warnings":       warnings,
+            "issues":         issues,
+            "enrichments":    enrichments,
+            "hierarchy_rank": h_rank,
         }
 
     with ThreadPoolExecutor(max_workers=min(LIBRARIAN_WORKERS, len(judgement_ids) or 1)) as pool:
@@ -324,6 +460,11 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
             if len(details) and (len(details) == len(judgement_ids) or len(details) % 5 == 0):
                 logger.info("[LIBRARIAN] progress %d/%d checked", len(details), len(judgement_ids))
 
+    hierarchy_rankings: Dict[str, int] = {
+        jid: (details[jid].get("hierarchy_rank") or 5)
+        for jid in details
+    }
+
     logger.info(
         "╔══ LIBRARIAN SUMMARY ═════════════════════════════════════╗\n"
         "║  ✓ Validated:  %3d  |  ⚠ Flagged: %3d  |  ✗ Rejected: %3d ║\n"
@@ -332,8 +473,9 @@ def run_librarian(judgement_ids: List[str]) -> Dict[str, Any]:
     )
 
     return {
-        "validated_ids": validated_ids,
-        "flagged_ids":   flagged_ids,
-        "rejected_ids":  rejected_ids,
-        "details":       details,
+        "validated_ids":      validated_ids,
+        "flagged_ids":        flagged_ids,
+        "rejected_ids":       rejected_ids,
+        "details":            details,
+        "hierarchy_rankings": hierarchy_rankings,
     }

@@ -1,8 +1,7 @@
-@import url('https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=Inter:wght@100..900&display=swap');
 /* Note: Google Sans and Product Sans are proprietary fonts. 
 
 .analysis-page-ai-response {
-  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-family: "Times New Roman", Times, serif !important;
   font-size: 22px;
   line-height: 1.6;
   color: #111;
@@ -85,7 +84,7 @@
 .prose table,
 .prose th,
 .prose td {
-  font-family: "Crimson Text", Georgia, "Times New Roman", serif !important;
+  font-family: "Times New Roman", Times, serif !important;
 }
 
 .prose table {
@@ -197,6 +196,20 @@
   animation: shimmer 1.5s infinite linear;
 }
 
+@keyframes slideInRight {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+.chat-artifact-panel {
+  animation: slideInRight 0.25s ease;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
 @keyframes pulse {
   0%, 100% {
     opacity: 1;
@@ -276,4 +289,75 @@ svg tspan {
 .mindmap-generator-container button[aria-label="Close Mindmap Generator"]:hover {
   opacity: 1;
   background-color: rgba(0, 0, 0, 0.05);
+}
+
+/* ── Learning mode single-screen chat thread ── */
+.learning-chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 8px 4px 16px;
+}
+
+.learning-thread-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 160px;
+  color: #9ca3af;
+  text-align: center;
+  gap: 6px;
+}
+
+.learning-thread-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* User message — right-aligned bubble */
+.learning-user-bubble {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.learning-user-text {
+  background: #1f6b5f;
+  color: #ffffff;
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  max-width: 72%;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* AI response — left-aligned */
+.learning-ai-bubble {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.learning-ai-bubble .learning-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px 16px 16px 16px;
+  padding: 14px 16px;
+  max-width: 90%;
+  width: 100%;
+}
+
+.learning-thinking-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px 16px 16px 16px;
+  font-size: 13px;
+  color: #6b7280;
 }

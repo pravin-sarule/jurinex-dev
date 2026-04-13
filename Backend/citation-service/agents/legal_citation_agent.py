@@ -19,12 +19,15 @@ import logging
 import uuid
 import hashlib
 import re
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 from db.connections import get_es_client, get_neo4j_driver, get_pg_conn, get_qdrant_client
+from google import genai
 
 class LegalCitationAgent:
     def __init__(self, pg_conn=None, es_client=None, qdrant_client=None, neo4j_driver=None):
@@ -33,6 +36,21 @@ class LegalCitationAgent:
         self.es = es_client or get_es_client()
         self.qdrant = qdrant_client or get_qdrant_client()
         self.neo4j = neo4j_driver or get_neo4j_driver()
+        self._embed_model = os.environ.get("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
+        self._embed_batch_size = max(1, min(64, int(os.environ.get("CITATION_EMBED_BATCH_SIZE", "16"))))
+        self._embed_workers = max(1, min(16, int(os.environ.get("CITATION_EMBED_WORKERS", "4"))))
+        self._embed_output_dims = int(os.environ.get("CITATION_EMBED_OUTPUT_DIMS", "768"))
+        self._embed_client = None
+        self._embed_available = False
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if api_key:
+            try:
+                self._embed_client = genai.Client(api_key=api_key)
+                self._embed_available = True
+            except Exception as exc:
+                logger.warning("[EMBED] Gemini client init failed: %s", exc)
+        else:
+            logger.warning("[EMBED] GEMINI_API_KEY/GOOGLE_API_KEY missing; embedding disabled")
 
     def generate_canonical_id(self, case_name: str, court_code: str, year: str) -> str:
         """Generate a deterministic canonical_id based on core case identifiers."""
@@ -48,10 +66,62 @@ class LegalCitationAgent:
             start += chunk_size - overlap
         return chunks
 
-    def _get_embedding(self, text: str) -> List[float]:
-        """Placeholder for actual embedding generation (e.g., using Gemini or OpenAI)."""
-        # In a real implementation: return genai_embed(text)
-        return [0.0] * 768  # Dummy embedding of size 768
+    def _embed_texts_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Create embeddings for one batch using Gemini embedding API.
+        Returns one vector per input text; failed items are returned as [].
+        """
+        if not self._embed_available or not self._embed_client:
+            return [[] for _ in texts]
+        try:
+            response = self._embed_client.models.embed_content(
+                model=self._embed_model,
+                contents=texts,
+                config={"output_dimensionality": self._embed_output_dims},
+            )
+            embeddings_obj = getattr(response, "embeddings", None) or []
+            out: List[List[float]] = []
+            for emb in embeddings_obj:
+                values = getattr(emb, "values", None)
+                if isinstance(values, list) and values:
+                    out.append([float(v) for v in values])
+                else:
+                    out.append([])
+            if len(out) < len(texts):
+                out.extend([[] for _ in range(len(texts) - len(out))])
+            return out[: len(texts)]
+        except Exception as exc:
+            logger.warning("[EMBED] Batch embedding failed: %s", exc)
+            return [[] for _ in texts]
+
+    def _embed_texts_parallel(self, texts: List[str]) -> List[List[float]]:
+        """
+        Embed all chunk texts using batch + parallel execution.
+        Preserves original order.
+        """
+        if not texts:
+            return []
+        indexed = [(i, t or "") for i, t in enumerate(texts)]
+        batches: List[List[tuple[int, str]]] = [
+            indexed[i : i + self._embed_batch_size]
+            for i in range(0, len(indexed), self._embed_batch_size)
+        ]
+        vectors: List[List[float]] = [[] for _ in texts]
+        with ThreadPoolExecutor(max_workers=min(self._embed_workers, len(batches))) as pool:
+            future_map = {
+                pool.submit(self._embed_texts_batch, [item[1] for item in batch]): batch
+                for batch in batches
+            }
+            for fut in as_completed(future_map):
+                batch = future_map[fut]
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    logger.warning("[EMBED] Parallel batch failed: %s", exc)
+                    result = [[] for _ in batch]
+                for idx_in_batch, (orig_idx, _) in enumerate(batch):
+                    vectors[orig_idx] = result[idx_in_batch] if idx_in_batch < len(result) else []
+        return vectors
 
     def _extract_citations(self, text: str) -> List[Dict[str, Any]]:
         """Extract citations from text using a legal citation parser."""
@@ -139,6 +209,10 @@ class LegalCitationAgent:
             "judges":              data.get("judges") or [],
             "paragraphs":          data.get("paragraphs") or [],
             "case_name":           data.get("case_name"),
+            "dimension_id":        data.get("dimension_id"),
+            "dimension_name":      data.get("dimension_name"),
+            "dimension_tags":      data.get("dimension_tags") or [],
+            "query_type":          data.get("query_type"),
         }, ensure_ascii=False)
 
         try:
@@ -287,13 +361,20 @@ class LegalCitationAgent:
         if not self.qdrant:
             logger.warning("[QDRANT] skipped vectors (no connection)")
             return False
+        if not self._embed_available:
+            logger.warning("[QDRANT] skipped vectors (Gemini embedding unavailable)")
+            return False
         from qdrant_client.models import PointStruct
         
         logger.info(f"[QDRANT] Storing {len(chunks)} chunks for canonical_id: {data['canonical_id']}")
+        embeddings = self._embed_texts_parallel(chunks)
         points = []
         for i, chunk in enumerate(chunks):
             vector_id = str(uuid.uuid4())
-            embedding = self._get_embedding(chunk)
+            embedding = embeddings[i] if i < len(embeddings) else []
+            if not embedding:
+                logger.warning("[QDRANT] Missing embedding for chunk=%s canonical_id=%s", i, data.get("canonical_id"))
+                continue
             # Spec payload: case_id (original case), citation_text, relevant_section
             citation_text = data.get("primary_citation") or data.get("citation_text") or ""
             relevant_section = (data.get("excerpt_text") or data.get("excerpt_para") or "")[:500]
@@ -311,9 +392,17 @@ class LegalCitationAgent:
                 "relevant_section": relevant_section,
                 "source_url": (data.get("source_url") or data.get("official_source_url") or "")[:2000],
                 "import_source_link": (data.get("source_url") or data.get("official_source_url") or "")[:2000],
+                # Dimension tags from LDE/Clerk
+                "dimension_id":   data.get("dimension_id"),
+                "dimension_name": (data.get("dimension_name") or "")[:200],
+                "dimension_tags": data.get("dimension_tags") or [],
+                "query_type":     (data.get("query_type") or "")[:50],
             }
             points.append(PointStruct(id=vector_id, vector=embedding, payload=payload))
         
+        if not points:
+            logger.warning("[QDRANT] No embeddings generated for canonical_id=%s", data.get("canonical_id"))
+            return False
         try:
             self.qdrant.upsert(
                 collection_name="legal_embeddings",
@@ -469,31 +558,53 @@ class LegalCitationAgent:
 
         ack = {"canonical_id": canonical_id, "pg": False, "es_doc_id": None, "qdrant_stored": False, "neo4j_stored": False, "errors": []}
 
-        # 2. Insert metadata into PostgreSQL
+        # 2. Insert metadata into PostgreSQL (must succeed before secondary stores)
         ack["pg"] = self._insert_pg_metadata(raw_data)
         if not ack["pg"]:
             ack["errors"].append("pg_insert_failed")
 
-        # 3. Index full text into Elasticsearch
-        if self._index_elasticsearch(raw_data):
-            ack["es_doc_id"] = canonical_id
-        else:
-            ack["errors"].append("es_index_failed")
-
-        # 4 & 5 & 6. Split, embed, and store in Qdrant
+        # Prepare chunks for embedding (needed by Qdrant)
         full_text = raw_data.get("full_text", "")
         chunks = self._chunk_text(full_text)
-        ack["qdrant_stored"] = self._store_qdrant_embeddings(raw_data, chunks)
-        if not ack["qdrant_stored"]:
-            ack["errors"].append("qdrant_upsert_failed")
-
-        # 7. Extract citations
         extracted_citations = self._extract_citations(full_text)
 
-        # 8. Create relationships in Neo4j
-        ack["neo4j_stored"] = self._create_neo4j_graph(raw_data, extracted_citations)
-        if not ack["neo4j_stored"]:
-            ack["errors"].append("neo4j_graph_failed")
+        # 3/4/5/6/8. Parallelize ES + Qdrant + Neo4j writes (independent of each other)
+        def _write_es():
+            ok = self._index_elasticsearch(raw_data)
+            return ("es", ok)
+
+        def _write_qdrant():
+            ok = self._store_qdrant_embeddings(raw_data, chunks)
+            return ("qdrant", ok)
+
+        def _write_neo4j():
+            ok = self._create_neo4j_graph(raw_data, extracted_citations)
+            return ("neo4j", ok)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futs = [
+                pool.submit(_write_es),
+                pool.submit(_write_qdrant),
+                pool.submit(_write_neo4j),
+            ]
+            for fut in as_completed(futs):
+                try:
+                    store, ok = fut.result()
+                    if store == "es":
+                        ack["es_doc_id"] = canonical_id if ok else None
+                        if not ok:
+                            ack["errors"].append("es_index_failed")
+                    elif store == "qdrant":
+                        ack["qdrant_stored"] = ok
+                        if not ok:
+                            ack["errors"].append("qdrant_upsert_failed")
+                    elif store == "neo4j":
+                        ack["neo4j_stored"] = ok
+                        if not ok:
+                            ack["errors"].append("neo4j_graph_failed")
+                except Exception as exc:
+                    logger.warning("[INGEST] secondary store error: %s", exc)
+                    ack["errors"].append(f"store_error:{exc!s:.60}")
 
         # Consider success if PostgreSQL succeeded (ES/Qdrant/Neo4j optional for report generation)
         success = ack["pg"]

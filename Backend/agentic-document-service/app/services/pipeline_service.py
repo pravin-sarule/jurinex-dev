@@ -630,6 +630,10 @@ class LegalCasePipelineService:
                   fc.content,
                   fc.file_id,
                   COALESCE(uf.originalname, fc.file_id::text) AS document_name,
+                  fc.page_start,
+                  fc.page_end,
+                  COALESCE(fc.heading, '') AS section_title,
+                  fc.chunk_index,
                   (cv.embedding <=> %s::vector) AS distance,
                   (1 / (1 + (cv.embedding <=> %s::vector))) AS similarity
                 FROM chunk_vectors cv
@@ -653,6 +657,10 @@ class LegalCasePipelineService:
                           fc.content,
                           fc.file_id,
                           COALESCE(uf.originalname, fc.file_id::text) AS document_name,
+                          fc.page_start,
+                          fc.page_end,
+                          COALESCE(fc.heading, '') AS section_title,
+                          fc.chunk_index,
                           ts_rank_cd(
                             to_tsvector(%s::regconfig, COALESCE(fc.content, '')),
                             websearch_to_tsquery(%s::regconfig, %s)
@@ -735,6 +743,57 @@ class LegalCasePipelineService:
             if len(deduped) >= 24:
                 break
         return " ".join(deduped)
+
+    def retrieve_learning_chunk_hits(
+        self,
+        request: QueryRequest,
+        file_ids: list[str],
+        *,
+        top_k: int = 5,
+        similarity_floor: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """
+        Vector (+ optional hybrid) chunk hits for teaching / grounding without running the answer LLM.
+        Rows include page_start, page_end, section_title, chunk_index when available from file_chunks.
+        """
+        valid_file_ids = [str(item) for item in file_ids if item]
+        if not valid_file_ids or not is_db_available():
+            return []
+        llm_config = get_llm_chat_config()
+        params = dict(self._resolve_retrieval_params(request, llm_config))
+        params["top_k"] = max(1, int(top_k))
+        # Learning mode should prefer legal-safe recall over strict semantic-only retrieval.
+        # Force hybrid retrieval (semantic + PostgreSQL full-text rank) for chunk grounding.
+        params["use_hybrid_search"] = True
+        params["use_rrf"] = True
+        query_embedding = embeddings.embed_text(request.query)
+        try:
+            rows = self._search_db_chunks(
+                request=request,
+                valid_file_ids=valid_file_ids,
+                query_embedding=query_embedding,
+                params=params,
+            )
+        except Exception:
+            logger.exception(
+                "[Pipeline] retrieve_learning_chunk_hits failed case_id=%s",
+                request.case_id,
+            )
+            return []
+        scored: list[dict[str, Any]] = []
+        for row in rows:
+            sim = float(row.get("similarity") or row.get("semantic_score") or row.get("combined_score") or 0.0)
+            if similarity_floor > 0 and sim < similarity_floor:
+                continue
+            item = dict(row)
+            item["_retrieval_score"] = sim
+            scored.append(item)
+        if not scored and rows and similarity_floor > 0:
+            for row in rows[: max(1, min(len(rows), top_k))]:
+                item = dict(row)
+                item["_retrieval_score"] = float(item.get("similarity") or item.get("combined_score") or 0.0)
+                scored.append(item)
+        return scored[:top_k]
 
     def answer_query_for_files(
         self,

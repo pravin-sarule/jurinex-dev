@@ -57,6 +57,19 @@ def run_pipeline(
     if pipeline_console:
         pipeline_console.log_pipeline_start(query, user_id, run_id=run_id, case_id=case_id or "")
 
+    # Extract state/jurisdiction from case file metadata (first file that has it)
+    # so LegalDimensionExtractor can map it to the correct High Court name.
+    _state = ""
+    for _f in (case_file_context or []):
+        _state = (
+            _f.get("state")
+            or _f.get("jurisdiction")
+            or _f.get("court_state")
+            or ""
+        ).strip()
+        if _state:
+            break
+
     context = AgentContext(
         query   = query,
         user_id = user_id,
@@ -66,6 +79,7 @@ def run_pipeline(
             "ingest_external":   ingest_external,
             "run_id":            run_id,
             "user_id":           user_id,
+            "state":             _state,
         },
     )
 

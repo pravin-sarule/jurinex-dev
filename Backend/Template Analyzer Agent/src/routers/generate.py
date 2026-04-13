@@ -652,32 +652,39 @@ _DATA_INDICATORS = (
 
 _GENERATION_SYSTEM = """You are an expert Indian legal document drafter with 25 years of experience across all areas of Indian law: Contract Act 1872, Transfer of Property Act 1882, Companies Act 2013, Family Law, BNSS/CrPC, CPC, and all other relevant statutes.
 
-Your task: Draft a complete, professional, legally enforceable template.
+YOUR TASK: Generate a BLANK TEMPLATE FORM — not a drafted case, not a filled document, not a specific instance.
+A template is a reusable blank form with pre-written standard legal language, fill-in blanks for variable fields, and instruction guidance for free-text sections.
 
-CRITICAL PLACEHOLDER RULES — follow EXACTLY:
-1. Every variable field MUST use __lowercase_snake_case__ format (double underscores on BOTH sides, NO capitals)
-   CORRECT:  __party1_name__  __agreement_date__  __rent_amount__  __property_address__  __governing_state__
-   WRONG:    __PartyName__    __PARTY_NAME__       __Party_Name__   [party name]         {party_name}
-2. ALWAYS use lowercase snake_case inside placeholders — never uppercase, never spaces
-3. Every single variable — names, dates, amounts, addresses, numbers, court names — MUST be a __placeholder__
-4. Use descriptive names: __party1_full_name__, __party1_address__, __monthly_rent_amount__, __agreement_start_date__
-5. Signature block must have: __party1_signature__, __party1_name__, __party1_date__, __witness1_name__, etc.
+TEMPLATE vs DRAFT — CRITICAL DISTINCTION:
+- WRONG (draft): "That the present petition relates to the FIR No. __fir_number__ registered at __police_station_name__ for offence under __section__ whereby the Petitioner was arrested on __arrest_date__."
+- CORRECT (template): "That the present Writ Petition is being filed by the Petitioner(s) under Article 226 / 227 of the Constitution of India, seeking issuance of a Writ of __writ_type__ for __brief_relief_description__.\n[Provide a brief synopsis of the case, summarizing the main facts, the cause of action, the grievance, and the relief sought. This section should give the Court a concise overview of the entire petition in approximately 2–3 paragraphs.]"
+
+PLACEHOLDER RULES — TWO TYPES ONLY:
+1. __field_name__ (double underscores, lowercase snake_case): Use ONLY for specific short fill-in data points — party names, dates, case numbers, court names, amounts, writ type, advocate details. Keep these minimal and only where a single specific value is needed.
+   CORRECT: __petitioner_name__  __high_court_name__  __writ_type__  __filing_date__  __advocate_name__
+   WRONG: __full_synopsis_paragraph__  __detailed_facts__  __all_grounds__  (never use for narrative/free-text)
+2. [Instruction text in square brackets]: Use for all free-text narrative sections — synopsis paragraphs, case-specific ground text, specific relief details, annexure descriptions. This tells the user WHAT to write, not a machine placeholder.
+   CORRECT: [Describe the impugned order/action and the relief sought — 2 to 3 paragraphs]
+   CORRECT: [Add additional grounds specific to your case]
+   CORRECT: [State specific relief sought]
 
 DOCUMENT STRUCTURE RULES:
-6. Output clean final document text only. Do NOT use markdown syntax, code fences, bullets for narration, or separator lines like ---.
-7. Start with the document title in uppercase, centered-style plain text on its own line.
-8. Use properly ordered main headings and sub-clauses only where appropriate for the document type.
-9. ALL formal section headings must be in uppercase or standard Indian court/registration style.
-10. Preserve formal Indian legal drafting tone, alignment logic, and document flow suitable for filing, review, stamping, notarization, or registration.
-11. LENGTH: Strictly follow the length instruction given in the user message. Do NOT add extra sections or padding beyond what the user asked for. If no length is specified, default to 3-5 pages.
-12. The document must be ready to use in Indian courts and for official registration.
-13. LANGUAGE: Strictly follow the language instruction given in the user message. If a non-English language is specified, write the ENTIRE document — every section, clause, heading, and paragraph — in that language. Do NOT default to English. Only __placeholder__ field names may remain in English.
-14. USER ANSWERS ARE BINDING: Every answer the user provided must be reflected exactly in the document. Do not invent, substitute, or ignore any user-provided detail.
-15. For court pleadings, applications, petitions, plaints, written statements, and family-court filings, use authentic Indian court-document structure: court heading, cause title, party description blocks, jurisdiction, facts, grounds, prayers, interim relief if applicable, verification, place, date, advocate block, and signature block.
-16. For deeds and agreements, use recital-driven Indian drafting style with proper operative clauses, schedules, witness blocks, and execution language.
-17. Keep numbering consistent. Never jump clause numbers, never repeat heading numbers, and never mix markdown headings with legal clause numbering.
-18. INDIAN COURTS ONLY: For any court/family filing, use only Indian court nomenclature and procedural structure. Do not use foreign styles (e.g., "Plaintiff v. Defendant" US style, "County Court", "Circuit Court", "Claimant", "Statement of Claim"). Use "Petitioner/Applicant" and "Respondent(s)" unless user explicitly requires another Indian label.
-19. WHEN REFERENCE DOCUMENTS ARE PROVIDED: treat them as strict scope boundaries. Do not introduce extra sections or extra fill-up placeholders beyond what those documents and user answers justify."""
+3. Output clean final document text only. Do NOT use markdown syntax, code fences, bullets for narration, or separator lines like ---.
+4. Start with the document title in uppercase, centered-style plain text on its own line.
+5. Use properly ordered main headings and sub-clauses only where appropriate for the document type.
+6. ALL formal section headings must be in uppercase or standard Indian court/registration style.
+7. Preserve formal Indian legal drafting tone, alignment logic, and document flow suitable for filing, review, stamping, notarization, or registration.
+8. LENGTH: Strictly follow the length instruction given in the user message. If no length is specified, default to 4-6 pages for court templates.
+9. The template must be ready to use in Indian courts and for official registration.
+10. LANGUAGE: Strictly follow the language instruction given in the user message. If a non-English language is specified, write the ENTIRE document in that language. Only __placeholder__ field names may remain in English.
+11. USER ANSWERS ARE BINDING for structure decisions — reflect clause selections, writ type, party types, and court type exactly.
+12. For court pleadings, applications, petitions, plaints, written statements, and family-court filings, use authentic Indian court-document structure: court heading, cause title, party description blocks, jurisdiction, facts, grounds, prayers, interim relief if applicable, verification, place, date, advocate block, and signature block.
+13. For WRIT PETITIONS specifically, you MUST include ALL sections in order and follow the MANDATORY WRIT PETITION SKELETON provided. Omitting any section is NOT acceptable.
+14. For deeds and agreements, use recital-driven Indian drafting style with proper operative clauses, schedules, witness blocks, and execution language.
+15. Keep numbering consistent. Never jump clause numbers, never repeat heading numbers.
+16. INDIAN COURTS ONLY: Use only Indian court nomenclature. Do not use foreign styles. Use "Petitioner/Applicant" and "Respondent(s)" unless user explicitly requires another label.
+17. WHEN REFERENCE DOCUMENTS ARE PROVIDED: treat them as strict scope boundaries. Do not introduce extra sections or placeholders beyond what those documents and user answers justify.
+18. PRE-WRITTEN STANDARD CLAUSES: For court documents, the standard boilerplate language (grounds A-D, verification text, declaration text, prayer introductory paragraph, interim prayer introductory paragraph) must be written out in full as standard legal text — do NOT replace standard legal prose with placeholders. Only blank out the case-specific variable data within those clauses."""
 
 
 async def _call_claude_json(system: str, user_msg: str) -> str:
@@ -726,6 +733,25 @@ def _call_claude_template_stream(system: str, user_msg: str):
 
 def _category_generation_guidance(doc_type: str) -> str:
     category = _infer_category(doc_type)
+
+    t = doc_type.lower()
+    is_writ = any(k in t for k in ("writ", "article 226", "article 227", "habeas corpus", "mandamus", "certiorari", "quo warranto"))
+
+    if is_writ:
+        return (
+            "WRIT PETITION BLANK TEMPLATE FORM REQUIREMENTS:\n"
+            "- Generate a BLANK FORM TEMPLATE — not a specific drafted case, not a filled document.\n"
+            "- Reproduce the MANDATORY WRIT PETITION SKELETON exactly as provided below.\n"
+            "- All pre-written standard legal clauses (Grounds A, B, C, D, F; Verification text; Declaration text; Prayer intro; Interim Prayer intro) must be written out in full with their standard language.\n"
+            "- Do NOT convert pre-written standard legal prose into placeholders or paraphrase them into case-specific narratives.\n"
+            "- Use __field_name__ ONLY for specific short data-point fill-ins (names, court name, writ type, state, advocate details).\n"
+            "- Use [instruction text in brackets] for free-text narrative guidance (synopsis body, case-specific grounds, specific relief direction).\n"
+            "- LIST OF DATES AND EVENTS: use __.__.20__ for date blanks and [instruction] for event descriptions.\n"
+            "- All section headings in ALL-CAPS. GROUNDS use A., B., C. alphabetical labels only.\n"
+            "- PRAYER uses (a)(b)(c); INTERIM PRAYER uses (i)(ii)(iii).\n"
+            "- The output must look like a print-ready blank legal form, exactly matching the structure and visual style of a standard Indian High Court Writ Petition template."
+        )
+
     if category in {"Court", "Criminal"}:
         return (
             "COURT FORMAT REQUIREMENTS:\n"
@@ -762,6 +788,150 @@ def _court_pleading_skeleton(doc_type: str) -> str:
     category = _infer_category(doc_type)
     if category not in {"Court", "Family", "Criminal"}:
         return ""
+
+    t = doc_type.lower()
+    is_writ = any(k in t for k in ("writ", "article 226", "article 227", "habeas corpus", "mandamus", "certiorari", "quo warranto"))
+
+    if is_writ:
+        return (
+            "MANDATORY WRIT PETITION BLANK TEMPLATE FORM — REPRODUCE THIS STRUCTURE EXACTLY:\n\n"
+            "--- SECTION 1: COURT HEADING (centered) ---\n"
+            "IN THE HON'BLE HIGH COURT OF __high_court_name__\n"
+            "AT __high_court_bench__\n"
+            "(Under Article 226 / 227 of the Constitution of India)\n"
+            "WRIT PETITION (CIVIL / CRIMINAL) NO. ________ OF 20____\n\n"
+            "--- SECTION 2: IN THE MATTER OF ---\n"
+            "IN THE MATTER OF:\n\n"
+            "1. __petitioner1_name__,\n"
+            "   S/o / D/o / W/o __petitioner1_guardian_name__,\n"
+            "   Aged: ____ years, Occupation: __petitioner1_occupation__,\n"
+            "   R/o: __petitioner1_address__,\n"
+            "   District: __petitioner1_district__, State: __petitioner1_state__.\n\n"
+            "2. __petitioner2_name__ (if any additional petitioner),\n"
+            "   (Complete address as above)\n\n"
+            "                                                    ......... PETITIONER(S)\n\n"
+            "--- SECTION 3: VERSUS ---\n"
+            "VERSUS\n\n"
+            "1. The State of __respondent_state__,\n"
+            "   Through its Principal Secretary,\n"
+            "   Department of __department_name__,\n"
+            "   Secretariat, __secretariat_location__.\n\n"
+            "2. __respondent2_name__,\n"
+            "   (Designation and complete address)\n\n"
+            "3. __respondent3_name__,\n"
+            "   (Designation and complete address)\n\n"
+            "                                                    ......... RESPONDENT(S)\n\n"
+            "--- SECTION 4: PETITION TITLE ---\n"
+            "WRIT PETITION UNDER ARTICLE 226 / 227 OF\n"
+            "THE CONSTITUTION OF INDIA\n"
+            "(For issuance of a Writ of Mandamus / Certiorari / Prohibition / Habeas Corpus / Quo Warranto)\n\n"
+            "MOST RESPECTFULLY SHOWETH:\n\n"
+            "--- SECTION 5: SYNOPSIS ---\n"
+            "SYNOPSIS\n\n"
+            "        The present Writ Petition is being filed by the Petitioner(s) under Article 226 / 227 of the Constitution of India, seeking issuance of a Writ of __writ_type__ (Mandamus / Certiorari / Prohibition / Habeas Corpus / Quo Warranto) for __brief_relief_description__.\n\n"
+            "        [Provide a brief synopsis of the case, summarizing the main facts, the cause of action, the grievance, and the relief sought. This section should give the Court a concise overview of the entire petition in approximately 2–3 paragraphs.]\n\n"
+            "--- SECTION 6: LIST OF DATES AND EVENTS ---\n"
+            "LIST OF DATES AND EVENTS\n\n"
+            "Date                    Event / Particulars\n"
+            "________________________________________________________________________\n\n"
+            "__.__.20__              [Describe event/fact chronologically]\n"
+            "__.__.20__              [Next chronological event]\n"
+            "__.__.20__              [Order/decision impugned, if any]\n"
+            "__.__.20__              [Subsequent events, if any]\n"
+            "__.__.20__              [Filing of the present petition]\n\n"
+            "--- SECTION 7: GROUNDS ---\n"
+            "GROUNDS\n\n"
+            "The Petitioner(s) is/are filing the present Writ Petition on the following grounds, which are taken without prejudice to each other:\n\n"
+            "A.\n"
+            "        BECAUSE the impugned order / action / inaction of the Respondent(s) is arbitrary, illegal, and violative of the fundamental rights of the Petitioner(s) guaranteed under Articles 14, 19, and 21 of the Constitution of India.\n\n"
+            "B.\n"
+            "        BECAUSE the Respondent(s) acted in contravention of the principles of natural justice by failing to provide the Petitioner(s) an adequate opportunity of being heard before passing the impugned order.\n\n"
+            "C.\n"
+            "        BECAUSE the impugned order / action is without jurisdiction and has been passed / taken without any authority of law.\n\n"
+            "D.\n"
+            "        BECAUSE the action / decision of the Respondent(s) is vitiated by malice in law and malice in fact, and is a colourable exercise of power.\n\n"
+            "E.\n"
+            "        BECAUSE _________________________________________________________________________ [Add additional grounds specific to your case].\n\n"
+            "F.\n"
+            "        BECAUSE the Petitioner(s) has/have no other equally efficacious alternative remedy available except to approach this Hon'ble Court under Article 226 / 227 of the Constitution of India.\n\n"
+            "--- SECTION 8: PRAYER ---\n"
+            "PRAYER\n\n"
+            "        In view of the facts and circumstances stated above, it is most respectfully prayed that this Hon'ble Court may graciously be pleased to:\n\n"
+            "(a)\n"
+            "        Issue an appropriate Writ, Order or Direction, more particularly a Writ of __writ_type__ (Mandamus / Certiorari / Prohibition / Habeas Corpus / Quo Warranto), thereby _________________________________________________ [state specific relief sought];\n\n"
+            "(b)\n"
+            "        Set aside / Quash the impugned order dated __.__.20__ passed by the Respondent No. ____ (Annexure P-____);\n\n"
+            "(c)\n"
+            "        Direct the Respondent(s) to _________________________________________________ [any other specific direction sought];\n\n"
+            "(d)\n"
+            "        Award costs of this petition to the Petitioner(s);\n\n"
+            "(e)\n"
+            "        Pass such other and further order(s) as this Hon'ble Court may deem fit and proper in the facts and circumstances of the present case.\n\n"
+            "--- SECTION 9: INTERIM PRAYER ---\n"
+            "INTERIM PRAYER\n\n"
+            "        Pending the hearing and final disposal of the present Writ Petition, it is most respectfully prayed that this Hon'ble Court may graciously be pleased to:\n\n"
+            "(i)\n"
+            "        Stay the operation and implementation of the impugned order dated __.__.20__ passed by the Respondent No. ____;\n\n"
+            "(ii)\n"
+            "        Direct the Respondent(s) to maintain status quo with respect to _________________________________________;\n\n"
+            "(iii)\n"
+            "        Pass such other interim order(s) as this Hon'ble Court may deem fit and proper.\n\n"
+            "--- SECTION 10: DECLARATION ---\n"
+            "DECLARATION\n\n"
+            "        It is hereby declared that no other petition, suit, appeal, or proceeding pertaining to the same cause of action and/or seeking similar relief has been filed by the Petitioner(s) before this Hon'ble Court or any other Court / Tribunal / Authority.\n\n"
+            "Place: __filing_place__\n"
+            "Date: __.__.20__\n\n"
+            "                                                    PETITIONER(S)\n"
+            "                                                    Through Counsel\n\n"
+            "                                        ________________________\n"
+            "                                        ADVOCATE FOR THE PETITIONER(S)\n"
+            "                                        Enrollment No.: __enrollment_number__\n"
+            "Address: __advocate_address__\n"
+            "                                        Phone: __advocate_phone__\n"
+            "                                        Email: __advocate_email__\n\n"
+            "--- SECTION 11: VERIFICATION ---\n"
+            "VERIFICATION\n\n"
+            "        I, __petitioner1_name__, S/o / D/o / W/o __petitioner1_guardian_name__, aged about ____ years, R/o __petitioner1_address__, the Petitioner No. ____ above named, do hereby solemnly affirm and state as under:\n\n"
+            "1.\n"
+            "        That the contents of the above Writ Petition have been drafted under my instructions and I have read and understood the same.\n\n"
+            "2.\n"
+            "        That the facts stated in paragraphs ____ to ____ of the Petition are true and correct to my personal knowledge, and those stated in paragraphs ____ to ____ are based on information received and believed to be true, and those stated in paragraphs ____ to ____ are based on legal advice received and believed to be correct.\n\n"
+            "3.\n"
+            "        That nothing material has been concealed or suppressed from this Hon'ble Court.\n\n"
+            "Verified at __verification_place__ on this the ____ day of __verification_month__, 20__.\n\n"
+            "                                                    DEPONENT / PETITIONER\n\n"
+            "--- SECTION 12: MEMO OF PARTIES ---\n"
+            "MEMO OF PARTIES\n\n"
+            "PETITIONER(S):\n\n"
+            "1. __petitioner1_name__, S/o / D/o / W/o __petitioner1_guardian_name__, Aged: ____ years, Occupation: __petitioner1_occupation__, R/o: __petitioner1_address__, District: __petitioner1_district__, State: __petitioner1_state__.\n\n"
+            "2. __petitioner2_name__ (if applicable, with full details as above).\n\n"
+            "RESPONDENT(S):\n\n"
+            "1. The State of __respondent_state__, Through its Principal Secretary, Department of __department_name__, Secretariat, __secretariat_location__.\n\n"
+            "2. __respondent2_name__, (Designation), (Complete official address).\n\n"
+            "3. __respondent3_name__, (Designation), (Complete official address).\n\n"
+            "--- SECTION 13: INDEX ---\n"
+            "INDEX\n\n"
+            "S. No.    Particulars                                         Page No.\n"
+            "________________________________________________________________________\n\n"
+            "1.        Memo of Parties                                     ____\n"
+            "2.        Synopsis and List of Dates                          ____\n"
+            "3.        Writ Petition with Affidavit                        ____\n"
+            "4.        Verification                                        ____\n"
+            "5.        Annexure P-1: ________________________________       ____\n"
+            "6.        Annexure P-2: ________________________________       ____\n"
+            "7.        Annexure P-3: ________________________________       ____\n"
+            "8.        Vakalatnama                                         ____\n"
+            "9.        Court Fee                                           ____\n\n"
+            "IMPORTANT OUTPUT RULES:\n"
+            "- Reproduce ALL 13 sections above in full.\n"
+            "- Keep all pre-written standard legal language exactly as shown — do NOT paraphrase or expand it into case-specific prose.\n"
+            "- Use __field_name__ ONLY for the specific data-point placeholders shown above (names, state, court, writ type, etc.).\n"
+            "- Use [instruction text] for free-text guidance sections as shown.\n"
+            "- Use __ (blank underscores) exactly as shown for fill-in blanks within pre-written clauses.\n"
+            "- Do NOT invent new placeholder fields beyond what is shown in this skeleton.\n"
+            "- Do NOT convert pre-written grounds (A, B, C, D, F) into placeholder fields."
+        )
+
     return (
         "MANDATORY INDIAN COURT PLEADING SKELETON (DO NOT SKIP/REORDER WITHOUT LEGAL REASON):\n"
         "1. COURT HEADING (e.g., IN THE FAMILY COURT AT __district_name__, __state_name__)\n"
@@ -838,10 +1008,21 @@ def _build_generation_user_message(body: GenerateTemplateRequest) -> str:
     court_skeleton = _court_pleading_skeleton(body.document_type)
     reference_block = _reference_document_block(body.reference_document_text, body.reference_document_name)
     reference_scope_limits = _reference_scope_rules(body.reference_document_text)
-    return f"""Draft a complete "{body.document_type}" legal template for Indian jurisdiction.
+
+    t = body.document_type.lower()
+    is_writ = any(k in t for k in ("writ", "article 226", "article 227", "habeas corpus", "mandamus", "certiorari", "quo warranto"))
+    template_type_directive = (
+        "*** THIS MUST BE A BLANK TEMPLATE FORM — not a drafted case, not a filled document. ***\n"
+        "*** Reproduce the MANDATORY SKELETON below EXACTLY. Do NOT invent case-specific facts or narratives. ***\n"
+        "*** Pre-written standard legal clauses must be kept verbatim. Use __field__ only for short data-point blanks. ***\n"
+        "*** Use [instruction text] for all free-text guidance sections. ***"
+    ) if is_writ else ""
+
+    return f"""Generate a blank "{body.document_type}" legal template form for Indian jurisdiction.
 
 *** {lang_directive} ***
 {f"*** {page_directive} ***" if page_directive else ""}
+{template_type_directive}
 
 {category_guidance}
 {court_skeleton if court_skeleton else ""}
@@ -849,20 +1030,19 @@ def _build_generation_user_message(body: GenerateTemplateRequest) -> str:
 {reference_block}
 {reference_scope_limits if reference_scope_limits else ""}
 
-BINDING USER REQUIREMENTS — YOU MUST FOLLOW EVERY ANSWER EXACTLY:
+USER STRUCTURE REQUIREMENTS:
 {chr(10).join(qa_lines)}
 
 IMPORTANT INSTRUCTIONS:
-1. Every answer above is a strict requirement — reflect each one exactly in the document.
-2. Do not add clauses, sections, or content that contradicts what the user specified.
-3. Do not output markdown headings, markdown bullets, separator lines, bold markers (**), commentary, notes to the user, or drafting explanations.
+1. Generate a REUSABLE BLANK FORM TEMPLATE — not a specific case draft.
+2. Reflect user structure choices (writ type, court, party types, clauses) in the template structure — do not invent specific case facts.
+3. Do not output markdown headings, markdown bullets, separator lines, bold markers (**), commentary, or drafting explanations.
 4. Use authentic Indian legal format for the relevant document category.
-5. Respect the page count and level of detail exactly.
-6. If a reference document is provided, keep the template limited to the scope and data density supported by that document.
+5. If a reference document is provided, keep the template limited to that scope.
   • Jurisdiction: {body.jurisdiction}
   • Language: {selected_language}
 
-Use __placeholder__ syntax for all variable fields throughout the document."""
+Use __field_name__ for specific short data-point placeholders and [instruction text] for free-text guidance sections."""
 
 
 def _make_question(
@@ -1018,31 +1198,51 @@ def _category_mandatory_questions(category: str) -> List[Dict[str, Any]]:
             ),
             _make_question(
                 "dispute_nature",
-                "Nature of dispute?",
+                "Nature of dispute / writ type?",
                 "single_select",
                 [
-                    "Constitutional / Writ",
+                    "Writ of Mandamus (enforce a duty)",
+                    "Writ of Certiorari (quash an order)",
+                    "Writ of Prohibition (prevent excess jurisdiction)",
+                    "Writ of Habeas Corpus (challenge detention)",
+                    "Writ of Quo Warranto (challenge public office)",
                     "Property dispute",
                     "Contract / Commercial",
-                    "Employment / Service",
-                    "Consumer",
-                    "Regulatory / Public law",
+                    "Employment / Service matter",
+                    "Consumer / Regulatory",
                 ],
-                "Drives prayer structure and issue-specific sections.",
+                "Determines writ type, prayer structure, and issue-specific grounds.",
             ),
             _make_question(
                 "opposing_party_type",
-                "Who is the opposing party?",
+                "Who is the opposing party (Respondent)?",
                 "single_select",
                 [
-                    "Central Government",
                     "State Government",
+                    "Central Government",
+                    "State Government + Local Authority",
+                    "Central Government + Statutory Body",
                     "Authority / Corporation",
                     "Private Individual",
                     "Private Company",
-                    "Multiple Respondents",
+                    "Multiple Respondents (Government + Private)",
                 ],
-                "Determines party-capacity language and pleading clauses.",
+                "Determines respondent block structure and party-capacity clauses.",
+            ),
+            _make_question(
+                "grounds_to_include",
+                "Which grounds should be included?",
+                "multi_select",
+                [
+                    "Violation of Articles 14, 19, 21 (Fundamental Rights)",
+                    "Violation of natural justice / no hearing",
+                    "Without jurisdiction / without authority of law",
+                    "Malice in law / colourable exercise of power",
+                    "Non-compliance with statutory mandate",
+                    "Legitimate expectation violated",
+                    "No alternative remedy available",
+                ],
+                "Selects which GROUNDS (A., B., C.…) appear in the template.",
             ),
         ],
     }
@@ -1375,7 +1575,7 @@ def _infer_category(doc_type: str) -> str:
     t = doc_type.lower()
     if any(k in t for k in ("lease", "rent", "sale deed", "gift deed", "property", "mortgage", "licence")): return "Property"
     if any(k in t for k in ("employment", "offer letter", "appointment", "termination", "non-compete")): return "Employment"
-    if any(k in t for k in ("bail", "writ", "petition", "suit", "complaint", "plaint", "cpc", "crpc")): return "Court"
+    if any(k in t for k in ("writ", "article 226", "article 227", "habeas corpus", "mandamus", "certiorari", "quo warranto", "bail", "petition", "suit", "complaint", "plaint", "cpc", "crpc", "bnss")): return "Court"
     if any(k in t for k in ("will", "testament", "divorce", "custody", "maintenance", "family", "marriage")): return "Family"
     if any(k in t for k in ("trust", "charity", "society", "foundation")): return "Trust"
     if any(k in t for k in ("nda", "non-disclosure", "service", "mou", "joint venture", "partnership", "shareholders", "agreement", "contract")): return "Agreement"

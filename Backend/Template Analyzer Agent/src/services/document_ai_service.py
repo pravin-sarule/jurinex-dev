@@ -5,7 +5,7 @@ import asyncio
 import io
 import datetime
 from pypdf import PdfReader, PdfWriter
-from google.cloud import documentai
+import google.cloud.documentai as documentai
 from google.cloud import storage
 from google.oauth2 import service_account
 from ..config import settings

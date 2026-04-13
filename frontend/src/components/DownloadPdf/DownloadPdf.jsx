@@ -56,6 +56,8 @@ const DownloadPdf = ({ markdownOutputRef, contentRef, questionTitle }) => {
       ? '"Noto Sans Devanagari", "Times New Roman", Times, serif'
       : '"Times New Roman", Times, Georgia, serif';
 
+    const reportDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+
     // Clone and strip buttons / conversational openers
     const cloned = sourceElement.cloneNode(true);
     cloned.querySelectorAll('button').forEach((b) => b.remove());
@@ -235,9 +237,59 @@ const DownloadPdf = ({ markdownOutputRef, contentRef, questionTitle }) => {
   hr { border: none; border-top: 1px solid #ccc; margin: 18pt 0; }
   img { max-width: 100%; height: auto; page-break-inside: avoid; break-inside: avoid; }
   .html2pdf__page-break { page-break-before: always; break-before: page; }
+
+  /* ── Jurinex Analysis header ── */
+  .jurinex-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10pt 0 10pt;
+    margin-bottom: 18pt;
+    border-bottom: 2pt solid #21C1B6;
+  }
+  .jurinex-header-left {
+    display: flex;
+    align-items: baseline;
+    gap: 8pt;
+  }
+  .jurinex-logo {
+    font-family: ${fontStack};
+    font-size: 18pt;
+    font-weight: 800;
+    color: #21C1B6;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .jurinex-tag {
+    font-family: ${fontStack};
+    font-size: 10pt;
+    font-weight: 600;
+    color: #6b7280;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .jurinex-header-right {
+    font-family: ${fontStack};
+    font-size: 9pt;
+    color: #9ca3af;
+    text-align: right;
+    line-height: 1.5;
+  }
 </style>
 </head>
-<body>${cloned.innerHTML}</body>
+<body>
+<div class="jurinex-header">
+  <div class="jurinex-header-left">
+    <span class="jurinex-logo">JuriNex</span>
+    <span class="jurinex-tag">Analysis</span>
+  </div>
+  <div class="jurinex-header-right">
+    ${questionTitle ? `<div style="font-weight:600;color:#374151;font-size:10pt;">${questionTitle.substring(0, 60)}${questionTitle.length > 60 ? '…' : ''}</div>` : ''}
+    <div>${reportDate}</div>
+  </div>
+</div>
+${cloned.innerHTML}
+</body>
 </html>`;
   };
 
@@ -339,6 +391,8 @@ const DownloadPdf = ({ markdownOutputRef, contentRef, questionTitle }) => {
       const fontStack = hasDevanagari
         ? '"Noto Sans Devanagari", "Times New Roman", Times, serif'
         : '"Times New Roman", Times, Georgia, serif';
+
+      const printDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
       const htmlContent = `<!DOCTYPE html>
 <html lang="${hasDevanagari ? 'mr' : 'en'}">
@@ -486,9 +540,57 @@ const DownloadPdf = ({ markdownOutputRef, contentRef, questionTitle }) => {
     a { color: #0056b3; text-decoration: underline; }
     hr { border: none; border-top: 1px solid #ccc; margin: 18pt 0; }
     img { max-width: 100%; height: auto; page-break-inside: avoid; }
+
+    /* ── Jurinex Analysis header ── */
+    .jurinex-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10pt 0 10pt;
+      margin-bottom: 18pt;
+      border-bottom: 2pt solid #21C1B6;
+    }
+    .jurinex-header-left {
+      display: flex;
+      align-items: baseline;
+      gap: 8pt;
+    }
+    .jurinex-logo {
+      font-family: ${fontStack};
+      font-size: 18pt;
+      font-weight: 800;
+      color: #21C1B6;
+      letter-spacing: -0.02em;
+      line-height: 1;
+    }
+    .jurinex-tag {
+      font-family: ${fontStack};
+      font-size: 10pt;
+      font-weight: 600;
+      color: #6b7280;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .jurinex-header-right {
+      font-family: ${fontStack};
+      font-size: 9pt;
+      color: #9ca3af;
+      text-align: right;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
+  <div class="jurinex-header">
+    <div class="jurinex-header-left">
+      <span class="jurinex-logo">JuriNex</span>
+      <span class="jurinex-tag">Analysis</span>
+    </div>
+    <div class="jurinex-header-right">
+      ${questionTitle ? `<div style="font-weight:600;color:#374151;font-size:10pt;">${questionTitle.substring(0, 60)}${questionTitle.length > 60 ? '…' : ''}</div>` : ''}
+      <div>${printDate}</div>
+    </div>
+  </div>
   ${printableClone.innerHTML}
   <script>
     window.onload = function () {

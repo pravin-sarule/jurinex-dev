@@ -222,12 +222,34 @@ class ChatSession(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
+class LearningQuestionAnswerPayload(BaseModel):
+    question_id: str
+    selected_answer: str
+    session_id: str | None = None
+    time_taken: float | None = None
+
+
+class LearningQuestionGeneratePayload(BaseModel):
+    session_id: str | None = None
+    concept: str = ""
+    difficulty: str = "intermediate"
+    question_type: str = Field(
+        default="comprehension",
+        validation_alias=AliasChoices("question_type", "questionType"),
+    )
+
+
 class FolderChatRequest(BaseModel):
     question: str | None = None
     session_id: str | None = None
     llm_name: str | None = None
     prompt_label: str | None = None
     secret_id: str | None = None
+    learning_mode: bool = False
+    adversarial_mode: bool = False
+    document_context: str | None = None
+    context_page: int | None = None
+    context_selection: str | None = None
     max_output_tokens: int | None = Field(
         default=None,
         validation_alias=AliasChoices("max_output_tokens", "maxOutputTokens"),
@@ -244,6 +266,7 @@ class FolderChatResponse(BaseModel):
     case_id: str
     session_id: str
     answer: str
+    learning_response: dict[str, Any] | None = None
     citations: list[QueryCitation] = Field(default_factory=list)
     answer_segments: list[AnswerSegment] = Field(default_factory=list)
     stored_chat_count: int = 0

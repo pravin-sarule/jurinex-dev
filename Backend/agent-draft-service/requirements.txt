@@ -16,6 +16,7 @@ python-multipart
 PyJWT
 # DOCX export (assemble + download); premailer inlines template CSS so Google Docs matches static preview
 python-docx
+docxtpl
 htmldocx
 premailer
 beautifulsoup4

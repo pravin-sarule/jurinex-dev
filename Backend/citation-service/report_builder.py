@@ -1753,6 +1753,71 @@ def _apply_three_layer_verification(
     }
 
 
+# ─── Relevance badge & dimension justification ────────────────────────────────
+
+def _compute_relevance_badge(j: Dict[str, Any], audit_info: Optional[Dict[str, Any]]) -> str:
+    """
+    Return HIGH / MEDIUM / LOW relevance badge.
+
+    HIGH   — VERIFIED SC judgment with confidence ≥ 80
+    MEDIUM — VERIFIED / VERIFIED_WITH_WARNINGS with confidence ≥ 60, or NEEDS_REVIEW ≥ 70
+    LOW    — everything else
+    """
+    audit_status = (
+        (audit_info or {}).get("audit_status")
+        or j.get("audit_status")
+        or ""
+    ).upper()
+    confidence = 0
+    try:
+        confidence = int(
+            (audit_info or {}).get("final_confidence")
+            or j.get("audit_confidence")
+            or 0
+        )
+    except (TypeError, ValueError):
+        confidence = 0
+
+    court = (j.get("court") or "").lower()
+    is_sc = "supreme court" in court
+
+    if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS") and confidence >= 80 and is_sc:
+        return "HIGH"
+    if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS") and confidence >= 60:
+        return "MEDIUM" if not is_sc else "HIGH"
+    if audit_status == "NEEDS_REVIEW" and confidence >= 70:
+        return "MEDIUM"
+    if audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS"):
+        return "MEDIUM"
+    return "LOW"
+
+
+def _dimension_justification(j: Dict[str, Any], dimensions: Optional[List[Dict[str, Any]]]) -> str:
+    """
+    Build a one-line justification explaining which Legal Dimension this citation covers.
+    Prefers stored dimension_name; falls back to dimension lookup by id.
+    """
+    dim_name = (j.get("dimension_name") or "").strip()
+    if not dim_name:
+        # Try to resolve from citation_data (stored as JSONB in PG)
+        cd = j.get("citation_data") or {}
+        if isinstance(cd, dict):
+            dim_name = (cd.get("dimension_name") or "").strip()
+
+    if dim_name:
+        return f"This citation addresses {dim_name}, which is a core issue in your case."
+
+    dim_id = j.get("dimension_id")
+    if dim_id is not None and dimensions:
+        for d in dimensions:
+            if d.get("dimension_id") == dim_id:
+                name = (d.get("name") or "").strip()
+                if name:
+                    return f"This citation addresses {name}, which is a core issue in your case."
+
+    return "This citation is directly relevant to your case query."
+
+
 # ─── Map judgement → citation object ─────────────────────────────────────────
 
 def _judgement_to_citation(
@@ -1761,6 +1826,7 @@ def _judgement_to_citation(
     query: str,
     audit_info: Optional[Dict[str, Any]] = None,
     explicit_perspective: str = "",
+    dimensions: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Map DB judgement row to one citation object in frontend format (all 10 fields)."""
     cid        = j.get("id") or str(uuid.uuid4())
@@ -1971,7 +2037,9 @@ def _judgement_to_citation(
         except Exception as _he:
             logger.warning("[HEADNOTE] Generation failed for %s: %s", case_name[:60], _he)
 
-    party_badge = _PARTY_BADGE.get(argument_party, _PARTY_BADGE["neutral"])
+    party_badge      = _PARTY_BADGE.get(argument_party, _PARTY_BADGE["neutral"])
+    relevance_badge  = _compute_relevance_badge(j, audit_info)
+    dim_justification = _dimension_justification(j, dimensions)
 
     return {
         "id":                       f"cit-{index:03d}",
@@ -2049,6 +2117,12 @@ def _judgement_to_citation(
         "ikCiteList":               _format_ik_cite_list(j.get("ik_cite_list") or []),
         "ikCitedByList":            _format_ik_cite_list(j.get("ik_cited_by_list") or []),
         "ikDocMeta":                j.get("ik_doc_meta") or {},
+        # ── Dimension & relevance fields ───────────────────────────────────
+        "relevanceBadge":           relevance_badge,
+        "dimensionJustification":   dim_justification,
+        "dimensionId":              j.get("dimension_id"),
+        "dimensionName":            j.get("dimension_name") or "",
+        "dimensionTags":            j.get("dimension_tags") or [],
     }
 
 
@@ -2132,6 +2206,7 @@ def build_report_from_judgements(
     search_keywords_by_route: Optional[Dict[str, List[str]]] = None,
     perspective: Optional[str] = None,
     run_id: Optional[str] = None,
+    dimensions: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Load judgements from DB, enrich with Gemini when fields are blank,
@@ -2186,6 +2261,7 @@ def build_report_from_judgements(
             j, i + 1, query,
             audit_info=audit_info,
             explicit_perspective=_perspective,
+            dimensions=dimensions,
         )
 
         # ── PERSPECTIVE FILTER ────────────────────────────────────────────────
@@ -2331,6 +2407,12 @@ def build_report_from_judgements(
             "ikCiteList":               [],
             "ikCitedByList":            [],
             "ikDocMeta":                {},
+            # Dimension & relevance
+            "relevanceBadge":           "LOW",
+            "dimensionJustification":   "This citation point could not be filled; further research needed.",
+            "dimensionId":              None,
+            "dimensionName":            "",
+            "dimensionTags":            [],
         })
 
     # Renumber after sorting + padding
@@ -2360,6 +2442,35 @@ def build_report_from_judgements(
         )
         logger.warning("[PERSPECTIVE] %s", perspective_warn)
 
+    # ── Dimension-grouped output ──────────────────────────────────────────────
+    # Build dimensionGroups: {dimension_id → {name, reasoning, citations: [...]}}
+    dimension_groups: Dict[str, Any] = {}
+    ungrouped: List[Dict[str, Any]] = []
+    _dim_meta: Dict[int, Dict[str, Any]] = {
+        d.get("dimension_id"): d for d in (dimensions or []) if d.get("dimension_id") is not None
+    }
+    for cit in citations:
+        did = cit.get("dimensionId")
+        if did is not None:
+            key = str(did)
+            if key not in dimension_groups:
+                d_meta = _dim_meta.get(did) or {}
+                dimension_groups[key] = {
+                    "dimension_id":  did,
+                    "name":          cit.get("dimensionName") or d_meta.get("name") or f"Dimension {did}",
+                    "reasoning":     d_meta.get("reasoning") or "",
+                    "citations":     [],
+                }
+            dimension_groups[key]["citations"].append(cit.get("id"))
+        else:
+            ungrouped.append(cit.get("id"))
+
+    # Relevance breakdown
+    relevance_counts: Dict[str, int] = {}
+    for c in citations:
+        badge = c.get("relevanceBadge") or "LOW"
+        relevance_counts[badge] = relevance_counts.get(badge, 0) + 1
+
     result = {
         "citations":              citations,
         "generatedAt":            datetime.utcnow().strftime("%d %B %Y"),
@@ -2371,6 +2482,11 @@ def build_report_from_judgements(
         "perspective":            _perspective or "all",
         "perspectiveCounts":      perspective_counts,
         "perspectiveWarning":     perspective_warn,
+        # Dimension grouping
+        "dimensionGroups":        list(dimension_groups.values()),
+        "ungroupedCitationIds":   ungrouped,
+        # Relevance distribution
+        "relevanceCounts":        relevance_counts,
         "reportNote": (
             f"This report contains {len(citations)} citation point(s) (target 10). "
             "Each point shows where that relevant case was fetched from: Indian Kanoon, "

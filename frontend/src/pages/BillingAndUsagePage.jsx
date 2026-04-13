@@ -5,6 +5,12 @@ import html2pdf from 'html2pdf.js';
 import { USER_RESOURCES_SERVICE_URL, PAYMENT_SERVICE_URL, FILES_SERVICE_URL } from '../config/apiConfig';
 import LLMUsageComponent from '../components/LLMUsageComponent';
 import { getPlanDisplayName } from '../utils/planUtils';
+import jurinexLogoUrl from '../assets/JuriNex_gavel_logo.png';
+import {
+  buildProformaBillingHtml,
+  getDefaultCompanyLines,
+  getCustomerLinesFromUserInfo,
+} from '../utils/billingProformaTemplate';
 
 const api = {
  getUserPlanDetails: async () => {
@@ -21,7 +27,7 @@ const api = {
  },
  fetchPaymentHistory: async () => {
  const token = localStorage.getItem('token');
- const response = await fetch(`${PAYMENT_SERVICE_URL}/history`, {
+ const response = await fetch(`${PAYMENT_SERVICE_URL}/api/payments/history`, {
  headers: {
  'Authorization': `Bearer ${token}`,
  'Content-Type': 'application/json'
@@ -342,6 +348,57 @@ const BillingAndUsagePage = () => {
  return formatCurrency(amount, transaction.currency || 'INR');
  };
 
+ const getTransactionAmountRupees = (transaction) => {
+ if (transaction.amount === null || transaction.amount === undefined) return 0;
+ let amount = parseFloat(transaction.amount);
+ if (amount > 1000 && !transaction.amount_in_rupees) {
+ amount = amount / 100;
+ }
+ return amount;
+ };
+
+ const getBillingPartyContext = () => {
+ try {
+ const raw = localStorage.getItem('userInfo');
+ const userInfo = raw ? JSON.parse(raw) : {};
+ const name =
+ userInfo.name ||
+ userInfo.fullName ||
+ (userInfo.email ? String(userInfo.email).split('@')[0] : null) ||
+ 'Customer';
+ return {
+ name,
+ lines: getCustomerLinesFromUserInfo(userInfo),
+ };
+ } catch {
+ return { name: 'Customer', lines: [] };
+ }
+ };
+
+ const html2pdfBillingOptions = (filename) => ({
+ margin: [8, 8, 8, 8],
+ filename,
+ image: { type: 'jpeg', quality: 0.98 },
+ html2canvas: { scale: 2, useCORS: true, logging: false },
+ jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+ pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
+ });
+
+ const downloadBillingPdf = (kind, transaction) => {
+ const amountRupees = getTransactionAmountRupees(transaction);
+ const html = buildProformaBillingHtml({
+ logoUrl: jurinexLogoUrl,
+ kind,
+ transaction,
+ amountRupees,
+ company: { name: 'JuriNex', lines: getDefaultCompanyLines() },
+ customer: getBillingPartyContext(),
+ });
+ const prefix = kind === 'invoice' ? 'invoice' : 'receipt';
+ const filename = `${prefix}_${transaction.id}_${Date.now()}.pdf`;
+ html2pdf().set(html2pdfBillingOptions(filename)).from(html, 'string').save();
+ };
+
  const exportTransactionsToCSV = () => {
  if (transactions.length === 0) {
  alert('No transactions to export.');
@@ -374,26 +431,8 @@ const BillingAndUsagePage = () => {
  document.body.removeChild(link);
  };
 
- const downloadReceipt = (transaction) => {
- const amountDisplay = getTransactionAmountDisplay(transaction);
- const receiptHtml = `
- <div style="font-family: Arial, sans-serif; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #ccc; border-radius: 10px;">
- <div style="text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 2px solid #333;">
- <h1 style="color: #000; font-size: 32px; margin: 0;">PAYMENT RECEIPT</h1>
- </div>
- <table style="width: 100%; margin-bottom: 20px;">
- <tr><td style="padding: 10px 0; color: #000; font-weight: bold;">Receipt Number:</td><td style="color: #000;">${transaction.razorpay_payment_id || transaction.id}</td></tr>
- <tr><td style="padding: 10px 0; color: #000; font-weight: bold;">Date:</td><td style="color: #000;">${formatDate(transaction.payment_date)}</td></tr>
- <tr><td style="padding: 10px 0; color: #000; font-weight: bold;">Description:</td><td style="color: #000;">${transaction.plan_name}</td></tr>
- <tr><td style="padding: 10px 0; color: #000; font-weight: bold;">Payment Method:</td><td style="color: #000;">${transaction.payment_method || 'N/A'}</td></tr>
- </table>
- <div style="border-top: 2px solid #333; padding-top: 25px; text-align: right;">
- <p style="font-size: 24px; color: #000;"><strong>TOTAL PAID:</strong> ${amountDisplay}</p>
- </div>
- </div>
- `;
- html2pdf().from(receiptHtml).save(`receipt_${transaction.id}_${Date.now()}.pdf`);
- };
+ const downloadReceipt = (transaction) => downloadBillingPdf('receipt', transaction);
+ const downloadInvoice = (transaction) => downloadBillingPdf('invoice', transaction);
 
  const LoadingSpinner = () => (
  <div className="flex justify-center items-center py-12">
@@ -417,8 +456,8 @@ const BillingAndUsagePage = () => {
 
  if (error && !planData && !loading) {
  return (
- <div className="p-8 bg-white min-h-screen">
- <div className="max-w-7xl mx-auto">
+ <div className="w-full min-h-screen bg-white">
+ <div className="mx-auto w-full max-w-7xl px-8 py-8 pb-16">
  <div className="mb-8 pb-6 border-b border-gray-200">
  <h1 className="text-3xl font-bold text-gray-900 mb-2">Billing & Usage Dashboard</h1>
  </div>
@@ -429,8 +468,8 @@ const BillingAndUsagePage = () => {
  }
 
  return (
- <div className="p-8 bg-white min-h-screen">
- <div className="max-w-7xl mx-auto">
+ <div className="w-full min-h-screen bg-white">
+ <div className="mx-auto w-full max-w-7xl px-8 py-8 pb-16">
  <div className="mb-8 pb-6 border-b border-gray-200 flex justify-between items-center">
  <div>
  <h1 className="text-3xl font-bold text-gray-900 mb-2">Billing & Usage Dashboard</h1>
@@ -746,12 +785,22 @@ const BillingAndUsagePage = () => {
  {transaction.payment_method || 'N/A'}
  </td>
  <td className="px-8 py-6 whitespace-nowrap text-center">
+ <div className="flex flex-wrap items-center justify-center gap-2">
  <button
- onClick={() => downloadReceipt(transaction)}
- className="border border-gray-300 text-gray-900 px-4 py-2 text-sm font-medium rounded hover:bg-gray-50"
+ type="button"
+ onClick={() => downloadInvoice(transaction)}
+ className="border border-gray-300 text-gray-900 px-3 py-2 text-sm font-medium rounded hover:bg-gray-50"
  >
- Download Receipt
+ Invoice
  </button>
+ <button
+ type="button"
+ onClick={() => downloadReceipt(transaction)}
+ className="border border-gray-300 text-gray-900 px-3 py-2 text-sm font-medium rounded hover:bg-gray-50"
+ >
+ Receipt
+ </button>
+ </div>
  </td>
  </tr>
  ))}

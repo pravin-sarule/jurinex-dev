@@ -59,6 +59,7 @@ import {
   Square,
   Mic,
   MicOff,
+  Sparkles,
 } from 'lucide-react';
 
 const PROGRESS_STAGES = {
@@ -330,6 +331,8 @@ const AnalysisPage = () => {
   const [displayLimit, setDisplayLimit] = useState(10);
   const [showAllChats, setShowAllChats] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
+  const [showStyleDropdown, setShowStyleDropdown] = useState(false);
+  const [learningModeActive, setLearningModeActive] = useState(false);
 
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
@@ -400,6 +403,7 @@ const AnalysisPage = () => {
 
   const fileInputRef = useRef(null);
   const dropdownRef = useRef(null);
+  const styleDropdownRef = useRef(null);
   const responseRef = useRef(null);
   const markdownOutputRef = useRef(null);
   const pollingIntervalRef = useRef(null);
@@ -1923,6 +1927,11 @@ const AnalysisPage = () => {
     }
   };
 
+  const handleStyleSelect = (style) => {
+    setLearningModeActive(style === 'learning');
+    setShowStyleDropdown(false);
+  };
+
   const handleChatInputChange = (e) => {
     setChatInput(e.target.value);
     if (e.target.value && isSecretPromptSelected) {
@@ -2056,6 +2065,7 @@ const AnalysisPage = () => {
               prompt_label: currentPromptLabel,
               session_id: sessionId,
               llm_name: currentLlmName || 'gemini',
+              learning_mode: learningModeActive,
             }
           : {
               file_id: fileId,
@@ -2065,6 +2075,7 @@ const AnalysisPage = () => {
               session_id: sessionId,
               llm_name: currentLlmName,
               additional_input: chatInput.trim() || '',
+              learning_mode: learningModeActive,
             };
 
         const response = await fetch(streamUrl, {
@@ -2563,6 +2574,9 @@ const AnalysisPage = () => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setShowDropdown(false);
+      }
+      if (styleDropdownRef.current && !styleDropdownRef.current.contains(event.target)) {
+        setShowStyleDropdown(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -3337,6 +3351,36 @@ const AnalysisPage = () => {
                     </div>
                   )}
                 </div>
+                <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowStyleDropdown((prev) => !prev)}
+                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50"
+                    title="Choose response style"
+                  >
+                    <Sparkles className="h-3 w-3 sm:h-4 sm:w-4" />
+                    <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
+                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
+                  </button>
+                  {showStyleDropdown && (
+                    <div className="absolute bottom-full left-0 mb-2 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => handleStyleSelect('normal')}
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                      >
+                        Normal
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleStyleSelect('learning')}
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                      >
+                        Learning
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={chatInput}
@@ -3391,6 +3435,20 @@ const AnalysisPage = () => {
                       <X className="h-4 w-4" />
                     </button>
                   </div>
+                </div>
+              )}
+              {learningModeActive && (
+                <div className="mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
+                  <Sparkles className="h-3 w-3" />
+                  <span>Learning mode active</span>
+                  <button
+                    type="button"
+                    onClick={() => setLearningModeActive(false)}
+                    className="text-[#11766f] hover:text-[#0e5f59]"
+                    title="Disable learning mode"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
                 </div>
               )}
             </form>
@@ -3618,6 +3676,36 @@ const AnalysisPage = () => {
                       </div>
                     )}
                   </div>
+                  <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={() => setShowStyleDropdown((prev) => !prev)}
+                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50"
+                      title="Choose response style"
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
+                      <ChevronDown className="h-3 w-3" />
+                    </button>
+                    {showStyleDropdown && (
+                      <div className="absolute bottom-full left-0 mb-2 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => handleStyleSelect('normal')}
+                          className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                        >
+                          Normal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleStyleSelect('learning')}
+                          className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                        >
+                          Learning
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 <input
                   type="text"
                   value={chatInput}
@@ -3672,6 +3760,20 @@ const AnalysisPage = () => {
                         <X className="h-3 w-3" />
                       </button>
                     </div>
+                  </div>
+                )}
+                {learningModeActive && (
+                  <div className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
+                    <Sparkles className="h-3 w-3" />
+                    <span>Learning active</span>
+                    <button
+                      type="button"
+                      onClick={() => setLearningModeActive(false)}
+                      className="text-[#11766f] hover:text-[#0e5f59]"
+                      title="Disable learning mode"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
                   </div>
                 )}
               </form>

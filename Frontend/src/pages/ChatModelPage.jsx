@@ -53,7 +53,9 @@ import {
   Square,
   Mic,
   MicOff,
+  Sparkles,
 } from 'lucide-react';
+import LearningBubble from '../components/LearningBubble';
 
 const PROGRESS_STAGES = {
   INIT: { range: [0, 15], label: 'Initialization' },
@@ -313,6 +315,10 @@ const ChatModelPage = () => {
   const [displayLimit, setDisplayLimit] = useState(10);
   const [showAllChats, setShowAllChats] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
+  const [showStyleDropdown, setShowStyleDropdown] = useState(false);
+  const [learningModeActive, setLearningModeActive] = useState(false);
+  const [turnCount, setTurnCount] = useState(0);
+  const [turnThreshold, setTurnThreshold] = useState(4);
 
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
@@ -342,6 +348,11 @@ const ChatModelPage = () => {
   const [chatModelFiles, setChatModelFiles] = useState([]);
   const [chatModelHistory, setChatModelHistory] = useState([]);
 
+  // Sessions list for the sidebar panel (ChatGPT-style)
+  const [chatSessions, setChatSessions] = useState([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [showSessionsPanel, setShowSessionsPanel] = useState(true);
+
   /** Messages for the active session only (UI + viewer; `messages` may hold mixed sessions from restore). */
   const sessionMessages = useMemo(() => {
     if (!Array.isArray(messages) || messages.length === 0) return [];
@@ -362,6 +373,7 @@ const ChatModelPage = () => {
 
   const fileInputRef = useRef(null);
   const dropdownRef = useRef(null);
+  const styleDropdownRef = useRef(null);
   const responseRef = useRef(null);
   const markdownOutputRef = useRef(null);
   const exportContentRef = useRef(null);
@@ -370,6 +382,7 @@ const ChatModelPage = () => {
   const streamUpdateTimeoutRef = useRef(null);
   const streamReaderRef = useRef(null);
   const splitContainerRef = useRef(null);
+  const learningThreadRef = useRef(null);
   /** Optional per-request LLM overrides (VITE_CHAT_MODEL_MAX_OUTPUT_TOKENS, VITE_CHAT_MODEL_TEMPERATURE). */
   const chatModelStreamFetchParams = useMemo(() => {
     const o = {};
@@ -692,6 +705,82 @@ const ChatModelPage = () => {
       console.error('[fetchChatModelFiles] Error:', error);
     }
   };
+
+  const generateSessionName = (firstQuestion) => {
+    if (!firstQuestion) return 'New Conversation';
+    const words = firstQuestion.trim().split(/\s+/);
+    const name = words.length <= 6 ? firstQuestion.trim() : words.slice(0, 6).join(' ') + '...';
+    return name.length > 50 ? name.substring(0, 50) + '...' : name;
+  };
+
+  // Fetch all chat sessions for the sidebar
+  const fetchChatSessions = async () => {
+    try {
+      setIsLoadingSessions(true);
+      let sessions = [];
+
+      // Try fetching general chat sessions
+      try {
+        const response = await apiService.getGeneralChatSessions();
+        if (response.success && Array.isArray(response.data?.sessions)) {
+          const generalSessions = response.data.sessions.map((session) => ({
+            session_id: session.session_id,
+            name: session.title || generateSessionName(session.first_question || session.first_message),
+            first_question: session.first_question || session.first_message || '',
+            created_at: session.created_at,
+            message_count: session.message_count || 0,
+            is_general_chat: !session.file_id,
+            file_id: session.file_id || null,
+          }));
+          sessions = [...sessions, ...generalSessions];
+        }
+      } catch (err) {
+        console.warn('[fetchChatSessions] General sessions API error (may not be supported):', err.message);
+      }
+
+      // Sort by created_at descending
+      sessions.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      setChatSessions(sessions);
+    } catch (error) {
+      console.error('[fetchChatSessions] Error:', error);
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  // Load a specific session when clicked in the sidebar
+  const handleSessionClick = async (session) => {
+    if (session.session_id === sessionId) return; // Already active
+    // Clear current state
+    setMessages([]);
+    setCurrentResponse('');
+    setAnimatedResponseContent('');
+    setSelectedMessageId(null);
+    setHasResponse(false);
+    setError(null);
+    setChatInput('');
+    setDocumentData(null);
+    setFileId(null);
+    chatAttachmentFileIdsRef.current = [];
+
+    setSessionId(session.session_id);
+
+    if (session.file_id) {
+      // Document chat session
+      setFileId(session.file_id);
+      chatAttachmentFileIdsRef.current = [session.file_id];
+      setShowSplitView(true);
+      setHasResponse(true);
+      await fetchChatModelHistory(session.file_id, session.session_id);
+      navigate(`/chatmodel/${session.file_id}/${session.session_id}`, { replace: true });
+    } else {
+      // General chat session
+      setShowSplitView(true);
+      setHasResponse(true);
+      await fetchGeneralChatHistory(session.session_id);
+      navigate(`/chatmodel/session/${encodeURIComponent(session.session_id)}`, { replace: true });
+    }
+  };
  
   const fetchChatModelHistory = async (fileId, sessionId = null) => {
     try {
@@ -945,8 +1034,9 @@ const ChatModelPage = () => {
           setSelectedMessageId(messageId);
           setPendingQuestion(null);
           if (resolvedSessionId) setSessionId(resolvedSessionId);
-          setCurrentResponse(finalResponse);
-          showResponseImmediately(finalResponse);
+          const displayResponse = formatResponseForDisplay(finalResponse, newChat);
+          setCurrentResponse(displayResponse);
+          showResponseImmediately(displayResponse);
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setSuccess('Legal question answered!');
@@ -1118,16 +1208,25 @@ const ChatModelPage = () => {
                     answer: finalResponse,
                     session_id: resolvedSessionId,
                     isStreaming: false,
+                    learning_payload: doneData?.learning_payload || null,
+                    learning_mode: !!doneData?.learning_mode,
                   }
                 : msg
             );
             return updated;
           });
+          setTurnCount(Number(doneData?.turn_count || 0));
+          setTurnThreshold(Number(doneData?.turn_threshold || 4));
          
           setSelectedMessageId(messageId);
           if (resolvedSessionId) setSessionId(resolvedSessionId);
-          setCurrentResponse(finalResponse);
-          showResponseImmediately(finalResponse);
+          const displayResponse = formatResponseForDisplay(finalResponse, {
+            used_secret_prompt: false,
+            learning_mode: !!doneData?.learning_mode,
+            learning_payload: doneData?.learning_payload || null,
+          });
+          setCurrentResponse(displayResponse);
+          showResponseImmediately(displayResponse);
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setSuccess('Question answered!');
@@ -1166,7 +1265,11 @@ const ChatModelPage = () => {
         null,
         null,
         selectedLlmName,
-        chatModelStreamFetchParams,
+        {
+          ...chatModelStreamFetchParams,
+          learning_mode: learningModeActive,
+          document_context: learningModeActive ? getLearningDocumentContext() : undefined,
+        },
         ids.length > 1 ? ids : null,
         (thoughtText) => {
           if (typeof thoughtText === 'string' && thoughtText) {
@@ -1784,6 +1887,8 @@ const ChatModelPage = () => {
         used_secret_prompt: false,
         prompt_label: null,
         session_id: currentSessionId,
+        learning_mode: learningModeActive,
+        document_context: learningModeActive ? getLearningDocumentContext() : undefined,
       };
       if (llm_name) {
         body.llm_name = llm_name;
@@ -1840,15 +1945,20 @@ const ChatModelPage = () => {
             confidence: finalMetadata?.confidence || 0.8,
             type: 'chat',
             used_secret_prompt: false,
+            learning_payload: finalMetadata?.learning_payload || null,
+            learning_mode: !!finalMetadata?.learning_mode,
           };
           setMessages((prev) => [...prev, newChat]);
           setSelectedMessageId(newChat.id);
           setSessionId(newSessionId);
           setChatInput('');
-          setCurrentResponse(finalResponse);
+          const displayResponse = formatResponseForDisplay(finalResponse, newChat);
+          setCurrentResponse(displayResponse);
           setHasResponse(true);
           setSuccess('Question answered!');
-          showResponseImmediately(finalResponse);
+          setTurnCount(Number(finalMetadata?.turn_count || 0));
+          setTurnThreshold(Number(finalMetadata?.turn_threshold || 4));
+          showResponseImmediately(displayResponse);
           break;
         }
 
@@ -1886,15 +1996,20 @@ const ChatModelPage = () => {
               confidence: finalMetadata?.confidence || 0.8,
               type: 'chat',
               used_secret_prompt: false,
+              learning_payload: finalMetadata?.learning_payload || null,
+              learning_mode: !!finalMetadata?.learning_mode,
             };
             setMessages((prev) => [...prev, newChat]);
             setSelectedMessageId(newChat.id);
             setSessionId(newSessionId);
             setChatInput('');
-            setCurrentResponse(finalResponse);
+            const displayResponse = formatResponseForDisplay(finalResponse, newChat);
+            setCurrentResponse(displayResponse);
             setHasResponse(true);
             setSuccess('Question answered!');
-            showResponseImmediately(finalResponse);
+            setTurnCount(Number(finalMetadata?.turn_count || 0));
+            setTurnThreshold(Number(finalMetadata?.turn_threshold || 4));
+            showResponseImmediately(displayResponse);
             return;
           }
 
@@ -1915,9 +2030,14 @@ const ChatModelPage = () => {
               const fd = typeof parsed.answer === 'string' ? parsed.answer : '';
               const fb = streamBufferRef.current || '';
               const finalResponse = fd.length >= fb.length ? (fd || fb) : fb;
-              setCurrentResponse(finalResponse);
+              const displayResponse = formatResponseForDisplay(finalResponse, {
+                used_secret_prompt: false,
+                learning_mode: !!finalMetadata?.learning_mode,
+                learning_payload: finalMetadata?.learning_payload || null,
+              });
+              setCurrentResponse(displayResponse);
               setIsLoading(false);
-              showResponseImmediately(finalResponse);
+              showResponseImmediately(displayResponse);
             } else if (parsed.type === 'error') {
               setError(parsed.error);
               setIsLoading(false);
@@ -2487,6 +2607,8 @@ const ChatModelPage = () => {
                     used_secret_prompt: true,
                     prompt_label: promptLabel,
                     secret_id: selectedSecretId,
+                    learning_payload: doneData?.learning_payload || null,
+                    learning_mode: !!doneData?.learning_mode,
                   };
                 }
                 return msg;
@@ -2512,6 +2634,8 @@ const ChatModelPage = () => {
             clearProcessingTimeline();
             setIsSecretPromptSelected(false);
             setActiveDropdown('Custom Query');
+            setTurnCount(Number(doneData?.turn_count || 0));
+            setTurnThreshold(Number(doneData?.turn_threshold || 4));
           },
           (error) => {
             console.error('[Secret Prompt] Error:', error);
@@ -2526,7 +2650,11 @@ const ChatModelPage = () => {
           promptLabel,
           chatInput.trim() || '',
           selectedLlmName,
-          chatModelStreamFetchParams,
+          {
+            ...chatModelStreamFetchParams,
+            learning_mode: learningModeActive,
+            document_context: learningModeActive ? getLearningDocumentContext() : undefined,
+          },
           secretAttachmentIds.length > 1 ? secretAttachmentIds : null,
           (thoughtText) => {
             if (typeof thoughtText === 'string' && thoughtText) {
@@ -2624,10 +2752,7 @@ const ChatModelPage = () => {
     }
    
     const rawAnswer = message.answer || message.response || '';
-    const isStructured = message.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-    const responseToDisplay = isStructured
-      ? renderSecretPromptResponse(rawAnswer)
-      : convertJsonToPlainText(rawAnswer);
+    const responseToDisplay = formatResponseForDisplay(rawAnswer, message);
    
     setCurrentResponse(responseToDisplay);
     showResponseImmediately(responseToDisplay);
@@ -2693,7 +2818,19 @@ const ChatModelPage = () => {
     setSessionId(newSessionId);
     console.log('[Session] New chat session created with UUID:', newSessionId);
     chatAttachmentFileIdsRef.current = [];
+    // IMPORTANT: Clear localStorage to prevent old messages bleeding into new session
+    localStorage.removeItem('messages');
+    localStorage.removeItem('sessionId');
+    localStorage.removeItem('currentResponse');
+    localStorage.removeItem('animatedResponseContent');
+    localStorage.removeItem('hasResponse');
+    localStorage.removeItem('documentData');
+    localStorage.removeItem('fileId');
+    localStorage.removeItem('processingStatus');
+    localStorage.removeItem('progressPercentage');
     setSuccess('New chat session started!');
+    // Refresh sessions list after a brief moment
+    setTimeout(() => fetchChatSessions(), 500);
     navigate('/chatmodel', { replace: true });
   };
 
@@ -2797,6 +2934,9 @@ const ChatModelPage = () => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setShowDropdown(false);
       }
+      if (styleDropdownRef.current && !styleDropdownRef.current.contains(event.target)) {
+        setShowStyleDropdown(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => {
@@ -2806,7 +2946,39 @@ const ChatModelPage = () => {
 
   useEffect(() => {
     fetchSecrets();
+    fetchChatSessions();
   }, []);
+
+  // Refresh sessions list when a new message is sent (so sessions panel stays current)
+  useEffect(() => {
+    if (sessionMessages.length > 0) {
+      // Update local sessions state with current session if newly created
+      setChatSessions((prev) => {
+        const currentSid = sessionId;
+        const exists = prev.some((s) => s.session_id === currentSid);
+        const firstMsg = sessionMessages[0];
+        const sessionName = generateSessionName(firstMsg?.display_text_left_panel || firstMsg?.question || '');
+        if (!exists && currentSid) {
+          const newSession = {
+            session_id: currentSid,
+            name: sessionName,
+            first_question: firstMsg?.question || '',
+            created_at: firstMsg?.timestamp || new Date().toISOString(),
+            message_count: sessionMessages.length,
+            is_general_chat: !fileId,
+            file_id: fileId || null,
+          };
+          return [newSession, ...prev];
+        }
+        // Update message count and name for existing session
+        return prev.map((s) =>
+          s.session_id === currentSid
+            ? { ...s, message_count: sessionMessages.length, name: s.name || sessionName }
+            : s
+        );
+      });
+    }
+  }, [sessionMessages.length, sessionId]);
 
   // Format structured JSON responses (similar to AnalysisPage)
   useEffect(() => {
@@ -2814,12 +2986,12 @@ const ChatModelPage = () => {
       const selectedMessage = sessionMessages.find(msg => msg.id === selectedMessageId);
       if (selectedMessage) {
         const rawAnswer = selectedMessage.answer || selectedMessage.response || '';
-        const isSecretPrompt = selectedMessage.used_secret_prompt || false;
-        const isCurrentResponseRawJson = isStructuredJsonResponse(currentResponse);
-        const isRawAnswerStructured = isStructuredJsonResponse(rawAnswer);
-        
-        if (isSecretPrompt && isRawAnswerStructured && (isCurrentResponseRawJson || currentResponse === rawAnswer)) {
-          const formattedResponse = renderSecretPromptResponse(rawAnswer);
+        const shouldNormalize =
+          currentResponse === rawAnswer ||
+          isStructuredJsonResponse(currentResponse) ||
+          Boolean(selectedMessage.learning_payload);
+        if (shouldNormalize) {
+          const formattedResponse = formatResponseForDisplay(rawAnswer, selectedMessage);
           if (formattedResponse !== currentResponse) {
             setCurrentResponse(formattedResponse);
             setAnimatedResponseContent(formattedResponse);
@@ -2848,10 +3020,7 @@ const ChatModelPage = () => {
       const last = list[list.length - 1];
       setSelectedMessageId(last.id);
       const rawAnswer = last.answer || '';
-      const isStructured = last.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-      const responseToDisplay = isStructured
-        ? renderSecretPromptResponse(rawAnswer)
-        : convertJsonToPlainText(rawAnswer);
+      const responseToDisplay = formatResponseForDisplay(rawAnswer, last);
       setCurrentResponse(responseToDisplay);
       setAnimatedResponseContent(responseToDisplay);
       setIsAnimatingResponse(false);
@@ -2916,10 +3085,7 @@ const ChatModelPage = () => {
             : allMessages[allMessages.length - 1];
           if (chatToDisplay) {
             const rawAnswer = chatToDisplay.answer || chatToDisplay.response || '';
-            const isStructured = chatToDisplay.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-            const responseToDisplay = isStructured
-              ? renderSecretPromptResponse(rawAnswer)
-              : convertJsonToPlainText(rawAnswer);
+            const responseToDisplay = formatResponseForDisplay(rawAnswer, chatToDisplay);
             setCurrentResponse(responseToDisplay);
             showResponseImmediately(responseToDisplay);
             setSelectedMessageId(chatToDisplay.id);
@@ -3013,10 +3179,7 @@ const ChatModelPage = () => {
             : allMessages[allMessages.length - 1];
           if (chatToDisplay) {
             const rawAnswer = chatToDisplay.answer || chatToDisplay.response || '';
-            const isStructured = chatToDisplay.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-            const responseToDisplay = isStructured
-              ? renderSecretPromptResponse(rawAnswer)
-              : convertJsonToPlainText(rawAnswer);
+            const responseToDisplay = formatResponseForDisplay(rawAnswer, chatToDisplay);
             setCurrentResponse(responseToDisplay);
             showResponseImmediately(responseToDisplay);
             setSelectedMessageId(chatToDisplay.id);
@@ -3157,65 +3320,23 @@ const ChatModelPage = () => {
     }
 
     try {
-      const savedMessages = localStorage.getItem('messages');
-      if (savedMessages) {
-        const parsed = JSON.parse(savedMessages);
-        if (Array.isArray(parsed)) {
-          setMessages(parsed);
-        }
-      }
-      const savedSessionId = localStorage.getItem('sessionId');
-      if (savedSessionId) {
-        console.log('[DB] Restored session ID from localStorage:', savedSessionId);
-        setSessionId(savedSessionId);
-      } else {
-        const newSessionId = crypto.randomUUID();
-        console.log('[Session] No saved session, created new UUID session:', newSessionId);
-        setSessionId(newSessionId);
-      }
-      const savedCurrentResponse = localStorage.getItem('currentResponse');
-      const savedAnimatedResponseContent = localStorage.getItem('animatedResponseContent');
-      if (savedCurrentResponse) {
-        setCurrentResponse(savedCurrentResponse);
-        if (savedAnimatedResponseContent) {
-          setAnimatedResponseContent(savedAnimatedResponseContent);
-          setShowSplitView(true);
-        } else {
-          setAnimatedResponseContent(savedCurrentResponse);
-        }
-        setIsAnimatingResponse(false);
-      }
-      const savedHasResponse = localStorage.getItem('hasResponse');
-      if (savedHasResponse) {
-        const parsedHasResponse = JSON.parse(savedHasResponse);
-        setHasResponse(parsedHasResponse);
-        if (parsedHasResponse) {
-          setShowSplitView(true);
-        }
-      }
-      const savedDocumentData = localStorage.getItem('documentData');
-      if (savedDocumentData) {
-        const parsed = JSON.parse(savedDocumentData);
-        setDocumentData(parsed);
-      }
-      const savedFileId = localStorage.getItem('fileId');
-      if (savedFileId) {
-        setFileId(savedFileId);
-        chatAttachmentFileIdsRef.current = [savedFileId];
-      }
-      const savedProcessingStatus = localStorage.getItem('processingStatus');
-      if (savedProcessingStatus) {
-        const parsed = JSON.parse(savedProcessingStatus);
-        setProcessingStatus(parsed);
-        setProgressPercentage(parsed.processing_progress || 0);
-      }
+      // Generate a fresh session ID — don't restore old session to prevent message bleeding
+      // Each page load without explicit URL params gets a clean slate
+      const newSessionId = crypto.randomUUID();
+      console.log('[Session] Fresh page load — new session UUID:', newSessionId);
+      setSessionId(newSessionId);
+      // Clear any stale localStorage data
+      localStorage.removeItem('messages');
+      localStorage.removeItem('sessionId');
+      localStorage.removeItem('currentResponse');
+      localStorage.removeItem('animatedResponseContent');
+      localStorage.removeItem('hasResponse');
+      localStorage.removeItem('documentData');
+      localStorage.removeItem('fileId');
     } catch (error) {
-      console.error('[AnalysisPage] Error restoring from localStorage:', error);
-      if (!sessionId) {
-        const newSessionId = crypto.randomUUID();
-        console.log('[Session] Error recovery: created new UUID session:', newSessionId);
-        setSessionId(newSessionId);
-      }
+      console.error('[ChatModelPage] Error in init:', error);
+      const newSessionId = crypto.randomUUID();
+      setSessionId(newSessionId);
     }
   }, [location.state, paramFileId, paramSessionId]);
 
@@ -3383,6 +3504,94 @@ const ChatModelPage = () => {
     }
     return showSplitView ? 'Ask a question about the document...' : 'Ask a legal question or question about your document...';
   };
+
+  const parseLearningPayloadFromRaw = (rawText) => {
+    const text = String(rawText || '').trim();
+    if (!text) return null;
+    const fenced = text.match(/```json\s*([\s\S]*?)\s*```/i);
+    const candidate = fenced ? fenced[1].trim() : text;
+    const withoutJsonPrefix = candidate.replace(/^\s*json\s*[\r\n]*/i, '').trim();
+    const normalizedCandidate = withoutJsonPrefix.startsWith('{')
+      ? withoutJsonPrefix
+      : withoutJsonPrefix.replace(/^[^{]*({[\s\S]*})[^}]*$/m, '$1').trim();
+    try {
+      const parsed = JSON.parse(normalizedCandidate);
+      if (parsed && typeof parsed === 'object' && (parsed.question || parsed.feedback || parsed.ui_type)) {
+        return parsed;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const formatLearningPayloadToText = (payload) => {
+    if (!payload || typeof payload !== 'object') return '';
+    const feedback = String(payload.feedback || '').trim();
+    const hint = String(payload.content_hint || '').trim();
+    const question = String(payload.question || '').trim();
+    const options = Array.isArray(payload.options) ? payload.options.filter(Boolean) : [];
+    const lines = [];
+    if (feedback) lines.push(feedback);
+    if (hint) lines.push(`Hint: ${hint}`);
+    if (question) lines.push(`Question: ${question}`);
+    if (options.length) lines.push(`Options: ${options.join(' | ')}`);
+    return lines.join('\n\n');
+  };
+
+  const formatResponseForDisplay = (rawAnswer, messageMeta = {}) => {
+    const raw = String(rawAnswer || '');
+    const learningPayload = messageMeta.learning_payload || parseLearningPayloadFromRaw(raw);
+    if (learningPayload) {
+      const learningText = formatLearningPayloadToText(learningPayload);
+      if (learningText) return learningText;
+    }
+    const isStructured = Boolean(messageMeta.used_secret_prompt) && isStructuredJsonResponse(raw);
+    return isStructured ? renderSecretPromptResponse(raw) : convertJsonToPlainText(raw);
+  };
+
+  const getLearningDocumentContext = () => {
+    if (documentData?.full_text_content) return String(documentData.full_text_content);
+    if (selectedMessage?.answer) return String(selectedMessage.answer);
+    if (currentResponse) return String(currentResponse);
+    return '';
+  };
+
+  const handleSelectStyle = (style) => {
+    if (style === 'learning' && !fileId) {
+      setError('Add a document first to use Learning Mode');
+      setShowStyleDropdown(false);
+      return;
+    }
+    setLearningModeActive(style === 'learning');
+    setTurnCount(0);
+    setShowStyleDropdown(false);
+  };
+
+  const handleLearningOptionSelect = async (optionText) => {
+    const text = String(optionText || '').trim();
+    if (!text || isLoading || isGeneratingInsights) return;
+    setChatInput(text);
+    if (fileId) {
+      await askQuestionToChat(text, fileId, chatAttachmentFileIdsRef.current.length > 0 ? chatAttachmentFileIdsRef.current : null);
+    } else {
+      await askQuestionToGeneralChat(text);
+    }
+  };
+
+  useEffect(() => {
+    if (!fileId && learningModeActive) {
+      setLearningModeActive(false);
+      setTurnCount(0);
+    }
+  }, [fileId, learningModeActive]);
+
+  // Auto-scroll learning thread to bottom when new messages arrive
+  useEffect(() => {
+    if (learningModeActive && learningThreadRef.current) {
+      learningThreadRef.current.scrollTop = learningThreadRef.current.scrollHeight;
+    }
+  }, [sessionMessages, learningModeActive]);
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
@@ -3598,6 +3807,29 @@ const ChatModelPage = () => {
                     </div>
                   )}
                 </div>
+                <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowStyleDropdown((s) => !s)}
+                    disabled={isLoading || isGeneratingInsights}
+                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={!fileId ? 'Add a document first to use Learning Mode' : 'Choose response style'}
+                  >
+                    <Sparkles className="h-3 w-3 sm:h-4 sm:w-4" />
+                    <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
+                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
+                  </button>
+                  {showStyleDropdown && (
+                    <div className="absolute bottom-full left-0 mb-2 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                      <button type="button" onClick={() => handleSelectStyle('normal')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">
+                        Normal
+                      </button>
+                      <button type="button" onClick={() => handleSelectStyle('learning')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50" disabled={!fileId}>
+                        Learning
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={chatInput}
@@ -3654,6 +3886,16 @@ const ChatModelPage = () => {
                   </div>
                 </div>
                 )}
+              {learningModeActive && (
+                <div className="mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
+                  <Sparkles className="h-3 w-3" />
+                  <span>Learning mode active</span>
+                  {turnCount > 0 && turnCount <= turnThreshold ? <span>{`Turn ${turnCount} of ${turnThreshold}`}</span> : null}
+                  <button type="button" onClick={() => setLearningModeActive(false)} className="text-[#11766f] hover:text-[#0e5f59]" title="Disable learning mode">
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
               </form>
               <RateQuotaPills limits={limits} className="mt-2" />
               
@@ -3750,34 +3992,82 @@ const ChatModelPage = () => {
             className={`w-full h-full flex flex-col lg:flex-row ${isResizingSplit ? 'select-none' : ''}`}
           >
           <div
-            className="w-full border-r-0 lg:border-r border-b lg:border-b-0 border-gray-200 flex flex-col bg-white h-1/2 lg:h-full"
+            className={`w-full flex flex-col bg-white ${learningModeActive ? 'h-full' : 'border-r-0 lg:border-r border-b lg:border-b-0 border-gray-200 h-1/2 lg:h-full'}`}
             style={
-              isDesktopSplit
-                ? { width: `${splitLeftWidth}%`, flex: `0 0 ${splitLeftWidth}%` }
-                : undefined
+              learningModeActive
+                ? { width: '100%', flex: '1 1 auto' }
+                : isDesktopSplit
+                  ? { width: `${splitLeftWidth}%`, flex: `0 0 ${splitLeftWidth}%` }
+                  : undefined
             }
           >
-            <div className="p-4 border-b border-gray-200 bg-white">
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <div className="min-w-0">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-[#807868]">
-                    {documentData?.originalName ? 'AI Projects' : 'Legal Assistant'}
-                  </p>
-                  <h2 className="text-base sm:text-lg font-semibold text-[#2b3528] truncate">
+            <div className="flex flex-col h-full">
+            {/* Left panel: Sessions List + Current Session Messages */}
+            <div className="p-3 border-b border-gray-200 bg-white flex-shrink-0">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="min-w-0 flex items-center gap-2">
+                  <button
+                    onClick={() => setShowSessionsPanel((p) => !p)}
+                    className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-800 transition-colors"
+                    title={showSessionsPanel ? 'Hide chat history' : 'Show chat history'}
+                  >
+                    <MessageSquare className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">History</span>
+                  </button>
+                  <span className="text-gray-300">|</span>
+                  <p className="text-xs font-semibold text-[#2b3528] truncate max-w-[120px] sm:max-w-[180px]" title="Current session">
                     {documentData?.originalName
                       ? documentData.originalName
-                      : selectedMessageId
-                        ? (sessionMessages.find((msg) => msg.id === selectedMessageId)?.display_text_left_panel || 'Legal Chat')
-                        : 'General Legal Chat'}
-                  </h2>
+                      : sessionMessages.length > 0
+                        ? generateSessionName(sessionMessages[0]?.display_text_left_panel || sessionMessages[0]?.question || '')
+                        : 'New Conversation'}
+                  </p>
                 </div>
                 <button
                   onClick={startNewChat}
-                  className="px-3 py-1.5 text-xs font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-md transition-colors border border-gray-200"
+                  title="New Chat"
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-white bg-[#21C1B6] hover:bg-[#1AA49B] rounded-lg transition-colors shadow-sm flex-shrink-0"
                 >
-                  New Chat
+                  <span>+ New Chat</span>
                 </button>
               </div>
+              {/* Sessions list panel */}
+              {showSessionsPanel && (
+                <div className="border border-gray-200 rounded-lg bg-gray-50 max-h-48 overflow-y-auto mb-2">
+                  <div className="px-2 py-1.5 border-b border-gray-200 flex items-center justify-between">
+                    <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Recent Chats</span>
+                    <button
+                      onClick={fetchChatSessions}
+                      className="text-[10px] text-[#21C1B6] hover:text-[#1AA49B] font-medium"
+                      disabled={isLoadingSessions}
+                    >
+                      {isLoadingSessions ? '...' : 'Refresh'}
+                    </button>
+                  </div>
+                  {isLoadingSessions ? (
+                    <div className="px-3 py-3 text-xs text-gray-400 text-center">Loading sessions...</div>
+                  ) : chatSessions.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-gray-400 text-center">No previous chats</div>
+                  ) : (
+                    chatSessions.map((session) => (
+                      <button
+                        key={session.session_id}
+                        onClick={() => handleSessionClick(session)}
+                        className={`w-full text-left px-3 py-2 hover:bg-white transition-colors border-b border-gray-100 last:border-b-0 group ${
+                          session.session_id === sessionId ? 'bg-[#E0F7F6] border-l-2 border-l-[#21C1B6]' : ''
+                        }`}
+                      >
+                        <p className="text-xs font-medium text-gray-800 line-clamp-1 group-hover:text-[#21C1B6] transition-colors">
+                          {session.name}
+                        </p>
+                        {session.message_count > 0 && (
+                          <p className="text-[10px] text-gray-400 mt-0.5">{session.message_count} message{session.message_count !== 1 ? 's' : ''}</p>
+                        )}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#8e8678]" />
                 <input
@@ -3785,89 +4075,134 @@ const ChatModelPage = () => {
                   placeholder="Search questions..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 bg-white rounded-lg text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1f6b5f] border border-gray-200"
+                  className="w-full pl-9 pr-3 py-1.5 bg-white rounded-lg text-xs text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1f6b5f] border border-gray-200"
                 />
               </div>
             </div>
 
-            <div className="flex-1 min-h-0 px-4 pt-3 pb-2 bg-white">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[#807868] mb-2">
-                Recent Questions
-              </p>
-              {pendingQuestion && (
-                <div className="mb-2 p-3 rounded-xl border border-[#cfe1db] bg-[#f6fbf9]">
-                  <p className="text-xs font-medium text-[#2b3528] line-clamp-2 mb-3">{pendingQuestion}</p>
-                  <button
-                    type="button"
-                    onClick={() => setShowProcessingTimeline((prev) => !prev)}
-                    className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
-                  >
-                    <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
-                    <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
-                    <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
-                  </button>
-                  {showProcessingTimeline && processingTimeline.length > 0 && (
-                    <div className="border-l border-[#c9ddd5] pl-3 space-y-3">
-                      {processingTimeline.map((step) => (
-                        <div key={step.id}>
-                          <div className="flex items-center gap-2 mb-1">
-                            {step.state === 'active' ? (
-                              <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
-                            ) : (
-                              <CheckCircle className="h-3 w-3 text-[#1f6b5f] flex-shrink-0" />
-                            )}
-                            <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
-                          </div>
-                          <p className="text-xs text-[#4f5b56] leading-5">{step.description}</p>
-                        </div>
-                      ))}
+            <div className="flex-1 min-h-0 px-4 pt-3 pb-2 bg-white flex flex-col">
+              {learningModeActive ? (
+                /* ── Learning mode: single-screen chat thread ── */
+                <div
+                  ref={learningThreadRef}
+                  className="learning-chat-thread flex-1 min-h-0 overflow-y-auto"
+                >
+                  {sessionMessages.length === 0 && (
+                    <div className="learning-thread-empty">
+                      <Sparkles className="h-6 w-6 text-[#21C1B6] mb-2" />
+                      <p className="text-sm text-gray-500">Ask a question about the document to start learning.</p>
                     </div>
                   )}
-                  {normalizedReasoningText && (
-                    <div className="mt-3 pt-3 border-t border-[#dbe9e3]">
+                  {sessionMessages.map((msg) => (
+                    <div key={msg.id} className="learning-thread-item">
+                      {/* User question */}
+                      {msg.question && (
+                        <div className="learning-user-bubble">
+                          <p className="learning-user-text">{msg.display_text_left_panel || msg.question}</p>
+                        </div>
+                      )}
+                      {/* AI response */}
+                      <div className="learning-ai-bubble">
+                        {msg.learning_payload ? (
+                          <LearningBubble
+                            payload={msg.learning_payload}
+                            isStreaming={msg.isStreaming && (isLoading || isGeneratingInsights)}
+                            onOptionSelect={handleLearningOptionSelect}
+                          />
+                        ) : msg.isStreaming ? (
+                          <div className="learning-thinking-indicator">
+                            <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                            <span>{streamingMessage || 'Thinking...'}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                /* ── Normal mode: question history list ── */
+                <>
+                  <p className="text-[11px] uppercase tracking-[0.16em] text-[#807868] mb-2 flex-shrink-0">
+                    Recent Questions
+                  </p>
+                  {pendingQuestion && (
+                    <div className="mb-2 p-3 rounded-xl border border-[#cfe1db] bg-[#f6fbf9] flex-shrink-0">
+                      <p className="text-xs font-medium text-[#2b3528] line-clamp-2 mb-3">{pendingQuestion}</p>
                       <button
                         type="button"
-                        onClick={() => setShowReasoning((prev) => !prev)}
-                        className="flex items-center gap-2 text-xs font-medium text-[#6f7f79] mb-2"
+                        onClick={() => setShowProcessingTimeline((prev) => !prev)}
+                        className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
                       >
-                        <span>Show AI Reasoning</span>
-                        <ChevronDown className={`h-3 w-3 transition-transform ${showReasoning ? 'rotate-180' : ''}`} />
+                        <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                        <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
+                        <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
                       </button>
-                      {showReasoning && (
-                        <div className="border-l border-[#d6e4de] pl-3 max-h-80 overflow-y-auto pr-2">
-                          <div className="prose prose-sm max-w-none text-[#67756f] prose-p:my-2 prose-headings:my-2 prose-strong:text-[#42504a] prose-em:text-[#67756f]">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {normalizedReasoningText}
-                            </ReactMarkdown>
-                          </div>
+                      {showProcessingTimeline && processingTimeline.length > 0 && (
+                        <div className="border-l border-[#c9ddd5] pl-3 space-y-3">
+                          {processingTimeline.map((step) => (
+                            <div key={step.id}>
+                              <div className="flex items-center gap-2 mb-1">
+                                {step.state === 'active' ? (
+                                  <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
+                                ) : (
+                                  <CheckCircle className="h-3 w-3 text-[#1f6b5f] flex-shrink-0" />
+                                )}
+                                <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
+                              </div>
+                              <p className="text-xs text-[#4f5b56] leading-5">{step.description}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {normalizedReasoningText && (
+                        <div className="mt-3 pt-3 border-t border-[#dbe9e3]">
+                          <button
+                            type="button"
+                            onClick={() => setShowReasoning((prev) => !prev)}
+                            className="flex items-center gap-2 text-xs font-medium text-[#6f7f79] mb-2"
+                          >
+                            <span>Show AI Reasoning</span>
+                            <ChevronDown className={`h-3 w-3 transition-transform ${showReasoning ? 'rotate-180' : ''}`} />
+                          </button>
+                          {showReasoning && (
+                            <div className="border-l border-[#d6e4de] pl-3 max-h-80 overflow-y-auto pr-2">
+                              <div className="prose prose-sm max-w-none text-[#67756f] prose-p:my-2 prose-headings:my-2 prose-strong:text-[#42504a] prose-em:text-[#67756f]">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {normalizedReasoningText}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {(!showProcessingTimeline || processingTimeline.length === 0) && (
+                        <div className="flex items-center space-x-1.5">
+                          <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
+                          <span className="text-xs text-[#1f6b5f] font-medium">
+                            {streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}
+                          </span>
                         </div>
                       )}
                     </div>
                   )}
-                  {(!showProcessingTimeline || processingTimeline.length === 0) && (
-                    <div className="flex items-center space-x-1.5">
-                      <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
-                      <span className="text-xs text-[#1f6b5f] font-medium">
-                        {streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}
-                      </span>
-                    </div>
-                  )}
-                </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
+                    <MessagesList
+                      messages={sessionMessages}
+                      selectedMessageId={selectedMessageId}
+                      handleMessageClick={handleMessageClick}
+                      displayLimit={displayLimit}
+                      showAllChats={showAllChats}
+                      setShowAllChats={setShowAllChats}
+                      highlightText={highlightText}
+                      formatDate={formatDate}
+                      searchQuery={searchQuery}
+                    />
+                  </div>
+                </>
               )}
-              <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
-                <MessagesList
-                  messages={sessionMessages}
-                  selectedMessageId={selectedMessageId}
-                  handleMessageClick={handleMessageClick}
-                  displayLimit={displayLimit}
-                  showAllChats={showAllChats}
-                  setShowAllChats={setShowAllChats}
-                  highlightText={highlightText}
-                  formatDate={formatDate}
-                  searchQuery={searchQuery}
-                />
-              </div>
             </div>
+
+            </div>{/* end flex flex-col h-full */}
 
             <div className="border-t border-gray-200 p-3 bg-white flex-shrink-0">
               {documentData && (
@@ -3955,6 +4290,29 @@ const ChatModelPage = () => {
                       </div>
                     )}
                   </div>
+                  <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={() => setShowStyleDropdown((s) => !s)}
+                      disabled={isLoading || isGeneratingInsights}
+                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title={!fileId ? 'Add a document first to use Learning Mode' : 'Choose response style'}
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
+                      <ChevronDown className="h-3 w-3" />
+                    </button>
+                    {showStyleDropdown && (
+                      <div className="absolute bottom-full left-0 mb-2 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                        <button type="button" onClick={() => handleSelectStyle('normal')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">
+                          Normal
+                        </button>
+                        <button type="button" onClick={() => handleSelectStyle('learning')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50" disabled={!fileId}>
+                          Learning
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 <input
                   type="text"
                   value={chatInput}
@@ -4011,6 +4369,16 @@ const ChatModelPage = () => {
                     </div>
                   </div>
                 )}
+                {learningModeActive && (
+                  <div className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
+                    <Sparkles className="h-3 w-3" />
+                    <span>Learning</span>
+                    {turnCount > 0 && turnCount <= turnThreshold ? <span>{`${turnCount}/${turnThreshold}`}</span> : null}
+                    <button type="button" onClick={() => setLearningModeActive(false)} className="text-[#11766f] hover:text-[#0e5f59]" title="Disable learning mode">
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
               </form>
               <RateQuotaPills limits={limits} className="mt-2" />
               
@@ -4048,6 +4416,7 @@ const ChatModelPage = () => {
             </div>
           </div>
 
+          {!learningModeActive && (
           <div
             className="hidden lg:flex items-center justify-center w-3 cursor-col-resize bg-white border-x border-gray-200 hover:bg-[#eef5f2] transition-colors"
             onMouseDown={() => setIsResizingSplit(true)}
@@ -4058,7 +4427,9 @@ const ChatModelPage = () => {
           >
             <div className="h-12 w-[3px] rounded-full bg-[#c9c2b4]" />
           </div>
+          )}
 
+          {!learningModeActive && (
           <div
             className="w-full flex flex-col h-1/2 lg:h-full bg-white min-h-0"
             style={
@@ -4088,6 +4459,7 @@ const ChatModelPage = () => {
               </div>
             </div>
           </div>
+          )}
           </div>
         </>
       )}

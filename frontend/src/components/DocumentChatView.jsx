@@ -29,6 +29,7 @@ const DocumentChatView = () => {
   const [animatedResponseContent, setAnimatedResponseContent] = useState('');
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
   const [selectedMessageId, setSelectedMessageId] = useState(null);
+  const [learningModeActive, setLearningModeActive] = useState(false);
 
   const dropdownRef = useRef(null);
   const responseRef = useRef(null);
@@ -235,6 +236,7 @@ const DocumentChatView = () => {
 
     try {
       let response;
+      const learningOptions = learningModeActive ? { learning_mode: true } : {};
       if (isSecretPrompt && selectedSecretId) {
         const selectedSecret = secrets.find(s => s.id === selectedSecretId);
         let promptValue = selectedSecret?.value;
@@ -251,7 +253,8 @@ const DocumentChatView = () => {
           selectedFolder,
           promptValue,
           promptLabel,
-          selectedChatSessionId
+          selectedChatSessionId,
+          learningOptions
         );
         if (!selectedChatSessionId && response.sessionId) {
           setSelectedChatSessionId(response.sessionId);
@@ -289,7 +292,7 @@ const DocumentChatView = () => {
         }
 
       } else if (selectedChatSessionId) {
-        response = await ApiService.continueFolderChat(selectedFolder, selectedChatSessionId, processedMessage);
+        response = await ApiService.continueFolderChat(selectedFolder, selectedChatSessionId, processedMessage, learningOptions);
         const chatHistoryContinue = Array.isArray(response.chatHistory) ? response.chatHistory : [];
         setCurrentChatHistory(chatHistoryContinue);
         const latestMessageContinue = chatHistoryContinue[chatHistoryContinue.length - 1];
@@ -298,7 +301,7 @@ const DocumentChatView = () => {
         setSelectedMessageId(latestMessageContinue?.id);
 
       } else {
-        response = await ApiService.queryFolderDocuments(selectedFolder, processedMessage);
+        response = await ApiService.queryFolderDocuments(selectedFolder, processedMessage, learningOptions);
         if (response.sessionId) {
           setSelectedChatSessionId(response.sessionId);
         }
@@ -433,6 +436,8 @@ const DocumentChatView = () => {
             setIsSecretPromptSelected={setIsSecretPromptSelected}
             handleChatInputChange={handleChatInputChange}
             dropdownRef={dropdownRef}
+            learningModeActive={learningModeActive}
+            setLearningModeActive={setLearningModeActive}
           />
         </div>
       </div>

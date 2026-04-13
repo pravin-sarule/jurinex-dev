@@ -274,6 +274,11 @@ def _compute_final_verdict(
         return {"audit_status": "VERIFIED_WITH_WARNINGS", "final_confidence": max(trust_baseline - 10, final_confidence - 10), "multi_route_confirmed": multi_route}
     if source == "google" and not ik_verified:
         return {"audit_status": "QUARANTINED", "final_confidence": final_confidence, "multi_route_confirmed": False}
+    # PENDING_HITL: IK-sourced judgment that local DB confirms exists (local_verified=True)
+    # but IK cross-check couldn't fully verify it.  High enough confidence to be useful —
+    # surface it to a human reviewer rather than silently quarantining.
+    if source == "indian_kanoon" and local_verified and not ik_verified and final_confidence >= 60:
+        return {"audit_status": "PENDING_HITL", "final_confidence": final_confidence, "multi_route_confirmed": False}
     if final_confidence >= 45:
         return {"audit_status": "NEEDS_REVIEW", "final_confidence": final_confidence, "multi_route_confirmed": False}
     return {"audit_status": "QUARANTINED", "final_confidence": final_confidence, "multi_route_confirmed": False}
@@ -365,6 +370,8 @@ def _audit_one(
         logger.info("  └─ [VERDICT] ✅ %-26s confidence=%d  multi_route=%s", audit_status, final_conf, multi_route)
     elif audit_status == "NEEDS_REVIEW":
         logger.warning("  └─ [VERDICT] 🔍 %-26s confidence=%d", audit_status, final_conf)
+    elif audit_status == "PENDING_HITL":
+        logger.warning("  └─ [VERDICT] 🕐 %-26s confidence=%d  (queued for human review)", audit_status, final_conf)
     else:
         logger.warning("  └─ [VERDICT] ❌ %-26s confidence=%d  flags=%s", audit_status, final_conf, hallucination_flags)
 
@@ -377,7 +384,7 @@ def _audit_one(
         "multi_route_confirmed": multi_route,
         "is_flagged":            is_flagged,
     }
-    is_approved = audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS", "NEEDS_REVIEW")
+    is_approved = audit_status in ("VERIFIED", "VERIFIED_WITH_WARNINGS", "NEEDS_REVIEW", "PENDING_HITL")
     return jid, detail, is_approved
 
 
@@ -410,6 +417,7 @@ def run_auditor(
 
     approved_ids:    List[str]       = []
     quarantined_ids: List[str]       = []
+    hitl_ids:        List[str]       = []
     audit_details:   Dict[str, Any]  = {}
 
     logger.info("╔══ AUDITOR AGENT ════════════════════════════════════════╗")
@@ -440,6 +448,8 @@ def run_auditor(
         audit_details[jid] = detail
         if approved:
             approved_ids.append(jid)
+            if detail.get("audit_status") == "PENDING_HITL":
+                hitl_ids.append(jid)
         else:
             quarantined_ids.append(jid)
 
@@ -447,10 +457,11 @@ def run_auditor(
     logger.info(
         "╔══ AUDITOR SUMMARY ═══════════════════════════════════════╗\n"
         "║  ✅ Approved:    %3d  (shown to user)                    ║\n"
+        "║  🕐 HITL queue: %3d  (high-relevance, needs human review)║\n"
         "║  ❌ Quarantined: %3d  (hidden — zero-mistake policy)     ║\n"
         "║  📊 Pass rate:   %5.1f%%                                  ║\n"
         "╚══════════════════════════════════════════════════════════╝",
-        len(approved_ids), len(quarantined_ids), pass_rate,
+        len(approved_ids), len(hitl_ids), len(quarantined_ids), pass_rate,
     )
 
     # CHECK 8: expose counts and failed IDs for root_agent retry loop
@@ -459,6 +470,7 @@ def run_auditor(
     return {
         "approved_ids":      approved_ids,
         "quarantined_ids":   quarantined_ids,
+        "hitl_ids":          hitl_ids,
         "audit_details":     audit_details,
         "approved_count":    approved_count,
         "missing_count":     missing_count,

@@ -1,6 +1,12 @@
 """
-Watchdog agent: find relevant judgements from (1) local DB, (2) Indian Kanoon API, (3) Google search.
-Returns merged, ranked candidate list for Fetcher/Clerk and for report building.
+Watchdog agent: find relevant judgements from (1) local DB, (2) Indian Kanoon API, (3) Google.
+
+Dimension-aware multi-query logic (JuriNex Spec v1.1.1):
+  - Iterates Legal Dimensions from AgentContext (3 queries each: SC / HC / Provision)
+  - Runs IK searches in batches of 5 with a 200 ms stagger to avoid IP-rate-limiting
+  - Applies hierarchy pre-filter: drops District Courts, Tribunals, Consumer Forums
+  - Applies jurisdiction priority ranking: SC > same-state HC > other HC
+  - Global deduplication by tid / external_id across all dimension queries
 """
 
 from __future__ import annotations
@@ -8,15 +14,43 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-SEARCH_WORKERS = max(1, min(10, int(os.environ.get("CITATION_WATCHDOG_WORKERS", "6"))))
+
+SEARCH_WORKERS          = max(1, min(10, int(os.environ.get("CITATION_WATCHDOG_WORKERS", "6"))))
+IK_BATCH_SIZE           = max(1, int(os.environ.get("CITATION_IK_BATCH_SIZE", "5")))
+IK_BATCH_STAGGER_SECS   = float(os.environ.get("CITATION_IK_BATCH_STAGGER_MS", "200")) / 1000.0
+
+# ── Hierarchy filter ──────────────────────────────────────────────────────────
+# docsource substrings that identify low-hierarchy courts/bodies to be dropped
+_LOW_HIERARCHY_KEYWORDS: frozenset = frozenset({
+    "district court", "district judge", "munsiff", "civil judge",
+    "sessions court", "judicial magistrate", "executive magistrate",
+    "tribunal", "consumer forum", "consumer court", "consumer commission",
+    "labour court", "industrial tribunal", "armed forces tribunal",
+    "drt", "drat",          # Debt Recovery Tribunal / Appellate
+    "sat",                  # Securities Appellate Tribunal
+    "itat",                 # Income Tax Appellate Tribunal
+    "cestat",               # Customs Excise & Service Tax Appellate Tribunal
+    "ngt", "ngtt",          # National Green Tribunal
+    "aat",                  # Airports Authority of India Tribunal
+})
 
 
-def _db_log(run_id: Optional[str], agent: str, stage: str, level: str, msg: str, meta: Optional[Dict] = None) -> None:
+def _db_log(
+    run_id: Optional[str],
+    agent: str,
+    stage: str,
+    level: str,
+    msg: str,
+    meta: Optional[Dict] = None,
+) -> None:
     if not run_id:
         return
     try:
@@ -26,26 +60,98 @@ def _db_log(run_id: Optional[str], agent: str, stage: str, level: str, msg: str,
         pass
 
 
-def _search_local(query: str, limit: int = 10, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Search local DB (judgements table). Returns list of judgement rows (id, title, primary_citation, court, ratio, source, canonical_id)."""
+def _is_low_hierarchy(docsource: str) -> bool:
+    """True when the result comes from a District Court, Tribunal, or similar low-level body."""
+    ds = (docsource or "").lower()
+    return any(kw in ds for kw in _LOW_HIERARCHY_KEYWORDS)
+
+
+# State → canonical HC name (lower-case for matching)
+_STATE_TO_HC_LOWER: Dict[str, str] = {
+    "andhra pradesh":   "andhra pradesh high court",
+    "telangana":        "telangana high court",
+    "delhi":            "delhi high court",
+    "gujarat":          "gujarat high court",
+    "karnataka":        "karnataka high court",
+    "kerala":           "kerala high court",
+    "madhya pradesh":   "madhya pradesh high court",
+    "maharashtra":      "bombay high court",
+    "goa":              "bombay high court",
+    "punjab":           "punjab and haryana high court",
+    "haryana":          "punjab and haryana high court",
+    "rajasthan":        "rajasthan high court",
+    "tamil nadu":       "madras high court",
+    "uttar pradesh":    "allahabad high court",
+    "west bengal":      "calcutta high court",
+    "odisha":           "orissa high court",
+    "assam":            "gauhati high court",
+    "himachal pradesh": "himachal pradesh high court",
+    "uttarakhand":      "uttarakhand high court",
+    "chhattisgarh":     "chhattisgarh high court",
+    "jharkhand":        "jharkhand high court",
+    "jammu":            "jammu and kashmir high court",
+    "kashmir":          "jammu and kashmir high court",
+    "sikkim":           "sikkim high court",
+    "meghalaya":        "meghalaya high court",
+    "manipur":          "manipur high court",
+    "tripura":          "tripura high court",
+}
+
+
+def _jurisdiction_priority(candidate: Dict[str, Any], case_state: str) -> int:
+    """
+    Returns a priority score (higher = better) for post-search ranking.
+
+      3  Supreme Court
+      2  Same-state High Court (resolved via _STATE_TO_HC_LOWER mapping)
+      1  Other High Court
+      0  Unknown / already filtered
+    """
+    ds = (candidate.get("docsource") or "").lower()
+    if not ds:
+        return 0
+    if "supreme court" in ds:
+        return 3
+    state = (case_state or "").lower().strip()
+    if state:
+        # Direct substring match (e.g. "delhi" in "delhi high court")
+        if state in ds:
+            return 2
+        # Mapped HC name match (e.g. "maharashtra" → "bombay high court")
+        hc = _STATE_TO_HC_LOWER.get(state, "")
+        if hc and hc in ds:
+            return 2
+    if "high court" in ds:
+        return 1
+    return 0
+
+
+# ── Local DB ──────────────────────────────────────────────────────────────────
+
+def _search_local(
+    query: str,
+    limit: int = 10,
+    run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Search local DB (judgements table)."""
     try:
         from db.client import judgement_search_local
         _db_log(run_id, "watchdog", "watchdog", "INFO", f"🏛 Searching Local DB for: {query[:80]!r}")
         rows = judgement_search_local(query, limit=limit)
         for r in rows:
             r["_source"] = "local"
-        logger.info("[WATCHDOG] 🏛  SOURCE=local_db       → %d result(s) for query: %r", len(rows), query[:80])
+        logger.info("[WATCHDOG] 🏛  SOURCE=local_db → %d result(s) for query: %r", len(rows), query[:80])
         for r in rows:
             logger.info(
-                "  ├─ [LOCAL_DB]        title=%-55s | citation=%-25s | court=%s",
+                "  ├─ [LOCAL_DB]  title=%-55s | citation=%-25s | court=%s",
                 (r.get("title") or "?")[:55],
                 (r.get("primary_citation") or "—")[:25],
                 (r.get("court") or "?")[:30],
             )
         titles = [r.get("title") or "?" for r in rows[:5]]
-        title_str = ", ".join(t[:50] for t in titles) + (f" … +{len(rows)-5} more" if len(rows) > 5 else "")
+        title_str = ", ".join(t[:50] for t in titles) + (f" … +{len(rows) - 5} more" if len(rows) > 5 else "")
         _db_log(run_id, "watchdog", "watchdog", "INFO",
-                f"🏛 Local DB → {len(rows)} judgment(s) found" + (f": {title_str}" if rows else ""),
+                f"🏛 Local DB → {len(rows)} judgment(s)" + (f": {title_str}" if rows else ""),
                 {"source": "local_db", "count": len(rows), "titles": titles})
         return rows
     except Exception as e:
@@ -54,65 +160,80 @@ def _search_local(query: str, limit: int = 10, run_id: Optional[str] = None) -> 
         return []
 
 
-def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Call Indian Kanoon API search. Requires INDIAN_KANOON_API_TOKEN (or INDIAN_KANOON_TOKEN / IK_API_TOKEN). Returns list of { tid, title, headline, docsource }."""
-    token = (
+# ── Indian Kanoon search ──────────────────────────────────────────────────────
+
+def _get_ik_token() -> Optional[str]:
+    return (
         os.environ.get("INDIAN_KANOON_TOKEN")
         or os.environ.get("INDIAN_KANOON_API_TOKEN")
         or os.environ.get("IK_API_TOKEN")
     )
+
+
+def _search_indian_kanoon(
+    query: str,
+    limit: int = 10,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dimension_id: Any = None,
+    dimension_name: str = "",
+    query_type: str = "keyword",
+) -> List[Dict[str, Any]]:
+    """
+    Call IK /search/ API for one query.
+    Tags each result with _dimension_id, _dimension_name, _query_type for traceability.
+    Returns list of candidate dicts.
+    """
+    token = _get_ik_token()
     if not token:
-        logger.warning("INDIAN_KANOON_API_TOKEN not set; skipping Indian Kanoon search.")
-        _db_log(run_id, "watchdog", "watchdog", "WARNING", "📚 Indian Kanoon skipped — API token not configured")
+        logger.warning("[WATCHDOG] INDIAN_KANOON_TOKEN not set; skipping IK search.")
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", "📚 Indian Kanoon skipped — token not configured")
         return []
 
     try:
-        import urllib.parse
-        import urllib.error
-        _db_log(run_id, "watchdog", "watchdog", "INFO", f"📚 Querying Indian Kanoon API: {query[:80]!r}")
-        url = "https://api.indiankanoon.org/search/?formInput=" + urllib.parse.quote(query) + "&pagenum=0"
+        _db_log(run_id, "watchdog", "watchdog", "INFO",
+                f"📚 IK [{query_type}|dim={dimension_id}] {query[:80]!r}")
+        url = ("https://api.indiankanoon.org/search/?formInput="
+               + urllib.parse.quote(query) + "&pagenum=0")
         req = urllib.request.Request(url, method="POST")
         req.add_header("Authorization", f"Token {token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read()
-                data = json.loads(raw.decode("utf-8", errors="replace"))
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as e:
             body = ""
             try:
                 body = e.read().decode("utf-8", errors="replace")[:200]
             except Exception:
-                body = ""
-            logger.warning("Indian Kanoon search HTTP %s for query %r: %s", getattr(e, "code", "?"), query[:80], body)
-            _db_log(run_id, "watchdog", "watchdog", "WARNING", f"📚 Indian Kanoon HTTP {getattr(e,'code','?')} — {body[:100]}")
+                pass
+            logger.warning("[WATCHDOG] IK HTTP %s for %r: %s", getattr(e, "code", "?"), query[:80], body)
+            _db_log(run_id, "watchdog", "watchdog", "WARNING",
+                    f"📚 IK HTTP {getattr(e, 'code', '?')} — {body[:100]}")
             return []
+
         docs = data.get("docs") or data.get("results") or []
-        out = []
+        out: List[Dict[str, Any]] = []
         for d in docs[:limit]:
             out.append({
-                "external_id": str(d.get("tid", "")),
-                "title": d.get("title", ""),
-                "snippet": d.get("headline", ""),
-                "docsource": d.get("docsource", ""),
-                "_source": "indian_kanoon",
+                "external_id":      str(d.get("tid", "")),
+                "title":            d.get("title", ""),
+                "snippet":          d.get("headline", ""),
+                "docsource":        d.get("docsource", ""),
+                "_source":          "indian_kanoon",
+                "_dimension_id":    dimension_id,
+                "_dimension_name":  dimension_name,
+                "_query_type":      query_type,
+                "_query":           query,
             })
-        logger.info("[WATCHDOG] 📚  SOURCE=indian_kanoon  → %d result(s) for query: %r", len(out), query[:80])
+        logger.info("[WATCHDOG] 📚 IK [%s|dim=%s] → %d result(s) for %r",
+                    query_type, dimension_id, len(out), query[:60])
         for c in out:
-            logger.info(
-                "  ├─ [INDIAN_KANOON]   title=%-55s | tid=%-12s | docsource=%s",
-                (c.get("title") or "?")[:55],
-                (c.get("external_id") or "?")[:12],
-                (c.get("docsource") or "?")[:30],
-            )
             _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"  📚 IK: {(c.get('title') or '?')[:70]} | tid={c.get('external_id','?')} | {c.get('docsource','?')[:25]}",
-                    {"source": "indian_kanoon", "tid": c.get("external_id"), "title": c.get("title")})
-        titles = [c.get("title") or "?" for c in out[:5]]
-        _db_log(run_id, "watchdog", "watchdog", "INFO",
-                f"📚 Indian Kanoon → {len(out)} candidate(s)" + (f" for: {query[:60]!r}" if len(out) == 0 else ""),
-                {"source": "indian_kanoon", "count": len(out), "titles": titles})
+                    f"  📚 {c.get('title','?')[:70]} | tid={c.get('external_id','?')} | {c.get('docsource','?')[:25]}",
+                    {"source": "indian_kanoon", "tid": c.get("external_id"), "title": c.get("title"),
+                     "dimension_id": dimension_id, "query_type": query_type})
         try:
             from utils.usage_tracker import record_ik
             record_ik(run_id, user_id or "anonymous", "search", count=1)
@@ -120,30 +241,32 @@ def _search_indian_kanoon(query: str, limit: int = 10, run_id: Optional[str] = N
             pass
         return out
     except Exception as e:
-        logger.warning("Indian Kanoon search failed: %s", e)
-        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"📚 Indian Kanoon search failed: {e}")
+        logger.warning("[WATCHDOG] IK search failed for %r: %s", query[:60], e)
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"📚 IK search failed: {e}")
         return []
 
 
+# ── Google search ─────────────────────────────────────────────────────────────
+
 def _use_serper_for_google_search() -> bool:
-    """
-    Use Serper API only when explicitly configured (e.g. WATCHDOG_USE_CLAUDE_SEARCH or
-    WATCHDOG_GOOGLE_SEARCH_PROVIDER=serper). Default is Google Grounding via Gemini.
-    """
     provider = (os.environ.get("WATCHDOG_GOOGLE_SEARCH_PROVIDER") or "google_grounding").strip().lower()
     use_claude = (os.environ.get("WATCHDOG_USE_CLAUDE_SEARCH") or "").strip().lower() in ("1", "true", "yes", "on")
     return use_claude or provider == "serper"
 
 
-def _search_google_grounding(query: str, num_results: int = 5, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Google Search via Gemini's Grounding with Google Search (default for all models)."""
+def _search_google_grounding(
+    query: str,
+    num_results: int = 5,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Google Search via Gemini Grounding (default)."""
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY not set; skipping Google Search grounding.")
+        logger.warning("[WATCHDOG] GEMINI_API_KEY not set; skipping Google Search grounding.")
         _db_log(run_id, "watchdog", "watchdog", "WARNING",
                 "🌐 Google Search skipped — GEMINI_API_KEY not configured")
         return []
-
     try:
         from google import genai
         from google.genai import types
@@ -153,20 +276,14 @@ def _search_google_grounding(query: str, num_results: int = 5, run_id: Optional[
         model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
         search_query = (
             f"Search for relevant Indian law judgments about: {query}. "
-            "Focus on site:indiankanoon.org OR site:supremecourtofindia.nic.in OR site:judgments.ecourts.gov.in. "
+            "Focus on site:indiankanoon.org OR site:supremecourtofindia.nic.in OR "
+            "site:judgments.ecourts.gov.in. "
             f"Return up to {num_results} most relevant judgment URLs with titles."
         )
         grounding_tool = types.Tool(google_search=types.GoogleSearch())
-        config = types.GenerateContentConfig(
-            tools=[grounding_tool],
-            max_output_tokens=2048,
-        )
+        config = types.GenerateContentConfig(tools=[grounding_tool], max_output_tokens=2048)
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model,
-            contents=search_query,
-            config=config,
-        )
+        response = client.models.generate_content(model=model, contents=search_query, config=config)
 
         results: List[Dict[str, Any]] = []
         if response.candidates:
@@ -175,30 +292,24 @@ def _search_google_grounding(query: str, num_results: int = 5, run_id: Optional[
             if gm:
                 chunks = getattr(gm, "grounding_chunks", None) or getattr(gm, "groundingChunks", None) or []
                 for i, ch in enumerate(chunks[:num_results]):
-                    web = getattr(ch, "web", None) if hasattr(ch, "web") else (ch.get("web") if isinstance(ch, dict) else None)
+                    web = (getattr(ch, "web", None) if hasattr(ch, "web")
+                           else (ch.get("web") if isinstance(ch, dict) else None))
                     if not web:
                         continue
-                    uri = getattr(web, "uri", None) or (web.get("uri") if isinstance(web, dict) else None)
+                    uri   = getattr(web, "uri",   None) or (web.get("uri")   if isinstance(web, dict) else None)
                     title = getattr(web, "title", None) or (web.get("title") if isinstance(web, dict) else None) or ""
                     uri_str = str(uri).strip()
-                    if uri_str and (uri_str.startswith("http://") or uri_str.startswith("https://")):
+                    if uri_str and uri_str.startswith("http"):
                         results.append({
-                            "title": str(title) if title else f"Result {i+1}",
-                            "link": uri_str,
+                            "title":   str(title) if title else f"Result {i + 1}",
+                            "link":    uri_str,
                             "snippet": (response.text or "")[:200] if response.text else "",
                             "_source": "google",
                         })
-
-        logger.info("[WATCHDOG] 🌐  SOURCE=google_search (Grounding) → %d result(s) for query: %r",
-                    len(results), query[:80])
+        logger.info("[WATCHDOG] 🌐 Google Grounding → %d result(s) for %r", len(results), query[:60])
         for g in results:
-            logger.info(
-                "  ├─ [GOOGLE_SEARCH]   title=%-55s | url=%s",
-                (g.get("title") or "?")[:55],
-                (g.get("link") or "?")[:80],
-            )
             _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"  🌐 Google (Grounding): {(g.get('title') or '?')[:70]} | {(g.get('link') or '')[:60]}",
+                    f"  🌐 Google: {g.get('title','?')[:70]} | {g.get('link','')[:60]}",
                     {"source": "google", "title": g.get("title"), "url": g.get("link")})
         _db_log(run_id, "watchdog", "watchdog", "INFO",
                 f"🌐 Google Search (Grounding) → {len(results)} result(s)",
@@ -210,23 +321,30 @@ def _search_google_grounding(query: str, num_results: int = 5, run_id: Optional[
             pass
         return results
     except Exception as e:
-        logger.warning("Google Search (Grounding) failed: %s", e)
-        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Google Search (Grounding) failed: {e}")
+        logger.warning("[WATCHDOG] Google Grounding failed: %s", e)
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Google Grounding failed: {e}")
         return []
 
 
-def _search_google_serper(query: str, num_results: int = 5, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Serper API for Indian law judgements. Used only when WATCHDOG_USE_CLAUDE_SEARCH or WATCHDOG_GOOGLE_SEARCH_PROVIDER=serper."""
+def _search_google_serper(
+    query: str,
+    num_results: int = 5,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Serper API fallback."""
     api_key = os.environ.get("SERPER_API_KEY")
     if not api_key:
-        logger.warning("SERPER_API_KEY not set; skipping Serper search.")
-        _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                "🌐 Serper skipped — SERPER_API_KEY not configured")
+        logger.warning("[WATCHDOG] SERPER_API_KEY not set; skipping Serper search.")
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", "🌐 Serper skipped — API key not configured")
         return []
-
     try:
         _db_log(run_id, "watchdog", "watchdog", "INFO", f"🌐 Querying Serper API: {query[:80]!r}")
-        search_query = f"{query} Indian law judgement Supreme Court High Court site:indiankanoon.org OR site:supremecourtofindia.nic.in OR site:judgments.ecourts.gov.in"
+        search_query = (
+            f"{query} Indian law judgement Supreme Court High Court "
+            "site:indiankanoon.org OR site:supremecourtofindia.nic.in OR "
+            "site:judgments.ecourts.gov.in"
+        )
         payload = {"q": search_query, "num": num_results}
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -237,26 +355,15 @@ def _search_google_serper(query: str, num_results: int = 5, run_id: Optional[str
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
-        organic = data.get("organic", [])
         results = [
-            {
-                "title": item.get("title", ""),
-                "link": item.get("link", ""),
-                "snippet": item.get("snippet", ""),
-                "_source": "google",
-            }
-            for item in organic[:num_results]
+            {"title": item.get("title", ""), "link": item.get("link", ""),
+             "snippet": item.get("snippet", ""), "_source": "google"}
+            for item in (data.get("organic") or [])[:num_results]
         ]
-        logger.info("[WATCHDOG] 🌐  SOURCE=google_search (Serper) → %d result(s) for query: %r",
-                    len(results), query[:80])
+        logger.info("[WATCHDOG] 🌐 Serper → %d result(s) for %r", len(results), query[:60])
         for g in results:
-            logger.info(
-                "  ├─ [GOOGLE_SEARCH]   title=%-55s | url=%s",
-                (g.get("title") or "?")[:55],
-                (g.get("link") or "?")[:80],
-            )
             _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"  🌐 Serper: {(g.get('title') or '?')[:70]} | {(g.get('link') or '')[:60]}",
+                    f"  🌐 Serper: {g.get('title','?')[:70]} | {g.get('link','')[:60]}",
                     {"source": "google", "title": g.get("title"), "url": g.get("link")})
         _db_log(run_id, "watchdog", "watchdog", "INFO",
                 f"🌐 Serper → {len(results)} result(s)",
@@ -268,24 +375,54 @@ def _search_google_serper(query: str, num_results: int = 5, run_id: Optional[str
             pass
         return results
     except Exception as e:
-        logger.warning("Serper search failed: %s", e)
+        logger.warning("[WATCHDOG] Serper failed: %s", e)
         _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Serper failed: {e}")
         return []
 
 
-def _search_google(query: str, num_results: int = 5, run_id: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Google search: uses Gemini Google Grounding by default.
-    Falls back to Serper only when WATCHDOG_USE_CLAUDE_SEARCH or WATCHDOG_GOOGLE_SEARCH_PROVIDER=serper.
-    """
+def _search_google(
+    query: str,
+    num_results: int = 5,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Google search: Gemini Grounding by default; falls back to Serper."""
     if _use_serper_for_google_search():
         return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
     result = _search_google_grounding(query, num_results=num_results, run_id=run_id, user_id=user_id)
     if not result and os.environ.get("SERPER_API_KEY"):
-        logger.info("[WATCHDOG] Google Grounding returned no results; falling back to Serper")
+        logger.info("[WATCHDOG] Google Grounding returned 0; falling back to Serper")
         return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
     return result
 
+
+# ── Dimension query builder ───────────────────────────────────────────────────
+
+def _build_dimension_query_tasks(
+    dimensions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Expand dimensions into flat query-task dicts.
+    Each task: { query, q_type, dimension_id, dimension_name }
+    """
+    tasks: List[Dict[str, Any]] = []
+    for dim in dimensions:
+        dim_id   = dim.get("dimension_id", "?")
+        dim_name = dim.get("name", "")
+        qs       = dim.get("queries") or {}
+        for q_type, q_key in (("sc", "sc_query"), ("hc", "hc_query"), ("provision", "provision_query")):
+            q = (qs.get(q_key) or "").strip()
+            if q:
+                tasks.append({
+                    "query":          q,
+                    "q_type":         q_type,
+                    "dimension_id":   dim_id,
+                    "dimension_name": dim_name,
+                })
+    return tasks
+
+
+# ── Main watchdog entry point ─────────────────────────────────────────────────
 
 def run_watchdog(
     query: str,
@@ -293,126 +430,262 @@ def run_watchdog(
     max_ik: int = 10,
     max_google: int = 5,
     keyword_sets: Optional[List[str]] = None,
+    dimensions: Optional[List[Dict[str, Any]]] = None,
+    case_state: str = "",
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run Watchdog: search local DB first, then Indian Kanoon API, then Google.
-    If keyword_sets is provided, run search for each query; for each query where IK returns 0,
-    run Google fallback (CHECK 4). Merge and dedupe candidates.
+    Run Watchdog: Local DB → Indian Kanoon API (dimension-aware) → Google.
+
+    Dimension-aware mode (when `dimensions` is provided):
+      • Expands 3 queries per dimension (SC / HC / Provision)
+      • Sends queries in batches of IK_BATCH_SIZE with IK_BATCH_STAGGER_SECS delay
+      • Drops results from low-hierarchy courts (District Court, Tribunal, etc.)
+      • Ranks surviving results: SC > same-state HC > other HC
+      • Global deduplication by tid / external_id across ALL dimension queries
+
+    Legacy mode (no dimensions): falls back to keyword_sets / single query.
+
+    When max_ik=0: IK search is skipped entirely.
+
     Returns:
-      - local: list of judgement records from DB (already have full metadata).
-      - candidates_ik: list from Indian Kanoon (need fetch + clerk).
-      - candidates_google: list from Google (need fetch + clerk).
-      - all_judgement_ids: local judgement IDs to include in report.
+      local, candidates_ik, candidates_google, all_judgement_ids,
+      search_keywords_by_route, dropped_low_hierarchy_count
     """
+
     def _unique_nonempty(items: List[str]) -> List[str]:
-        seen = set()
+        seen: set = set()
         out: List[str] = []
         for it in items:
             val = (it or "").strip()
-            if not val or val in seen:
-                continue
-            seen.add(val)
-            out.append(val)
+            if val and val not in seen:
+                seen.add(val)
+                out.append(val)
         return out
 
+    skip_ik = (max_ik == 0)
     query = (query or "").strip()
-    queries = keyword_sets if keyword_sets else ([query] if query else [])
-    if not queries:
-        return {"error": "query or keyword_sets required", "local": [], "candidates_ik": [], "candidates_google": [], "all_judgement_ids": []}
 
-    # Use first query for local search; run IK + Google per query when multiple
-    primary_query = queries[0] if queries else query
+    # ── Build flat keyword list for legacy / Google paths ─────────────────────
+    if dimensions:
+        all_dim_queries = [t["query"] for t in _build_dimension_query_tasks(dimensions)]
+        keyword_list = all_dim_queries if all_dim_queries else ([query] if query else [])
+    elif keyword_sets:
+        keyword_list = [q for q in keyword_sets if (q or "").strip()]
+    else:
+        keyword_list = [query] if query else []
+
+    if not keyword_list and not dimensions:
+        return {
+            "error": "query or keyword_sets or dimensions required",
+            "local": [], "candidates_ik": [], "candidates_google": [],
+            "all_judgement_ids": [], "search_keywords_by_route": {},
+            "dropped_low_hierarchy_count": 0,
+        }
+
+    primary_query = keyword_list[0] if keyword_list else query
+    ik_mode = "SKIPPED" if skip_ik else ("dimension-aware" if dimensions else "keyword")
+
     logger.info("╔══ WATCHDOG ══════════════════════════════════════════════╗")
-    logger.info("║ Queries: %d (primary: %-40s) ║", len(queries), primary_query[:40])
-    logger.info("║ Searching: Local DB → Indian Kanoon API → Google Search   ║")
+    logger.info("║  Primary query : %-42s ║", primary_query[:42])
+    logger.info("║  IK mode       : %-42s ║", ik_mode[:42])
+    logger.info("║  Dimensions    : %-42s ║", str(len(dimensions) if dimensions else 0))
     logger.info("╚══════════════════════════════════════════════════════════╝")
     _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"🐕 Watchdog started — {len(queries)} keyword set(s) | Searching: Local DB → Indian Kanoon → Google",
-            {"keyword_count": len(queries), "primary_query": primary_query[:120]})
+            f"🐕 Watchdog started — IK mode={ik_mode} | "
+            f"dims={len(dimensions) if dimensions else 0} | queries={len(keyword_list)}",
+            {"ik_mode": ik_mode, "dimension_count": len(dimensions) if dimensions else 0,
+             "keyword_count": len(keyword_list), "primary_query": primary_query[:120]})
 
+    # ── 1. Local DB search ────────────────────────────────────────────────────
     local = _search_local(primary_query, limit=max_local, run_id=run_id)
-    seen_ik: Dict[str, Any] = {}
-    seen_google: Dict[str, Any] = {}
-    per_ik = max(1, max_ik // len(queries)) if len(queries) > 1 else max_ik
-    per_google = max(1, max_google // len(queries)) if len(queries) > 1 else max_google
 
-    def _run_one_query(args: tuple[int, str]) -> tuple[int, str, List[Dict[str, Any]], List[Dict[str, Any]]]:
-        qi, q = args
-        q = (q or "").strip()
-        if not q:
-            return qi, q, [], []
-        _db_log(run_id, "watchdog", "watchdog", "INFO", f"🔎 Keyword set {qi}/{len(queries)}: {q[:80]!r}")
-        ik_results = _search_indian_kanoon(q, limit=per_ik, run_id=run_id, user_id=user_id)
-        if not ik_results:
-            logger.info("[WATCHDOG] IK returned 0 for query %r → Google fallback", q[:60])
+    # ── 2. Indian Kanoon — dimension-aware batched search ────────────────────
+    seen_tids: Dict[str, Dict[str, Any]] = {}
+    dropped_low_hierarchy = 0
+
+    if not skip_ik:
+        if dimensions:
+            # ── Dimension mode: batch 5 tasks at a time with 200 ms stagger ──
+            tasks = _build_dimension_query_tasks(dimensions)
+            per_query_limit = max(2, max_ik // max(len(tasks), 1))
+            batches = [tasks[i: i + IK_BATCH_SIZE] for i in range(0, len(tasks), IK_BATCH_SIZE)]
+
+            logger.info("[WATCHDOG] Dimension IK search: %d queries → %d batch(es) of %d",
+                        len(tasks), len(batches), IK_BATCH_SIZE)
             _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"📚 Indian Kanoon returned 0 for this query → falling back to Google")
-            google_results = _search_google(q, num_results=per_google, run_id=run_id, user_id=user_id)
-            return qi, q, [], google_results
-        google_results = _search_google(q, num_results=per_google, run_id=run_id, user_id=user_id)
-        return qi, q, ik_results, google_results
+                    f"📚 IK dimension search — {len(tasks)} queries across {len(batches)} batch(es) "
+                    f"(stagger={IK_BATCH_STAGGER_SECS * 1000:.0f}ms)",
+                    {"total_queries": len(tasks), "batch_count": len(batches),
+                     "batch_size": IK_BATCH_SIZE, "per_query_limit": per_query_limit})
 
-    active_queries = [(qi, q) for qi, q in enumerate(queries, 1) if (q or "").strip()]
-    max_workers = min(SEARCH_WORKERS, max(1, len(active_queries)))
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_run_one_query, item): item for item in active_queries}
-        ordered_results: List[tuple[int, str, List[Dict[str, Any]], List[Dict[str, Any]]]] = []
-        for fut in as_completed(futures):
+            for batch_idx, batch in enumerate(batches):
+                if batch_idx > 0:
+                    time.sleep(IK_BATCH_STAGGER_SECS)
+
+                batch_workers = min(SEARCH_WORKERS, len(batch))
+                with ThreadPoolExecutor(max_workers=batch_workers) as pool:
+                    fut_map = {
+                        pool.submit(
+                            _search_indian_kanoon,
+                            t["query"],
+                            per_query_limit,
+                            run_id,
+                            user_id,
+                            t["dimension_id"],
+                            t["dimension_name"],
+                            t["q_type"],
+                        ): t
+                        for t in batch
+                    }
+                    for fut in as_completed(fut_map):
+                        task = fut_map[fut]
+                        try:
+                            results = fut.result(timeout=20)
+                        except Exception as exc:
+                            logger.warning("[WATCHDOG] IK task failed for %r: %s",
+                                           task.get("query", "")[:60], exc)
+                            _db_log(run_id, "watchdog", "watchdog", "WARNING",
+                                    f"📚 IK query failed [{task.get('q_type')}|dim="
+                                    f"{task.get('dimension_id')}]: {exc}")
+                            results = []
+
+                        for candidate in results:
+                            tid = (candidate.get("external_id") or "").strip()
+                            if not tid:
+                                continue
+
+                            # ── Hierarchy pre-filter ──────────────────────────
+                            if _is_low_hierarchy(candidate.get("docsource", "")):
+                                dropped_low_hierarchy += 1
+                                logger.debug(
+                                    "[WATCHDOG] Dropped low-hierarchy: %s (%s)",
+                                    candidate.get("title", "?")[:60],
+                                    candidate.get("docsource", ""),
+                                )
+                                continue
+
+                            # ── Global deduplication ──────────────────────────
+                            if tid not in seen_tids:
+                                candidate["_jurisdiction_priority"] = _jurisdiction_priority(
+                                    candidate, case_state
+                                )
+                                seen_tids[tid] = candidate
+
+        else:
+            # ── Legacy keyword mode ───────────────────────────────────────────
+            per_ik = max(1, max_ik // len(keyword_list)) if len(keyword_list) > 1 else max_ik
+
+            def _run_ik_keyword(args: Tuple[int, str]) -> Tuple[int, List[Dict[str, Any]]]:
+                qi, q = args
+                q = (q or "").strip()
+                if not q:
+                    return qi, []
+                return qi, _search_indian_kanoon(q, limit=per_ik, run_id=run_id, user_id=user_id)
+
+            active = [(qi, q) for qi, q in enumerate(keyword_list, 1) if (q or "").strip()]
+            # Still batch in groups of IK_BATCH_SIZE
+            batches = [active[i: i + IK_BATCH_SIZE] for i in range(0, len(active), IK_BATCH_SIZE)]
+            for batch_idx, batch in enumerate(batches):
+                if batch_idx > 0:
+                    time.sleep(IK_BATCH_STAGGER_SECS)
+                with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, len(batch))) as pool:
+                    futs = {pool.submit(_run_ik_keyword, item): item for item in batch}
+                    for fut in as_completed(futs):
+                        try:
+                            _, results = fut.result(timeout=20)
+                        except Exception as exc:
+                            qi, q = futs[fut]
+                            logger.warning("[WATCHDOG] Keyword IK failed #%d %r: %s", qi, q[:60], exc)
+                            results = []
+                        for c in results:
+                            tid = (c.get("external_id") or "").strip()
+                            if not tid:
+                                continue
+                            if _is_low_hierarchy(c.get("docsource", "")):
+                                dropped_low_hierarchy += 1
+                                continue
+                            if tid not in seen_tids:
+                                c["_jurisdiction_priority"] = _jurisdiction_priority(c, case_state)
+                                seen_tids[tid] = c
+
+    # ── Sort IK candidates by jurisdiction priority (SC first) ───────────────
+    candidates_ik = sorted(
+        seen_tids.values(),
+        key=lambda c: c.get("_jurisdiction_priority", 0),
+        reverse=True,
+    )
+
+    # ── 3. Google search ──────────────────────────────────────────────────────
+    # Run Google for primary query + first query of each dimension (deduped)
+    google_queries: List[str] = []
+    if dimensions:
+        for dim in dimensions:
+            sc_q = ((dim.get("queries") or {}).get("sc_query") or "").strip()
+            if sc_q and sc_q not in google_queries:
+                google_queries.append(sc_q)
+    if not google_queries:
+        google_queries = [primary_query] if primary_query else []
+    # Cap Google to avoid quota burn: first 3 unique queries
+    google_queries = google_queries[:3]
+
+    seen_google: Dict[str, Dict[str, Any]] = {}
+    per_google = max(1, max_google // max(len(google_queries), 1))
+
+    def _run_google_one(q: str) -> List[Dict[str, Any]]:
+        return _search_google(q, num_results=per_google, run_id=run_id, user_id=user_id)
+
+    with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, max(1, len(google_queries)))) as pool:
+        gfuts = {pool.submit(_run_google_one, q): q for q in google_queries}
+        for fut in as_completed(gfuts):
             try:
-                ordered_results.append(fut.result())
+                for g in fut.result(timeout=20):
+                    link = (g.get("link") or "").strip()
+                    if link and link not in seen_google:
+                        seen_google[link] = g
             except Exception as exc:
-                qi, q = futures[fut]
-                logger.warning("[WATCHDOG] Query worker failed for keyword set %d (%r): %s", qi, q[:60], exc)
-        for _, _, ik_results, google_results in sorted(ordered_results, key=lambda row: row[0]):
-            for c in ik_results:
-                eid = c.get("external_id") or c.get("tid") or ""
-                if eid and eid not in seen_ik:
-                    seen_ik[eid] = c
-            for g in google_results:
-                link = g.get("link") or ""
-                if link and link not in seen_google:
-                    seen_google[link] = g
+                logger.warning("[WATCHDOG] Google worker failed: %s", exc)
 
-    candidates_ik = list(seen_ik.values())
     candidates_google = list(seen_google.values())
 
-    all_judgement_ids = [r["id"] for r in local]
+    # ── Summary ───────────────────────────────────────────────────────────────
+    all_judgement_ids = [r["id"] for r in local if r.get("id")]
 
     logger.info(
         "╔══ WATCHDOG SUMMARY ══════════════════════════════════════╗\n"
-        "║  🏛  Local DB:       %3d judgement(s) (ready for report) ║\n"
-        "║  📚  Indian Kanoon:  %3d candidate(s) (need fetch+clerk) ║\n"
-        "║  🌐  Google Search:  %3d candidate(s) (need fetch+clerk) ║\n"
+        "║  🏛  Local DB       : %3d judgement(s) (ready)           ║\n"
+        "║  📚  Indian Kanoon  : %3d candidate(s) (need fetch+clerk) ║\n"
+        "║  🌐  Google Search  : %3d candidate(s) (need fetch+clerk) ║\n"
+        "║  🚫  Dropped (hier) : %3d (District Court / Tribunal)     ║\n"
         "╚══════════════════════════════════════════════════════════╝",
-        len(local), len(candidates_ik), len(candidates_google),
+        len(local), len(candidates_ik), len(candidates_google), dropped_low_hierarchy,
     )
 
-    ik_enabled = bool(
-        os.environ.get("INDIAN_KANOON_TOKEN")
-        or os.environ.get("INDIAN_KANOON_API_TOKEN")
-        or os.environ.get("IK_API_TOKEN")
-    )
+    ik_enabled = bool(_get_ik_token())
     google_enabled = (
         bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         if not _use_serper_for_google_search()
         else bool(os.environ.get("SERPER_API_KEY"))
     )
     search_keywords_by_route = {
-        "local": _unique_nonempty([primary_query]) if primary_query else [],
-        "indian_kanoon": _unique_nonempty(queries) if ik_enabled else [],
-        "google": _unique_nonempty(queries) if google_enabled else [],
+        "local":         _unique_nonempty([primary_query]),
+        "indian_kanoon": _unique_nonempty(keyword_list) if ik_enabled and not skip_ik else [],
+        "google":        _unique_nonempty(google_queries) if google_enabled else [],
     }
 
     _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"✅ Watchdog complete — 🏛 Local DB: {len(local)} | 📚 Indian Kanoon: {len(candidates_ik)} candidates | 🌐 Google: {len(candidates_google)} candidates",
-            {"local_count": len(local), "ik_count": len(candidates_ik), "google_count": len(candidates_google)})
+            f"✅ Watchdog done — 🏛 {len(local)} local | 📚 {len(candidates_ik)} IK | "
+            f"🌐 {len(candidates_google)} Google | 🚫 {dropped_low_hierarchy} dropped",
+            {"local_count": len(local), "ik_count": len(candidates_ik),
+             "google_count": len(candidates_google),
+             "dropped_low_hierarchy": dropped_low_hierarchy})
 
     return {
-        "local": local,
-        "candidates_ik": candidates_ik,
-        "candidates_google": candidates_google,
-        "all_judgement_ids": all_judgement_ids,
-        "search_keywords_by_route": search_keywords_by_route,
+        "local":                     local,
+        "candidates_ik":             candidates_ik,
+        "candidates_google":         candidates_google,
+        "all_judgement_ids":         all_judgement_ids,
+        "search_keywords_by_route":  search_keywords_by_route,
+        "dropped_low_hierarchy_count": dropped_low_hierarchy,
     }

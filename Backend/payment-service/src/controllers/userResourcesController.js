@@ -3,8 +3,7 @@ const axios = require('axios'); // Import axios for HTTP requests
 const TokenUsageService = require('../services/tokenUsageService');
 const TokenUsageSyncService = require('../services/tokenUsageSyncService');
 const { resolveEffectivePlan } = require('../services/effectivePlanService');
-
-const DOCUMENT_SERVICE_URL = process.env.API_GATEWAY_URL || 'http://localhost:5000';
+const { getUserUsageAndPlanUrl, usageRequestHeaders } = require('../utils/documentUsageUrl');
 
 exports.getPlanAndResourceDetails = async (req, res) => {
     console.log("DEBUG: getPlanAndResourceDetails - Controller entered.");
@@ -54,7 +53,6 @@ exports.getPlanAndResourceDetails = async (req, res) => {
             });
         }
 
-        const apiGatewayUrl = process.env.API_GATEWAY_URL || "http://localhost:5000";
         const authorizationHeader = req.headers.authorization;
 
         let userUsageFromDocumentService = null;
@@ -62,8 +60,9 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         let timeLeftUntilReset = null;
 
         try {
-            const documentServiceResponse = await axios.get(`${apiGatewayUrl}/files/user-usage-and-plan/${userId}`, {
-                headers: { Authorization: authorizationHeader },
+            const usageUrl = getUserUsageAndPlanUrl(userId);
+            const documentServiceResponse = await axios.get(usageUrl, {
+                headers: usageRequestHeaders(authorizationHeader, userId),
                 timeout: 10000 // 10 seconds
             });
 
@@ -232,7 +231,6 @@ exports.getUserResourceUtilization = async (req, res) => {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        const apiGatewayUrl = process.env.API_GATEWAY_URL || "http://localhost:5000";
         const authorizationHeader = req.headers.authorization;
 
         let userUsageFromDocumentService = null;
@@ -240,8 +238,9 @@ exports.getUserResourceUtilization = async (req, res) => {
         let timeLeftUntilReset = null;
 
         try {
-            const documentServiceResponse = await axios.get(`${apiGatewayUrl}/files/user-usage-and-plan/${userId}`, {
-                headers: { Authorization: authorizationHeader },
+            const usageUrl = getUserUsageAndPlanUrl(userId);
+            const documentServiceResponse = await axios.get(usageUrl, {
+                headers: usageRequestHeaders(authorizationHeader, userId),
                 timeout: 10000 // 10 seconds
             });
 

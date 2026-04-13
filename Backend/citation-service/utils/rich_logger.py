@@ -36,7 +36,8 @@ _SOURCE_STYLES = {
 
 # Agent emoji map
 _AGENT_ICONS = {
-    "KeywordExtractor":    "🔑",
+    "LegalDimensionExtractor": "⚖",
+    "KeywordExtractor":        "🔑",  # legacy alias
     "Watchdog":            "🐕",
     "Fetcher":             "📥",
     "Clerk":               "📋",

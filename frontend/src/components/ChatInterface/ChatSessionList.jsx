@@ -1,47 +1,99 @@
-import React from 'react';
+import React from "react";
+import { MessageSquare, Trash2, Clock } from "lucide-react";
 
-const ChatSessionList = ({ sessions, selectedSessionId, onSelectSession, onDeleteSession }) => {
+const formatRelativeTime = (value) => {
+  if (!value) return "No recent messages";
+
+  try {
+    const date = new Date(value);
+    const now = new Date();
+    const diffInSeconds = Math.max(0, Math.floor((now - date) / 1000));
+
+    if (diffInSeconds < 60) return "Just now";
+
+    const diffInMinutes = Math.floor(diffInSeconds / 60);
+    if (diffInMinutes < 60) {
+      return `${diffInMinutes}m ago`;
+    }
+
+    const diffInHours = Math.floor(diffInMinutes / 60);
+    if (diffInHours < 24) {
+      return `${diffInHours}h ago`;
+    }
+
+    const diffInDays = Math.floor(diffInHours / 24);
+    return `${diffInDays}d ago`;
+  } catch {
+    return "Recently";
+  }
+};
+
+const ChatSessionList = ({
+  sessions,
+  selectedSessionId,
+  onSelectSession,
+  onDeleteSession,
+}) => {
+  if (!sessions.length) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-center pt-20">
+        <MessageSquare className="h-10 w-10 mb-3 text-gray-200" />
+        <p className="text-gray-500 text-sm font-medium">No chat sessions yet</p>
+        <p className="text-gray-400 text-sm mt-1">
+          Ask a question to start your first session.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-2">
-      {sessions.length === 0 ? (
-        <p className="text-gray-400 text-sm">No chat sessions yet. Start a new query!</p>
-      ) : (
-        sessions.map((session) => (
+    <div className="w-full flex flex-col gap-2 pb-4">
+      {sessions.map((session, index) => {
+        const isSelected = selectedSessionId === session.sessionId;
+        // Use session title (first user question) as the session name
+        const sessionName = session.title && session.title !== "Untitled session"
+          ? session.title
+          : `Session ${index + 1}`;
+
+        return (
           <div
             key={session.sessionId}
-            className={`flex items-center justify-between p-3 rounded-md cursor-pointer transition-colors duration-200
-              ${selectedSessionId === session.sessionId ? 'bg-blue-700' : 'hover:bg-gray-700'}`}
             onClick={() => onSelectSession(session.sessionId)}
+            className={`group flex items-start justify-between gap-3 px-4 py-4 cursor-pointer rounded-xl transition-all border ${
+              isSelected
+                ? "bg-[#E8F8F7] border-[#21C1B6] shadow-sm"
+                : "bg-white border-gray-100 hover:bg-[#F5FBFB] hover:border-[#21C1B6]/40 hover:shadow-sm"
+            }`}
           >
-            <span className="font-medium text-sm flex-grow truncate">
-              {session.messages[0]?.question || `Session ${session.sessionId.substring(0, 8)}...`}
-            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isSelected ? 'bg-[#21C1B6]' : 'bg-gray-300'}`} />
+                <p className={`text-[14px] leading-5 font-semibold truncate ${isSelected ? 'text-[#11766f]' : 'text-gray-800'}`}>
+                  {sessionName}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 pl-3.5">
+                <Clock className="h-3 w-3 text-gray-400 flex-shrink-0" />
+                <p className="text-xs text-gray-400">
+                  {formatRelativeTime(session.lastMessageAt)}
+                </p>
+              </div>
+            </div>
+
             <button
-              onClick={(e) => {
-                e.stopPropagation();
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
                 onDeleteSession(session.sessionId);
               }}
-              className="ml-2 text-red-400 hover:text-red-300 p-1 rounded-full hover:bg-gray-600"
+              className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all p-1 flex-shrink-0 mt-1"
               title="Delete session"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-4 w-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                />
-              </svg>
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
           </div>
-        ))
-      )}
+        );
+      })}
     </div>
   );
 };

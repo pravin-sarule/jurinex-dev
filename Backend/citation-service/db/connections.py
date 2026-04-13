@@ -209,6 +209,9 @@ def get_neo4j_driver():
     URI examples: neo4j://localhost, neo4j+s://xxx.databases.neo4j.io
     """
     global _neo4j_driver, _neo4j_init_attempted
+    if _get_env_bool("CITATION_DISABLE_NEO4J", False) or not _get_env_bool("CITATION_ENABLE_NEO4J", True):
+        logger.info("[NEO4J] Disabled by env (CITATION_DISABLE_NEO4J/CITATION_ENABLE_NEO4J).")
+        return None
     uri = os.getenv("NEO4J_URI")
     user = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
     password = os.getenv("NEO4J_PASSWORD")

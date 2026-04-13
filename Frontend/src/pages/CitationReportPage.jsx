@@ -4,6 +4,7 @@ import citationApi from '../services/citationApi';
 import documentApi from '../services/documentApi';
 import { CITATION_SERVICE_URL } from '../config/apiConfig';
 import html2pdf from 'html2pdf.js';
+import RedesignedCitationReportDoc from '../components/CitationReport/RedesignedCitationReportDoc';
 
 /* ── tokens ── */
 const N = '#1B2A4A', NL = '#2C4066', ND = '#0F1A30';
@@ -1326,6 +1327,35 @@ ${graphSection}
 
 /* ─── Full citation report doc view ─── */
 function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPerspective = 'all', onPerspectiveChange }) {
+  const [redesignNotifyStatus, setRedesignNotifyStatus] = useState({});
+  const redesignGeneratedAt = report?.report_format?.generatedAt || '';
+
+  const redesignHandleNotifyMe = async (ticketId) => {
+    if (!ticketId) return;
+    setRedesignNotifyStatus((prev) => ({ ...prev, [ticketId]: 'sending' }));
+    const user = (() => { try { return JSON.parse(localStorage.getItem('user') || '{}'); } catch { return {}; } })();
+    const userId = String(user.id || user.user_id || localStorage.getItem('userId') || 'anonymous');
+    try {
+      await citationApi.notifyMeOnHitl(ticketId, userId);
+    } catch {
+      // keep the report interactive even if notify registration fails
+    }
+    setRedesignNotifyStatus((prev) => ({ ...prev, [ticketId]: 'done' }));
+  };
+
+  return (
+    <RedesignedCitationReportDoc
+      report={report}
+      query={query}
+      initialPerspective={initialPerspective}
+      onPerspectiveChange={onPerspectiveChange}
+      onViewFullJudgment={onViewFullJudgment}
+      onDownloadCitation={(citation) => downloadCitationPDF(citation, query, redesignGeneratedAt)}
+      onNotifyMe={redesignHandleNotifyMe}
+      notifyStatus={redesignNotifyStatus}
+    />
+  );
+
   const [sel, setSel] = useState(new Set());
   const [atcCitId, setAtcCitId] = useState(null);
   const [atcCase, setAtcCase] = useState('');
@@ -3608,11 +3638,11 @@ export default function CitationReportPage({ embedded = false }) {
                 disabled={sending || (!input.trim() && !selCase && refDocs.length === 0)}
                 style={{ marginLeft: 'auto' }}
               >
-                Generate Report
+                Find Citations
               </button>
               {report && (
                 <button onClick={() => setShowReport(true)} style={{ padding: '6px 14px', background: T, color: W, border: 'none', borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                  View Report ({report?.report_format?.citations?.length || 0}) →
+                  View Report ({report?.report_format?.citations?.length || 0} citations / {(report?.report_format?.dimensionGroups || []).length || 0} dimensions) →
                 </button>
               )}
             </div>
@@ -3734,7 +3764,7 @@ export default function CitationReportPage({ embedded = false }) {
                 </div>
               )}
               <div style={{ marginTop: 8, fontSize: 10, color: g400, lineHeight: 1.4 }}>
-                Selecting a case sends its documents to Claude for keyword extraction, improving search precision.
+                Selecting a case auto-loads backend legal dimensions from case documents, so citation grouping is ready before search.
               </div>
 
               {/* Case-specific reports */}
@@ -3792,32 +3822,46 @@ export default function CitationReportPage({ embedded = false }) {
               )}
             </div>
 
-            {/* Reference docs */}
+            {/* Dimension sidebar */}
             <div style={{ background: W, borderRadius: 10, padding: 14, border: `1px solid ${g200}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }}>📎 Reference Documents</div>
-              {refDocs.length === 0 ? (
-                <div style={{ fontSize: 11, color: g400 }}>No files uploaded. Use 📎 in the chat bar to add reference files.</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }}>⚖️ Dimension Sidebar</div>
+              {!report ? (
+                <div style={{ fontSize: 11, color: g400, lineHeight: 1.5 }}>
+                  Select a case and run <b>Find Citations</b>. Legal dimensions are auto-extracted from backend report data and appear here for one-click navigation.
+                </div>
+              ) : (report?.report_format?.dimensionGroups || []).length === 0 ? (
+                <div style={{ fontSize: 11, color: g400, lineHeight: 1.5 }}>
+                  No explicit dimension groups found in this report yet. Open report to review grouped citations.
+                </div>
               ) : (
-                refDocs.map((d, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', borderBottom: `1px solid ${g100}` }}>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: N }}>{d.name}</div>
-                      <div style={{ fontSize: 9, color: g400 }}>{(d.size / 1024).toFixed(1)} KB</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {(report?.report_format?.dimensionGroups || []).map((dg, idx) => (
+                    <button
+                      key={String(dg.dimension_id ?? idx)}
+                      type="button"
+                      onClick={() => setShowReport(true)}
+                      style={{
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '7px 9px',
+                        borderRadius: 8,
+                        border: `1px solid ${g200}`,
+                        background: g50,
+                        cursor: 'pointer',
+                        color: N,
+                        fontSize: 11,
+                        fontWeight: 600,
+                      }}
+                    >
+                      <div style={{ fontSize: 10, color: '#0F766E', fontWeight: 700, marginBottom: 2 }}>Dimension {idx + 1}</div>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dg.name || `Dimension ${idx + 1}`}</div>
+                    </button>
+                  ))}
+                  <div style={{ marginTop: 4, fontSize: 10, color: g500 }}>
+                    {(report?.report_format?.citations || []).length} citations found across {(report?.report_format?.dimensionGroups || []).length} legal dimensions.
                     </div>
-                    <span onClick={() => setRefDocs(p => p.filter((_, j) => j !== i))} style={{ cursor: 'pointer', fontSize: 14, color: g400, padding: '0 4px' }}>×</span>
-                  </div>
-                ))
+                </div>
               )}
-              <button onClick={() => fileRef.current?.click()} style={{ marginTop: 8, width: '100%', padding: '5px', background: '#F3E5F5', border: '1px solid #D1C4E9', borderRadius: 6, fontSize: 10, fontWeight: 600, color: '#4A148C', cursor: 'pointer', fontFamily: 'inherit' }}>📎 Upload Files (.txt .md .json .csv)</button>
-              <div style={{ marginTop: 6, padding: '5px 8px', background: '#F3E5F5', borderRadius: 6, fontSize: 9, color: '#4A148C', lineHeight: 1.4 }}>File content is included as context. Max 3 files at a time.</div>
-            </div>
-
-            {/* Confidence guide */}
-            <div style={{ background: W, borderRadius: 10, padding: 14, border: `1px solid ${g200}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }}>Confidence Guide</div>
-              {[{ c: '#1B5E20', l: 'Verified — Fully confirmed' }, { c: '#E65100', l: 'Review Suggested' }, { c: '#B71C1C', l: 'Unverified — Needs verification' }].map(({ c, l }) => (
-                <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', fontSize: 11, color: g600 }}><Dot c={c} /> {l}</div>
-              ))}
             </div>
 
             {/* Disclaimer */}

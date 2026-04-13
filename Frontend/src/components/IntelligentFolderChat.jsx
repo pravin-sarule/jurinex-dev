@@ -1,16 +1,18 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
-import { BookOpen, ChevronDown, Mic, MicOff, Send } from 'lucide-react';
+import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles } from 'lucide-react';
 import './IntelligentFolderChat.css';
 import CitationsPanel from '../AnalysisPage/CitationsPanel';
 import apiService from '../services/api';
+import LearningBubble from './LearningBubble';
+import LearningQuestionModal from './LearningQuestionModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
-import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCS_BASE_URL } from '../config/apiConfig';
 import ChatQuotaErrorModal from './ChatQuotaErrorModal';
 
 export default function IntelligentFolderChat({
@@ -18,6 +20,7 @@ export default function IntelligentFolderChat({
   authToken = null,
   onMessageComplete = null,
   className = '',
+  documentContext: documentContextProp = '',
 }) {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
@@ -32,14 +35,23 @@ export default function IntelligentFolderChat({
   const [selectedSecretId, setSelectedSecretId] = useState(null);
   const [activeDropdown, setActiveDropdown] = useState('Summary');
   const [showDropdown, setShowDropdown] = useState(false);
+  const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [isSecretPromptSelected, setIsSecretPromptSelected] = useState(false);
 
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
+  const [learningMode, setLearningMode] = useState(() => localStorage.getItem('learning_mode_enabled') === 'true');
+  const [adversarialMode, setAdversarialMode] = useState(() => localStorage.getItem('learning_adversarial_mode') === 'true');
+  const [learningSessionId, setLearningSessionId] = useState(null);
+  const [turnCount, setTurnCount] = useState(0);
+  const [turnThreshold, setTurnThreshold] = useState(4);
+  const [contextWarning, setContextWarning] = useState('');
+  const [relationshipHint, setRelationshipHint] = useState('');
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const dropdownRef = useRef(null);
+  const styleDropdownRef = useRef(null);
   const finalizedMessageIds = useRef(new Set());
 
   // Setup speech recognition
@@ -96,8 +108,13 @@ export default function IntelligentFolderChat({
       const t = Number(temp);
       if (Number.isFinite(t)) o.model_temperature = t;
     }
+    o.learning_mode = !!learningMode;
+    if (learningMode) {
+      o.adversarial_mode = !!adversarialMode;
+      if (relationshipHint) o.context_selection = relationshipHint;
+    }
     return Object.keys(o).length ? o : null;
-  }, []);
+  }, [learningMode, adversarialMode, relationshipHint]);
 
   const {
     text,
@@ -109,6 +126,9 @@ export default function IntelligentFolderChat({
     routingDecision,
     status,
     finalMetadata,
+    learningPayload,
+    learningPopupQuestion,
+    dismissLearningPopup,
     sendMessage,
     stopStreaming,
     clear,
@@ -126,6 +146,77 @@ export default function IntelligentFolderChat({
       if (token) return token;
     }
     return null;
+  };
+
+  /** Optional client-provided document_context (advanced); default is built on the server. */
+  const optionalDocumentContextOverride = useMemo(
+    () => String(documentContextProp || '').trim(),
+    [documentContextProp],
+  );
+
+  const ensureLearningSession = async () => {
+    const token = authToken || getAuthToken();
+    const seg = encodeURIComponent(String(folderName || '').trim());
+    const endpoint = `${String(DOCS_BASE_URL || '').replace(/\/$/, '')}/${seg}/learning/init`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const body = { sessionId: learningSessionId || undefined };
+    body.adversarial_mode = !!adversarialMode;
+    if (optionalDocumentContextOverride) {
+      body.documentContext = optionalDocumentContextOverride;
+    }
+    const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setContextWarning(String(err?.detail || err?.message || 'Learning Mode could not start'));
+      return null;
+    }
+    setContextWarning('');
+    const data = await res.json().catch(() => ({}));
+    const sid = data?.sessionId || data?.session_id || learningSessionId || null;
+    if (sid) setLearningSessionId(sid);
+    if (typeof data?.turnCount === 'number') setTurnCount(data.turnCount);
+    if (typeof data?.turnThreshold === 'number') setTurnThreshold(data.turnThreshold);
+    return sid;
+  };
+
+  const analyzeRelationshipsForQuestion = async (questionText) => {
+    if (!learningMode || !String(folderName || '').trim()) return '';
+    const q = String(questionText || '').trim();
+    if (!q) return '';
+    const token = authToken || getAuthToken();
+    const seg = encodeURIComponent(String(folderName || '').trim());
+    const endpoint = `${String(DOCS_BASE_URL || '').replace(/\/$/, '')}/${seg}/learning/analyze-relationships`;
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ query: q }),
+      });
+      if (!res.ok) return '';
+      const data = await res.json().catch(() => ({}));
+      const g = data?.grounding || {};
+      const conflicts = Array.isArray(g?.conflicting_facts) ? g.conflicting_facts : [];
+      const dates = Array.isArray(g?.key_dates) ? g.key_dates : [];
+      const reqs = Array.isArray(g?.statutory_requirements) ? g.statutory_requirements : [];
+      const summary = [
+        conflicts[0]
+          ? `Conflict: ${conflicts[0]?.left?.doc_id || 'Doc A'} vs ${conflicts[0]?.right?.doc_id || 'Doc B'}.`
+          : '',
+        dates[0] ? `Key date: ${dates[0]?.date_text || ''} (${dates[0]?.doc_id || 'document'}).` : '',
+        reqs[0] ? `Statutory cue: ${reqs[0]?.requirement || ''} (${reqs[0]?.doc_id || 'document'}).` : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      setRelationshipHint(summary);
+      return summary;
+    } catch (e) {
+      console.warn('[IntelligentFolderChat] relationship analysis failed', e);
+      return '';
+    }
   };
 
   const fetchSecrets = async () => {
@@ -197,8 +288,14 @@ export default function IntelligentFolderChat({
             lastMessage.status = null;
             
             if (finalMetadata) {
+              if (finalMetadata.session_id) setLearningSessionId(finalMetadata.session_id);
               lastMessage.used_chunk_ids = finalMetadata.used_chunk_ids || [];
               lastMessage.citations = finalMetadata.citations || null;
+              lastMessage.learningPayload = learningPayload || finalMetadata.learning_payload || null;
+              lastMessage.learningPopupQuestion =
+                finalMetadata.learning_popup_question || learningPopupQuestion || null;
+              if (typeof finalMetadata.turn_count === 'number') setTurnCount(finalMetadata.turn_count);
+              if (typeof finalMetadata.turn_threshold === 'number') setTurnThreshold(finalMetadata.turn_threshold);
               console.log('[IntelligentFolderChat] Stored metadata in message:', {
                 used_chunk_ids: lastMessage.used_chunk_ids,
                 citations: lastMessage.citations
@@ -223,7 +320,43 @@ export default function IntelligentFolderChat({
         setCurrentMessageId(null);
       }
     }
-  }, [text, thinking, isStreaming, methodUsed, routingDecision, status, currentMessageId, sessionId, onMessageComplete, finalMetadata]);
+  }, [
+    text,
+    thinking,
+    isStreaming,
+    methodUsed,
+    routingDecision,
+    status,
+    currentMessageId,
+    sessionId,
+    onMessageComplete,
+    finalMetadata,
+    learningPayload,
+    learningPopupQuestion,
+  ]);
+
+  useEffect(() => {
+    localStorage.setItem('learning_mode_enabled', String(learningMode));
+  }, [learningMode]);
+  useEffect(() => {
+    localStorage.setItem('learning_adversarial_mode', String(adversarialMode));
+  }, [adversarialMode]);
+
+  useEffect(() => {
+    if (!learningMode) {
+      setContextWarning('');
+      setRelationshipHint('');
+    }
+  }, [learningMode]);
+
+  useEffect(() => {
+    if (!learningMode) return;
+    setMessages([]);
+    setCurrentMessageId(null);
+    finalizedMessageIds.current.clear();
+    setTurnCount(0);
+    ensureLearningSession().catch(() => null);
+  }, [folderName]);
 
   useEffect(() => {
     const fetchCitationsForMessage = async (message) => {
@@ -332,15 +465,23 @@ export default function IntelligentFolderChat({
     }
   };
 
-  const handleRegularSubmit = async () => {
+  const handleQuickReply = async (optionText) => {
+    if (!optionText || isStreaming) return;
+    setInput(String(optionText));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await handleRegularSubmit(String(optionText));
+  };
+
+  const handleRegularSubmit = async (overrideText = null) => {
     if (currentMessageId) {
       setCurrentMessageId(null);
     }
 
+    const outgoingText = (overrideText ?? input).trim();
     const userMessage = {
       id: Date.now(),
       role: 'user',
-      text: input.trim(),
+      text: outgoingText,
       timestamp: new Date(),
     };
 
@@ -362,7 +503,25 @@ export default function IntelligentFolderChat({
     setTimeout(() => inputRef.current?.focus(), 100);
 
     try {
-      await sendMessage(input.trim(), null, folderChatStreamFetchParams || undefined);
+      let extra = { ...(folderChatStreamFetchParams || {}) };
+      if (learningMode) {
+        const sid = await ensureLearningSession();
+        if (!sid) {
+          setCurrentMessageId(null);
+          setMessages(prev => prev.filter((m) => m.id !== aiMessageId));
+          return;
+        }
+        const relHint = await analyzeRelationshipsForQuestion(outgoingText);
+        extra = {
+          ...extra,
+          session_id: sid,
+          ...(relHint ? { context_selection: relHint } : {}),
+          ...(optionalDocumentContextOverride
+            ? { document_context: optionalDocumentContextOverride }
+            : {}),
+        };
+      }
+      await sendMessage(outgoingText, null, extra || undefined);
     } catch (err) {
       console.error('Error sending message:', err);
       if (currentMessageId === aiMessageId) {
@@ -409,7 +568,24 @@ export default function IntelligentFolderChat({
     setTimeout(() => inputRef.current?.focus(), 100);
 
     try {
-      await sendMessage(null, selectedSecretId, folderChatStreamFetchParams || undefined);
+      let extra = { ...(folderChatStreamFetchParams || {}) };
+      if (learningMode) {
+        const sid = await ensureLearningSession();
+        if (!sid) {
+          setCurrentMessageId(null);
+          setMessages(prev => prev.filter((m) => m.id !== aiMessageId));
+          return;
+        }
+        extra = {
+          ...extra,
+          session_id: sid,
+          ...(relationshipHint ? { context_selection: relationshipHint } : {}),
+          ...(optionalDocumentContextOverride
+            ? { document_context: optionalDocumentContextOverride }
+            : {}),
+        };
+      }
+      await sendMessage(null, selectedSecretId, extra || undefined);
     } catch (err) {
       console.error('Error sending secret prompt:', err);
       if (currentMessageId === aiMessageId) {
@@ -430,6 +606,33 @@ export default function IntelligentFolderChat({
     setInput(e.target.value);
     setIsSecretPromptSelected(false);
     setActiveDropdown('Custom Query');
+  };
+
+  const handleLearningModeToggle = async (enabled) => {
+    if (enabled) {
+      const sid = await ensureLearningSession();
+      if (!sid) return;
+      setMessages([]);
+      setCurrentMessageId(null);
+      finalizedMessageIds.current.clear();
+      setTurnCount(0);
+      setLearningMode(true);
+      return;
+    }
+    const ok = window.confirm('Exit Learning Mode? Your progress will be reset.');
+    if (!ok) return;
+    setLearningMode(false);
+    setLearningSessionId(null);
+    setTurnCount(0);
+  };
+
+  const handleSelectStyle = async (style) => {
+    if (style === 'learning') {
+      await handleLearningModeToggle(true);
+    } else {
+      await handleLearningModeToggle(false);
+    }
+    setShowStyleDropdown(false);
   };
 
   const handleStop = () => {
@@ -465,6 +668,9 @@ export default function IntelligentFolderChat({
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setShowDropdown(false);
       }
+      if (styleDropdownRef.current && !styleDropdownRef.current.contains(event.target)) {
+        setShowStyleDropdown(false);
+      }
     };
 
     document.addEventListener('mousedown', handleClickOutside);
@@ -476,11 +682,98 @@ export default function IntelligentFolderChat({
   return (
     <div className={`intelligent-folder-chat ${className}`}>
       <ChatQuotaErrorModal error={error} onDismiss={clearError} />
+      <LearningQuestionModal
+        open={Boolean(learningMode && learningPopupQuestion)}
+        data={learningPopupQuestion}
+        folderName={folderName}
+        sessionId={learningSessionId || sessionId}
+        authToken={authToken}
+        onClose={() => dismissLearningPopup()}
+        onCompleted={(r) => {
+          dismissLearningPopup();
+          const follow = r && typeof r.follow_up_message === 'string' ? r.follow_up_message.trim() : '';
+          if (follow) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                role: 'assistant',
+                text: follow,
+                timestamp: new Date(),
+                thinking: '',
+                isStreaming: false,
+              },
+            ]);
+          }
+        }}
+      />
       <div className="chat-header">
-        <h3>Intelligent Folder Chat</h3>
-        {sessionId && (
+        <h3>
+          Intelligent Folder Chat
+          {learningMode ? <span className="learning-mode-tag">📖 Learning Mode</span> : null}
+        </h3>
+        <div className="style-dropdown-wrap" ref={styleDropdownRef}>
+          <button
+            type="button"
+            className={`learning-pill-toggle ${learningMode ? 'active' : ''}`}
+            onClick={() => setShowStyleDropdown((s) => !s)}
+            disabled={isStreaming || !String(folderName || '').trim()}
+            title={!String(folderName || '').trim() ? 'Select a folder first' : 'Choose response style'}
+          >
+            <span className="learning-pill-knob" />
+            <span className="learning-pill-label">{learningMode ? 'Learning' : 'Normal'}</span>
+            <ChevronDown className="h-3 w-3" />
+          </button>
+          {showStyleDropdown && (
+            <div className="style-dropdown-menu">
+              <button type="button" className="style-dropdown-item" onClick={() => handleSelectStyle('normal')}>
+                Normal
+              </button>
+              <button
+                type="button"
+                className="style-dropdown-item"
+                onClick={() => handleSelectStyle('learning')}
+                disabled={!String(folderName || '').trim()}
+              >
+                Learning
+              </button>
+            </div>
+          )}
+        </div>
+        {learningMode && (
+          <button
+            type="button"
+            onClick={() => setAdversarialMode((s) => !s)}
+            disabled={isStreaming}
+            title="Toggle opposing counsel challenge mode"
+            style={{
+              marginLeft: 8,
+              padding: '6px 10px',
+              borderRadius: 10,
+              border: `1px solid ${adversarialMode ? '#b91c1c' : '#d1d5db'}`,
+              background: adversarialMode ? '#fef2f2' : '#fff',
+              color: adversarialMode ? '#b91c1c' : '#374151',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: isStreaming ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {adversarialMode ? 'Adversarial: ON' : 'Adversarial: OFF'}
+          </button>
+        )}
+        {learningMode && turnCount > 0 && turnCount < turnThreshold && (
+          <div className="turn-progress">
+            <span>Turn {turnCount} of {turnThreshold}</span>
+            <span className="turn-dots">
+              {Array.from({ length: turnThreshold }).map((_, i) => (
+                <span key={`turn-dot-${i}`} className={i < turnCount ? 'dot filled' : 'dot'}>●</span>
+              ))}
+            </span>
+          </div>
+        )}
+        {(learningSessionId || sessionId) && (
           <div className="session-info">
-            Session: {sessionId.substring(0, 8)}...
+            Session: {(learningSessionId || sessionId).substring(0, 8)}...
           </div>
         )}
         {messages.length > 0 && (
@@ -493,6 +786,16 @@ export default function IntelligentFolderChat({
           </button>
         )}
       </div>
+      {contextWarning ? (
+        <div className="learning-warning-banner">
+          {contextWarning}
+        </div>
+      ) : null}
+      {learningMode && relationshipHint ? (
+        <div className="learning-warning-banner" style={{ background: '#ecfeff', borderColor: '#99f6e4', color: '#0f766e' }}>
+          Deep grounding active: {relationshipHint}
+        </div>
+      ) : null}
 
       <div className="chat-messages">
         {messages.length === 0 && (
@@ -548,54 +851,22 @@ export default function IntelligentFolderChat({
                   )}
 
                   <div className="ai-message">
-                    {msg.text ? (
+                    {msg.learningPayload ? (
+                      <LearningBubble
+                        payload={msg.learningPayload}
+                        isStreaming={isStreaming}
+                        onOptionSelect={handleQuickReply}
+                      />
+                    ) : msg.text ? (
                       <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
                         rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                        components={{
-                          h1: ({node, ...props}) => <h1 className="text-2xl font-bold mb-4 mt-6 text-gray-900 border-b-2 border-gray-300 pb-2" {...props} />,
-                          h2: ({node, ...props}) => <h2 className="text-xl font-bold mb-3 mt-5 text-gray-900 border-b border-gray-200 pb-1" {...props} />,
-                          h3: ({node, ...props}) => <h3 className="text-lg font-semibold mb-2 mt-4 text-gray-800" {...props} />,
-                          h4: ({node, ...props}) => <h4 className="text-base font-semibold mb-2 mt-3 text-gray-800" {...props} />,
-                          h5: ({node, ...props}) => <h5 className="text-sm font-semibold mb-1 mt-2 text-gray-700" {...props} />,
-                          h6: ({node, ...props}) => <h6 className="text-sm font-semibold mb-1 mt-2 text-gray-700" {...props} />,
-                          p: ({node, ...props}) => <p className="mb-3 leading-relaxed text-gray-800 text-[15px]" {...props} />,
-                          strong: ({node, ...props}) => <strong className="font-bold text-gray-900" {...props} />,
-                          em: ({node, ...props}) => <em className="italic text-gray-800" {...props} />,
-                          ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-3 space-y-1 text-gray-800" {...props} />,
-                          ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-3 space-y-1 text-gray-800" {...props} />,
-                          li: ({node, ...props}) => <li className="leading-relaxed text-gray-800" {...props} />,
-                          a: ({node, ...props}) => <a className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors" target="_blank" rel="noopener noreferrer" {...props} />,
-                          blockquote: ({node, ...props}) => <blockquote className="border-l-4 border-blue-500 pl-4 py-2 my-3 bg-blue-50 text-gray-700 italic rounded-r" {...props} />,
-                          code: ({node, inline, ...props}) => {
-                            const className = inline 
-                              ? "bg-gray-100 px-1.5 py-0.5 rounded text-xs font-mono text-red-600" 
-                              : "block bg-gray-900 text-gray-100 p-3 rounded-md text-xs font-mono overflow-x-auto my-3";
-                            return <code className={className} {...props} />;
-                          },
-                          pre: ({node, ...props}) => <pre className="bg-gray-900 rounded-md overflow-hidden my-3" {...props} />,
-                          table: ({node, ...props}) => (
-                            <div className="overflow-x-auto my-4">
-                              <table className="min-w-full border-collapse border border-gray-300" {...props} />
-                            </div>
-                          ),
-                          thead: ({node, ...props}) => <thead className="bg-gray-100" {...props} />,
-                          th: ({node, ...props}) => <th className="border border-gray-300 px-3 py-2 text-left font-bold text-gray-900 text-sm" {...props} />,
-                          tbody: ({node, ...props}) => <tbody {...props} />,
-                          td: ({node, ...props}) => <td className="border border-gray-300 px-3 py-2 text-gray-800 text-sm" {...props} />,
-                          tr: ({node, ...props}) => <tr className="hover:bg-gray-50" {...props} />,
-                          hr: ({node, ...props}) => <hr className="my-4 border-gray-300" {...props} />,
-                        }}
                       >
                         {(() => {
                           const rawResponse = msg.text || '';
                           if (!rawResponse) return '';
-                          
                           const isStructured = isStructuredJsonResponse(rawResponse);
-                          if (isStructured) {
-                            return renderSecretPromptResponse(rawResponse);
-                          }
-                          
+                          if (isStructured) return renderSecretPromptResponse(rawResponse);
                           return convertJsonToPlainText(rawResponse);
                         })()}
                       </ReactMarkdown>
@@ -665,13 +936,27 @@ export default function IntelligentFolderChat({
 
       <form onSubmit={handleSubmit} className="chat-input-form">
         <div className="input-container flex items-center space-x-2 bg-white rounded-xl border border-[#21C1B6] px-4 py-2 focus-within:ring-2 focus-within:ring-[#21C1B6]/20 transition-all">
+          {learningMode && (
+            <div className="learning-active-chip" title="Learning mode is active">
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>Learning</span>
+              <button
+                type="button"
+                className="learning-chip-close"
+                onClick={() => handleLearningModeToggle(false)}
+                disabled={isStreaming}
+              >
+                ×
+              </button>
+            </div>
+          )}
           <input
             ref={inputRef}
             type="text"
             value={input}
             onChange={handleInputChange}
             placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : "Ask a question about your documents..."}
-            disabled={isStreaming}
+            disabled={isStreaming || (learningMode && !!learningPopupQuestion)}
             className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
             autoFocus
           />
@@ -741,7 +1026,11 @@ export default function IntelligentFolderChat({
             ) : (
               <button
                 type="submit"
-                disabled={(!input.trim() && !(isSecretPromptSelected && selectedSecretId)) || isStreaming}
+                disabled={
+                  (!input.trim() && !(isSecretPromptSelected && selectedSecretId)) ||
+                  isStreaming ||
+                  (learningMode && !!learningPopupQuestion)
+                }
                 className="flex items-center space-x-2 px-4 py-2 bg-[#21C1B6] text-white rounded-lg text-sm font-semibold hover:bg-[#1AA49B] transition-all disabled:bg-gray-200 disabled:text-gray-400 shadow-sm active:scale-95"
                 title="Send message"
               >

@@ -182,6 +182,7 @@ def _gemini_extract(
     raw_text: str,
     title: str = "",
     query: str = "",
+    dimension_context: str = "",
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -198,6 +199,11 @@ def _gemini_extract(
     if not excerpt:
         return None
 
+    # Build dimension context annotation for the prompt (injected after query line)
+    dim_annotation = ""
+    if dimension_context:
+        dim_annotation = f"\nLegal Dimension Context: {dimension_context}\n"
+
     # Resolve prompt, model, temperature from DB → fallback to defaults
     default_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
     default_config_kw: Dict[str, Any] = {
@@ -205,7 +211,9 @@ def _gemini_extract(
         "maxOutputTokens": 1536,
         "responseMimeType": "application/json",
     }
-    prompt = _safe_prompt_format(_DEFAULT_CLERK_PROMPT, title=title, query=query, excerpt=excerpt)
+    prompt = _safe_prompt_format(
+        _DEFAULT_CLERK_PROMPT, title=title, query=query + dim_annotation, excerpt=excerpt
+    )
     model = default_model
     config_kw: Dict[str, Any] = default_config_kw.copy()
     try:
@@ -218,7 +226,7 @@ def _gemini_extract(
             default_temperature=0.1,
             default_max_tokens=1536,
         )
-        prompt = _safe_prompt_format(pc.prompt, title=title, query=query, excerpt=excerpt)
+        prompt = _safe_prompt_format(pc.prompt, title=title, query=query + dim_annotation, excerpt=excerpt)
         model = pc.model_name
         temperature = pc.temperature
         max_tokens = pc.max_tokens
@@ -227,7 +235,9 @@ def _gemini_extract(
         logger.info("[CLERK] Prompt source=%s model=%s temp=%.2f", pc.source, model, temperature)
     except Exception as exc:
         logger.warning("[CLERK] Prompt resolver failed (%s), using default", exc)
-        prompt = _safe_prompt_format(_DEFAULT_CLERK_PROMPT, title=title, query=query, excerpt=excerpt)
+        prompt = _safe_prompt_format(
+            _DEFAULT_CLERK_PROMPT, title=title, query=query + dim_annotation, excerpt=excerpt
+        )
         model = default_model
         config_kw = default_config_kw.copy()
 
@@ -442,8 +452,16 @@ def clerk_ingest_ik(
     case_id: Optional[str] = None,
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    dimensions: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """Ingest documents from Indian Kanoon API results. case_id = original case for report (for Qdrant payload)."""
+    # Build dimension lookup: dimension_id → dimension dict (for context injection)
+    _dim_lookup: Dict[int, Dict[str, Any]] = {}
+    for d in (dimensions or []):
+        did = d.get("dimension_id")
+        if did is not None:
+            _dim_lookup[did] = d
+
     def _process_doc(doc: Dict[str, Any]) -> Optional[str]:
         from agents.legal_citation_agent import LegalCitationAgent
         agent = LegalCitationAgent()
@@ -460,10 +478,31 @@ def clerk_ingest_ik(
         tid = doc.get("external_id") or doc.get("tid") or ""
         source_url = f"https://indiankanoon.org/doc/{tid}/" if tid else ""
 
+        # Resolve dimension metadata attached by Watchdog/LDE
+        dim_id   = doc.get("_dimension_id")
+        dim_name = doc.get("_dimension_name") or ""
+        q_type   = doc.get("_query_type") or ""
+        dimension_context = ""
+        if dim_id is not None and dim_id in _dim_lookup:
+            d = _dim_lookup[dim_id]
+            dimension_context = (
+                f"{d.get('name', dim_name)} — {d.get('reasoning', '')}".strip(" —")
+            )
+        elif dim_name:
+            dimension_context = dim_name
+
         # 1. Gemini Extraction (OCR + Structure). CHECK 6: re-extract once if ratio/citation empty.
-        extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
+        extracted = _gemini_extract(
+            raw_text, title=title, query=query,
+            dimension_context=dimension_context,
+            run_id=run_id, user_id=user_id,
+        )
         if extracted and not (extracted.get("ratio") or "").strip() and not (extracted.get("primaryCitation") or "").strip():
-            extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
+            extracted = _gemini_extract(
+                raw_text, title=title, query=query,
+                dimension_context=dimension_context,
+                run_id=run_id, user_id=user_id,
+            )
         info = _merge_extraction(extracted, title)
 
         # 2. Chunking for ES/Qdrant
@@ -509,6 +548,11 @@ def clerk_ingest_ik(
             "ik_cite_list":       doc.get("cite_list") or [],
             "ik_cited_by_list":   doc.get("cited_by_list") or [],
             "ik_doc_meta":        doc.get("ik_doc_meta") or {},
+            # Dimension tags (from LDE/Watchdog)
+            "dimension_id":       dim_id,
+            "dimension_name":     dim_name or None,
+            "dimension_tags":     [dim_name] if dim_name else [],
+            "query_type":         q_type or None,
         }
 
         try:

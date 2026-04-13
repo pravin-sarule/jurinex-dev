@@ -32,6 +32,7 @@ from agents.librarian.agent import run_librarian_agent
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["sections"])
+_ANALYZER_SECTIONS_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_SECTIONS_TIMEOUT", "25"))
 
 
 def _invalidate_assembled_cache(draft_id: str, user_id: int):
@@ -1276,7 +1277,7 @@ def _fetch_sections_from_template_analyzer(
     """
     configured = (os.environ.get("TEMPLATE_ANALYZER_URL") or "").rstrip("/")
     base_urls = []
-    for candidate in [configured, "http://localhost:5017", "http://localhost:8002"]:
+    for candidate in [configured, "http://localhost:8002", "http://localhost:5017"]:
         if candidate and candidate not in base_urls:
             base_urls.append(candidate)
     if not base_urls or user_id is None:
@@ -1289,7 +1290,7 @@ def _fetch_sections_from_template_analyzer(
             import json as _json
             import urllib.request
             req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=_ANALYZER_SECTIONS_TIMEOUT_SECONDS) as resp:
                 data = resp.read().decode()
             payload = _json.loads(data)
             break

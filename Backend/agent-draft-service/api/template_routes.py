@@ -9,7 +9,9 @@ import os
 import uuid
 import io
 import base64
+import time
 import json as _json
+import re
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 
@@ -22,6 +24,63 @@ from services.gcs_signed_url import generate_signed_url, generate_signed_url_fro
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Templates"])
+
+_ANALYZER_CACHE_TTL_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_CACHE_TTL", "45"))
+_ANALYZER_TEMPLATE_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_TEMPLATE_TIMEOUT", "20"))
+_ANALYZER_PAYLOAD_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_PAYLOAD_TIMEOUT", "25"))
+_analyzer_template_cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]] = {}
+_analyzer_payload_cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]] = {}
+
+
+def _clean_section_title(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip(" \t:-.")
+
+
+def _section_title_from_marker(marker: str) -> str:
+    title = _clean_section_title(marker)
+    if not title:
+        return ""
+    title = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s*", "", title, flags=re.IGNORECASE).strip()
+    return _clean_section_title(title)
+
+
+def _normalize_section_title(section_name: str, prompts: Any, index: int) -> str:
+    name = _clean_section_title(section_name)
+    marker_title = ""
+    if isinstance(prompts, list) and prompts:
+        first = prompts[0]
+        if isinstance(first, dict):
+            marker_title = _section_title_from_marker(first.get("start_marker", ""))
+    noisy = (
+        not name
+        or len(name) > 90
+        or len(name.split()) > 10
+        or "," in name
+        or ";" in name
+    )
+    return marker_title if marker_title and noisy else (name or marker_title or f"Section {index + 1}")
+
+
+def _cache_get(
+    cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]],
+    key: tuple[str, int],
+) -> Optional[Dict[str, Any]]:
+    item = cache.get(key)
+    if not item:
+        return None
+    expires_at, value = item
+    if time.time() >= expires_at:
+        cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(
+    cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]],
+    key: tuple[str, int],
+    value: Dict[str, Any],
+) -> None:
+    cache[key] = (time.time() + _ANALYZER_CACHE_TTL_SECONDS, value)
 
 
 def _is_uuid(value: str) -> bool:
@@ -46,8 +105,8 @@ def _get_template_analyzer_base_urls() -> list[str]:
     configured = (os.environ.get("TEMPLATE_ANALYZER_URL") or "").strip().rstrip("/")
     candidates = [
         configured,
-        "http://localhost:5017",
         "http://localhost:8002",
+        "http://localhost:5017",
     ]
     out: list[str] = []
     for item in candidates:
@@ -68,6 +127,11 @@ def _fetch_user_template_from_analyzer(
     """
     if user_id is None:
         return None, "Missing user context", None
+    cache_key = (str(template_id), int(user_id))
+    cached = _cache_get(_analyzer_template_cache, cache_key)
+    if cached is not None:
+        return cached, None, 200
+
     base_urls = _get_template_analyzer_base_urls()
     if not base_urls:
         return None, "Template Analyzer URL is not configured", None
@@ -81,7 +145,7 @@ def _fetch_user_template_from_analyzer(
             import json as _json
             import urllib.request
             req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=_ANALYZER_TEMPLATE_TIMEOUT_SECONDS) as resp:
                 data = resp.read().decode()
             payload = _json.loads(data)
             break
@@ -113,9 +177,9 @@ def _fetch_user_template_from_analyzer(
     for idx, sec in enumerate(section_list):
         if not isinstance(sec, dict):
             continue
-        section_name = sec.get("section_name") or "Untitled"
-        section_key = (section_name or "").lower().replace(" ", "_").replace("-", "_") or f"section_{idx}"
         prompts = sec.get("section_prompts") or []
+        section_name = _normalize_section_title(sec.get("section_name") or "", prompts, idx)
+        section_key = (section_name or "").lower().replace(" ", "_").replace("-", "_") or f"section_{idx}"
         default_prompt = ""
         if isinstance(prompts, list) and len(prompts) > 0:
             first = prompts[0]
@@ -145,7 +209,7 @@ def _fetch_user_template_from_analyzer(
     # All custom template fields are required — placeholders extracted from uploaded PDFs must be filled
     for f in fields:
         f["is_required"] = True
-    return {
+    result_payload = {
         "template_id": str(template_obj.get("template_id", template_id)),
         "name": template_obj.get("template_name") or template_obj.get("name") or "Untitled",
         "description": template_obj.get("description"),
@@ -157,7 +221,9 @@ def _fetch_user_template_from_analyzer(
         "fields": fields,
         "sections": sections_out,
         "preview_image_url": template_obj.get("image_url"),
-    }, None, 200
+    }
+    _cache_set(_analyzer_template_cache, cache_key, result_payload)
+    return result_payload, None, 200
 
 
 def _fetch_user_template_payload_from_analyzer(
@@ -165,6 +231,11 @@ def _fetch_user_template_payload_from_analyzer(
     user_id: int,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str], Optional[int]]:
     """Fetch full raw payload from Template Analyzer for a UUID template."""
+    cache_key = (str(template_id), int(user_id))
+    cached = _cache_get(_analyzer_payload_cache, cache_key)
+    if cached is not None:
+        return cached, None, 200
+
     base_urls = _get_template_analyzer_base_urls()
     if not base_urls:
         return None, "Template Analyzer URL is not configured", None
@@ -177,7 +248,7 @@ def _fetch_user_template_payload_from_analyzer(
         try:
             import urllib.request
             req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=_ANALYZER_PAYLOAD_TIMEOUT_SECONDS) as resp:
                 data = resp.read().decode()
             payload = _json.loads(data)
             break
@@ -199,6 +270,7 @@ def _fetch_user_template_payload_from_analyzer(
         return None, last_error, last_status
     if not isinstance(payload, dict):
         return None, "Template Analyzer returned invalid payload", None
+    _cache_set(_analyzer_payload_cache, cache_key, payload)
     return payload, None, 200
 
 

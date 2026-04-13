@@ -134,11 +134,17 @@ async def assemble_document(
         # 6. Get template asset (URL) and template CSS (so Google Docs/DOCX match static preview)
         primary_asset = draft_db.get_template_primary_asset(template_id)
         template_url = None
+        template_asset_meta = {}
         if primary_asset:
             template_url = generate_signed_url(
                 primary_asset["gcs_bucket"],
                 primary_asset["gcs_path"]
             )
+            template_asset_meta = {
+                "mime_type": primary_asset.get("mime_type"),
+                "original_file_name": primary_asset.get("original_file_name"),
+                "asset_type": primary_asset.get("asset_type"),
+            }
         template_css_row = draft_db.get_template_css(template_id)
         css_content = template_css_row.get("css_content") if template_css_row else None
         
@@ -153,6 +159,7 @@ async def assemble_document(
             "user_id": user_id,
             "template_id": template_id,
             "template_url": template_url,
+            "template_asset_meta": template_asset_meta,
             "template_css": css_content,
             "field_values": draft.get("field_values", {}),
             "sections": sections_data,
@@ -281,4 +288,42 @@ async def export_to_docx(
 
     except Exception as e:
         logger.exception("DOCX export failed")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+@router.post("/drafts/chat_export/export/docx")
+async def export_chat_html_to_docx(
+    user_id: int = Depends(require_user_id),
+    body: Dict[str, Any] = Body(...),
+):
+    """
+    Convert ad-hoc analysis/chat HTML to a downloadable DOCX file.
+    This mirrors the standard DOCX export path but does not require a draft id.
+    """
+    import io
+    from fastapi.responses import StreamingResponse
+
+    try:
+        from services.docx_export import assembled_html_to_docx_bytes
+    except ImportError:
+        raise HTTPException(status_code=500, detail="DOCX export dependencies are not installed on the server.")
+
+    html_content = body.get("html_content")
+    if not html_content:
+        raise HTTPException(status_code=400, detail="No html_content provided for export")
+
+    try:
+        docx_bytes = assembled_html_to_docx_bytes(html_content)
+        file_stream = io.BytesIO(docx_bytes)
+        file_stream.seek(0)
+
+        filename = "Case_Summary.docx"
+        return StreamingResponse(
+            file_stream,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except Exception as e:
+        logger.exception("Chat DOCX export failed for user %s", user_id)
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")

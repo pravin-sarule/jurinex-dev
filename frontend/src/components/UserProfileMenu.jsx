@@ -4,8 +4,48 @@ import { USER_RESOURCES_SERVICE_URL } from '../config/apiConfig';
 import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 import { getPlanDisplayName } from '../utils/planUtils';
 
+const INVALID_PLAN_LABELS = new Set([
+  'development',
+  'developer',
+  'personal',
+  'user',
+  'users',
+]);
+
+const sanitizePlanName = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return INVALID_PLAN_LABELS.has(trimmed.toLowerCase()) ? null : trimmed;
+};
+
+const deriveAccountLabel = (planInfo, userInfo) => {
+  const rawType = (
+    planInfo?.subscription?.type ||
+    planInfo?.subscription?.accountType ||
+    planInfo?.subscription?.subscription_type ||
+    userInfo?.accountType ||
+    userInfo?.subscriptionType ||
+    userInfo?.role ||
+    ''
+  );
+
+  const normalizedType = String(rawType || '').toLowerCase().trim();
+
+  if (['business', 'team', 'enterprise', 'firm', 'law-firm', 'law firm'].includes(normalizedType)) {
+    return 'Firm Account';
+  }
+
+  if (['individual', 'solo', 'solo-lawyer', 'solo lawyer'].includes(normalizedType)) {
+    return 'Individual Account';
+  }
+
+  return 'Professional Account';
+};
+
 const UserProfileMenu = ({ userData, navigate, onLogout }) => {
   const [userPlan, setUserPlan] = useState('Free plan');
+  const [accountLabel, setAccountLabel] = useState('Professional Account');
   const [userEmail, setUserEmail] = useState('');
   const [userName, setUserName] = useState('');
   const [userInitials, setUserInitials] = useState('U');
@@ -42,7 +82,12 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
 
       const activePlan = data.activePlan || data.userSubscription || data.subscription;
       if (activePlan && (activePlan.plan_name || activePlan.planName || activePlan.name)) {
-        const planName = getPlanDisplayName(activePlan) || activePlan.plan_name || activePlan.planName || activePlan.name;
+        const planName = sanitizePlanName(
+          getPlanDisplayName(activePlan) || activePlan.plan_name || activePlan.planName || activePlan.name
+        );
+        if (!planName) {
+          return null;
+        }
         console.log('✅ Plan name from API:', planName);
         
         try {
@@ -247,9 +292,9 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       }
     }
 
-    if (contextPlanInfo && contextPlanInfo.plan) {
+    if (contextPlanInfo && (contextPlanInfo.plan || contextPlanInfo.planName)) {
       planInfo = contextPlanInfo;
-      console.log('⚡ INSTANT: Found plan in RAM (AuthContext):', planInfo.plan);
+      console.log('⚡ INSTANT: Found plan in RAM (AuthContext):', planInfo.plan || planInfo.planName);
     } else {
       planInfo = getFromStorage('userInfo');
       if (planInfo && planInfo.plan) {
@@ -273,7 +318,7 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
         }
       }
 
-      if (!planInfo || !planInfo.plan) {
+      if (!planInfo || !(planInfo.plan || planInfo.planName)) {
         console.log('🌐 No plan found, fetching from API in background...');
         fetchPlanFromAPI().then(apiPlan => {
           if (apiPlan) {
@@ -290,35 +335,28 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       const email = userInfo.email || '';
       const name = userInfo.displayName || userInfo.username || getDisplayNameFromEmail(email);
       
-      let plan = 'Free plan';
-      
-      if (planInfo && planInfo.plan) {
-        plan = planInfo.plan;
+      let plan = 'No active plan';
+      const contextOrStoragePlan = sanitizePlanName(planInfo?.plan || planInfo?.planName);
+      const directUserPlan = sanitizePlanName(userInfo.plan);
+
+      if (contextOrStoragePlan) {
+        plan = contextOrStoragePlan;
         console.log('✅ Plan set from localStorage["userInfo"]:', plan);
-        console.log('📊 Plan details:', { plan: planInfo.plan, lastPayment: planInfo.lastPayment });
-      } else if (userInfo.plan) {
-        plan = userInfo.plan;
+        console.log('📊 Plan details:', { plan, lastPayment: planInfo.lastPayment });
+      } else if (directUserPlan) {
+        plan = directUserPlan;
         console.log('✅ Plan set from user.plan:', plan);
-      } else if (userInfo.role) {
-        const planMap = {
-          'admin': 'Admin Plan',
-          'premium': 'Premium Plan',
-          'pro': 'Pro Plan',
-          'plus': 'Plus Plan',
-          'free': 'Free Plan',
-          'user': 'Free Plan',
-        };
-        plan = planMap[userInfo.role.toLowerCase()] || 'Free Plan';
-        console.log('⚠️ Plan set from user role mapping (fallback):', plan);
       } else {
         console.log('❌ No plan data found, using default:', plan);
       }
 
       const initials = generateInitials(name, email);
+      const nextAccountLabel = deriveAccountLabel(planInfo, userInfo);
 
       setUserEmail(email);
       setUserName(name || 'User');
       setUserPlan(plan);
+      setAccountLabel(nextAccountLabel);
       setUserInitials(initials);
 
       console.log('🎉 Final user info update:', {
@@ -330,6 +368,7 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
         role: userInfo.role,
         is_blocked: userInfo.is_blocked,
         plan,
+        accountLabel: nextAccountLabel,
         initials,
         lastPayment: planInfo?.lastPayment,
       });
@@ -337,7 +376,8 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       console.log('❌ No user data found in prop or localStorage');
       setUserEmail('');
       setUserName('');
-      setUserPlan('Free plan');
+      setUserPlan('No active plan');
+      setAccountLabel('Professional Account');
       setUserInitials('U');
     }
     
@@ -371,9 +411,11 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
   }, [updateUserInfo]);
 
   useEffect(() => {
-    if (contextPlanInfo && contextPlanInfo.plan) {
-      console.log('⚡ UserProfileMenu: Plan updated from context:', contextPlanInfo.plan);
-      setUserPlan(contextPlanInfo.plan);
+    if (contextPlanInfo && (contextPlanInfo.plan || contextPlanInfo.planName)) {
+      const nextPlan = sanitizePlanName(contextPlanInfo.plan || contextPlanInfo.planName);
+      if (!nextPlan) return;
+      console.log('⚡ UserProfileMenu: Plan updated from context:', nextPlan);
+      setUserPlan(nextPlan);
     }
   }, [contextPlanInfo]);
 
@@ -382,6 +424,7 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       console.log('🚀 UserProfileMenu: Starting enhanced logout process...');
 
       setUserPlan('Free plan');
+      setAccountLabel('Professional Account');
       setUserEmail('');
       setUserName('');
       setUserInitials('U');
@@ -447,7 +490,8 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
 
   return (
     <div className="p-4 border-b border-gray-200 bg-white relative z-[9999]">
-      <div className="flex items-center space-x-3 mb-4">
+      <div className="mb-4 rounded-2xl border border-[#d8efe9] bg-[linear-gradient(135deg,#f8fffe_0%,#eefaf7_100%)] p-4 shadow-sm">
+      <div className="flex items-start space-x-3">
         <div
           className="flex-shrink-0 inline-flex items-center justify-center h-10 w-10 rounded-full text-white font-semibold text-sm shadow-lg transition-colors duration-200 transform hover:-translate-y-0.5 hover:shadow-xl"
           style={{ backgroundColor: '#21C1B6' }}
@@ -459,18 +503,19 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
         <div className="flex-1 min-w-0">
           {userName && <div className="text-sm font-semibold text-gray-900 truncate">{userName}</div>}
           {userEmail && <div className="text-sm text-gray-600 truncate">{userEmail}</div>}
-          <div className="flex items-center space-x-2 mt-1">
-            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center rounded-full bg-[#dff7f3] px-2.5 py-1 text-xs font-semibold text-[#0f766e]">
               {userPlan}
             </span>
-            <span className="text-xs text-gray-500">Personal</span>
+            <span className="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-xs font-medium text-gray-600 border border-[#d8efe9]">
+              {accountLabel}
+            </span>
           </div>
         </div>
-        <div className="flex-shrink-0">
-          <svg className="h-5 w-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-          </svg>
+        <div className="flex-shrink-0 pt-1">
+          <span className="inline-flex h-3 w-3 rounded-full bg-[#22c55e] ring-4 ring-[#dcfce7]"></span>
         </div>
+      </div>
       </div>
 
       <nav>
