@@ -243,6 +243,7 @@ def _compute_final_verdict(
     ik_check: dict,
     hallucination_flags: list,
     is_flagged: bool,
+    judgement_hint: Optional[Dict[str, Any]] = None,
 ) -> dict:
     local_verified  = local_check.get("verified", False)
     local_conf      = int(local_check.get("confidence") or 0)
@@ -281,6 +282,18 @@ def _compute_final_verdict(
         return {"audit_status": "PENDING_HITL", "final_confidence": final_confidence, "multi_route_confirmed": False}
     if final_confidence >= 45:
         return {"audit_status": "NEEDS_REVIEW", "final_confidence": final_confidence, "multi_route_confirmed": False}
+    hint = judgement_hint or {}
+    if (
+        (hint.get("_provision_focus_district") or hint.get("is_provision_match"))
+        and source == "local"
+        and local_verified
+        and final_confidence >= 35
+    ):
+        return {
+            "audit_status": "NEEDS_REVIEW",
+            "final_confidence": max(45, final_confidence),
+            "multi_route_confirmed": multi_route,
+        }
     return {"audit_status": "QUARANTINED", "final_confidence": final_confidence, "multi_route_confirmed": False}
 
 
@@ -324,6 +337,7 @@ def _audit_one(
     verify_online: bool,
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    judgement_hints: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """Audit a single judgement. Returns (jid, detail_dict, is_approved)."""
     from db.client import judgement_get, judgement_update_validation
@@ -356,7 +370,10 @@ def _audit_one(
     else:
         logger.info("  ├─ [HALLUCINATION] ✓ clean")
 
-    verdict      = _compute_final_verdict(jid, j, local_check, ik_check, hallucination_flags, is_flagged)
+    verdict      = _compute_final_verdict(
+        jid, j, local_check, ik_check, hallucination_flags, is_flagged,
+        judgement_hint=(judgement_hints or {}).get(jid),
+    )
     audit_status = verdict["audit_status"]
     final_conf   = verdict["final_confidence"]
     multi_route  = verdict["multi_route_confirmed"]
@@ -398,6 +415,7 @@ def run_auditor(
     verify_online: bool = True,
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    judgement_hints: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Cross-validate every citation from the Librarian — parallel IK checks.
@@ -412,6 +430,7 @@ def run_auditor(
         audit_details    — dict[id] -> full audit trail
     """
     flagged_ids  = flagged_ids or []
+    judgement_hints = judgement_hints or {}
     all_ids      = list(dict.fromkeys(validated_ids + flagged_ids))  # preserve order, deduplicate
     flagged_set  = set(flagged_ids)
 
@@ -432,7 +451,10 @@ def run_auditor(
     workers = min(5, len(all_ids) or 1)
     uid = user_id or "anonymous"
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_audit_one, jid, flagged_set, verify_online, run_id, uid): jid for jid in all_ids}
+        futs = {
+            pool.submit(_audit_one, jid, flagged_set, verify_online, run_id, uid, judgement_hints): jid
+            for jid in all_ids
+        }
         for fut in as_completed(futs):
             jid = futs[fut]
             try:

@@ -1782,6 +1782,9 @@ def _compute_relevance_badge(
 
     When no dimensions are provided falls back to the original court-tier/confidence heuristic.
     """
+    if str(j.get("relevance_badge_hint") or "").strip().upper() == "MEDIUM":
+        return "MEDIUM"
+
     # ── Case-specific path: match citation content against active case dimensions ──
     if dimensions:
         # Build a flat text blob from the citation's legal content
@@ -2173,6 +2176,11 @@ def _judgement_to_citation(
     party_badge       = _PARTY_BADGE.get(argument_party, _PARTY_BADGE["neutral"])
     relevance_badge   = _compute_relevance_badge(j, audit_info, dimensions=dimensions)
     dim_justification = _dimension_justification(j, dimensions, relevance_badge=relevance_badge)
+    citation_tags = list(j.get("citation_tags") or [])
+    rel_to_case = (j.get("relevance_to_current_case") or "").strip()
+    if relevance_badge == "MEDIUM" and citation_tags:
+        tag_line = " ".join(citation_tags)
+        rel_to_case = (rel_to_case + "\n\n" if rel_to_case else "") + f"Relevance: Medium — {tag_line}"
     citation_data    = j.get("citation_data") if isinstance(j.get("citation_data"), dict) else {}
     dim_id_value     = j.get("dimension_id")
     if dim_id_value is None:
@@ -2252,7 +2260,7 @@ def _judgement_to_citation(
         "auditStatus":              audit_status or j.get("audit_status") or "not_audited",
         "librarianStatus":          j.get("librarian_status") or "not_validated",
         "issue":                    j.get("issue") or "",
-        "relevanceToCurrentCase":   j.get("relevance_to_current_case") or "",
+        "relevanceToCurrentCase":   rel_to_case or j.get("relevance_to_current_case") or "",
         "storedInEs":               j.get("canonical_id") or j.get("es_doc_id") or cid,
         "verificationRoute":        v.get("route"),
         "verificationTrace":        v.get("trace") or [],
@@ -2278,11 +2286,21 @@ def _judgement_to_citation(
         "dimensionId":              dim_id_value,
         "dimensionName":            dim_name_value,
         "dimensionTags":            j.get("dimension_tags") or [],
+        "citationTags":             citation_tags,
         # ── Admin source flag — True when judgment was uploaded via admin panel ──
         # Drives the Local DB icon in the frontend CitationCard.
         "isLocalAdmin":             _normalize_source_key(
             j.get("source") or j.get("source_type") or ""
         ) == "admin_upload" or bool(j.get("is_local_admin")),
+        "displayIcon":              "local_db_icon" if (
+            str(j.get("source_type") or "").strip().lower() == "admin"
+            or bool(j.get("is_local_admin"))
+        ) else "",
+        "display_icon":             "local_db_icon" if (
+            str(j.get("source_type") or "").strip().lower() == "admin"
+            or bool(j.get("is_local_admin"))
+        ) else "",
+        "isProvisionMatch":         bool(j.get("is_provision_match")),
         "similarityScore":          float(j.get("_similarity_score") or 0.0),
     }
 
@@ -2368,6 +2386,7 @@ def build_report_from_judgements(
     perspective: Optional[str] = None,
     run_id: Optional[str] = None,
     dimensions: Optional[List[Dict[str, Any]]] = None,
+    local_judgement_hints: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Load judgements from DB, enrich with Gemini when fields are blank,
@@ -2380,6 +2399,7 @@ def build_report_from_judgements(
     from db.client import judgement_get
 
     audit_details            = audit_details or {}
+    local_judgement_hints    = local_judgement_hints or {}
     search_keywords          = search_keywords or []
     search_keywords_by_route = search_keywords_by_route or {}
     query_display            = ", ".join(search_keywords) if search_keywords else query
@@ -2422,6 +2442,10 @@ def build_report_from_judgements(
     def _guardrail_label(c: Dict[str, Any]) -> str:
         case_name = (c.get("caseName") or "").strip().lower()
         court = (c.get("court") or "").strip().lower()
+        tags_upper = [str(t).upper() for t in (c.get("citationTags") or [])]
+        if any("PROVISION FOCUS" in t for t in tags_upper):
+            if any(x in court for x in ("district", "sessions", "munsiff", "magistrate", "civil judge", "family court")):
+                return "MEDIUM_VERIFY"
         if not case_name or (" vs " not in case_name and " v " not in case_name):
             return "BLOCKED"
         if not court:
@@ -2488,6 +2512,26 @@ def build_report_from_judgements(
         if not j:
             logger.warning("  [SKIP] %s not in DB", jid)
             return None
+
+        hint = local_judgement_hints.get(jid) or {}
+        if hint.get("citation_tags"):
+            j["citation_tags"] = list(hint.get("citation_tags") or [])
+        if hint.get("relevance_badge_hint"):
+            j["relevance_badge_hint"] = hint.get("relevance_badge_hint")
+        if hint.get("_provision_focus_district") is not None:
+            j["_provision_focus_district"] = hint.get("_provision_focus_district")
+        if hint.get("_similarity_score") is not None:
+            j["_similarity_score"] = hint.get("_similarity_score")
+        if hint.get("is_provision_match"):
+            j["is_provision_match"] = True
+        if hint.get("_dimension_id") is not None and not j.get("dimension_id"):
+            j["dimension_id"] = hint.get("_dimension_id")
+        if hint.get("_dimension_name") and not j.get("dimension_name"):
+            j["dimension_name"] = hint.get("_dimension_name")
+        if hint.get("is_local_admin"):
+            j["is_local_admin"] = True
+            if not j.get("source_type"):
+                j["source_type"] = "admin"
 
         src = _normalize_source_key(j.get("source", "unknown"))
         source_counts[src] = source_counts.get(src, 0) + 1

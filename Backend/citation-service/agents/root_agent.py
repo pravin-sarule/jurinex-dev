@@ -192,6 +192,7 @@ class WatchdogAgent(BaseAgent):
         context.metadata["candidates_ik"]           = result.get("candidates_ik", [])
         context.metadata["candidates_google"]       = result.get("candidates_google", [])
         context.metadata["search_keywords_by_route"] = result.get("search_keywords_by_route", {})
+        context.metadata["local_judgement_hints"]   = result.get("local_judgement_hints") or {}
         dropped = result.get("dropped_low_hierarchy_count", 0)
 
         return AgentResult(data={
@@ -361,6 +362,7 @@ class LibrarianAgent(BaseAgent):
             context.judgement_ids,
             case_state=case_state,
             dimensions=context.dimensions or [],
+            judgement_hints=context.metadata.get("local_judgement_hints") or {},
         )
         context.metadata["librarian_result"]    = result
         context.metadata["validated_ids"]       = result["validated_ids"]
@@ -434,7 +436,14 @@ class AuditorAgent(BaseAgent):
             pass
 
         user_id = context.metadata.get("user_id") or context.user_id or "anonymous"
-        result = run_auditor(validated, flagged, verify_online=True, run_id=run_id, user_id=user_id)
+        result = run_auditor(
+            validated,
+            flagged,
+            verify_online=True,
+            run_id=run_id,
+            user_id=user_id,
+            judgement_hints=context.metadata.get("local_judgement_hints") or {},
+        )
         context.metadata["audit_details"]  = result.get("audit_details", {})
         context.metadata["approved_ids"]   = result.get("approved_ids", [])
         context.metadata["hitl_ids"]       = result.get("hitl_ids", [])
@@ -513,6 +522,7 @@ class ReportBuilderAgent(BaseAgent):
             perspective=perspective,
             run_id=run_id,
             dimensions=context.dimensions or [],
+            local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
         )
         report_id = str(uuid.uuid4())
         run_id = context.metadata.get("run_id")
@@ -1472,6 +1482,7 @@ class CitationRootAgent(BaseAgent):
                 perspective=_perspective,
                 run_id=run_id,
                 dimensions=dimensions_meta,
+                local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
             )
             report_format["pendingHITLCount"] = len(quarantined_ids)
             report_format["status"] = "pending_hitl"
@@ -1491,6 +1502,7 @@ class CitationRootAgent(BaseAgent):
                     perspective=_perspective,
                     run_id=run_id,
                     dimensions=dimensions_meta,
+                    local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
                 )
                 citation_snapshot = (one_report.get("citations") or [{}])[0]
                 if citation_snapshot:
@@ -1550,6 +1562,7 @@ class CitationRootAgent(BaseAgent):
                     perspective=_perspective,
                     run_id=run_id,
                     dimensions=dimensions_meta,
+                    local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
                 )
                 snap = (j_report.get("citations") or [{}])[0]
                 report_citation_insert(report_id, jid, "approved", snap)
@@ -1674,6 +1687,7 @@ class CitationRootAgent(BaseAgent):
                 perspective=_perspective,
                 run_id=run_id,
                 dimensions=dimensions_meta,
+                local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
             )
         else:
             report_format = {
@@ -1698,6 +1712,7 @@ class CitationRootAgent(BaseAgent):
                         perspective=_perspective,
                         run_id=run_id,
                         dimensions=dimensions_meta,
+                        local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
                     )
                     snap = (one_rep.get("citations") or [{}])[0]
                     hitl_id = hitl_queue_insert(

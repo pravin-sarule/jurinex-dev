@@ -57,14 +57,35 @@ _qdrant_init_attempted = False
 _neo4j_driver = None
 _neo4j_init_attempted = False
 _clients_lock = threading.Lock()
+_dotenv_loaded_for_connections = False
+
+
+def _load_citation_service_dotenv_once() -> None:
+    """Load Backend/citation-service/.env so ELASTICSEARCH_* is available when cwd differs."""
+    global _dotenv_loaded_for_connections
+    if _dotenv_loaded_for_connections:
+        return
+    with _clients_lock:
+        if _dotenv_loaded_for_connections:
+            return
+        try:
+            from pathlib import Path
+            from dotenv import load_dotenv
+            env_path = Path(__file__).resolve().parent.parent / ".env"
+            if env_path.is_file():
+                load_dotenv(env_path)
+        except Exception:
+            pass
+        _dotenv_loaded_for_connections = True
 PG_POOL_MINCONN = max(1, _get_env_int("PG_POOL_MINCONN", 1))
 PG_POOL_MAXCONN = max(PG_POOL_MINCONN, _get_env_int("PG_POOL_MAXCONN", 30))
 DRAFT_POOL_MINCONN = max(1, _get_env_int("DRAFT_POOL_MINCONN", 1))
 DRAFT_POOL_MAXCONN = max(DRAFT_POOL_MINCONN, _get_env_int("DRAFT_POOL_MAXCONN", 3))
 DOC_POOL_MINCONN = max(1, _get_env_int("DOC_POOL_MINCONN", 1))
 DOC_POOL_MAXCONN = max(DOC_POOL_MINCONN, _get_env_int("DOC_POOL_MAXCONN", 3))
-ES_REQUEST_TIMEOUT = max(1, _get_env_int("ELASTIC_REQUEST_TIMEOUT", 3))
-ES_MAX_RETRIES = max(0, _get_env_int("ELASTIC_MAX_RETRIES", 0))
+# Remote ES (e.g. GCP VM) often needs >3s for TLS + first ping over the internet.
+ES_REQUEST_TIMEOUT = max(1, _get_env_int("ELASTIC_REQUEST_TIMEOUT", 15))
+ES_MAX_RETRIES = max(0, _get_env_int("ELASTIC_MAX_RETRIES", 1))
 ES_VERIFY_CERTS = _get_env_bool("ELASTIC_VERIFY_CERTS", True)
 ES_SSL_SHOW_WARN = _get_env_bool("ELASTIC_SSL_SHOW_WARN", ES_VERIFY_CERTS)
 ES_SSL_ASSERT_HOSTNAME = _get_env_bool("ELASTIC_SSL_ASSERT_HOSTNAME", ES_VERIFY_CERTS)
@@ -96,6 +117,7 @@ class PooledConnWrapper:
 
 def get_pg_conn():
     global _pg_pool
+    _load_citation_service_dotenv_once()
     dsn = get_pg_dsn()
     if not dsn:
         logger.warning("[PG] Missing database config. Set CITATION_DB_URL or DATABASE_URL.")
@@ -124,6 +146,7 @@ def get_pg_conn():
 
 def get_es_client():
     global _es_client, _es_init_attempted
+    _load_citation_service_dotenv_once()
     url = _get_env("ELASTICSEARCH_URL", "ELASTIC_URL", "ES_URL")
     if not url:
         logger.warning("[ES] Missing ELASTICSEARCH_URL/ELASTIC_URL/ES_URL; Elasticsearch disabled.")
@@ -140,9 +163,22 @@ def get_es_client():
                 return None
             _es_init_attempted = True
             from elasticsearch import Elasticsearch
-            username = _get_env("ELASTICSEARCH_USERNAME", "ELASTIC_USER", "ES_USERNAME")
-            password = _get_env("ELASTICSEARCH_PASSWORD", "ELASTIC_PASSWORD", "ES_PASSWORD")
-            api_key = _get_env("ELASTICSEARCH_API_KEY")
+            username = _get_env(
+                "ELASTICSEARCH_USERNAME",
+                "ELASTIC_USER",
+                "ES_USERNAME",
+                "ELASTIC_USERNAME",
+            )
+            password = _get_env(
+                "ELASTICSEARCH_PASSWORD",
+                "ELASTIC_PASSWORD",
+                "ES_PASSWORD",
+                "ELASTIC_PASS",
+            )
+            # Elasticsearch 8+ default superuser when only a bootstrap password is set on the VM
+            if password and not username:
+                username = "elastic"
+            api_key = _get_env("ELASTICSEARCH_API_KEY", "ELASTIC_API_KEY")
             kwargs = {
                 "request_timeout": ES_REQUEST_TIMEOUT,
                 "max_retries": ES_MAX_RETRIES,

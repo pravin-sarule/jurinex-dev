@@ -983,6 +983,78 @@ def judgement_search_local(
         raw = str(source_type or "").strip().lower()
         return raw in ("admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload")
 
+    def _rows_from_es_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for h in hits:
+            src = h.get("_source") or {}
+            canonical_id = src.get("canonical_id") or h.get("_id")
+            src_type = str(src.get("source_type") or "").strip().lower()
+            is_admin = _is_admin_source(src_type)
+            row = {
+                "id": canonical_id,
+                "canonical_id": canonical_id,
+                "title": src.get("case_name"),
+                "primary_citation": src.get("primary_citation"),
+                "court": src.get("court_code"),
+                "ratio": src.get("holding_text") or src.get("summary_text"),
+                "source": "admin_upload" if is_admin else (src.get("source_type") or "local"),
+                "source_type": src_type or (src.get("source_type") or "local"),
+                "is_local_admin": is_admin,
+            }
+            if approved_only and not is_admin and not _is_approved_status(src.get("verification_status")):
+                continue
+            if exclude_low_hierarchy and _is_low_hierarchy_court(row.get("court")):
+                continue
+            row["_local_rank"] = _rank_row(row.get("court"))
+            rows.append(row)
+        rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+        return rows
+
+    def _search_es_fuzzy_text(limit_count: int) -> List[Dict[str, Any]]:
+        if not es:
+            return []
+        try:
+            resp = es.search(
+                index="judgments",
+                size=limit_count,
+                query={
+                    "bool": {
+                        "must": [
+                            {
+                                "multi_match": {
+                                    "query": query,
+                                    "fields": [
+                                        "case_name^4",
+                                        "primary_citation^3",
+                                        "summary_text^2",
+                                        "holding_text^2",
+                                        "facts_text",
+                                        "full_text",
+                                    ],
+                                    "fuzziness": "AUTO",
+                                    "operator": "or",
+                                }
+                            }
+                        ],
+                        "filter": [
+                            {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}}
+                        ] if approved_only else [],
+                        "must_not": [
+                            {"match": {"court_code": "district"}},
+                            {"match": {"court_code": "tribunal"}},
+                            {"match": {"court_code": "forum"}},
+                            {"match": {"court_code": "commission"}},
+                        ] if exclude_low_hierarchy else [],
+                    }
+                },
+            )
+            rows = _rows_from_es_hits(resp.get("hits", {}).get("hits", []))
+            logger.info("[ES] fuzzy fallback returned %d result(s) for %r", len(rows), query[:80])
+            return rows[:limit_count]
+        except Exception as exc:
+            logger.warning("[ES] fuzzy fallback failed: %s", exc)
+            return []
+
     def _search_qdrant_semantic(limit_count: int) -> List[Dict[str, Any]]:
         """
         Semantic search via Qdrant vector similarity.
@@ -993,7 +1065,18 @@ def judgement_search_local(
         if not qdr:
             logger.info("[QDRANT] Client not available — skipping semantic search")
             return []
-        vector = _get_qdrant_query_embedding(query)
+        vector: Optional[List[float]] = None
+        for attempt in range(3):
+            vector = _get_qdrant_query_embedding(query)
+            if vector:
+                break
+            if attempt < 2:
+                logger.warning("[QDRANT] Empty embedding for %r - retry %d/2", query[:60], attempt + 1)
+        if vector is None:
+            vector = []
+        if False and not vector:
+            logger.info("[QDRANT] No embedding vector - using ES fuzzy fallback for: %r", query[:60])
+            return _search_es_fuzzy_text(limit_count)
         if not vector:
             logger.info("[QDRANT] No embedding vector — skipping semantic search for: %r", query[:60])
             return []
@@ -1110,10 +1193,13 @@ def judgement_search_local(
                     "_from_qdrant": True,
                 })
             scored.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
-            return scored[:limit_count]
+            if scored:
+                return scored[:limit_count]
+            logger.info("[QDRANT] Semantic search produced 0 hydrated rows - using ES fuzzy fallback")
+            return _search_es_fuzzy_text(limit_count)
         except Exception as exc:
             logger.warning("[QDRANT] semantic local search failed: %s", exc)
-            return []
+            return _search_es_fuzzy_text(limit_count)
 
     es_rows: List[Dict[str, Any]] = []
     if es:
@@ -1151,32 +1237,7 @@ def judgement_search_local(
                 },
             )
             hits = resp.get("hits", {}).get("hits", [])
-            rows = []
-            for h in hits:
-                src = h.get("_source") or {}
-                canonical_id = src.get("canonical_id") or h.get("_id")
-                _src_type = str(src.get("source_type") or "").strip().lower()
-                _is_adm = _src_type in (
-                    "admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload"
-                )
-                row = {
-                    "id": canonical_id,
-                    "canonical_id": canonical_id,
-                    "title": src.get("case_name"),
-                    "primary_citation": src.get("primary_citation"),
-                    "court": src.get("court_code"),
-                    "ratio": src.get("holding_text") or src.get("summary_text"),
-                    "source": src.get("source_type") or "local",
-                    "is_local_admin": _is_adm,
-                }
-                if approved_only and not _is_adm and not _is_approved_status(src.get("verification_status")):
-                    continue
-                if exclude_low_hierarchy and _is_low_hierarchy_court(row.get("court")):
-                    continue
-                row["_local_rank"] = _rank_row(row.get("court"))
-                rows.append(row)
-            rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
-            es_rows = rows[:limit]
+            es_rows = _rows_from_es_hits(hits)[:limit]
         except Exception as exc:
             logger.warning("[ES] search failed: %s", exc)
 

@@ -30,13 +30,16 @@ LIBRARIAN_WORKERS = max(1, min(12, int(os.environ.get("CITATION_LIBRARIAN_WORKER
 
 # ── Hierarchy constants ───────────────────────────────────────────────────────
 
-# Keywords that identify low-hierarchy courts (District, Tribunals, Consumer fora).
-# Any judgment whose court string contains one of these → hierarchy_rank=99 → reject.
-_LOW_HIERARCHY_COURT_KWS: frozenset = frozenset({
+# District-level bodies — AC-6 relaxed for local provision matches (rank 4, not auto-reject).
+_DISTRICT_COURT_KWS: frozenset = frozenset({
     "district court", "sessions court", "munsiff", "civil judge",
     "judicial magistrate", "executive magistrate", "metropolitan magistrate",
-    "motor accident claims tribunal", "mact",
     "family court",
+})
+
+# Tribunals / commissions / forums — still hierarchy_rank=99 → reject (unless future carve-out).
+_TRIBUNAL_LOW_KWS: frozenset = frozenset({
+    "motor accident claims tribunal", "mact",
     "debt recovery tribunal", "drt",
     "income tax appellate tribunal", "itat",
     "customs excise and service tax appellate tribunal", "cestat",
@@ -87,7 +90,37 @@ _STATE_TO_HC_LOWER: Dict[str, str] = {
 }
 
 
-def _court_hierarchy_rank(court: str, case_state: str = "") -> Tuple[int, bool]:
+def _admin_source_from_hint_or_row(hint: Dict[str, Any], source_type: str) -> bool:
+    if hint.get("is_local_admin"):
+        return True
+    st = (source_type or "").strip().lower()
+    return st in ("admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload")
+
+
+def _allow_district_rank4(hint: Dict[str, Any]) -> bool:
+    """
+    Do not skip Rank 4 (District Court) when:
+      - Admin-uploaded local judgment, or
+      - Strong provision-query semantic match (cosine ≥ 0.80 on provision path).
+    """
+    if not hint:
+        return False
+    if hint.get("is_provision_match"):
+        return True
+    if hint.get("is_local_admin"):
+        return True
+    qtypes = [str(x).lower() for x in (hint.get("_query_types") or [])]
+    prov = float(hint.get("_provision_best_score") or hint.get("_similarity_score") or 0.0)
+    if "provision" in qtypes and prov >= 0.80:
+        return True
+    return False
+
+
+def _court_hierarchy_rank(
+    court: str,
+    case_state: str = "",
+    judgement_hint: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, bool]:
     """
     Compute a hierarchy rank for the court string.
 
@@ -95,12 +128,14 @@ def _court_hierarchy_rank(court: str, case_state: str = "") -> Tuple[int, bool]:
       rank 1  — Supreme Court of India
       rank 2  — same-state High Court (based on case_state)
       rank 3  — other High Court
-      rank 4  — appellate tribunals (NCLAT, NCDRC, NCLT in appellate mode)
+      rank 4  — District Court (AC-6 relaxed for provision/admin local) OR appellate tribunals
       rank 5  — unknown / unrecognised (pass through with low priority)
-      rank 99 — District Court / lower tribunal → should_reject=True
+      rank 99 — low tribunals/forums → should_reject=True
 
     should_reject=True means the judgment should be discarded early by the Librarian.
     """
+    hint = judgement_hint or {}
+
     if not court:
         return (5, False)
 
@@ -110,9 +145,16 @@ def _court_hierarchy_rank(court: str, case_state: str = "") -> Tuple[int, bool]:
     if "supreme court" in cl:
         return (1, False)
 
-    # Known low-hierarchy courts → reject
-    for kw in _LOW_HIERARCHY_COURT_KWS:
+    # Tribunals / commissions (not district benches) → reject
+    for kw in _TRIBUNAL_LOW_KWS:
         if kw in cl:
+            return (99, True)
+
+    # District-level courts → rank 4 when Watchdog signalled provision/admin carry
+    for kw in _DISTRICT_COURT_KWS:
+        if kw in cl:
+            if _allow_district_rank4(hint):
+                return (4, False)
             return (99, True)
 
     # High Courts
@@ -272,6 +314,7 @@ def run_librarian(
     judgement_ids: List[str],
     case_state: str = "",
     dimensions: Optional[List[Dict[str, Any]]] = None,
+    judgement_hints: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Validate and enrich each judgement in the DB.
@@ -280,7 +323,8 @@ def run_librarian(
         judgement_ids — IDs to validate
         case_state    — state/jurisdiction string (e.g. "Maharashtra") used for same-state HC
                         priority scoring and to reject unrelated low-hierarchy courts.
-        dimensions    — Legal Dimensions from LegalDimensionExtractor (reserved for future use).
+        dimensions        — Legal Dimensions from LegalDimensionExtractor (reserved for future use).
+        judgement_hints — Per canonical_id metadata from Watchdog local/Qdrant (provision scores, admin).
 
     Returns:
         validated_ids      — passed all / most checks (goes to Auditor)
@@ -292,6 +336,8 @@ def run_librarian(
     from db.client import judgement_update_validation
     from db.connections import get_pg_conn
     from psycopg2.extras import RealDictCursor
+
+    judgement_hints = judgement_hints or {}
 
     validated_ids: List[str] = []
     flagged_ids:   List[str] = []
@@ -324,6 +370,7 @@ def run_librarian(
                         continue
                     judgement_map[canonical_id] = {
                         "source": citation_data.get("source_type") or row.get("source_type") or "unknown",
+                        "source_type": str(row.get("source_type") or "").strip().lower(),
                         "title": row.get("case_name") or citation_data.get("case_name") or "",
                         "primary_citation": citation_data.get("primary_citation") or "",
                         "court": citation_data.get("court_name") or row.get("court_code") or "",
@@ -359,11 +406,23 @@ def run_librarian(
         warnings:    List[str] = []
         enrichments: Dict[str, Any] = {}
 
-        # ── 0. Hierarchy check (early reject for low-level courts) ────────────
-        h_rank, h_reject = _court_hierarchy_rank(court, case_state)
+        # ── 0. Hierarchy check (AC-6: district courts may pass at rank 4 for provision/admin local) ─
+        hint = dict(judgement_hints.get(jid) or {})
+        if _admin_source_from_hint_or_row(hint, str(j.get("source_type") or "")):
+            hint["is_local_admin"] = True
+        qtypes = [str(x).lower() for x in (hint.get("_query_types") or [])]
+        if hint.get("is_local_admin") and "provision" in qtypes:
+            hint["is_provision_match"] = True
+            hint["_provision_focus_district"] = True
+        h_rank, h_reject = _court_hierarchy_rank(
+            court, case_state, judgement_hint=hint,
+        )
         enrichments["hierarchy_rank"] = h_rank
+        enrichments["is_provision_match"] = bool(hint.get("is_provision_match"))
         if h_reject:
-            rank_label = {1: "SC", 2: "same-HC", 3: "HC", 4: "Appellate Tribunal"}.get(h_rank, f"rank-{h_rank}")
+            rank_label = {
+                1: "SC", 2: "same-HC", 3: "HC", 4: "District / Tribunal (carry)",
+            }.get(h_rank, f"rank-{h_rank}")
             logger.warning(
                 "[LIBRARIAN] ✗ HIERARCHY REJECT (rank=%d) — %s | court=%s",
                 h_rank, title[:60], court[:60],
@@ -375,6 +434,7 @@ def run_librarian(
                 "warnings": [],
                 "enrichments": enrichments,
                 "hierarchy_rank": h_rank,
+                "is_provision_match": bool(hint.get("is_provision_match")),
             }
 
         source_icon = {"local": "🏛", "indian_kanoon": "📚", "google": "🌐"}.get(source, "❓")
@@ -477,6 +537,7 @@ def run_librarian(
             "issues":         issues,
             "enrichments":    enrichments,
             "hierarchy_rank": h_rank,
+            "is_provision_match": bool(hint.get("is_provision_match")),
         }
 
     with ThreadPoolExecutor(max_workers=min(LIBRARIAN_WORKERS, len(judgement_ids) or 1)) as pool:
