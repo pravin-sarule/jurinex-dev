@@ -1166,7 +1166,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -2302,6 +2302,7 @@ def _judgement_to_citation(
         ) else "",
         "isProvisionMatch":         bool(j.get("is_provision_match")),
         "similarityScore":          float(j.get("_similarity_score") or 0.0),
+        "sourceType":               (str(j.get("source_type") or "").strip().lower() or None),
     }
 
 
@@ -2644,6 +2645,26 @@ def build_report_from_judgements(
 
     # ── Sort: complete data first, then by confidence ─────────────────────────
     citations.sort(key=lambda c: (not c.get("dataComplete", False), -(c.get("confidence") or 0)))
+
+    # ── Within each dimension group: local admin (source_type=admin) first, stable order ──
+    def _is_local_admin_st(c: Dict[str, Any]) -> bool:
+        if bool(c.get("isLocalAdmin")):
+            return True
+        st = str(c.get("sourceType") or "").strip().lower()
+        return st == "admin"
+
+    _indexed = list(enumerate(citations))
+
+    def _dim_sort_key(t: Tuple[int, Dict[str, Any]]) -> Tuple[int, Any, int, int]:
+        idx, c = t
+        did = c.get("dimensionId")
+        admin_first = 0 if _is_local_admin_st(c) else 1
+        if did is None:
+            return (1, 0, admin_first, idx)
+        return (0, did, admin_first, idx)
+
+    _indexed.sort(key=_dim_sort_key)
+    citations = [t[1] for t in _indexed]
 
     # Renumber after sorting + padding
     for i, cit in enumerate(citations):

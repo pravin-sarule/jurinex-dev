@@ -195,16 +195,19 @@ def get_es_client():
             }
             if ES_CA_CERTS:
                 kwargs["ca_certs"] = ES_CA_CERTS
+            probe_kwargs = dict(kwargs)
+            probe_kwargs["max_retries"] = 0
+            probe_kwargs["retry_on_timeout"] = False
             # Prefer explicit username/password from .env; fall back to API key.
             if username and password:
-                client = Elasticsearch(url, basic_auth=(username, password), **kwargs)
+                probe_client = Elasticsearch(url, basic_auth=(username, password), **probe_kwargs)
             elif api_key:
-                kwargs["api_key"] = api_key
-                client = Elasticsearch(url, **kwargs)
+                probe_kwargs["api_key"] = api_key
+                probe_client = Elasticsearch(url, **probe_kwargs)
             else:
-                client = Elasticsearch(url, **kwargs)
-            if not client.ping(request_timeout=ES_PING_TIMEOUT):
-                _es_last_failure_at = time.time()
+                probe_client = Elasticsearch(url, **probe_kwargs)
+            if not probe_client.ping(request_timeout=ES_PING_TIMEOUT):
+                _es_last_failure_at = now
                 logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this process.", url)
                 return None
             _es_last_failure_at = 0.0

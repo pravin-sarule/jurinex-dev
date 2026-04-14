@@ -193,6 +193,9 @@ class WatchdogAgent(BaseAgent):
         context.metadata["candidates_google"]       = result.get("candidates_google", [])
         context.metadata["search_keywords_by_route"] = result.get("search_keywords_by_route", {})
         context.metadata["local_judgement_hints"]   = result.get("local_judgement_hints") or {}
+        context.metadata["local_canonical_ids_needing_analysis"] = (
+            result.get("local_canonical_ids_needing_analysis") or []
+        )
         dropped = result.get("dropped_low_hierarchy_count", 0)
 
         return AgentResult(data={
@@ -273,7 +276,7 @@ class ClerkAgent(BaseAgent):
     description = "OCRs judgment text, uses Gemini to extract all structured fields, chunks and stores."
 
     def run(self, context: AgentContext) -> AgentResult:
-        from agents.clerk import clerk_ingest_ik, clerk_ingest_google
+        from agents.clerk import clerk_ingest_ik, clerk_ingest_google, clerk_enrich_local_canonical_ids
         run_id     = context.metadata.get("run_id")
         query      = context.metadata.get("search_query") or context.query
         fetched_ik = context.metadata.get("fetched_ik", [])
@@ -317,6 +320,29 @@ class ClerkAgent(BaseAgent):
         for jid in new_ids:
             if jid not in context.judgement_ids:
                 context.judgement_ids.append(jid)
+
+        local_need = list(dict.fromkeys(context.metadata.get("local_canonical_ids_needing_analysis") or []))
+        if local_need:
+            pipeline_api_context = {
+                "fetched_ik_documents":      len(fetched_ik),
+                "fetched_google_documents": len(fetched_go),
+                "watchdog_ik_candidates":  len(context.metadata.get("candidates_ik") or []),
+                "watchdog_google_candidates": len(context.metadata.get("candidates_google") or []),
+            }
+            try:
+                clerk_enrich_local_canonical_ids(
+                    local_need,
+                    query=query,
+                    case_id=case_id,
+                    run_id=run_id,
+                    user_id=user_id,
+                    dimensions=dimensions,
+                    local_hints=context.metadata.get("local_judgement_hints") or {},
+                    pipeline_api_context=pipeline_api_context,
+                )
+            except Exception as e:
+                errors.append(f"LOCAL_ENRICH: {e}")
+                logger.warning("[CLERK] Local canonical enrich failed: %s", e)
 
         logger.info("[CLERK] Ingested %d IK + %d Google = %d total new IDs",
                     len(ik_ids), len(go_ids), len(new_ids))
@@ -1363,10 +1389,14 @@ class CitationRootAgent(BaseAgent):
         context.metadata["candidates_ik"] = ik_cands
         context.metadata["candidates_google"] = go_cands
 
+        need_local_clerk = bool(context.metadata.get("local_canonical_ids_needing_analysis"))
         if ik_cands or go_cands:
             # Fetcher first, then Clerk (Clerk needs fetched docs)
             self._delegate(self.fetcher, context, "fetcher")
             self._delegate(self.clerk,   context, "clerk")
+        elif need_local_clerk:
+            logger.info("[ROOT] No external candidates — running Clerk for Qdrant-local analysis gaps only")
+            self._delegate(self.clerk, context, "clerk")
         else:
             logger.info("[ROOT] No external candidates — skipping Fetcher/Clerk")
 
@@ -1424,8 +1454,11 @@ class CitationRootAgent(BaseAgent):
             )
             context.metadata["candidates_ik"] = ik_cands
             context.metadata["candidates_google"] = go_cands
+            _need_local = bool(context.metadata.get("local_canonical_ids_needing_analysis"))
             if ik_cands or go_cands:
                 self._delegate(self.fetcher, context, "fetcher")
+                self._delegate(self.clerk, context, "clerk")
+            elif _need_local:
                 self._delegate(self.clerk, context, "clerk")
             else:
                 logger.info("[ROOT] Retry %d produced no new external candidates; stopping retries", audit_round + 1)

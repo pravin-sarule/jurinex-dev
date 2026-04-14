@@ -442,6 +442,9 @@ def _search_local_semantic(
             cit_tags.append("PROVISION FOCUS - DISTRICT COURT")
             rel_hint = "MEDIUM"
 
+        has_analysis = bool(r.get("has_analysis_report"))
+        needs_clerk = not has_analysis
+
         row = {
             **r,
             # Watchdog-standard tags (used by deduplication + clerk)
@@ -462,6 +465,9 @@ def _search_local_semantic(
             "_provision_focus_district": provision_focus,
             "citation_tags":    cit_tags,
             "relevance_badge_hint": rel_hint,
+            # Qdrant semantic path: Clerk enriches citation_data.analysis_report when absent
+            "_from_qdrant_semantic": True,
+            "_needs_clerk_analysis": needs_clerk,
         }
         out.append(row)
         logger.info(
@@ -832,6 +838,8 @@ def _hints_from_local_rows(local: List[Dict[str, Any]]) -> Dict[str, Dict[str, A
             "_provision_focus_district": bool(r.get("_provision_focus_district")),
             "relevance_badge_hint": r.get("relevance_badge_hint"),
             "citation_tags": tags,
+            "_needs_clerk_analysis": bool(r.get("_needs_clerk_analysis")),
+            "source_type": r.get("source_type"),
         }
     return out
 
@@ -907,6 +915,10 @@ def run_watchdog(
             if q_type and q_type not in ex.get("_query_types", []):
                 ex.setdefault("_query_types", []).append(q_type)
             ex["_local_rank"] = max(ex.get("_local_rank", 0), r.get("_local_rank", 0))
+            if r.get("_from_qdrant_semantic"):
+                ex["_from_qdrant_semantic"] = True
+            if r.get("_needs_clerk_analysis"):
+                ex["_needs_clerk_analysis"] = True
         out = list(seen.values())
         out.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
         return out
@@ -1310,6 +1322,21 @@ def run_watchdog(
              "google_count": len(candidates_google),
              "dropped_low_hierarchy": dropped_low_hierarchy})
 
+    needing_clerk: List[str] = []
+    _seen_nc = set()
+    for r in local:
+        if not r.get("_needs_clerk_analysis"):
+            continue
+        cid = str(r.get("canonical_id") or r.get("id") or "").strip()
+        if cid and cid not in _seen_nc:
+            _seen_nc.add(cid)
+            needing_clerk.append(cid)
+    if needing_clerk:
+        logger.info(
+            "[WATCHDOG] %d Qdrant local hit(s) missing citation_data.analysis_report — queued for Clerk enrich",
+            len(needing_clerk),
+        )
+
     return {
         "local":                     local,
         "candidates_ik":             candidates_ik,
@@ -1318,4 +1345,5 @@ def run_watchdog(
         "search_keywords_by_route":  search_keywords_by_route,
         "dropped_low_hierarchy_count": dropped_low_hierarchy,
         "local_judgement_hints":     _hints_from_local_rows(local),
+        "local_canonical_ids_needing_analysis": needing_clerk,
     }

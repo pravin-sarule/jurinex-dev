@@ -770,3 +770,148 @@ def clerk_ingest_google(
             except Exception as exc:
                 logger.warning("[CLERK] Google worker failed: %s", exc)
     return new_ids
+
+
+def clerk_enrich_local_canonical_ids(
+    canonical_ids: List[str],
+    query: str = "",
+    case_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dimensions: Optional[List[Dict[str, Any]]] = None,
+    local_hints: Optional[Dict[str, Dict[str, Any]]] = None,
+    pipeline_api_context: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """
+    For Qdrant-local judgments missing ``citation_data.analysis_report``, run the same
+    Gemini extraction as IK ingest and merge into PG (JSONB) + Elasticsearch.
+
+    ``pipeline_api_context`` is stored inside ``analysis_report`` so downstream
+    ReportBuilder / auditors can see which external search routes ran alongside.
+    """
+    from db.client import judgement_get, judgement_merge_citation_data, _judgment_citation_data_has_analysis_report
+    from db.connections import get_es_client
+
+    ids = [str(c).strip() for c in (canonical_ids or []) if str(c).strip()]
+    if not ids:
+        return []
+
+    _dim_lookup: Dict[int, Dict[str, Any]] = {}
+    for d in (dimensions or []):
+        did = d.get("dimension_id")
+        if did is not None:
+            _dim_lookup[did] = d
+    hints = local_hints or {}
+
+    def _one(cid: str) -> Optional[str]:
+        j = judgement_get(cid)
+        if not j:
+            logger.warning("[CLERK_ENRICH] Unknown canonical_id=%s", cid)
+            return None
+        cd = j.get("citation_data") or {}
+        if isinstance(cd, str):
+            try:
+                cd = json.loads(cd)
+            except Exception:
+                cd = {}
+        if _judgment_citation_data_has_analysis_report(cd):
+            return cid
+        raw_text = _html_to_text(
+            (j.get("full_text") or j.get("raw_content") or cd.get("full_text") or "").strip()
+        )
+        if len(raw_text) < 120:
+            logger.info("[CLERK_ENRICH] Skip %s — insufficient full_text (%d chars)", cid, len(raw_text))
+            return cid
+        title = (j.get("title") or j.get("case_name") or "Judgment")[:500]
+        hint = hints.get(cid) or {}
+        dim_id = hint.get("_dimension_id")
+        dim_name = hint.get("_dimension_name") or ""
+        q_type = (hint.get("_query_types") or [None])[0] if hint.get("_query_types") else hint.get("_query_type")
+        dimension_context = ""
+        if dim_id is not None and dim_id in _dim_lookup:
+            d = _dim_lookup[dim_id]
+            dimension_context = f"{d.get('name', dim_name)} — {d.get('reasoning', '')}".strip(" —")
+        elif dim_name:
+            dimension_context = str(dim_name)
+
+        extracted = _gemini_extract(
+            raw_text, title=title, query=query,
+            dimension_context=dimension_context,
+            run_id=run_id, user_id=user_id,
+        )
+        if extracted and not (extracted.get("ratio") or "").strip() and not (extracted.get("primaryCitation") or "").strip():
+            extracted = _gemini_extract(
+                raw_text, title=title, query=query,
+                dimension_context=dimension_context,
+                run_id=run_id, user_id=user_id,
+            )
+        info = _merge_extraction(extracted, title)
+        if _looks_like_non_judgment(info):
+            logger.info("[CLERK_ENRICH] Skip non-judgment shape for %s", title[:70])
+            return cid
+
+        analysis_report: Dict[str, Any] = {
+            "clerkModelExtraction": extracted or {},
+            "mergedFields": info,
+            "watchdogContext": {
+                "qdrantSimilarity": float(hint.get("_similarity_score") or 0.0),
+                "dimension_id": hint.get("_dimension_id"),
+                "dimension_ids": hint.get("_dimension_ids"),
+                "dimension_name": hint.get("_dimension_name"),
+                "query_types": hint.get("_query_types"),
+            },
+            "pipelineApiContext": pipeline_api_context or {},
+        }
+        patch = {
+            "analysis_report": analysis_report,
+            "primary_citation": info.get("primary_citation") or cd.get("primary_citation"),
+            "holding_text": info.get("ratio") or cd.get("holding_text"),
+            "summary_text": info.get("ratio") or cd.get("summary_text"),
+            "court_name": info.get("court") or cd.get("court_name"),
+            "case_name": info.get("title") or cd.get("case_name"),
+            "excerpt_para": info.get("excerpt_para") or cd.get("excerpt_para"),
+            "excerpt_text": info.get("excerpt_text") or cd.get("excerpt_text"),
+            "statutes": info.get("statutes") or cd.get("statutes") or [],
+            "dimension_id": dim_id if dim_id is not None else cd.get("dimension_id"),
+            "dimension_name": dim_name or cd.get("dimension_name"),
+            "query_type": q_type or cd.get("query_type"),
+        }
+        if not judgement_merge_citation_data(cid, patch):
+            logger.warning("[CLERK_ENRICH] PG merge failed for %s", cid)
+            return None
+        es = get_es_client()
+        if es:
+            try:
+                es.update(
+                    index="judgments",
+                    id=cid,
+                    body={
+                        "doc": {
+                            "primary_citation": patch.get("primary_citation"),
+                            "holding_text": patch.get("holding_text"),
+                            "summary_text": patch.get("summary_text"),
+                            "case_name": patch.get("case_name"),
+                            "court_name": patch.get("court_name"),
+                            "excerpt_para": patch.get("excerpt_para"),
+                            "excerpt_text": patch.get("excerpt_text"),
+                            "statutes": patch.get("statutes"),
+                        }
+                    },
+                    doc_as_upsert=True,
+                )
+            except Exception as exc:
+                logger.warning("[CLERK_ENRICH] ES update failed for %s: %s", cid, exc)
+        logger.info("[CLERK_ENRICH] Updated analysis_report for canonical_id=%s", cid)
+        return cid
+
+    done: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(CLERK_DOC_WORKERS, len(ids) or 1)) as pool:
+        futs = [pool.submit(_one, c) for c in ids]
+        for fut in as_completed(futs):
+            try:
+                r = fut.result(timeout=240)
+                if r:
+                    done.append(r)
+            except Exception as exc:
+                logger.warning("[CLERK_ENRICH] worker failed: %s", exc)
+    return done

@@ -204,6 +204,21 @@ def get_query_embedding(query: str) -> List[float]:
     return _get_qdrant_query_embedding(query)
 
 
+def _judgment_citation_data_has_analysis_report(cd: Any) -> bool:
+    """True when citation_data already carries a persisted Clerk / analysis payload."""
+    if not isinstance(cd, dict):
+        return False
+    ar = cd.get("analysis_report")
+    if ar is None:
+        return False
+    if isinstance(ar, dict):
+        return len(ar) > 0
+    if isinstance(ar, str):
+        s = ar.strip()
+        return bool(s) and s not in ("{}", "null", "None")
+    return bool(ar)
+
+
 def judgements_fetch_by_canonical_ids(
     canonical_ids: List[str],
     approved_only: bool = True,
@@ -289,6 +304,8 @@ def judgements_fetch_by_canonical_ids(
 
         display_source = "admin_upload" if is_admin else (src_type or "local")
 
+        has_ar = _judgment_citation_data_has_analysis_report(cd)
+
         result.append({
             "canonical_id":   r.get("canonical_id"),
             "id":             r.get("canonical_id"),
@@ -304,8 +321,47 @@ def judgements_fetch_by_canonical_ids(
             "judgment_date":  r.get("judgment_date"),
             "year":           r.get("year"),
             "citation_data":  cd,
+            # Expose full content directly for Watchdog/Clerk local-path enrichment.
+            "full_text":      cd.get("full_text") or "",
+            "raw_content":    cd.get("full_text") or "",
+            "has_analysis_report": has_ar,
         })
     return result
+
+
+def judgement_merge_citation_data(canonical_id: str, patch: Dict[str, Any]) -> bool:
+    """
+    Merge keys into judgments.citation_data (JSONB) for an existing canonical_id.
+    Used when Clerk re-enriches Qdrant hits without re-ingesting the full judgment row.
+    """
+    canonical_id = (canonical_id or "").strip()
+    if not canonical_id or not patch:
+        return False
+    conn = get_pg_conn()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE judgments
+                   SET citation_data = COALESCE(citation_data, '{}'::jsonb) || %s::jsonb
+                 WHERE canonical_id = %s
+                """,
+                (Json(patch), canonical_id),
+            )
+            ok = cur.rowcount > 0
+        conn.commit()
+        return bool(ok)
+    except Exception as exc:
+        logger.warning("[DB] judgement_merge_citation_data failed for %s: %s", canonical_id, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        conn.close()
 
 
 def _resolve_hitl_pk_column(conn) -> str:
@@ -877,6 +933,9 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
     if uploaded_by_admin and (str(source_key).strip().lower() in ("local", "unknown", "")):
         source_key = "admin_upload"
 
+    _pg_src_type = str(row.get("source_type") or "").strip().lower() if row else ""
+    _src_type_resolved = _pg_src_type or str(_es_or_pg("source_type") or "").strip().lower()
+
     result = {
         "id": canonical_id,
         "canonical_id": canonical_id,
@@ -912,6 +971,11 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         "ik_cite_list":       row.get("ik_cite_list") or [],
         "ik_cited_by_list":   row.get("ik_cited_by_list") or [],
         "ik_doc_meta":        row.get("ik_doc_meta") or {},
+        "source_type":        _src_type_resolved or None,
+        "citation_data":      pg_citation,
+        "is_local_admin":     _src_type_resolved in (
+            "admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload"
+        ),
     }
 
     # ── IK fallback: if judgments IK columns are empty, pull from ik_document_assets ──
