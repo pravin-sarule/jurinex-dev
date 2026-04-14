@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 _HITL_PK_CACHE: Optional[str] = None
 _qdrant_embed_client = None
 _qdrant_embed_available = None
+_EMBED_RETRY_ATTEMPTS = 3
+_EMBED_RETRY_BASE_DELAY_SECS = 0.75
 
 
 def _resolve_query_embed_model() -> str:
@@ -86,6 +89,35 @@ def _ensure_query_embed_client() -> bool:
     return True
 
 
+def _embed_with_retries(model: str, contents: List[str], config: Dict[str, Any], label: str):
+    """Retry Gemini embedding calls with exponential backoff."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(_EMBED_RETRY_ATTEMPTS):
+        try:
+            return _qdrant_embed_client.models.embed_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt < (_EMBED_RETRY_ATTEMPTS - 1):
+                delay = _EMBED_RETRY_BASE_DELAY_SECS * (2 ** attempt)
+                logger.warning(
+                    "[QDRANT] %s embed failed (attempt %d/%d): %s; retrying in %.2fs",
+                    label, attempt + 1, _EMBED_RETRY_ATTEMPTS, exc, delay,
+                )
+                time.sleep(delay)
+            else:
+                logger.warning(
+                    "[QDRANT] %s embed failed after %d attempts: %s",
+                    label, _EMBED_RETRY_ATTEMPTS, exc,
+                )
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"{label} embed failed without an exception")
+
+
 def _embed_strings_gemini(strings: List[str]) -> List[List[float]]:
     """Call Gemini embed_content for one or more non-empty strings; returns vectors (same length)."""
     if not strings:
@@ -95,21 +127,13 @@ def _embed_strings_gemini(strings: List[str]) -> List[List[float]]:
     model = _resolve_query_embed_model()
     config = _query_embed_config(model)
     try:
-        resp = _qdrant_embed_client.models.embed_content(
-            model=model,
-            contents=strings,
-            config=config,
-        )
+        resp = _embed_with_retries(model, strings, config, "batch")
     except Exception as exc:
         logger.warning("[QDRANT] batch embed_content failed: %s — retrying per string", exc)
         out: List[List[float]] = []
         for s in strings:
             try:
-                resp_one = _qdrant_embed_client.models.embed_content(
-                    model=model,
-                    contents=[s],
-                    config=config,
-                )
+                resp_one = _embed_with_retries(model, [s], config, "single-string")
                 embeds = getattr(resp_one, "embeddings", None) or []
                 vals = getattr(embeds[0], "values", None) if embeds else None
                 if isinstance(vals, list) and vals:
@@ -117,7 +141,7 @@ def _embed_strings_gemini(strings: List[str]) -> List[List[float]]:
                 else:
                     out.append([])
             except Exception as exc2:
-                logger.warning("[QDRANT] single-string embed failed: %s", exc2)
+                logger.warning("[QDRANT] single-string embed failed after retries: %s", exc2)
                 out.append([])
         return out
 
@@ -1074,10 +1098,10 @@ def judgement_search_local(
                 logger.warning("[QDRANT] Empty embedding for %r - retry %d/2", query[:60], attempt + 1)
         if vector is None:
             vector = []
-        if False and not vector:
-            logger.info("[QDRANT] No embedding vector - using ES fuzzy fallback for: %r", query[:60])
-            return _search_es_fuzzy_text(limit_count)
         if not vector:
+            if es_unreachable:
+                logger.info("[QDRANT] No embedding vector while ES is unreachable - relying on PG metadata fallback for: %r", query[:60])
+                return []
             logger.info("[QDRANT] No embedding vector — skipping semantic search for: %r", query[:60])
             return []
         try:

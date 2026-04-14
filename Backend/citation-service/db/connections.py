@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ def get_pg_dsn() -> Optional[str]:
 _pg_pool = None
 _es_client = None
 _es_init_attempted = False
+_es_last_failure_at = 0.0
 _qdrant_client = None
 _qdrant_init_attempted = False
 _neo4j_driver = None
@@ -84,10 +86,12 @@ DRAFT_POOL_MAXCONN = max(DRAFT_POOL_MINCONN, _get_env_int("DRAFT_POOL_MAXCONN", 
 DOC_POOL_MINCONN = max(1, _get_env_int("DOC_POOL_MINCONN", 1))
 DOC_POOL_MAXCONN = max(DOC_POOL_MINCONN, _get_env_int("DOC_POOL_MAXCONN", 3))
 # Remote ES (e.g. GCP VM) often needs >3s for TLS + first ping over the internet.
-ES_REQUEST_TIMEOUT = max(1, _get_env_int("ELASTIC_REQUEST_TIMEOUT", 15))
-ES_MAX_RETRIES = max(0, _get_env_int("ELASTIC_MAX_RETRIES", 1))
-ES_VERIFY_CERTS = _get_env_bool("ELASTIC_VERIFY_CERTS", True)
-ES_SSL_SHOW_WARN = _get_env_bool("ELASTIC_SSL_SHOW_WARN", ES_VERIFY_CERTS)
+ES_REQUEST_TIMEOUT = max(1, _get_env_int("ELASTIC_REQUEST_TIMEOUT", 30))
+ES_PING_TIMEOUT = max(1, _get_env_int("ELASTIC_PING_TIMEOUT", 5))
+ES_INIT_COOLDOWN_SECS = max(1, _get_env_int("ELASTIC_INIT_COOLDOWN_SECS", 60))
+ES_MAX_RETRIES = max(0, _get_env_int("ELASTIC_MAX_RETRIES", 3))
+ES_VERIFY_CERTS = _get_env_bool("ELASTIC_VERIFY_CERTS", False)
+ES_SSL_SHOW_WARN = _get_env_bool("ELASTIC_SSL_SHOW_WARN", False)
 ES_SSL_ASSERT_HOSTNAME = _get_env_bool("ELASTIC_SSL_ASSERT_HOSTNAME", ES_VERIFY_CERTS)
 ES_CA_CERTS = _get_env("ELASTIC_CA_CERTS", "ELASTICSEARCH_CA_CERTS")
 NEO4J_MAX_POOL_SIZE = max(1, _get_env_int("NEO4J_MAX_CONNECTION_POOL_SIZE", 20))
@@ -145,21 +149,23 @@ def get_pg_conn():
 
 
 def get_es_client():
-    global _es_client, _es_init_attempted
+    global _es_client, _es_init_attempted, _es_last_failure_at
     _load_citation_service_dotenv_once()
     url = _get_env("ELASTICSEARCH_URL", "ELASTIC_URL", "ES_URL")
     if not url:
         logger.warning("[ES] Missing ELASTICSEARCH_URL/ELASTIC_URL/ES_URL; Elasticsearch disabled.")
         return None
+    now = time.time()
     if _es_client is not None:
         return _es_client
-    if _es_init_attempted:
+    if _es_init_attempted and (now - _es_last_failure_at) < ES_INIT_COOLDOWN_SECS:
         return None
     try:
         with _clients_lock:
+            now = time.time()
             if _es_client is not None:
                 return _es_client
-            if _es_init_attempted:
+            if _es_init_attempted and (now - _es_last_failure_at) < ES_INIT_COOLDOWN_SECS:
                 return None
             _es_init_attempted = True
             from elasticsearch import Elasticsearch
@@ -182,7 +188,7 @@ def get_es_client():
             kwargs = {
                 "request_timeout": ES_REQUEST_TIMEOUT,
                 "max_retries": ES_MAX_RETRIES,
-                "retry_on_timeout": False,
+                "retry_on_timeout": True,
                 "verify_certs": ES_VERIFY_CERTS,
                 "ssl_show_warn": ES_SSL_SHOW_WARN,
                 "ssl_assert_hostname": ES_SSL_ASSERT_HOSTNAME,
@@ -197,19 +203,23 @@ def get_es_client():
                 client = Elasticsearch(url, **kwargs)
             else:
                 client = Elasticsearch(url, **kwargs)
-            if not client.ping():
+            if not client.ping(request_timeout=ES_PING_TIMEOUT):
+                _es_last_failure_at = time.time()
                 logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this process.", url)
                 return None
+            _es_last_failure_at = 0.0
             _es_client = client
             logger.info(
-                "[ES] Client ready for %s (auth=%s verify_certs=%s assert_hostname=%s)",
+                "[ES] Client ready for %s (auth=%s verify_certs=%s assert_hostname=%s ping_timeout=%ss)",
                 url,
                 "basic_auth" if (username and password) else ("api_key" if api_key else "none"),
                 ES_VERIFY_CERTS,
                 ES_SSL_ASSERT_HOSTNAME,
+                ES_PING_TIMEOUT,
             )
             return _es_client
     except Exception as exc:
+        _es_last_failure_at = time.time()
         logger.warning("[ES] Client init failed or unreachable: %s", exc)
         return None
 
