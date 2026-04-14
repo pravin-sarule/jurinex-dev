@@ -6,15 +6,312 @@ Uses canonical_id across systems and stores report snapshots in PostgreSQL.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import Json, RealDictCursor
 
-from db.connections import get_es_client, get_pg_conn, get_neo4j_driver
+from db.connections import (
+    elasticsearch_init_failed,
+    get_es_client,
+    get_neo4j_driver,
+    get_pg_conn,
+    get_qdrant_client,
+)
 
 logger = logging.getLogger(__name__)
+_HITL_PK_CACHE: Optional[str] = None
+_qdrant_embed_client = None
+_qdrant_embed_available = None
+
+
+def _resolve_query_embed_model() -> str:
+    """
+    Model id for query vectors (must match Qdrant `legal_embeddings` index geometry).
+    Default: models/gemini-embedding-001 (same family as document chunks in LegalCitationAgent).
+    Env GEMINI_QUERY_EMBEDDING_MODEL overrides. Legacy doc name "text-embedding-001" maps here.
+    """
+    raw = (os.environ.get("GEMINI_QUERY_EMBEDDING_MODEL") or "models/gemini-embedding-001").strip()
+    legacy = {
+        "text-embedding-001",
+        "models/text-embedding-001",
+        "gemini-text-embedding-001",
+    }
+    if raw.lower() in legacy:
+        raw = "models/gemini-embedding-001"
+    if not raw:
+        raw = "models/gemini-embedding-001"
+    return raw if raw.startswith("models/") else f"models/{raw}"
+
+
+def _query_embed_config(model: str) -> Dict[str, Any]:
+    """Gemini embedding models use RETRIEVAL_QUERY; text-embedding models omit task_type."""
+    dims = int(os.environ.get("CITATION_EMBED_OUTPUT_DIMS", "768"))
+    if "gemini-embedding" in model:
+        task_type = os.environ.get("CITATION_EMBED_QUERY_TASK_TYPE", "RETRIEVAL_QUERY")
+        return {"task_type": task_type, "output_dimensionality": dims}
+    return {"output_dimensionality": dims}
+
+
+def _ensure_query_embed_client() -> bool:
+    """Lazily initialise google.genai client for query embeddings. Returns True if usable."""
+    global _qdrant_embed_client, _qdrant_embed_available
+    if _qdrant_embed_available is None:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except Exception:
+            pass
+        try:
+            from google import genai
+            api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            if not api_key:
+                logger.warning("[QDRANT] GEMINI_API_KEY / GOOGLE_API_KEY not set — semantic search disabled")
+                _qdrant_embed_available = False
+            else:
+                _qdrant_embed_client = genai.Client(api_key=api_key)
+                _qdrant_embed_available = True
+                logger.info(
+                    "[QDRANT] Query embedder initialised (model=%s)",
+                    _resolve_query_embed_model(),
+                )
+        except Exception as e:
+            logger.warning("[QDRANT] Embedding client init failed: %s", e)
+            _qdrant_embed_available = False
+    if not _qdrant_embed_available or _qdrant_embed_client is None:
+        logger.info("[QDRANT] Embedding unavailable — skipping semantic query")
+        return False
+    return True
+
+
+def _embed_strings_gemini(strings: List[str]) -> List[List[float]]:
+    """Call Gemini embed_content for one or more non-empty strings; returns vectors (same length)."""
+    if not strings:
+        return []
+    if not _ensure_query_embed_client():
+        return [[] for _ in strings]
+    model = _resolve_query_embed_model()
+    config = _query_embed_config(model)
+    try:
+        resp = _qdrant_embed_client.models.embed_content(
+            model=model,
+            contents=strings,
+            config=config,
+        )
+    except Exception as exc:
+        logger.warning("[QDRANT] batch embed_content failed: %s — retrying per string", exc)
+        out: List[List[float]] = []
+        for s in strings:
+            try:
+                resp_one = _qdrant_embed_client.models.embed_content(
+                    model=model,
+                    contents=[s],
+                    config=config,
+                )
+                embeds = getattr(resp_one, "embeddings", None) or []
+                vals = getattr(embeds[0], "values", None) if embeds else None
+                if isinstance(vals, list) and vals:
+                    out.append([float(v) for v in vals])
+                else:
+                    out.append([])
+            except Exception as exc2:
+                logger.warning("[QDRANT] single-string embed failed: %s", exc2)
+                out.append([])
+        return out
+
+    embeds = getattr(resp, "embeddings", None) or []
+    out_full: List[List[float]] = []
+    for emb in embeds:
+        vals = getattr(emb, "values", None) or []
+        if vals:
+            out_full.append([float(v) for v in vals])
+        else:
+            out_full.append([])
+    if len(out_full) < len(strings):
+        out_full.extend([[] for _ in range(len(strings) - len(out_full))])
+    elif len(out_full) > len(strings):
+        out_full = out_full[: len(strings)]
+    if any(out_full):
+        sample = next((v for v in out_full if v), [])
+        logger.info("[QDRANT] Embedding batch OK: %d vector(s), dims=%d", len(out_full), len(sample))
+    return out_full
+
+
+def get_query_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """
+    Embed every string in `texts` (e.g. sc_query, hc_query, provision_query per dimension).
+    Preserves list length and index alignment; blank strings produce [].
+    """
+    if not texts:
+        return []
+    out: List[List[float]] = [[] for _ in texts]
+    need_pairs: List[Tuple[int, str]] = [(i, (t or "").strip()) for i, t in enumerate(texts) if (t or "").strip()]
+    if not need_pairs:
+        return out
+    idxs = [p[0] for p in need_pairs]
+    batch = [p[1] for p in need_pairs]
+    vectors = _embed_strings_gemini(batch)
+    for j, i in enumerate(idxs):
+        out[i] = vectors[j] if j < len(vectors) else []
+    return out
+
+
+def _get_qdrant_query_embedding(query: str) -> List[float]:
+    """Create one embedding vector for semantic local search."""
+    text = (query or "").strip()
+    if not text:
+        return []
+    vecs = get_query_embeddings_batch([text])
+    v = vecs[0] if vecs else []
+    if v:
+        logger.info("[QDRANT] Embedding generated: dims=%d for query: %r", len(v), text[:60])
+    return v
+
+
+def get_query_embedding(query: str) -> List[float]:
+    """Public wrapper — generate a Gemini embedding vector for `query`.
+
+    Returned vector dimension matches CITATION_EMBED_OUTPUT_DIMS (default 768).
+    Returns [] when the Gemini client is unavailable or the API call fails.
+    Suitable for use by watchdog and other modules without duplicating init logic.
+    """
+    return _get_qdrant_query_embedding(query)
+
+
+def judgements_fetch_by_canonical_ids(
+    canonical_ids: List[str],
+    approved_only: bool = True,
+    exclude_low_hierarchy: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Batch-fetch judgment rows from PostgreSQL by canonical_id list.
+
+    Rules:
+      - Admin-uploaded judgments (source_type IN ('admin','admin_upload',...)) are
+        always included regardless of verification_status.
+      - Other judgments are filtered by approved_only when True.
+      - Low-hierarchy courts (district / tribunal / forum) are filtered when
+        exclude_low_hierarchy is True.
+      - Each returned row has is_local_admin (bool) set from source_type.
+      - citation_data JSONB is parsed and merged into the row for convenience.
+
+    Returns list of enriched dicts keyed by snake_case DB column names.
+    """
+    ids = [str(i).strip() for i in (canonical_ids or []) if (i or "")]
+    if not ids:
+        return []
+
+    _ADMIN_SOURCES = frozenset(
+        ("admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload")
+    )
+    _LOW_HIER_KEYWORDS = frozenset(
+        ("district", "tribunal", "forum", "commission", "magistrate", "drt", "drat", "itat", "cestat")
+    )
+
+    def _is_admin(src: Any) -> bool:
+        return str(src or "").strip().lower() in _ADMIN_SOURCES
+
+    def _is_low_hier(court: Any) -> bool:
+        c = str(court or "").strip().lower()
+        return any(kw in c for kw in _LOW_HIER_KEYWORDS)
+
+    conn = get_pg_conn()
+    if not conn:
+        logger.warning("[FETCH_BATCH] No DB connection available")
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT canonical_id, case_name, court_code, source_type,
+                       verification_status, citation_data, judgment_date, year
+                  FROM judgments
+                 WHERE canonical_id = ANY(%s)
+                """,
+                (ids,),
+            )
+            rows = cur.fetchall() or []
+    except Exception as exc:
+        logger.warning("[FETCH_BATCH] DB query failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+    import json as _json
+    result: List[Dict[str, Any]] = []
+    for r in rows:
+        src_type = str(r.get("source_type") or "").strip().lower()
+        is_admin = _is_admin(src_type)
+
+        # Approved-only filter — admin judgments bypass it
+        if approved_only and not is_admin:
+            vs = str(r.get("verification_status") or "").upper()
+            if vs not in ("APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"):
+                continue
+
+        # Hierarchy filter
+        if exclude_low_hierarchy and _is_low_hier(r.get("court_code")):
+            continue
+
+        # Parse citation_data JSONB
+        cd = r.get("citation_data") or {}
+        if isinstance(cd, str):
+            try:
+                cd = _json.loads(cd)
+            except Exception:
+                cd = {}
+
+        display_source = "admin_upload" if is_admin else (src_type or "local")
+
+        result.append({
+            "canonical_id":   r.get("canonical_id"),
+            "id":             r.get("canonical_id"),
+            "title":          r.get("case_name") or cd.get("case_name") or "",
+            "case_name":      r.get("case_name") or cd.get("case_name") or "",
+            "court":          r.get("court_code") or cd.get("court_code") or "",
+            "court_code":     r.get("court_code") or cd.get("court_code") or "",
+            "primary_citation": cd.get("primary_citation") or "",
+            "ratio":          cd.get("holding_text") or cd.get("summary_text") or "",
+            "source":         display_source,
+            "source_type":    src_type,
+            "is_local_admin": is_admin,
+            "judgment_date":  r.get("judgment_date"),
+            "year":           r.get("year"),
+            "citation_data":  cd,
+        })
+    return result
+
+
+def _resolve_hitl_pk_column(conn) -> str:
+    """
+    Resolve hitl_queue primary id column across schema variants.
+    Prefers: id, hitl_id, queue_id.
+    """
+    global _HITL_PK_CACHE
+    if _HITL_PK_CACHE:
+        return _HITL_PK_CACHE
+    candidates = ("id", "hitl_id", "queue_id")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                  FROM information_schema.columns
+                 WHERE table_schema = 'public'
+                   AND table_name = 'hitl_queue'
+                """
+            )
+            cols = {str(r[0]).lower() for r in (cur.fetchall() or []) if r and r[0]}
+        for c in candidates:
+            if c in cols:
+                _HITL_PK_CACHE = c
+                return c
+    except Exception:
+        pass
+    _HITL_PK_CACHE = "id"
+    return _HITL_PK_CACHE
 
 
 def _fmt_date(value: Any) -> Any:
@@ -91,6 +388,7 @@ def init_db() -> None:
                     user_id VARCHAR,
                     query TEXT,
                     report_format JSONB,
+                    dimensions_metadata JSONB,
                     status VARCHAR,
                     case_id VARCHAR,
                     citation_count INTEGER DEFAULT 0,
@@ -107,6 +405,7 @@ def init_db() -> None:
             # Add new columns if table already existed (ignore errors)
             try:
                 cur.execute("ALTER TABLE citation_reports ADD COLUMN IF NOT EXISTS run_id UUID")
+                cur.execute("ALTER TABLE citation_reports ADD COLUMN IF NOT EXISTS dimensions_metadata JSONB")
                 cur.execute("ALTER TABLE citation_reports ADD COLUMN IF NOT EXISTS hitl_pending_count INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE citation_reports ADD COLUMN IF NOT EXISTS hitl_approved_count INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE citation_reports ADD COLUMN IF NOT EXISTS citations_approved_count INTEGER DEFAULT 0")
@@ -417,6 +716,8 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     row = None
+    uploaded_by_admin = False
+    upload_source_url = ""
     conn = get_pg_conn()
     if conn:
         try:
@@ -435,6 +736,27 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                     (canonical_id,),
                 )
                 row = cur.fetchone()
+                if row:
+                    try:
+                        cur.execute("SELECT to_regclass('public.judgment_uploads') AS t")
+                        _tbl = cur.fetchone() or {}
+                        if _tbl.get("t"):
+                            cur.execute(
+                                """
+                                SELECT source_url
+                                  FROM judgment_uploads
+                                 WHERE canonical_id = %s
+                                 ORDER BY created_at DESC NULLS LAST
+                                 LIMIT 1
+                                """,
+                                (canonical_id,),
+                            )
+                            _up = cur.fetchone() or {}
+                            if _up:
+                                uploaded_by_admin = True
+                                upload_source_url = str(_up.get("source_url") or "")
+                    except Exception:
+                        uploaded_by_admin = False
         finally:
             conn.close()
 
@@ -527,6 +849,10 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         if isinstance(_judges, list) and _judges:
             _coram = ", ".join(str(j) for j in _judges if j)
 
+    source_key = row.get("source_type") or _es_or_pg("source_type") or "local"
+    if uploaded_by_admin and (str(source_key).strip().lower() in ("local", "unknown", "")):
+        source_key = "admin_upload"
+
     result = {
         "id": canonical_id,
         "canonical_id": canonical_id,
@@ -541,11 +867,11 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         "ratio": _es_or_pg("holding_text") or _es_or_pg("summary_text") or "",
         "excerpt_para": _es_or_pg("excerpt_para"),
         "excerpt_text": _es_or_pg("excerpt_text"),
-        "source_url": source_url,
+        "source_url": source_url or upload_source_url,
         "official_source_url": _es_or_pg("official_source_url") or source_url,
         "import_source_link": import_source_link,
         "subsequent_treatment": subsequent_treatment or {},
-        "source": row.get("source_type") or _es_or_pg("source_type") or "local",
+        "source": source_key,
         "raw_content": _es_or_pg("full_text") or "",
         "full_text": _es_or_pg("full_text") or "",
         "paragraphs": _es_or_pg("paragraphs") or [],
@@ -607,27 +933,220 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
     return result
 
 
-def judgement_search_local(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+def judgement_search_local(
+    query: str,
+    limit: int = 10,
+    case_state: str = "",
+    approved_only: bool = True,
+    exclude_low_hierarchy: bool = True,
+) -> List[Dict[str, Any]]:
     query = (query or "").strip()
     if not query:
         return []
 
+    # Probe ES once: unreachable ES must not abort local search; Qdrant/PG still run.
     es = get_es_client()
+    es_unreachable = elasticsearch_init_failed()
+    try:
+        qdrant_floor = float(os.environ.get("CITATION_QDRANT_SCORE_THRESHOLD_WHEN_ES_DOWN", "0.70"))
+    except (TypeError, ValueError):
+        qdrant_floor = 0.70
+    qdrant_score_threshold: Optional[float] = qdrant_floor if es_unreachable else None
+
+    def _is_approved_status(v: Any) -> bool:
+        s = str(v or "").strip().upper()
+        return s in {"APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"}
+
+    def _is_low_hierarchy_court(v: Any) -> bool:
+        c = str(v or "").strip().lower()
+        if not c:
+            return False
+        bad = ("district", "tribunal", "forum", "commission", "magistrate", "drt", "drat", "itat", "cestat", "nclt", "nclat")
+        return any(x in c for x in bad)
+
+    def _rank_row(court_value: Any) -> int:
+        c = str(court_value or "").strip().lower()
+        if "supreme" in c:
+            return 300
+        if "high" in c:
+            score = 200
+            st = str(case_state or "").strip().lower()
+            if st and st in c:
+                score += 25
+            if st == "maharashtra" and "bombay high court" in c:
+                score += 25
+            return score
+        return 100
+
+    def _is_admin_source(source_type: Any) -> bool:
+        """True when the judgment was uploaded by an admin (not fetched from external API)."""
+        raw = str(source_type or "").strip().lower()
+        return raw in ("admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload")
+
+    def _search_qdrant_semantic(limit_count: int) -> List[Dict[str, Any]]:
+        """
+        Semantic search via Qdrant vector similarity.
+        Each Qdrant chunk payload must have canonical_id.
+        Admin-uploaded judgments are always included regardless of verification_status.
+        """
+        qdr = get_qdrant_client()
+        if not qdr:
+            logger.info("[QDRANT] Client not available — skipping semantic search")
+            return []
+        vector = _get_qdrant_query_embedding(query)
+        if not vector:
+            logger.info("[QDRANT] No embedding vector — skipping semantic search for: %r", query[:60])
+            return []
+        try:
+            fetch_limit = max(limit_count * 3, 30)
+            if qdrant_score_threshold is not None:
+                logger.info(
+                    "[QDRANT] Querying collection 'legal_embeddings' limit=%d score_threshold=%s for: %r",
+                    fetch_limit, qdrant_score_threshold, query[:60],
+                )
+            else:
+                logger.info("[QDRANT] Querying collection 'legal_embeddings' limit=%d for: %r",
+                            fetch_limit, query[:60])
+            points = []
+            try:
+                _qp_kwargs: Dict[str, Any] = {
+                    "collection_name": "legal_embeddings",
+                    "query": vector,
+                    "limit": fetch_limit,
+                    "with_payload": True,
+                }
+                if qdrant_score_threshold is not None:
+                    _qp_kwargs["score_threshold"] = qdrant_score_threshold
+                try:
+                    qp = qdr.query_points(**_qp_kwargs)
+                except TypeError:
+                    _qp_kwargs.pop("score_threshold", None)
+                    qp = qdr.query_points(**_qp_kwargs)
+                points = list(getattr(qp, "points", None) or [])
+            except Exception as _qp_exc:
+                logger.info("[QDRANT] query_points failed (%s), falling back to search()", _qp_exc)
+                _s_kwargs: Dict[str, Any] = {
+                    "collection_name": "legal_embeddings",
+                    "query_vector": vector,
+                    "limit": fetch_limit,
+                    "with_payload": True,
+                }
+                if qdrant_score_threshold is not None:
+                    _s_kwargs["score_threshold"] = qdrant_score_threshold
+                try:
+                    points = qdr.search(**_s_kwargs) or []
+                except TypeError:
+                    _s_kwargs.pop("score_threshold", None)
+                    points = qdr.search(**_s_kwargs) or []
+            logger.info("[QDRANT] Vector search returned %d point(s)", len(points))
+            # Extract canonical_ids from chunk payloads, preserving similarity order
+            canonical_ids: List[str] = []
+            seen = set()
+            for p in points:
+                payload = getattr(p, "payload", None) or {}
+                cid = str(payload.get("canonical_id") or "").strip()
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    canonical_ids.append(cid)
+            logger.info("[QDRANT] Unique canonical_ids from chunks: %d", len(canonical_ids))
+            if not canonical_ids:
+                return []
+            conn2 = get_pg_conn()
+            if not conn2:
+                logger.warning("[QDRANT] DB connection unavailable for canonical_id fetch")
+                return []
+            try:
+                with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
+                    cur2.execute(
+                        """
+                        SELECT canonical_id, case_name, court_code, source_type,
+                               citation_data, verification_status
+                          FROM judgments
+                         WHERE canonical_id = ANY(%s)
+                        """,
+                        (canonical_ids,),
+                    )
+                    rows2 = cur2.fetchall() or []
+                logger.info("[QDRANT] DB fetch returned %d row(s) for %d canonical_id(s)",
+                            len(rows2), len(canonical_ids))
+            finally:
+                conn2.close()
+
+            scored: List[Dict[str, Any]] = []
+            for r in rows2:
+                src_type = str(r.get("source_type") or "").strip().lower()
+                is_admin = _is_admin_source(src_type)
+                # Admin-uploaded judgments are always included; external ones need approval
+                if approved_only and not is_admin:
+                    if str(r.get("verification_status") or "").upper() not in (
+                        "APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"
+                    ):
+                        continue
+                if exclude_low_hierarchy and _is_low_hierarchy_court(r.get("court_code")):
+                    continue
+                cd = r.get("citation_data") or {}
+                if isinstance(cd, str):
+                    try:
+                        import json as _json
+                        cd = _json.loads(cd)
+                    except Exception:
+                        cd = {}
+                # Normalise source: 'admin' → 'admin_upload' so frontend shows local DB icon
+                display_source = src_type
+                if is_admin:
+                    display_source = "admin_upload"
+                elif not display_source:
+                    display_source = cd.get("source_type") or "local"
+                scored.append({
+                    "id": r.get("canonical_id"),
+                    "canonical_id": r.get("canonical_id"),
+                    "title": r.get("case_name") or cd.get("case_name"),
+                    "primary_citation": cd.get("primary_citation"),
+                    "court": r.get("court_code") or cd.get("court_code"),
+                    "ratio": cd.get("holding_text") or cd.get("summary_text") or "",
+                    "source": display_source,
+                    "is_local_admin": is_admin,
+                    "_local_rank": _rank_row(r.get("court_code") or cd.get("court_code")),
+                    "_from_qdrant": True,
+                })
+            scored.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+            return scored[:limit_count]
+        except Exception as exc:
+            logger.warning("[QDRANT] semantic local search failed: %s", exc)
+            return []
+
+    es_rows: List[Dict[str, Any]] = []
     if es:
         try:
             resp = es.search(
                 index="judgments",
                 size=limit,
                 query={
-                    "multi_match": {
-                        "query": query,
-                        "fields": [
-                            "case_name^3",
-                            "summary_text^2",
-                            "holding_text^2",
-                            "facts_text",
-                            "full_text",
+                    "bool": {
+                        "must": [
+                            {
+                                "multi_match": {
+                                    "query": query,
+                                    "type": "cross_fields",
+                                    "fields": [
+                                        "case_name^3",
+                                        "summary_text^2",
+                                        "holding_text^2",
+                                        "facts_text",
+                                        "full_text",
+                                    ],
+                                }
+                            }
                         ],
+                        "filter": [
+                            {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}}
+                        ] if approved_only else [],
+                        "must_not": [
+                            {"match": {"court_code": "district"}},
+                            {"match": {"court_code": "tribunal"}},
+                            {"match": {"court_code": "forum"}},
+                            {"match": {"court_code": "commission"}},
+                        ] if exclude_low_hierarchy else [],
                     }
                 },
             )
@@ -636,7 +1155,11 @@ def judgement_search_local(query: str, limit: int = 10) -> List[Dict[str, Any]]:
             for h in hits:
                 src = h.get("_source") or {}
                 canonical_id = src.get("canonical_id") or h.get("_id")
-                rows.append({
+                _src_type = str(src.get("source_type") or "").strip().lower()
+                _is_adm = _src_type in (
+                    "admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload"
+                )
+                row = {
                     "id": canonical_id,
                     "canonical_id": canonical_id,
                     "title": src.get("case_name"),
@@ -644,41 +1167,187 @@ def judgement_search_local(query: str, limit: int = 10) -> List[Dict[str, Any]]:
                     "court": src.get("court_code"),
                     "ratio": src.get("holding_text") or src.get("summary_text"),
                     "source": src.get("source_type") or "local",
-                })
-            return rows
+                    "is_local_admin": _is_adm,
+                }
+                if approved_only and not _is_adm and not _is_approved_status(src.get("verification_status")):
+                    continue
+                if exclude_low_hierarchy and _is_low_hierarchy_court(row.get("court")):
+                    continue
+                row["_local_rank"] = _rank_row(row.get("court"))
+                rows.append(row)
+            rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+            es_rows = rows[:limit]
         except Exception as exc:
             logger.warning("[ES] search failed: %s", exc)
 
+    # ── Qdrant semantic search — runs independently of PG/ES ──────────────────
+    # Runs first so its results are available even when PG query fails.
+    # Finds judgments by vector similarity using canonical_id from chunk payloads.
+    logger.info("[LOCAL_SEARCH] Running Qdrant semantic search for: %r", query[:80])
+    qdrant_rows = _search_qdrant_semantic(limit)
+    logger.info("[LOCAL_SEARCH] Qdrant returned %d result(s)", len(qdrant_rows))
+
     conn = get_pg_conn()
     if not conn:
-        return []
+        # No DB — return whatever Qdrant + ES found
+        combined = es_rows + qdrant_rows
+        seen: Dict[str, Dict[str, Any]] = {}
+        for r in combined:
+            k = str(r.get("canonical_id") or r.get("id") or "").strip()
+            if k and k not in seen:
+                seen[k] = r
+        return list(seen.values())[:limit]
+
+    pg_rows: List[Dict[str, Any]] = []
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            q_like = f"%{query}%"
+            # Local DB fallback should handle older DB schemas safely.
             cur.execute(
                 """
-                SELECT canonical_id, case_name, court_code, judgment_date, year, source_type
-                  FROM judgments
-                 WHERE case_name ILIKE %s
-                 ORDER BY ingested_at DESC NULLS LAST
-                 LIMIT %s
-                """,
-                (f"%{query}%", limit),
+                SELECT column_name
+                  FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'judgments'
+                """
             )
+            available_cols = {str(r.get("column_name") or "").strip().lower() for r in (cur.fetchall() or [])}
+            has_primary = "primary_citation" in available_cols
+            has_holding = "holding_text" in available_cols
+            has_summary = "summary_text" in available_cols
+            has_full = "full_text" in available_cols
+            has_verification = "verification_status" in available_cols
+
+            select_primary = "primary_citation" if has_primary else "NULL::text AS primary_citation"
+            select_holding = "holding_text" if has_holding else "NULL::text AS holding_text"
+            select_summary = "summary_text" if has_summary else "NULL::text AS summary_text"
+            select_verification = "verification_status" if has_verification else "NULL::text AS verification_status"
+
+            search_parts = ["case_name ILIKE %s"]
+            params = [q_like]
+            if has_primary:
+                search_parts.append("primary_citation ILIKE %s")
+                params.append(q_like)
+            if has_summary:
+                search_parts.append("COALESCE(summary_text, '') ILIKE %s")
+                params.append(q_like)
+            if has_holding:
+                search_parts.append("COALESCE(holding_text, '') ILIKE %s")
+                params.append(q_like)
+            if has_full:
+                search_parts.append("COALESCE(full_text, '') ILIKE %s")
+                params.append(q_like)
+            hard_filters = []
+            if approved_only and has_verification:
+                # Always include admin-uploaded judgments regardless of verification status
+                hard_filters.append(
+                    "(COALESCE(verification_status, '') IN ('APPROVED','VERIFIED','VERIFIED_WARN','GREEN')"
+                    " OR LOWER(COALESCE(source_type,'')) IN ('admin','admin_upload','adminupload','manual_upload','judgment_upload'))"
+                )
+            if exclude_low_hierarchy:
+                hard_filters.append(
+                    "LOWER(COALESCE(court_code,'')) NOT LIKE %s "
+                    "AND LOWER(COALESCE(court_code,'')) NOT LIKE %s "
+                    "AND LOWER(COALESCE(court_code,'')) NOT LIKE %s "
+                    "AND LOWER(COALESCE(court_code,'')) NOT LIKE %s"
+                )
+                params.extend(["%district%", "%tribunal%", "%forum%", "%commission%"])
+
+            order_case = "CASE WHEN case_name ILIKE %s THEN 0"
+            order_params = [q_like]
+            if has_primary:
+                order_case += " WHEN primary_citation ILIKE %s THEN 1"
+                order_params.append(q_like)
+            order_case += " ELSE 2 END"
+
+            sql_query = f"""
+                SELECT canonical_id, case_name, court_code, judgment_date, year, source_type,
+                       {select_primary}, {select_holding}, {select_summary}, {select_verification}
+                  FROM judgments
+                 WHERE ({" OR ".join(search_parts)})
+                   {"AND " + " AND ".join(hard_filters) if hard_filters else ""}
+                 ORDER BY {order_case}, ingested_at DESC NULLS LAST
+                 LIMIT %s
+            """
+            params.extend(order_params)
+            params.append(limit)
+            cur.execute(sql_query, tuple(params))
             rows = cur.fetchall()
-            out = []
             for r in rows:
-                out.append({
+                src_raw = str(r.get("source_type") or "").strip().lower()
+                display_src = "admin_upload" if _is_admin_source(src_raw) else (src_raw or "local")
+                pg_rows.append({
                     "id": r.get("canonical_id"),
                     "canonical_id": r.get("canonical_id"),
                     "title": r.get("case_name"),
-                    "primary_citation": None,
+                    "primary_citation": r.get("primary_citation"),
                     "court": r.get("court_code"),
-                    "ratio": "",
-                    "source": r.get("source_type") or "local",
+                    "ratio": r.get("holding_text") or r.get("summary_text") or "",
+                    "source": display_src,
+                    "is_local_admin": _is_admin_source(src_raw),
+                    "_local_rank": _rank_row(r.get("court_code")),
                 })
-            return out
+            pg_rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+            logger.info("[LOCAL_SEARCH] PG text search returned %d result(s)", len(pg_rows))
+    except Exception as exc:
+        logger.warning("[PG] local search broad query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        # Try narrow case-name fallback
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT canonical_id, case_name, court_code, source_type
+                      FROM judgments
+                     WHERE case_name ILIKE %s
+                     ORDER BY ingested_at DESC NULLS LAST
+                     LIMIT %s
+                    """,
+                    (f"%{query}%", limit),
+                )
+                for r in (cur.fetchall() or []):
+                    src_raw = str(r.get("source_type") or "").strip().lower()
+                    pg_rows.append({
+                        "id": r.get("canonical_id"),
+                        "canonical_id": r.get("canonical_id"),
+                        "title": r.get("case_name"),
+                        "primary_citation": None,
+                        "court": r.get("court_code"),
+                        "ratio": "",
+                        "source": "admin_upload" if _is_admin_source(src_raw) else (src_raw or "local"),
+                        "is_local_admin": _is_admin_source(src_raw),
+                    })
+        except Exception as inner_exc:
+            logger.warning("[PG] local search fallback failed: %s", inner_exc)
     finally:
         conn.close()
+
+    # ── Merge ES + PG + Qdrant by canonical_id, preserving best rank ──────────
+    merged: Dict[str, Dict[str, Any]] = {}
+    for r in (es_rows + pg_rows + qdrant_rows):
+        key = str(r.get("canonical_id") or r.get("id") or "").strip()
+        if not key:
+            key = f"{str(r.get('title') or '').strip()}::{str(r.get('court') or '').strip()}"
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = r
+            continue
+        existing = merged[key]
+        # Prefer higher hierarchy rank; for equal rank prefer Qdrant (semantic match)
+        if (r.get("_local_rank") or 0) > (existing.get("_local_rank") or 0):
+            merged[key] = r
+        elif (r.get("_local_rank") or 0) == (existing.get("_local_rank") or 0) and r.get("_from_qdrant"):
+            merged[key] = r
+    final_rows = list(merged.values())
+    final_rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+    logger.info(
+        "[LOCAL_SEARCH] Final merged: %d result(s) [PG=%d, ES=%d, Qdrant=%d]",
+        len(final_rows), len(pg_rows), len(es_rows), len(qdrant_rows),
+    )
+    return final_rows[:limit]
 
 
 # --- Citation reports (user-specific) ---
@@ -695,6 +1364,7 @@ def report_insert(
     hitl_approved_count: int = 0,
     citations_approved_count: int = 0,
     citations_quarantined_count: int = 0,
+    dimensions_metadata: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """Persist report snapshot. Returns report_id on success, None if PostgreSQL is unavailable."""
     conn = get_pg_conn()
@@ -702,20 +1372,23 @@ def report_insert(
         logger.warning("[report_insert] PostgreSQL unavailable — skipping persist (report_id=%s)", report_id)
         return None
     cit_count = len(report_format.get("citations", [])) if isinstance(report_format, dict) else 0
+    dims_meta = dimensions_metadata if dimensions_metadata is not None else (
+        (report_format.get("dimensions") or []) if isinstance(report_format, dict) else []
+    )
     try:
         with conn.cursor() as cur:
             # Store main report row
             cur.execute(
                 """
                 INSERT INTO citation_reports (
-                    id, user_id, query, report_format, status, case_id, citation_count,
+                    id, user_id, query, report_format, dimensions_metadata, status, case_id, citation_count,
                     run_id, hitl_pending_count, hitl_approved_count,
                     citations_approved_count, citations_quarantined_count
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    report_id, user_id, query, Json(report_format), status, case_id, cit_count,
+                    report_id, user_id, query, Json(report_format), Json(dims_meta), status, case_id, cit_count,
                     run_id, hitl_pending_count, hitl_approved_count,
                     citations_approved_count, citations_quarantined_count,
                 ),
@@ -917,6 +1590,7 @@ def report_update(
     status: Optional[str] = None,
     hitl_pending_count: Optional[int] = None,
     hitl_approved_count: Optional[int] = None,
+    dimensions_metadata: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Update report after HITL approvals or status change."""
     conn = get_pg_conn()
@@ -927,6 +1601,8 @@ def report_update(
             updates, vals = [], []
             if report_format is not None:
                 updates.append("report_format = %s"); vals.append(Json(report_format))
+            if dimensions_metadata is not None:
+                updates.append("dimensions_metadata = %s"); vals.append(Json(dimensions_metadata))
             if status is not None:
                 updates.append("status = %s"); vals.append(status)
             if hitl_pending_count is not None:
@@ -955,7 +1631,7 @@ def report_get(report_id: str) -> Optional[Dict[str, Any]]:
             cur.execute(
                 """
                 SELECT id, user_id, query, report_format, created_at, status, case_id, citation_count,
-                       run_id, hitl_pending_count, hitl_approved_count, citations_approved_count,
+                       dimensions_metadata, run_id, hitl_pending_count, hitl_approved_count, citations_approved_count,
                        citations_quarantined_count, updated_at, shared_with
                   FROM citation_reports
                  WHERE id = %s
@@ -1548,16 +2224,17 @@ def hitl_queue_insert(
         logger.warning("[hitl_queue_insert] PostgreSQL unavailable — skipping (canonical_id=%s)", canonical_id)
         return None
     try:
+        pk_col = _resolve_hitl_pk_column(conn)
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 INSERT INTO hitl_queue (
                     report_id, run_id, canonical_id, user_id,
                     citation_snapshot, reason_queued, case_id,
                     citation_string, query_context, web_source_url, priority_score
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
+                RETURNING {pk_col}
                 """,
                 (
                     report_id or None, run_id, canonical_id, user_id,

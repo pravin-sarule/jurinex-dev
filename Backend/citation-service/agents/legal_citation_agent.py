@@ -32,14 +32,19 @@ from google import genai
 class LegalCitationAgent:
     def __init__(self, pg_conn=None, es_client=None, qdrant_client=None, neo4j_driver=None):
         """Initialize the agent with database connections."""
-        self.pg = pg_conn or get_pg_conn()
+        # Do not hold a pooled PG connection per agent instance by default.
+        # In high-concurrency Clerk ingest, one agent is created per document;
+        # retaining pooled connections here quickly exhausts the pool.
+        self.pg = pg_conn
         self.es = es_client or get_es_client()
         self.qdrant = qdrant_client or get_qdrant_client()
         self.neo4j = neo4j_driver or get_neo4j_driver()
-        self._embed_model = os.environ.get("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
+        raw_embed_model = os.environ.get("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
+        self._embed_model = raw_embed_model if raw_embed_model.startswith("models/") else f"models/{raw_embed_model}"
         self._embed_batch_size = max(1, min(64, int(os.environ.get("CITATION_EMBED_BATCH_SIZE", "16"))))
         self._embed_workers = max(1, min(16, int(os.environ.get("CITATION_EMBED_WORKERS", "4"))))
         self._embed_output_dims = int(os.environ.get("CITATION_EMBED_OUTPUT_DIMS", "768"))
+        self._embed_task_type = os.environ.get("CITATION_EMBED_TASK_TYPE", "RETRIEVAL_DOCUMENT")
         self._embed_client = None
         self._embed_available = False
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -64,6 +69,10 @@ class LegalCitationAgent:
         while start < len(text):
             chunks.append(text[start:start + chunk_size])
             start += chunk_size - overlap
+        max_chunks = max(10, int(os.environ.get("CITATION_MAX_CHUNKS_PER_DOC", "80")))
+        if len(chunks) > max_chunks:
+            logger.info("[INGEST] Chunk cap applied: %d -> %d", len(chunks), max_chunks)
+            return chunks[:max_chunks]
         return chunks
 
     def _embed_texts_batch(self, texts: List[str]) -> List[List[float]]:
@@ -77,7 +86,10 @@ class LegalCitationAgent:
             response = self._embed_client.models.embed_content(
                 model=self._embed_model,
                 contents=texts,
-                config={"output_dimensionality": self._embed_output_dims},
+                config={
+                    "task_type": self._embed_task_type,
+                    "output_dimensionality": self._embed_output_dims,
+                },
             )
             embeddings_obj = getattr(response, "embeddings", None) or []
             out: List[List[float]] = []
@@ -187,7 +199,16 @@ class LegalCitationAgent:
             except (TypeError, ValueError):
                 return None
 
-        verification_status = _safe_str(data.get("verification_status", "pending"), 20) or "pending"
+        raw_verification_status = _safe_str(data.get("verification_status", "pending"), 32) or "pending"
+        _vs = str(raw_verification_status).strip().upper()
+        if _vs in ("VERIFIED", "VERIFIED_WARN", "GREEN", "APPROVED"):
+            verification_status = "APPROVED"
+        elif _vs in ("NEEDS_REVIEW", "YELLOW", "REVIEW"):
+            verification_status = "NEEDS_REVIEW"
+        elif _vs in ("QUARANTINED", "RED", "REJECTED"):
+            verification_status = "QUARANTINED"
+        else:
+            verification_status = "PENDING"
 
         # Rich fields stored as JSONB for ES-free fallback (used by judgement_get when ES is down)
         import json as _json
@@ -213,6 +234,8 @@ class LegalCitationAgent:
             "dimension_name":      data.get("dimension_name"),
             "dimension_tags":      data.get("dimension_tags") or [],
             "query_type":          data.get("query_type"),
+            "embedding_model":     data.get("embedding_model"),
+            "embedding_dims":      data.get("embedding_dims"),
         }, ensure_ascii=False)
 
         try:
@@ -309,11 +332,11 @@ class LegalCitationAgent:
     # ─────────────────────────────────────────────────────────────────────────────
     # Elasticsearch (Full Text Search)
     # ─────────────────────────────────────────────────────────────────────────────
-    def _index_elasticsearch(self, data: Dict[str, Any]) -> bool:
-        """Returns True if index succeeded."""
+    def _index_elasticsearch(self, data: Dict[str, Any]) -> Optional[bool]:
+        """Returns True if index succeeded, None when skipped, False on failure."""
         if not self.es:
             logger.warning("[ES] skipped index (no connection)")
-            return False
+            return None
         logger.info(f"[ES] Indexing document for canonical_id: {data['canonical_id']}")
         subsequent = data.get("subsequent_treatment")
         if subsequent and isinstance(subsequent, dict):
@@ -356,14 +379,14 @@ class LegalCitationAgent:
     # ─────────────────────────────────────────────────────────────────────────────
     # Qdrant (Vector Embeddings)
     # ─────────────────────────────────────────────────────────────────────────────
-    def _store_qdrant_embeddings(self, data: Dict[str, Any], chunks: List[str]) -> bool:
-        """Returns True if store succeeded."""
+    def _store_qdrant_embeddings(self, data: Dict[str, Any], chunks: List[str]) -> Optional[bool]:
+        """Returns True if store succeeded, None when skipped, False on failure."""
         if not self.qdrant:
             logger.warning("[QDRANT] skipped vectors (no connection)")
-            return False
+            return None
         if not self._embed_available:
             logger.warning("[QDRANT] skipped vectors (Gemini embedding unavailable)")
-            return False
+            return None
         from qdrant_client.models import PointStruct
         
         logger.info(f"[QDRANT] Storing {len(chunks)} chunks for canonical_id: {data['canonical_id']}")
@@ -397,6 +420,8 @@ class LegalCitationAgent:
                 "dimension_name": (data.get("dimension_name") or "")[:200],
                 "dimension_tags": data.get("dimension_tags") or [],
                 "query_type":     (data.get("query_type") or "")[:50],
+                "embedding_model": data.get("embedding_model") or self._embed_model,
+                "embedding_dims":  data.get("embedding_dims") or self._embed_output_dims,
             }
             points.append(PointStruct(id=vector_id, vector=embedding, payload=payload))
         
@@ -416,11 +441,11 @@ class LegalCitationAgent:
     # ─────────────────────────────────────────────────────────────────────────────
     # Neo4j (Citation Graph)
     # ─────────────────────────────────────────────────────────────────────────────
-    def _create_neo4j_graph(self, data: Dict[str, Any], citations: List[Dict[str, Any]]) -> bool:
-        """Returns True if graph update succeeded. Spec: OriginalCase, CitedCase, LegalSection, Court, Doctrine; CITES, APPLIES_DOCTRINE, DECIDED_BY, INTERPRETS_SECTION."""
+    def _create_neo4j_graph(self, data: Dict[str, Any], citations: List[Dict[str, Any]]) -> Optional[bool]:
+        """Returns True if graph update succeeded, None when skipped, False on failure."""
         if not self.neo4j:
             logger.warning("[NEO4J] skipped graph (no connection)")
-            return False
+            return None
 
         logger.info(f"[NEO4J] Updating graph for canonical_id: {data['canonical_id']}")
         canonical_id = data["canonical_id"]
@@ -555,6 +580,8 @@ class LegalCitationAgent:
         raw_data["neo4j_node_id"] = raw_data.get("neo4j_node_id")
         raw_data["source_type"] = raw_data.get("source_type") or "local"
         raw_data["judgment_uuid"] = raw_data.get("judgment_uuid") or str(uuid.uuid4())
+        raw_data["embedding_model"] = raw_data.get("embedding_model") or self._embed_model
+        raw_data["embedding_dims"] = raw_data.get("embedding_dims") or self._embed_output_dims
 
         ack = {"canonical_id": canonical_id, "pg": False, "es_doc_id": None, "qdrant_stored": False, "neo4j_stored": False, "errors": []}
 
@@ -591,16 +618,16 @@ class LegalCitationAgent:
                 try:
                     store, ok = fut.result()
                     if store == "es":
-                        ack["es_doc_id"] = canonical_id if ok else None
-                        if not ok:
+                        ack["es_doc_id"] = canonical_id if ok is True else None
+                        if ok is False:
                             ack["errors"].append("es_index_failed")
                     elif store == "qdrant":
-                        ack["qdrant_stored"] = ok
-                        if not ok:
+                        ack["qdrant_stored"] = bool(ok)
+                        if ok is False:
                             ack["errors"].append("qdrant_upsert_failed")
                     elif store == "neo4j":
-                        ack["neo4j_stored"] = ok
-                        if not ok:
+                        ack["neo4j_stored"] = bool(ok)
+                        if ok is False:
                             ack["errors"].append("neo4j_graph_failed")
                 except Exception as exc:
                     logger.warning("[INGEST] secondary store error: %s", exc)

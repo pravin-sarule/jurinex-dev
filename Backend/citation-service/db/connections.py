@@ -140,9 +140,9 @@ def get_es_client():
                 return None
             _es_init_attempted = True
             from elasticsearch import Elasticsearch
-            api_key = _get_env("ELASTICSEARCH_API_KEY")
             username = _get_env("ELASTICSEARCH_USERNAME", "ELASTIC_USER", "ES_USERNAME")
             password = _get_env("ELASTICSEARCH_PASSWORD", "ELASTIC_PASSWORD", "ES_PASSWORD")
+            api_key = _get_env("ELASTICSEARCH_API_KEY")
             kwargs = {
                 "request_timeout": ES_REQUEST_TIMEOUT,
                 "max_retries": ES_MAX_RETRIES,
@@ -153,11 +153,12 @@ def get_es_client():
             }
             if ES_CA_CERTS:
                 kwargs["ca_certs"] = ES_CA_CERTS
-            if api_key:
+            # Prefer explicit username/password from .env; fall back to API key.
+            if username and password:
+                client = Elasticsearch(url, basic_auth=(username, password), **kwargs)
+            elif api_key:
                 kwargs["api_key"] = api_key
                 client = Elasticsearch(url, **kwargs)
-            elif username and password:
-                client = Elasticsearch(url, basic_auth=(username, password), **kwargs)
             else:
                 client = Elasticsearch(url, **kwargs)
             if not client.ping():
@@ -165,8 +166,9 @@ def get_es_client():
                 return None
             _es_client = client
             logger.info(
-                "[ES] Client ready for %s (verify_certs=%s assert_hostname=%s)",
+                "[ES] Client ready for %s (auth=%s verify_certs=%s assert_hostname=%s)",
                 url,
+                "basic_auth" if (username and password) else ("api_key" if api_key else "none"),
                 ES_VERIFY_CERTS,
                 ES_SSL_ASSERT_HOSTNAME,
             )
@@ -174,6 +176,19 @@ def get_es_client():
     except Exception as exc:
         logger.warning("[ES] Client init failed or unreachable: %s", exc)
         return None
+
+
+def elasticsearch_init_failed() -> bool:
+    """
+    True when an Elasticsearch URL was configured but this process could not
+    obtain a working client (ping failed or constructor error). Used to relax
+    Qdrant score thresholds so local semantic retrieval still returns hits.
+    """
+    if _es_client is not None:
+        return False
+    if not _get_env("ELASTICSEARCH_URL", "ELASTIC_URL", "ES_URL"):
+        return False
+    return _es_init_attempted
 
 
 def get_qdrant_client():

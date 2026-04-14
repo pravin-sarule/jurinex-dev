@@ -238,6 +238,34 @@ def _validate_court(court: str) -> bool:
     return any(c in court_lower for c in _VALID_COURTS)
 
 
+def _is_placeholder_text(value: str) -> bool:
+    s = (value or "").strip().lower()
+    return s in {
+        "",
+        "—",
+        "further research needed",
+        "further research needed.",
+        "not applicable",
+        "not applicable - constitution of india",
+        "unknown",
+        "null",
+        "none",
+    }
+
+
+def _looks_like_legislation(title: str, citation: str, court: str) -> bool:
+    blob = f"{title} {citation} {court}".lower()
+    return any(k in blob for k in (
+        " act, ",
+        " act ",
+        " rules,",
+        " rules ",
+        "constitution of india",
+        "notification",
+        "published vide",
+    ))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_librarian(
@@ -355,6 +383,14 @@ def run_librarian(
             source_icon, source.upper(), title[:65], primary_cite or "—",
         )
 
+        # ── 0.5 Block placeholders / legislation-like non-judgment entries ──
+        if _is_placeholder_text(primary_cite) or _is_placeholder_text(title):
+            logger.warning("  ├─ [PLACEHOLDER] ✗ Placeholder citation/title detected")
+            issues.append("placeholder_entry")
+        if _looks_like_legislation(title, primary_cite, court):
+            logger.warning("  ├─ [DOC-TYPE] ✗ Looks like legislation/non-judgment text")
+            issues.append("non_judgment_document")
+
         # ── 1. Citation format ────────────────────────────────────────────────
         fmt = _detect_citation_format(primary_cite)
         if fmt:
@@ -401,8 +437,11 @@ def run_librarian(
         enrichments["area_of_law"] = area
 
         # ── 6. Determine validation status ───────────────────────────────────
-        # Critical: missing citation AND empty content = reject outright
-        if "missing_citation" in issues and "empty_content" in issues:
+        # Critical rejects
+        if "placeholder_entry" in issues or "non_judgment_document" in issues:
+            status = "rejected"
+            logger.warning("  └─ [STATUS]  ✗ REJECTED — non-judgment/placeholder")
+        elif "missing_citation" in issues and "empty_content" in issues:
             status = "rejected"
             logger.warning("  └─ [STATUS]  ✗ REJECTED — %s", issues)
         elif issues:

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE    = 1200
 CHUNK_OVERLAP = 200
 CLERK_DOC_WORKERS = max(1, min(12, int(os.environ.get("CITATION_CLERK_DOC_WORKERS", "6"))))
+MAX_CHUNKS_PER_DOC = max(10, int(os.environ.get("CITATION_MAX_CHUNKS_PER_DOC", "80")))
 _EXPECTED_CLERK_KEYS = {
     "caseName",
     "primaryCitation",
@@ -110,7 +111,46 @@ def _parse_model_json(text: str) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError as exc:
         preview = repaired[:400].replace("\n", " ")
         logger.warning("[CLERK] Gemini JSON parse failed: %s | preview=%s", exc, preview)
+        return _salvage_partial_clerk_payload(repaired)
+
+
+def _salvage_partial_clerk_payload(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort extraction when Gemini returns truncated/invalid JSON.
+    Pulls core fields from partial text so pipeline can continue safely.
+    """
+    if not text:
         return None
+
+    def _pick(key: str) -> str:
+        m = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]*)', text, flags=re.I)
+        return (m.group(1).strip() if m else "")
+
+    def _pick_list(key: str) -> List[str]:
+        m = re.search(rf'"{re.escape(key)}"\s*:\s*\[([^\]]*)', text, flags=re.I | re.S)
+        if not m:
+            return []
+        chunk = m.group(1)
+        vals = re.findall(r'"([^"]+)"', chunk)
+        return [v.strip() for v in vals if v and v.strip()]
+
+    out = {
+        "caseName": _pick("caseName"),
+        "primaryCitation": _pick("primaryCitation"),
+        "alternateCitations": _pick_list("alternateCitations"),
+        "court": _pick("court"),
+        "coram": _pick("coram"),
+        "benchType": _pick("benchType"),
+        "dateOfJudgment": _pick("dateOfJudgment"),
+        "statutes": _pick_list("statutes"),
+        "ratio": _pick("ratio"),
+        "excerptPara": _pick("excerptPara"),
+        "excerptText": _pick("excerptText"),
+        "subsequentTreatment": {"followed": [], "distinguished": [], "overruled": []},
+        "verificationStatus": _pick("verificationStatus") or "Requires review",
+        "officialSourceUrl": _pick("officialSourceUrl") or None,
+    }
+    return out if _is_expected_clerk_payload(out) else None
 
 
 def _is_expected_clerk_payload(payload: Optional[Dict[str, Any]]) -> bool:
@@ -130,6 +170,13 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
     while start < len(text):
         chunks.append(text[start:start + chunk_size])
         start += chunk_size - overlap
+    if len(chunks) > MAX_CHUNKS_PER_DOC:
+        logger.info(
+            "[CLERK] Chunk cap applied: %d -> %d (set CITATION_MAX_CHUNKS_PER_DOC to tune)",
+            len(chunks),
+            MAX_CHUNKS_PER_DOC,
+        )
+        return chunks[:MAX_CHUNKS_PER_DOC]
     return chunks
 
 
@@ -208,7 +255,7 @@ def _gemini_extract(
     default_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
     default_config_kw: Dict[str, Any] = {
         "temperature": 0.1,
-        "maxOutputTokens": 1536,
+        "maxOutputTokens": 4096,
         "responseMimeType": "application/json",
     }
     prompt = _safe_prompt_format(
@@ -224,7 +271,7 @@ def _gemini_extract(
             default_prompt=_DEFAULT_CLERK_PROMPT,
             default_model=default_model,
             default_temperature=0.1,
-            default_max_tokens=1536,
+            default_max_tokens=4096,
         )
         prompt = _safe_prompt_format(pc.prompt, title=title, query=query + dim_annotation, excerpt=excerpt)
         model = pc.model_name
@@ -334,14 +381,14 @@ def _html_to_text(content: str) -> str:
 
 
 def _merge_extraction(gem: Optional[Dict], title: str) -> Dict[str, Any]:
-    """Ensure all 10 report points are present (CHECK 6: holding, ratio, citation). Use placeholder if missing."""
+    """Ensure all 10 report points are present (CHECK 6) while keeping unknowns empty."""
     gem = gem or {}
     ratio = (gem.get("ratio") or "").strip()
     citation = (gem.get("primaryCitation") or "").strip()
-    if not ratio:
-        ratio = "Further research needed."
-    if not citation or citation in ("—", "null", "None"):
-        citation = "—"
+    if ratio.lower() in ("further research needed", "further research needed.", "not available", "unknown"):
+        ratio = ""
+    if not citation or citation in ("—", "null", "None", "Further research needed", "Further research needed."):
+        citation = ""
     subsequent = _normalize_subsequent_treatment(gem.get("subsequentTreatment"))
     verification = (gem.get("verificationStatus") or "").strip() or "Requires review"
     if verification.lower() in ("null", "none", ""):
@@ -361,20 +408,41 @@ def _merge_extraction(gem: Optional[Dict], title: str) -> Dict[str, Any]:
     excerpt_clean = _strip_html_css(excerpt_raw) if excerpt_raw else ""
     return {
         "title":                 case_name,
-        "primary_citation":      citation or "—",
+        "primary_citation":      citation,
         "alternate_citations":   gem.get("alternateCitations") or [],
-        "court":                 gem.get("court") or "Court not specified",
-        "coram":                 gem.get("coram") or "—",
-        "bench_type":            gem.get("benchType") or "—",
-        "date_judgment":         gem.get("dateOfJudgment") or "—",
+        "court":                 gem.get("court") or "",
+        "coram":                 gem.get("coram") or "",
+        "bench_type":            gem.get("benchType") or "",
+        "date_judgment":         gem.get("dateOfJudgment") or "",
         "statutes":              gem.get("statutes") or [],
-        "ratio":                 ratio or "Ratio not available.",
-        "excerpt_para":          gem.get("excerptPara") or "Para 1",
-        "excerpt_text":          excerpt_clean or excerpt_raw or "—",
+        "ratio":                 ratio,
+        "excerpt_para":          gem.get("excerptPara") or "",
+        "excerpt_text":          excerpt_clean or excerpt_raw or "",
         "subsequent_treatment":  subsequent,
         "verification_status":   verification,
         "official_source_url":   official_url,
     }
+
+
+def _looks_like_non_judgment(info: Dict[str, Any]) -> bool:
+    blob = " ".join([
+        str(info.get("title") or ""),
+        str(info.get("primary_citation") or ""),
+        str(info.get("court") or ""),
+        str(info.get("ratio") or ""),
+    ]).lower()
+    if not blob.strip():
+        return True
+    blocked_markers = (
+        "not applicable",
+        "document is a manual",
+        "manual",
+        "constitution of india",
+        "published vide",
+        "rules,",
+        " act,",
+    )
+    return any(m in blob for m in blocked_markers)
 
 
 def _clean_date(value: str) -> Optional[str]:
@@ -504,6 +572,9 @@ def clerk_ingest_ik(
                 run_id=run_id, user_id=user_id,
             )
         info = _merge_extraction(extracted, title)
+        if _looks_like_non_judgment(info):
+            logger.info("[CLERK] Skipping non-judgment document: %s", title[:80])
+            return None
 
         # 2. Chunking for ES/Qdrant
         chunks = _chunk_text(raw_text)
@@ -633,6 +704,9 @@ def clerk_ingest_google(
         if extracted and not (extracted.get("ratio") or "").strip() and not (extracted.get("primaryCitation") or "").strip():
             extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         info = _merge_extraction(extracted, title)
+        if _looks_like_non_judgment(info):
+            logger.info("[CLERK] Skipping non-judgment web document: %s", title[:80])
+            return None
 
         # 2. Chunking for ES/Qdrant
         chunks = _chunk_text(raw_text)

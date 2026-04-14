@@ -44,6 +44,7 @@ from db.client import (
     usage_get_aggregate,
     usage_get_user_breakdown,
     usage_get_by_run,
+    pipeline_run_update,
     pipeline_run_get_user_id,
     report_share,
     report_get_shares,
@@ -472,14 +473,15 @@ def startup():
     if qdrant:
         try:
             from qdrant_client.models import VectorParams, Distance
+            vector_size = int(os.environ.get("CITATION_EMBED_OUTPUT_DIMS", "768"))
             if not qdrant.collection_exists(collection_name="legal_embeddings"):
                 qdrant.create_collection(
                     collection_name="legal_embeddings",
-                    vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
                 )
                 logger.info("[QDRANT] Created collection: legal_embeddings")
             else:
-                logger.info("[QDRANT] Collection exists: legal_embeddings")
+                logger.info("[QDRANT] Collection exists: legal_embeddings (expected vector size=%d)", vector_size)
         except Exception as exc:
             logger.warning("[QDRANT] Init failed: %s", exc)
 
@@ -1215,6 +1217,9 @@ async def get_report(report_id: str) -> Dict[str, Any]:
             fmt = json.loads(fmt)
         except Exception:
             fmt = {"citations": [], "generatedAt": ""}
+    dims_meta = report.get("dimensions_metadata") or []
+    if isinstance(fmt, dict) and dims_meta and not fmt.get("dimensions"):
+        fmt["dimensions"] = dims_meta
     return {
         "success": True,
         "report_id": report_id,
@@ -1288,10 +1293,20 @@ async def hitl_approve(
                 citations.append(snap)
                 seen_ids.add(cid)
         fmt["citations"] = citations
+        dims_meta = report.get("dimensions_metadata") or []
+        if dims_meta and not fmt.get("dimensions"):
+            fmt["dimensions"] = dims_meta
         fmt["status"] = "completed"
         fmt.pop("pendingHITLCount", None)
         fmt.pop("pendingMessage", None)
-        report_update(report_id, report_format=fmt, status="completed", hitl_pending_count=0, hitl_approved_count=len(approved_items))
+        report_update(
+            report_id,
+            report_format=fmt,
+            status="completed",
+            hitl_pending_count=0,
+            hitl_approved_count=len(approved_items),
+            dimensions_metadata=dims_meta,
+        )
     return {
         "success": True,
         "updated": len(to_update),
@@ -1649,6 +1664,7 @@ async def get_citation_usage_by_run(
 
 # In-memory run state: run_id → {status, report_id, report_format, error}
 _run_state: Dict[str, Dict[str, Any]] = {}
+STALE_RUN_TIMEOUT_SECONDS = max(60, _env_int("CITATION_STALE_RUN_TIMEOUT_SECONDS", 180))
 
 @app.post("/citation/report/start")
 async def start_citation_report(
@@ -1736,17 +1752,39 @@ async def start_citation_report(
                             report_update(rid_out, report_format=report_format)
                         except Exception as exc:
                             logger.warning("[START] report_update after cost attach failed: %s", exc)
+                final_status = (
+                    result.data.get("report_status")
+                    or (report_format.get("status") if isinstance(report_format, dict) else None)
+                    or "completed"
+                )
                 _set_run_state(run_id, {
-                    "status": "completed",
+                    "status": final_status,
                     "report_id": result.data.get("report_id"),
                     "report_format": report_format,
                     "error": None,
                 })
+                try:
+                    pipeline_run_update(
+                        run_id,
+                        final_status,
+                        report_id=result.data.get("report_id"),
+                        error_message=None,
+                    )
+                except Exception as exc:
+                    logger.warning("[BG_PIPELINE] pipeline_run_update success failed: %s", exc)
             else:
                 _set_run_state(run_id, {"status": "failed", "report_id": None, "report_format": None, "error": result.error})
+                try:
+                    pipeline_run_update(run_id, "failed", error_message=str(result.error or "Pipeline failed"))
+                except Exception as exc:
+                    logger.warning("[BG_PIPELINE] pipeline_run_update failure failed: %s", exc)
         except Exception as exc:
             logger.exception("[BG_PIPELINE] crashed: %s", exc)
             _set_run_state(run_id, {"status": "failed", "report_id": None, "report_format": None, "error": str(exc)})
+            try:
+                pipeline_run_update(run_id, "failed", error_message=str(exc))
+            except Exception as e2:
+                logger.warning("[BG_PIPELINE] pipeline_run_update crash failed: %s", e2)
         finally:
             _release_pipeline_slot()
 
@@ -1769,13 +1807,40 @@ async def get_run_status(run_id: str) -> Dict[str, Any]:
     if conn:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT status, report_id FROM citation_pipeline_runs WHERE id=%s", (run_id,))
+                cur.execute("SELECT status, report_id, error_message, created_at FROM citation_pipeline_runs WHERE id=%s", (run_id,))
                 row = cur.fetchone()
             if row:
                 report_id = row.get("report_id")
                 status = row.get("status")
                 report_format = None
-                error = None
+                error = row.get("error_message")
+                if status == "running":
+                    last_log_at = None
+                    try:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                            cur.execute(
+                                "SELECT MAX(created_at) AS last_log_at FROM agent_logs WHERE run_id=%s",
+                                (run_id,),
+                            )
+                            lr = cur.fetchone() or {}
+                            last_log_at = lr.get("last_log_at")
+                    except Exception:
+                        last_log_at = None
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    stale_from = last_log_at or row.get("created_at")
+                    if stale_from is not None:
+                        try:
+                            age_seconds = (now - stale_from).total_seconds()
+                            if age_seconds >= STALE_RUN_TIMEOUT_SECONDS:
+                                status = "failed"
+                                error = f"Run stalled for {int(age_seconds)}s without progress."
+                                try:
+                                    pipeline_run_update(run_id, "failed", error_message=error)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                 if report_id and status in ("completed", "pending_hitl"):
                     try:
                         report = report_get(report_id)

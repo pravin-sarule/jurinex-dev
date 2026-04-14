@@ -492,6 +492,7 @@ class ReportBuilderAgent(BaseAgent):
         audit_details = context.metadata.get("audit_details", {})
         search_keywords = context.metadata.get("keyword_sets") or []
         search_keywords_by_route = context.metadata.get("search_keywords_by_route") or {}
+        dimensions_meta = context.dimensions or context.metadata.get("dimensions") or []
 
         try:
             from db.client import agent_log_insert
@@ -519,6 +520,7 @@ class ReportBuilderAgent(BaseAgent):
             report_id, context.user_id, context.query,
             report_format, "completed", case_id=context.case_id, run_id=run_id,
             citations_approved_count=len(context.judgement_ids),
+            dimensions_metadata=dimensions_meta,
         )
         context.metadata["report_id"] = report_id
         citation_count = len(report_format.get("citations", []))
@@ -623,9 +625,21 @@ class LegalDimensionExtractor(BaseAgent):
 
     # ── Prompt template ────────────────────────────────────────────────────
     _PROMPT_TEMPLATE = (
-        "You are a senior Indian legal research analyst specialising in citation research.\n\n"
-        "Analyze the case context below and identify the core legal disputes.\n\n"
-        "TASK: Identify EXACTLY {num_dimensions} Legal Dimensions — distinct legal issues that are central to this case.\n\n"
+        "ROLE: You are JuriNex Citation Finder v2 — India's legal citation research assistant for practising advocates.\n\n"
+        "You operate in two modes:\n"
+        "- MODE 1 — Case folder exists (RAG-powered citation search)\n"
+        "- MODE 2 — No case yet (description-based citation search)\n\n"
+        "Current mode: {mode_label}.\n"
+        "{mode_instruction}\n\n"
+        "CONFIDENCE GUARDRAIL (strict):\n"
+        "- HIGH confidence (include): Supreme Court of India, same-jurisdiction High Court, Constitutional Bench.\n"
+        "- MEDIUM confidence (include with [VERIFY]): other High Courts and tribunals (NCLAT, DRAT, CAT etc.).\n"
+        "- BLOCKED (never include): uncertain year OR uncertain court OR uncertain party names.\n"
+        "- Never fabricate; blocked is better than wrong.\n\n"
+        "Analyze the input context and identify the core disputes.\n\n"
+        "TASK:\n"
+        "- Identify 3 to 6 Legal Dimensions (not less than 3, not more than 6).\n"
+        "- Each dimension must be specific, dispute-centric, and useful for precedent search.\n\n"
         "For each dimension, generate EXACTLY 3 targeted search queries:\n"
         "  sc_query      : 8-15 words — focused on Supreme Court landmark judgments.\n"
         "  hc_query      : 8-15 words — focused on {hc_name} precedents.\n"
@@ -633,26 +647,33 @@ class LegalDimensionExtractor(BaseAgent):
         "Query rules:\n"
         "- Each query MUST be 8-15 words (count carefully).\n"
         "- Write natural language phrases — no quotes, no operators (ANDD/ORR/NOTT), no punctuation.\n"
-        "- Include specific section numbers (e.g. Section 302 IPC, Section 389 CrPC, Article 21).\n"
+        "- Include specific section numbers (e.g. Section 316 BNS 2023, Section 389 BNSS 2023, Article 21).\n"
         "- sc_query must mention 'Supreme Court'; hc_query must mention '{hc_name_short}'.\n\n"
+        "Jurisdiction preference:\n"
+        "- Prioritize {hc_name} for same-state High Court research.\n"
+        "- Maharashtra preference: Bombay High Court.\n"
+        "- Use current legal nomenclature where applicable (BNS 2023 / BNSS 2023).\n\n"
         "User query / case description:\n{base_query}\n\n"
         "Case context (use ALL of this):\n\n{case_context}\n\n"
-        "Return ONLY valid JSON — no markdown, no explanation, no trailing text:\n"
-        "{{\n"
-        '  "dimensions": [\n'
-        "    {{\n"
-        '      "dimension_id": 1,\n'
-        '      "name": "Short Name (e.g. Section 65B Admissibility)",\n'
-        '      "reasoning": "One sentence explaining why this is a core issue in the current case",\n'
-        '      "queries": {{\n'
-        '        "sc_query": "8-15 word Supreme Court focused phrase",\n'
-        '        "hc_query": "8-15 word High Court focused phrase",\n'
-        '        "provision_query": "8-15 word statute/section focused phrase"\n'
-        "      }}\n"
+        "Output must be ONLY valid JSON array (no markdown, no prose):\n"
+        "[\n"
+        "  {{\n"
+        '    "dimension_id": 1,\n'
+        '    "name": "Short Name (e.g. Section 65B Admissibility)",\n'
+        '    "reasoning": "One sentence explaining why this is a core issue in the current case",\n'
+        '    "queries": {{\n'
+        '      "sc_query": "8-15 word Supreme Court focused phrase",\n'
+        '      "hc_query": "8-15 word High Court focused phrase",\n'
+        '      "provision_query": "8-15 word statute/section focused phrase"\n'
         "    }}\n"
-        "  ]\n"
-        "}}"
+        "  }}\n"
+        "]"
     )
+
+    @staticmethod
+    def _word_count_ok(text: str) -> bool:
+        words = [w for w in re.split(r"\s+", (text or "").strip()) if w]
+        return 8 <= len(words) <= 15
 
     def _parse_dimensions(self, raw: str) -> List[Dict[str, Any]]:
         """Extract and validate the dimensions array from LLM output."""
@@ -664,19 +685,72 @@ class LegalDimensionExtractor(BaseAgent):
         # Attempt full JSON parse
         try:
             obj = json.loads(text)
-            return obj.get("dimensions") or []
+            if isinstance(obj, list):
+                return obj
+            if isinstance(obj, dict):
+                return obj.get("dimensions") or []
         except Exception:
             pass
-        # Fallback: extract first {...} block
+        # Fallback: try array block first, then object block
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            try:
+                arr = json.loads(m.group(0))
+                if isinstance(arr, list):
+                    return arr
+            except Exception:
+                pass
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             try:
                 obj = json.loads(m.group(0))
-                return obj.get("dimensions") or []
+                if isinstance(obj, dict):
+                    return obj.get("dimensions") or []
             except Exception:
                 pass
         logger.warning("[LEGAL_DIM_EXTRACTOR] Could not parse dimensions JSON")
         return []
+
+    def _validate_dimensions(self, dimensions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enforce production schema:
+        - 3 to 6 dimensions
+        - each has id, name, reasoning
+        - each query present and 8-15 words
+        """
+        validated: List[Dict[str, Any]] = []
+        for idx, dim in enumerate(dimensions[:MAX_DIMENSIONS]):
+            if not isinstance(dim, dict):
+                continue
+            name = str(dim.get("name") or "").strip()
+            reasoning = str(dim.get("reasoning") or "").strip()
+            qs = dim.get("queries") or {}
+            sc_q = str(qs.get("sc_query") or "").strip()
+            hc_q = str(qs.get("hc_query") or "").strip()
+            prov_q = str(qs.get("provision_query") or "").strip()
+            if not (name and reasoning and sc_q and hc_q and prov_q):
+                continue
+            if not (self._word_count_ok(sc_q) and self._word_count_ok(hc_q) and self._word_count_ok(prov_q)):
+                continue
+            did = dim.get("dimension_id")
+            try:
+                did = int(did)
+            except Exception:
+                did = idx + 1
+            validated.append({
+                "dimension_id": did,
+                "name": name,
+                "reasoning": reasoning,
+                "queries": {
+                    "sc_query": sc_q,
+                    "hc_query": hc_q,
+                    "provision_query": prov_q,
+                },
+            })
+        # Keep only 3-6
+        if len(validated) > 6:
+            validated = validated[:6]
+        return validated
 
     def _dimensions_to_keyword_sets(self, dimensions: List[Dict[str, Any]]) -> List[str]:
         """Flatten all dimension queries into a deduplicated keyword_sets list."""
@@ -764,15 +838,20 @@ class LegalDimensionExtractor(BaseAgent):
             pass
 
         # Deduplicate by tid, preserving first-seen dimension tag
+        try:
+            from agents.watchdog import _is_pending_result as _ik_is_pending
+        except Exception:
+            _ik_is_pending = None
+
         seen_tids: set = set()
         candidates: List[Dict[str, Any]] = []
+        pending_dropped = 0
         for dim_id, dim_name, q_type, query, docs in raw_results:
             for d in docs:
                 tid = str(d.get("tid") or "").strip()
                 if not tid or tid in seen_tids:
                     continue
-                seen_tids.add(tid)
-                candidates.append({
+                candidate_dict = {
                     "external_id": tid,
                     "title":       d.get("title", ""),
                     "snippet":     d.get("headline", ""),
@@ -782,16 +861,23 @@ class LegalDimensionExtractor(BaseAgent):
                     "_dimension_name": dim_name,
                     "_query_type":     q_type,
                     "_query":          query,
-                })
+                }
+                if _ik_is_pending and _ik_is_pending(candidate_dict):
+                    logger.debug("[LEGAL_DIM_EXTRACTOR] Dropped Pending result: %s (%s)", tid, d.get("title", ""))
+                    pending_dropped += 1
+                    continue
+                seen_tids.add(tid)
+                candidates.append(candidate_dict)
 
         total_raw = sum(len(r[4]) for r in raw_results)
-        logger.info("[LEGAL_DIM_EXTRACTOR] IK search complete — %d raw results → %d unique candidates",
-                    total_raw, len(candidates))
+        logger.info("[LEGAL_DIM_EXTRACTOR] IK search complete — %d raw results → %d unique candidates (%d pending dropped)",
+                    total_raw, len(candidates), pending_dropped)
         try:
             from db.client import agent_log_insert
             agent_log_insert(run_id, None, self.name, self.name, "INFO",
-                f"✅ India Kanoon search done — {total_raw} raw results → {len(candidates)} unique candidates",
+                f"✅ India Kanoon search done — {total_raw} raw results → {len(candidates)} unique candidates ({pending_dropped} pending dropped)",
                 {"raw_total": total_raw, "unique_candidates": len(candidates),
+                 "pending_dropped": pending_dropped,
                  "queries_run": len(tasks), "tids": [c["external_id"] for c in candidates[:20]]})
         except Exception:
             pass
@@ -803,6 +889,13 @@ class LegalDimensionExtractor(BaseAgent):
         case_context = context.metadata.get("case_file_context", [])
         base_query   = (context.query or "").strip()
         user_id      = context.metadata.get("user_id") or context.user_id or "anonymous"
+        mode_label   = "MODE 1" if case_context else "MODE 2"
+        mode_instruction = (
+            "Case folder context is present. Use the case context as primary source."
+            if case_context
+            else "No case folder context. Use user description only and decompose all legal dimensions."
+        )
+        context.metadata["citation_finder_mode"] = 1 if case_context else 2
 
         try:
             from db.client import agent_log_insert
@@ -817,8 +910,8 @@ class LegalDimensionExtractor(BaseAgent):
         except Exception:
             pass
 
-        # ── Fallback: no case context → treat query as single keyword set ──
-        if not case_context:
+        # ── Fallback: no case context and no query seed ───────────────────
+        if not case_context and not base_query:
             context.metadata["search_query"] = base_query
             context.metadata["keyword_sets"] = [base_query] if base_query else []
             context.metadata["dimensions"] = []
@@ -828,7 +921,7 @@ class LegalDimensionExtractor(BaseAgent):
                 "augmented": False,
                 "dimensions_count": 0,
                 "keyword_sets_count": len(context.metadata["keyword_sets"]),
-                "message": "No case file context; using query only.",
+                "message": "No case file context or query description; nothing to extract.",
             })
 
         # ── Build case text from file snippets ────────────────────────────
@@ -857,23 +950,13 @@ class LegalDimensionExtractor(BaseAgent):
         context.metadata["keyword_extraction_chunks_used"] = chunks_used
         context.metadata["keyword_extraction_embeddings_used"] = embeddings_used
 
-        if not parts:
-            context.metadata["search_query"] = base_query
-            context.metadata["keyword_sets"] = [base_query] if base_query else []
-            context.metadata["dimensions"] = []
-            context.dimensions = []
-            return AgentResult(data={
-                "search_query": base_query,
-                "augmented": False,
-                "dimensions_count": 0,
-                "keyword_sets_count": len(context.metadata["keyword_sets"]),
-                "message": "No snippet/content in case context.",
-            })
+        if not parts and base_query:
+            parts.append(f"[USER_DESCRIPTION]\n{base_query}")
 
         # ── Resolve High Court name from metadata ─────────────────────────
         hc_name       = _resolve_hc_name(context)
         hc_name_short = hc_name.replace(" High Court", "").strip()
-        num_dimensions = min(MAX_DIMENSIONS, max(3, MAX_DIMENSIONS))  # 3–6
+        num_dimensions = min(6, max(3, MAX_DIMENSIONS))  # hint only; model still returns 3-6
 
         chunk_summary = ", ".join(
             f"{c['file_name']} (chunk {c['chunk_index']}, {c['snippet_length']} chars)"
@@ -898,6 +981,8 @@ class LegalDimensionExtractor(BaseAgent):
                 num_dimensions=num_dimensions,
                 hc_name=hc_name,
                 hc_name_short=hc_name_short,
+                mode_label=mode_label,
+                mode_instruction=mode_instruction,
                 base_query=base_query,
                 case_context=case_context_str,
             )
@@ -908,6 +993,8 @@ class LegalDimensionExtractor(BaseAgent):
                 num_dimensions=num_dimensions,
                 hc_name=hc_name,
                 hc_name_short=hc_name_short,
+                mode_label=mode_label,
+                mode_instruction=mode_instruction,
                 base_query=base_query,
                 case_context=case_context_str,
             )
@@ -925,17 +1012,11 @@ class LegalDimensionExtractor(BaseAgent):
 
         # ── Parse dimensions ──────────────────────────────────────────────
         dimensions = self._parse_dimensions(raw_response or "")
+        validated_dims = self._validate_dimensions(dimensions)
 
-        # Enforce cap and validate each dimension has all 3 queries
-        validated_dims: List[Dict[str, Any]] = []
-        for dim in dimensions[:MAX_DIMENSIONS]:
-            qs = dim.get("queries") or {}
-            if qs.get("sc_query") and qs.get("hc_query") and qs.get("provision_query"):
-                validated_dims.append(dim)
-
-        if not validated_dims:
+        if len(validated_dims) < 3:
             # Graceful fallback: treat base_query as sole keyword set
-            logger.warning("[LEGAL_DIM_EXTRACTOR] No valid dimensions extracted; falling back to base query")
+            logger.warning("[LEGAL_DIM_EXTRACTOR] Insufficient valid dimensions (%d); falling back to base query", len(validated_dims))
             context.metadata["search_query"] = base_query
             context.metadata["keyword_sets"] = [base_query] if base_query else []
             context.metadata["dimensions"] = []
@@ -943,7 +1024,7 @@ class LegalDimensionExtractor(BaseAgent):
             try:
                 from db.client import agent_log_insert
                 agent_log_insert(run_id, None, self.name, self.name, "WARNING",
-                    "⚠ No valid dimensions extracted from LLM response; using base query as fallback",
+                    "⚠ Valid dimension count was below 3; using base query as fallback",
                     {"raw_preview": (raw_response or "")[:300]})
             except Exception:
                 pass
@@ -967,6 +1048,16 @@ class LegalDimensionExtractor(BaseAgent):
 
         # ── Log dimensions ────────────────────────────────────────────────
         logger.info("[LEGAL_DIM_EXTRACTOR] %d dimension(s), %d keyword set(s)", len(validated_dims), len(keyword_sets))
+        for d in validated_dims:
+            qs = d.get("queries") or {}
+            logger.info(
+                "[LEGAL_DIM_EXTRACTOR] DIM %s | %s | SC=%s | HC=%s | PROVISION=%s",
+                d.get("dimension_id"),
+                (d.get("name") or "")[:90],
+                (qs.get("sc_query") or "")[:160],
+                (qs.get("hc_query") or "")[:160],
+                (qs.get("provision_query") or "")[:160],
+            )
         dim_preview = " | ".join(
             f"[{d.get('dimension_id','?')}] {d.get('name','?')}" for d in validated_dims[:4]
         ) + ("…" if len(validated_dims) > 4 else "")
@@ -1354,6 +1445,7 @@ class CitationRootAgent(BaseAgent):
         audit_details = context.metadata.get("audit_details") or {}
         search_keywords = context.metadata.get("keyword_sets") or []
         search_keywords_by_route = context.metadata.get("search_keywords_by_route") or {}
+        dimensions_meta = context.dimensions or context.metadata.get("dimensions") or []
 
         # 6a. Citations that are not validated (quarantined by Auditor) → store in hitl_queue for human review
         if quarantined_ids:
@@ -1378,6 +1470,8 @@ class CitationRootAgent(BaseAgent):
                 search_keywords=search_keywords,
                 search_keywords_by_route=search_keywords_by_route,
                 perspective=_perspective,
+                run_id=run_id,
+                dimensions=dimensions_meta,
             )
             report_format["pendingHITLCount"] = len(quarantined_ids)
             report_format["status"] = "pending_hitl"
@@ -1395,6 +1489,8 @@ class CitationRootAgent(BaseAgent):
                     search_keywords=search_keywords,
                     search_keywords_by_route=search_keywords_by_route,
                     perspective=_perspective,
+                    run_id=run_id,
+                    dimensions=dimensions_meta,
                 )
                 citation_snapshot = (one_report.get("citations") or [{}])[0]
                 if citation_snapshot:
@@ -1452,6 +1548,8 @@ class CitationRootAgent(BaseAgent):
                     search_keywords=search_keywords,
                     search_keywords_by_route=search_keywords_by_route,
                     perspective=_perspective,
+                    run_id=run_id,
+                    dimensions=dimensions_meta,
                 )
                 snap = (j_report.get("citations") or [{}])[0]
                 report_citation_insert(report_id, jid, "approved", snap)
@@ -1468,6 +1566,7 @@ class CitationRootAgent(BaseAgent):
                 status="pending_hitl", case_id=context.case_id, run_id=run_id,
                 hitl_pending_count=len(quarantined_ids), citations_approved_count=len(approved_ids),
                 citations_quarantined_count=len(quarantined_ids),
+                dimensions_metadata=dimensions_meta,
             )
             if run_id:
                 pipeline_run_update(
@@ -1544,6 +1643,7 @@ class CitationRootAgent(BaseAgent):
         audit_details = context.metadata.get("audit_details") or {}
         search_keywords = context.metadata.get("keyword_sets") or []
         search_keywords_by_route = context.metadata.get("search_keywords_by_route") or {}
+        dimensions_meta = context.dimensions or context.metadata.get("dimensions") or []
         _perspective = (context.metadata.get("perspective") or "all").lower().strip()
         report_id   = str(uuid.uuid4())
         context.metadata["report_id"] = report_id
@@ -1572,6 +1672,8 @@ class CitationRootAgent(BaseAgent):
                 search_keywords=search_keywords,
                 search_keywords_by_route=search_keywords_by_route,
                 perspective=_perspective,
+                run_id=run_id,
+                dimensions=dimensions_meta,
             )
         else:
             report_format = {
@@ -1594,6 +1696,8 @@ class CitationRootAgent(BaseAgent):
                         search_keywords=search_keywords,
                         search_keywords_by_route=search_keywords_by_route,
                         perspective=_perspective,
+                        run_id=run_id,
+                        dimensions=dimensions_meta,
                     )
                     snap = (one_rep.get("citations") or [{}])[0]
                     hitl_id = hitl_queue_insert(
@@ -1628,6 +1732,7 @@ class CitationRootAgent(BaseAgent):
         report_insert(report_id, context.user_id, context.query,
                       report_format, status, case_id=context.case_id, run_id=run_id,
                       citations_approved_count=len(safe_ids),
-                      citations_quarantined_count=len(google_ids))
+                      citations_quarantined_count=len(google_ids),
+                      dimensions_metadata=dimensions_meta)
         logger.info("[ROOT._fallback] report_id=%s safe=%d google_hitl=%d", report_id, len(safe_ids), len(google_ids))
         return AgentResult(data={"report_id": report_id, "report_format": report_format, "report_status": status})
