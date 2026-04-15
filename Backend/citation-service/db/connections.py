@@ -211,7 +211,7 @@ def get_es_client():
                 logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this process.", url)
                 return None
             _es_last_failure_at = 0.0
-            _es_client = client
+            _es_client = probe_client
             logger.info(
                 "[ES] Client ready for %s (auth=%s verify_certs=%s assert_hostname=%s ping_timeout=%ss)",
                 url,

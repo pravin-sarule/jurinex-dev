@@ -1035,11 +1035,9 @@ def judgement_search_local(
     # Probe ES once: unreachable ES must not abort local search; Qdrant/PG still run.
     es = get_es_client()
     es_unreachable = elasticsearch_init_failed()
-    try:
-        qdrant_floor = float(os.environ.get("CITATION_QDRANT_SCORE_THRESHOLD_WHEN_ES_DOWN", "0.70"))
-    except (TypeError, ValueError):
-        qdrant_floor = 0.70
-    qdrant_score_threshold: Optional[float] = qdrant_floor if es_unreachable else None
+    # Do not apply a score_threshold — it blocks all results when ES is down.
+    # Rely on cosine similarity ordering and limit instead.
+    qdrant_score_threshold: Optional[float] = None
 
     def _is_approved_status(v: Any) -> bool:
         s = str(v or "").strip().upper()
@@ -1169,19 +1167,22 @@ def judgement_search_local(
             logger.info("[QDRANT] No embedding vector — skipping semantic search for: %r", query[:60])
             return []
         try:
+            qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2").strip() or "legal_embeddings_v2"
             fetch_limit = max(limit_count * 3, 30)
             if qdrant_score_threshold is not None:
                 logger.info(
-                    "[QDRANT] Querying collection 'legal_embeddings' limit=%d score_threshold=%s for: %r",
-                    fetch_limit, qdrant_score_threshold, query[:60],
+                    "[QDRANT] Querying collection '%s' limit=%d score_threshold=%s for: %r",
+                    qdrant_collection, fetch_limit, qdrant_score_threshold, query[:60],
                 )
             else:
-                logger.info("[QDRANT] Querying collection 'legal_embeddings' limit=%d for: %r",
-                            fetch_limit, query[:60])
+                logger.info(
+                    "[QDRANT] Querying collection '%s' limit=%d for: %r",
+                    qdrant_collection, fetch_limit, query[:60]
+                )
             points = []
             try:
                 _qp_kwargs: Dict[str, Any] = {
-                    "collection_name": "legal_embeddings",
+                    "collection_name": qdrant_collection,
                     "query": vector,
                     "limit": fetch_limit,
                     "with_payload": True,
@@ -1197,7 +1198,7 @@ def judgement_search_local(
             except Exception as _qp_exc:
                 logger.info("[QDRANT] query_points failed (%s), falling back to search()", _qp_exc)
                 _s_kwargs: Dict[str, Any] = {
-                    "collection_name": "legal_embeddings",
+                    "collection_name": qdrant_collection,
                     "query_vector": vector,
                     "limit": fetch_limit,
                     "with_payload": True,
@@ -1210,22 +1211,56 @@ def judgement_search_local(
                     _s_kwargs.pop("score_threshold", None)
                     points = qdr.search(**_s_kwargs) or []
             logger.info("[QDRANT] Vector search returned %d point(s)", len(points))
-            # Extract canonical_ids from chunk payloads, preserving similarity order
+            # Extract canonical_ids from chunk payloads, preserving similarity order.
+            # Also keep a payload map so we can build results from Qdrant data directly
+            # for judgments not yet present in the PG judgments table.
             canonical_ids: List[str] = []
-            seen = set()
+            seen: set = set()
+            payload_by_cid: Dict[str, Any] = {}
             for p in points:
                 payload = getattr(p, "payload", None) or {}
                 cid = str(payload.get("canonical_id") or "").strip()
                 if cid and cid not in seen:
                     seen.add(cid)
                     canonical_ids.append(cid)
+                    payload_by_cid[cid] = payload
             logger.info("[QDRANT] Unique canonical_ids from chunks: %d", len(canonical_ids))
             if not canonical_ids:
                 return []
+
+            def _build_from_payload(cid: str) -> Optional[Dict[str, Any]]:
+                """Build a result entry directly from Qdrant payload fields."""
+                p = payload_by_cid.get(cid, {})
+                case_name = str(p.get("case_name") or "").strip()
+                court_code = str(p.get("court_code") or "").strip()
+                if not case_name and not court_code:
+                    return None
+                return {
+                    "id": cid,
+                    "canonical_id": cid,
+                    "judgment_uuid": str(p.get("judgment_uuid") or "").strip(),
+                    "title": case_name,
+                    "case_name": case_name,
+                    "primary_citation": "",
+                    "court": court_code,
+                    "court_code": court_code,
+                    "year": p.get("year"),
+                    "ratio": str(p.get("chunk_text") or "")[:500],
+                    "source": "local",
+                    "is_local_admin": False,
+                    "_local_rank": _rank_row(court_code),
+                    "_from_qdrant": True,
+                    "_qdrant_payload_only": True,
+                }
+
             conn2 = get_pg_conn()
             if not conn2:
-                logger.warning("[QDRANT] DB connection unavailable for canonical_id fetch")
-                return []
+                logger.warning("[QDRANT] DB connection unavailable — building results from Qdrant payload directly")
+                payload_rows = [_build_from_payload(cid) for cid in canonical_ids]
+                payload_rows = [r for r in payload_rows if r]
+                payload_rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+                return payload_rows[:limit_count]
+
             try:
                 with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
                     cur2.execute(
@@ -1244,7 +1279,9 @@ def judgement_search_local(
                 conn2.close()
 
             scored: List[Dict[str, Any]] = []
+            found_in_pg: set = set()
             for r in rows2:
+                pg_cid = str(r.get("canonical_id") or "").strip()
                 src_type = str(r.get("source_type") or "").strip().lower()
                 is_admin = _is_admin_source(src_type)
                 # Admin-uploaded judgments are always included; external ones need approval
@@ -1252,8 +1289,10 @@ def judgement_search_local(
                     if str(r.get("verification_status") or "").upper() not in (
                         "APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"
                     ):
+                        found_in_pg.add(pg_cid)
                         continue
                 if exclude_low_hierarchy and _is_low_hierarchy_court(r.get("court_code")):
+                    found_in_pg.add(pg_cid)
                     continue
                 cd = r.get("citation_data") or {}
                 if isinstance(cd, str):
@@ -1268,18 +1307,34 @@ def judgement_search_local(
                     display_source = "admin_upload"
                 elif not display_source:
                     display_source = cd.get("source_type") or "local"
+                # Prefer PG data but fill gaps from Qdrant payload
+                p = payload_by_cid.get(pg_cid, {})
+                found_in_pg.add(pg_cid)
                 scored.append({
-                    "id": r.get("canonical_id"),
-                    "canonical_id": r.get("canonical_id"),
-                    "title": r.get("case_name") or cd.get("case_name"),
-                    "primary_citation": cd.get("primary_citation"),
-                    "court": r.get("court_code") or cd.get("court_code"),
-                    "ratio": cd.get("holding_text") or cd.get("summary_text") or "",
+                    "id": pg_cid,
+                    "canonical_id": pg_cid,
+                    "judgment_uuid": str(p.get("judgment_uuid") or "").strip(),
+                    "title": r.get("case_name") or cd.get("case_name") or p.get("case_name"),
+                    "case_name": r.get("case_name") or cd.get("case_name") or p.get("case_name"),
+                    "primary_citation": cd.get("primary_citation") or "",
+                    "court": r.get("court_code") or cd.get("court_code") or p.get("court_code"),
+                    "court_code": r.get("court_code") or cd.get("court_code") or p.get("court_code"),
+                    "year": r.get("year") or p.get("year"),
+                    "ratio": cd.get("holding_text") or cd.get("summary_text") or str(p.get("chunk_text") or "")[:500],
                     "source": display_source,
                     "is_local_admin": is_admin,
-                    "_local_rank": _rank_row(r.get("court_code") or cd.get("court_code")),
+                    "_local_rank": _rank_row(r.get("court_code") or cd.get("court_code") or p.get("court_code")),
                     "_from_qdrant": True,
                 })
+
+            # For canonical_ids returned by Qdrant but absent from PG, build from payload
+            for cid in canonical_ids:
+                if cid not in found_in_pg:
+                    entry = _build_from_payload(cid)
+                    if entry:
+                        logger.info("[QDRANT] canonical_id %r not in PG — using payload data directly", cid)
+                        scored.append(entry)
+
             scored.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
             if scored:
                 return scored[:limit_count]

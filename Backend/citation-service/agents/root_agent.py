@@ -547,9 +547,22 @@ class ReportBuilderAgent(BaseAgent):
             search_keywords_by_route=search_keywords_by_route,
             perspective=perspective,
             run_id=run_id,
-            dimensions=context.dimensions or [],
+            dimensions=dimensions_meta,
             local_judgement_hints=context.metadata.get("local_judgement_hints") or {},
         )
+        # Ensure structured legal metadata visibility for every citation object.
+        for c in (report_format.get("citations") or []):
+            c.setdefault("metadata", {
+                "caseName": c.get("caseName") or "Not Available",
+                "court": c.get("court") or "Not Available",
+                "bench": c.get("coram") or "Not Available",
+                "date": c.get("dateOfJudgment") or "Not Available",
+                "official_citation": c.get("primaryCitation") or "Not Available",
+            })
+            c.setdefault("headnotes", c.get("headnote") or "Not Available")
+            c.setdefault("ratio_decidendi", c.get("ratio") or "Not Available")
+            c.setdefault("relevance_badge", "High" if str(c.get("relevanceBadge") or "").upper() == "HIGH" else "Medium")
+            c.setdefault("is_local_admin", bool(c.get("isLocalAdmin")))
         report_id = str(uuid.uuid4())
         run_id = context.metadata.get("run_id")
         report_insert(

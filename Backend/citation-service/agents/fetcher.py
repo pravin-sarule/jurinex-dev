@@ -440,6 +440,8 @@ def fetch_google_candidates(
                 "snippet":     c.get("snippet", ""),
                 "raw_content": content,
                 "source":      "google",
+                "source_type": c.get("source_type") or "google_grounding",
+                "source_url":  link,
             }
         except Exception as e:
             logger.warning("[FETCHER] GET failed %s: %s", link[:80], e)

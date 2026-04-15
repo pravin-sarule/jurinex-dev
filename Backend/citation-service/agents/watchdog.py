@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +28,37 @@ logger = logging.getLogger(__name__)
 SEARCH_WORKERS          = max(1, min(10, int(os.environ.get("CITATION_WATCHDOG_WORKERS", "6"))))
 IK_BATCH_SIZE           = max(1, int(os.environ.get("CITATION_IK_BATCH_SIZE", "5")))
 IK_BATCH_STAGGER_SECS   = float(os.environ.get("CITATION_IK_BATCH_STAGGER_MS", "200")) / 1000.0
+_GROUNDING_ALLOWED_SITES: Tuple[str, ...] = (
+    "indiankanoon.org",
+    "casemine.com",
+    "app.bharatlaw.ai",
+    "lawfinderlive.com",
+    "judgments.ecourts.gov.in",
+)
+
+
+def _google_source_type_for_link(link: str) -> str:
+    host = (urlparse(str(link or "")).netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host.endswith("indiankanoon.org"):
+        return "indian_kanoon"
+    if host.endswith("casemine.com"):
+        return "casemine"
+    if host.endswith("app.bharatlaw.ai"):
+        return "bharatlaw"
+    if host.endswith("lawfinderlive.com"):
+        return "lawfinderlive"
+    if host.endswith("judgments.ecourts.gov.in"):
+        return "ecourts"
+    return "google_grounding"
+
+
+def _is_allowed_grounding_link(link: str) -> bool:
+    host = (urlparse(str(link or "")).netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == site or host.endswith(f".{site}") for site in _GROUNDING_ALLOWED_SITES)
 
 # ── Hierarchy filter ──────────────────────────────────────────────────────────
 # docsource substrings that identify low-hierarchy courts/bodies to be dropped
@@ -192,6 +224,8 @@ def _search_local(
             r["_source"] = "local"
             r["_dimension_id"] = dimension_id
             r["_dimension_name"] = dimension_name or ""
+            r["dimension_id"] = dimension_id
+            r["dimension_name"] = dimension_name or ""
             r["_query_type"] = query_type
             r["_query"] = query
         logger.info("[WATCHDOG] 🏛  SOURCE=local_db → %d result(s) for query: %r", len(rows), query[:80])
@@ -223,8 +257,9 @@ def _qdrant_search_one(
     score_threshold: Optional[float] = None,
 ) -> List[Any]:
     """Run one Qdrant cosine similarity query on ``legal_embeddings``; tries query_points then search()."""
+    qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2").strip() or "legal_embeddings_v2"
     kwargs_qp: Dict[str, Any] = {
-        "collection_name": "legal_embeddings",
+        "collection_name": qdrant_collection,
         "query": vector,
         "limit": fetch_limit,
         "with_payload": True,
@@ -240,7 +275,7 @@ def _qdrant_search_one(
         return list(getattr(qp, "points", None) or [])
     except Exception:
         kwargs_s: Dict[str, Any] = {
-            "collection_name": "legal_embeddings",
+            "collection_name": qdrant_collection,
             "query_vector": vector,
             "limit": fetch_limit,
             "with_payload": True,
@@ -295,11 +330,9 @@ def _search_local_semantic(
     # Force ES client probe so elasticsearch_init_failed() reflects reachability for this process.
     get_es_client()
     es_unreachable = elasticsearch_init_failed()
-    try:
-        qdr_floor = float(os.environ.get("CITATION_QDRANT_SCORE_THRESHOLD_WHEN_ES_DOWN", "0.70"))
-    except (TypeError, ValueError):
-        qdr_floor = 0.70
-    qdrant_score_threshold: Optional[float] = qdr_floor if es_unreachable else None
+    # Do not apply a score_threshold — it blocks all results when ES is down.
+    # Rely on cosine similarity ordering and limit instead.
+    qdrant_score_threshold: Optional[float] = None
 
     per_task_limit = max(5, (max_total * 3) // max(len(tasks), 1))
     if es_unreachable:
@@ -405,6 +438,19 @@ def _search_local_semantic(
             return score
         return 100
 
+    def _same_state_high_court(court: Any) -> bool:
+        c = str(court or "").strip().lower()
+        if "high" not in c:
+            return False
+        st = (case_state or "").strip().lower()
+        if not st:
+            return False
+        if st in c:
+            return True
+        if st == "maharashtra" and "bombay high court" in c:
+            return True
+        return False
+
     out: List[Dict[str, Any]] = []
     for r in db_rows:
         cid = str(r.get("canonical_id") or "").strip()
@@ -431,6 +477,15 @@ def _search_local_semantic(
             else:
                 lr = min(lr, 40) if lr < 200 else 40
 
+        is_sc = "supreme" in str(court_val or "").strip().lower()
+        same_state_hc = _same_state_high_court(court_val)
+        # 3-tier priority:
+        #  3: Supreme Court
+        #  2: High Court (same state)
+        #  1: District Court (provision match)
+        #  0: everything else (kept, but lower)
+        priority_tier = 3 if is_sc else (2 if same_state_hc else (1 if provision_focus else 0))
+
         # Primary dimension = first one attached (highest priority from Qdrant order)
         primary_dim_id   = dim_ids[0] if dim_ids else None
         primary_dim_name = dim_names[0] if dim_names else ""
@@ -451,6 +506,8 @@ def _search_local_semantic(
             "_source":          "local",
             "_dimension_id":    primary_dim_id,
             "_dimension_name":  primary_dim_name,
+            "dimension_id":     primary_dim_id,
+            "dimension_name":   primary_dim_name,
             "_query_type":      primary_q_type,
             "_query":           (tasks[0].get("query") or "") if tasks else "",
             "_dimension_ids":   dim_ids,
@@ -459,6 +516,7 @@ def _search_local_semantic(
             "_similarity_score": sim_score,
             "_provision_best_score": prov_best,
             "_local_rank":      lr,
+            "_priority_tier":   priority_tier,
             # Admin source flag — passed through to report_builder → frontend
             "is_local_admin":   is_admin,
             "is_provision_match": bool(is_admin and "provision" in q_types),
@@ -478,18 +536,16 @@ def _search_local_semantic(
             (r.get("court") or "?")[:30],
         )
 
-    # If a strong senior-court match exists, demote non-admin provision+district rows (spec: prefer SC/HC).
-    has_senior_strong = any(
-        (r.get("_local_rank") or 0) >= 200 and float(r.get("_similarity_score") or 0) >= 0.75
-        for r in out
+    # Do NOT demote or drop district-court provision matches.
+    # Sort primarily by 3-tier priority, then local rank, then similarity.
+    out.sort(
+        key=lambda r: (
+            int(r.get("_priority_tier", 0)),
+            int(r.get("_local_rank", 0)),
+            float(r.get("_similarity_score", 0.0)),
+        ),
+        reverse=True,
     )
-    if has_senior_strong:
-        for r in out:
-            if r.get("_provision_focus_district") and not r.get("is_local_admin"):
-                r["_local_rank"] = min(r.get("_local_rank", 0), 15)
-
-    # Sort: hierarchy rank first, then similarity score as tiebreaker
-    out.sort(key=lambda r: (r.get("_local_rank", 0), r.get("_similarity_score", 0.0)), reverse=True)
     result = out[:max_total]
 
     titles = [(r.get("title") or r.get("case_name") or "?") for r in result[:5]]
@@ -566,6 +622,8 @@ def _search_indian_kanoon(
                 "_source":          "indian_kanoon",
                 "_dimension_id":    dimension_id,
                 "_dimension_name":  dimension_name,
+                "dimension_id":     dimension_id,
+                "dimension_name":   dimension_name,
                 "_query_type":      query_type,
                 "_query":           query,
             })
@@ -616,10 +674,10 @@ def _search_google_grounding(
         _db_log(run_id, "watchdog", "watchdog", "INFO",
                 f"🌐 Querying Google Search (Gemini Grounding): {query[:80]!r}")
         model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        allowed_sites = " OR ".join(f"site:{s}" for s in _GROUNDING_ALLOWED_SITES)
         search_query = (
             f"Search for relevant Indian law judgments about: {query}. "
-            "Focus on site:indiankanoon.org OR site:supremecourtofindia.nic.in OR "
-            "site:judgments.ecourts.gov.in. "
+            f"Strictly limit results to {allowed_sites}. "
             f"Return up to {num_results} most relevant judgment URLs with titles."
         )
         grounding_tool = types.Tool(google_search=types.GoogleSearch())
@@ -641,12 +699,13 @@ def _search_google_grounding(
                     uri   = getattr(web, "uri",   None) or (web.get("uri")   if isinstance(web, dict) else None)
                     title = getattr(web, "title", None) or (web.get("title") if isinstance(web, dict) else None) or ""
                     uri_str = str(uri).strip()
-                    if uri_str and uri_str.startswith("http"):
+                    if uri_str and uri_str.startswith("http") and _is_allowed_grounding_link(uri_str):
                         results.append({
                             "title":   str(title) if title else f"Result {i + 1}",
                             "link":    uri_str,
                             "snippet": (response.text or "")[:200] if response.text else "",
                             "_source": "google",
+                            "source_type": _google_source_type_for_link(uri_str),
                         })
         logger.info("[WATCHDOG] 🌐 Google Grounding → %d result(s) for %r", len(results), query[:60])
         for g in results:
@@ -684,8 +743,8 @@ def _search_google_serper(
         _db_log(run_id, "watchdog", "watchdog", "INFO", f"🌐 Querying Serper API: {query[:80]!r}")
         search_query = (
             f"{query} Indian law judgement Supreme Court High Court "
-            "site:indiankanoon.org OR site:supremecourtofindia.nic.in OR "
-            "site:judgments.ecourts.gov.in"
+            "site:indiankanoon.org OR site:casemine.com OR site:app.bharatlaw.ai OR "
+            "site:lawfinderlive.com OR site:judgments.ecourts.gov.in"
         )
         payload = {"q": search_query, "num": num_results}
         body = json.dumps(payload).encode("utf-8")
@@ -697,11 +756,20 @@ def _search_google_serper(
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
-        results = [
-            {"title": item.get("title", ""), "link": item.get("link", ""),
-             "snippet": item.get("snippet", ""), "_source": "google"}
-            for item in (data.get("organic") or [])[:num_results]
-        ]
+        results = []
+        for item in (data.get("organic") or []):
+            link = item.get("link", "")
+            if not _is_allowed_grounding_link(link):
+                continue
+            results.append({
+                "title": item.get("title", ""),
+                "link": link,
+                "snippet": item.get("snippet", ""),
+                "_source": "google",
+                "source_type": _google_source_type_for_link(link),
+            })
+            if len(results) >= num_results:
+                break
         logger.info("[WATCHDOG] 🌐 Serper → %d result(s) for %r", len(results), query[:60])
         for g in results:
             _db_log(run_id, "watchdog", "watchdog", "INFO",
@@ -728,11 +796,9 @@ def _search_google(
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Google search: Gemini Grounding by default; falls back to Serper."""
-    if _use_serper_for_google_search():
-        return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
+    """Google search route uses Gemini Grounding and legal-site allowlist."""
     result = _search_google_grounding(query, num_results=num_results, run_id=run_id, user_id=user_id)
-    if not result and os.environ.get("SERPER_API_KEY"):
+    if not result and _use_serper_for_google_search():
         logger.info("[WATCHDOG] Google Grounding returned 0; falling back to Serper")
         return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
     return result
@@ -831,6 +897,8 @@ def _hints_from_local_rows(local: List[Dict[str, Any]]) -> Dict[str, Dict[str, A
             "_provision_best_score": float(r.get("_provision_best_score") or 0.0),
             "_dimension_id": r.get("_dimension_id"),
             "_dimension_name": r.get("_dimension_name"),
+            "dimension_id": r.get("dimension_id", r.get("_dimension_id")),
+            "dimension_name": r.get("dimension_name", r.get("_dimension_name")),
             "_dimension_ids": list(r.get("_dimension_ids") or ([] if r.get("_dimension_id") is None else [r.get("_dimension_id")])),
             "_dimension_names": list(r.get("_dimension_names") or ([] if not r.get("_dimension_name") else [r.get("_dimension_name")])),
             "is_local_admin": bool(r.get("is_local_admin")),
@@ -887,6 +955,28 @@ def run_watchdog(
         return out
 
     def _dedupe_local_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        def _same_state_hc(court: Any) -> bool:
+            c = str(court or "").strip().lower()
+            if "high" not in c:
+                return False
+            st = (case_state or "").strip().lower()
+            if not st:
+                return False
+            if st in c:
+                return True
+            return st == "maharashtra" and "bombay high court" in c
+
+        def _priority_tier(row: Dict[str, Any]) -> int:
+            court = row.get("court") or row.get("court_code")
+            c = str(court or "").strip().lower()
+            if "supreme" in c:
+                return 3
+            if _same_state_hc(court):
+                return 2
+            if row.get("_provision_focus_district"):
+                return 1
+            return int(row.get("_priority_tier", 0) or 0)
+
         seen: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             key = (
@@ -915,12 +1005,26 @@ def run_watchdog(
             if q_type and q_type not in ex.get("_query_types", []):
                 ex.setdefault("_query_types", []).append(q_type)
             ex["_local_rank"] = max(ex.get("_local_rank", 0), r.get("_local_rank", 0))
+            ex["_priority_tier"] = max(int(ex.get("_priority_tier", 0) or 0), int(r.get("_priority_tier", 0) or 0))
             if r.get("_from_qdrant_semantic"):
                 ex["_from_qdrant_semantic"] = True
             if r.get("_needs_clerk_analysis"):
                 ex["_needs_clerk_analysis"] = True
+            if r.get("dimension_id") is not None:
+                ex["dimension_id"] = r.get("dimension_id")
+            if r.get("dimension_name"):
+                ex["dimension_name"] = r.get("dimension_name")
         out = list(seen.values())
-        out.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
+        # Within each dimension: Tier1 SC > Tier2 same-state HC > Tier3 district provision matches.
+        # Then local rank + semantic similarity as tie-breakers.
+        out.sort(
+            key=lambda r: (
+                str(r.get("_dimension_id") if r.get("_dimension_id") is not None else r.get("dimension_id") or ""),
+                -_priority_tier(r),
+                -(int(r.get("_local_rank", 0) or 0)),
+                -(float(r.get("_similarity_score", 0.0) or 0.0)),
+            )
+        )
         return out
 
     skip_ik = (max_ik == 0)
@@ -1021,9 +1125,11 @@ def run_watchdog(
                 )
                 continue
 
-        local = _dedupe_local_rows(local_rows)[:max_local]
-        if not local and primary_query:
-            local = _search_local(primary_query, limit=max_local, run_id=run_id, case_state=case_state)
+        local = _dedupe_local_rows(local_rows)
+        if len(local) < max_local and primary_query:
+            topup = _search_local(primary_query, limit=max_local, run_id=run_id, case_state=case_state)
+            local = _dedupe_local_rows(local + (topup or []))
+        local = local[:max_local]
     else:
         # Legacy / no-dimension mode — semantic first, then keyword fallback
         local = _search_local_semantic(
@@ -1034,8 +1140,9 @@ def run_watchdog(
             run_id=run_id,
             user_id=user_id,
         )
-        if not local:
-            local = _search_local(primary_query, limit=max_local, run_id=run_id, case_state=case_state)
+        if len(local) < max_local:
+            topup = _search_local(primary_query, limit=max_local, run_id=run_id, case_state=case_state)
+            local = _dedupe_local_rows((local or []) + (topup or []))[:max_local]
 
     # ── 2. Indian Kanoon — dimension-aware batched search ────────────────────
     seen_tids: Dict[str, Dict[str, Any]] = {}

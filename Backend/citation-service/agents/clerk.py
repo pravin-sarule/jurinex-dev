@@ -38,6 +38,11 @@ _EXPECTED_CLERK_KEYS = {
     "subsequentTreatment",
     "verificationStatus",
     "officialSourceUrl",
+    "officialCitation",
+    "judgmentDate",
+    "bench",
+    "headnotes",
+    "ratioDetailed",
 }
 
 
@@ -213,7 +218,12 @@ Return ONLY a single valid JSON object. No explanation.
     "overruled": ["Case that overruled this, if in text."]
   }},
   "verificationStatus": "Verified and authentic" | "Requires review" | "Invalid / not found",
-  "officialSourceUrl": "URL if stated in judgment (e.g. Supreme Court, eCourts). Otherwise null."
+  "officialSourceUrl": "URL if stated in judgment (e.g. Supreme Court, eCourts). Otherwise null.",
+  "officialCitation": "Best official legal citation found (SCC/AIR/local journal).",
+  "judgmentDate": "Date in DD-MM-YYYY format if detectable.",
+  "bench": "Full names of all presiding judges from top section/coram.",
+  "headnotes": "- Bullet 1: Facts\\n- Bullet 2: Core appellant arguments\\n- Bullet 3: Core respondent arguments\\n- Bullet 4: Final verdict",
+  "ratioDetailed": "Detailed ratio decidendi: legal reasoning, how sections/precedents were interpreted, and why the rule was applied."
 }}
 
 Context Title: {title}
@@ -406,22 +416,109 @@ def _merge_extraction(gem: Optional[Dict], title: str) -> Dict[str, Any]:
         case_name = title or "Judgment"
     excerpt_raw = (gem.get("excerptText") or "").strip()
     excerpt_clean = _strip_html_css(excerpt_raw) if excerpt_raw else ""
+    official_citation = (gem.get("officialCitation") or "").strip() or citation
+    bench = (gem.get("bench") or gem.get("coram") or "").strip()
+    ratio_detailed = (gem.get("ratioDetailed") or "").strip() or ratio
+    headnotes = (gem.get("headnotes") or "").strip()
     return {
         "title":                 case_name,
         "primary_citation":      citation,
+        "official_citation":     official_citation,
         "alternate_citations":   gem.get("alternateCitations") or [],
         "court":                 gem.get("court") or "",
-        "coram":                 gem.get("coram") or "",
+        "coram":                 gem.get("coram") or bench,
+        "bench":                 bench,
         "bench_type":            gem.get("benchType") or "",
         "date_judgment":         gem.get("dateOfJudgment") or "",
+        "judgment_date_ddmmyyyy": (gem.get("judgmentDate") or "").strip(),
         "statutes":              gem.get("statutes") or [],
         "ratio":                 ratio,
+        "ratio_detailed":        ratio_detailed,
+        "headnotes":             headnotes,
         "excerpt_para":          gem.get("excerptPara") or "",
         "excerpt_text":          excerpt_clean or excerpt_raw or "",
         "subsequent_treatment":  subsequent,
         "verification_status":   verification,
         "official_source_url":   official_url,
     }
+
+
+def _extract_official_citation_from_text(text: str) -> str:
+    if not text:
+        return ""
+    patterns = [
+        r"\(\d{4}\)\s*\d+\s*SCC\s*\d+",
+        r"AIR\s*\d{4}\s*[A-Z]{1,4}\s*\d+",
+        r"\(\d{4}\)\s*\d+\s*SCR\s*\d+",
+        r"\d{4}\s*\(\d+\)\s*SCC\s*\d+",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            return m.group(0).strip()
+    return ""
+
+
+def _extract_bench_from_top(text: str) -> str:
+    if not text:
+        return ""
+    m = re.search(r"coram\s*[:\-]\s*(.+)", text, re.I)
+    if m:
+        return m.group(1).split("\n")[0].strip()[:350]
+    justice_hits = re.findall(r"(?:hon'?ble\s+)?justice\s+[A-Z][A-Za-z\.\s]{2,80}", text, re.I)
+    if not justice_hits:
+        return ""
+    out: List[str] = []
+    for hit in justice_hits:
+        h = " ".join(hit.split())
+        if h not in out:
+            out.append(h)
+    return ", ".join(out[:8])[:500]
+
+
+def _to_dd_mm_yyyy(raw_date: str) -> str:
+    s = (raw_date or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"\b(\d{2})-(\d{2})-(\d{4})\b", s)
+    if m:
+        return m.group(0)
+    m = re.search(
+        r"\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b",
+        s,
+        re.I,
+    )
+    if m:
+        d = int(m.group(1))
+        mon = m.group(2).lower()
+        y = m.group(3)
+        month_map = {
+            "january": "01", "february": "02", "march": "03", "april": "04",
+            "may": "05", "june": "06", "july": "07", "august": "08",
+            "september": "09", "october": "10", "november": "11", "december": "12",
+        }
+        return f"{d:02d}-{month_map[mon]}-{y}"
+    m = re.search(r"\b(\d{1,2})[\/\.](\d{1,2})[\/\.](\d{4})\b", s)
+    if m:
+        return f"{int(m.group(1)):02d}-{int(m.group(2)):02d}-{m.group(3)}"
+    return ""
+
+
+def _build_headnotes(info: Dict[str, Any]) -> str:
+    existing = (info.get("headnotes") or "").strip()
+    if existing:
+        return existing
+    case_name = info.get("title") or "Case"
+    ratio = (info.get("ratio_detailed") or info.get("ratio") or "").strip()
+    excerpt = (info.get("excerpt_text") or "").strip()
+    facts = excerpt[:220] if excerpt else "Facts not available."
+    verdict = ratio[:260] if ratio else "Final verdict reasoning not available."
+    return "\n".join([
+        f"- Facts: {facts}",
+        "- Appellant Arguments: Not Available",
+        "- Respondent Arguments: Not Available",
+        f"- Verdict ({case_name}): {verdict}",
+    ])
 
 
 def _looks_like_non_judgment(info: Dict[str, Any]) -> bool:
@@ -572,6 +669,13 @@ def clerk_ingest_ik(
                 run_id=run_id, user_id=user_id,
             )
         info = _merge_extraction(extracted, title)
+        top_text = (raw_text or "")[:4500]
+        info["official_citation"] = info.get("official_citation") or _extract_official_citation_from_text(top_text)
+        info["bench"] = info.get("bench") or _extract_bench_from_top(top_text)
+        info["judgment_date_ddmmyyyy"] = _to_dd_mm_yyyy(
+            info.get("judgment_date_ddmmyyyy") or info.get("date_judgment") or str(doc.get("publishdate") or "")
+        )
+        info["headnotes"] = _build_headnotes(info)
         if _looks_like_non_judgment(info):
             logger.info("[CLERK] Skipping non-judgment document: %s", title[:80])
             return None
@@ -591,14 +695,14 @@ def clerk_ingest_ik(
             "year": _parse_year(judgment_date or "") or datetime.utcnow().year,
             "bench_size": _bench_size(info["bench_type"]),
             "bench_type": info["bench_type"],
-            "summary_text": info["ratio"],
-            "holding_text": info["ratio"],
+            "summary_text": info["ratio_detailed"] or info["ratio"],
+            "holding_text": info["ratio_detailed"] or info["ratio"],
             "facts_text": "",
             "full_text": raw_text,
             "paragraphs": paragraphs,
             "judges": _split_judges(info["coram"]),
             "statutes": info["statutes"],
-            "primary_citation": info["primary_citation"],
+            "primary_citation": info["official_citation"] or info["primary_citation"],
             "alternate_citations": info["alternate_citations"],
             "citation_aliases": info["alternate_citations"],
             "excerpt_para": info["excerpt_para"],
@@ -609,6 +713,10 @@ def clerk_ingest_ik(
             "source_type": "indian_kanoon",
             "source_url": source_url or info.get("official_source_url") or "",
             "case_id": case_id,
+            "headnote": info.get("headnotes") or "",
+            "bench_name": info.get("bench") or info.get("coram") or "",
+            "official_citation": info.get("official_citation") or info.get("primary_citation") or "",
+            "judgment_date_ddmmyyyy": info.get("judgment_date_ddmmyyyy") or "",
             # IK-specific enrichment fields from fetcher
             "ik_orig_doc_url":    doc.get("original_copy_url") or "",
             "ik_fragments":       {
@@ -618,7 +726,13 @@ def clerk_ingest_ik(
             },
             "ik_cite_list":       doc.get("cite_list") or [],
             "ik_cited_by_list":   doc.get("cited_by_list") or [],
-            "ik_doc_meta":        doc.get("ik_doc_meta") or {},
+            "ik_doc_meta":        {
+                **(doc.get("ik_doc_meta") or {}),
+                "ik_api_docid": str(doc.get("external_id") or doc.get("tid") or ""),
+                "ik_api_title": doc.get("title") or "",
+                "ik_api_court": doc.get("docsource") or "",
+                "ik_api_publishdate": doc.get("publishdate") or "",
+            },
             # Dimension tags (from LDE/Watchdog)
             "dimension_id":       dim_id,
             "dimension_name":     dim_name or None,
@@ -640,6 +754,21 @@ def clerk_ingest_ik(
                 return None
         if out.get("status") in ("success", "skipped") and out.get("canonical_id"):
             canonical_id = out["canonical_id"]
+            try:
+                from db.client import judgement_merge_citation_data
+                judgement_merge_citation_data(canonical_id, {
+                    "analysis_report": {
+                        "clerkModelExtraction": extracted or {},
+                        "mergedFields": info,
+                    },
+                    "official_citation": info.get("official_citation") or "",
+                    "bench_name": info.get("bench") or info.get("coram") or "",
+                    "judgment_date_ddmmyyyy": info.get("judgment_date_ddmmyyyy") or "",
+                    "headnotes": info.get("headnotes") or "",
+                    "ratio_detailed": info.get("ratio_detailed") or info.get("ratio") or "",
+                })
+            except Exception as _me:
+                logger.warning("[CLERK] judgement_merge_citation_data failed for %s: %s", canonical_id, _me)
             # Persist IK asset data to ik_document_assets table
             if tid:
                 try:
@@ -697,13 +826,19 @@ def clerk_ingest_google(
         )
         raw_text = _html_to_text(raw_text)
         title = doc.get("title") or "Web Result"
-        url = doc.get("link") or doc.get("url") or ""
+        url = doc.get("link") or doc.get("source_url") or doc.get("url") or ""
+        source_type = str(doc.get("source_type") or "google_grounding").strip().lower()
 
         # 1. Gemini Extraction. CHECK 6: re-extract once if ratio/citation empty.
         extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         if extracted and not (extracted.get("ratio") or "").strip() and not (extracted.get("primaryCitation") or "").strip():
             extracted = _gemini_extract(raw_text, title=title, query=query, run_id=run_id, user_id=user_id)
         info = _merge_extraction(extracted, title)
+        top_text = (raw_text or "")[:4500]
+        info["official_citation"] = info.get("official_citation") or _extract_official_citation_from_text(top_text)
+        info["bench"] = info.get("bench") or _extract_bench_from_top(top_text)
+        info["judgment_date_ddmmyyyy"] = _to_dd_mm_yyyy(info.get("judgment_date_ddmmyyyy") or info.get("date_judgment"))
+        info["headnotes"] = _build_headnotes(info)
         if _looks_like_non_judgment(info):
             logger.info("[CLERK] Skipping non-judgment web document: %s", title[:80])
             return None
@@ -723,14 +858,14 @@ def clerk_ingest_google(
             "year": _parse_year(judgment_date or "") or datetime.utcnow().year,
             "bench_size": _bench_size(info["bench_type"]),
             "bench_type": info["bench_type"],
-            "summary_text": info["ratio"],
-            "holding_text": info["ratio"],
+            "summary_text": info["ratio_detailed"] or info["ratio"],
+            "holding_text": info["ratio_detailed"] or info["ratio"],
             "facts_text": "",
             "full_text": raw_text,
             "paragraphs": paragraphs,
             "judges": _split_judges(info["coram"]),
             "statutes": info["statutes"],
-            "primary_citation": info["primary_citation"],
+            "primary_citation": info["official_citation"] or info["primary_citation"],
             "alternate_citations": info["alternate_citations"],
             "citation_aliases": info["alternate_citations"],
             "excerpt_para": info["excerpt_para"],
@@ -738,9 +873,13 @@ def clerk_ingest_google(
             "subsequent_treatment": info.get("subsequent_treatment") or {"followed": [], "distinguished": [], "overruled": []},
             "verification_status": info.get("verification_status") or "Requires review",
             "official_source_url": info.get("official_source_url"),
-            "source_type": "google",
+            "source_type": source_type or "google_grounding",
             "source_url": url or info.get("official_source_url") or "",
             "case_id": case_id,
+            "headnote": info.get("headnotes") or "",
+            "bench_name": info.get("bench") or info.get("coram") or "",
+            "official_citation": info.get("official_citation") or info.get("primary_citation") or "",
+            "judgment_date_ddmmyyyy": info.get("judgment_date_ddmmyyyy") or "",
         }
 
         try:
@@ -756,6 +895,21 @@ def clerk_ingest_google(
                 logger.warning("[CLERK] Google ingest retry failed for %s: %s", title[:60], e2)
                 return None
         if out.get("status") in ("success", "skipped") and out.get("canonical_id"):
+            try:
+                from db.client import judgement_merge_citation_data
+                judgement_merge_citation_data(out["canonical_id"], {
+                    "analysis_report": {
+                        "clerkModelExtraction": extracted or {},
+                        "mergedFields": info,
+                    },
+                    "official_citation": info.get("official_citation") or "",
+                    "bench_name": info.get("bench") or info.get("coram") or "",
+                    "judgment_date_ddmmyyyy": info.get("judgment_date_ddmmyyyy") or "",
+                    "headnotes": info.get("headnotes") or "",
+                    "ratio_detailed": info.get("ratio_detailed") or info.get("ratio") or "",
+                })
+            except Exception as _me:
+                logger.warning("[CLERK] judgement_merge_citation_data failed for %s: %s", out.get("canonical_id"), _me)
             return out["canonical_id"]
         return None
 
@@ -846,6 +1000,11 @@ def clerk_enrich_local_canonical_ids(
                 run_id=run_id, user_id=user_id,
             )
         info = _merge_extraction(extracted, title)
+        top_text = (raw_text or "")[:4500]
+        info["official_citation"] = info.get("official_citation") or _extract_official_citation_from_text(top_text)
+        info["bench"] = info.get("bench") or _extract_bench_from_top(top_text)
+        info["judgment_date_ddmmyyyy"] = _to_dd_mm_yyyy(info.get("judgment_date_ddmmyyyy") or info.get("date_judgment"))
+        info["headnotes"] = _build_headnotes(info)
         if _looks_like_non_judgment(info):
             logger.info("[CLERK_ENRICH] Skip non-judgment shape for %s", title[:70])
             return cid
@@ -865,10 +1024,15 @@ def clerk_enrich_local_canonical_ids(
         patch = {
             "analysis_report": analysis_report,
             "primary_citation": info.get("primary_citation") or cd.get("primary_citation"),
-            "holding_text": info.get("ratio") or cd.get("holding_text"),
-            "summary_text": info.get("ratio") or cd.get("summary_text"),
+            "official_citation": info.get("official_citation") or cd.get("official_citation"),
+            "holding_text": info.get("ratio_detailed") or info.get("ratio") or cd.get("holding_text"),
+            "summary_text": info.get("ratio_detailed") or info.get("ratio") or cd.get("summary_text"),
             "court_name": info.get("court") or cd.get("court_name"),
             "case_name": info.get("title") or cd.get("case_name"),
+            "bench_name": info.get("bench") or info.get("coram") or cd.get("bench_name"),
+            "judgment_date_ddmmyyyy": info.get("judgment_date_ddmmyyyy") or cd.get("judgment_date_ddmmyyyy"),
+            "headnotes": info.get("headnotes") or cd.get("headnotes"),
+            "ratio_detailed": info.get("ratio_detailed") or cd.get("ratio_detailed"),
             "excerpt_para": info.get("excerpt_para") or cd.get("excerpt_para"),
             "excerpt_text": info.get("excerpt_text") or cd.get("excerpt_text"),
             "statutes": info.get("statutes") or cd.get("statutes") or [],

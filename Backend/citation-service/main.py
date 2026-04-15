@@ -474,14 +474,15 @@ def startup():
         try:
             from qdrant_client.models import VectorParams, Distance
             vector_size = int(os.environ.get("CITATION_EMBED_OUTPUT_DIMS", "768"))
-            if not qdrant.collection_exists(collection_name="legal_embeddings"):
+            qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2").strip() or "legal_embeddings_v2"
+            if not qdrant.collection_exists(collection_name=qdrant_collection):
                 qdrant.create_collection(
-                    collection_name="legal_embeddings",
+                    collection_name=qdrant_collection,
                     vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
                 )
-                logger.info("[QDRANT] Created collection: legal_embeddings")
+                logger.info("[QDRANT] Created collection: %s", qdrant_collection)
             else:
-                logger.info("[QDRANT] Collection exists: legal_embeddings (expected vector size=%d)", vector_size)
+                logger.info("[QDRANT] Collection exists: %s (expected vector size=%d)", qdrant_collection, vector_size)
         except Exception as exc:
             logger.warning("[QDRANT] Init failed: %s", exc)
 

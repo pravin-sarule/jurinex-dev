@@ -1979,6 +1979,13 @@ def _judgement_to_citation(
             source_key = "indian_kanoon"
 
     source_label = _SOURCE_LABELS.get(source_key, source_key.replace("_", " ").title())
+    citation_data = j.get("citation_data") if isinstance(j.get("citation_data"), dict) else {}
+    analysis_report = citation_data.get("analysis_report") if isinstance(citation_data, dict) else {}
+    merged_fields = analysis_report.get("mergedFields") if isinstance(analysis_report, dict) else {}
+
+    def _na(v: Any) -> str:
+        s = str(v or "").strip()
+        return s if s else "Not Available"
     audit_status = (audit_info or {}).get("audit_status") or j.get("audit_status")
 
     v           = _apply_three_layer_verification(j, query, source_key, audit_info)
@@ -2198,13 +2205,45 @@ def _judgement_to_citation(
         if not dim_name_value and inferred_name:
             dim_name_value = inferred_name
 
+    # Admin priority fields: prefer DB-stored bench/date (including citation_data) for admin uploads.
+    src_type_raw = str(j.get("source_type") or citation_data.get("source_type") or "").strip().lower()
+    is_local_admin = (
+        _normalize_source_key(j.get("source") or src_type_raw) == "admin_upload"
+        or bool(j.get("is_local_admin"))
+        or src_type_raw == "admin"
+    )
+    bench_value = j.get("coram") or j.get("bench_name") or citation_data.get("bench_name") or merged_fields.get("bench")
+    if is_local_admin:
+        bench_value = citation_data.get("bench_name") or j.get("bench_name") or bench_value
+    date_value = j.get("date_judgment") or citation_data.get("judgment_date_ddmmyyyy") or merged_fields.get("judgment_date_ddmmyyyy")
+    if is_local_admin:
+        date_value = citation_data.get("judgment_date_ddmmyyyy") or j.get("date_judgment") or date_value
+    official_citation = (
+        citation_data.get("official_citation")
+        or merged_fields.get("official_citation")
+        or j.get("primary_citation")
+    )
+    headnotes_value = (
+        citation_data.get("headnotes")
+        or merged_fields.get("headnotes")
+        or j.get("headnote")
+        or j.get("head_note")
+        or "Not Available"
+    )
+    ratio_decidendi_value = (
+        citation_data.get("ratio_detailed")
+        or merged_fields.get("ratio_detailed")
+        or ratio
+        or "Not Available"
+    )
+
     return {
         "id":                       f"cit-{index:03d}",
         "verificationStatus":       status,
         "verificationStatusLabel":  verification_label,
         "confidence":               confidence,
-        "caseName":                 case_name,
-        "primaryCitation":          j.get("primary_citation") or "",
+        "caseName":                 _na(case_name),
+        "primaryCitation":          _na(j.get("primary_citation") or official_citation),
         "sourceApplication":        source_application,
         "dataComplete":             data_complete,
         "alternateCitations":       alt or [],
@@ -2218,13 +2257,13 @@ def _judgement_to_citation(
             "respondent": j.get("respondent_args") or ([] if argument_party != "respondent" else ["See ratio"]),
             "court":      j.get("court_ratio") or (ratio[:200] if argument_party == "court" and ratio else ""),
         },
-        "court":                    j.get("court") or "",
-        "coram":                    j.get("coram") or "",
+        "court":                    _na(j.get("court") or citation_data.get("court_name")),
+        "coram":                    _na(bench_value),
         "benchType":                j.get("bench_type") or "",
-        "dateOfJudgment":           j.get("date_judgment") or "",
+        "dateOfJudgment":           _na(date_value),
         "statutes":                 statutes if statutes else [],
-        "headnote":                 headnote,
-        "ratio":                    ratio or "",
+        "headnote":                 _na(headnote if headnote else headnotes_value),
+        "ratio":                    _na(ratio if ratio else ratio_decidendi_value),
         "proposition": {
             "query":      query,
             "matchScore": match_score,
@@ -2289,9 +2328,7 @@ def _judgement_to_citation(
         "citationTags":             citation_tags,
         # ── Admin source flag — True when judgment was uploaded via admin panel ──
         # Drives the Local DB icon in the frontend CitationCard.
-        "isLocalAdmin":             _normalize_source_key(
-            j.get("source") or j.get("source_type") or ""
-        ) == "admin_upload" or bool(j.get("is_local_admin")),
+        "isLocalAdmin":             is_local_admin,
         "displayIcon":              "local_db_icon" if (
             str(j.get("source_type") or "").strip().lower() == "admin"
             or bool(j.get("is_local_admin"))
@@ -2302,7 +2339,19 @@ def _judgement_to_citation(
         ) else "",
         "isProvisionMatch":         bool(j.get("is_provision_match")),
         "similarityScore":          float(j.get("_similarity_score") or 0.0),
-        "sourceType":               (str(j.get("source_type") or "").strip().lower() or None),
+        "sourceType":               (str(j.get("source_type") or citation_data.get("source_type") or "").strip().lower() or None),
+        # Structured legal metadata block requested by consumers.
+        "metadata": {
+            "caseName": _na(case_name),
+            "court": _na(j.get("court") or citation_data.get("court_name")),
+            "bench": _na(bench_value),
+            "date": _na(date_value),
+            "official_citation": _na(official_citation),
+        },
+        "headnotes": _na(headnotes_value),
+        "ratio_decidendi": _na(ratio_decidendi_value),
+        "relevance_badge": "High" if str(relevance_badge).upper() == "HIGH" else "Medium",
+        "is_local_admin": bool(is_local_admin),
     }
 
 
@@ -2350,7 +2399,9 @@ def _build_text_report(
             f"| {treat.get('note') or '—'}"
         )
         lines.append(f"2.9 Verification: {c.get('verificationStatusLabel') or c.get('verificationStatus') or '—'}")
-        lines.append(f"2.10 Official Source Link: {c.get('officialSourceLink') or c.get('sourceUrl') or '—'}")
+        lines.append(f"2.10 Source Type: {c.get('sourceType') or c.get('source') or '—'}")
+        lines.append(f"2.11 Official Source Link: {c.get('officialSourceLink') or c.get('sourceUrl') or '—'}")
+        lines.append(f"2.12 Judgment Source URL: {c.get('importSourceLink') or c.get('sourceUrl') or c.get('officialSourceLink') or '—'}")
         imp_link = c.get("importSourceLink") or c.get("sourceUrl") or c.get("officialSourceLink")
         if imp_link and str(imp_link).strip() not in ("—", ""):
             lines.append(f"Data imported from: {imp_link}")
@@ -2534,7 +2585,31 @@ def build_report_from_judgements(
             if not j.get("source_type"):
                 j["source_type"] = "admin"
 
-        src = _normalize_source_key(j.get("source", "unknown"))
+        # Local DB fallback: when no full analysis_report exists, still provide
+        # usable report content from summary/full text.
+        citation_data = j.get("citation_data") if isinstance(j.get("citation_data"), dict) else {}
+        analysis_report = citation_data.get("analysis_report") if isinstance(citation_data, dict) else None
+        has_analysis_report = bool(analysis_report) and str(analysis_report).strip().lower() not in ("{}", "null", "none")
+        source_key = _normalize_source_key(j.get("source", "unknown"))
+        if source_key == "local" and not has_analysis_report:
+            raw_full = (
+                (j.get("raw_content") or j.get("full_text") or "")
+                or str(citation_data.get("full_text") or "")
+            ).strip()
+            summary = (
+                (j.get("ratio") or "")
+                or str(citation_data.get("holding_text") or "")
+                or str(citation_data.get("summary_text") or "")
+            ).strip()
+            fallback_text = summary or raw_full[:1000]
+            if fallback_text:
+                if not j.get("ratio"):
+                    j["ratio"] = fallback_text
+                j["summary_text"] = (j.get("summary_text") or fallback_text)
+                j["holding_text"] = (j.get("holding_text") or fallback_text)
+                j["excerpt_text"] = (j.get("excerpt_text") or fallback_text[:1000])
+
+        src = source_key
         source_counts[src] = source_counts.get(src, 0) + 1
 
         # Stamp perspective so _enrich_with_gemini can focus ratio extraction
@@ -2630,18 +2705,10 @@ def build_report_from_judgements(
                 citations.append(cit)
                 already_included.add(jid)
 
-    # ── Strict quality gate: hide incomplete extractions ──────────────────────
-    before_quality_filter = len(citations)
+    # ── Quality label only: keep incomplete citations in report ───────────────
     for c in citations:
         label = _guardrail_label(c)
         c["confidenceGuardrail"] = "HIGH" if label == "HIGH" else ("MEDIUM — VERIFY" if label == "MEDIUM_VERIFY" else "BLOCKED")
-    citations = [c for c in citations if not _is_incomplete_citation(c)]
-    dropped_count = before_quality_filter - len(citations)
-    if dropped_count:
-        logger.warning(
-            "[REPORT_BUILDER] Dropped %d incomplete citation(s) containing placeholder or missing key points",
-            dropped_count,
-        )
 
     # ── Sort: complete data first, then by confidence ─────────────────────────
     citations.sort(key=lambda c: (not c.get("dataComplete", False), -(c.get("confidence") or 0)))
@@ -2700,6 +2767,19 @@ def build_report_from_judgements(
     _dim_meta: Dict[int, Dict[str, Any]] = {
         d.get("dimension_id"): d for d in (dimensions or []) if d.get("dimension_id") is not None
     }
+    # Pre-create all known dimensions so frontend always receives all sections.
+    for d in (dimensions or []):
+        did = d.get("dimension_id")
+        if did is None:
+            continue
+        key = str(did)
+        if key not in dimension_groups:
+            dimension_groups[key] = {
+                "dimension_id": did,
+                "name": d.get("name") or f"Dimension {did}",
+                "reasoning": d.get("reasoning") or "",
+                "citations": [],
+            }
     for cit in citations:
         did = cit.get("dimensionId")
         if did is not None:

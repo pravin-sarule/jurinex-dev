@@ -429,8 +429,9 @@ class LegalCitationAgent:
             logger.warning("[QDRANT] No embeddings generated for canonical_id=%s", data.get("canonical_id"))
             return False
         try:
+            qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2").strip() or "legal_embeddings_v2"
             self.qdrant.upsert(
-                collection_name="legal_embeddings",
+                collection_name=qdrant_collection,
                 points=points
             )
             return True
