@@ -5,7 +5,7 @@
  * Environment variables are supported with sensible defaults.
  */
 
-const DEFAULT_GATEWAY_URL = 'http://localhost:5000';
+const DEFAULT_GATEWAY_URL = '';
 
 // Get base gateway URL from environment or use deployed default
 const GATEWAY_URL =
@@ -35,10 +35,10 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'http://localhost:5001';
+  'https://authservice-120280829617.asia-south1.run.app';
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
-  'http://localhost:8080';
+  'https://chat-model-120280829617.asia-south1.run.app';
 
 /** Secret prompts list/detail via gateway file proxy (`/files/secrets`). */
 export const SECRET_PROMPTS_API_BASE =
@@ -47,7 +47,7 @@ export const SECRET_PROMPTS_API_BASE =
 
 export const PAYMENT_SERVICE_URL =
   import.meta.env.VITE_APP_PAYMENT_SERVICE_URL ||
-  'http://localhost:5003';
+  'https://payment-service-120280829617.asia-south1.run.app';
 export const VISUAL_SERVICE_URL =
   import.meta.env.VITE_APP_VISUAL_SERVICE_URL ||
   'https://visual-service-120280829617.asia-south1.run.app';
@@ -58,7 +58,7 @@ export const VISUAL_SERVICE_URL =
  * Set e.g. VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL=https://.../api/files for a custom host.
  */
 const DEFAULT_AGENTIC_DOCUMENT_HOST =
-  'http://localhost:8092';
+  'https://agentic-document-service-120280829617.asia-south1.run.app';
 
 const rawAgenticDocs =
   import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
@@ -100,7 +100,7 @@ export const DRAFTING_SERVICE_URL =
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
   import.meta.env.VITE_APP_AGENT_DRAFT_TEMPLATE_URL ||
-  'http://localhost:8000';
+  'https://all-drafting-agent-120280829617.asia-south1.run.app';
 
 export const CHAT_DRAFT_BACKEND_URL =
   import.meta.env.VITE_APP_CHAT_DRAFT_BACKEND_URL ||
@@ -109,7 +109,7 @@ export const CHAT_DRAFT_BACKEND_URL =
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE = ensureLocalhostPort(
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-    'http://localhost:8002',
+    'https://drafting-agents-120280829617.asia-south1.run.app',
   5017
 );
 
