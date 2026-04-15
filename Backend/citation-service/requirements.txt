@@ -11,3 +11,5 @@ neo4j
 PyJWT
 rich
 httpx
+requests
+certifi

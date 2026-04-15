@@ -844,8 +844,18 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
     es = get_es_client()
     if es:
         try:
-            res = es.get(index="judgments", id=canonical_id)
-            es_doc = res.get("_source") or {}
+            es_id = str(row.get("es_doc_id") or "").strip() if row else ""
+            fetch_ids = [es_id] if es_id else []
+            if canonical_id and canonical_id not in fetch_ids:
+                fetch_ids.append(canonical_id)
+            for _id in fetch_ids:
+                try:
+                    res = es.get(index="judgments", id=_id)
+                    es_doc = res.get("_source") or {}
+                    if es_doc:
+                        break
+                except Exception:
+                    continue
         except Exception:
             es_doc = None
 
@@ -870,6 +880,20 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         if v is not None and v != "" and v != []:
             return v
         return pg_citation.get(pg_key or key)
+
+    def _pg_or_es(row_key: str, es_key: str = None, citation_key: str = None):
+        """
+        Prefer PostgreSQL metadata first, then PG citation_data, then ES.
+        Used for metadata fields so canonical-id hydration stays PG-authoritative.
+        """
+        rv = row.get(row_key)
+        if rv is not None and rv != "" and rv != []:
+            return rv
+        ck = citation_key or row_key
+        cv = pg_citation.get(ck)
+        if cv is not None and cv != "" and cv != []:
+            return cv
+        return es_doc.get(es_key or row_key)
 
     source_url = _es_or_pg("source_url") or _es_or_pg("official_source_url")
     # Import source link: URL from which this judgment was fetched (Indian Kanoon, Google result, etc.)
@@ -922,10 +946,11 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                                 logger.warning("[ES] subsequent_treatment cache failed for %s: %s", canonical_id, exc)
             except Exception as exc:
                 logger.warning("[NEO4J] subsequent_treatment fetch failed for %s: %s", canonical_id, exc)
-    # Build coram from ES coram field, falling back to judges list
-    _coram = _es_or_pg("coram") or ""
+    # Build coram with PG metadata priority, then ES fallbacks.
+    _coram = pg_citation.get("bench_name") or pg_citation.get("coram") or es_doc.get("coram") or ""
+    _coram = _coram if isinstance(_coram, str) else ""
     if not _coram:
-        _judges = _es_or_pg("judges")
+        _judges = _pg_or_es("bench_size", citation_key="judges") or _es_or_pg("judges")
         if isinstance(_judges, list) and _judges:
             _coram = ", ".join(str(j) for j in _judges if j)
 
@@ -939,13 +964,14 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
     result = {
         "id": canonical_id,
         "canonical_id": canonical_id,
-        "title": _es_or_pg("case_name") or row.get("case_name"),
+        "title": _pg_or_es("case_name", es_key="case_name"),
         "primary_citation": _es_or_pg("primary_citation"),
         "alternate_citations": _es_or_pg("alternate_citations") or [],
-        "court": _es_or_pg("court_name") or _es_or_pg("court_code") or row.get("court_code"),
+        "court": _pg_or_es("court_code", es_key="court_name", citation_key="court_name")
+                 or _pg_or_es("court_code", es_key="court_code"),
         "coram": _coram,
         "bench_type": _es_or_pg("bench_type"),
-        "date_judgment": _fmt_date(row.get("judgment_date")),
+        "date_judgment": _fmt_date(_pg_or_es("judgment_date", es_key="judgment_date", citation_key="judgment_date")),
         "statutes": _es_or_pg("statutes") or [],
         "ratio": _es_or_pg("holding_text") or _es_or_pg("summary_text") or "",
         "excerpt_para": _es_or_pg("excerpt_para"),
@@ -955,6 +981,7 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         "import_source_link": import_source_link,
         "subsequent_treatment": subsequent_treatment or {},
         "source": source_key,
+        # Full judgment body should come from ES first, then PG JSONB fallback.
         "raw_content": _es_or_pg("full_text") or "",
         "full_text": _es_or_pg("full_text") or "",
         "paragraphs": _es_or_pg("paragraphs") or [],
@@ -973,6 +1000,11 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         "ik_doc_meta":        row.get("ik_doc_meta") or {},
         "source_type":        _src_type_resolved or None,
         "citation_data":      pg_citation,
+        # Expose local-vector linkage explicitly for Qdrant chunk traceability.
+        "qdrant_vector_id":   row.get("qdrant_vector_id"),
+        "es_doc_id":          row.get("es_doc_id"),
+        "metadata_source":    "postgresql",
+        "judgment_text_source": "elasticsearch" if (es_doc.get("full_text") or "") else "postgresql_jsonb",
         "is_local_admin":     _src_type_resolved in (
             "admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload"
         ),
@@ -1253,47 +1285,75 @@ def judgement_search_local(
                     "_qdrant_payload_only": True,
                 }
 
+            pg_rows_by_cid: Dict[str, Dict[str, Any]] = {}
+            es_id_by_cid: Dict[str, str] = {}
             conn2 = get_pg_conn()
-            if not conn2:
-                logger.warning("[QDRANT] DB connection unavailable — building results from Qdrant payload directly")
-                payload_rows = [_build_from_payload(cid) for cid in canonical_ids]
-                payload_rows = [r for r in payload_rows if r]
-                payload_rows.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
-                return payload_rows[:limit_count]
+            if conn2:
+                try:
+                    with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
+                        cur2.execute(
+                            """
+                            SELECT canonical_id, es_doc_id, case_name, court_code, source_type, year,
+                                   citation_data, verification_status
+                              FROM judgments
+                             WHERE canonical_id = ANY(%s)
+                            """,
+                            (canonical_ids,),
+                        )
+                        rows2 = cur2.fetchall() or []
+                    logger.info("[QDRANT] DB fetch returned %d row(s) for %d canonical_id(s)",
+                                len(rows2), len(canonical_ids))
+                    for r in rows2:
+                        rcid = str(r.get("canonical_id") or "").strip()
+                        if rcid:
+                            pg_rows_by_cid[rcid] = r
+                            es_id_by_cid[rcid] = str(r.get("es_doc_id") or "").strip()
+                finally:
+                    conn2.close()
+            else:
+                logger.warning("[QDRANT] DB connection unavailable — metadata fallback to Qdrant payload only")
 
-            try:
-                with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
-                    cur2.execute(
-                        """
-                        SELECT canonical_id, case_name, court_code, source_type,
-                               citation_data, verification_status
-                          FROM judgments
-                         WHERE canonical_id = ANY(%s)
-                        """,
-                        (canonical_ids,),
-                    )
-                    rows2 = cur2.fetchall() or []
-                logger.info("[QDRANT] DB fetch returned %d row(s) for %d canonical_id(s)",
-                            len(rows2), len(canonical_ids))
-            finally:
-                conn2.close()
+            # Fetch judgment body from Elasticsearch using es_doc_id from PG first,
+            # then canonical_id as fallback.
+            es_docs_by_cid: Dict[str, Dict[str, Any]] = {}
+            if es:
+                try:
+                    fetch_ids: List[str] = []
+                    seen_ids: set = set()
+                    for cid in canonical_ids:
+                        esid = es_id_by_cid.get(cid, "")
+                        if esid and esid not in seen_ids:
+                            fetch_ids.append(esid)
+                            seen_ids.add(esid)
+                    for cid in canonical_ids:
+                        if cid and cid not in seen_ids:
+                            fetch_ids.append(cid)
+                            seen_ids.add(cid)
+
+                    mres = es.mget(index="judgments", body={"ids": fetch_ids})
+                    for d in (mres.get("docs") or []):
+                        if not d.get("found"):
+                            continue
+                        src = d.get("_source") or {}
+                        esid = str(d.get("_id") or "").strip()
+                        scid = str(src.get("canonical_id") or "").strip()
+                        if scid:
+                            es_docs_by_cid[scid] = src
+                        # If canonical_id missing in source, map via PG es_doc_id relation.
+                        elif esid:
+                            for cid, mapped_esid in es_id_by_cid.items():
+                                if mapped_esid and mapped_esid == esid:
+                                    es_docs_by_cid[cid] = src
+                                    break
+                except Exception as _mexc:
+                    logger.warning("[QDRANT] ES mget hydration failed: %s", _mexc)
 
             scored: List[Dict[str, Any]] = []
-            found_in_pg: set = set()
-            for r in rows2:
-                pg_cid = str(r.get("canonical_id") or "").strip()
-                src_type = str(r.get("source_type") or "").strip().lower()
-                is_admin = _is_admin_source(src_type)
-                # Admin-uploaded judgments are always included; external ones need approval
-                if approved_only and not is_admin:
-                    if str(r.get("verification_status") or "").upper() not in (
-                        "APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"
-                    ):
-                        found_in_pg.add(pg_cid)
-                        continue
-                if exclude_low_hierarchy and _is_low_hierarchy_court(r.get("court_code")):
-                    found_in_pg.add(pg_cid)
-                    continue
+            for cid in canonical_ids:
+                p = payload_by_cid.get(cid, {}) or {}
+                r = pg_rows_by_cid.get(cid, {}) or {}
+                esd = es_docs_by_cid.get(cid, {}) or {}
+
                 cd = r.get("citation_data") or {}
                 if isinstance(cd, str):
                     try:
@@ -1301,39 +1361,84 @@ def judgement_search_local(
                         cd = _json.loads(cd)
                     except Exception:
                         cd = {}
-                # Normalise source: 'admin' → 'admin_upload' so frontend shows local DB icon
+
+                src_type = str(r.get("source_type") or cd.get("source_type") or esd.get("source_type") or "").strip().lower()
+                is_admin = _is_admin_source(src_type)
+                verification_status = str(
+                    r.get("verification_status")
+                    or esd.get("verification_status")
+                    or cd.get("verification_status")
+                    or ""
+                ).upper()
+
+                # Admin-uploaded judgments are always included; others require approved status.
+                if approved_only and not is_admin:
+                    if verification_status not in ("APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"):
+                        continue
+
+                court_code = (
+                    r.get("court_code")
+                    or cd.get("court_code")
+                    or cd.get("court_name")
+                    or esd.get("court_code")
+                    or esd.get("court_name")
+                    or p.get("court_code")
+                )
+                if exclude_low_hierarchy and _is_low_hierarchy_court(court_code):
+                    continue
+
                 display_source = src_type
                 if is_admin:
                     display_source = "admin_upload"
                 elif not display_source:
-                    display_source = cd.get("source_type") or "local"
-                # Prefer PG data but fill gaps from Qdrant payload
-                p = payload_by_cid.get(pg_cid, {})
-                found_in_pg.add(pg_cid)
-                scored.append({
-                    "id": pg_cid,
-                    "canonical_id": pg_cid,
-                    "judgment_uuid": str(p.get("judgment_uuid") or "").strip(),
-                    "title": r.get("case_name") or cd.get("case_name") or p.get("case_name"),
-                    "case_name": r.get("case_name") or cd.get("case_name") or p.get("case_name"),
-                    "primary_citation": cd.get("primary_citation") or "",
-                    "court": r.get("court_code") or cd.get("court_code") or p.get("court_code"),
-                    "court_code": r.get("court_code") or cd.get("court_code") or p.get("court_code"),
-                    "year": r.get("year") or p.get("year"),
-                    "ratio": cd.get("holding_text") or cd.get("summary_text") or str(p.get("chunk_text") or "")[:500],
-                    "source": display_source,
-                    "is_local_admin": is_admin,
-                    "_local_rank": _rank_row(r.get("court_code") or cd.get("court_code") or p.get("court_code")),
-                    "_from_qdrant": True,
-                })
+                    display_source = "local"
 
-            # For canonical_ids returned by Qdrant but absent from PG, build from payload
-            for cid in canonical_ids:
-                if cid not in found_in_pg:
+                title = (
+                    r.get("case_name")
+                    or cd.get("case_name")
+                    or esd.get("case_name")
+                    or p.get("case_name")
+                    or ""
+                )
+                ratio_text = (
+                    esd.get("holding_text")
+                    or esd.get("summary_text")
+                    or cd.get("holding_text")
+                    or cd.get("summary_text")
+                    or str(esd.get("full_text") or "")[:500]
+                    or str(p.get("chunk_text") or "")[:500]
+                )
+                primary_citation = (
+                    cd.get("primary_citation")
+                    or esd.get("primary_citation")
+                    or ""
+                )
+
+                if not title and not court_code and not ratio_text:
                     entry = _build_from_payload(cid)
                     if entry:
-                        logger.info("[QDRANT] canonical_id %r not in PG — using payload data directly", cid)
                         scored.append(entry)
+                    continue
+
+                scored.append({
+                    "id": cid,
+                    "canonical_id": cid,
+                    "judgment_uuid": str(p.get("judgment_uuid") or "").strip(),
+                    "title": title,
+                    "case_name": title,
+                    "primary_citation": primary_citation,
+                    "court": court_code,
+                    "court_code": court_code,
+                    "year": r.get("year") or esd.get("year") or p.get("year"),
+                    "ratio": ratio_text,
+                    "source": display_source,
+                    "is_local_admin": is_admin,
+                    "_local_rank": _rank_row(court_code),
+                    "_from_qdrant": True,
+                    "_hydrated_from_es": bool(esd),
+                    "raw_content": esd.get("full_text") or cd.get("full_text") or "",
+                    "full_text": esd.get("full_text") or cd.get("full_text") or "",
+                })
 
             scored.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
             if scored:

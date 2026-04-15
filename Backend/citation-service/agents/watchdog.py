@@ -195,7 +195,10 @@ def _jurisdiction_priority(candidate: Dict[str, Any], case_state: str) -> int:
             return 2
     if "high court" in ds:
         return 1
-    return 0
+    q_type = str(candidate.get("_query_type") or "").strip().lower()
+    if q_type == "provision" and _is_low_hierarchy(ds):
+        return 0
+    return -1
 
 
 # ── Local DB ──────────────────────────────────────────────────────────────────
@@ -1070,6 +1073,7 @@ def run_watchdog(
     # ── 1. Local DB search — Qdrant semantic (primary) + keyword fallback ──────
     if dimensions:
         all_dim_tasks = _build_dimension_query_tasks(dimensions)
+        qdrant_tasks = _build_qdrant_dimension_tasks(dimensions)
         per_local = max(1, max_local // max(len(all_dim_tasks), 1))
         local_rows: List[Dict[str, Any]] = []
 
@@ -1088,42 +1092,32 @@ def run_watchdog(
                 for t in dim_tasks
             ], return_exceptions=True)
 
-        for dim in dimensions:
-            dim_id = dim.get("dimension_id", "?")
-            dim_name = dim.get("name", "")
-            dim_tasks = _build_single_dimension_query_tasks(dim)
-            if not dim_tasks:
-                continue
+        # Run all dimension semantic tasks in one batch (so all dimensions are evaluated together).
+        if qdrant_tasks:
             try:
-                dim_local_rows: List[Dict[str, Any]] = []
-                qdrant_tasks = _build_single_qdrant_dimension_tasks(dim)
-                if qdrant_tasks:
-                    dim_local_rows = _search_local_semantic(
+                local_rows.extend(
+                    _search_local_semantic(
                         tasks=qdrant_tasks,
                         max_total=max_local,
                         case_state=case_state,
                         run_id=run_id,
                         user_id=user_id,
                     )
-                if not dim_local_rows:
-                    local_results = _run_async(_run_local_dimension_queries(dim_tasks))
-                    for task, result in zip(dim_tasks, local_results):
-                        if isinstance(result, Exception):
-                            logger.warning(
-                                "[WATCHDOG] Local keyword task failed for dim=%s query=%r: %s",
-                                dim_id, task.get("query", "")[:60], result,
-                            )
-                            continue
-                        dim_local_rows.extend(result or [])
-                local_rows.extend(dim_local_rows)
-            except Exception as exc:
-                logger.warning("[WATCHDOG] Dimension local search failed for dim=%s (%s): %s",
-                               dim_id, dim_name, exc)
-                _db_log(
-                    run_id, "watchdog", "watchdog", "WARNING",
-                    f"🏛 Local dimension failed [dim={dim_id}|{dim_name}]: {exc}",
                 )
-                continue
+            except Exception as exc:
+                logger.warning("[WATCHDOG] Semantic local dimension batch failed: %s", exc)
+
+        # Fallback keyword retrieval for all dimension queries in parallel.
+        if len(local_rows) < max_local and all_dim_tasks:
+            local_results = _run_async(_run_local_dimension_queries(all_dim_tasks))
+            for task, result in zip(all_dim_tasks, local_results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "[WATCHDOG] Local keyword task failed for dim=%s query=%r: %s",
+                        task.get("dimension_id", "?"), task.get("query", "")[:60], result,
+                    )
+                    continue
+                local_rows.extend(result or [])
 
         local = _dedupe_local_rows(local_rows)
         if len(local) < max_local and primary_query:
@@ -1174,43 +1168,40 @@ def run_watchdog(
                 for t in dim_tasks
             ], return_exceptions=True)
 
-        for dim_idx, dim in enumerate(dimensions):
-            dim_id = dim.get("dimension_id", "?")
-            dim_name = dim.get("name", "")
-            dim_tasks = _build_single_dimension_query_tasks(dim)
-            if not dim_tasks:
-                continue
-            if dim_idx > 0:
-                time.sleep(IK_BATCH_STAGGER_SECS)
-            try:
-                dim_results = _run_async(_run_ik_dimension_queries(dim_tasks))
-            except Exception as exc:
-                logger.warning("[WATCHDOG] IK dimension failed for dim=%s (%s): %s",
-                               dim_id, dim_name, exc)
+        try:
+            # Execute all dimension queries together so all dimensions resolve in parallel.
+            dim_results = _run_async(_run_ik_dimension_queries(tasks))
+        except Exception as exc:
+            logger.warning("[WATCHDOG] IK dimension batch failed: %s", exc)
+            _db_log(run_id, "watchdog", "watchdog", "WARNING", f"📚 IK dimension batch failed: {exc}")
+            dim_results = []
+
+        for task, results in zip(tasks, dim_results):
+            dim_id = task.get("dimension_id", "?")
+            if isinstance(results, Exception):
+                logger.warning("[WATCHDOG] IK task failed for dim=%s query=%r: %s",
+                               dim_id, task.get("query", "")[:60], results)
                 _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                        f"📚 IK dimension failed [dim={dim_id}|{dim_name}]: {exc}")
+                        f"📚 IK query failed [{task.get('q_type')}|dim={dim_id}]: {results}")
                 continue
 
-            for task, results in zip(dim_tasks, dim_results):
-                if isinstance(results, Exception):
-                    logger.warning("[WATCHDOG] IK task failed for dim=%s query=%r: %s",
-                                   dim_id, task.get("query", "")[:60], results)
-                    _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                            f"📚 IK query failed [{task.get('q_type')}|dim={dim_id}]: {results}")
+            for candidate in results:
+                q_type = str(task.get("q_type") or "").strip().lower()
+                candidate["_query_type"] = q_type
+                candidate["is_provision_match"] = (q_type == "provision")
+                candidate["_dimension_id"] = dim_id
+                candidate["_dimension_name"] = task.get("dimension_name")
+                tid = (candidate.get("external_id") or "").strip()
+                if not tid:
                     continue
-
-                for candidate in results:
-                    tid = (candidate.get("external_id") or "").strip()
-                    if not tid:
-                        continue
-                    if _is_pending_result(candidate):
-                        continue
-                    if _is_low_hierarchy(candidate.get("docsource", "")):
-                        dropped_low_hierarchy += 1
-                        continue
-                    if tid not in seen_tids:
-                        candidate["_jurisdiction_priority"] = _jurisdiction_priority(candidate, case_state)
-                        seen_tids[tid] = candidate
+                if _is_pending_result(candidate):
+                    continue
+                if _is_low_hierarchy(candidate.get("docsource", "")) and q_type != "provision":
+                    dropped_low_hierarchy += 1
+                    continue
+                if tid not in seen_tids:
+                    candidate["_jurisdiction_priority"] = _jurisdiction_priority(candidate, case_state)
+                    seen_tids[tid] = candidate
 
     if not skip_ik:
         if False:
@@ -1361,28 +1352,19 @@ def run_watchdog(
                 asyncio.to_thread(_run_google_one, q) for q in dim_queries
             ], return_exceptions=True)
 
-        for dim in dimensions:
-            dim_id = dim.get("dimension_id", "?")
-            dim_name = dim.get("name", "")
-            dim_tasks = _build_single_dimension_query_tasks(dim)
-            dim_queries = [t["query"] for t in dim_tasks if t.get("query") in google_queries]
-            if not dim_queries:
+        try:
+            dim_results = _run_async(_run_google_dimension_queries(google_queries))
+        except Exception as exc:
+            logger.warning("[WATCHDOG] Google dimension batch failed: %s", exc)
+            dim_results = []
+        for query_text, result in zip(google_queries, dim_results):
+            if isinstance(result, Exception):
+                logger.warning("[WATCHDOG] Google query failed query=%r: %s", query_text[:60], result)
                 continue
-            try:
-                dim_results = _run_async(_run_google_dimension_queries(dim_queries))
-            except Exception as exc:
-                logger.warning("[WATCHDOG] Google dimension failed for dim=%s (%s): %s",
-                               dim_id, dim_name, exc)
-                continue
-            for query_text, result in zip(dim_queries, dim_results):
-                if isinstance(result, Exception):
-                    logger.warning("[WATCHDOG] Google query failed for dim=%s query=%r: %s",
-                                   dim_id, query_text[:60], result)
-                    continue
-                for g in result:
-                    link = (g.get("link") or "").strip()
-                    if link and link not in seen_google:
-                        seen_google[link] = g
+            for g in result:
+                link = (g.get("link") or "").strip()
+                if link and link not in seen_google:
+                    seen_google[link] = g
     else:
         with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, max(1, len(google_queries)))) as pool:
             gfuts = {pool.submit(_run_google_one, q): q for q in google_queries}

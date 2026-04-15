@@ -1214,6 +1214,11 @@ def _normalize_source_key(value: Any) -> str:
         return "admin_upload"
     if raw in ("ik", "indiankanoon", "indian kanoon"):
         return "indian_kanoon"
+    if raw in (
+        "google", "google_search", "google_grounding",
+        "casemine", "bharatlaw", "lawfinderlive", "ecourts",
+    ):
+        return "google"
     return raw or "unknown"
 
 _AUDIT_TO_STATUS = {
@@ -1973,10 +1978,12 @@ def _judgement_to_citation(
     if audit_info:
         local_check = audit_info.get("local_check") or {}
         ik_check    = audit_info.get("ik_check") or {}
-        if local_check.get("verified"):
-            source_key = "local"
-        elif ik_check.get("verified"):
-            source_key = "indian_kanoon"
+        # Keep source as judgment origin; auditor checks are verification routes, not source override.
+        if source_key in ("unknown", ""):
+            if ik_check.get("verified"):
+                source_key = "indian_kanoon"
+            elif local_check.get("verified"):
+                source_key = "local"
 
     source_label = _SOURCE_LABELS.get(source_key, source_key.replace("_", " ").title())
     citation_data = j.get("citation_data") if isinstance(j.get("citation_data"), dict) else {}
@@ -2295,6 +2302,9 @@ def _judgement_to_citation(
         "source":                   source_key,
         "sourceLabel":              source_label,
         "dataComplete":             data_complete,
+        # Persist explicit report-source attribution for later fetch/render.
+        "sourceStored":             source_key,
+        "sourceLabelStored":        source_label,
         "fetchedFrom":              fetched_from_text,
         "auditStatus":              audit_status or j.get("audit_status") or "not_audited",
         "librarianStatus":          j.get("librarian_status") or "not_validated",
@@ -2339,7 +2349,13 @@ def _judgement_to_citation(
         ) else "",
         "isProvisionMatch":         bool(j.get("is_provision_match")),
         "similarityScore":          float(j.get("_similarity_score") or 0.0),
-        "sourceType":               (str(j.get("source_type") or citation_data.get("source_type") or "").strip().lower() or None),
+        # Keep sourceType in strict report buckets for UI consistency.
+        # Allowed values: local, indian_kanoon, google.
+        "sourceType":               (
+            "local" if source_key == "admin_upload" else (
+                source_key if source_key in ("local", "indian_kanoon", "google") else "local"
+            )
+        ),
         # Structured legal metadata block requested by consumers.
         "metadata": {
             "caseName": _na(case_name),
@@ -2518,8 +2534,8 @@ def build_report_from_judgements(
 
     def _is_incomplete_citation(c: Dict[str, Any]) -> bool:
         """
-        Drop citations that still carry placeholder-quality extraction.
-        Requirement: if key points are incomplete, do not show the judgment.
+        Detect citations that still carry placeholder-quality extraction.
+        Kept only for confidence labeling; incomplete citations are not dropped.
         """
         def _bad(v: Any) -> bool:
             s = str(v or "").strip().lower()
@@ -2557,13 +2573,124 @@ def build_report_from_judgements(
             return True
         return False
 
+    def _normalize_incomplete_citation(c: Dict[str, Any], j: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Keep incomplete entries in the report by normalizing critical fields.
+        LLM enrichment already ran in _enrich_with_gemini; this function applies
+        deterministic fallbacks from extracted snippet/metadata.
+        """
+        citation_data = j.get("citation_data") if isinstance(j.get("citation_data"), dict) else {}
+        excerpt = c.get("excerpt") if isinstance(c.get("excerpt"), dict) else {}
+        fallback_excerpt = (
+            str(excerpt.get("text") or "").strip()
+            or str(j.get("excerpt_text") or "").strip()
+            or str(citation_data.get("excerpt_text") or "").strip()
+            or str(j.get("summary_text") or "").strip()
+            or str(j.get("holding_text") or "").strip()
+            or str(j.get("ratio") or "").strip()
+        )
+
+        def _fill_str(value: Any, *fallbacks: Any) -> str:
+            val = str(value or "").strip()
+            if val and val not in ("—", "null", "None"):
+                return val
+            for f in fallbacks:
+                fs = str(f or "").strip()
+                if fs and fs not in ("—", "null", "None"):
+                    return fs
+            return "Not Available"
+
+        c["caseName"] = _fill_str(c.get("caseName"), j.get("case_name"), citation_data.get("case_name"))
+        c["primaryCitation"] = _fill_str(
+            c.get("primaryCitation"),
+            j.get("primary_citation"),
+            citation_data.get("official_citation"),
+        )
+        c["court"] = _fill_str(c.get("court"), j.get("court"), citation_data.get("court_name"))
+        c["coram"] = _fill_str(c.get("coram"), j.get("coram"), citation_data.get("bench_name"))
+        c["dateOfJudgment"] = _fill_str(
+            c.get("dateOfJudgment"),
+            j.get("date_judgment"),
+            citation_data.get("judgment_date_ddmmyyyy"),
+        )
+        c["ratio"] = _fill_str(c.get("ratio"), fallback_excerpt)
+        if not isinstance(c.get("excerpt"), dict):
+            c["excerpt"] = {"para": "Para", "text": _fill_str(fallback_excerpt)}
+        else:
+            c["excerpt"]["text"] = _fill_str(c.get("excerpt", {}).get("text"), fallback_excerpt)
+            c["excerpt"]["para"] = _fill_str(c.get("excerpt", {}).get("para"), "Para")
+        source_key = _normalize_source_key(
+            c.get("source")
+            or c.get("sourceType")
+            or j.get("source")
+            or j.get("source_type")
+            or citation_data.get("source_type")
+        )
+        source_label = _SOURCE_LABELS.get(source_key, source_key.replace("_", " ").title())
+        c["source"] = source_key
+        c["sourceLabel"] = source_label
+        c["sourceApplication"] = source_label
+        c["sourceType"] = source_key
+        c["sourceUrl"] = _fill_str(c.get("sourceUrl"), j.get("source_url"), citation_data.get("source_url"))
+        c["officialSourceLink"] = _fill_str(
+            c.get("officialSourceLink"),
+            j.get("official_source_url"),
+            citation_data.get("official_source_url"),
+            c.get("sourceUrl"),
+        )
+        c["importSourceLink"] = _fill_str(c.get("importSourceLink"), c.get("sourceUrl"), c.get("officialSourceLink"))
+        # Stored-with-report source fields: fetched later exactly as persisted.
+        c["sourceStored"] = source_key
+        c["sourceLabelStored"] = source_label
+        return c
+
+    def _build_not_available_citation(index: int, jid: str, source_hint: str = "local") -> Dict[str, Any]:
+        source_key = _normalize_source_key(source_hint or "local")
+        if source_key == "admin_upload":
+            source_key = "local"
+        source_label = _SOURCE_LABELS.get(source_key, source_key.replace("_", " ").title())
+        return {
+            "id": f"cit-{index + 1:03d}",
+            "canonicalId": jid,
+            "caseName": "Not Available",
+            "primaryCitation": "Not Available",
+            "alternateCitations": [],
+            "court": "Not Available",
+            "coram": "Not Available",
+            "benchType": "",
+            "dateOfJudgment": "Not Available",
+            "ratio": "Not Available",
+            "headnote": "Not Available",
+            "excerpt": {"para": "Para", "text": "Not Available"},
+            "verificationStatus": "YELLOW",
+            "verificationStatusLabel": "Requires review",
+            "confidence": 0,
+            "dataComplete": False,
+            "source": source_key,
+            "sourceType": source_key,
+            "sourceLabel": source_label,
+            "sourceApplication": source_label,
+            "sourceStored": source_key,
+            "sourceLabelStored": source_label,
+            "sourceUrl": "Not Available",
+            "officialSourceLink": "Not Available",
+            "importSourceLink": "Not Available",
+            "fetchedFrom": "Not Available",
+            "argumentParty": "neutral",
+            "partyBadge": _PARTY_BADGE["neutral"],
+            "treatment": {"followed": 0, "distinguished": 0, "overruled": 0, "note": "Not Available"},
+            "issue": "Not Available",
+            "relevanceToCurrentCase": "Not Available",
+            "storedInEs": jid or "Not Available",
+        }
+
     # ── Worker: load → enrich → tag → filter ─────────────────────────────────
     def _process_one(args: tuple) -> Optional[Dict[str, Any]]:
         i, jid = args
         j = judgement_get(jid)
         if not j:
-            logger.warning("  [SKIP] %s not in DB", jid)
-            return None
+            logger.warning("  [FALLBACK] %s not in DB — keeping citation with Not Available fields", jid)
+            return _build_not_available_citation(i, jid)
 
         hint = local_judgement_hints.get(jid) or {}
         if hint.get("citation_tags"):
@@ -2625,6 +2752,7 @@ def build_report_from_judgements(
             explicit_perspective=_perspective,
             dimensions=dimensions,
         )
+        cit = _normalize_incomplete_citation(cit, j)
 
         # ── PERSPECTIVE FILTER ────────────────────────────────────────────────
         # Only apply when user chose a specific perspective (not "all").
@@ -2632,7 +2760,9 @@ def build_report_from_judgements(
         # Keep citations tagged as the requested perspective OR neutral.
         if _perspective:
             argument_party = cit.get("argumentParty", "neutral")
-            if argument_party != _perspective:
+            verified_status = str(cit.get("verificationStatus") or "").upper()
+            keep_verified = verified_status in {"GREEN", "YELLOW", "STALE"}
+            if argument_party != _perspective and not keep_verified:
                 logger.debug(
                     "  [PERSPECTIVE_SKIP] jid=%s tagged=%s wanted=%s — dropping",
                     jid, argument_party, _perspective,
@@ -2662,6 +2792,9 @@ def build_report_from_judgements(
                     )
             except Exception as e:
                 logger.warning("  [ERROR] citation processing failed for %s: %s", jid, e)
+                # Do not skip on per-citation processing failures; keep full report shape.
+                orig_index = next((i for i, _jid in enumerate(judgement_ids) if _jid == jid), 0)
+                results_map[jid] = _build_not_available_citation(orig_index, jid)
 
     # Preserve original ordering
     citations: List[Dict[str, Any]] = []

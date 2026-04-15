@@ -24,11 +24,14 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
+import certifi
 import httpx
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +384,59 @@ def fetch_google_candidates(
             f"📡 Google URL fetch — {len(candidates)} URL(s)…",
             {"total": len(candidates)})
 
+    def _read_url_with_ssl_retry(link: str, title: str) -> str:
+        """
+        Fetch URL content with robust SSL handling:
+        1) requests + certifi CA bundle
+        2) retry once
+        3) optional dev fallback via unverified SSL context
+        """
+        allow_unverified = (os.environ.get("CITATION_ALLOW_INSECURE_SSL_FALLBACK") or "1").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        last_err: Optional[Exception] = None
+        for attempt in range(1, 3):
+            try:
+                resp = requests.get(
+                    link,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; JurinexCitation/1.0)"},
+                    timeout=15,
+                    verify=certifi.where(),
+                )
+                resp.raise_for_status()
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if "pdf" in content_type or link.lower().endswith(".pdf"):
+                    return "[PDF content not extracted in fetcher; URL stored for reference.]"
+                resp.encoding = resp.encoding or "utf-8"
+                return (resp.text or "")[:300_000]
+            except Exception as exc:
+                last_err = exc
+                logger.warning(
+                    "[FETCHER] GET attempt %d failed %s: %s",
+                    attempt, link[:80], exc,
+                )
+                if attempt < 2:
+                    continue
+
+        if allow_unverified:
+            try:
+                _db_log(run_id, "fetcher", "fetcher", "WARNING",
+                        f"  ⚠ SSL verify failed; trying insecure dev fallback: {title}")
+                req = urllib.request.Request(link, method="GET")
+                req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                    raw = resp.read()
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                if "pdf" in content_type or link.lower().endswith(".pdf"):
+                    return "[PDF content not extracted in fetcher; URL stored for reference.]"
+                return raw.decode("utf-8", errors="replace")[:300_000]
+            except Exception as exc:
+                last_err = exc
+        if last_err:
+            logger.warning("[FETCHER] Exhausted retries for %s: %s", link[:80], last_err)
+        return ""
+
     def _fetch_one_google(c: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         link  = c.get("link", "")
         title = (c.get("title") or link)[:70]
@@ -411,18 +467,11 @@ def fetch_google_candidates(
         _db_log(run_id, "fetcher", "fetcher", "INFO",
                 f"  🌐 GET: {title} | {link[:60]}")
         try:
-            req = urllib.request.Request(link, method="GET")
-            req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read()
-                content_type = (resp.headers.get("Content-Type") or "").lower()
-            try:
-                raw_content = raw.decode("utf-8", errors="replace")
-            except Exception:
-                raw_content = ""
-            if "pdf" in content_type or link.lower().endswith(".pdf"):
-                raw_content = "[PDF content not extracted in fetcher; URL stored for reference.]"
-            content = (raw_content or "")[:300_000]
+            content = _read_url_with_ssl_retry(link, title)
+            if not content:
+                _db_log(run_id, "fetcher", "fetcher", "WARNING",
+                        f"  ⚠ URL fetch returned empty after retry: {link[:60]}")
+                return None
 
             # ── Stub filter ───────────────────────────────────────────────────
             if len(content) < MIN_JUDGMENT_CHARS:
