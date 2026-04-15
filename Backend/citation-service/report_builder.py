@@ -2693,6 +2693,12 @@ def build_report_from_judgements(
             return _build_not_available_citation(i, jid)
 
         hint = local_judgement_hints.get(jid) or {}
+        # If this citation came from Watchdog local retrieval path, source in report
+        # should reflect Local DB fetch route (not original ingestion provenance).
+        if hint:
+            j["source"] = "local"
+            if not j.get("source_type"):
+                j["source_type"] = "local"
         if hint.get("citation_tags"):
             j["citation_tags"] = list(hint.get("citation_tags") or [])
         if hint.get("relevance_badge_hint"):
