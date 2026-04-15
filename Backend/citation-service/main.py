@@ -283,7 +283,15 @@ def _html_to_text(content: str) -> str:
 
 def _set_run_state(run_id: str, state: Dict[str, Any]) -> None:
     with _run_state_lock:
-        _run_state[run_id] = state
+        prev = _run_state.get(run_id) or {}
+        now_ts = time.time()
+        merged = {**prev, **state}
+        if "started_at_ts" not in merged:
+            merged["started_at_ts"] = now_ts
+        merged["updated_at_ts"] = now_ts
+        if "slot_released" not in merged:
+            merged["slot_released"] = False
+        _run_state[run_id] = merged
         try:
             _run_state_order.remove(run_id)
         except ValueError:
@@ -303,6 +311,18 @@ def _release_pipeline_slot() -> None:
         _pipeline_slots.release()
     except ValueError:
         pass
+
+
+def _release_pipeline_slot_once(run_id: str) -> None:
+    should_release = False
+    with _run_state_lock:
+        st = _run_state.get(run_id) or {}
+        if not st.get("slot_released"):
+            st["slot_released"] = True
+            _run_state[run_id] = st
+            should_release = True
+    if should_release:
+        _release_pipeline_slot()
 
 
 app = FastAPI(
@@ -948,7 +968,7 @@ async def generate_citation_report(
             logger.exception("Pipeline failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e)) from e
         finally:
-            _release_pipeline_slot()
+            _release_pipeline_slot_once(run_id)
         if out.get("error"):
             raise HTTPException(status_code=500, detail=out["error"])
 
@@ -1666,6 +1686,7 @@ async def get_citation_usage_by_run(
 # In-memory run state: run_id → {status, report_id, report_format, error}
 _run_state: Dict[str, Dict[str, Any]] = {}
 STALE_RUN_TIMEOUT_SECONDS = max(60, _env_int("CITATION_STALE_RUN_TIMEOUT_SECONDS", 180))
+INMEMORY_RUN_TIMEOUT_SECONDS = max(120, _env_int("CITATION_INMEMORY_RUN_TIMEOUT_SECONDS", 900))
 
 @app.post("/citation/report/start")
 async def start_citation_report(
@@ -1797,8 +1818,30 @@ async def start_citation_report(
 async def get_run_status(run_id: str) -> Dict[str, Any]:
     """Poll for pipeline run completion. Returns status + report when done."""
     with _run_state_lock:
-        state = _run_state.get(run_id)
+        state = dict(_run_state.get(run_id) or {})
     if state:
+        if state.get("status") == "running":
+            now_ts = time.time()
+            last_ts = float(state.get("updated_at_ts") or state.get("started_at_ts") or now_ts)
+            age_seconds = max(0, int(now_ts - last_ts))
+            if age_seconds >= INMEMORY_RUN_TIMEOUT_SECONDS:
+                error = (
+                    f"Run timed out after {age_seconds}s without completion. "
+                    "Marked as failed to avoid stuck pipeline."
+                )
+                _set_run_state(run_id, {
+                    "status": "failed",
+                    "report_id": None,
+                    "report_format": None,
+                    "error": error,
+                })
+                try:
+                    pipeline_run_update(run_id, "failed", error_message=error)
+                except Exception:
+                    pass
+                _release_pipeline_slot_once(run_id)
+                with _run_state_lock:
+                    state = dict(_run_state.get(run_id) or {})
         return {"success": True, "run_id": run_id, **state}
     # Fallback: check DB citation_pipeline_runs table
     from db.connections import get_pg_conn
