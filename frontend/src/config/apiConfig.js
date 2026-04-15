@@ -5,7 +5,7 @@
  * Environment variables are supported with sensible defaults.
  */
 
-const DEFAULT_GATEWAY_URL = '';
+const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
 // Get base gateway URL from environment or use deployed default
 const GATEWAY_URL =
