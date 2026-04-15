@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+import asyncio
 from collections import deque
 import httpx
 from pathlib import Path
@@ -71,6 +72,7 @@ def _env_int(name: str, default: int) -> int:
 
 PIPELINE_MAX_CONCURRENT_RUNS = max(1, _env_int("CITATION_MAX_CONCURRENT_RUNS", 2))
 RUN_STATE_MAX_ENTRIES = max(50, _env_int("CITATION_RUN_STATE_MAX_ENTRIES", 500))
+SYNC_PIPELINE_TIMEOUT_SECONDS = max(60, _env_int("CITATION_SYNC_PIPELINE_TIMEOUT_SECONDS", 840))
 _pipeline_slots = threading.BoundedSemaphore(PIPELINE_MAX_CONCURRENT_RUNS)
 _run_state_lock = threading.Lock()
 _run_state_order: deque[str] = deque()
@@ -957,18 +959,32 @@ async def generate_citation_report(
                 detail=f"Citation pipeline is busy. Try again shortly. Max concurrent runs: {PIPELINE_MAX_CONCURRENT_RUNS}",
             )
         try:
-            out = run_pipeline(
-                query,
-                user_id,
-                ingest_external=True,
-                case_file_context=case_file_context or [],
-                case_id=case_id,
+            out = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_pipeline,
+                    query,
+                    user_id,
+                    True,
+                    case_file_context or [],
+                    case_id,
+                ),
+                timeout=SYNC_PIPELINE_TIMEOUT_SECONDS,
             )
+        except asyncio.TimeoutError as e:
+            logger.error(
+                "Pipeline timed out after %ss for query=%r",
+                SYNC_PIPELINE_TIMEOUT_SECONDS,
+                query[:120],
+            )
+            raise HTTPException(
+                status_code=504,
+                detail=f"Pipeline timed out after {SYNC_PIPELINE_TIMEOUT_SECONDS}s",
+            ) from e
         except Exception as e:
             logger.exception("Pipeline failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e)) from e
         finally:
-            _release_pipeline_slot_once(run_id)
+            _release_pipeline_slot()
         if out.get("error"):
             raise HTTPException(status_code=500, detail=out["error"])
 
