@@ -206,7 +206,21 @@ def get_es_client():
                 probe_client = Elasticsearch(url, **probe_kwargs)
             else:
                 probe_client = Elasticsearch(url, **probe_kwargs)
-            if not probe_client.ping(request_timeout=ES_PING_TIMEOUT):
+            ping_ok = False
+            try:
+                ping_ok = bool(probe_client.ping(request_timeout=ES_PING_TIMEOUT))
+            except Exception:
+                ping_ok = False
+            if not ping_ok:
+                # Some managed/proxied ES endpoints return 400 on HEAD / used by ping().
+                # Fallback to GET / (info API) before declaring ES unreachable.
+                try:
+                    _ = probe_client.info()
+                    ping_ok = True
+                    logger.info("[ES] ping() failed but info() succeeded for %s; continuing with ES client.", url)
+                except Exception:
+                    ping_ok = False
+            if not ping_ok:
                 _es_last_failure_at = now
                 logger.warning("[ES] Elasticsearch unreachable at %s — ES indexing disabled for this process.", url)
                 return None
