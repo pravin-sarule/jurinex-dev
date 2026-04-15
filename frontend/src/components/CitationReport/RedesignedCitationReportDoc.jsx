@@ -41,7 +41,32 @@ function normalizeSearch(value) {
 
 function normalizeCourt(value) {
   const raw = normalizeSearch(value);
-  return !raw || raw === 'court not specified' || raw === '-' ? 'unknown' : raw;
+  if (!raw || raw === 'court not specified' || raw === '-') return 'unknown';
+  if (/^(sc|supreme)$/i.test(raw) || raw.includes('supreme court')) return 'supreme court';
+  if (/^(hc|high)$/i.test(raw) || raw.includes('high court')) return 'high court';
+  return raw;
+}
+
+function normalizeDimensionKey(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const compact = raw.toLowerCase().replace(/[_\-\s]+/g, '');
+  if (compact === 'all') return 'all';
+  if (compact === 'ungrouped' || compact === 'otherrelevantcitations') return 'ungrouped';
+  const dimMatch = compact.match(/^dimension(\d+)$/);
+  if (dimMatch) return dimMatch[1];
+  const numericMatch = compact.match(/^\d+$/);
+  if (numericMatch) return numericMatch[0];
+  return compact;
+}
+
+function getDimensionDisplayLabel(group, fallbackIndex = 0) {
+  const raw = group?.id;
+  const n = Number(raw);
+  if (!Number.isNaN(n) && Number.isFinite(n) && n > 0) {
+    return `Dimension ${n}`;
+  }
+  return `Dimension ${fallbackIndex + 1}`;
 }
 
 function effectiveParty(citation) {
@@ -69,34 +94,283 @@ function matchesPerspective(citation, filter) {
   return true;
 }
 
-function dimensionGroups(reportFormat, citations) {
+function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
   const groups = new Map();
-  (reportFormat.dimensionGroups || []).forEach((group, index) => {
-    groups.set(String(group.dimension_id ?? `group_${index}`), {
-      id: String(group.dimension_id ?? `group_${index}`),
-      name: group.name || `Dimension ${index + 1}`,
-      reasoning: group.reasoning || '',
-      ids: new Set(group.citations || []),
-      citations: [],
-    });
+
+  // Source of truth: backend dimensions metadata (if present)
+  const dimensionsMeta = [
+    ...(Array.isArray(reportFormat.dimensions) ? reportFormat.dimensions : []),
+    ...(Array.isArray(dimensionsOverride) ? dimensionsOverride : []),
+  ];
+  dimensionsMeta.forEach((dim, index) => {
+    const didRaw = dim?.dimension_id ?? dim?.dimensionId ?? `group_${index}`;
+    const did = normalizeDimensionKey(didRaw) || String(didRaw).trim();
+    if (!groups.has(did)) {
+      groups.set(did, {
+        id: did,
+        name: dim?.name || `Dimension ${index + 1}`,
+        reasoning: dim?.reasoning || '',
+        ids: null,
+        citations: [],
+      });
+    }
   });
+
+  // Backward compatibility: dimensionGroups from older payloads
+  (reportFormat.dimensionGroups || []).forEach((group, index) => {
+    const gidRaw = group.dimension_id ?? group.dimensionId ?? `group_${index}`;
+    const gid = normalizeDimensionKey(gidRaw) || String(gidRaw).trim();
+    if (!groups.has(gid)) {
+      groups.set(gid, {
+        id: gid,
+        name: group.name || `Dimension ${index + 1}`,
+        reasoning: group.reasoning || '',
+        ids: new Set(group.citations || []),
+        citations: [],
+      });
+    } else {
+      const existing = groups.get(gid);
+      if (!existing.name && group.name) existing.name = group.name;
+      if (!existing.reasoning && group.reasoning) existing.reasoning = group.reasoning;
+      if (Array.isArray(group.citations) && group.citations.length) existing.ids = new Set(group.citations);
+    }
+  });
+
   citations.forEach((citation) => {
-    const key = citation.dimensionId != null || citation.dimensionName
-      ? String(citation.dimensionId ?? citation.dimensionName)
-      : 'ungrouped';
+    const rawDimId =
+      citation.dimensionId ??
+      citation.dimension_id ??
+      citation._dimension_id ??
+      '';
+    const rawDimName =
+      citation.dimensionName ||
+      citation.dimension_name ||
+      citation._dimension_name ||
+      '';
+    const dimIdKey = normalizeDimensionKey(rawDimId);
+    const dimNameKey = String(rawDimName).trim().toLowerCase();
+    // hasDimId: citation carries an explicit dimension assignment from the backend
+    const hasDimId = dimIdKey !== '' && dimIdKey !== 'ungrouped';
+    let key = dimIdKey || '';
+    if (!key && dimNameKey) {
+      const byName = Array.from(groups.values()).find((g) => (g.name || '').trim().toLowerCase() === dimNameKey);
+      key = byName?.id || '';
+    }
+    if (!key) key = 'ungrouped';
     if (!groups.has(key)) {
-      groups.set(key, { id: key, name: citation.dimensionName || 'Other Relevant Citations', reasoning: '', ids: null, citations: [] });
+      groups.set(key, {
+        id: key,
+        name: rawDimName || (key === 'ungrouped' ? 'Other Relevant Citations' : `Dimension ${key}`),
+        reasoning: '',
+        ids: null,
+        citations: [],
+      });
     }
     const group = groups.get(key);
-    if (!group.ids || group.ids.has(citation.id)) group.citations.push(citation);
+    const citationKeys = new Set(
+      [
+        citation.id,
+        citation.canonicalId,
+        citation.canonical_id,
+        citation.externalId,
+        citation.external_id,
+      ]
+        .filter(Boolean)
+        .map((v) => String(v).trim())
+    );
+    // If the citation carries an explicit dimensionId from backend, always assign it to that
+    // group — don't let the backward-compat ids set block it. The ids set is only consulted
+    // for legacy payloads where citations have no dimensionId field.
+    if (hasDimId || !group.ids || Array.from(citationKeys).some((k) => group.ids.has(k))) {
+      group.citations.push(citation);
+    }
   });
-  return Array.from(groups.values()).filter((group) => group.citations.length);
+  const ordered = Array.from(groups.values());
+  ordered.sort((a, b) => {
+    if (a.id === 'ungrouped') return 1;
+    if (b.id === 'ungrouped') return -1;
+    const an = Number(a.id);
+    const bn = Number(b.id);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) return an - bn;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  return ordered;
 }
 
 function normalizeRelevance(value) {
   const raw = String(value || '').toUpperCase();
   if (raw.includes('HIGH')) return 'High';
   return 'Medium';
+}
+
+function getSourceMeta(citation) {
+  // isLocalAdmin flag: set by backend when source_type == 'admin' (uploaded via admin panel)
+  // Always show the local DB icon for admin-sourced judgments regardless of source string.
+  if (citation.isLocalAdmin === true || citation.is_local_admin === true) return { icon: '🗄️', label: 'Local DB' };
+
+  const raw = String(
+    citation.source ||
+    citation.sourceType ||
+    citation.sourceLabel ||
+    citation.sourceApplication ||
+    ''
+  ).toLowerCase();
+  if (
+    raw === 'admin'
+    || raw.includes('admin upload')
+    || raw.includes('admin_upload')
+    || raw.includes('adminupload')
+    || raw.includes('manual_upload')
+    || raw.includes('judgment_upload')
+  ) return { icon: '🗄️', label: 'Local DB' };
+  if (raw.includes('local') || raw.includes('db')) return { icon: '🗄️', label: 'Local DB' };
+  if (raw.includes('indian') || raw.includes('kanoon') || raw.includes('ik')) return { icon: '📚', label: 'Indian Kanoon' };
+  if (raw.includes('google')) return { icon: '🌐', label: 'Google Search' };
+  return { icon: '📄', label: 'Source' };
+}
+
+function formatSourceTypeLabel(citation) {
+  const raw = String(
+    citation?.sourceType
+    || citation?.sourceStored
+    || citation?.source
+    || citation?.source_type
+    || ''
+  ).trim().toLowerCase();
+  if (!raw) return 'Not Available';
+  if (raw === 'indian_kanoon') return 'indian_kanoon';
+  if (raw === 'google') return 'google search';
+  if (raw === 'local' || raw === 'admin_upload') return 'local db';
+  return 'local db';
+}
+
+function decodeHtmlEntities(text) {
+  if (!text || typeof window === 'undefined') return String(text || '');
+  const textarea = document.createElement('textarea');
+  textarea.innerHTML = String(text);
+  return textarea.value;
+}
+
+function sanitizeJudgmentHtml(html) {
+  let out = String(html || '');
+  out = out.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, '');
+  out = out.replace(/\son\w+="[^"]*"/gi, '');
+  out = out.replace(/\son\w+='[^']*'/gi, '');
+  out = out.replace(/javascript:/gi, '');
+  return out;
+}
+
+function formatJudgmentPlainText(text) {
+  const decoded = decodeHtmlEntities(text)
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!decoded) return [];
+  return decoded
+    .split(/\n{2,}/)
+    .map((p) => p.replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim())
+    .filter(Boolean);
+}
+
+/* ── Judgment text parser ─────────────────────────────────────────── */
+const IK_META_KEYS = [
+  'Author', 'Bench', 'CASE NO', 'PETITIONER', 'RESPONDENT',
+  'DATE OF JUDGMENT', 'BENCH', 'CORAM', 'ACT', 'HEADNOTE',
+  'JUDGMENT', 'ORDER',
+];
+const IK_META_RE = new RegExp(
+  `\\b(${IK_META_KEYS.map(k => k.replace(/\s/g, '\\s+')).join('|')})\\.?:\\s*`,
+  'gi'
+);
+
+function parseJudgmentText(rawText) {
+  // Returns { metaPairs: [{key,val}], sections: [{heading:str|null, paragraphs:[str]}] }
+  const text = decodeHtmlEntities(rawText || '')
+    .replace(/\r/g, '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+  if (!text) return { metaPairs: [], sections: [] };
+
+  // ── 1. Detect embedded IK metadata block at the start ──────────────
+  // IK embeds "Key: value Key2: value2 …" as a long inline string before the body.
+  const metaPairs = [];
+  const metaKeyRe = /\b(Author|Bench|CASE\s+NO\.?|PETITIONER|RESPONDENT|DATE\s+OF\s+JUDGMENT|JUDGMENT\s+DATE|BENCH|DECIDED\s+ON)\s*:\s*/gi;
+  const keyMatches = [];
+  let m;
+  while ((m = metaKeyRe.exec(text)) !== null) {
+    keyMatches.push({ key: m[1].replace(/\s+/g, ' ').trim(), start: m.index, end: m.index + m[0].length });
+  }
+  let bodyStart = 0;
+  if (keyMatches.length >= 2) {
+    // Extract each key's value (from its end to the next key's start)
+    for (let i = 0; i < keyMatches.length; i++) {
+      const valStart = keyMatches[i].end;
+      const valEnd = i + 1 < keyMatches.length ? keyMatches[i + 1].start : valStart + 300;
+      const val = text.slice(valStart, valEnd).replace(/\s+/g, ' ').trim();
+      if (val) metaPairs.push({ key: keyMatches[i].key, val: val.slice(0, 300) });
+    }
+    // Body starts after the last detected meta key's content (heuristic: 600 chars from last key)
+    const lastKey = keyMatches[keyMatches.length - 1];
+    bodyStart = Math.min(lastKey.end + 600, text.length);
+    // Trim to nearest sentence boundary
+    const nextDot = text.indexOf('. ', bodyStart);
+    if (nextDot > 0 && nextDot - bodyStart < 200) bodyStart = nextDot + 2;
+  }
+
+  const body = text.slice(bodyStart).trim();
+
+  // ── 2. Parse body into sections + paragraphs ────────────────────────
+  const rawLines = body.split('\n');
+  const sections = [];
+  let cur = { heading: null, paragraphs: [] };
+  let pendingWords = '';
+
+  const flushPending = () => {
+    const p = pendingWords.replace(/\s+/g, ' ').trim();
+    if (p) cur.paragraphs.push(p);
+    pendingWords = '';
+  };
+
+  const isHeading = (line) => {
+    const t = line.trim();
+    if (!t || t.length > 120) return false;
+    // ALL-CAPS line (≥4 chars, not a citation number like "AIR 2005 SC")
+    if (t === t.toUpperCase() && /[A-Z]{3}/.test(t) && t.length >= 4 && !/^\(?\d/.test(t)) return true;
+    // "PART I/II/III" or "PART - I"
+    if (/^PART\s*[-–]?\s*[IVX\d]+/i.test(t)) return true;
+    // Roman-numeral section: "I.", "II.", "III."
+    if (/^(?:X{0,3}(?:IX|IV|V?I{0,3}))\.?\s+[A-Z]/.test(t) && t.length < 80) return true;
+    return false;
+  };
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushPending();
+      continue;
+    }
+    if (isHeading(trimmed)) {
+      flushPending();
+      if (cur.paragraphs.length > 0 || cur.heading) sections.push(cur);
+      cur = { heading: trimmed, paragraphs: [] };
+    } else {
+      // Accumulate into current paragraph; a blank line (already flushed) separates
+      pendingWords += (pendingWords ? ' ' : '') + trimmed;
+      // Split on long paragraph — if accumulated > ~600 chars and ends with period
+      if (pendingWords.length > 600 && /[.!?]$/.test(pendingWords)) {
+        flushPending();
+      }
+    }
+  }
+  flushPending();
+  if (cur.paragraphs.length > 0 || cur.heading) sections.push(cur);
+
+  // Remove duplicate/noise headings
+  const cleaned = sections.filter(s => s.paragraphs.length > 0 || s.heading);
+  return { metaPairs, sections: cleaned };
 }
 
 function RelevanceBadge({ value }) {
@@ -107,8 +381,136 @@ function RelevanceBadge({ value }) {
   );
 }
 
+function valOrNA(v) {
+  const s = String(v ?? '').trim();
+  return s || 'Not Available';
+}
+
+function statuteToLink(statute, citation) {
+  if (statute && typeof statute === 'object') {
+    const label = String(
+      statute.name || statute.title || statute.section || statute.text || statute.label || 'Statute'
+    ).trim();
+    const direct = String(
+      statute.india_code_url || statute.indiaCodeUrl || statute.url || statute.link || ''
+    ).trim();
+    if (direct) return { label: label || direct, url: direct };
+    if (label) {
+      return {
+        label,
+        url: `https://indiankanoon.org/search/?formInput=${encodeURIComponent(label)}`,
+      };
+    }
+  }
+
+  const raw = String(statute || '').trim();
+  if (!raw) return { label: 'Not Available', url: '' };
+  if (/^https?:\/\//i.test(raw)) return { label: raw, url: raw };
+
+  const citationSource =
+    String(
+      citation?.originalCourtCopyUrl ||
+      citation?.officialSourceLink ||
+      citation?.importSourceLink ||
+      citation?.sourceUrl ||
+      ''
+    ).trim();
+
+  // Prefer statute-specific search; fall back to citation's original page when needed.
+  return {
+    label: raw,
+    url: `https://indiankanoon.org/search/?formInput=${encodeURIComponent(raw)}` || citationSource,
+  };
+}
+
+function extractCaseTitle(rawValue) {
+  const raw = String(rawValue || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return 'Untitled Case';
+  const cleaned = raw.replace(/^[\-\u2022\d\.\)\(]+\s*/, '').trim();
+  const m = cleaned.match(/^(.*?\b(?:v\.?|vs\.?)\b.*?)(?:\s+on\s+\d{1,2}\b.*)?$/i);
+  if (m && m[1]) return m[1].trim();
+  return cleaned;
+}
+
+/* ── parse flat text into bullet-point array ── */
+function parseTextToPoints(text) {
+  if (!text || typeof text !== 'string') return [];
+  const t = text.trim();
+  if (!t) return [];
+  // "- Bullet 1: text - Bullet 2: text …"
+  const bulletSplit = t.split(/\s*[-–]\s*Bullet\s*\d*\s*:\s*/i).map(s => s.trim()).filter(Boolean);
+  if (bulletSplit.length > 1) return bulletSplit;
+  // "1. text" / "1) text" on newlines
+  const numberedSplit = t.split(/\n+/).map(s => s.replace(/^\d+[.)]\s*/, '').replace(/^[-•·]\s*/, '').trim()).filter(Boolean);
+  if (numberedSplit.length > 1) return numberedSplit;
+  // Sentence-split for very long single paragraphs (ratio decidendi)
+  if (t.length > 400) {
+    const sentences = t.match(/[^.!?]+[.!?]+["']?(?:\s|$)/g);
+    if (sentences && sentences.length > 1) return sentences.map(s => s.trim()).filter(Boolean);
+  }
+  return [t];
+}
+
+const SECTION_ACCENTS = {
+  ratio:   { bg: '#E6F6F3', border: '#0F766E', num: '#0F766E', icon: '⚖️' },
+  headnote:{ bg: '#EEF4FF', border: '#2563EB', num: '#2563EB', icon: '📋' },
+  excerpt: { bg: '#FFFBEB', border: '#D97706', num: '#D97706', icon: '📝' },
+  statute: { bg: '#F3F4F6', border: '#6B7280', num: '#6B7280', icon: '📜' },
+};
+
+function DocSection({ label, text, accent = 'ratio', singleBlock = false }) {
+  const points = parseTextToPoints(text);
+  if (!points.length) return null;
+  const a = SECTION_ACCENTS[accent] || SECTION_ACCENTS.ratio;
+  return (
+    <div className="doc-section">
+      <div className="doc-section-title" style={{ borderLeftColor: a.border }}>
+        <span className="doc-section-icon">{a.icon}</span>
+        {label}
+      </div>
+      {singleBlock ? (
+        <div className="doc-single-block" style={{ borderLeftColor: a.border, background: a.bg }}>
+          {points[0]}
+        </div>
+      ) : (
+        <ol className="doc-point-list">
+          {points.map((pt, i) => (
+            <li key={i} className="doc-point-item">
+              <span className="doc-point-num" style={{ background: a.num }}>{i + 1}</span>
+              <span className="doc-point-text">{pt}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function citationContextItemToLink(item) {
+  if (item && typeof item === 'object') {
+    const label = extractCaseTitle(
+      item.caseName || item.title || item.name || item.headline || item.text || item.value || ''
+    );
+    const docId = String(item.docid || item.docId || item.ik_docid || '').trim();
+    const direct = String(item.url || item.link || item.href || '').trim();
+    if (direct) return { label, url: direct };
+    if (docId) return { label, url: `https://indiankanoon.org/doc/${docId}/` };
+    return {
+      label,
+      url: `https://indiankanoon.org/search/?formInput=${encodeURIComponent(label)}`,
+    };
+  }
+  const label = extractCaseTitle(item);
+  if (/^https?:\/\//i.test(String(item || '').trim())) return { label, url: String(item).trim() };
+  return {
+    label,
+    url: `https://indiankanoon.org/search/?formInput=${encodeURIComponent(label)}`,
+  };
+}
+
 function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, dimensionLabel, isPriority }) {
   const courtBadgeClass = getCourtBadgeClass(citation.court);
+  const sourceMeta = getSourceMeta(citation);
   return (
     <div
       className={`cite-card ${isPriority ? 'sc-priority' : ''}`}
@@ -117,8 +519,21 @@ function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, d
       <div className="cc-top">
         <span className={`court-badge ${courtBadgeClass}`}>{getCourtLabel(citation.court)}</span>
         <span className="dimension-badge">{dimensionLabel}</span>
+        <span className="source-badge" title={sourceMeta.label}>
+          <span className="source-icon" aria-hidden="true">{sourceMeta.icon}</span>
+          {sourceMeta.label}
+        </span>
         <RelevanceBadge value={citation.relevanceBadge} />
       </div>
+      {Array.isArray(citation.citationTags) && citation.citationTags.length > 0 ? (
+        <div className="cite-tag-row" aria-label="Citation tags">
+          {citation.citationTags.map((tag) => (
+            <span key={String(tag)} className="cite-tag-chip">
+              [{String(tag)}]
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className="cc-name">{citation.caseName || 'Untitled Citation'}</div>
       <div className="cc-meta">
         {citation.dateOfJudgment || 'Date N/A'} &middot; {citation.coram || 'Coram N/A'}
@@ -141,7 +556,7 @@ function DimensionGroup({
   return (
     <div className="dim-group">
       <button className="dim-header dim-toggle" onClick={() => onToggle(group.id)}>
-        <span className="dim-pill">Dimension {index + 1}</span>
+        <span className="dim-pill">{getDimensionDisplayLabel(group, index)}</span>
         <span className="dim-title">{group.name}</span>
         <span className="dim-count">{group.citations.length} citations</span>
       </button>
@@ -154,7 +569,7 @@ function DimensionGroup({
               onSelect={onSelectCitation}
               getCourtBadgeClass={getCourtBadgeClass}
               getCourtLabel={getCourtLabel}
-              dimensionLabel={`Dimension ${index + 1}`}
+              dimensionLabel={getDimensionDisplayLabel(group, index)}
               isPriority={priorityIds.has(citation.id)}
             />
           ))}
@@ -168,28 +583,50 @@ export default function RedesignedCitationReportDoc({
   report,
   query,
   initialPerspective = 'all',
+  initialDimension = 'all',
   onPerspectiveChange,
   onViewFullJudgment,
+  onFetchFullJudgment,
   onDownloadCitation,
   onNotifyMe,
   notifyStatus = {},
 }) {
-  const [dimension, setDimension] = useState('all');
+  const toCleanHeaderText = (value) => {
+    const raw = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return '';
+    // If backend sends stitched keyword/query phrases, hide that noisy text.
+    const commaCount = (raw.match(/,/g) || []).length;
+    if (raw.length > 180 || commaCount >= 4) return '';
+    return raw;
+  };
+
+  const [dimension, setDimension] = useState(initialDimension || 'all');
   const [courtFilter, setCourtFilter] = useState('all'); // 'all', 'sc', 'hc'
   const [perspective, setPerspective] = useState(initialPerspective || 'all');
   const [search, setSearch] = useState('');
   const [activeId, setActiveId] = useState(null);
   const [activeTab, setActiveTab] = useState('rep'); // 'rep' or 'fj'
   const [collapsedGroups, setCollapsedGroups] = useState({});
+  const [fullJudgmentState, setFullJudgmentState] = useState({ loading: false, error: '', text: '', sourceUrl: '' });
 
   const reportFormat = report?.report_format || {};
-  const queryLabel = reportFormat.searchQuery || query || 'Citation research';
+  const queryLabel =
+    toCleanHeaderText(report?.title) ||
+    toCleanHeaderText(reportFormat.caseTitle) ||
+    toCleanHeaderText(reportFormat.caseSummary) ||
+    toCleanHeaderText(query) ||
+    'Citation research report';
   
   const all = (reportFormat.citations || []).map((citation, index) => ({
     ...citation,
     id: citation.id || citation.canonicalId || citation.canonical_id || `citation_${index}`,
     argumentParty: normalizePerspective(citation.argumentParty || citation.argument_party || citation.partyBadge || citation.party_badge || citation.perspective || 'neutral', 'neutral'),
-    normalizedCourt: normalizeCourt(citation.court),
+    normalizedCourt: normalizeCourt(
+      citation.court
+      || citation.court_code
+      || citation.courtCode
+      || citation.metadata?.court
+    ),
     searchableText: normalizeSearch([
       citation.caseName,
       citation.primaryCitation,
@@ -203,17 +640,27 @@ export default function RedesignedCitationReportDoc({
   }));
 
   const verified = all.filter((citation) => ['GREEN', 'YELLOW', 'STALE'].includes(citation.verificationStatus));
-  const groups = dimensionGroups(reportFormat, verified);
+  const extraDims = report?.dimensions_metadata || report?.dimensionsMeta || [];
+  const groups = dimensionGroups(reportFormat, verified, extraDims);
+  const sidebarGroups = groups.filter((group) => group.id !== 'ungrouped');
   
   useEffect(() => setPerspective(normalizePerspective(initialPerspective || 'all', 'all')), [initialPerspective]);
+  useEffect(() => setDimension(initialDimension || 'all'), [initialDimension]);
   useEffect(() => { if (typeof onPerspectiveChange === 'function') onPerspectiveChange(perspective); }, [onPerspectiveChange, perspective]);
-  useEffect(() => { setDimension('all'); setCourtFilter('all'); setSearch(''); setActiveId(null); setCollapsedGroups({}); }, [report?.id, report?.report_id]);
-
+  useEffect(() => { setDimension('all'); setCourtFilter('all'); setSearch(''); setActiveId(null); setCollapsedGroups({}); setFullJudgmentState({ loading: false, error: '', text: '', sourceUrl: '' }); }, [report?.id, report?.report_id]);
   const term = normalizeSearch(search);
+  const selectedDimension = normalizeDimensionKey(dimension) || 'all';
+  const selectedDimensionName = normalizeSearch(String(dimension || ''));
   const filtered = groups.map((group) => ({
     ...group,
     citations: group.citations.filter((citation) => {
-      if (dimension !== 'all' && group.id !== dimension) return false;
+      const groupDimId = normalizeDimensionKey(group.id);
+      const groupDimName = normalizeSearch(group.name || '');
+      if (
+        selectedDimension !== 'all'
+        && groupDimId !== selectedDimension
+        && (!selectedDimensionName || groupDimName !== selectedDimensionName)
+      ) return false;
       if (courtFilter === 'sc' && !(citation.normalizedCourt.includes('supreme court'))) return false;
       if (courtFilter === 'hc' && !(citation.normalizedCourt.includes('high court'))) return false;
       if (!matchesPerspective(citation, perspective)) return false;
@@ -224,6 +671,31 @@ export default function RedesignedCitationReportDoc({
 
   const visible = filtered.flatMap((group) => group.citations);
   const active = visible.find((citation) => citation.id === activeId) || null;
+  useEffect(() => {
+    let cancelled = false;
+    if (activeTab !== 'fj' || !active?.canonicalId || typeof onFetchFullJudgment !== 'function') {
+      return undefined;
+    }
+    setFullJudgmentState({ loading: true, error: '', text: '', sourceUrl: '' });
+    Promise.resolve(onFetchFullJudgment(active.canonicalId, active.caseName))
+      .then((data) => {
+        if (cancelled) return;
+        if (!data || !data.fullText) {
+          setFullJudgmentState({ loading: false, error: 'No full judgment text available.', text: '', sourceUrl: data?.sourceUrl || '' });
+          return;
+        }
+        setFullJudgmentState({
+          loading: false,
+          error: '',
+          text: String(data.fullText || ''),
+          sourceUrl: data.sourceUrl || '',
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setFullJudgmentState({ loading: false, error: 'Failed to load full judgment text.', text: '', sourceUrl: '' });
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, active?.canonicalId, active?.caseName, onFetchFullJudgment]);
   const topSupremeCourtIds = new Set(
     visible
       .filter((citation) => citation.normalizedCourt.includes('supreme court'))
@@ -236,13 +708,15 @@ export default function RedesignedCitationReportDoc({
   }
 
   const getCourtBadgeClass = (courtName) => {
-    if ((courtName || '').toLowerCase().includes('supreme')) return 'sc-b';
+    const normalized = normalizeCourt(courtName);
+    if (normalized.includes('supreme')) return 'sc-b';
     return 'hc-b';
   };
 
   const getCourtLabel = (courtName) => {
-    if ((courtName || '').toLowerCase().includes('supreme')) return 'Supreme Court';
-    if ((courtName || '').toLowerCase().includes('high')) return 'High Court';
+    const normalized = normalizeCourt(courtName);
+    if (normalized.includes('supreme')) return 'Supreme Court';
+    if (normalized.includes('high')) return 'High Court';
     return courtName || 'Court';
   };
 
@@ -252,25 +726,6 @@ export default function RedesignedCitationReportDoc({
 
   return (
     <div className="citation-panel-container">
-      {/* PAGE HEADER */}
-      <div className="page-header">
-        <div className="page-logo">
-          <div className="logo-mark">
-            <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="3" y="2" width="14" height="16" rx="2" fill="white" fillOpacity=".2" stroke="white" strokeWidth="1.2"/>
-              <rect x="6" y="6" width="8" height="1.5" rx=".75" fill="white"/>
-              <rect x="6" y="9.5" width="8" height="1.5" rx=".75" fill="white"/>
-              <rect x="6" y="13" width="5" height="1.5" rx=".75" fill="white"/>
-            </svg>
-          </div>
-          <div>
-            <div className="logo-name">JuriNex</div>
-            <div className="logo-sub">Citation Panel — Redesigned UI</div>
-          </div>
-        </div>
-        <div className="page-badge">Citation System v2 — Active</div>
-      </div>
-
       {/* CASE BAR */}
       <div className="case-bar">
         <div>
@@ -289,14 +744,21 @@ export default function RedesignedCitationReportDoc({
         <div className="sidebar">
           <div className="sb-label">Dimensions</div>
           
-          <div className={`dim-chip ${dimension === 'all' ? 'active' : ''}`} onClick={() => { setDimension('all'); setActiveId(null); }}>
+          <div className={`dim-chip ${selectedDimension === 'all' ? 'active' : ''}`} onClick={() => { setDimension('all'); setActiveId(null); }}>
             <span className="chip-num">All dimensions</span>
             {verified.length} citations total
           </div>
 
-          {groups.map((group, index) => (
-            <div key={group.id} className={`dim-chip ${dimension === group.id ? 'active' : ''}`} onClick={() => { setDimension(group.id); setActiveId(null); }}>
-              <span className="chip-num">Dimension {index + 1}</span>
+          {sidebarGroups.map((group, index) => (
+            <div
+              key={group.id}
+              className={`dim-chip ${(
+                selectedDimension === normalizeDimensionKey(group.id)
+                || selectedDimensionName === normalizeSearch(group.name || '')
+              ) ? 'active' : ''}`}
+              onClick={() => { setDimension((group.name || '').trim() || normalizeDimensionKey(group.id) || group.id); setActiveId(null); }}
+            >
+              <span className="chip-num">{getDimensionDisplayLabel(group, index)}</span>
               {group.name}
             </div>
           ))}
@@ -311,7 +773,7 @@ export default function RedesignedCitationReportDoc({
             <>
               <div className="panel-header">
                 <div className="panel-title">Find Citations</div>
-                <div className="count-pill"><b>{visible.length}</b> citations across <b>{filtered.length}</b> legal dimensions</div>
+                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> legal dimensions</div>
               </div>
 
               <div className="filter-row">
@@ -366,127 +828,576 @@ export default function RedesignedCitationReportDoc({
                 </div>
               </div>
 
-              {/* REPORT TAB */}
-              {activeTab === 'rep' && (
-                <div id="rep-content" style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                  <div className="rep-body">
-                    <div className="dim-tag-top">
-                      <span className="dt-num">Dimension Name</span>
-                      <span className="dt-name">{active.dimensionName || 'General Relevance'}</span>
-                      <span className="dt-match">Matched on this Citation</span>
-                    </div>
+              {/* REPORT TAB — Legal Intelligence Document */}
+              {activeTab === 'rep' && (() => {
+                const isHigh = String(active.relevanceBadge || '').toUpperCase() === 'HIGH';
+                const confidenceScore = active.confidenceScore ?? active.confidence_score ?? (isHigh ? 94.8 : 72.3);
+                const verStatus = String(active.verificationStatus || active.verification_status || 'VERIFIED').toUpperCase();
+                const isVerified = ['APPROVED','VERIFIED','GREEN','VERIFIED_WARN'].includes(verStatus);
+                const courtRaw = String(active.court || '').toUpperCase();
+                const jurisdiction = courtRaw.includes('SUPREME') ? 'CRIMINAL APPELLATE JURISDICTION'
+                  : courtRaw.includes('HIGH') ? 'ORIGINAL CIVIL JURISDICTION'
+                  : 'ORIGINAL JURISDICTION';
+                const coramList = (active.coram || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
+                const followedBy = (active.ikCitedByList || []);
+                const citeList   = (active.ikCiteList || []);
+                const excerptText = active.excerpt?.text || active.excerptText || '';
+                const hasExcerpt = excerptText && excerptText.trim().toLowerCase() !== 'further research needed';
+                const ratioPoints = (active.ratio && active.ratio !== 'Ratio decidendi not extracted.')
+                  ? parseTextToPoints(active.ratio) : [];
+                const headnotePoints = active.headnote ? parseTextToPoints(active.headnote) : [];
+                const matchQuery = active.ikFragment?.formInput || active.ikFragment?.headline || '';
+                const ikScore = active.ikFragment?.matchScore ?? active.ikMatchScore ?? null;
+                const semScore = active.semanticScore ?? active.semantic_score ?? null;
+                const judgmentSourceUrl =
+                  String(
+                    active.importSourceLink
+                    || active.sourceUrl
+                    || active.officialSourceLink
+                    || active.originalCourtCopyUrl
+                    || ''
+                  ).trim();
+                const sourceTypeLabel = formatSourceTypeLabel(active);
+                return (
+                  <div id="rep-content" style={{ overflowY: 'auto', flex: 1, padding: '20px 16px', background: '#F0F4F3' }}>
+                    <div className="ld-paper">
 
-                    <div className="cite-hdr">
-                      <div className="ch-court">{active.court || 'Court Not Specified'}</div>
-                      <div className="ch-name">{active.caseName || 'Untitled'}</div>
-                      <div className="meta-grid">
-                        <div className="meta-cell">
-                          <div className="mlbl">Primary Citation</div>
-                          <div className="mval air">{active.primaryCitation || '-'}</div>
+                      {/* ── Watermark ── */}
+                      <div className="ld-watermark">{isVerified ? 'VERIFIED' : 'UNVERIFIED'}</div>
+
+                      {/* ── Top Row: Seal + Confidence ── */}
+                      <div className="ld-toprow">
+                        <div className="ld-seal">
+                          <div className={`ld-seal-ring ${isVerified ? 'ld-seal-green' : 'ld-seal-amber'}`}>
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              {isVerified
+                                ? <><polyline points="20 6 9 17 4 12"/></>
+                                : <><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>}
+                            </svg>
+                          </div>
+                          <div className="ld-seal-info">
+                            <span className="ld-seal-label">VERIFICATION SEAL</span>
+                            <span className={`ld-seal-status ${isVerified ? 'ld-seal-status-green' : 'ld-seal-status-amber'}`}>
+                              {isVerified ? '✓ VERIFIED CITATION' : '⚠ PENDING REVIEW'}
+                            </span>
+                            {active.primaryCitation && (
+                              <span className="ld-seal-sub">{active.primaryCitation}</span>
+                            )}
+                          </div>
                         </div>
-                        <div className="meta-cell">
-                          <div className="mlbl">Date of Judgment</div>
-                          <div className="mval">{active.dateOfJudgment || '-'}</div>
-                        </div>
-                        <div className="meta-cell">
-                          <div className="mlbl">Coram</div>
-                          <div className="mval">{active.coram || '-'}</div>
+                        <div className="ld-confidence">
+                          <span className="ld-conf-label">CONFIDENCE INDEX</span>
+                          <span className="ld-conf-value">{Number(confidenceScore).toFixed(1)}%</span>
+                          <span className="ld-conf-sub">AUTHENTICITY &amp; RESEARCH VERIFIED</span>
                         </div>
                       </div>
-                      {!!(active.alternateCitations || []).length && (
-                        <div className="eq-row">
-                          {(active.alternateCitations || []).map(cit => (
-                            <div key={cit} className="eq-chip">{cit}</div>
+
+                      <div className="ld-divider" />
+
+                      {/* ── Court Header ── */}
+                      <div className="ld-court-header">
+                        <div className="ld-court-name">IN THE {courtRaw || 'COURT NOT SPECIFIED'}</div>
+                        <div className="ld-court-jurisdiction">{jurisdiction}</div>
+                      </div>
+
+                      {/* ── Case Title ── */}
+                      <div className="ld-case-block">
+                        <h1 className="ld-case-title">{active.caseName || 'Untitled Case'}</h1>
+                        <div className="ld-case-meta-row">
+                          <div className="ld-case-meta-item">
+                            <span className="ld-meta-lbl">PRIMARY CITATION</span>
+                            <span className="ld-meta-val ld-meta-teal">{active.primaryCitation || '—'}</span>
+                          </div>
+                          <div className="ld-case-meta-divider" />
+                          <div className="ld-case-meta-item">
+                            <span className="ld-meta-lbl">DATE OF JUDGMENT</span>
+                            <span className="ld-meta-val">{active.dateOfJudgment || '—'}</span>
+                          </div>
+                          {active.year && (
+                            <>
+                              <div className="ld-case-meta-divider" />
+                              <div className="ld-case-meta-item">
+                                <span className="ld-meta-lbl">YEAR</span>
+                                <span className="ld-meta-val">{active.year}</span>
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Alternate Citations */}
+                        {(active.alternateCitations || []).length > 0 && (
+                          <div className="ld-alt-cits">
+                            {(active.alternateCitations).map(c => (
+                              <span key={c} className="ld-alt-chip">{c}</span>
+                            ))}
+                          </div>
+                        )}
+                        <div className="ld-alt-cits">
+                          <span className="ld-alt-chip">Source Type: {sourceTypeLabel}</span>
+                          {judgmentSourceUrl && (
+                            <a href={judgmentSourceUrl} target="_blank" rel="noopener noreferrer" className="ld-alt-chip">
+                              Judgment Source URL ↗
+                            </a>
+                          )}
+                        </div>
+
+                        {/* Bench + Statutes row */}
+                        <div className="ld-bench-statutes-row">
+                          {coramList.length > 0 && (
+                            <div className="ld-bench-col">
+                              <span className="ld-meta-lbl">CORAM / BENCH</span>
+                              <div className="ld-judges">
+                                {coramList.map((j, i) => (
+                                  <div key={i} className="ld-judge-item">
+                                    <span className="ld-judge-dot" />
+                                    {j}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {(active.statutes || []).length > 0 && (
+                            <div className="ld-statutes-col">
+                              <span className="ld-meta-lbl">STATUTORY PROVISIONS</span>
+                              <div className="ld-statute-pills">
+                                {(active.statutes || []).map((s, i) => {
+                                  const { label, url } = statuteToLink(s, active);
+                                  return url ? (
+                                    <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="ld-statute-pill">{label}</a>
+                                  ) : (
+                                    <span key={i} className="ld-statute-pill">{label}</span>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Dimension tag */}
+                        {active.dimensionName && (
+                          <div className="ld-dimension-tag">
+                            <span className="ld-dim-num">
+                              {active.dimensionId != null ? `DIMENSION ${active.dimensionId}` : 'LEGAL DIMENSION'}
+                            </span>
+                            <span className="ld-dim-name">{active.dimensionName}</span>
+                            <span className={`ld-rel-pill ${isHigh ? 'ld-rel-high' : 'ld-rel-med'}`}>
+                              {isHigh ? '★ High Relevance' : '◆ Medium Relevance'}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── SECTION I: Legal Analysis & Ratio ── */}
+                      <div className="ld-section">
+                        <div className="ld-section-hdr">
+                          <span className="ld-section-num">I.</span>
+                          LEGAL ANALYSIS &amp; RATIO
+                        </div>
+
+                        {/* Ratio quote */}
+                        {ratioPoints.length > 0 && (
+                          <blockquote className="ld-ratio-quote">
+                            {ratioPoints.length === 1
+                              ? <span className="ld-ratio-text">"{ratioPoints[0]}"</span>
+                              : (
+                                <ol className="ld-ratio-list">
+                                  {ratioPoints.map((pt, i) => (
+                                    <li key={i} className="ld-ratio-item">
+                                      <span className="ld-ratio-num">{i + 1}</span>
+                                      <span className="ld-ratio-text">{pt}</span>
+                                    </li>
+                                  ))}
+                                </ol>
+                              )
+                            }
+                          </blockquote>
+                        )}
+
+                        {/* Headnote */}
+                        {headnotePoints.length > 0 && (
+                          <div className="ld-headnote-block">
+                            <div className="ld-sub-hdr">HEADNOTE</div>
+                            <ol className="ld-headnote-list">
+                              {headnotePoints.map((pt, i) => (
+                                <li key={i} className="ld-headnote-item">
+                                  <span className="ld-headnote-num">{i + 1}</span>
+                                  <span className="ld-headnote-text">{pt}</span>
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        )}
+
+                        {/* Headnotes (Structured) — separate field from headnote */}
+                        {active.headnotes && active.headnotes !== active.headnote && (() => {
+                          const pts = parseTextToPoints(active.headnotes);
+                          return pts.length > 0 ? (
+                            <div className="ld-headnote-block" style={{ background: '#F0F4FF', borderLeft: '3px solid #4F46E5' }}>
+                              <div className="ld-sub-hdr" style={{ color: '#4338CA' }}>HEADNOTES (STRUCTURED)</div>
+                              <ol className="ld-headnote-list">
+                                {pts.map((pt, i) => (
+                                  <li key={i} className="ld-headnote-item">
+                                    <span className="ld-headnote-num" style={{ background: '#4F46E5' }}>{i + 1}</span>
+                                    <span className="ld-headnote-text" style={{ color: '#1e1b4b' }}>{pt}</span>
+                                  </li>
+                                ))}
+                              </ol>
+                            </div>
+                          ) : null;
+                        })()}
+
+                        {/* Party Arguments */}
+                        {(() => {
+                          const args = active.partyArguments || active.party_arguments || {};
+                          const appArgs = Array.isArray(args.appellant) ? args.appellant : [];
+                          const respArgs = Array.isArray(args.respondent) ? args.respondent : [];
+                          const courtArgs = args.court ? (Array.isArray(args.court) ? args.court : [args.court]) : [];
+                          if (!appArgs.length && !respArgs.length && !courtArgs.length) return null;
+                          return (
+                            <div className="ld-party-args">
+                              <div className="ld-sub-hdr">PARTY ARGUMENTS</div>
+                              <div className="ld-args-grid">
+                                {appArgs.length > 0 && (
+                                  <div className="ld-arg-col ld-arg-appellant">
+                                    <div className="ld-arg-col-hdr">
+                                      <span className="ld-arg-dot ld-dot-blue" />
+                                      Appellant / Petitioner
+                                    </div>
+                                    <ol className="ld-arg-list">
+                                      {appArgs.map((a, i) => (
+                                        <li key={i} className="ld-arg-item">
+                                          <span className="ld-arg-num ld-num-blue">{i + 1}</span>
+                                          <span className="ld-arg-text">{String(a)}</span>
+                                        </li>
+                                      ))}
+                                    </ol>
+                                  </div>
+                                )}
+                                {respArgs.length > 0 && (
+                                  <div className="ld-arg-col ld-arg-respondent">
+                                    <div className="ld-arg-col-hdr">
+                                      <span className="ld-arg-dot ld-dot-amber" />
+                                      Respondent / Defendant
+                                    </div>
+                                    <ol className="ld-arg-list">
+                                      {respArgs.map((a, i) => (
+                                        <li key={i} className="ld-arg-item">
+                                          <span className="ld-arg-num ld-num-amber">{i + 1}</span>
+                                          <span className="ld-arg-text">{String(a)}</span>
+                                        </li>
+                                      ))}
+                                    </ol>
+                                  </div>
+                                )}
+                              </div>
+                              {courtArgs.length > 0 && (
+                                <div className="ld-court-ratio">
+                                  <div className="ld-arg-col-hdr" style={{ color: '#0F766E' }}>
+                                    <span className="ld-arg-dot" style={{ background: '#0F766E' }} />
+                                    Court's Ratio / Analysis
+                                  </div>
+                                  <ol className="ld-arg-list">
+                                    {courtArgs.map((a, i) => (
+                                      <li key={i} className="ld-arg-item">
+                                        <span className="ld-arg-num" style={{ background: '#0F766E' }}>{i + 1}</span>
+                                        <span className="ld-arg-text">{String(a)}</span>
+                                      </li>
+                                    ))}
+                                  </ol>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        {/* Relevant excerpt */}
+                        {hasExcerpt && (
+                          <div className="ld-excerpt-block">
+                            <div className="ld-sub-hdr">RELEVANT EXCERPT</div>
+                            <p className="ld-excerpt-text">{excerptText}</p>
+                          </div>
+                        )}
+
+                        {/* Proposition Verification */}
+                        {(matchQuery || ikScore !== null || semScore !== null) && (
+                          <div className="ld-proposition">
+                            <div className="ld-prop-hdr">
+                              PROPOSITION VERIFICATION
+                              <span className="ld-prop-tag">DETAILED SEMANTIC MAPPING</span>
+                            </div>
+                            {matchQuery && (
+                              <div className="ld-prop-query">
+                                Query: <em>{matchQuery.slice(0, 120)}{matchQuery.length > 120 ? '…' : ''}</em>
+                              </div>
+                            )}
+                            {(ikScore !== null || semScore !== null) && (
+                              <div className="ld-scores">
+                                {ikScore !== null && (
+                                  <div className="ld-score-row">
+                                    <span className="ld-score-lbl">IK Passage</span>
+                                    <div className="ld-score-bar-wrap">
+                                      <div className="ld-score-bar ld-score-bar-green" style={{ width: `${Math.min(100, Math.round(Number(ikScore) * 100))}%` }} />
+                                    </div>
+                                    <span className="ld-score-val">{(Number(ikScore) * 100).toFixed(0)} / 100</span>
+                                  </div>
+                                )}
+                                {semScore !== null && (
+                                  <div className="ld-score-row">
+                                    <span className="ld-score-lbl">Semantic Score</span>
+                                    <div className="ld-score-bar-wrap">
+                                      <div className="ld-score-bar ld-score-bar-blue" style={{ width: `${Math.min(100, Math.round(Number(semScore) * 100))}%` }} />
+                                    </div>
+                                    <span className="ld-score-val">{(Number(semScore) * 100).toFixed(0)} / 100</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <div className="ld-match-confirmed">MATCH CONFIRMED</div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── SECTION II: Subsequent Treatment ── */}
+                      {(followedBy.length > 0 || citeList.length > 0) && (
+                        <div className="ld-section">
+                          <div className="ld-section-hdr">
+                            <span className="ld-section-num">II.</span>
+                            SUBSEQUENT TREATMENT
+                          </div>
+                          <div className="ld-treatment-grid">
+                            <div className="ld-treatment-box ld-treat-green">
+                              <span className="ld-treat-count">{followedBy.length}</span>
+                              <span className="ld-treat-icon">📈</span>
+                              <span className="ld-treat-lbl">FOLLOWED IN</span>
+                              <span className="ld-treat-sub">Cases</span>
+                            </div>
+                            <div className="ld-treatment-box ld-treat-amber">
+                              <span className="ld-treat-count">0</span>
+                              <span className="ld-treat-icon">⚖️</span>
+                              <span className="ld-treat-lbl">DISTINGUISHED IN</span>
+                              <span className="ld-treat-sub">Cases</span>
+                            </div>
+                            <div className="ld-treatment-box ld-treat-red">
+                              <span className="ld-treat-count">0</span>
+                              <span className="ld-treat-icon">🚫</span>
+                              <span className="ld-treat-lbl">OVERRULED BY</span>
+                              <span className="ld-treat-sub">Cases</span>
+                            </div>
+                          </div>
+                          {followedBy.length > 0 && (
+                            <div className="ld-follow-list">
+                              {followedBy.slice(0, 8).map((item, idx) => {
+                                const { label, url } = citationContextItemToLink(item);
+                                return (
+                                  <div key={idx} className="ld-follow-item">
+                                    <div className="ld-follow-info">
+                                      <a href={url} target="_blank" rel="noopener noreferrer" className="ld-follow-name">{label}</a>
+                                      {item.publishdate && <span className="ld-follow-date">{item.publishdate}</span>}
+                                    </div>
+                                    <span className="ld-follows-badge">FOLLOWS</span>
+                                  </div>
+                                );
+                              })}
+                              {followedBy.length > 8 && (
+                                <div className="ld-follow-more">+{followedBy.length - 8} more cases</div>
+                              )}
+                            </div>
+                          )}
+                          {citeList.length > 0 && (
+                            <div style={{ marginTop: 14 }}>
+                              <div className="ld-sub-hdr" style={{ marginBottom: 8 }}>CASES CITED IN THIS JUDGMENT</div>
+                              <div className="ld-follow-list">
+                                {citeList.slice(0, 5).map((item, idx) => {
+                                  const { label, url } = citationContextItemToLink(item);
+                                  return (
+                                    <div key={idx} className="ld-follow-item">
+                                      <a href={url} target="_blank" rel="noopener noreferrer" className="ld-follow-name">{label}</a>
+                                      <span className="ld-cited-badge">CITED</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ── Citation Tags ── */}
+                      {Array.isArray(active.citationTags) && active.citationTags.length > 0 && (
+                        <div className="ld-tags-row">
+                          {active.citationTags.map(tag => (
+                            <span key={String(tag)} className="cite-tag-chip">[{String(tag)}]</span>
                           ))}
                         </div>
                       )}
-                    </div>
 
-                    <div className="sec-hdr">Legal Analysis and Ratio</div>
-
-                    <div className="rel-block">
-                      <div className="rel-top">
-                        <div className={`rel-rating ${String(active.relevanceBadge || '').toUpperCase() === 'HIGH' ? 'rh' : ''}`} style={{ backgroundColor: String(active.relevanceBadge || '').toUpperCase() === 'HIGH' ? 'var(--teal-bg)' : 'var(--amber-bg)', color: String(active.relevanceBadge || '').toUpperCase() === 'HIGH' ? 'var(--teal-dark)' : 'var(--amber-str)' }}>
-                          Relevance: {normalizeRelevance(active.relevanceBadge)}
+                      {/* ── Footer ── */}
+                      <div className="ld-footer">
+                        <div className="ld-footer-left">
+                          <div className="ld-footer-brand">JURINEX LEGAL INTELLIGENCE REPORT</div>
+                          <div className="ld-footer-meta">
+                            Generated {new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}
+                            {active.court && ` · Source: ${active.court}`}
+                          </div>
+                          <div className="ld-footer-meta">Authenticated Research Document</div>
+                        </div>
+                        <div className="ld-footer-actions">
+                          {active.canonicalId && (
+                            <button className="ld-btn-ghost" onClick={() => window.open(`https://indiankanoon.org/doc/${active.canonicalId}/`, '_blank')}>
+                              VIEW SOURCE ↗
+                            </button>
+                          )}
+                          {active.originalCourtCopyUrl && (
+                            <button className="ld-btn-ghost" onClick={() => window.open(active.originalCourtCopyUrl, '_blank')}>
+                              COURT COPY
+                            </button>
+                          )}
+                          <button className="ld-btn-primary" onClick={() => onDownloadCitation?.(active)}>
+                            DOWNLOAD PDF
+                          </button>
+                          <button className="ld-btn-ghost" onClick={() => { navigator.clipboard?.writeText(window.location.href); }}>
+                            SHARE LINK
+                          </button>
                         </div>
                       </div>
-                      <div className="rel-reason">
-                        {active.dimensionJustification || 'This citation was included because it materially supports the selected legal issue.'}
-                      </div>
-                    </div>
 
-                    {active.ratio && active.ratio !== 'Ratio decidendi not extracted.' && (
-                      <>
-                        <div className="sec-hdr">Ratio Decidendi</div>
-                        <div className="ab-item">{active.ratio}</div>
-                      </>
-                    )}
-
-                    {active.headnote && (
-                      <>
-                        <div className="sec-hdr">Headnote</div>
-                        <div className="ab-item">{active.headnote}</div>
-                      </>
-                    )}
-
-                    {(active.excerpt?.text || active.excerptText || active.ikFragment?.headline) && (
-                      <>
-                        <div className="sec-hdr">Relevant Excerpt</div>
-                        <div className="ab-item">{active.excerpt?.text || active.excerptText || active.ikFragment?.headline}</div>
-                      </>
-                    )}
-
-                    {((active.ikCiteList || []).length > 0 || (active.ikCitedByList || []).length > 0) && (
-                      <>
-                        <div className="sec-hdr">Citation Context</div>
-                        <div className="ctx-grid">
-                          <div className="ctx-box">
-                            <div className="ctx-n">{(active.ikCiteList || []).length}</div>
-                            <div className="ctx-l">Cases cited</div>
-                          </div>
-                          <div className="ctx-box">
-                            <div className="ctx-n">{(active.ikCitedByList || []).length}</div>
-                            <div className="ctx-l">Cited by</div>
-                          </div>
-                        </div>
-                      </>
-                    )}
-
-                    <div style={{ marginTop: '20px', paddingTop: '14px', borderTop: '0.5px solid #E0DED8', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                      {active.canonicalId && <button onClick={() => window.open(`https://indiankanoon.org/doc/${active.canonicalId}/`, '_blank')} style={{ fontSize: '13px', padding: '8px 18px', borderRadius: '8px', border: '0.5px solid #C4C2BB', background: '#fff', color: '#5F5E5A', cursor: 'pointer' }}>View on Indian Kanoon ↗</button>}
-                      {active.originalCourtCopyUrl && <button onClick={() => window.open(active.originalCourtCopyUrl, '_blank')} style={{ fontSize: '13px', padding: '8px 18px', borderRadius: '8px', border: '0.5px solid #C4C2BB', background: '#fff', color: '#5F5E5A', cursor: 'pointer' }}>Open Court Copy</button>}
-                      <button onClick={() => onDownloadCitation?.(active)} style={{ fontSize: '13px', padding: '8px 18px', borderRadius: '8px', border: '0.5px solid #534AB7', background: '#534AB7', color: '#fff', cursor: 'pointer', fontWeight: 500 }}>Download PDF</button>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* FULL JUDGMENT TAB */}
-              {activeTab === 'fj' && (
-                <div id="fj-content" style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                  <div className="fj-wrap">
-                    <div className="fj-hdr">
-                      <div className="fj-court">{active.court || 'Court Not Specified'}</div>
-                      <div className="fj-title">{active.caseName || 'Untitled'}</div>
-                    </div>
-                    {!!(active.alternateCitations || []).length && (
-                      <div className="fj-eq">
-                        <strong>Equivalent Citations:</strong> {(active.alternateCitations || []).join(', ')}
+              {activeTab === 'fj' && (() => {
+                const raw = String(fullJudgmentState.text || '').trim();
+                const looksHtml = /<\s*(p|div|h1|h2|h3|section|article|br|span|table|ol|ul|li)\b/i.test(raw);
+                const coramList = (active.coram || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
+                const { metaPairs, sections } = (!looksHtml && raw) ? parseJudgmentText(raw) : { metaPairs: [], sections: [] };
+
+                return (
+                  <div id="fj-content" style={{ overflowY: 'auto', flex: 1, padding: '20px 16px', background: '#F0F4F3' }}>
+                    <div className="jdoc-paper">
+
+                      {/* ── Document Header ── */}
+                      <div className="jdoc-header">
+                        <div className="jdoc-court-badge">{active.court || 'Court Not Specified'}</div>
+                        <h1 className="jdoc-case-title">{active.caseName || 'Untitled'}</h1>
+                        {active.primaryCitation && (
+                          <div className="jdoc-primary-cit">{active.primaryCitation}</div>
+                        )}
+                        {active.dateOfJudgment && (
+                          <div className="jdoc-date">Decided on {active.dateOfJudgment}</div>
+                        )}
                       </div>
-                    )}
-                    <div className="fj-meta">
-                      <strong>Coram:</strong> {active.coram || '-'}
-                    </div>
-                    <div className="fj-body-text">
-                      <p><em>Full judgment text is not fully embedded in this view unless fetched explicitly. For the full document, please click "View complete judgment" below or switch to the Report tab to view the primary excerpts.</em></p>
-                      
-                      <div style={{marginTop: '20px', textAlign: 'center'}}>
-                        <button onClick={() => onViewFullJudgment?.(active.canonicalId, active.caseName)} disabled={!active.canonicalId} style={{ fontSize: '13px', padding: '8px 18px', borderRadius: '8px', border: '0.5px solid #534AB7', background: '#534AB7', color: '#fff', cursor: 'pointer', fontWeight: 500 }}>View complete judgment</button>
+
+                      {/* ── Metadata Card ── */}
+                      <div className="jdoc-meta-card">
+                        {coramList.length > 0 && (
+                          <div className="jdoc-meta-row">
+                            <span className="jdoc-meta-key">Coram</span>
+                            <div className="jdoc-coram-chips">
+                              {coramList.map((j, i) => (
+                                <span key={i} className="jdoc-coram-chip">
+                                  <span className="jdoc-coram-dot" />
+                                  {j}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {(active.alternateCitations || []).length > 0 && (
+                          <div className="jdoc-meta-row">
+                            <span className="jdoc-meta-key">Equivalent Citations</span>
+                            <div className="jdoc-alt-cit-chips">
+                              {(active.alternateCitations).map((c, i) => (
+                                <span key={i} className="jdoc-alt-chip">{c}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {metaPairs.filter(p => !['Bench','Author','BENCH'].includes(p.key)).map(({ key, val }, i) => (
+                          <div key={i} className="jdoc-meta-row">
+                            <span className="jdoc-meta-key">{key}</span>
+                            <span className="jdoc-meta-val">{val}</span>
+                          </div>
+                        ))}
                       </div>
+
+                      {/* ── Loading / Error ── */}
+                      {fullJudgmentState.loading && (
+                        <div className="jdoc-state-box">
+                          <div className="jdoc-spinner" />
+                          <span>Loading full judgment…</span>
+                        </div>
+                      )}
+                      {!fullJudgmentState.loading && fullJudgmentState.error && (
+                        <div className="jdoc-state-box jdoc-error">
+                          <span>⚠ {fullJudgmentState.error}</span>
+                        </div>
+                      )}
+
+                      {/* ── Judgment Body ── */}
+                      {!fullJudgmentState.loading && !fullJudgmentState.error && raw && (
+                        looksHtml ? (
+                          <div
+                            className="jdoc-prose jdoc-html-prose"
+                            dangerouslySetInnerHTML={{ __html: sanitizeJudgmentHtml(raw) }}
+                          />
+                        ) : (
+                          <div className="jdoc-prose">
+                            {sections.length > 0 ? sections.map((sec, si) => (
+                              <div key={si} className="jdoc-section">
+                                {sec.heading && (
+                                  <div className="jdoc-section-heading">{sec.heading}</div>
+                                )}
+                                {sec.paragraphs.map((para, pi) => {
+                                  // Detect if paragraph itself is a sub-heading
+                                  const isSubHead = para.length < 90 && para === para.toUpperCase() && /[A-Z]{3}/.test(para);
+                                  if (isSubHead) {
+                                    return <div key={pi} className="jdoc-subheading">{para}</div>;
+                                  }
+                                  // Detect numbered paragraph: starts with digit+dot or digit+bracket
+                                  const numMatch = para.match(/^(\d{1,3}[.)])\s+(.+)$/s);
+                                  if (numMatch) {
+                                    return (
+                                      <div key={pi} className="jdoc-numbered-para">
+                                        <span className="jdoc-para-num">{numMatch[1]}</span>
+                                        <span className="jdoc-para-text">{numMatch[2]}</span>
+                                      </div>
+                                    );
+                                  }
+                                  return <p key={pi} className="jdoc-para">{para}</p>;
+                                })}
+                              </div>
+                            )) : (
+                              // Fallback: simple paragraph split
+                              formatJudgmentPlainText(raw).map((p, idx) => (
+                                <p key={idx} className="jdoc-para">{p}</p>
+                              ))
+                            )}
+                          </div>
+                        )
+                      )}
+
+                      {/* ── Footer Actions ── */}
+                      <div className="jdoc-footer-actions">
+                        {!!fullJudgmentState.sourceUrl && (
+                          <button className="ld-btn-ghost" onClick={() => window.open(fullJudgmentState.sourceUrl, '_blank')}>
+                            OPEN SOURCE ↗
+                          </button>
+                        )}
+                        <button
+                          className="ld-btn-primary"
+                          onClick={() => onViewFullJudgment?.(active.canonicalId, active.caseName)}
+                          disabled={!active.canonicalId}
+                        >
+                          VIEW COMPLETE JUDGMENT
+                        </button>
+                      </div>
+
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           )}
 

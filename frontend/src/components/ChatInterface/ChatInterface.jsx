@@ -2530,6 +2530,7 @@ import {
   Mic,
   MicOff,
   Sparkles,
+  Settings2,
   PanelRight,
   ChevronLeft,
 } from "lucide-react";
@@ -3564,6 +3565,26 @@ const ChatInterface = () => {
     [currentChatHistory, selectedMessageId]
   );
 
+  const selectedMessageResponseContent = useMemo(() => {
+    if (!selectedMessage) return '';
+    const responseText =
+      selectedMessage.response || selectedMessage.answer || selectedMessage.message || '';
+    if (!responseText) return '';
+    return isStructuredJsonResponse(responseText)
+      ? renderSecretPromptResponse(responseText)
+      : convertJsonToPlainText(responseText);
+  }, [selectedMessage]);
+
+  const activeResponseContent = useMemo(
+    () =>
+      formattedResponseContent ||
+      animatedResponseContent ||
+      selectedMessageResponseContent ||
+      panelData?.response ||
+      '',
+    [formattedResponseContent, animatedResponseContent, selectedMessageResponseContent, panelData]
+  );
+
   const selectedMessageIsLearning = useMemo(() => {
     if (!selectedMessage) return false;
     if (selectedMessage.learning_mode || selectedMessage.learningPayload) return true;
@@ -3582,10 +3603,10 @@ const ChatInterface = () => {
     () =>
       buildSuggestedQuestions({
         question: selectedMessage?.question || '',
-        response: formattedResponseContent || animatedResponseContent || selectedMessage?.response || '',
+        response: activeResponseContent || selectedMessage?.response || '',
         promptLabel: selectedMessage?.prompt_label || '',
       }),
-    [selectedMessage, formattedResponseContent, animatedResponseContent]
+    [selectedMessage, activeResponseContent]
   );
 
   const shouldShowHorizontalScrollbar = useMemo(() => {
@@ -3734,7 +3755,7 @@ const ChatInterface = () => {
 
   const handleCopyResponse = async () => {
     try {
-      await navigator.clipboard.writeText(animatedResponseContent);
+      await navigator.clipboard.writeText(activeResponseContent);
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
     } catch (error) {
@@ -5885,10 +5906,11 @@ const ChatInterface = () => {
               <button
                 type="button"
                 onClick={handleNewChat}
-                className="p-1.5 bg-white border border-gray-200 rounded-lg hover:border-[#21C1B6] hover:text-[#21C1B6] transition-all"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg hover:border-[#21C1B6] hover:text-[#21C1B6] transition-all text-xs font-medium text-gray-700"
                 title="Start New Chat"
               >
                 <Plus className="w-4 h-4" />
+                <span>New Chat</span>
               </button>
               {showMainArea && (
                 <button
@@ -5963,7 +5985,7 @@ const ChatInterface = () => {
               {hasResponse && !selectedMessageIsLearning && (
                 <button
                   type="button"
-                  onClick={() => panelOpen ? closePanel() : openPanel('response', { response: animatedResponseContent, messageId: selectedMessageId })}
+                  onClick={() => panelOpen ? closePanel() : openPanel('response', { response: activeResponseContent, messageId: selectedMessageId })}
                   title={panelOpen ? 'Close split view' : 'Open split view'}
                   className={`px-3 py-1 text-xs font-medium rounded-full transition-colors inline-flex items-center gap-1.5 ${
                     panelOpen
@@ -6035,30 +6057,79 @@ const ChatInterface = () => {
 
                     return (
                       <div key={chat.id != null ? `${String(chat.id)}-${idx}` : `chat-${idx}`} className="flex flex-col gap-3">
-                        {/* User question bubble — same teal style as Learning reference */}
+                        {/* User question item */}
                         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                          <div style={{
-                            background: '#f0fdfa',
-                            color: '#1a1a1a',
-                            borderRadius: '18px 18px 4px 18px',
-                            border: '1px solid #21C1B6',
-                            padding: '10px 16px',
-                            maxWidth: '72%',
-                            fontSize: '17px',
-                            fontWeight: '500',
-                            lineHeight: '1.55',
-                            fontFamily: 'Inter, sans-serif',
-                            wordBreak: 'break-word',
-                            boxShadow: '0 2px 4px rgba(33, 193, 182, 0.05)'
-                          }}>
-                            {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
-                              ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
-                              : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
-                          </div>
+                          {panelOpen && !isLearning ? (
+                            <div style={{ width: '100%', position: 'relative' }}>
+                              <button
+                                type="button"
+                                onClick={() => handleSelectChat(chat)}
+                                style={{
+                                  background: selectedMessageId === chat.id ? '#E0F7F6' : '#f9fafb',
+                                  color: '#1a1a1a',
+                                  borderRadius: '12px',
+                                  border: selectedMessageId === chat.id ? '1px solid #21C1B6' : '1px solid #e5e7eb',
+                                  padding: '14px 38px 14px 14px',
+                                  minHeight: '64px',
+                                  width: '84%',
+                                  textAlign: 'left',
+                                  fontSize: '14px',
+                                  fontWeight: selectedMessageId === chat.id ? '600' : '500',
+                                  lineHeight: '1.45',
+                                  fontFamily: 'Inter, sans-serif',
+                                  wordBreak: 'break-word',
+                                  boxShadow: selectedMessageId === chat.id ? '0 1px 3px rgba(33, 193, 182, 0.12)' : 'none',
+                                  cursor: 'pointer',
+                                  marginLeft: 'auto'
+                                }}
+                              >
+                                {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
+                                  ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
+                                  : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
+                              </button>
+                              <div
+                                className="absolute top-2 right-2"
+                                ref={(el) => (chatMenuRefs.current[chat.id] = el)}
+                              >
+                                <button
+                                  onClick={(e) => handleChatMenuToggle(chat.id, e)}
+                                  className="p-1 text-gray-400 hover:text-gray-600 transition-colors rounded"
+                                >
+                                  <MoreVertical className="h-3.5 w-3.5" />
+                                </button>
+                                {openChatMenuId === chat.id && (
+                                  <div className="absolute right-0 top-7 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                                    <button onClick={(e) => handleDeleteChat(chat.id, e)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg">
+                                      <Trash2 className="w-4 h-4" /> Delete
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{
+                              background: '#f0fdfa',
+                              color: '#1a1a1a',
+                              borderRadius: '18px 18px 4px 18px',
+                              border: '1px solid #21C1B6',
+                              padding: '10px 16px',
+                              maxWidth: '72%',
+                              fontSize: '17px',
+                              fontWeight: '500',
+                              lineHeight: '1.55',
+                              fontFamily: 'Inter, sans-serif',
+                              wordBreak: 'break-word',
+                              boxShadow: '0 2px 4px rgba(33, 193, 182, 0.05)'
+                            }}>
+                              {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
+                                ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
+                                : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
+                            </div>
+                          )}
                         </div>
 
-                        {/* AI response */}
-                        {(chat.response || ((loadingChat || isGenerating) && !pendingQuestion && idx === currentChatHistory.length - 1)) && (
+                        {/* AI response (Normal mode: hidden in left column when split panel is open) */}
+                        {(!panelOpen || isLearning) && (chat.response || ((loadingChat || isGenerating) && !pendingQuestion && idx === currentChatHistory.length - 1)) && (
                           isLearning ? (
                             <div style={{ display: 'flex', justifyContent: 'flex-start', width: '100%' }}>
                               <div style={{ width: '100%', padding: '4px 0' }}>
@@ -6107,20 +6178,22 @@ const ChatInterface = () => {
                         )}
 
                         {/* Menu */}
-                        <div className="mt-1 flex justify-end">
-                          <div className="relative" ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
-                            <button onClick={(e) => handleChatMenuToggle(chat.id, e)} className="p-1 text-gray-300 hover:text-gray-500 transition-colors">
-                              <MoreVertical className="h-3.5 w-3.5" />
-                            </button>
-                            {openChatMenuId === chat.id && (
-                              <div className="absolute right-0 bottom-6 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-                                <button onClick={(e) => handleDeleteChat(chat.id, e)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg">
-                                  <Trash2 className="w-4 h-4" /> Delete
-                                </button>
-                              </div>
-                            )}
+                        {!(panelOpen && !isLearning) && (
+                          <div className="mt-1 flex justify-end">
+                            <div className="relative" ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
+                              <button onClick={(e) => handleChatMenuToggle(chat.id, e)} className="p-1 text-gray-300 hover:text-gray-500 transition-colors">
+                                <MoreVertical className="h-3.5 w-3.5" />
+                              </button>
+                              {openChatMenuId === chat.id && (
+                                <div className="absolute right-0 bottom-6 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                                  <button onClick={(e) => handleDeleteChat(chat.id, e)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg">
+                                    <Trash2 className="w-4 h-4" /> Delete
+                                  </button>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                     );
                   })}
@@ -6220,15 +6293,43 @@ const ChatInterface = () => {
                 )}
               </div>
               <div className="relative flex-shrink-0" ref={styleDropdownRef}>
-                <button type="button" onClick={() => setShowStyleDropdown(!showStyleDropdown)} className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
-                  <ChevronDown className="h-3.5 w-3.5" />
+                <button
+                  type="button"
+                  onClick={() => setShowStyleDropdown(!showStyleDropdown)}
+                  className="flex items-center space-x-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg"
+                  title="Mode settings"
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                  {learningModeActive ? (
+                    <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
+                  ) : (
+                    <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />
+                  )}
                 </button>
                 {showStyleDropdown && (
-                  <div className="absolute bottom-full left-0 mb-2 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
-                    <button type="button" onClick={() => { setLearningModeActive(false); setShowStyleDropdown(false); closePanel(); }} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">Normal</button>
-                    <button type="button" onClick={() => { setLearningModeActive(true); setShowStyleDropdown(false); }} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">Learning</button>
+                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => { setLearningModeActive(false); setShowStyleDropdown(false); closePanel(); }}
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />
+                        Normal
+                      </span>
+                      {!learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setLearningModeActive(true); setShowStyleDropdown(false); }}
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
+                        Learning
+                      </span>
+                      {learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
                   </div>
                 )}
               </div>
@@ -6281,7 +6382,7 @@ const ChatInterface = () => {
           {/* ── Response / A4 viewer panel ── */}
           {(panelType === 'response' || (!panelType && hasResponse)) && (
           <>{/* Toolbar */}
-          {selectedMessageId && animatedResponseContent && (
+          {selectedMessageId && activeResponseContent && (
             <div className="flex-shrink-0 px-4 py-2 flex items-center justify-between" style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb' }}>
               <div className="flex items-center gap-2">
                 <DownloadPdf markdownOutputRef={markdownOutputRef} />
@@ -6344,14 +6445,14 @@ const ChatInterface = () => {
               </div>
             )}
            
-            {loadingChat && !animatedResponseContent && !thinkingContent && !currentStatus ? (
+            {loadingChat && !activeResponseContent && !thinkingContent && !currentStatus ? (
               <div className="flex items-center justify-center h-full">
                 <div className="text-center">
                   <Loader2 className="h-12 w-12 mx-auto mb-4 animate-spin text-[#21C1B6]" />
                   <p className="text-gray-600">Generating response...</p>
                 </div>
               </div>
-            ) : selectedMessageId && (animatedResponseContent || thinkingContent || currentStatus) ? (
+            ) : selectedMessageId && (activeResponseContent || thinkingContent || currentStatus) ? (
               /* Paginated A4 pages — one card per page, Claude-style */
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '0 0 32px 0' }}>
                 {/* Thinking section above page 1 */}
@@ -6374,8 +6475,8 @@ const ChatInterface = () => {
                 {/* Paginated content */}
                 {(() => {
                   const pages = selectedMessageIsLearning
-                    ? [formattedResponseContent || '']
-                    : paginateContent(formattedResponseContent || '');
+                    ? [activeResponseContent || '']
+                    : paginateContent(activeResponseContent || '');
                   const totalPages = pages.length || 1;
                   const useContinuousPanelLayout = selectedMessageIsLearning;
 
