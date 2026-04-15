@@ -112,7 +112,7 @@
 
 // export default CitationsPanel;
 
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { FileText, X, ExternalLink, Scale, ChevronDown, ChevronRight } from 'lucide-react';
 import { API_BASE_URL } from '../../config/apiConfig';
 
@@ -185,10 +185,99 @@ function isJudgmentCitation(c) {
   return !!(c.caseName || c.primaryCitation || c.source || c.auditStatus || c.verificationStatus);
 }
 
+function normalizeSourceKey(citation) {
+  const st = String(citation?.source_type || citation?.sourceType || '').trim().toLowerCase();
+  if (st === 'admin' || st === 'admin_upload' || st === 'adminupload' || st === 'manual_upload' || st === 'judgment_upload') {
+    return 'local';
+  }
+  if (citation?.isLocalAdmin === true || citation?.is_local_admin === true) {
+    return 'local';
+  }
+  return citation?.source || citation?.sourceType || '';
+}
+
+function courtTierRank(citation) {
+  const c = String(citation?.court || citation?.court_code || '').toLowerCase();
+  if (c.includes('supreme')) return 3;
+  if (c.includes('high')) return 2;
+  if (c.includes('district') || c.includes('sessions') || c.includes('magistrate') || c.includes('munsiff') || c.includes('civil judge')) return 1;
+  return 0;
+}
+
+function normalizeDimensionId(raw) {
+  if (raw === undefined || raw === null || raw === '') return '__none__';
+  return String(raw);
+}
+
+function getCitationDimensionMeta(c) {
+  const rawId = c.dimension_id ?? c.dimensionId ?? c._dimension_id;
+  const id = normalizeDimensionId(rawId);
+  const name = c.dimension_name ?? c.dimensionName ?? c._dimension_name ?? null;
+  return { id, name: typeof name === 'string' ? name : name != null ? String(name) : null };
+}
+
+/**
+ * @param {Array} citations
+ * @param {Array<{ dimension_id?: any, dimensionId?: any, dimension_name?: string, dimensionName?: string, name?: string }>|null|undefined} dimensions
+ *   When set, every dimension is shown even if it has no citations (empty sections).
+ */
+function buildDimensionSections(citations, dimensions) {
+  const list = Array.isArray(citations) ? citations : [];
+
+  if (dimensions && dimensions.length > 0) {
+    const byKey = new Map();
+    for (const d of dimensions) {
+      const raw = d.dimension_id ?? d.dimensionId;
+      const key = normalizeDimensionId(raw);
+      const label =
+        d.dimension_name ||
+        d.dimensionName ||
+        d.name ||
+        (key === '__none__' ? 'General' : `Dimension ${key}`);
+      byKey.set(key, { key, name: label, citations: [] });
+    }
+    const extras = new Map();
+    for (const c of list) {
+      const { id, name } = getCitationDimensionMeta(c);
+      if (byKey.has(id)) {
+        byKey.get(id).citations.push(c);
+      } else {
+        if (!extras.has(id)) {
+          extras.set(id, {
+            key: id,
+            name: name || (id === '__none__' ? 'General' : `Dimension ${id}`),
+            citations: [],
+          });
+        }
+        extras.get(id).citations.push(c);
+      }
+    }
+    return [...byKey.values(), ...extras.values()];
+  }
+
+  const grouped = list.reduce((acc, c) => {
+    const { id, name } = getCitationDimensionMeta(c);
+    if (!acc.map.has(id)) {
+      const defaultName = id === '__none__' ? 'General' : (name || `Issue ${id}`);
+      acc.map.set(id, { key: id, name: defaultName, citations: [] });
+      acc.order.push(id);
+    }
+    const entry = acc.map.get(id);
+    if (name) {
+      if (id === '__none__') entry.name = name;
+      else if (entry.name === `Issue ${id}`) entry.name = name;
+    }
+    entry.citations.push(c);
+    return acc;
+  }, { map: new Map(), order: [] });
+  return grouped.order.map((id) => grouped.map.get(id));
+}
+
 // ── Judgment citation card ─────────────────────────────────────────────────
 function JudgmentCitationCard({ citation, index }) {
   const [expanded, setExpanded] = useState(false);
   const statusCfg = STATUS_CFG[citation.verificationStatus] || STATUS_CFG.YELLOW;
+  const sourceKey = normalizeSourceKey(citation);
 
   return (
     <div style={{
@@ -236,7 +325,7 @@ function JudgmentCitationCard({ citation, index }) {
                 {citation.confidence}%
               </span>
             )}
-            <SourceBadge source={citation.source} />
+            <SourceBadge source={sourceKey} />
             <AuditBadge status={citation.auditStatus} />
           </div>
         </div>
@@ -357,7 +446,7 @@ function JudgmentCitationCard({ citation, index }) {
             display: 'flex', alignItems: 'center', gap: 8, paddingTop: 6,
             borderTop: '1px dashed #E8E8E8', flexWrap: 'wrap',
           }}>
-            <SourceBadge source={citation.source} />
+            <SourceBadge source={sourceKey} />
             <AuditBadge status={citation.auditStatus} />
             {citation.sourceUrl && citation.sourceUrl !== '—' && (
               <a
@@ -424,8 +513,70 @@ function DocumentCitationCard({ citation, onCitationClick }) {
   );
 }
 
+// Citations for one dimension (same judgment / document split as before)
+function DimensionCitationsBody({ citations, handleDocCitationClick, reactKeyPrefix = '' }) {
+  const judgmentCitations = [...citations.filter(isJudgmentCitation)].sort((a, b) => {
+    const tierDiff = courtTierRank(b) - courtTierRank(a);
+    if (tierDiff !== 0) return tierDiff;
+    const confA = Number(a?.confidence ?? 0);
+    const confB = Number(b?.confidence ?? 0);
+    return confB - confA;
+  });
+  const documentCitations = citations.filter((c) => !isJudgmentCitation(c));
+  const hasJudgments = judgmentCitations.length > 0;
+  const p = reactKeyPrefix ? `${reactKeyPrefix}-` : '';
+
+  return (
+    <>
+      {hasJudgments && (
+        <div>
+          {documentCitations.length > 0 && (
+            <div style={{
+              fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF',
+              letterSpacing: '0.12em', textTransform: 'uppercase',
+              marginBottom: 8, paddingBottom: 4, borderBottom: '1px dashed #E5E7EB',
+            }}>
+              Legal Citations
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {judgmentCitations.map((c, idx) => (
+              <JudgmentCitationCard key={`${p}j-${c.id ?? idx}`} citation={c} index={idx + 1} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {documentCitations.length > 0 && (
+        <div>
+          {hasJudgments && (
+            <div style={{
+              fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF',
+              letterSpacing: '0.12em', textTransform: 'uppercase',
+              marginBottom: 8, paddingTop: 4, paddingBottom: 4,
+              borderBottom: '1px dashed #E5E7EB',
+              borderTop: '1px dashed #E5E7EB',
+            }}>
+              Case File Documents
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {documentCitations.map((c, idx) => (
+              <DocumentCitationCard
+                key={`${p}d-${c.fileId ?? c.viewUrl ?? idx}`}
+                citation={c}
+                onCitationClick={handleDocCitationClick}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── Main panel ─────────────────────────────────────────────────────────────
-const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitationClick }) => {
+const CitationsPanel = ({ citations = [], dimensions = null, fileId, folderName, onClose, onCitationClick }) => {
   const handleDocCitationClick = (citation) => {
     if (onCitationClick) {
       onCitationClick(citation);
@@ -439,10 +590,37 @@ const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitatio
     }
   };
 
-  // Separate legal judgment citations from document citations
-  const judgmentCitations = citations.filter(isJudgmentCitation);
-  const documentCitations = citations.filter(c => !isJudgmentCitation(c));
-  const hasJudgments = judgmentCitations.length > 0;
+  const dimensionSections = useMemo(
+    () => buildDimensionSections(citations, dimensions),
+    [citations, dimensions],
+  );
+
+  const [collapsedDims, setCollapsedDims] = useState({});
+  const toggleDim = (key) => {
+    setCollapsedDims((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+  const isDimOpen = (key) => !collapsedDims[key];
+
+  const judgmentTotal = useMemo(
+    () => (Array.isArray(citations) ? citations.filter(isJudgmentCitation).length : 0),
+    [citations],
+  );
+  const documentTotal = useMemo(
+    () => (Array.isArray(citations) ? citations.filter((c) => !isJudgmentCitation(c)).length : 0),
+    [citations],
+  );
+  const hasAnyJudgments = judgmentTotal > 0;
+
+  const showGlobalEmpty =
+    (!citations || citations.length === 0) &&
+    (!dimensions || dimensions.length === 0);
+  const scrollRefs = useRef({});
+  const scrollToDimension = (key) => {
+    const el = scrollRefs.current[key];
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
 
   return (
     <div className="h-full flex flex-col bg-white border-l border-gray-200 shadow-xl rounded-l-2xl" style={{ width: '380px', maxWidth: '380px' }}>
@@ -450,16 +628,16 @@ const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitatio
       <div className="px-4 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Sources</h2>
-          {hasJudgments && (
+          {hasAnyJudgments && (
             <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
-              {judgmentCitations.length > 0 && (
+              {judgmentTotal > 0 && (
                 <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#6B7280', letterSpacing: '0.08em' }}>
-                  {judgmentCitations.length} judgment{judgmentCitations.length !== 1 ? 's' : ''}
+                  {judgmentTotal} judgment{judgmentTotal !== 1 ? 's' : ''}
                 </span>
               )}
-              {documentCitations.length > 0 && (
+              {documentTotal > 0 && (
                 <span style={{ fontFamily: 'monospace', fontSize: 8, color: '#6B7280', letterSpacing: '0.08em' }}>
-                  · {documentCitations.length} document{documentCitations.length !== 1 ? 's' : ''}
+                  · {documentTotal} document{documentTotal !== 1 ? 's' : ''}
                 </span>
               )}
             </div>
@@ -475,58 +653,125 @@ const CitationsPanel = ({ citations = [], fileId, folderName, onClose, onCitatio
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4" style={{ scrollbarWidth: 'thin' }}>
-        {!citations || citations.length === 0 ? (
+      <div className="flex-1 p-3" style={{ minHeight: 0 }}>
+        {showGlobalEmpty ? (
           <div className="flex items-center justify-center h-full">
             <p className="text-gray-500 text-sm">No sources found for this response.</p>
           </div>
         ) : (
-          <>
-            {/* Legal judgment citations */}
-            {hasJudgments && (
-              <div>
-                {documentCitations.length > 0 && (
-                  <div style={{
-                    fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF',
-                    letterSpacing: '0.12em', textTransform: 'uppercase',
-                    marginBottom: 8, paddingBottom: 4, borderBottom: '1px dashed #E5E7EB',
-                  }}>
-                    Legal Citations
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {judgmentCitations.map((c, idx) => (
-                    <JudgmentCitationCard key={c.id || idx} citation={c} index={idx + 1} />
-                  ))}
-                </div>
+          <div style={{ display: 'flex', gap: 10, height: '100%', minHeight: 0 }}>
+            <div
+              style={{
+                width: 110,
+                border: '1px solid #E5E7EB',
+                borderRadius: 8,
+                background: '#F9FAFB',
+                padding: 8,
+                overflowY: 'auto',
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#6B7280', marginBottom: 6, letterSpacing: '.05em' }}>
+                DIMENSIONS
               </div>
-            )}
+              {dimensionSections.map((section, idx) => (
+                <button
+                  key={`side-${section.key}`}
+                  type="button"
+                  onClick={() => scrollToDimension(section.key)}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 7px',
+                    borderRadius: 6,
+                    border: '1px solid #E5E7EB',
+                    background: '#FFF',
+                    marginBottom: 6,
+                    cursor: 'pointer',
+                    fontSize: 10,
+                    color: '#374151',
+                  }}
+                >
+                  <div style={{ fontWeight: 700, color: '#0F766E' }}>Dim {idx + 1}</div>
+                  <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{section.name}</div>
+                </button>
+              ))}
+            </div>
 
-            {/* Document citations */}
-            {documentCitations.length > 0 && (
-              <div>
-                {hasJudgments && (
-                  <div style={{
-                    fontFamily: 'monospace', fontSize: 8, color: '#9CA3AF',
-                    letterSpacing: '0.12em', textTransform: 'uppercase',
-                    marginBottom: 8, paddingTop: 4, paddingBottom: 4,
-                    borderBottom: '1px dashed #E5E7EB', borderTop: hasJudgments ? '1px dashed #E5E7EB' : 'none',
-                  }}>
-                    Case File Documents
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  {documentCitations.map((c, idx) => (
-                    <DocumentCitationCard
-                      key={idx}
-                      citation={c}
-                      onCitationClick={handleDocCitationClick}
-                    />
-                  ))}
-                </div>
+            <div className="overflow-y-auto" style={{ scrollbarWidth: 'thin', flex: 1, minHeight: 0, paddingRight: 2 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {dimensionSections.map((section) => {
+                  const open = isDimOpen(section.key);
+                  const count = section.citations.length;
+                  return (
+                    <div
+                      key={section.key}
+                      ref={(el) => { scrollRefs.current[section.key] = el; }}
+                      style={{
+                        border: '1px solid #E5E7EB',
+                        borderRadius: 8,
+                        overflow: 'hidden',
+                        background: '#FAFAFA',
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleDim(section.key)}
+                        aria-expanded={open}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '10px 12px',
+                          background: '#F3F4F6',
+                          border: 'none',
+                          borderBottom: open ? '1px solid #E5E7EB' : 'none',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        }}
+                      >
+                        <span style={{ color: '#6B7280', flexShrink: 0, display: 'flex' }}>
+                          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontFamily: 'system-ui, sans-serif',
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: '#111827',
+                            lineHeight: 1.35,
+                          }}>
+                            {section.name}
+                          </div>
+                          <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#9CA3AF', marginTop: 2 }}>
+                            {count} citation{count !== 1 ? 's' : ''}
+                          </div>
+                        </div>
+                      </button>
+                      {open && (
+                        <div style={{ padding: 12, background: '#FFF' }}>
+                          {count === 0 ? (
+                            <p className="text-gray-500 text-sm" style={{ margin: 0 }}>
+                              No citations found for this issue
+                            </p>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                              <DimensionCitationsBody
+                                citations={section.citations}
+                                handleDocCitationClick={handleDocCitationClick}
+                                reactKeyPrefix={section.key}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-            )}
-          </>
+            </div>
+          </div>
         )}
       </div>
     </div>

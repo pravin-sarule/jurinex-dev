@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import citationApi from '../services/citationApi';
+import citationApi, { resolveCitationUserId } from '../services/citationApi';
 import documentApi from '../services/documentApi';
 import { CITATION_SERVICE_URL } from '../config/apiConfig';
 import html2pdf from 'html2pdf.js';
@@ -975,32 +975,8 @@ body{font-family:'Source Sans 3',sans-serif;background:#EAECF0;color:#0F172A;fon
     </div>
     <div class="ratio-block">"${esc(c.ratio || '—')}"</div>
 
-    <div class="sub-h">Proposition Verification</div>
-    <div class="prop-box">
-      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:10px"><tr>
-        <td style="width:22px;vertical-align:top;padding-top:1px">
-          <span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#DBEAFE;color:#1D4ED8;font-size:9px;font-weight:900;text-align:center;line-height:16px">i</span>
-        </td>
-        <td style="vertical-align:top;padding-left:6px">
-          <div class="sans" style="font-size:9px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px">Query</div>
-          <div class="serif" style="font-size:12.5px;color:#1E293B;line-height:1.65">${esc((c.proposition || {}).query || query || '—')}</div>
-        </td>
-      </tr></table>
-      <div>
-        <span style="display:inline-block;background:${matchColor};color:#FFFFFF;font-family:'Source Sans 3',sans-serif;font-size:9px;font-weight:700;letter-spacing:.07em;padding:3px 10px;border-radius:3px;margin-right:8px">${esc(matchLabel)}</span>
-        <span class="sans" style="font-size:10px;color:#64748B">Semantic Similarity: ${(score / 100).toFixed(2)} (${esc(verdict.charAt(0) + verdict.slice(1).toLowerCase())}-Sbert)</span>
-      </div>
-    </div>
-
     <div class="sub-h">Source Excerpt (${esc(exc.para || 'Para —')})</div>
     <div class="excerpt-box">"${esc(excerptText)}"</div>
-
-    <div style="margin:24px 0 10px;border-left:3px solid #21C1B6;padding-left:9px">
-      <span class="sans" style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#1B2A4A">II. Subsequent Treatment</span>
-    </div>
-    ${treatStats3}
-    ${secondaryHtml}
-    ${treatRowsHtml}
 
     <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;padding-top:14px;border-top:1px solid #E2E8F0"><tr>
       <td style="vertical-align:bottom">
@@ -1264,7 +1240,7 @@ h1{font-family:'Source Serif 4',serif;font-size:20px;font-weight:700;text-align:
 .tstat{padding:10px 16px}.tcount{font-family:'Source Serif 4',serif;font-size:26px;font-weight:700;line-height:1}
 .footer{margin-top:20px;padding-top:12px;border-top:1px solid #E2E8F0}
 .auth{display:inline-flex;align-items:center;gap:4px;background:#F0FDF4;border:1px solid #BBF7D0;padding:2px 9px;border-radius:3px;font-size:7px;font-weight:700;color:#15803D;letter-spacing:.07em;margin-top:6px}
-@media print{body{padding:20px 24px}@page{margin:1cm}}
+@media print{body{padding:20px 24px}@page{size:A4 portrait;margin:1cm}}
 </style></head><body>
 <div class="court">${courtLine}</div>
 ${showJuris ? '<div class="juris">CRIMINAL APPELLATE JURISDICTION</div>' : ''}
@@ -1326,7 +1302,7 @@ ${graphSection}
 }
 
 /* ─── Full citation report doc view ─── */
-function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPerspective = 'all', onPerspectiveChange }) {
+function ReportDoc({ report, query, cases = [], onViewFullJudgment, onFetchFullJudgment, initialPerspective = 'all', initialDimension = 'all', onPerspectiveChange }) {
   const [redesignNotifyStatus, setRedesignNotifyStatus] = useState({});
   const redesignGeneratedAt = report?.report_format?.generatedAt || '';
 
@@ -1348,8 +1324,10 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, initialPersp
       report={report}
       query={query}
       initialPerspective={initialPerspective}
+      initialDimension={initialDimension}
       onPerspectiveChange={onPerspectiveChange}
       onViewFullJudgment={onViewFullJudgment}
+      onFetchFullJudgment={onFetchFullJudgment}
       onDownloadCitation={(citation) => downloadCitationPDF(citation, query, redesignGeneratedAt)}
       onNotifyMe={redesignHandleNotifyMe}
       notifyStatus={redesignNotifyStatus}
@@ -2791,10 +2769,13 @@ export default function CitationReportPage({ embedded = false }) {
   const [selCase, setSelCase] = useState('');
   const [selCaseName, setSelCaseName] = useState('');
   const [casesLoading, setCasesLoading] = useState(false);
+  const [caseDropOpen, setCaseDropOpen] = useState(false);
+  const caseDropRef = useRef(null);
   const [vaultCount, setVaultCount] = useState(0);
   const [queryCount, setQueryCount] = useState(0);
   const [refDocs, setRefDocs] = useState([]);
   const [selectedPerspective, setSelectedPerspective] = useState('all');
+  const [selectedDimension, setSelectedDimension] = useState('all');
   const fileRef = useRef(null);
   // case-specific report history
   const [caseReports, setCaseReports] = useState([]);
@@ -2813,12 +2794,21 @@ export default function CitationReportPage({ embedded = false }) {
 
   useEffect(() => { loadCases(); }, [loadCases]);
 
+  // Close case dropdown on outside click
+  useEffect(() => {
+    if (!caseDropOpen) return;
+    const handler = (e) => { if (caseDropRef.current && !caseDropRef.current.contains(e.target)) setCaseDropOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [caseDropOpen]);
+
   useEffect(() => {
     if (!reportId) return;
     citationApi.getReport(reportId).then(d => {
       setReport(d);
       setQuery(d?.query || '');
       setSelectedPerspective(prev => normalizePerspectiveKey(d?.report_format?.perspective || prev || 'all', 'all'));
+      setSelectedDimension('all');
       setShowReport(true);
     }).catch(() => { });
   }, [reportId]);
@@ -2826,14 +2816,29 @@ export default function CitationReportPage({ embedded = false }) {
   // Load case-specific reports when case selection changes
   useEffect(() => {
     if (!selCase) { setCaseReports([]); return; }
-    const _cu = (() => { try { return JSON.parse(localStorage.getItem('user') || '{}'); } catch { return {}; } })();
-    const uid = String(_cu.id || _cu.user_id || localStorage.getItem('userId') || 'anonymous');
+    const uid = resolveCitationUserId();
     setCaseReportsLoading(true);
     citationApi.listReportsByCase(selCase, uid)
-      .then(r => setCaseReports((r?.reports || []).filter(r => r.status !== 'pending_hitl')))
+      .then(async (r) => {
+        const list = (r?.reports || []).filter(x => x.status !== 'pending_hitl');
+        setCaseReports(list);
+        // Auto-open latest report for selected case when user opens a case from dropdown.
+        if (list.length > 0 && !reportId) {
+          const latest = list[0];
+          const data = await citationApi.getReport(latest.id).catch(() => null);
+          if (data) {
+            setReport(data);
+            setQuery(data.query || '');
+            setSelectedPerspective(prev => normalizePerspectiveKey(data?.report_format?.perspective || prev || 'all', 'all'));
+            setSelectedDimension('all');
+            setShowReport(true);
+            navigate(`/citation/reports/${latest.id}`, { replace: true });
+          }
+        }
+      })
       .catch(() => setCaseReports([]))
       .finally(() => setCaseReportsLoading(false));
-  }, [selCase]);
+  }, [selCase, reportId, navigate]);
 
   useEffect(() => { chatRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs, sending]);
 
@@ -2975,8 +2980,7 @@ export default function CitationReportPage({ embedded = false }) {
 
     try {
       // Resolve actual user ID from stored user object (auth stores under 'user' key as JSON)
-      const _u = (() => { try { return JSON.parse(localStorage.getItem('user') || '{}'); } catch { return {}; } })();
-      const uid = String(_u.id || _u.user_id || localStorage.getItem('userId') || localStorage.getItem('user_id') || 'anonymous');
+      const uid = resolveCitationUserId();
       let ctx = null;
       if (selCase) {
         try {
@@ -3009,6 +3013,7 @@ export default function CitationReportPage({ embedded = false }) {
 
       // Poll agent logs at a calmer interval and never overlap requests.
       let lastLogTime = '';
+      let lastProgressAt = Date.now();
       let logPollInFlight = false;
       logPollRef.current = setInterval(async () => {
         if (logPollInFlight) return;
@@ -3018,6 +3023,7 @@ export default function CitationReportPage({ embedded = false }) {
           const newLogs = logData.logs || [];
           if (newLogs.length > 0) {
             lastLogTime = newLogs[newLogs.length - 1].created_at;
+            lastProgressAt = Date.now();
             setAgentLogs(prev => [...prev, ...newLogs]);
           }
         } catch (_) { }
@@ -3027,6 +3033,7 @@ export default function CitationReportPage({ embedded = false }) {
       // Poll status every 5s and avoid overlapping requests.
       const pollStarted = Date.now();
       let statusPollInFlight = false;
+      let statusPollErrors = 0;
       statusPollRef.current = setInterval(async () => {
         if (statusPollInFlight) return;
         if (Date.now() - pollStarted > 15 * 60 * 1000) {
@@ -3036,16 +3043,28 @@ export default function CitationReportPage({ embedded = false }) {
           setSending(false); setGenerating(false);
           return;
         }
+        // Fail-safe: backend often hangs during long clerk runs; avoid infinite loader.
+        if (Date.now() - lastProgressAt > 2 * 60 * 1000) {
+          stopPolling();
+          addMsg('error', '❌ Citation generation seems stuck. Please retry once.');
+          setReportError('Pipeline appears stuck (no progress updates).');
+          setSending(false); setGenerating(false);
+          return;
+        }
         statusPollInFlight = true;
         try {
           const st = await citationApi.getRunStatus(rid);
-          if (st.status === 'completed' || st.status === 'failed') {
+          statusPollErrors = 0;
+          lastProgressAt = Date.now();
+          const terminalSuccessStates = new Set(['completed', 'pending_hitl']);
+          const terminalFailureStates = new Set(['failed', 'unknown']);
+          if (terminalSuccessStates.has(st.status) || terminalFailureStates.has(st.status)) {
             stopPolling();
             // Final log fetch
             const finalLogs = await citationApi.getRunLogs(rid, lastLogTime);
             if (finalLogs.logs?.length) setAgentLogs(prev => [...prev, ...finalLogs.logs]);
 
-            if (st.status === 'completed') {
+            if (terminalSuccessStates.has(st.status)) {
               let rpt = null;
               if (st.report_format) {
                 rpt = { report_id: st.report_id, report_format: st.report_format, run_id: rid };
@@ -3055,20 +3074,35 @@ export default function CitationReportPage({ embedded = false }) {
               if (rpt) {
                 setReport(rpt); setQuery(q);
                 setSelectedPerspective(normalizePerspectiveKey(rpt?.report_format?.perspective || selectedPerspective || 'all', 'all'));
+                setSelectedDimension('all');
                 setVaultCount(p => p + (rpt?.report_format?.citations?.length || 0));
-                addMsg('assistant', `✅ Generated **${rpt?.report_format?.citations?.length || 0} verified citations** for your query.${selCase ? ' Case context was used for research.' : ''}`, { reportId: st.report_id });
                 if (st.report_id) navigate(`/citation/reports/${st.report_id}`, { replace: true });
                 if (selCase) {
                   citationApi.listReportsByCase(selCase, uid).then(r => setCaseReports((r?.reports || []).filter(r => r.status !== 'pending_hitl'))).catch(() => { });
                 }
               }
             } else {
-              addMsg('error', `❌ Pipeline failed: ${st.error || 'Unknown error'}`);
-              setReportError(st.error || 'Pipeline failed');
+              const pipelineError = st.error || 'Pipeline failed';
+              const normalized = String(pipelineError).toLowerCase();
+              const suppressWatchdogMissingQuery =
+                normalized.includes('watchdog failed') &&
+                normalized.includes('query or keyword_sets or dimensions required');
+              if (!suppressWatchdogMissingQuery) {
+                addMsg('error', `❌ Pipeline failed: ${pipelineError}`);
+              }
+              setReportError(pipelineError);
             }
             setSending(false); setGenerating(false);
           }
-        } catch (_) { }
+        } catch (_) {
+          statusPollErrors += 1;
+          if (statusPollErrors >= 4) {
+            stopPolling();
+            addMsg('error', '❌ Backend is not responding right now. Please retry.');
+            setReportError('Run status polling failed repeatedly.');
+            setSending(false); setGenerating(false);
+          }
+        }
         finally { statusPollInFlight = false; }
       }, 5000);
 
@@ -3135,7 +3169,7 @@ export default function CitationReportPage({ embedded = false }) {
   const handleDeleteReport = async (rId, e) => {
     if (e) e.stopPropagation();
     if (!window.confirm('Delete this citation report? This cannot be undone.')) return;
-    const uid = localStorage.getItem('userId') || localStorage.getItem('user_id') || 'anonymous';
+    const uid = resolveCitationUserId();
     try {
       await citationApi.deleteReport(rId, uid);
       if (reportId === rId || (report && report.id === rId)) {
@@ -3170,6 +3204,18 @@ export default function CitationReportPage({ embedded = false }) {
     }
   }, []);
 
+  const fetchFullJudgmentInline = useCallback(async (canonicalId, caseName) => {
+    const data = await citationApi.getJudgementFullText(canonicalId);
+    if (!data || !data.success) {
+      throw new Error('Failed to fetch judgment');
+    }
+    return {
+      caseName: data.case_name || caseName || 'Judgment',
+      fullText: data.full_text || '',
+      sourceUrl: data.source_url || '',
+    };
+  }, []);
+
   /* ── If showing full report page ── */
   if (showReport && report) {
     const currentReportId = report?.report_id || report?.id || reportId;
@@ -3178,7 +3224,12 @@ export default function CitationReportPage({ embedded = false }) {
       <div style={{ fontFamily: "'DM Sans',sans-serif", display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
         <div style={{ background: g50, borderBottom: `1px solid ${g200}`, padding: '10px 24px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <button onClick={() => setShowReport(false)} style={{ padding: '8px 0', border: 'none', background: 'transparent', fontSize: 13, color: N, fontWeight: 700, cursor: 'pointer' }}>← Back to Research</button>
+            <button
+              onClick={() => { setShowReport(false); setMsgs([]); }}
+              style={{ padding: '8px 0', border: 'none', background: 'transparent', fontSize: 13, color: N, fontWeight: 700, cursor: 'pointer' }}
+            >
+              ← Back to Research
+            </button>
             <span style={{ color: g300 }}>|</span>
             <span style={{ fontSize: 12, color: g400 }}>
               Verified Citation Report · {report?.report_format?.citations?.length || 0} citations
@@ -3218,31 +3269,6 @@ export default function CitationReportPage({ embedded = false }) {
               Delete report
             </button>
             </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 10, color: g500, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em' }}>
-              Party Filter
-            </span>
-            {PERSPECTIVE_OPTIONS.map(btn => (
-              <button
-                key={btn.key}
-                onClick={() => setSelectedPerspective(btn.key)}
-                style={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  padding: '5px 12px',
-                  borderRadius: 999,
-                  cursor: 'pointer',
-                  border: `1px solid ${selectedPerspective === btn.key ? T : g200}`,
-                  background: selectedPerspective === btn.key ? '#E6FFFB' : W,
-                  color: selectedPerspective === btn.key ? '#0F766E' : '#475569',
-                  letterSpacing: '.02em',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {btn.emoji} {btn.label}
-              </button>
-            ))}
           </div>
         </div>
         {/* ── Report save to case folder: uploading / processing until complete ── */}
@@ -3323,7 +3349,9 @@ export default function CitationReportPage({ embedded = false }) {
             query={query}
             cases={cases}
             onViewFullJudgment={handleViewFullJudgment}
+            onFetchFullJudgment={fetchFullJudgmentInline}
             initialPerspective={selectedPerspective}
+            initialDimension={selectedDimension}
             onPerspectiveChange={setSelectedPerspective}
           />
         </div>
@@ -3591,283 +3619,361 @@ export default function CitationReportPage({ embedded = false }) {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
         *{box-sizing:border-box}
-        @keyframes fdUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-        .tab-c{cursor:pointer;border:none;background:transparent;display:flex;align-items:center;gap:6px;padding:12px 14px;font-size:13px;font-weight:500;color:${g500};border-bottom:2px solid transparent;transition:all .15s;font-family:'DM Sans',sans-serif}
-        .tab-c:hover{color:${N}}
-        .tab-c.on{color:${N};background:${BS};border-bottom-color:${N};font-weight:700}
-        .sug{padding:6px 12px;background:${BS};border:1px solid rgba(13,71,161,.13);border-radius:20px;font-size:11px;color:${B};cursor:pointer;font-weight:500;transition:all .15s;font-family:'DM Sans',sans-serif}
-        .sug:hover{background:${T};color:${W};border-color:${T}}
-        .send-b{height:42px;padding:0 20px;background:linear-gradient(135deg,${N},${NL});color:${W};border:none;border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s}
-        .send-b:hover{opacity:.88}
-        .send-b:disabled{opacity:.5;cursor:not-allowed}
-        .gen-b{height:30px;padding:0 12px;background:${T};color:${W};border:none;border-radius:8px;font-weight:700;font-size:11px;cursor:pointer;font-family:'DM Sans',sans-serif}
-        .gen-b:disabled{opacity:.5;cursor:not-allowed}
-        .chat-in{flex:1;height:42px;border:2px solid ${g200};border-radius:10px;padding:0 12px;font-size:13px;outline:none;transition:border-color .2s;font-family:'DM Sans',sans-serif}
-        .chat-in:focus{border-color:${T}}
-        .sel-in{width:100%;padding:9px 12px;border:1.5px solid ${g200};border-radius:8px;font-size:12px;outline:none;font-family:'DM Sans',sans-serif;cursor:pointer}
+        @keyframes fdUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes glow{0%,100%{box-shadow:0 8px 32px rgba(27,42,74,.18)}50%{box-shadow:0 12px 40px rgba(33,193,182,.22)}}
+        .tab-c{cursor:pointer;border:none;background:transparent;display:flex;align-items:center;gap:6px;padding:12px 18px;font-size:13px;font-weight:500;color:${g400};border-bottom:2.5px solid transparent;transition:all .18s;font-family:'DM Sans',sans-serif;letter-spacing:.01em}
+        .tab-c:hover{color:${g700}}
+        .tab-c.on{color:${T};border-bottom-color:${T};font-weight:700}
+        .sug{padding:8px 14px;background:${W};border:1px solid ${g200};border-radius:20px;font-size:12px;color:${g600};cursor:pointer;font-weight:600;transition:all .18s;font-family:'DM Sans',sans-serif;text-align:left}
+        .sug:hover{border-color:${T};color:${N};background:#F0FEFB;transform:translateY(-1px)}
+        .send-b{height:46px;padding:0 24px;background:linear-gradient(135deg,${T},${TD});color:${W};border:none;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .2s;white-space:nowrap;box-shadow:0 3px 10px rgba(33,193,182,.35);letter-spacing:.01em}
+        .send-b:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(33,193,182,.45)}
+        .send-b:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+        .chat-in{flex:1;height:46px;border:1.5px solid ${g200};border-radius:12px;padding:0 16px;font-size:13.5px;outline:none;transition:all .2s;font-family:'DM Sans',sans-serif;color:${g700};background:${g50}}
+        .chat-in:focus{border-color:${T};background:${W};box-shadow:0 0 0 3px rgba(33,193,182,.1)}
+        .chat-in:disabled{opacity:.55}
+        .sel-in{width:100%;padding:10px 12px;border:1.5px solid ${g200};border-radius:10px;font-size:12px;outline:none;font-family:'DM Sans',sans-serif;cursor:pointer;color:${g700};background:${W};transition:border-color .18s}
         .sel-in:focus{border-color:${T}}
-        .view-rep-btn{display:block;margin-top:8px;padding:6px 14px;background:${T};color:${W};border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif}
-        .ref-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;background:#F3E5F5;border:1px solid #D1C4E9;border-radius:14px;font-size:10px;color:#4A148C;font-weight:600;margin:2px}
-        .sc::-webkit-scrollbar{width:5px}.sc::-webkit-scrollbar-thumb{background:${g200};border-radius:8px}
+        .view-rep-btn{display:inline-flex;align-items:center;gap:5px;margin-top:10px;padding:7px 14px;background:${T};color:${W};border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;transition:opacity .15s}
+        .view-rep-btn:hover{opacity:.88}
+        .ref-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;background:#F0FDFB;border:1px solid #99F6E4;border-radius:14px;font-size:10px;color:#0F766E;font-weight:600;margin:2px}
+        .sc::-webkit-scrollbar{width:4px}.sc::-webkit-scrollbar-thumb{background:${g200};border-radius:8px}
+        .persp-sel{height:46px;padding:0 12px;border-radius:12px;border:1.5px solid ${g200};font-size:12px;color:${g700};background:${W};outline:none;cursor:pointer;font-family:'DM Sans',sans-serif;transition:border-color .18s}
+        .persp-sel:focus{border-color:${T}}
+        .case-card{padding:10px 12px;background:${W};border:1.5px solid ${g200};border-radius:10px;cursor:pointer;transition:all .18s;display:flex;flex-direction:column;gap:3px}
+        .case-card:hover{border-color:${T};background:#F0FEFB;transform:translateX(2px);box-shadow:0 2px 8px rgba(33,193,182,.12)}
+        .sidebar-label{font-size:10px;font-weight:700;color:${g400};text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}
+        .attach-icon-btn{width:46px;height:46px;display:flex;align-items:center;justify-content:center;border:1.5px solid ${g200};border-radius:12px;cursor:pointer;font-size:18px;background:${W};transition:all .18s;flex-shrink:0}
+        .attach-icon-btn:hover{border-color:${T};background:#F0FEFB;transform:translateY(-1px)}
       `}</style>
-
-      {/* Tab nav — no shadow so it does not overlap or hide content below */}
-      <div style={{ background: W, borderBottom: `1px solid ${g200}`, padding: '0 20px', display: 'flex', gap: 2, flexShrink: 0 }}>
-        {TABS.map(t => (
-          <button key={t.id} className={`tab-c${activeTab === t.id ? ' on' : ''}`} onClick={() => setActiveTab(t.id)}>
-            {t.label}{t.id === 'team' && !teamLoading && teamReports.length > 0 ? ` (${teamReports.length})` : ''}
-          </button>
-        ))}
-      </div>
 
       {/* AI Research tab */}
       {activeTab === 'research' && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 280px', gap: 0, overflow: 'hidden' }}>
-          {/* Chat area — flex column so input row stays at bottom and visible */}
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 340px', gap: 0, overflow: 'hidden' }}>
+          {/* Chat area */}
           <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1, background: W, borderRight: `1px solid ${g200}` }}>
-            {/* Chat header — no overlay shadow */}
-            <div style={{ padding: '12px 18px', borderBottom: `1px solid ${g200}`, display: 'flex', alignItems: 'center', gap: 10, background: W, flexShrink: 0 }}>
-              <span style={{ fontSize: 20 }}>⚖️</span>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: N }}>AI Legal Research</div>
-                <div style={{ fontSize: 10, color: g400 }}>Every citation verified · Enterprise access</div>
-              </div>
-              <button
-                className="gen-b"
-                onClick={() => handleSend(true)}
-                disabled={sending || (!input.trim() && !selCase && refDocs.length === 0)}
-                style={{ marginLeft: 'auto' }}
-              >
-                Find Citations
-              </button>
-              {report && (
-                <button onClick={() => setShowReport(true)} style={{ padding: '6px 14px', background: T, color: W, border: 'none', borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                  View Report ({report?.report_format?.citations?.length || 0} citations / {(report?.report_format?.dimensionGroups || []).length || 0} dimensions) →
-                </button>
-              )}
-            </div>
-
-            {/* Messages — scrollable; input row below stays visible */}
-            <div className="sc" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>
-              {msgs.length === 0 && (
-                <div style={{ textAlign: 'center', padding: '40px 16px', animation: 'fdUp .3s ease' }}>
-                  <div style={{ fontSize: 48, marginBottom: 12 }}>⚖️</div>
-                  <h3 style={{ fontSize: 16, fontWeight: 700, color: N, marginBottom: 6 }}>Ask any Indian legal question</h3>
-                  <p style={{ fontSize: 12, color: g400, marginBottom: 20, maxWidth: 400, margin: '0 auto 20px', lineHeight: 1.6 }}>Citations verified through multi-layer pipeline. Select case on the right for contextual research. Green = verified, Yellow = review.</p>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center' }}>
-                    {SUGS.map((s, i) => <button key={i} className="sug" onClick={() => setInput(s)}>{s.length > 40 ? s.slice(0, 38) + '…' : s}</button>)}
+            {/* Messages — scrollable */}
+            <div className="sc" style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: `linear-gradient(180deg,#EEF4FF 0%,${W} 42%)` }}>
+              {sending && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100%', animation: 'fdUp .35s ease', padding: '40px 28px' }}>
+                  {/* Pulse ring + icon */}
+                  <div style={{ position: 'relative', marginBottom: 24 }}>
+                    <div style={{ position: 'absolute', inset: -20, borderRadius: '50%', background: `radial-gradient(circle,rgba(33,193,182,.18) 0%,transparent 70%)`, animation: 'glow 2s ease-in-out infinite' }} />
+                    <div style={{ width: 80, height: 80, borderRadius: 22, background: `linear-gradient(145deg,${N} 0%,${TD} 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 36, boxShadow: `0 10px 32px rgba(27,42,74,.3)`, animation: 'glow 2.5s ease-in-out infinite', position: 'relative' }}>⚖️</div>
                   </div>
+
+                  <h3 style={{ fontSize: 20, fontWeight: 800, color: N, marginBottom: 6, letterSpacing: '-.02em', textAlign: 'center' }}>Generating Citations…</h3>
+                  <p style={{ fontSize: 12, color: g400, marginBottom: 28, textAlign: 'center' }}>
+                    {selCaseName ? `Analysing case context for "${selCaseName.length > 40 ? selCaseName.slice(0,38)+'…' : selCaseName}"` : 'Processing case context…'}
+                  </p>
+
+                  {/* Progress steps derived from agentLogs */}
+                  {(() => {
+                    const STEPS = [
+                      { id: 'start',     label: 'Starting pipeline',            keywords: ['start', 'initializ', 'begin', 'run_id'] },
+                      { id: 'docs',      label: 'Loading case documents',       keywords: ['document', 'folder', 'file', 'context', 'fetch'] },
+                      { id: 'dims',      label: 'Extracting legal dimensions',  keywords: ['dimension', 'extract', 'legal dim', 'identify'] },
+                      { id: 'search',    label: 'Searching citation database',  keywords: ['search', 'query', 'ik', 'indiakant', 'retriev'] },
+                      { id: 'verify',    label: 'Verifying citations',          keywords: ['verif', 'watchdog', 'status', 'check', 'valid'] },
+                      { id: 'build',     label: 'Building report',              keywords: ['build', 'report', 'generat', 'compil', 'format'] },
+                    ];
+                    const latestMsg = agentLogs.length > 0 ? agentLogs[agentLogs.length - 1].message?.toLowerCase() || '' : '';
+                    let activeIdx = agentLogs.length === 0 ? 0 : 0;
+                    for (let i = STEPS.length - 1; i >= 0; i--) {
+                      if (STEPS[i].keywords.some(k => latestMsg.includes(k))) { activeIdx = i; break; }
+                    }
+                    if (agentLogs.length > 0 && activeIdx === 0) activeIdx = Math.min(1, STEPS.length - 1);
+                    const pct = Math.min(96, Math.round(((activeIdx + (agentLogs.length > 0 ? 0.6 : 0)) / STEPS.length) * 100));
+                    return (
+                      <div style={{ width: '100%', maxWidth: 480 }}>
+                        {/* % bar */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: g500 }}>Progress</span>
+                          <span style={{ fontSize: 12, fontWeight: 800, color: T }}>{pct}%</span>
+                        </div>
+                        <div style={{ height: 6, background: g100, borderRadius: 6, marginBottom: 22, overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${pct}%`, background: `linear-gradient(90deg,${T},${TD})`, borderRadius: 6, transition: 'width 1s ease', boxShadow: `0 0 8px rgba(33,193,182,.4)` }} />
+                        </div>
+                        {/* Steps */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {STEPS.map((s, i) => {
+                            const done = i < activeIdx;
+                            const active = i === activeIdx;
+                            return (
+                              <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 10, background: active ? `linear-gradient(135deg,rgba(33,193,182,.08),rgba(27,42,74,.04))` : done ? 'transparent' : 'transparent', border: active ? `1.5px solid rgba(33,193,182,.3)` : `1px solid ${done ? 'transparent' : g100}`, transition: 'all .3s' }}>
+                                <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: done ? T : active ? `linear-gradient(135deg,${T},${TD})` : g100, boxShadow: active ? `0 0 10px rgba(33,193,182,.4)` : 'none', transition: 'all .3s' }}>
+                                  {done ? (
+                                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3 8l4 4 6-7" stroke={W} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                                  ) : active ? (
+                                    <Spin />
+                                  ) : (
+                                    <div style={{ width: 7, height: 7, borderRadius: '50%', background: g300 }} />
+                                  )}
+                                </div>
+                                <span style={{ fontSize: 12.5, fontWeight: active ? 700 : done ? 600 : 500, color: active ? N : done ? g500 : g300, flex: 1 }}>{s.label}</span>
+                                {done && <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 8l4 4 6-7" stroke={T} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                                {active && <span style={{ fontSize: 9, fontWeight: 800, color: T, textTransform: 'uppercase', letterSpacing: '.08em' }}>Running</span>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
-              {msgs.map((m, i) => (
-                <div key={i} style={{ marginBottom: 12, display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', animation: 'fdUp .25s ease' }}>
+
+              {!sending && msgs.length === 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', minHeight: '100%', animation: 'fdUp .4s ease', padding: '60px 28px 20px' }}>
+
+                  {/* Icon */}
+                  <div style={{ position: 'relative', marginBottom: 16 }}>
+                    <div style={{ position: 'absolute', inset: -14, borderRadius: 38, background: `radial-gradient(circle,rgba(33,193,182,.14) 0%,transparent 70%)` }} />
+                    <div style={{ width: 72, height: 72, borderRadius: 20, background: `linear-gradient(145deg,${N} 0%,${TD} 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, position: 'relative', animation: 'glow 3s ease-in-out infinite', boxShadow: `0 8px 28px rgba(27,42,74,.28)` }}>⚖️</div>
+                  </div>
+
+                  <h3 style={{ fontSize: 22, fontWeight: 800, color: N, marginBottom: 6, letterSpacing: '-.03em', lineHeight: 1.2, textAlign: 'center' }}>AI Legal Research</h3>
+                  <p style={{ fontSize: 12.5, color: T, maxWidth: 340, lineHeight: 1.65, margin: '0 auto 22px', textAlign: 'center', fontWeight: 500 }}>
+                    Find verified citations from Supreme Court & High Courts,<br />grouped by your case's legal dimensions.
+                  </p>
+
+                  {/* ── Custom case selector card ── */}
+                  <div ref={caseDropRef} style={{ width: '100%', maxWidth: 580, position: 'relative' }}>
+                    {/* Card */}
+                    <div style={{ background: W, borderRadius: 16, border: `1.5px solid ${caseDropOpen ? T : g200}`, boxShadow: caseDropOpen ? `0 0 0 3px rgba(33,193,182,.12), 0 6px 24px rgba(27,42,74,.1)` : `0 3px 16px rgba(27,42,74,.07)`, transition: 'border-color .2s, box-shadow .2s' }}>
+
+                      {/* Card header stripe */}
+                      <div style={{ padding: '10px 16px 8px', borderBottom: `1px solid ${g100}`, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: T, flexShrink: 0 }} />
+                        <span style={{ fontSize: 10, fontWeight: 700, color: N, textTransform: 'uppercase', letterSpacing: '.1em' }}>Case Context</span>
+                      </div>
+
+                      {/* Trigger button */}
+                      <button
+                        type="button"
+                        onClick={() => !casesLoading && setCaseDropOpen(o => !o)}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'transparent', border: 'none', cursor: casesLoading ? 'default' : 'pointer', gap: 10, fontFamily: "'DM Sans',sans-serif" }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+                          <div style={{ width: 38, height: 38, borderRadius: 10, background: selCase ? `linear-gradient(135deg,${T},${TD})` : `linear-gradient(135deg,${g100},${g200})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flexShrink: 0, transition: 'background .25s' }}>
+                            {selCase ? '📂' : '📁'}
+                          </div>
+                          <div style={{ textAlign: 'left', minWidth: 0 }}>
+                            {selCase ? (
+                              <>
+                                <div style={{ fontSize: 13.5, fontWeight: 700, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selCaseName}</div>
+                                <div style={{ fontSize: 10.5, color: T, fontWeight: 600, marginTop: 2 }}>✓ Case context active</div>
+                              </>
+                            ) : (
+                              <div style={{ fontSize: 13, color: g400, fontWeight: 500 }}>{casesLoading ? 'Loading cases…' : cases.length === 0 ? 'No cases found' : 'Select a case…'}</div>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {selCase && (
+                            <span
+                              onClick={e => { e.stopPropagation(); setSelCase(''); setSelCaseName(''); setCaseDropOpen(false); }}
+                              style={{ width: 20, height: 20, borderRadius: '50%', background: g100, color: g500, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, cursor: 'pointer', lineHeight: 1 }}
+                            >×</span>
+                          )}
+                          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" style={{ transform: caseDropOpen ? 'rotate(180deg)' : 'none', transition: 'transform .22s', color: caseDropOpen ? T : g400 }}>
+                            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        </div>
+                      </button>
+
+                      {/* Active case — confirmation bar only */}
+                      {selCase && (
+                        <div style={{ margin: '0 12px 12px' }}>
+                          <div style={{ padding: '8px 12px', background: `linear-gradient(135deg,rgba(33,193,182,.08),rgba(27,42,74,.05))`, border: `1px solid rgba(33,193,182,.25)`, borderRadius: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3 8l4 4 6-7" stroke={T} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                            <span style={{ fontSize: 11, color: N, fontWeight: 600 }}>Case context loaded — ready to generate report</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Dropdown panel */}
+                    {caseDropOpen && cases.length > 0 && (
+                      <div style={{ position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, background: W, borderRadius: 14, border: `1.5px solid ${T}`, boxShadow: `0 10px 36px rgba(27,42,74,.18)`, zIndex: 100, overflow: 'hidden', animation: 'fdUp .16s ease' }}>
+                        <div style={{ padding: '6px 8px', maxHeight: 260, overflowY: 'auto' }} className="sc">
+                          {cases.map((c, idx) => {
+                            const name = c.case_title || c.name || c.id;
+                            const isSel = selCase === c.id;
+                            return (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => { setSelCase(c.id); setSelCaseName(name); setCaseDropOpen(false); }}
+                                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 9, border: 'none', background: isSel ? `linear-gradient(135deg,rgba(33,193,182,.1),rgba(27,42,74,.06))` : 'transparent', cursor: 'pointer', textAlign: 'left', transition: 'background .14s', fontFamily: "'DM Sans',sans-serif", marginBottom: idx < cases.length - 1 ? 2 : 0 }}
+                                onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = g50; }}
+                                onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = 'transparent'; }}
+                              >
+                                <div style={{ width: 34, height: 34, borderRadius: 8, background: isSel ? `linear-gradient(135deg,${N},${TD})` : `linear-gradient(135deg,${N},${NL})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>
+                                  ⚖️
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: 12.5, fontWeight: 600, color: isSel ? N : g700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+                                  {c.created_at && <div style={{ fontSize: 10, color: g400, marginTop: 1 }}>{new Date(c.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</div>}
+                                </div>
+                                {isSel && (
+                                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+                                    <path d="M3 8l4 4 6-7" stroke={T} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+                                  </svg>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Find Citations button — below the card */}
+                  {selCase && (
+                    <button
+                      onClick={() => handleSend(true)}
+                      disabled={sending}
+                      style={{ width: '100%', maxWidth: 580, marginTop: 14, padding: '13px 0', background: sending ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, boxShadow: sending ? 'none' : `0 4px 16px rgba(33,193,182,.35)`, transition: 'all .2s', fontFamily: "'DM Sans',sans-serif", letterSpacing: '.01em' }}
+                    >
+                      {sending ? <><Spin /> Generating…</> : <>⚡ Find Citations</>}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {!sending && msgs.map((m, i) => (
+                <div key={i} style={{ marginBottom: 14, display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', animation: 'fdUp .25s ease' }}>
                   {m.role === 'user' ? (
-                    <div style={{ maxWidth: '82%', padding: '10px 14px', background: `linear-gradient(135deg,${N},${NL})`, color: W, borderRadius: '12px 12px 2px 12px', fontSize: 13, lineHeight: 1.6 }}>{toPlainText(m.text)}</div>
+                    <div style={{ maxWidth: '80%', padding: '11px 16px', background: `linear-gradient(135deg,${N},${NL})`, color: W, borderRadius: '14px 14px 2px 14px', fontSize: 13, lineHeight: 1.65, boxShadow: '0 2px 10px rgba(27,42,74,.2)' }}>{toPlainText(m.text)}</div>
                   ) : m.role === 'status' ? (
-                    <div style={{ background: g50, border: `1px solid ${g200}`, borderRadius: '12px 12px 12px 2px', padding: '10px 14px', fontSize: 12, color: g500, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ background: g50, border: `1px solid ${g200}`, borderRadius: '14px 14px 14px 2px', padding: '11px 16px', fontSize: 12, color: g500, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <Spin /> {toPlainText(m.text)}
                     </div>
                   ) : (
-                    <div style={{ maxWidth: '85%', padding: '10px 14px', background: m.role === 'error' ? RS : g50, border: `1px solid ${m.role === 'error' ? '#FECACA' : g200}`, borderRadius: '12px 12px 12px 2px', fontSize: 13, color: m.role === 'error' ? R : g700, lineHeight: 1.7 }}>
+                    <div style={{ maxWidth: '84%', padding: '11px 16px', background: m.role === 'error' ? RS : g50, border: `1px solid ${m.role === 'error' ? '#FECACA' : g200}`, borderRadius: '14px 14px 14px 2px', fontSize: 13, color: m.role === 'error' ? R : g700, lineHeight: 1.7 }}>
                       <span dangerouslySetInnerHTML={{ __html: toPlainText(m.text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} />
-                      {m.reportId && <button className="view-rep-btn" onClick={() => setShowReport(true)}>📄 View Full Report →</button>}
                     </div>
                   )}
                 </div>
               ))}
-              {/* Live agent log panel */}
-              <LiveAgentLogs logs={agentLogs} />
               <div ref={chatRef} />
             </div>
 
-            {/* Ref docs bar */}
-            {refDocs.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '6px 14px', borderTop: `1px solid ${g100}`, background: g50 }}>
-                {refDocs.map((d, i) => (
-                  <span key={i} className="ref-chip">📄 {d.name}
-                    <span onClick={() => setRefDocs(p => p.filter((_, j) => j !== i))} style={{ cursor: 'pointer', marginLeft: 2, opacity: .6, fontSize: 12 }}>×</span>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            {/* Input row — stays visible, not covered by any overlay */}
-            <div style={{ padding: '10px 14px', borderTop: `1px solid ${g200}`, display: 'flex', gap: 8, alignItems: 'center', background: W, flexShrink: 0, position: 'relative', zIndex: 1 }}>
-              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 42, height: 42, background: '#F3E5F5', border: '1px solid #D1C4E9', borderRadius: 10, cursor: 'pointer', fontSize: 16, flexShrink: 0 }} title="Upload reference doc (.txt .md .json .csv)">
-                📎
-                <input ref={fileRef} type="file" accept=".txt,.md,.json,.csv,.html" multiple style={{ display: 'none' }} onChange={e => handleFile(e.target.files)} />
-              </label>
-              <select
-                value={selectedPerspective}
-                onChange={e => setSelectedPerspective(e.target.value)}
-                disabled={sending}
-                title="Choose which side's citations to prioritize"
-                style={{ width: 168, padding: '0 12px', height: 42, borderRadius: 10, border: `1px solid ${g200}`, fontSize: 12, color: N, background: W, flexShrink: 0, outline: 'none', cursor: sending ? 'default' : 'pointer' }}
-              >
-                <option value="all">All Perspectives</option>
-                <option value="appellant">Appellant</option>
-                <option value="respondent">Respondent</option>
-                <option value="court">Court&apos;s Ratio</option>
-                <option value="neutral">Both Sides</option>
-              </select>
-              <input className="chat-in" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} placeholder="Ask a legal research question…" disabled={sending} />
-              <button className="send-b" onClick={handleSend} disabled={sending || (!input.trim() && !selCase && refDocs.length === 0)}>
-                {sending ? <Spin /> : 'Send'}
-              </button>
-            </div>
-            {input.trim() && (
-              <div style={{ padding: '0 14px 10px', background: W, borderTop: `1px solid ${g100}` }}>
-                <div style={{ fontSize: 10, color: g500, lineHeight: 1.5 }}>
-                  Query analysis: {queryAnalysis.intent.replace(/_/g, ' ')}.
-                  {selectedPerspective === 'all'
-                    ? ` All Perspectives is selected, so the report will include all results${queryAnalysis.perspective !== 'all' ? ` while still detecting ${queryAnalysis.perspective} cues from the query` : ''}.`
-                    : ` Report perspective is locked to ${selectedPerspective}${queryAnalysis.perspective !== 'all' ? `, and the query also suggests ${queryAnalysis.perspective}` : ''}.`}
-                </div>
-              </div>
-            )}
           </div>
 
-          {/* Sidebar */}
-          <div className="sc" style={{ overflowY: 'auto', padding: 14, background: g50, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {/* Sidebar — reports + dimensions only (case selector moved to center) */}
+          <div className="sc" style={{ overflowY: 'auto', padding: '16px 14px', background: `linear-gradient(180deg,#EEF4FF 0%,${g50} 100%)`, display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-            {/* Vault pipeline card */}
-            <div style={{ background: W, borderRadius: 10, padding: 14, border: `1px solid ${g200}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: N, marginBottom: 10, textTransform: 'uppercase', letterSpacing: .5 }}>🏛 Vault-First Pipeline</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 10 }}>
-                {[{ v: queryCount, l: 'Queries (Session)', c: N }, { v: vaultCount, l: 'Vault Citations', c: G }].map(({ v, l, c }) => (
-                  <div key={l} style={{ background: g50, borderRadius: 6, padding: '6px 8px' }}>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: c }}>{v}</div>
-                    <div style={{ fontSize: 9, color: g400, marginTop: 1 }}>{l}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding: 8, background: '#E8F5E9', borderRadius: 6, fontSize: 10, color: '#1B5E20', lineHeight: 1.4 }}>
-                <b>How it works:</b> Your query runs through Watchdog → Fetcher → Clerk → Librarian → Auditor pipeline before generating the verified report.
-              </div>
-            </div>
-
-            {/* Attach case — with case-specific reports below */}
-            <div style={{ background: W, borderRadius: 10, padding: 14, border: `1px solid ${g200}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }}>📁 Attach Case Context</div>
-              <select className="sel-in" value={selCase} onChange={e => {
-                const id = e.target.value;
-                setSelCase(id);
-                const found = cases.find(c => c.id === id);
-                setSelCaseName(found ? (found.case_title || found.name || id) : '');
-              }} disabled={casesLoading}>
-                <option value="">{casesLoading ? 'Loading cases…' : cases.length === 0 ? 'No cases found' : '— Select a case (optional) —'}</option>
-                {cases.map(c => <option key={c.id} value={c.id}>{c.case_title || c.name || c.id}</option>)}
-              </select>
-              {selCase && (
-                <div style={{ marginTop: 6, fontSize: 10, color: GL, display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Dot c={GL} s={6} /> Case docs will be used as AI context · Reports tagged to this case
+            {/* Selected case indicator — compact */}
+            {selCase && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: `linear-gradient(135deg,rgba(33,193,182,.07),rgba(27,42,74,.04))`, border: `1.5px solid rgba(33,193,182,.3)`, borderRadius: 10 }}>
+                <Dot c={T} s={7} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, color: T, textTransform: 'uppercase', letterSpacing: '.08em' }}>Active Case</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>{selCaseName || selCase}</div>
                 </div>
-              )}
-              <div style={{ marginTop: 8, fontSize: 10, color: g400, lineHeight: 1.4 }}>
-                Selecting a case auto-loads backend legal dimensions from case documents, so citation grouping is ready before search.
+                <button
+                  onClick={() => { setSelCase(''); setSelCaseName(''); }}
+                  style={{ flexShrink: 0, width: 18, height: 18, borderRadius: '50%', border: 'none', background: g100, color: g500, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}
+                  title="Clear case"
+                >×</button>
               </div>
+            )}
 
-              {/* Case-specific reports */}
-              {selCase && (
-                <div style={{ marginTop: 12, borderTop: `1px solid ${g100}`, paddingTop: 10 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: N, marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span>📋 Reports for this case</span>
-                    {caseReportsLoading && <Spin />}
+            {/* Case-specific reports */}
+            {selCase && (
+              <div style={{ background: W, borderRadius: 14, padding: '13px 13px 10px', border: `1px solid ${g200}`, boxShadow: '0 2px 8px rgba(27,42,74,.06)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <div style={{ width: 22, height: 22, borderRadius: 6, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>📋</div>
+                    <div className="sidebar-label" style={{ marginBottom: 0 }}>Reports</div>
                   </div>
-                  {!caseReportsLoading && caseReports.length === 0 && (
-                    <div style={{ fontSize: 10, color: g400, fontStyle: 'italic' }}>No reports yet for this case. Generate one above!</div>
-                  )}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {caseReportsLoading && <Spin />}
+                </div>
+                {!caseReportsLoading && caseReports.length === 0 ? (
+                  <div style={{ fontSize: 11, color: g400, fontStyle: 'italic', textAlign: 'center', padding: '12px 0' }}>
+                    No reports yet. Generate one above.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     {caseReports.map(r => (
                       <div key={r.id}
+                        className="case-card"
                         onClick={async () => {
                           const data = await citationApi.getReport(r.id).catch(() => null);
                           if (data) {
                             setReport(data);
                             setQuery(data.query || '');
                             setSelectedPerspective(prev => normalizePerspectiveKey(data?.report_format?.perspective || prev || 'all', 'all'));
+                            setSelectedDimension('all');
                             setShowReport(true);
                             navigate(`/citation/reports/${r.id}`, { replace: true });
                           }
                         }}
-                        style={{ padding: '7px 10px', background: g50, border: `1px solid ${g200}`, borderRadius: 7, cursor: 'pointer', transition: 'background .12s', display: 'flex', flexDirection: 'column', gap: 4 }}
-                        onMouseEnter={e => e.currentTarget.style.background = '#EEF0F4'}
-                        onMouseLeave={e => e.currentTarget.style.background = g50}
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6 }}>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                            {r.query && r.query.length > 40 ? r.query.slice(0, 38) + '…' : r.query || 'Untitled'}
+                          <div style={{ fontSize: 11.5, fontWeight: 600, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                            {(() => {
+                              const caseName = r.case_id ? (cases.find(x => x.id === r.case_id)?.case_title || cases.find(x => x.id === r.case_id)?.name) : null;
+                              const raw = caseName || r.query || 'Citation Report';
+                              return raw.length > 36 ? raw.slice(0, 34) + '…' : raw;
+                            })()}
                           </div>
-                          <button
-                            type="button"
-                            onClick={(e) => handleDeleteReport(r.id, e)}
-                            title="Delete this report"
-                            style={{ flexShrink: 0, padding: '2px 6px', fontSize: 9, fontWeight: 600, color: '#B71C1C', background: 'transparent', border: '1px solid #FECACA', borderRadius: 4, cursor: 'pointer' }}
-                          >
-                            Delete
-                          </button>
+                          <button type="button" onClick={(e) => handleDeleteReport(r.id, e)} title="Delete"
+                            style={{ flexShrink: 0, padding: '2px 7px', fontSize: 9, fontWeight: 700, color: '#DC2626', background: 'transparent', border: '1px solid #FECACA', borderRadius: 4, cursor: 'pointer' }}>✕</button>
                         </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: 9, color: g400 }}>
-                            {r.created_at ? new Date(r.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : ''}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 3 }}>
+                          <span style={{ fontSize: 10, color: g400 }}>
+                            {r.created_at ? new Date(r.created_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }) : ''}
                           </span>
-                          <span style={{ fontSize: 9, color: GL, fontWeight: 700 }}>
-                            {r.citation_count ?? '?'} citations
-                          </span>
+                          <span style={{ fontSize: 10, color: T, fontWeight: 700 }}>{r.citation_count ?? '?'} citations</span>
                         </div>
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
 
-            {/* Dimension sidebar */}
-            <div style={{ background: W, borderRadius: 10, padding: 14, border: `1px solid ${g200}` }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }}>⚖️ Dimension Sidebar</div>
-              {!report ? (
-                <div style={{ fontSize: 11, color: g400, lineHeight: 1.5 }}>
-                  Select a case and run <b>Find Citations</b>. Legal dimensions are auto-extracted from backend report data and appear here for one-click navigation.
+            {/* Report dimensions — shown after report is generated */}
+            {report && (report?.report_format?.dimensionGroups || []).length > 0 && (
+              <div style={{ background: W, borderRadius: 14, padding: '13px 13px 10px', border: `1px solid ${g200}`, boxShadow: '0 2px 8px rgba(27,42,74,.06)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                  <div style={{ width: 22, height: 22, borderRadius: 6, background: 'linear-gradient(135deg,#7C3AED,#5B21B6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>⚖️</div>
+                  <div className="sidebar-label" style={{ marginBottom: 0 }}>Legal Dimensions</div>
                 </div>
-              ) : (report?.report_format?.dimensionGroups || []).length === 0 ? (
-                <div style={{ fontSize: 11, color: g400, lineHeight: 1.5 }}>
-                  No explicit dimension groups found in this report yet. Open report to review grouped citations.
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {(report?.report_format?.dimensionGroups || []).map((dg, idx) => (
-                    <button
-                      key={String(dg.dimension_id ?? idx)}
-                      type="button"
-                      onClick={() => setShowReport(true)}
-                      style={{
-                        width: '100%',
-                        textAlign: 'left',
-                        padding: '7px 9px',
-                        borderRadius: 8,
-                        border: `1px solid ${g200}`,
-                        background: g50,
-                        cursor: 'pointer',
-                        color: N,
-                        fontSize: 11,
-                        fontWeight: 600,
-                      }}
-                    >
-                      <div style={{ fontSize: 10, color: '#0F766E', fontWeight: 700, marginBottom: 2 }}>Dimension {idx + 1}</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {(report.report_format.dimensionGroups).map((dg, idx) => (
+                    <button key={String(dg.dimension_id ?? idx)} type="button" onClick={() => { setSelectedDimension((dg.name || '').trim() || String(dg.dimension_id ?? 'all')); setShowReport(true); }}
+                      style={{ width: '100%', textAlign: 'left', padding: '7px 10px', borderRadius: 8, border: `1px solid ${g200}`, background: g50, cursor: 'pointer', color: N, fontSize: 11, fontWeight: 600, transition: 'all .15s' }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.background = '#F0FEFB'; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = g200; e.currentTarget.style.background = g50; }}>
+                      <div style={{ fontSize: 9.5, color: T, fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '.06em' }}>Dim {idx + 1}</div>
                       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dg.name || `Dimension ${idx + 1}`}</div>
                     </button>
                   ))}
-                  <div style={{ marginTop: 4, fontSize: 10, color: g500 }}>
-                    {(report?.report_format?.citations || []).length} citations found across {(report?.report_format?.dimensionGroups || []).length} legal dimensions.
-                    </div>
                 </div>
-              )}
-            </div>
+                <div style={{ marginTop: 8, fontSize: 10, color: g400, textAlign: 'center' }}>
+                  {(report.report_format.citations || []).length} citations · {(report.report_format.dimensionGroups || []).length} dimensions
+                </div>
+              </div>
+            )}
+
+            {/* Empty sidebar state — no case selected yet */}
+            {!selCase && !report && (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '24px 8px', gap: 8 }}>
+                <div style={{ fontSize: 28, opacity: .35 }}>📋</div>
+                <div style={{ fontSize: 11, color: g400, lineHeight: 1.6 }}>Select a case in the centre panel to see reports here</div>
+              </div>
+            )}
 
             {/* Disclaimer */}
-            <div style={{ background: '#FFFBF0', border: '1px solid #F0DCA0', borderRadius: 10, padding: 14 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#9A6700' }}>⚠️ Disclaimer</div>
-              <div style={{ fontSize: 10, color: g600, lineHeight: 1.5, marginTop: 4 }}>AI-generated research assistance only. Not legal advice. Always verify citations independently before court proceedings.</div>
+            <div style={{ padding: '10px 12px', background: 'linear-gradient(135deg,#FFFBEB,#FFF7ED)', border: '1px solid #FDE68A', borderRadius: 10, marginTop: 'auto' }}>
+              <div style={{ fontSize: 10, color: '#92400E', lineHeight: 1.6, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: 12, flexShrink: 0 }}>⚠️</span>
+                <span><span style={{ fontWeight: 700 }}>AI research only.</span> Always verify citations independently before court proceedings.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -4195,7 +4301,7 @@ export default function CitationReportPage({ embedded = false }) {
         const fmtDate = (iso) => {
           if (!iso) return '';
           const d = new Date(iso);
-          return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+          return d.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
         };
 
         const getInitials = (nameOrEmail = '') =>
@@ -4282,7 +4388,7 @@ export default function CitationReportPage({ embedded = false }) {
                         >
                           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
                             <div style={{ fontSize: 14, fontWeight: 600, color: N, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {r.query || 'Untitled Report'}
+                              {caseName || r.query || 'Citation Report'}
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                               {isSharedWithMe && (
