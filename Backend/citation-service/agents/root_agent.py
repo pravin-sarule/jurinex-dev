@@ -674,49 +674,119 @@ class LegalDimensionExtractor(BaseAgent):
 
     # ── Prompt template ────────────────────────────────────────────────────
     _PROMPT_TEMPLATE = (
-        "ROLE: You are JuriNex Citation Finder v2 — India's legal citation research assistant for practising advocates.\n\n"
-        "You operate in two modes:\n"
-        "- MODE 1 — Case folder exists (RAG-powered citation search)\n"
-        "- MODE 2 — No case yet (description-based citation search)\n\n"
-        "Current mode: {mode_label}.\n"
-        "{mode_instruction}\n\n"
-        "CONFIDENCE GUARDRAIL (strict):\n"
-        "- HIGH confidence (include): Supreme Court of India, same-jurisdiction High Court, Constitutional Bench.\n"
-        "- MEDIUM confidence (include with [VERIFY]): other High Courts and tribunals (NCLAT, DRAT, CAT etc.).\n"
-        "- BLOCKED (never include): uncertain year OR uncertain court OR uncertain party names.\n"
-        "- Never fabricate; blocked is better than wrong.\n\n"
-        "Analyze the input context and identify the core disputes.\n\n"
-        "TASK:\n"
-        "- Identify 3 to 6 Legal Dimensions (not less than 3, not more than 6).\n"
-        "- Each dimension must be specific, dispute-centric, and useful for precedent search.\n\n"
-        "For each dimension, generate EXACTLY 3 targeted search queries:\n"
-        "  sc_query      : 8-15 words — focused on Supreme Court landmark judgments.\n"
-        "  hc_query      : 8-15 words — focused on {hc_name} precedents.\n"
-        "  provision_query: 8-15 words — focused on statutory sections, rules, legal ingredients.\n\n"
-        "Query rules:\n"
-        "- Each query MUST be 8-15 words (count carefully).\n"
-        "- Write natural language phrases — no quotes, no operators (ANDD/ORR/NOTT), no punctuation.\n"
-        "- Include specific section numbers (e.g. Section 316 BNS 2023, Section 389 BNSS 2023, Article 21).\n"
-        "- sc_query must mention 'Supreme Court'; hc_query must mention '{hc_name_short}'.\n\n"
-        "Jurisdiction preference:\n"
-        "- Prioritize {hc_name} for same-state High Court research.\n"
-        "- Maharashtra preference: Bombay High Court.\n"
-        "- Use current legal nomenclature where applicable (BNS 2023 / BNSS 2023).\n\n"
-        "User query / case description:\n{base_query}\n\n"
-        "Case context (use ALL of this):\n\n{case_context}\n\n"
-        "Output must be ONLY valid JSON array (no markdown, no prose):\n"
-        "[\n"
-        "  {{\n"
-        '    "dimension_id": 1,\n'
-        '    "name": "Short Name (e.g. Section 65B Admissibility)",\n'
-        '    "reasoning": "One sentence explaining why this is a core issue in the current case",\n'
-        '    "queries": {{\n'
-        '      "sc_query": "8-15 word Supreme Court focused phrase",\n'
-        '      "hc_query": "8-15 word High Court focused phrase",\n'
-        '      "provision_query": "8-15 word statute/section focused phrase"\n'
-        "    }}\n"
-        "  }}\n"
-        "]"
+        "You are a senior Indian legal research strategist for a citation retrieval pipeline.\n\n"
+        "Your only task is to generate highly relevant legal dimensions and search queries for case-law retrieval.\n\n"
+        "Current mode: {mode_label}. {mode_instruction}\n\n"
+        "High Court jurisdiction for hc_query: {hc_name} ({hc_name_short})\n\n"
+        "Your output will control downstream search across vector search, Indian Kanoon, and web-grounded retrieval.\n"
+        "Therefore, do NOT generate broad, generic, constitutional, writ-style, or party-label-driven dimensions"
+        " unless the record clearly shows those are central issues.\n\n"
+        "MISSION\n"
+        "Generate 3 to 5 legal dimensions that are:\n"
+        "- controversy-shaped, not topic-shaped\n"
+        "- fact-sensitive, not abstract\n"
+        "- offence-sensitive where criminal law is involved\n"
+        "- tailored to the actual dispute in the file\n"
+        "- optimized for retrieving precedent that is materially relevant, not merely lexically similar\n\n"
+        "PRIORITY ORDER\n"
+        "When inferring dimensions, use this order of importance:\n"
+        "1. operative facts\n"
+        "2. legal controversy actually arising from those facts\n"
+        "3. ingredients of invoked offences / causes of action / statutory requirements\n"
+        "4. procedural posture and relief sought\n"
+        "5. only then party labels, state names, forum names, or generic public-law framing\n\n"
+        "CRITICAL ANTI-DRIFT RULES\n"
+        "1. Do NOT create generic dimensions such as:\n"
+        "   - locus standi\n"
+        "   - maintainability\n"
+        "   - statutory duty of the State\n"
+        "   - violation of rights\n"
+        "   - joinder of parties\n"
+        "   - nature of relief\n"
+        "   unless the file clearly shows those are core deciding issues.\n\n"
+        "2. If the file concerns FIR quashing / criminal proceedings / cheating / forgery / business"
+        " dispute / money recovery / NI Act / contractual dispute, dimensions must focus on:\n"
+        "   - whether allegations disclose offence ingredients\n"
+        "   - whether dispute is civil/commercial but given criminal colour\n"
+        "   - whether criminal case is a counterblast / pressure tactic / abuse of process\n"
+        "   - effect of parallel civil, recovery, arbitration, or NI Act proceedings\n"
+        "   - scope of quashing power in that specific factual setting\n\n"
+        "3. Do NOT over-weight the appearance of words like: State, writ, quashing,"
+        " petitioner/applicant/respondent. If the facts point elsewhere, follow the facts.\n\n"
+        "4. Prefer dimensions that can retrieve precedents with close factual overlap.\n\n"
+        "MANDATORY CONTROVERSY COMPRESSION STEP\n"
+        "Before generating dimensions, silently derive this internal case map from the materials:\n"
+        "- dispute_nature / transaction_type / key_timeline / existing_proceedings\n"
+        "- later_impugned_action / offences_or_provisions_invoked\n"
+        "- applicant_core_case / respondent_core_case / actual_relief_sought\n"
+        "- strongest_factual_signals / likely_decisive_issues\n"
+        "Use that map to generate dimensions. Do NOT output the map.\n\n"
+        "DIMENSION DESIGN RULES\n"
+        "Each dimension must identify one real axis of legal controversy — narrow enough to"
+        " retrieve the right precedents, broad enough to return multiple authorities.\n\n"
+        "QUERY RULES\n\n"
+        "A. sc_query (8-15 words)\n"
+        "   - Supreme Court focused, concise but issue-specific\n"
+        "   - must target the controlling principle\n"
+        "   - include exact act/section (BNS/BNSS 2023 over IPC/CrPC where applicable)\n\n"
+        "B. hc_query (8-15 words)\n"
+        "   - {hc_name} focused, fact-pattern specific\n"
+        "   - MUST contain '{hc_name_short}'\n"
+        "   - should be useful for criminal quashing and applied precedent\n\n"
+        "C. provision_query (8-15 words)\n"
+        "   - must mention the most relevant offence/procedural/Act sections\n"
+        "   - target ingredients and quashing tests, not just raw section numbers\n\n"
+        "D. semantic_query (30-80 words)\n"
+        "   - must be richly factual — encode: transaction background, timeline, existing civil / NI"
+        " / recovery / contractual proceedings if any, later FIR / complaint / administrative action"
+        " if any, core legal grievance, key offence ingredients or statutory tests, relief sought\n"
+        "   - do NOT make it generic, do NOT merely restate the dimension title\n"
+        "   - make it suitable for semantic retrieval of materially similar judgments\n\n"
+        "SPECIAL RULES FOR CRIMINAL QUASHING MATTERS\n"
+        "If the file is a quashing matter, at least 3 dimensions should come from this cluster:\n"
+        "1. civil dispute vs criminal offence\n"
+        "2. ingredient failure (cheating / forgery / breach of trust / conspiracy etc.)\n"
+        "3. abuse of process / mala fide / counterblast after civil or NI proceedings\n"
+        "4. parallel proceedings and their legal effect\n"
+        "5. threshold for quashing at FIR stage\n\n"
+        "SPECIAL RULES FOR CHEATING / FORGERY CASES\n"
+        "If sections like 420, 467, 468, 471 (IPC) or analogous BNS offences appear:\n"
+        "- at least one dimension must focus on whether the complaint discloses the statutory ingredients\n"
+        "- at least one query must target 'dishonest intention at inception'\n"
+        "- at least one query must target 'false document' / 'forgery ingredients'\n"
+        "- do not collapse all offences into one vague fraud dimension\n\n"
+        "RELEVANCE FILTER — before finalising each dimension, test:\n"
+        "- Would this retrieve judgments that actually help decide this case?\n"
+        "- Is this dimension driven by the controversy, or just by legal vocabulary?\n"
+        "- Would this dimension wrongly retrieve broad writ/public-law cases?\n"
+        "If yes, rewrite it.\n\n"
+        "══════════════════════════════════════════\n"
+        "INPUT\n"
+        "══════════════════════════════════════════\n\n"
+        "User query:\n{base_query}\n\n"
+        "Case file context (uploaded documents / file snippets):\n\n{case_context}\n\n"
+        "══════════════════════════════════════════\n"
+        "OUTPUT REQUIREMENTS\n"
+        "══════════════════════════════════════════\n"
+        "- Return valid JSON only — no markdown, no commentary, no prose outside JSON\n"
+        "- 3 to 5 dimensions only\n"
+        "- Each semantic_query must be at least 30 words\n"
+        "- Avoid duplicate or overlapping dimensions\n"
+        "- Dimensions must be ordered by likely decisiveness\n\n"
+        "JSON SCHEMA (return exactly this structure):\n"
+        '{{\n'
+        '  "dimensions": [\n'
+        '    {{\n'
+        '      "dimension_id": 1,\n'
+        '      "name": "string — controversy-shaped, specific, not generic",\n'
+        '      "reasoning": "one sentence: why does this dimension require precedent support?",\n'
+        '      "sc_query": "8-15 word Supreme Court query with exact section",\n'
+        '      "hc_query": "8-15 word {hc_name_short} query with section",\n'
+        '      "provision_query": "8-15 word statute/section/ingredient query",\n'
+        '      "semantic_query": "30-80 word richly factual description for vector search"\n'
+        '    }}\n'
+        '  ]\n'
+        '}}'
     )
 
     @staticmethod
@@ -763,24 +833,49 @@ class LegalDimensionExtractor(BaseAgent):
     def _validate_dimensions(self, dimensions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Enforce production schema:
-        - 3 to 6 dimensions
+        - 3 to 5 dimensions
         - each has id, name, reasoning
-        - each query present and 8-15 words
+        - sc/hc/provision queries present and 8-15 words
+        - semantic_query present and 30+ words (synthesised from all fields if missing/short)
+
+        Accepts both flat format (queries at top level — new schema) and nested format
+        (queries in a 'queries' sub-dict — legacy schema), normalising to nested internally.
         """
         validated: List[Dict[str, Any]] = []
         for idx, dim in enumerate(dimensions[:MAX_DIMENSIONS]):
             if not isinstance(dim, dict):
                 continue
-            name = str(dim.get("name") or "").strip()
+            name      = str(dim.get("name") or "").strip()
             reasoning = str(dim.get("reasoning") or "").strip()
+            # Optional legacy enrichment fields
+            dispute    = str(dim.get("dispute") or "").strip()
+            prayer_link = str(dim.get("prayer_link") or "").strip()
+
+            # Accept both flat (new schema) and nested 'queries' dict (legacy schema)
             qs = dim.get("queries") or {}
-            sc_q = str(qs.get("sc_query") or "").strip()
-            hc_q = str(qs.get("hc_query") or "").strip()
-            prov_q = str(qs.get("provision_query") or "").strip()
+            sc_q   = str(dim.get("sc_query") or qs.get("sc_query") or "").strip()
+            hc_q   = str(dim.get("hc_query") or qs.get("hc_query") or "").strip()
+            prov_q = str(dim.get("provision_query") or qs.get("provision_query") or "").strip()
+
             if not (name and reasoning and sc_q and hc_q and prov_q):
                 continue
             if not (self._word_count_ok(sc_q) and self._word_count_ok(hc_q) and self._word_count_ok(prov_q)):
                 continue
+
+            # semantic_query: use LLM output if ≥25 words; otherwise synthesise a rich fallback
+            # covering reasoning, name, and all 3 keyword queries for maximum Qdrant coverage.
+            sem_q = str(dim.get("semantic_query") or qs.get("semantic_query") or "").strip()
+            sem_words = [w for w in sem_q.split() if w]
+            if len(sem_words) < 25:
+                sem_q = " ".join(filter(None, [
+                    dispute or name,
+                    prayer_link,
+                    reasoning,
+                    sc_q,
+                    hc_q,
+                    prov_q,
+                ]))
+
             did = dim.get("dimension_id")
             try:
                 did = int(did)
@@ -788,21 +883,27 @@ class LegalDimensionExtractor(BaseAgent):
                 did = idx + 1
             validated.append({
                 "dimension_id": did,
-                "name": name,
-                "reasoning": reasoning,
+                "name":         name,
+                "dispute":      dispute,
+                "prayer_link":  prayer_link,
+                "reasoning":    reasoning,
                 "queries": {
-                    "sc_query": sc_q,
-                    "hc_query": hc_q,
+                    "sc_query":        sc_q,
+                    "hc_query":        hc_q,
                     "provision_query": prov_q,
+                    "semantic_query":  sem_q,
                 },
             })
-        # Keep only 3-6
-        if len(validated) > 6:
-            validated = validated[:6]
+        # Cap at 5 — 5 specific dimensions outperform 6 generic ones
+        if len(validated) > 5:
+            validated = validated[:5]
         return validated
 
     def _dimensions_to_keyword_sets(self, dimensions: List[Dict[str, Any]]) -> List[str]:
-        """Flatten all dimension queries into a deduplicated keyword_sets list."""
+        """Flatten all dimension queries into a deduplicated keyword_sets list.
+        sc/hc/provision queries go to IK and Google keyword search.
+        semantic_query is excluded from keyword_sets (it is used only for Qdrant vector search).
+        """
         seen: set = set()
         kw: List[str] = []
         for dim in dimensions:
@@ -977,16 +1078,36 @@ class LegalDimensionExtractor(BaseAgent):
         parts: List[str] = []
         chunks_used: List[Dict[str, Any]] = []
         embeddings_used: List[str] = []
+
+        # Patterns that indicate high-value legal sections (prayer, issues, conflict)
+        _PRIORITY_PATTERNS = re.compile(
+            r"(?:wherefore|prayer|prayers|relief\s+sought|it\s+is\s+(?:humbly\s+)?prayed"
+            r"|points?\s+of\s+(?:dispute|conflict|contention|determination|law)"
+            r"|issues?\s+framed|question(?:s)?\s+of\s+law|grounds?\s+of\s+(?:appeal|challenge|petition)"
+            r"|contentions?\s+of\s+(?:petitioner|appellant|respondent|plaintiff|defendant)"
+            r"|prayer\s+clause|directions?\s+sought|order(?:s)?\s+sought)",
+            re.IGNORECASE,
+        )
+
+        priority_parts: List[str] = []   # prayer / issues / conflict sections — prepended
+        regular_parts:  List[str] = []   # remaining context
+
         for idx, f in enumerate(case_context[:20]):
             name    = f.get("name") or f.get("filename") or "document"
             snippet = (f.get("snippet") or f.get("content") or "")[:8000]
             if not snippet:
                 continue
-            parts.append(f"[{name}]\n{snippet}")
+
+            # Check if this chunk contains high-value legal analysis sections
+            is_priority = bool(_PRIORITY_PATTERNS.search(snippet))
+            bucket = priority_parts if is_priority else regular_parts
+            bucket.append(f"[{name}{'  ← prayer/issues/conflict' if is_priority else ''}]\n{snippet}")
+
             chunk_info: Dict[str, Any] = {
                 "file_name": name,
                 "chunk_index": idx,
                 "snippet_length": len(snippet),
+                "is_priority": is_priority,
                 "snippet_preview": snippet[:150] + ("…" if len(snippet) > 150 else ""),
             }
             if f.get("chunk_id") is not None:
@@ -996,8 +1117,12 @@ class LegalDimensionExtractor(BaseAgent):
                 embeddings_used.append(str(f["embedding_id"]))
             chunks_used.append(chunk_info)
 
+        # Priority sections first so Claude reads prayer/issues before generic facts
+        parts = priority_parts + regular_parts
+
         context.metadata["keyword_extraction_chunks_used"] = chunks_used
         context.metadata["keyword_extraction_embeddings_used"] = embeddings_used
+        context.metadata["priority_chunks_count"] = len(priority_parts)
 
         if not parts and base_query:
             parts.append(f"[USER_DESCRIPTION]\n{base_query}")
@@ -1007,11 +1132,13 @@ class LegalDimensionExtractor(BaseAgent):
         hc_name_short = hc_name.replace(" High Court", "").strip()
         num_dimensions = min(6, max(3, MAX_DIMENSIONS))  # hint only; model still returns 3-6
 
+        priority_count = len(priority_parts)
         chunk_summary = ", ".join(
-            f"{c['file_name']} (chunk {c['chunk_index']}, {c['snippet_length']} chars)"
+            f"{c['file_name']} (chunk {c['chunk_index']}, {c['snippet_length']} chars{', PRIORITY' if c.get('is_priority') else ''})"
             for c in chunks_used[:10]
         ) + (f" … and {len(chunks_used) - 10} more" if len(chunks_used) > 10 else "")
-        logger.info("[LEGAL_DIM_EXTRACTOR] Analysing chunks: %s | HC=%s", chunk_summary or "none", hc_name)
+        logger.info("[LEGAL_DIM_EXTRACTOR] Analysing chunks: %s | HC=%s | priority_chunks=%d",
+                    chunk_summary or "none", hc_name, priority_count)
 
         # ── Build & send prompt ───────────────────────────────────────────
         case_context_str = "\n\n".join(parts[:15])
@@ -1051,7 +1178,7 @@ class LegalDimensionExtractor(BaseAgent):
         claude_cfg = dict(pc.claude_config) if pc and pc.claude_config else {}
         raw_response = self._claude(
             prompt,
-            max_tokens=claude_cfg.pop("max_tokens", 2000),
+            max_tokens=claude_cfg.pop("max_tokens", 3000),  # increased for semantic_query field
             temperature=claude_cfg.pop("temperature", 0.1),
             run_id=run_id,
             user_id=user_id,
@@ -1100,9 +1227,10 @@ class LegalDimensionExtractor(BaseAgent):
         for d in validated_dims:
             qs = d.get("queries") or {}
             logger.info(
-                "[LEGAL_DIM_EXTRACTOR] DIM %s | %s | SC=%s | HC=%s | PROVISION=%s",
+                "[LEGAL_DIM_EXTRACTOR] DIM %s | %s | dispute=%s | SC=%s | HC=%s | PROVISION=%s",
                 d.get("dimension_id"),
                 (d.get("name") or "")[:90],
+                (d.get("dispute") or "")[:120],
                 (qs.get("sc_query") or "")[:160],
                 (qs.get("hc_query") or "")[:160],
                 (qs.get("provision_query") or "")[:160],
@@ -1117,14 +1245,18 @@ class LegalDimensionExtractor(BaseAgent):
                 {
                     "dimensions_count": len(validated_dims),
                     "keyword_sets_count": len(keyword_sets),
+                    "priority_chunks_used": context.metadata.get("priority_chunks_count", 0),
                     "dimensions": [
                         {
                             "id": d.get("dimension_id"),
                             "name": d.get("name"),
+                            "dispute": d.get("dispute"),
+                            "prayer_link": d.get("prayer_link"),
                             "reasoning": d.get("reasoning"),
                             "sc_query": (d.get("queries") or {}).get("sc_query"),
                             "hc_query": (d.get("queries") or {}).get("hc_query"),
                             "provision_query": (d.get("queries") or {}).get("provision_query"),
+                            "semantic_query": (d.get("queries") or {}).get("semantic_query", "")[:120],
                         }
                         for d in validated_dims
                     ],

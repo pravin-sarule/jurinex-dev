@@ -233,10 +233,12 @@ def _search_local(
             r["_query"] = query
         logger.info("[WATCHDOG] 🏛  SOURCE=local_db → %d result(s) for query: %r", len(rows), query[:80])
         for r in rows:
+            _cid = str(r.get("canonical_id") or r.get("id") or "").strip() or "—"
             logger.info(
-                "  ├─ [LOCAL_DB]  title=%-55s | citation=%-25s | court=%s",
-                (r.get("title") or "?")[:55],
-                (r.get("primary_citation") or "—")[:25],
+                "  ├─ [LOCAL_DB]  canonical_id=%s | title=%-45s | citation=%-20s | court=%s",
+                _cid,
+                (r.get("title") or "?")[:45],
+                (r.get("primary_citation") or "—")[:20],
                 (r.get("court") or "?")[:30],
             )
         titles = [r.get("title") or "?" for r in rows[:5]]
@@ -258,8 +260,9 @@ def _qdrant_search_one(
     qdrant_client: Any,
     fetch_limit: int,
     score_threshold: Optional[float] = None,
+    query_filter: Optional[Any] = None,
 ) -> List[Any]:
-    """Run one Qdrant cosine similarity query on ``legal_embeddings``; tries query_points then search()."""
+    """Run one Qdrant cosine similarity query on ``legal_embeddings_v2``; tries query_points then search()."""
     qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2").strip() or "legal_embeddings_v2"
     kwargs_qp: Dict[str, Any] = {
         "collection_name": qdrant_collection,
@@ -269,6 +272,8 @@ def _qdrant_search_one(
     }
     if score_threshold is not None:
         kwargs_qp["score_threshold"] = score_threshold
+    if query_filter is not None:
+        kwargs_qp["query_filter"] = query_filter
     try:
         try:
             qp = qdrant_client.query_points(**kwargs_qp)
@@ -285,6 +290,8 @@ def _qdrant_search_one(
         }
         if score_threshold is not None:
             kwargs_s["score_threshold"] = score_threshold
+        if query_filter is not None:
+            kwargs_s["query_filter"] = query_filter
         try:
             return qdrant_client.search(**kwargs_s) or []
         except TypeError:
@@ -294,6 +301,68 @@ def _qdrant_search_one(
             except Exception as exc2:
                 logger.warning("[WATCHDOG_QDRANT] search() fallback failed: %s", exc2)
                 return []
+
+
+# Admin source_type values used to identify admin-uploaded judgments
+_ADMIN_SOURCE_TYPES = frozenset({
+    "admin", "admin_upload", "admin-upload", "admin uploaded",
+    "admin-uploaded", "adminupload", "manual_upload", "manual-upload",
+    "judgment_upload", "judgement_upload",
+})
+
+
+def _fetch_admin_canonical_ids(run_id: Optional[str] = None) -> List[str]:
+    """
+    Query PostgreSQL for canonical_ids of all admin-uploaded judgments.
+    Checks both judgments.source_type and the admin upload table.
+    Returns a list of canonical_id strings (format: v-sc-YYYY-xxxxx or similar).
+    """
+    try:
+        from db.connections import get_pg_conn
+        conn = get_pg_conn()
+        if not conn:
+            return []
+        try:
+            cids: List[str] = []
+            admin_types = list(_ADMIN_SOURCE_TYPES)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT canonical_id FROM judgments
+                     WHERE LOWER(COALESCE(source_type,'')) = ANY(%s)
+                       AND canonical_id IS NOT NULL AND canonical_id <> ''
+                    """,
+                    (admin_types,),
+                )
+                for row in (cur.fetchall() or []):
+                    cid = str(row[0] if isinstance(row, tuple) else row.get("canonical_id") or "").strip()
+                    if cid:
+                        cids.append(cid)
+            # Also check the admin upload table
+            try:
+                from db.client import _resolve_admin_upload_table  # noqa: PLC2701
+                upload_table = _resolve_admin_upload_table(conn) or ""
+                if upload_table:
+                    with conn.cursor() as cur2:
+                        cur2.execute(
+                            f"SELECT canonical_id FROM {upload_table} WHERE canonical_id IS NOT NULL AND canonical_id <> ''"
+                        )
+                        for row in (cur2.fetchall() or []):
+                            cid = str(row[0] if isinstance(row, tuple) else row.get("canonical_id") or "").strip()
+                            if cid and cid not in cids:
+                                cids.append(cid)
+            except Exception:
+                pass
+            logger.info("[WATCHDOG_QDRANT] Admin canonical_ids from DB: %d", len(cids))
+            _db_log(run_id, "watchdog", "watchdog", "INFO",
+                    f"🔑 Admin canonical_ids: {len(cids)} found in DB",
+                    {"count": len(cids), "sample": cids[:5]})
+            return cids
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[WATCHDOG_QDRANT] _fetch_admin_canonical_ids failed: %s", exc)
+        return []
 
 
 def _search_local_semantic(
@@ -333,13 +402,22 @@ def _search_local_semantic(
     # Force ES client probe so elasticsearch_init_failed() reflects reachability for this process.
     get_es_client()
     es_unreachable = elasticsearch_init_failed()
-    # Do not apply a score_threshold — it blocks all results when ES is down.
-    # Rely on cosine similarity ordering and limit instead.
+    # No score threshold at Qdrant fetch time — we apply it after DB lookup below,
+    # once we know whether each result is admin-uploaded or not.
     qdrant_score_threshold: Optional[float] = None
+    # Similarity thresholds applied after DB hydration.
+    # Non-admin: 0.65 (strict — only well-matched IK/Google judgments pass).
+    # Admin:     0.45 (relaxed — admin judgments may use slightly different vocabulary,
+    #                  but still must have meaningful Qdrant chunk similarity).
+    # Both are env-configurable so they can be tuned without a code deploy.
+    _MIN_SCORE_NON_ADMIN = float(os.environ.get("CITATION_QDRANT_MIN_SCORE", "0.65"))
+    _MIN_SCORE_ADMIN     = float(os.environ.get("CITATION_ADMIN_QDRANT_MIN_SCORE", "0.45"))
 
-    per_task_limit = max(5, (max_total * 3) // max(len(tasks), 1))
+    # Fetch window: large enough to capture admin chunks that rank lower than IK chunks
+    # for the same query but are still genuinely relevant.
+    per_task_limit = max(30, (max_total * 6) // max(len(tasks), 1))
     if es_unreachable:
-        per_task_limit = max(per_task_limit * 2, 24)
+        per_task_limit = max(per_task_limit * 2, 60)
 
     # ── 1. Embed all dimension queries (sc / hc / provision) in one Gemini batch ─
     vectors_all = get_query_embeddings_batch([str(t.get("query") or "") for t in tasks])
@@ -360,6 +438,7 @@ def _search_local_semantic(
     # ── 2. Qdrant similarity search per embedded query ────────────────────────
     # Map: canonical_id → {best_score, dimension_ids[], dimension_names[], query_types[]}
     cid_meta: Dict[str, Dict[str, Any]] = {}
+    qdrant_judgment_uuids: set = set()
 
     def _search_one(idx_task: Tuple[int, Dict]) -> Tuple[int, List[Any]]:
         idx, t = idx_task
@@ -379,6 +458,9 @@ def _search_local_semantic(
             for p in points:
                 payload = getattr(p, "payload", None) or {}
                 cid = str(payload.get("canonical_id") or "").strip()
+                ju = str(payload.get("judgment_uuid") or "").strip()
+                if ju:
+                    qdrant_judgment_uuids.add(ju)
                 if not cid:
                     continue
                 score = float(getattr(p, "score", 0) or 0)
@@ -410,6 +492,90 @@ def _search_local_semantic(
             f"🔍 Qdrant similarity: {len(cid_meta)} unique canonical_ids found",
             {"canonical_id_count": len(cid_meta)})
 
+    if not cid_meta and not task_vectors:
+        return []
+
+    # ── 2b. Targeted admin search ─────────────────────────────────────────────
+    # Admin upload chunks may rank below per_task_limit in natural search because
+    # they compete with many IK/Google judgments for the same top-N slots.
+    # Fix: fetch all admin canonical_ids and run a payload-filtered Qdrant search
+    # that searches specifically within admin chunks — real 0.45 threshold applied,
+    # no force-include. Only chunks that genuinely score ≥ 0.45 are added.
+    admin_cids_all = _fetch_admin_canonical_ids(run_id=run_id)
+    admin_cids_to_search = [c for c in admin_cids_all if c not in cid_meta]
+
+    if admin_cids_to_search and any(v for v in task_vectors.values()):
+        logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d canonical_ids not in natural results",
+                    len(admin_cids_to_search))
+        _admin_filter = None
+        try:
+            from qdrant_client.http import models as _qm
+            _admin_filter = _qm.Filter(
+                must=[_qm.FieldCondition(
+                    key="canonical_id",
+                    match=_qm.MatchAny(any=admin_cids_to_search[:500]),
+                )]
+            )
+        except Exception as _fe:
+            logger.warning("[WATCHDOG_QDRANT] Could not build admin filter: %s", _fe)
+
+        if _admin_filter is not None:
+            fetch_limit_admin = max(30, per_task_limit)
+            _new_admin: List[str] = []
+            for idx, vec in task_vectors.items():
+                if not vec:
+                    continue
+                t = tasks[idx]
+                dim_id    = t.get("dimension_id")
+                dim_name  = t.get("dimension_name") or ""
+                q_type    = t.get("q_type") or "semantic"
+                query_txt = t.get("query") or ""
+                admin_pts = _qdrant_search_one(vec, qdr, fetch_limit_admin, None, _admin_filter)
+                for p in admin_pts:
+                    payload = getattr(p, "payload", None) or {}
+                    cid = str(payload.get("canonical_id") or "").strip()
+                    if not cid or cid not in admin_cids_to_search:
+                        continue
+                    score = float(getattr(p, "score", 0) or 0)
+                    if score < _MIN_SCORE_ADMIN:
+                        continue  # real threshold — no force-include
+                    ju = str(payload.get("judgment_uuid") or "").strip()
+                    if ju:
+                        qdrant_judgment_uuids.add(ju)
+                    if cid not in cid_meta:
+                        cid_meta[cid] = {
+                            "best_score":           score,
+                            "provision_best_score": score if q_type == "provision" else 0.0,
+                            "dimension_ids":        [dim_id] if dim_id is not None else [],
+                            "dimension_names":      [dim_name] if dim_name else [],
+                            "query_types":          [q_type] if q_type else [],
+                            "queries":              [query_txt] if query_txt else [],
+                        }
+                        _new_admin.append(cid)
+                    else:
+                        m = cid_meta[cid]
+                        m["best_score"] = max(m["best_score"], score)
+                        if q_type == "provision":
+                            m["provision_best_score"] = max(float(m.get("provision_best_score") or 0.0), score)
+                        if dim_id is not None and dim_id not in m["dimension_ids"]:
+                            m["dimension_ids"].append(dim_id)
+                        if dim_name and dim_name not in m["dimension_names"]:
+                            m["dimension_names"].append(dim_name)
+                        if q_type and q_type not in m["query_types"]:
+                            m["query_types"].append(q_type)
+
+            _new_admin = list(dict.fromkeys(_new_admin))  # deduplicate, preserve order
+            logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d new admin canonical_ids added (threshold=%.2f)",
+                        len(_new_admin), _MIN_SCORE_ADMIN)
+            if _new_admin:
+                _db_log(run_id, "watchdog", "watchdog", "INFO",
+                        f"✅ Admin targeted: {len(_new_admin)} admin judgment(s) score ≥ {_MIN_SCORE_ADMIN}",
+                        {"new_admin_cids": _new_admin[:10], "threshold": _MIN_SCORE_ADMIN})
+            else:
+                _db_log(run_id, "watchdog", "watchdog", "INFO",
+                        f"ℹ Admin targeted search: 0 admin judgments scored ≥ {_MIN_SCORE_ADMIN} for current queries",
+                        {"admin_cids_checked": len(admin_cids_to_search)})
+
     if not cid_meta:
         return []
 
@@ -419,6 +585,7 @@ def _search_local_semantic(
         list(cid_meta.keys()),
         approved_only=False,
         exclude_low_hierarchy=False,
+        judgment_uuids=list(qdrant_judgment_uuids),
     )
     logger.info("[WATCHDOG_QDRANT] DB returned %d row(s) for %d canonical_id(s)",
                 len(db_rows), len(cid_meta))
@@ -464,7 +631,24 @@ def _search_local_semantic(
         sim_score = meta.get("best_score", 0.0)
         prov_best = float(meta.get("provision_best_score") or 0.0)
         court_val = r.get("court") or r.get("court_code")
+        # Admin flag comes entirely from the DB row returned by judgements_fetch_by_canonical_ids.
+        # That function checks both judgments.source_type and judgment_uploads table.
         is_admin = bool(r.get("is_local_admin"))
+        # Apply score threshold — admin gets a relaxed floor (0.45), non-admin uses strict (0.65).
+        # Both thresholds are env-configurable (CITATION_ADMIN_QDRANT_MIN_SCORE / CITATION_QDRANT_MIN_SCORE).
+        # Only chunks that actually scored above the floor are kept — no result is force-included.
+        min_score = _MIN_SCORE_ADMIN if is_admin else _MIN_SCORE_NON_ADMIN
+        if sim_score < min_score:
+            logger.debug(
+                "[WATCHDOG_QDRANT] Dropped low-score %s: canonical_id=%s score=%.3f < threshold=%.2f",
+                "admin" if is_admin else "non-admin", cid, sim_score, min_score,
+            )
+            continue
+        if is_admin:
+            logger.info(
+                "[WATCHDOG_QDRANT] ✅ Admin judgment included: canonical_id=%s score=%.3f (admin_min=%.2f)",
+                cid, sim_score, _MIN_SCORE_ADMIN,
+            )
         is_dist = _district_court_like(court_val)
         prov_strong = "provision" in q_types and prov_best >= 0.80
         provision_focus = bool(
@@ -503,6 +687,11 @@ def _search_local_semantic(
         has_analysis = bool(r.get("has_analysis_report"))
         needs_clerk = not has_analysis
 
+        # Ensure admin source_type propagates correctly through the pipeline
+        resolved_source_type = str(r.get("source_type") or "").strip().lower()
+        if is_admin:
+            resolved_source_type = resolved_source_type or "admin-uploaded"
+
         row = {
             **r,
             # Watchdog-standard tags (used by deduplication + clerk)
@@ -522,6 +711,7 @@ def _search_local_semantic(
             "_priority_tier":   priority_tier,
             # Admin source flag — passed through to report_builder → frontend
             "is_local_admin":   is_admin,
+            "source_type":      resolved_source_type,
             "is_provision_match": bool(is_admin and "provision" in q_types),
             "_provision_focus_district": provision_focus,
             "citation_tags":    cit_tags,
@@ -532,10 +722,12 @@ def _search_local_semantic(
         }
         out.append(row)
         logger.info(
-            "  ├─ [QDRANT_LOCAL] title=%-50s | score=%.3f | admin=%s | court=%s",
-            (r.get("title") or r.get("case_name") or "?")[:50],
+            "  ├─ [QDRANT_LOCAL] canonical_id=%s | title=%-40s | score=%.3f | admin=%s | source_type=%s | court=%s",
+            cid or "—",
+            (r.get("title") or r.get("case_name") or "?")[:40],
             sim_score,
-            r.get("is_local_admin", False),
+            is_admin,
+            resolved_source_type or "—",
             (r.get("court") or "?")[:30],
         )
 
@@ -813,15 +1005,30 @@ def _build_qdrant_dimension_tasks(
     dimensions: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Tasks for Qdrant semantic local search only: Supreme Court + provision queries.
-    HC keywords are still used for IK / Google elsewhere.
+    Tasks for Qdrant semantic local search: SC + HC + provision + semantic queries.
+
+    Four query types are used per dimension:
+      sc        — Supreme Court-focused phrase (8-15 words, IK-optimised)
+      hc        — High Court-focused phrase (8-15 words)
+      provision — Statute/section-focused phrase (8-15 words)
+      semantic  — Rich 25-60 word descriptive phrase that encodes full dimension
+                  context (facts, outcome, legal principle, section numbers).
+                  Falls back to reasoning + sc + hc + provision concatenation.
+
+    Using all four guarantees that:
+    - Admin-uploaded HC judgments are found (hc query)
+    - Provision-specific judgments are found (provision query)
+    - Semantically rich matches are found via denser embedding (semantic query)
     """
     tasks: List[Dict[str, Any]] = []
     for dim in dimensions:
         dim_id = dim.get("dimension_id", "?")
         dim_name = dim.get("name", "")
         qs = dim.get("queries") or {}
-        for q_type, q_key in (("sc", "sc_query"), ("provision", "provision_query")):
+        reasoning = (dim.get("reasoning") or "").strip()
+
+        # Standard 3-tier queries
+        for q_type, q_key in (("sc", "sc_query"), ("hc", "hc_query"), ("provision", "provision_query")):
             q = (qs.get(q_key) or "").strip()
             if q:
                 tasks.append({
@@ -830,6 +1037,24 @@ def _build_qdrant_dimension_tasks(
                     "dimension_id": dim_id,
                     "dimension_name": dim_name,
                 })
+
+        # Semantic query: rich context for dense vector search — finds admin-uploaded
+        # judgments whose text doesn't match short IK-style keyword phrases.
+        sem_q = (qs.get("semantic_query") or "").strip()
+        if not sem_q:
+            # Synthesise: dimension name + reasoning + all 3 queries
+            sc_q = (qs.get("sc_query") or "").strip()
+            hc_q = (qs.get("hc_query") or "").strip()
+            pv_q = (qs.get("provision_query") or "").strip()
+            sem_q = " ".join(filter(None, [dim_name, reasoning, sc_q, hc_q, pv_q]))
+        if sem_q:
+            tasks.append({
+                "query": sem_q,
+                "q_type": "semantic",
+                "dimension_id": dim_id,
+                "dimension_name": dim_name,
+            })
+
     return tasks
 
 

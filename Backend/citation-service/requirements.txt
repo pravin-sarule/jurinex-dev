@@ -5,7 +5,7 @@ python-dotenv
 google-genai>=1.0.0
 anthropic>=0.40.0
 psycopg2-binary
-elasticsearch
+elasticsearch>=8.0.0,<9.0.0
 qdrant-client
 neo4j
 PyJWT

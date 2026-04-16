@@ -208,7 +208,9 @@ def get_es_client():
                 probe_client = Elasticsearch(url, **probe_kwargs)
             ping_ok = False
             try:
-                ping_ok = bool(probe_client.ping(request_timeout=ES_PING_TIMEOUT))
+                ping_ok = bool(
+                    probe_client.options(request_timeout=ES_PING_TIMEOUT).ping()
+                )
             except Exception:
                 ping_ok = False
             if not ping_ok:

@@ -2697,7 +2697,13 @@ def build_report_from_judgements(
         # should reflect Local DB fetch route (not original ingestion provenance).
         if hint:
             j["source"] = "local"
-            if not j.get("source_type"):
+            # Apply admin flag BEFORE setting source_type default so admin docs
+            # get source_type="admin" rather than being overridden to "local".
+            if hint.get("is_local_admin"):
+                j["is_local_admin"] = True
+                # Always stamp admin source_type — do not let "local" default win.
+                j["source_type"] = "admin"
+            elif not j.get("source_type"):
                 j["source_type"] = "local"
         if hint.get("citation_tags"):
             j["citation_tags"] = list(hint.get("citation_tags") or [])
@@ -2713,10 +2719,6 @@ def build_report_from_judgements(
             j["dimension_id"] = hint.get("_dimension_id")
         if hint.get("_dimension_name") and not j.get("dimension_name"):
             j["dimension_name"] = hint.get("_dimension_name")
-        if hint.get("is_local_admin"):
-            j["is_local_admin"] = True
-            if not j.get("source_type"):
-                j["source_type"] = "admin"
 
         # Local DB fallback: when no full analysis_report exists, still provide
         # usable report content from summary/full text.

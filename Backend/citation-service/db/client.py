@@ -28,6 +28,8 @@ _qdrant_embed_client = None
 _qdrant_embed_available = None
 _EMBED_RETRY_ATTEMPTS = 3
 _EMBED_RETRY_BASE_DELAY_SECS = 0.75
+_ADMIN_UPLOAD_TABLE_CACHE: Optional[str] = None
+_ADMIN_UPLOAD_COLS_CACHE: Dict[str, set] = {}
 
 
 def _resolve_query_embed_model() -> str:
@@ -219,10 +221,71 @@ def _judgment_citation_data_has_analysis_report(cd: Any) -> bool:
     return bool(ar)
 
 
+def _hydrate_judgment_rows_from_elasticsearch(rows: List[Dict[str, Any]]) -> None:
+    """
+    Load full judgment text from the ``judgments`` Elasticsearch index.
+
+    Uses each row's ``es_doc_id`` when set (including values taken from
+    ``judgment_uploads``), otherwise falls back to ``canonical_id`` / ``id`` as
+    the document id (matches the admin upload pipeline).
+    """
+    if not rows:
+        return
+    es = get_es_client()
+    if not es or elasticsearch_init_failed():
+        return
+    fetch_ids: List[str] = []
+    seen: set = set()
+    for row in rows:
+        cid = str(row.get("canonical_id") or row.get("id") or "").strip()
+        eid = str(row.get("es_doc_id") or "").strip() or cid
+        if not eid or eid in seen:
+            continue
+        seen.add(eid)
+        fetch_ids.append(eid)
+    if not fetch_ids:
+        return
+    try:
+        mres = es.mget(index="judgments", body={"ids": fetch_ids})
+    except Exception as exc:
+        logger.warning("[FETCH_BATCH] ES mget full_text hydration failed: %s", exc)
+        return
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for d in (mres.get("docs") or []):
+        if not d.get("found"):
+            continue
+        doc_id = str(d.get("_id") or "").strip()
+        src = d.get("_source") or {}
+        if not isinstance(src, dict):
+            src = {}
+        if doc_id:
+            by_id[doc_id] = src
+        scid = str(src.get("canonical_id") or "").strip()
+        if scid and scid != doc_id:
+            by_id[scid] = src
+    hydrated = 0
+    for row in rows:
+        cid = str(row.get("canonical_id") or row.get("id") or "").strip()
+        eid = str(row.get("es_doc_id") or "").strip() or cid
+        src = by_id.get(eid) or by_id.get(cid)
+        if not src:
+            continue
+        ft = str(src.get("full_text") or "").strip()
+        if not ft:
+            continue
+        row["full_text"] = ft
+        row["raw_content"] = ft
+        row["_full_text_from_es"] = True
+        hydrated += 1
+    if hydrated:
+        logger.info("[FETCH_BATCH] Elasticsearch full_text hydrated for %d judgment row(s)", hydrated)
+
+
 def judgements_fetch_by_canonical_ids(
     canonical_ids: List[str],
     approved_only: bool = True,
     exclude_low_hierarchy: bool = True,
+    judgment_uuids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Batch-fetch judgment rows from PostgreSQL by canonical_id list.
@@ -235,22 +298,45 @@ def judgements_fetch_by_canonical_ids(
         exclude_low_hierarchy is True.
       - Each returned row has is_local_admin (bool) set from source_type.
       - citation_data JSONB is parsed and merged into the row for convenience.
+      - ``judgment_uploads.es_doc_id`` overrides ``judgments.es_doc_id`` when both exist.
+      - When Elasticsearch is reachable, ``full_text`` / ``raw_content`` are refreshed
+        from the ``judgments`` index (complete document body).
 
     Returns list of enriched dicts keyed by snake_case DB column names.
     """
     ids = [str(i).strip() for i in (canonical_ids or []) if (i or "")]
-    if not ids:
+    extra_juuids = [str(j).strip() for j in (judgment_uuids or []) if (j or "")]
+    if not ids and not extra_juuids:
         return []
 
     _ADMIN_SOURCES = frozenset(
-        ("admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload")
+        (
+            "admin",
+            "admin_upload",
+            "admin-upload",
+            "admin uploaded",
+            "admin-uploaded",
+            "adminupload",
+            "manual_upload",
+            "manual-upload",
+            "judgment_upload",
+            "judgement_upload",
+        )
     )
     _LOW_HIER_KEYWORDS = frozenset(
         ("district", "tribunal", "forum", "commission", "magistrate", "drt", "drat", "itat", "cestat")
     )
 
     def _is_admin(src: Any) -> bool:
-        return str(src or "").strip().lower() in _ADMIN_SOURCES
+        raw = str(src or "").strip().lower()
+        # Accept exact known labels and flexible admin-prefixed variants.
+        return (
+            raw in _ADMIN_SOURCES
+            or raw == "admin"
+            or raw.startswith("admin_")
+            or raw.startswith("admin-")
+            or raw.startswith("admin ")
+        )
 
     def _is_low_hier(court: Any) -> bool:
         c = str(court or "").strip().lower()
@@ -264,7 +350,7 @@ def judgements_fetch_by_canonical_ids(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT canonical_id, case_name, court_code, source_type,
+                SELECT canonical_id, judgment_uuid, es_doc_id, case_name, court_code, source_type,
                        verification_status, citation_data, judgment_date, year
                   FROM judgments
                  WHERE canonical_id = ANY(%s)
@@ -279,10 +365,125 @@ def judgements_fetch_by_canonical_ids(
         conn.close()
 
     import json as _json
+    admin_uploaded_cids: set = set()
+    admin_uploaded_esids: set = set()
+    admin_uploaded_juuids: set = set()
+    # Full upload rows keyed by canonical_id — used to build result rows for
+    # admin judgments that exist only in judgment_uploads (not in judgments table).
+    upload_rows_by_cid: Dict[str, Any] = {}
+    upload_table_resolved: str = ""
+    try:
+        conn_u = get_pg_conn()
+        if conn_u:
+            try:
+                upload_table = _resolve_admin_upload_table(conn_u) or ""
+                upload_table_resolved = upload_table
+                upload_cols = _get_table_columns(conn_u, upload_table) if upload_table else set()
+                if upload_table:
+                    es_ids = [
+                        str(r.get("es_doc_id") or "").strip()
+                        for r in rows
+                        if str(r.get("es_doc_id") or "").strip()
+                    ]
+                    ju_ids = [
+                        str(r.get("judgment_uuid") or "").strip()
+                        for r in rows
+                        if str(r.get("judgment_uuid") or "").strip()
+                    ]
+                    for _ju in extra_juuids:
+                        if _ju and _ju not in ju_ids:
+                            ju_ids.append(_ju)
+                    clauses: List[str] = []
+                    params: List[Any] = []
+                    if "canonical_id" in upload_cols and ids:
+                        clauses.append("canonical_id = ANY(%s)")
+                        params.append(ids)
+                    if "es_doc_id" in upload_cols and es_ids:
+                        clauses.append("es_doc_id = ANY(%s)")
+                        params.append(es_ids)
+                    if "judgment_uuid" in upload_cols and ju_ids:
+                        clauses.append("judgment_uuid::text = ANY(%s)")
+                        params.append(ju_ids)
+                    if clauses:
+                        # Always fetch merged_text + metadata so we can hydrate
+                        # admin-uploaded judgments that are not in the judgments table.
+                        sel_cols = ["canonical_id", "judgment_uuid"]
+                        for _col in [
+                            "document_id",
+                            "judgment_uuid",
+                            "canonical_id",
+                            "original_filename",
+                            "source_url",
+                            "storage_bucket",
+                            "storage_path",
+                            "storage_uri",
+                            "status",
+                            "admin_user_id",
+                            "admin_role",
+                            "total_pages",
+                            "text_pages_count",
+                            "ocr_pages_count",
+                            "ocr_batches_count",
+                            "merged_text",
+                            "metadata",
+                            "es_doc_id",
+                            "qdrant_collection",
+                            "last_progress_message",
+                            "error_message",
+                            "processing_started_at",
+                            "processing_completed_at",
+                            "created_at",
+                            "updated_at",
+                            "pipeline_metrics",
+                        ]:
+                            if _col in upload_cols:
+                                sel_cols.append(_col)
+                        with conn_u.cursor(cursor_factory=RealDictCursor) as cur_u:
+                            cur_u.execute(
+                                f"""
+                                SELECT {", ".join(sel_cols)}
+                                  FROM {upload_table}
+                                 WHERE {" OR ".join(clauses)}
+                                """,
+                                tuple(params),
+                            )
+                            up_rows = cur_u.fetchall() or []
+                        for ur in up_rows:
+                            _cid = str(ur.get("canonical_id") or "").strip()
+                            _esid = str(ur.get("es_doc_id") or "").strip()
+                            _ju = str(ur.get("judgment_uuid") or "").strip()
+                            if _cid:
+                                admin_uploaded_cids.add(_cid)
+                                upload_rows_by_cid[_cid] = dict(ur)
+                            if _esid:
+                                admin_uploaded_esids.add(_esid)
+                            if _ju:
+                                admin_uploaded_juuids.add(_ju)
+                        logger.info(
+                            "[FETCH_BATCH] Admin upload matches (table=%s): canonical=%d/%d es_doc_id=%d judgment_uuid=%d",
+                            upload_table,
+                            len(admin_uploaded_cids),
+                            len(ids),
+                            len(admin_uploaded_esids),
+                            len(admin_uploaded_juuids),
+                        )
+            finally:
+                conn_u.close()
+    except Exception as exc:
+        logger.warning("[FETCH_BATCH] Admin upload mapping failed: %s", exc)
+
     result: List[Dict[str, Any]] = []
     for r in rows:
         src_type = str(r.get("source_type") or "").strip().lower()
-        is_admin = _is_admin(src_type)
+        r_cid = str(r.get("canonical_id") or "").strip()
+        r_esid = str(r.get("es_doc_id") or "").strip()
+        r_ju = str(r.get("judgment_uuid") or "").strip()
+        is_admin = (
+            _is_admin(src_type)
+            or (bool(r_cid) and r_cid in admin_uploaded_cids)
+            or (bool(r_esid) and r_esid in admin_uploaded_esids)
+            or (bool(r_ju) and r_ju in admin_uploaded_juuids)
+        )
 
         # Approved-only filter — admin judgments bypass it
         if approved_only and not is_admin:
@@ -306,9 +507,18 @@ def judgements_fetch_by_canonical_ids(
 
         has_ar = _judgment_citation_data_has_analysis_report(cd)
 
+        ju_u = upload_rows_by_cid.get(r_cid) or {}
+        upload_es = str(ju_u.get("es_doc_id") or "").strip()
+        judgment_es = str(r.get("es_doc_id") or "").strip()
+        eff_es = upload_es or judgment_es or ""
+        doc_id_u = ju_u.get("document_id")
+
         result.append({
             "canonical_id":   r.get("canonical_id"),
             "id":             r.get("canonical_id"),
+            "judgment_uuid":  r.get("judgment_uuid"),
+            "es_doc_id":      eff_es or None,
+            "document_id":    doc_id_u,
             "title":          r.get("case_name") or cd.get("case_name") or "",
             "case_name":      r.get("case_name") or cd.get("case_name") or "",
             "court":          r.get("court_code") or cd.get("court_code") or "",
@@ -325,7 +535,124 @@ def judgements_fetch_by_canonical_ids(
             "full_text":      cd.get("full_text") or "",
             "raw_content":    cd.get("full_text") or "",
             "has_analysis_report": has_ar,
+            # Full upload-lifecycle enrichment from judgment_uploads (when available).
+            "original_filename": ju_u.get("original_filename"),
+            "source_url": ju_u.get("source_url"),
+            "storage_bucket": ju_u.get("storage_bucket"),
+            "storage_path": ju_u.get("storage_path"),
+            "storage_uri": ju_u.get("storage_uri"),
+            "status": ju_u.get("status"),
+            "admin_user_id": ju_u.get("admin_user_id"),
+            "admin_role": ju_u.get("admin_role"),
+            "total_pages": ju_u.get("total_pages"),
+            "text_pages_count": ju_u.get("text_pages_count"),
+            "ocr_pages_count": ju_u.get("ocr_pages_count"),
+            "ocr_batches_count": ju_u.get("ocr_batches_count"),
+            "merged_text": ju_u.get("merged_text"),
+            "metadata": ju_u.get("metadata"),
+            "qdrant_collection": ju_u.get("qdrant_collection"),
+            "last_progress_message": ju_u.get("last_progress_message"),
+            "error_message": ju_u.get("error_message"),
+            "processing_started_at": ju_u.get("processing_started_at"),
+            "processing_completed_at": ju_u.get("processing_completed_at"),
+            "created_at": ju_u.get("created_at"),
+            "updated_at": ju_u.get("updated_at"),
+            "pipeline_metrics": ju_u.get("pipeline_metrics"),
         })
+    # For admin-uploaded judgments that exist only in judgment_uploads (not in the
+    # judgments table), build result rows from upload data using merged_text as full_text.
+    found_cids_in_result = {str(x.get("canonical_id") or "").strip() for x in result}
+    for cid in ids:
+        if cid in found_cids_in_result:
+            continue
+        ur = upload_rows_by_cid.get(cid)
+        if not ur:
+            continue
+        meta_raw = ur.get("metadata") or {}
+        if isinstance(meta_raw, str):
+            try:
+                meta_raw = _json.loads(meta_raw)
+            except Exception:
+                meta_raw = {}
+        merged_text = str(ur.get("merged_text") or "").strip()
+        orig_name = str(ur.get("original_filename") or "").rsplit(".", 1)[0].replace("_", " ").strip()
+        case_name = (
+            str(meta_raw.get("case_name") or meta_raw.get("caseName") or "").strip()
+            or orig_name
+        )
+        court_code = str(
+            meta_raw.get("court_code") or meta_raw.get("courtCode") or meta_raw.get("court") or ""
+        ).strip()
+        year = meta_raw.get("year") or meta_raw.get("judgment_year")
+        primary_citation = str(
+            meta_raw.get("primary_citation") or meta_raw.get("citation") or ""
+        ).strip()
+        _ues = str(ur.get("es_doc_id") or "").strip() or cid
+        result.append({
+            "canonical_id":        cid,
+            "id":                  cid,
+            "judgment_uuid":       ur.get("judgment_uuid"),
+            "es_doc_id":           _ues,
+            "document_id":         ur.get("document_id"),
+            "title":               case_name,
+            "case_name":           case_name,
+            "court":               court_code,
+            "court_code":          court_code,
+            "primary_citation":    primary_citation,
+            "ratio":               merged_text[:500] if merged_text else "",
+            "source":              "admin_upload",
+            "source_type":         "admin-uploaded",
+            "is_local_admin":      True,
+            "judgment_date":       None,
+            "year":                year,
+            "citation_data":       {},
+            # merged_text from judgment_uploads until ES hydration runs
+            "full_text":           merged_text,
+            "raw_content":         merged_text,
+            "has_analysis_report": False,
+            "_from_judgment_uploads": True,
+            "original_filename":   ur.get("original_filename"),
+            "source_url":          ur.get("source_url"),
+            "storage_bucket":      ur.get("storage_bucket"),
+            "storage_path":        ur.get("storage_path"),
+            "storage_uri":         ur.get("storage_uri"),
+            "status":              ur.get("status"),
+            "admin_user_id":       ur.get("admin_user_id"),
+            "admin_role":          ur.get("admin_role"),
+            "total_pages":         ur.get("total_pages"),
+            "text_pages_count":    ur.get("text_pages_count"),
+            "ocr_pages_count":     ur.get("ocr_pages_count"),
+            "ocr_batches_count":   ur.get("ocr_batches_count"),
+            "merged_text":         ur.get("merged_text"),
+            "metadata":            ur.get("metadata"),
+            "qdrant_collection":   ur.get("qdrant_collection"),
+            "last_progress_message": ur.get("last_progress_message"),
+            "error_message":       ur.get("error_message"),
+            "processing_started_at": ur.get("processing_started_at"),
+            "processing_completed_at": ur.get("processing_completed_at"),
+            "created_at":          ur.get("created_at"),
+            "updated_at":          ur.get("updated_at"),
+            "pipeline_metrics":    ur.get("pipeline_metrics"),
+        })
+        logger.info(
+            "[FETCH_BATCH] Admin upload fallback row: canonical_id=%s table=%s merged_text=%d chars",
+            cid, upload_table_resolved or "judgment_uploads", len(merged_text),
+        )
+
+    _hydrate_judgment_rows_from_elasticsearch(result)
+
+    if result:
+        ret_cids = [str(x.get("canonical_id") or "").strip() for x in result if x.get("canonical_id")]
+        logger.info(
+            "[FETCH_BATCH] Local PG → %d judgment row(s), canonical_id: %s",
+            len(ret_cids),
+            ", ".join(ret_cids),
+        )
+    elif ids:
+        logger.info(
+            "[FETCH_BATCH] Local PG → 0 rows returned (requested %d canonical_id(s); filters may exclude all)",
+            len(ids),
+        )
     return result
 
 
@@ -398,6 +725,92 @@ def _fmt_date(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
         return value.strftime("%d %b %Y")
     return value
+
+
+def _resolve_admin_upload_table(conn) -> Optional[str]:
+    """Resolve admin-upload table name across deployment variants."""
+    global _ADMIN_UPLOAD_TABLE_CACHE
+    if _ADMIN_UPLOAD_TABLE_CACHE:
+        return _ADMIN_UPLOAD_TABLE_CACHE
+    candidates = (
+        "judgment_uploads",
+        "judgement_uploads",
+        "judgment_documents",
+        "judgement_documents",
+    )
+    try:
+        with conn.cursor() as cur:
+            for t in candidates:
+                cur.execute("SELECT to_regclass(%s) AS t", (f"public.{t}",))
+                row = cur.fetchone() or {}
+                exists = row[0] if isinstance(row, tuple) else row.get("t")
+                if exists:
+                    _ADMIN_UPLOAD_TABLE_CACHE = t
+                    return t
+    except Exception:
+        return None
+    return None
+
+
+def _get_table_columns(conn, table_name: str) -> set:
+    cols = _ADMIN_UPLOAD_COLS_CACHE.get(table_name)
+    if cols is not None:
+        return cols
+    cols = set()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                  FROM information_schema.columns
+                 WHERE table_schema='public' AND table_name=%s
+                """,
+                (table_name,),
+            )
+            rows = cur.fetchall() or []
+        for r in rows:
+            if isinstance(r, tuple):
+                cols.add(str(r[0]).strip().lower())
+            else:
+                cols.add(str(r.get("column_name") or "").strip().lower())
+    except Exception:
+        cols = set()
+    _ADMIN_UPLOAD_COLS_CACHE[table_name] = cols
+    return cols
+
+
+def _is_admin_uploaded_record(
+    conn,
+    canonical_id: str = "",
+    es_doc_id: str = "",
+    judgment_uuid: str = "",
+) -> bool:
+    table = _resolve_admin_upload_table(conn)
+    if not table:
+        return False
+    cols = _get_table_columns(conn, table)
+    clauses: List[str] = []
+    params: List[str] = []
+    if canonical_id and "canonical_id" in cols:
+        clauses.append("canonical_id = %s")
+        params.append(canonical_id)
+    if es_doc_id and "es_doc_id" in cols:
+        clauses.append("es_doc_id = %s")
+        params.append(es_doc_id)
+    if judgment_uuid and "judgment_uuid" in cols:
+        clauses.append("judgment_uuid = %s")
+        params.append(judgment_uuid)
+    if not clauses:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT 1 FROM {table} WHERE ({' OR '.join(clauses)}) LIMIT 1",
+                tuple(params),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
 
 
 def _normalize_db_status(status: Any) -> Any:
@@ -818,23 +1231,32 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
                 row = cur.fetchone()
                 if row:
                     try:
-                        cur.execute("SELECT to_regclass('public.judgment_uploads') AS t")
-                        _tbl = cur.fetchone() or {}
-                        if _tbl.get("t"):
-                            cur.execute(
-                                """
-                                SELECT source_url
-                                  FROM judgment_uploads
-                                 WHERE canonical_id = %s
-                                 ORDER BY created_at DESC NULLS LAST
-                                 LIMIT 1
-                                """,
-                                (canonical_id,),
-                            )
-                            _up = cur.fetchone() or {}
-                            if _up:
-                                uploaded_by_admin = True
-                                upload_source_url = str(_up.get("source_url") or "")
+                        uploaded_by_admin = _is_admin_uploaded_record(
+                            conn,
+                            canonical_id=canonical_id,
+                            es_doc_id=str(row.get("es_doc_id") or ""),
+                            judgment_uuid=str(row.get("judgment_uuid") or ""),
+                        )
+                        if uploaded_by_admin:
+                            table = _resolve_admin_upload_table(conn) or ""
+                            cols = _get_table_columns(conn, table) if table else set()
+                            if table and "source_url" in cols and "canonical_id" in cols:
+                                cur.execute(
+                                    f"""
+                                    SELECT source_url
+                                      FROM {table}
+                                     WHERE canonical_id = %s
+                                     ORDER BY created_at DESC NULLS LAST
+                                     LIMIT 1
+                                    """,
+                                    (canonical_id,),
+                                )
+                                _up = cur.fetchone() or {}
+                                if _up:
+                                    if isinstance(_up, tuple):
+                                        upload_source_url = str(_up[0] or "")
+                                    else:
+                                        upload_source_url = str(_up.get("source_url") or "")
                     except Exception:
                         uploaded_by_admin = False
         finally:
@@ -1006,7 +1428,16 @@ def judgement_get(canonical_id: str) -> Optional[Dict[str, Any]]:
         "metadata_source":    "postgresql",
         "judgment_text_source": "elasticsearch" if (es_doc.get("full_text") or "") else "postgresql_jsonb",
         "is_local_admin":     _src_type_resolved in (
-            "admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload"
+            "admin",
+            "admin_upload",
+            "admin-upload",
+            "admin uploaded",
+            "admin-uploaded",
+            "adminupload",
+            "manual_upload",
+            "manual-upload",
+            "judgment_upload",
+            "judgement_upload",
         ),
     }
 
@@ -1099,7 +1530,23 @@ def judgement_search_local(
     def _is_admin_source(source_type: Any) -> bool:
         """True when the judgment was uploaded by an admin (not fetched from external API)."""
         raw = str(source_type or "").strip().lower()
-        return raw in ("admin", "admin_upload", "adminupload", "manual_upload", "judgment_upload")
+        return (
+            raw in (
+            "admin",
+            "admin_upload",
+            "admin-upload",
+            "admin uploaded",
+            "admin-uploaded",
+            "adminupload",
+            "manual_upload",
+            "manual-upload",
+            "judgment_upload",
+            "judgement_upload",
+        )
+            or raw.startswith("admin_")
+            or raw.startswith("admin-")
+            or raw.startswith("admin ")
+        )
 
     def _rows_from_es_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
@@ -1247,17 +1694,21 @@ def judgement_search_local(
             # Also keep a payload map so we can build results from Qdrant data directly
             # for judgments not yet present in the PG judgments table.
             canonical_ids: List[str] = []
+            qdrant_juuids: List[str] = []
             seen: set = set()
             payload_by_cid: Dict[str, Any] = {}
             for p in points:
                 payload = getattr(p, "payload", None) or {}
                 cid = str(payload.get("canonical_id") or "").strip()
+                ju = str(payload.get("judgment_uuid") or "").strip()
+                if ju and ju not in qdrant_juuids:
+                    qdrant_juuids.append(ju)
                 if cid and cid not in seen:
                     seen.add(cid)
                     canonical_ids.append(cid)
                     payload_by_cid[cid] = payload
             logger.info("[QDRANT] Unique canonical_ids from chunks: %d", len(canonical_ids))
-            if not canonical_ids:
+            if not canonical_ids and not qdrant_juuids:
                 return []
 
             def _build_from_payload(cid: str) -> Optional[Dict[str, Any]]:
@@ -1290,24 +1741,209 @@ def judgement_search_local(
             conn2 = get_pg_conn()
             if conn2:
                 try:
+                    admin_uploaded_cids: set = set()
+                    admin_uploaded_esids: set = set()
+                    admin_uploaded_juuids: set = set()
                     with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
-                        cur2.execute(
-                            """
-                            SELECT canonical_id, es_doc_id, case_name, court_code, source_type, year,
-                                   citation_data, verification_status
-                              FROM judgments
-                             WHERE canonical_id = ANY(%s)
-                            """,
-                            (canonical_ids,),
-                        )
+                        if canonical_ids and qdrant_juuids:
+                            cur2.execute(
+                                """
+                                SELECT j.canonical_id, j.es_doc_id, j.case_name, j.court_code, j.source_type, j.year,
+                                       j.citation_data, j.verification_status, j.judgment_uuid, j.judgment_date
+                                  FROM judgments j
+                                 WHERE j.canonical_id = ANY(%s)
+                                    OR j.judgment_uuid::text = ANY(%s)
+                                """,
+                                (canonical_ids, qdrant_juuids),
+                            )
+                        elif canonical_ids:
+                            cur2.execute(
+                                """
+                                SELECT j.canonical_id, j.es_doc_id, j.case_name, j.court_code, j.source_type, j.year,
+                                       j.citation_data, j.verification_status, j.judgment_uuid, j.judgment_date
+                                  FROM judgments j
+                                 WHERE j.canonical_id = ANY(%s)
+                                """,
+                                (canonical_ids,),
+                            )
+                        else:
+                            cur2.execute(
+                                """
+                                SELECT j.canonical_id, j.es_doc_id, j.case_name, j.court_code, j.source_type, j.year,
+                                       j.citation_data, j.verification_status, j.judgment_uuid, j.judgment_date
+                                  FROM judgments j
+                                 WHERE j.judgment_uuid::text = ANY(%s)
+                                """,
+                                (qdrant_juuids,),
+                            )
                         rows2 = cur2.fetchall() or []
-                    logger.info("[QDRANT] DB fetch returned %d row(s) for %d canonical_id(s)",
-                                len(rows2), len(canonical_ids))
+                    # Prefer judgment_uploads.es_doc_id over judgments.es_doc_id for ES mget.
+                    upload_es_by_cid: Dict[str, str] = {}
+                    try:
+                        upload_table = _resolve_admin_upload_table(conn2) or ""
+                        upload_cols = _get_table_columns(conn2, upload_table) if upload_table else set()
+                        es_ids = [
+                            str(r.get("es_doc_id") or "").strip()
+                            for r in rows2
+                            if str(r.get("es_doc_id") or "").strip()
+                        ]
+                        ju_ids = [
+                            str(r.get("judgment_uuid") or "").strip()
+                            for r in rows2
+                            if str(r.get("judgment_uuid") or "").strip()
+                        ]
+                        for _ju in qdrant_juuids:
+                            if _ju and _ju not in ju_ids:
+                                ju_ids.append(_ju)
+                        if upload_table:
+                            clauses: List[str] = []
+                            params: List[Any] = []
+                            if "canonical_id" in upload_cols and canonical_ids:
+                                clauses.append("canonical_id = ANY(%s)")
+                                params.append(canonical_ids)
+                            if "es_doc_id" in upload_cols and es_ids:
+                                clauses.append("es_doc_id = ANY(%s)")
+                                params.append(es_ids)
+                            if "judgment_uuid" in upload_cols and ju_ids:
+                                clauses.append("judgment_uuid::text = ANY(%s)")
+                                params.append(ju_ids)
+                            if not clauses:
+                                logger.info(
+                                    "[QDRANT] Upload table %s has no usable keys among canonical_id/es_doc_id/judgment_uuid",
+                                    upload_table,
+                                )
+                            else:
+                                # Fetch merged_text + metadata so missing-from-judgments
+                                # admin uploads can be hydrated from upload data directly.
+                                _up_sel = ["canonical_id", "judgment_uuid"]
+                                for _uc in [
+                                    "document_id",
+                                    "judgment_uuid",
+                                    "canonical_id",
+                                    "original_filename",
+                                    "source_url",
+                                    "storage_bucket",
+                                    "storage_path",
+                                    "storage_uri",
+                                    "status",
+                                    "admin_user_id",
+                                    "admin_role",
+                                    "total_pages",
+                                    "text_pages_count",
+                                    "ocr_pages_count",
+                                    "ocr_batches_count",
+                                    "merged_text",
+                                    "metadata",
+                                    "es_doc_id",
+                                    "qdrant_collection",
+                                    "last_progress_message",
+                                    "error_message",
+                                    "processing_started_at",
+                                    "processing_completed_at",
+                                    "created_at",
+                                    "updated_at",
+                                    "pipeline_metrics",
+                                ]:
+                                    if _uc in upload_cols:
+                                        _up_sel.append(_uc)
+                                with conn2.cursor(cursor_factory=RealDictCursor) as cur_up:
+                                    cur_up.execute(
+                                        f"""
+                                        SELECT {", ".join(_up_sel)}
+                                          FROM {upload_table}
+                                         WHERE {" OR ".join(clauses)}
+                                        """,
+                                        tuple(params),
+                                    )
+                                    up_rows = cur_up.fetchall() or []
+                                for ur in up_rows:
+                                    _cid = str(ur.get("canonical_id") or "").strip()
+                                    _esid = str(ur.get("es_doc_id") or "").strip()
+                                    _ju = str(ur.get("judgment_uuid") or "").strip()
+                                    if _cid and _esid:
+                                        upload_es_by_cid[_cid] = _esid
+                                    if _cid and _cid not in seen:
+                                        # Bring in canonical IDs discovered via upload-table
+                                        # lookup by judgment_uuid so admin uploads are not missed.
+                                        seen.add(_cid)
+                                        canonical_ids.append(_cid)
+                                    if _cid:
+                                        admin_uploaded_cids.add(_cid)
+                                        # Store full upload row for later hydration
+                                        if _cid not in pg_rows_by_cid:
+                                            pg_rows_by_cid[_cid] = {
+                                                "canonical_id": _cid,
+                                                "es_doc_id": _esid,
+                                                "judgment_uuid": _ju,
+                                                "document_id": ur.get("document_id"),
+                                                "original_filename": str(ur.get("original_filename") or ""),
+                                                "source_url": ur.get("source_url"),
+                                                "storage_bucket": ur.get("storage_bucket"),
+                                                "storage_path": ur.get("storage_path"),
+                                                "storage_uri": ur.get("storage_uri"),
+                                                "status": ur.get("status"),
+                                                "admin_user_id": ur.get("admin_user_id"),
+                                                "admin_role": ur.get("admin_role"),
+                                                "total_pages": ur.get("total_pages"),
+                                                "text_pages_count": ur.get("text_pages_count"),
+                                                "ocr_pages_count": ur.get("ocr_pages_count"),
+                                                "ocr_batches_count": ur.get("ocr_batches_count"),
+                                                "merged_text": str(ur.get("merged_text") or ""),
+                                                "metadata": ur.get("metadata") or {},
+                                                "qdrant_collection": ur.get("qdrant_collection"),
+                                                "last_progress_message": ur.get("last_progress_message"),
+                                                "error_message": ur.get("error_message"),
+                                                "processing_started_at": ur.get("processing_started_at"),
+                                                "processing_completed_at": ur.get("processing_completed_at"),
+                                                "created_at": ur.get("created_at"),
+                                                "updated_at": ur.get("updated_at"),
+                                                "pipeline_metrics": ur.get("pipeline_metrics"),
+                                                "uploaded_by_admin": True,
+                                                "_from_judgment_uploads": True,
+                                            }
+                                            es_id_by_cid[_cid] = _esid
+                                    if _esid:
+                                        admin_uploaded_esids.add(_esid)
+                                    if _ju:
+                                        admin_uploaded_juuids.add(_ju)
+                                logger.info(
+                                    "[QDRANT] Admin upload matches (table=%s): canonical=%d/%d es_doc_id=%d judgment_uuid=%d",
+                                    upload_table,
+                                    len(admin_uploaded_cids),
+                                    len(canonical_ids),
+                                    len(admin_uploaded_esids),
+                                    len(admin_uploaded_juuids),
+                                )
+                    except Exception as e:
+                        logger.warning("[QDRANT] Admin upload canonical mapping failed: %s", e)
+                    _row_cids = [str(r.get("canonical_id") or "").strip() for r in rows2 if r.get("canonical_id")]
+                    logger.info(
+                        "[QDRANT] DB fetch returned %d row(s) for %d canonical_id(s): %s",
+                        len(rows2),
+                        len(canonical_ids),
+                        ", ".join(_row_cids) if _row_cids else "(none)",
+                    )
                     for r in rows2:
                         rcid = str(r.get("canonical_id") or "").strip()
+                        rju = str(r.get("judgment_uuid") or "").strip()
+                        if not rcid and rju:
+                            # Ensure UUID-only hits can still participate in the canonical pipeline.
+                            rcid = rju
+                            r["canonical_id"] = rcid
+                        if rcid and rcid not in seen:
+                            seen.add(rcid)
+                            canonical_ids.append(rcid)
                         if rcid:
+                            r_esid = str(r.get("es_doc_id") or "").strip()
+                            r_ju = str(r.get("judgment_uuid") or "").strip()
+                            r["uploaded_by_admin"] = (
+                                (rcid in admin_uploaded_cids)
+                                or (bool(r_esid) and r_esid in admin_uploaded_esids)
+                                or (bool(r_ju) and r_ju in admin_uploaded_juuids)
+                            )
                             pg_rows_by_cid[rcid] = r
-                            es_id_by_cid[rcid] = str(r.get("es_doc_id") or "").strip()
+                            judgment_es = str(r.get("es_doc_id") or "").strip()
+                            es_id_by_cid[rcid] = upload_es_by_cid.get(rcid) or judgment_es
                 finally:
                     conn2.close()
             else:
@@ -1363,7 +1999,8 @@ def judgement_search_local(
                         cd = {}
 
                 src_type = str(r.get("source_type") or cd.get("source_type") or esd.get("source_type") or "").strip().lower()
-                is_admin = _is_admin_source(src_type)
+                uploaded_by_admin = bool(r.get("uploaded_by_admin")) or bool(r.get("_from_judgment_uploads"))
+                is_admin = _is_admin_source(src_type) or uploaded_by_admin
                 verification_status = str(
                     r.get("verification_status")
                     or esd.get("verification_status")
@@ -1393,25 +2030,56 @@ def judgement_search_local(
                 elif not display_source:
                     display_source = "local"
 
+                # For rows sourced from judgment_uploads, parse metadata JSONB for
+                # case_name / court_code / year / primary_citation.
+                upload_meta: Dict[str, Any] = {}
+                if r.get("_from_judgment_uploads"):
+                    _raw_meta = r.get("metadata") or {}
+                    if isinstance(_raw_meta, str):
+                        try:
+                            import json as _json2
+                            _raw_meta = _json2.loads(_raw_meta)
+                        except Exception:
+                            _raw_meta = {}
+                    upload_meta = _raw_meta if isinstance(_raw_meta, dict) else {}
+
+                merged_text_fallback = str(r.get("merged_text") or "").strip()
+
                 title = (
                     r.get("case_name")
+                    or upload_meta.get("case_name") or upload_meta.get("caseName")
                     or cd.get("case_name")
                     or esd.get("case_name")
                     or p.get("case_name")
+                    # Last resort: derive from original filename
+                    or str(r.get("original_filename") or "").rsplit(".", 1)[0].replace("_", " ").strip()
                     or ""
                 )
+                if not court_code:
+                    court_code = str(
+                        upload_meta.get("court_code") or upload_meta.get("courtCode")
+                        or upload_meta.get("court") or ""
+                    ).strip() or court_code
                 ratio_text = (
                     esd.get("holding_text")
                     or esd.get("summary_text")
                     or cd.get("holding_text")
                     or cd.get("summary_text")
                     or str(esd.get("full_text") or "")[:500]
+                    or merged_text_fallback[:500]
                     or str(p.get("chunk_text") or "")[:500]
                 )
                 primary_citation = (
                     cd.get("primary_citation")
+                    or upload_meta.get("primary_citation") or upload_meta.get("citation")
                     or esd.get("primary_citation")
                     or ""
+                )
+                year_val = (
+                    r.get("year")
+                    or upload_meta.get("year") or upload_meta.get("judgment_year")
+                    or esd.get("year")
+                    or p.get("year")
                 )
 
                 if not title and not court_code and not ratio_text:
@@ -1420,25 +2088,65 @@ def judgement_search_local(
                         scored.append(entry)
                     continue
 
+                full_text_val = (
+                    esd.get("full_text")
+                    or cd.get("full_text")
+                    or merged_text_fallback
+                    or ""
+                )
                 scored.append({
                     "id": cid,
                     "canonical_id": cid,
-                    "judgment_uuid": str(p.get("judgment_uuid") or "").strip(),
+                    "judgment_uuid": str(r.get("judgment_uuid") or p.get("judgment_uuid") or "").strip(),
+                    "document_id": r.get("document_id"),
+                    "es_doc_id": str(es_id_by_cid.get(cid) or r.get("es_doc_id") or cid).strip(),
                     "title": title,
                     "case_name": title,
                     "primary_citation": primary_citation,
                     "court": court_code,
                     "court_code": court_code,
-                    "year": r.get("year") or esd.get("year") or p.get("year"),
+                    "year": year_val,
                     "ratio": ratio_text,
                     "source": display_source,
+                    "source_type": "admin-uploaded" if is_admin else (src_type or "local"),
                     "is_local_admin": is_admin,
                     "_local_rank": _rank_row(court_code),
                     "_from_qdrant": True,
                     "_hydrated_from_es": bool(esd),
-                    "raw_content": esd.get("full_text") or cd.get("full_text") or "",
-                    "full_text": esd.get("full_text") or cd.get("full_text") or "",
+                    "_from_judgment_uploads": bool(r.get("_from_judgment_uploads")),
+                    "raw_content": full_text_val,
+                    "full_text": full_text_val,
+                    "original_filename": r.get("original_filename"),
+                    "source_url": r.get("source_url"),
+                    "storage_bucket": r.get("storage_bucket"),
+                    "storage_path": r.get("storage_path"),
+                    "storage_uri": r.get("storage_uri"),
+                    "status": r.get("status"),
+                    "admin_user_id": r.get("admin_user_id"),
+                    "admin_role": r.get("admin_role"),
+                    "total_pages": r.get("total_pages"),
+                    "text_pages_count": r.get("text_pages_count"),
+                    "ocr_pages_count": r.get("ocr_pages_count"),
+                    "ocr_batches_count": r.get("ocr_batches_count"),
+                    "merged_text": r.get("merged_text"),
+                    "metadata": r.get("metadata"),
+                    "qdrant_collection": r.get("qdrant_collection"),
+                    "last_progress_message": r.get("last_progress_message"),
+                    "error_message": r.get("error_message"),
+                    "processing_started_at": r.get("processing_started_at"),
+                    "processing_completed_at": r.get("processing_completed_at"),
+                    "created_at": r.get("created_at"),
+                    "updated_at": r.get("updated_at"),
+                    "pipeline_metrics": r.get("pipeline_metrics"),
                 })
+                logger.info(
+                    "[QDRANT_CHAIN] canonical_id=%s | judgment_uuid=%s | source_type=%s | admin=%s | es_doc_id=%s",
+                    cid or "—",
+                    str(r.get("judgment_uuid") or p.get("judgment_uuid") or "").strip() or "—",
+                    str(r.get("source_type") or src_type or "local").strip() or "local",
+                    bool(is_admin),
+                    str(es_id_by_cid.get(cid) or r.get("es_doc_id") or cid).strip() or "—",
+                )
 
             scored.sort(key=lambda r: r.get("_local_rank", 0), reverse=True)
             if scored:
@@ -1550,7 +2258,7 @@ def judgement_search_local(
                 # Always include admin-uploaded judgments regardless of verification status
                 hard_filters.append(
                     "(COALESCE(verification_status, '') IN ('APPROVED','VERIFIED','VERIFIED_WARN','GREEN')"
-                    " OR LOWER(COALESCE(source_type,'')) IN ('admin','admin_upload','adminupload','manual_upload','judgment_upload'))"
+                    " OR LOWER(COALESCE(source_type,'')) IN ('admin','admin_upload','admin-upload','admin uploaded','admin-uploaded','adminupload','manual_upload','manual-upload','judgment_upload','judgement_upload'))"
                 )
             if exclude_low_hierarchy:
                 hard_filters.append(
