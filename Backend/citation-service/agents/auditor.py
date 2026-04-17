@@ -349,8 +349,14 @@ def _audit_one(
 
     is_flagged          = jid in flagged_set
     local_check         = _verify_via_local_db(jid)
-    ik_check            = (_check_ik_with_timeout(jid, j, timeout_secs=8, run_id=run_id, user_id=user_id) if verify_online
-                           else {"verified": False, "method": "skipped", "confidence": 0, "notes": "verify_online=False"})
+    # Skip IK cross-check when local DB already gives high confidence (≥80) — avoids
+    # burning IK API quota and hitting 403 rate limits on every citation verification.
+    _local_high_conf    = local_check.get("verified") and int(local_check.get("confidence") or 0) >= 80
+    ik_check            = (
+        {"verified": False, "method": "skipped", "confidence": 0, "notes": "local_db confidence ≥80; IK skipped"}
+        if (not verify_online or _local_high_conf)
+        else _check_ik_with_timeout(jid, j, timeout_secs=8, run_id=run_id, user_id=user_id)
+    )
     title               = (j.get("title") or "")
     citation            = (j.get("primary_citation") or "")
     ratio               = (j.get("ratio") or "")
