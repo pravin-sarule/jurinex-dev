@@ -30,6 +30,164 @@ from agents.base_agent import BaseAgent, AgentContext, AgentResult, Tool
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Wide-net IK augmentation — runs after WatchdogAgent, before Fetcher
+# Injects additional IK candidates sourced by outcome-targeted queries and
+# landmark seeds, deduplicated against whatever Watchdog already found.
+# ---------------------------------------------------------------------------
+
+def _augment_candidates_wide_net(context: AgentContext) -> None:
+    """
+    Augment context.metadata["candidates_ik"] with wide-net retrieval results.
+    Only runs when a controversy_map with dispute_type is available and
+    CITATION_WIDE_NET_ENABLED=1 (default: off until explicitly enabled).
+    """
+    enabled = os.environ.get("CITATION_WIDE_NET_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not enabled:
+        return
+
+    controversy_map = context.metadata.get("controversy_map") or {}
+    query = context.metadata.get("search_query") or context.query or ""
+    statutes = controversy_map.get("applicable_statutes") or []
+
+    try:
+        from agents.ik_retrieval import IKWideNetRetrieval
+        retrieval = IKWideNetRetrieval()
+        new_candidates = retrieval.retrieve(
+            controversy_map=controversy_map,
+            query=query,
+            statutes=statutes,
+            run_id=context.metadata.get("run_id"),
+            user_id=context.metadata.get("user_id") or context.user_id,
+        )
+    except Exception as exc:
+        logger.warning("[WIDE_NET] IKWideNetRetrieval failed: %s", exc)
+        return
+
+    if not new_candidates:
+        return
+
+    # Merge into existing candidates_ik, deduplicated by external_id/tid
+    existing = context.metadata.get("candidates_ik") or []
+    seen_tids: set = {
+        str(c.get("external_id") or c.get("tid") or "").strip()
+        for c in existing
+        if c.get("external_id") or c.get("tid")
+    }
+
+    added = 0
+    for candidate in new_candidates:
+        tid = str(
+            candidate.get("external_id") or candidate.get("tid") or ""
+        ).strip()
+        if tid and tid not in seen_tids:
+            seen_tids.add(tid)
+            existing.append(candidate)
+            added += 1
+
+    context.metadata["candidates_ik"] = existing
+    logger.info(
+        "[WIDE_NET] Added %d new wide-net candidates (total IK candidates: %d)",
+        added, len(existing),
+    )
+    try:
+        from db.client import agent_log_insert
+        agent_log_insert(
+            context.metadata.get("run_id"), None,
+            "wide_net", "wide_net", "INFO",
+            f"🌐 Wide-net IK: +{added} new candidates ({len(existing)} total)",
+            {"added": added, "total": len(existing)},
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# HoldingFilter step — runs after FetcherAgent, before ClerkAgent
+# Drops fetched IK/Google docs that fail the holding-level relevance check.
+# ---------------------------------------------------------------------------
+
+def _apply_holding_filter(context: AgentContext) -> None:
+    """
+    Run HoldingFilter on context.metadata["fetched_ik"] and
+    context.metadata["fetched_go"].  Replace them with the filtered subset.
+
+    Only runs when CITATION_HOLDING_FILTER_ENABLED=1 (default: off until
+    explicitly enabled) and a controversy_map is present.
+    """
+    enabled = os.environ.get("CITATION_HOLDING_FILTER_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not enabled:
+        return
+
+    controversy_map = context.metadata.get("controversy_map") or {}
+    fetched_ik = context.metadata.get("fetched_ik") or []
+    fetched_go = context.metadata.get("fetched_go") or []
+
+    if not fetched_ik and not fetched_go:
+        return
+
+    # Seeds bypass the filter — they are already pre-verified by selection
+    seeds_ik = [c for c in fetched_ik if c.get("is_seed")]
+    non_seeds_ik = [c for c in fetched_ik if not c.get("is_seed")]
+    non_seeds_go = list(fetched_go)
+
+    candidates_to_filter = non_seeds_ik + non_seeds_go
+
+    if not candidates_to_filter:
+        return
+
+    logger.info(
+        "[HOLDING_FILTER_STEP] Running HoldingFilter on %d docs "
+        "(%d seeds bypass) | dispute_type=%s",
+        len(candidates_to_filter),
+        len(seeds_ik),
+        controversy_map.get("dispute_type"),
+    )
+
+    try:
+        from agents.holding_filter import HoldingFilter
+        hf = HoldingFilter()
+        filtered = hf.filter(
+            candidates=candidates_to_filter,
+            controversy_map=controversy_map,
+            max_candidates=100,
+        )
+    except Exception as exc:
+        logger.warning("[HOLDING_FILTER_STEP] HoldingFilter failed: %s — passing all through", exc)
+        return
+
+    # Separate filtered results back into IK and Google buckets
+    def _is_ik(c: dict) -> bool:
+        return c.get("_source") == "indian_kanoon" or c.get("source") == "indian_kanoon"
+
+    filtered_ik = seeds_ik + [c for c in filtered if _is_ik(c)]
+    filtered_go = [c for c in filtered if not _is_ik(c)]
+
+    original_count = len(fetched_ik) + len(fetched_go)
+    filtered_count = len(filtered_ik) + len(filtered_go)
+
+    context.metadata["fetched_ik"] = filtered_ik
+    context.metadata["fetched_go"] = filtered_go
+
+    logger.info(
+        "[HOLDING_FILTER_STEP] %d → %d docs after holding-level filter",
+        original_count, filtered_count,
+    )
+    try:
+        from db.client import agent_log_insert
+        agent_log_insert(
+            context.metadata.get("run_id"), None,
+            "holding_filter", "holding_filter", "INFO",
+            f"🔍 HoldingFilter: {original_count} → {filtered_count} docs passed holding check",
+            {"input": original_count, "output": filtered_count},
+        )
+    except Exception:
+        pass
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -170,6 +328,34 @@ class WatchdogAgent(BaseAgent):
         case_state   = (context.metadata.get("state") or "").strip()
 
         dim_count = len(dimensions)
+
+        # Fallback: if both query and dimensions are empty, prefer controversy_map over raw case text
+        if not query and not dimensions and not keyword_sets:
+            _cm = context.metadata.get("controversy_map") or {}
+            # controversy_query (40-60 words, question format) → use for Qdrant vector search
+            _cq = str(_cm.get("controversy_query") or _cm.get("central_controversy") or "").strip()
+            if _cq:
+                query = _cq
+                # Also build short IK-friendly keyword phrases from factual_trigger + legal_claim
+                _ik_phrases = [
+                    p for p in [
+                        str(_cm.get("factual_trigger") or "").strip(),
+                        str(_cm.get("legal_claim") or "").strip(),
+                        str(_cm.get("central_controversy") or "").strip(),
+                    ] if p
+                ]
+                if _ik_phrases:
+                    keyword_sets = _ik_phrases
+                logger.info("[WATCHDOG] No query/dimensions — using controversy_map seed: %r, IK phrases: %d",
+                            query[:80], len(keyword_sets or []))
+            else:
+                for f in (context.metadata.get("case_file_context") or [])[:3]:
+                    snippet = (f.get("snippet") or f.get("content") or "").strip()
+                    if snippet:
+                        query = snippet[:300]
+                        logger.info("[WATCHDOG] No query/dimensions — derived seed from case_file_context: %r", query[:80])
+                        break
+
         logger.info("[WATCHDOG] Starting — %d dimension(s), query=%s",
                     dim_count, (query or "")[:80])
 
@@ -270,6 +456,17 @@ class FetcherAgent(BaseAgent):
 
 # ── Phase 4: Clerk relevance pre-check helper ─────────────────────────────────
 
+_CLERK_PRECHECK_PROMPT = (
+    "You are a senior Indian legal research analyst.\n\n"
+    "Score each document for relevance to the legal dispute (0-5):\n"
+    "  5=directly on point   3-4=useful precedent   1-2=marginal   0=irrelevant\n\n"
+    "DISPUTE:\n{controversy_text}\n\n"
+    "DOCUMENTS:\n{documents_list}\n\n"
+    "Return JSON array ONLY: "
+    '[{{"index":1,"score":<0-5>}},{{"index":2,"score":<0-5>}},...]\n'
+    "Return ONLY the JSON array."
+)
+
 def _clerk_relevance_precheck(
     fetched_ik: List[Dict[str, Any]],
     fetched_go: List[Dict[str, Any]],
@@ -307,21 +504,35 @@ def _clerk_relevance_precheck(
             line += f" — {snippet}"
         lines.append(line)
 
-    prompt = (
-        "You are a senior Indian legal research analyst.\n\n"
-        "Score each document for relevance to the legal dispute (0-5):\n"
-        "  5=directly on point   3-4=useful precedent   1-2=marginal   0=irrelevant\n\n"
-        f"DISPUTE:\n{controversy_text}\n\n"
-        "DOCUMENTS:\n" + "\n".join(lines) + "\n\n"
-        "Return JSON array ONLY: "
-        '[{"index":1,"score":<0-5>},{"index":2,"score":<0-5>},...]'
+    _precheck_template = _CLERK_PRECHECK_PROMPT
+    _precheck_temp = 0.0
+    _precheck_max_tokens = 512
+    try:
+        from utils.prompt_resolver import resolve_prompt as _resolve_prompt
+        _pc = _resolve_prompt(
+            name="ClerkPrecheck",
+            agent_type="citation",
+            default_prompt=_CLERK_PRECHECK_PROMPT,
+            default_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+            default_temperature=0.0,
+            default_max_tokens=512,
+        )
+        _precheck_template = _pc.prompt
+        _precheck_temp = _pc.temperature
+        _precheck_max_tokens = _pc.max_tokens
+    except Exception as _exc:
+        logger.debug("[CLERK_PRECHECK] prompt_resolver unavailable: %s", _exc)
+
+    prompt = _precheck_template.format(
+        controversy_text=controversy_text,
+        documents_list="\n".join(lines),
     )
 
     try:
         raw = agent._gemini(
             prompt,
-            max_tokens=512,
-            temperature=0.0,
+            max_tokens=_precheck_max_tokens,
+            temperature=_precheck_temp,
             run_id=run_id,
             user_id=user_id,
             operation="clerk_precheck",
@@ -788,7 +999,7 @@ _STATE_TO_HC: Dict[str, str] = {
     "sikkim":            "Sikkim High Court",
 }
 
-MAX_DIMENSIONS = _env_int("CITATION_MAX_DIMENSIONS", 6)
+MAX_DIMENSIONS = _env_int("CITATION_MAX_DIMENSIONS", 8)
 
 
 def _resolve_hc_name(context: AgentContext) -> str:
@@ -885,15 +1096,34 @@ class ControversyMapperAgent(BaseAgent):
             logger.info("[CONTROVERSY_MAPPER] fast-path (short query, no context)")
             return AgentResult(data={"source": "fast_path", "controversy_map": cm})
 
-        prompt = self._PROMPT.format(
+        _cm_template = self._PROMPT
+        _cm_temp = 0.1
+        _cm_max_tokens = 512
+        try:
+            from utils.prompt_resolver import resolve_prompt as _resolve_prompt
+            _pc = _resolve_prompt(
+                name="ControversyMapper",
+                agent_type="citation",
+                default_prompt=self._PROMPT,
+                default_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+                default_temperature=0.1,
+                default_max_tokens=512,
+            )
+            _cm_template = _pc.prompt
+            _cm_temp = _pc.temperature
+            _cm_max_tokens = _pc.max_tokens
+        except Exception as _exc:
+            logger.debug("[CONTROVERSY_MAPPER] prompt_resolver unavailable: %s", _exc)
+
+        prompt = _cm_template.format(
             base_query=base_query,
             case_context=case_context_str or "(no file context provided)",
         )
         try:
             raw = self._gemini(
                 prompt,
-                max_tokens=512,
-                temperature=0.1,
+                max_tokens=_cm_max_tokens,
+                temperature=_cm_temp,
                 run_id=run_id,
                 user_id=user_id,
                 operation="controversy_map",
@@ -1349,8 +1579,10 @@ class LegalDimensionExtractor(BaseAgent):
 
         # ── Fallback: no case context and no query seed ───────────────────
         if not case_context and not base_query:
-            context.metadata["search_query"] = base_query
-            context.metadata["keyword_sets"] = [base_query] if base_query else []
+            _cm = context.metadata.get("controversy_map") or {}
+            _fallback_query = str(_cm.get("controversy_query") or _cm.get("central_controversy") or "").strip()
+            context.metadata["search_query"] = _fallback_query
+            context.metadata["keyword_sets"] = [_fallback_query] if _fallback_query else []
             context.metadata["dimensions"] = []
             context.dimensions = []
             return AgentResult(data={
@@ -1417,7 +1649,7 @@ class LegalDimensionExtractor(BaseAgent):
         # ── Resolve High Court name from metadata ─────────────────────────
         hc_name       = _resolve_hc_name(context)
         hc_name_short = hc_name.replace(" High Court", "").strip()
-        num_dimensions = min(6, max(3, MAX_DIMENSIONS))  # hint only; model still returns 3-6
+        num_dimensions = min(8, max(6, MAX_DIMENSIONS))  # hint only; model targets 6-8
 
         priority_count = len(priority_parts)
         chunk_summary = ", ".join(
@@ -1477,22 +1709,26 @@ class LegalDimensionExtractor(BaseAgent):
         dimensions = self._parse_dimensions(raw_response or "")
         validated_dims = self._validate_dimensions(dimensions)
 
-        if len(validated_dims) < 3:
-            # Graceful fallback: treat base_query as sole keyword set
-            logger.warning("[LEGAL_DIM_EXTRACTOR] Insufficient valid dimensions (%d); falling back to base query", len(validated_dims))
-            context.metadata["search_query"] = base_query
-            context.metadata["keyword_sets"] = [base_query] if base_query else []
+        if len(validated_dims) < 6:
+            # Graceful fallback: use controversy_map seed when base_query is empty
+            _cm = context.metadata.get("controversy_map") or {}
+            _fallback_query = base_query or str(_cm.get("controversy_query") or _cm.get("central_controversy") or "").strip()
+            _seed_source = "base_query" if base_query else ("controversy_map" if _fallback_query else "none")
+            logger.warning("[LEGAL_DIM_EXTRACTOR] Insufficient valid dimensions (%d); falling back to %s seed: %r",
+                           len(validated_dims), _seed_source, _fallback_query[:80])
+            context.metadata["search_query"] = _fallback_query
+            context.metadata["keyword_sets"] = [_fallback_query] if _fallback_query else []
             context.metadata["dimensions"] = []
             context.dimensions = []
             try:
                 from db.client import agent_log_insert
                 agent_log_insert(run_id, None, self.name, self.name, "WARNING",
                     "⚠ Valid dimension count was below 3; using base query as fallback",
-                    {"raw_preview": (raw_response or "")[:300]})
+                    {"raw_preview": (raw_response or "")[:300], "fallback_query": _fallback_query[:120]})
             except Exception:
                 pass
             return AgentResult(data={
-                "search_query": base_query,
+                "search_query": _fallback_query,
                 "augmented": False,
                 "dimensions_count": 0,
                 "keyword_sets_count": len(context.metadata["keyword_sets"]),
@@ -1823,6 +2059,11 @@ class CitationRootAgent(BaseAgent):
         if not wd_result.success:
             return AgentResult(success=False, error=f"Watchdog failed: {wd_result.error}")
 
+        # 2.5 Wide-net IK augmentation (opt-in: CITATION_WIDE_NET_ENABLED=1)
+        # Injects outcome-targeted queries and landmark seeds into candidates_ik
+        # before the Fetcher runs, so all candidates are fetched in one batch.
+        _augment_candidates_wide_net(context)
+
         # 3. Fetcher + Clerk in parallel (fetch external docs & ingest them)
         #    Only run if there are external candidates
         ik_cands, go_cands = _filter_new_external_candidates(
@@ -1835,8 +2076,12 @@ class CitationRootAgent(BaseAgent):
 
         need_local_clerk = bool(context.metadata.get("local_canonical_ids_needing_analysis"))
         if ik_cands or go_cands:
-            # Fetcher first, then Clerk (Clerk needs fetched docs)
+            # Fetcher first, then HoldingFilter, then Clerk
             self._delegate(self.fetcher, context, "fetcher")
+            # 3.3 Holding-level LLM filter (opt-in: CITATION_HOLDING_FILTER_ENABLED=1)
+            # Drops fetched docs whose holdings are irrelevant to the controversy.
+            # Seeds bypass this filter. Runs BEFORE Clerk so only relevant docs are ingested.
+            _apply_holding_filter(context)
             self._delegate(self.clerk,   context, "clerk")
         elif need_local_clerk:
             logger.info("[ROOT] No external candidates — running Clerk for Qdrant-local analysis gaps only")
@@ -1894,6 +2139,7 @@ class CitationRootAgent(BaseAgent):
             # Retry: fetch more candidates for missing slots
             logger.info("[ROOT] Retry %d: approved=%d < %d — re-running Watchdog/Fetcher/Clerk for more candidates", audit_round + 1, approved_count, TARGET_CITATION_POINTS)
             self._delegate(self.watchdog, context, "watchdog")
+            _augment_candidates_wide_net(context)
             ik_cands, go_cands = _filter_new_external_candidates(
                 context,
                 context.metadata.get("candidates_ik", []),
@@ -1904,6 +2150,7 @@ class CitationRootAgent(BaseAgent):
             _need_local = bool(context.metadata.get("local_canonical_ids_needing_analysis"))
             if ik_cands or go_cands:
                 self._delegate(self.fetcher, context, "fetcher")
+                _apply_holding_filter(context)
                 self._delegate(self.clerk, context, "clerk")
             elif _need_local:
                 self._delegate(self.clerk, context, "clerk")

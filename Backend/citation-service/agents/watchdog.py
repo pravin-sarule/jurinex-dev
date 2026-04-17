@@ -36,6 +36,22 @@ _GROUNDING_ALLOWED_SITES: Tuple[str, ...] = (
     "judgments.ecourts.gov.in",
 )
 
+# ── Default prompt for IK candidate re-ranking (DB-overridable) ───────────────
+_RERANK_IK_PROMPT = (
+    "You are a senior Indian legal research analyst.\n\n"
+    "Rate each judgment below for relevance to the legal dispute. "
+    "Score 0-5 where:\n"
+    "  5=directly on point (same facts/provision/controversy)\n"
+    "  3-4=useful precedent on one key issue\n"
+    "  1-2=tangentially relevant\n"
+    "  0=wrong area or no connection\n\n"
+    "DISPUTE:\n{controversy_text}\n\n"
+    "JUDGMENTS:\n{judgments_list}\n\n"
+    "Return a JSON array with one object per judgment in the SAME ORDER:\n"
+    '[{{"index":1,"score":<0-5>}},{{"index":2,"score":<0-5>}},...]\n'
+    "Return ONLY the JSON array."
+)
+
 
 def _google_source_type_for_link(link: str) -> str:
     host = (urlparse(str(link or "")).netloc or "").lower()
@@ -736,9 +752,11 @@ def _search_local_semantic(
         )
 
     # Do NOT demote or drop district-court provision matches.
-    # Sort primarily by 3-tier priority, then local rank, then similarity.
+    # Sort: scored results always beat zero-score admin force-includes, then by
+    # court priority tier, local rank, and similarity within each scored group.
     out.sort(
         key=lambda r: (
+            int(float(r.get("_similarity_score", 0.0)) > 0),  # 1=scored, 0=zero-score admin
             int(r.get("_priority_tier", 0)),
             int(r.get("_local_rank", 0)),
             float(r.get("_similarity_score", 0.0)),
@@ -1181,19 +1199,28 @@ def _rerank_ik_candidates_gemini(
             line += f" — {snippet}"
         lines.append(line)
 
-    prompt = (
-        "You are a senior Indian legal research analyst.\n\n"
-        "Rate each judgment below for relevance to the legal dispute. "
-        "Score 0-5 where:\n"
-        "  5=directly on point (same facts/provision/controversy)\n"
-        "  3-4=useful precedent on one key issue\n"
-        "  1-2=tangentially relevant\n"
-        "  0=wrong area or no connection\n\n"
-        f"DISPUTE:\n{controversy_text}\n\n"
-        "JUDGMENTS:\n" + "\n".join(lines) + "\n\n"
-        "Return a JSON array with one object per judgment in the SAME ORDER:\n"
-        '[{"index":1,"score":<0-5>},{"index":2,"score":<0-5>},...]\n'
-        "Return ONLY the JSON array."
+    _rerank_template = _RERANK_IK_PROMPT
+    _rerank_temp = 0.0
+    _rerank_max_tokens = 512
+    try:
+        from utils.prompt_resolver import resolve_prompt as _resolve_prompt
+        _pc = _resolve_prompt(
+            name="WatchdogIKReranker",
+            agent_type="citation",
+            default_prompt=_RERANK_IK_PROMPT,
+            default_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+            default_temperature=0.0,
+            default_max_tokens=512,
+        )
+        _rerank_template = _pc.prompt
+        _rerank_temp = _pc.temperature
+        _rerank_max_tokens = _pc.max_tokens
+    except Exception as _exc:
+        logger.debug("[WATCHDOG] prompt_resolver unavailable for IKReranker: %s", _exc)
+
+    prompt = _rerank_template.format(
+        controversy_text=controversy_text,
+        judgments_list="\n".join(lines),
     )
 
     try:
@@ -1201,8 +1228,8 @@ def _rerank_ik_candidates_gemini(
         _tmp = BaseAgent()
         raw = _tmp._gemini(
             prompt,
-            max_tokens=512,
-            temperature=0.0,
+            max_tokens=_rerank_max_tokens,
+            temperature=_rerank_temp,
             run_id=run_id,
             user_id=user_id or "anonymous",
             operation="ik_rerank",
@@ -1368,7 +1395,8 @@ def run_watchdog(
         all_dim_queries = [t["query"] for t in _build_dimension_query_tasks(dimensions)]
         keyword_list = all_dim_queries if all_dim_queries else ([query] if query else [])
     else:
-        keyword_list = [query] if query else []
+        ks_list = [ks for ks in (keyword_sets or []) if (ks or "").strip()]
+        keyword_list = [query] if query else ks_list
 
     if not keyword_list and not dimensions:
         return {

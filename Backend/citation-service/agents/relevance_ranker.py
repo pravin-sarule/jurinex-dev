@@ -138,6 +138,9 @@ def _score_batch(
     agent: "RelevanceRankerAgent",
     run_id: Optional[str],
     user_id: str,
+    prompt_template: str = _SCORE_PROMPT,
+    max_tokens: int = 1024,
+    temperature: float = 0.1,
 ) -> Dict[str, Dict[str, Any]]:
     """Call Gemini to score a batch of judgments. Returns {jid: {score, tier, reasoning}}."""
     judgments_section_lines = []
@@ -145,7 +148,7 @@ def _score_batch(
         judgments_section_lines.append(f"[{i + 1}] id={jid}\n{blurb}")
     judgments_section = "\n\n".join(judgments_section_lines)
 
-    prompt = _SCORE_PROMPT.format(
+    prompt = prompt_template.format(
         controversy_section=controversy_sec,
         dimensions_section=dimensions_sec,
         judgments_section=judgments_section,
@@ -154,8 +157,8 @@ def _score_batch(
     try:
         raw = agent._gemini(
             prompt,
-            max_tokens=1024,
-            temperature=0.1,
+            max_tokens=max_tokens,
+            temperature=temperature,
             run_id=run_id,
             user_id=user_id,
             operation="relevance_rank",
@@ -224,6 +227,26 @@ class RelevanceRankerAgent(BaseAgent):
         controversy_sec = _controversy_section(cm)
         dimensions_sec  = _dimensions_section(dims)
 
+        # Resolve prompt template from DB (or fall back to hardcoded default)
+        _score_template = _SCORE_PROMPT
+        _score_temp = 0.1
+        _score_max_tokens = 1024
+        try:
+            from utils.prompt_resolver import resolve_prompt as _resolve_prompt
+            _pc = _resolve_prompt(
+                name="RelevanceRanker",
+                agent_type="citation",
+                default_prompt=_SCORE_PROMPT,
+                default_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+                default_temperature=0.1,
+                default_max_tokens=1024,
+            )
+            _score_template = _pc.prompt
+            _score_temp = _pc.temperature
+            _score_max_tokens = _pc.max_tokens
+        except Exception as _exc:
+            logger.debug("[RELEVANCE_RANKER] prompt_resolver unavailable: %s", _exc)
+
         # Build (jid, blurb) pairs — fetch from DB only for those with no hint data
         jid_blurbs: List[Tuple[str, str]] = []
         jids_need_db: List[str] = []
@@ -262,7 +285,12 @@ class RelevanceRankerAgent(BaseAgent):
         ]
 
         def _run_batch(batch: List[Tuple[str, str]]) -> Dict[str, Dict[str, Any]]:
-            return _score_batch(batch, controversy_sec, dimensions_sec, self, run_id, user_id)
+            return _score_batch(
+                batch, controversy_sec, dimensions_sec, self, run_id, user_id,
+                prompt_template=_score_template,
+                max_tokens=_score_max_tokens,
+                temperature=_score_temp,
+            )
 
         with ThreadPoolExecutor(max_workers=_RANKER_WORKERS) as pool:
             futures = {pool.submit(_run_batch, b): b for b in batches}
