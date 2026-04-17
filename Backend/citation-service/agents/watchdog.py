@@ -581,7 +581,7 @@ def _search_local_semantic(
         # Force-include admin cids that Qdrant didn't return at all (score=0.0)
         # Cap at _ADMIN_ZERO_SCORE_MAX to avoid flooding the pool with irrelevant
         # judgments when the admin DB contains many unembedded or off-topic uploads.
-        _ADMIN_ZERO_SCORE_MAX = 10
+        _ADMIN_ZERO_SCORE_MAX = 30
         _zero_score_count = 0
         _first_task = tasks[0] if tasks else {}
         for cid in admin_cids_to_search:
@@ -1390,9 +1390,24 @@ def run_watchdog(
     if dimensions:
         all_dim_queries = [t["query"] for t in _build_dimension_query_tasks(dimensions)]
         keyword_list = all_dim_queries if all_dim_queries else ([query] if query else [])
+        # In dimension mode IK/Google use the same dimension queries
+        ik_google_queries = keyword_list
     else:
         ks_list = [ks for ks in (keyword_sets or []) if (ks or "").strip()]
+        # Qdrant semantic search uses the full controversy_query (long = better embedding)
         keyword_list = [query] if query else ks_list
+        # IK/Google keyword search MUST use short phrases (≤12 words).
+        # ks_list comes from LDE fallback (factual_trigger, legal_claim, central_controversy
+        # truncated to 12 words). If empty, fall back to query but still cap to 12 words.
+        if ks_list:
+            ik_google_queries = ks_list
+        elif query:
+            # Strip common question preamble so IK can find matches
+            _q = re.sub(r'^(?:did|does|was|were|is|are|whether|how|what|why|when)\s+(?:the\s+)?', '', query.strip(), flags=re.I)
+            _q = re.sub(r'^(?:high|supreme|bombay|delhi|madras|allahabad|calcutta|gujarat|karnataka|kerala|punjab|haryana|rajasthan|orissa|andhra|telangana)\s+court\s+\w+\s+', '', _q, flags=re.I)
+            ik_google_queries = [" ".join(_q.split()[:12])] if _q.strip() else [query]
+        else:
+            ik_google_queries = []
 
     if not keyword_list and not dimensions:
         return {
@@ -1653,7 +1668,10 @@ def run_watchdog(
 
         else:
             # ── Legacy keyword mode ───────────────────────────────────────────
-            per_ik = max(1, max_ik // len(keyword_list)) if len(keyword_list) > 1 else max_ik
+            # Use ik_google_queries (short IK-friendly phrases) not keyword_list
+            # (which may contain the long semantic controversy_query)
+            _ik_list = ik_google_queries if ik_google_queries else keyword_list
+            per_ik = max(1, max_ik // len(_ik_list)) if len(_ik_list) > 1 else max_ik
 
             def _run_ik_keyword(args: Tuple[int, str]) -> Tuple[int, List[Dict[str, Any]]]:
                 qi, q = args
@@ -1662,7 +1680,7 @@ def run_watchdog(
                     return qi, []
                 return qi, _search_indian_kanoon(q, limit=per_ik, run_id=run_id, user_id=user_id)
 
-            active = [(qi, q) for qi, q in enumerate(keyword_list, 1) if (q or "").strip()]
+            active = [(qi, q) for qi, q in enumerate(_ik_list, 1) if (q or "").strip()]
             # Still batch in groups of IK_BATCH_SIZE
             batches = [active[i: i + IK_BATCH_SIZE] for i in range(0, len(active), IK_BATCH_SIZE)]
             for batch_idx, batch in enumerate(batches):
@@ -1712,7 +1730,8 @@ def run_watchdog(
     if dimensions:
         google_queries = _unique_nonempty(keyword_list)
     if not google_queries:
-        google_queries = [primary_query] if primary_query else []
+        # Use ik_google_queries (short phrases) — primary_query may be the long controversy_query
+        google_queries = _unique_nonempty(ik_google_queries) if ik_google_queries else ([primary_query] if primary_query else [])
     # Cap Google via env so default remains safe but dimension-aware.
     try:
         max_google_queries = int(os.environ.get("CITATION_MAX_GOOGLE_QUERIES", "18"))

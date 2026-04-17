@@ -1596,6 +1596,20 @@ class LegalDimensionExtractor(BaseAgent):
                     _phrase = " ".join(_val.split()[:12])
                     if _phrase and _phrase not in _ik_phrases_early:
                         _ik_phrases_early.append(_phrase)
+            if not _ik_phrases_early and _fallback_query:
+                _stripped_e = re.sub(
+                    r'^(?:did|does|was|were|is|are|whether|how|what|why|when)\s+(?:the\s+)?',
+                    '', _fallback_query.strip(), flags=re.IGNORECASE,
+                )
+                _stripped_e = re.sub(
+                    r'^(?:high|supreme|bombay|delhi|madras|allahabad|calcutta|gujarat|'
+                    r'karnataka|kerala|punjab|haryana|rajasthan|telangana|andhra|orissa)\s+'
+                    r'court\s+\w+\s+',
+                    '', _stripped_e, flags=re.IGNORECASE,
+                )
+                _kw_e = " ".join(_stripped_e.split()[:10])
+                if _kw_e:
+                    _ik_phrases_early.append(_kw_e)
             context.metadata["keyword_sets"] = _ik_phrases_early if _ik_phrases_early else ([_fallback_query] if _fallback_query else [])
             context.metadata["dimensions"] = []
             context.dimensions = []
@@ -1742,6 +1756,22 @@ class LegalDimensionExtractor(BaseAgent):
                         _ik_phrases.append(_phrase)
             if base_query and len(base_query.split()) <= 15 and base_query not in _ik_phrases:
                 _ik_phrases.insert(0, base_query)
+            # If all cm fields were empty, derive clean keywords from the controversy_query
+            # by stripping question preamble ("Did the X correctly Y" → meaningful nouns)
+            if not _ik_phrases and _fallback_query:
+                _stripped = re.sub(
+                    r'^(?:did|does|was|were|is|are|whether|how|what|why|when)\s+(?:the\s+)?',
+                    '', _fallback_query.strip(), flags=re.IGNORECASE,
+                )
+                _stripped = re.sub(
+                    r'^(?:high|supreme|bombay|delhi|madras|allahabad|calcutta|gujarat|'
+                    r'karnataka|kerala|punjab|haryana|rajasthan|telangana|andhra|orissa)\s+'
+                    r'court\s+\w+\s+',
+                    '', _stripped, flags=re.IGNORECASE,
+                )
+                _kw = " ".join(_stripped.split()[:10])
+                if _kw:
+                    _ik_phrases.append(_kw)
             context.metadata["keyword_sets"] = _ik_phrases if _ik_phrases else ([_fallback_query] if _fallback_query else [])
             context.metadata["dimensions"] = []
             context.dimensions = []
