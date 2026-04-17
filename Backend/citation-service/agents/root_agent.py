@@ -1315,8 +1315,15 @@ class LegalDimensionExtractor(BaseAgent):
         """Extract and validate the dimensions array from LLM output."""
         if not raw:
             return []
+        # Strip extended-thinking blocks (Claude thinking mode)
+        text = re.sub(r"<thinking>.*?</thinking>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+        # Unwrap XML answer/output/response wrapper tags, keeping inner content
+        text = re.sub(
+            r"<(?:answer|output|response)>(.*?)</(?:answer|output|response)>",
+            r"\1", text, flags=re.DOTALL | re.IGNORECASE,
+        )
         # Strip markdown fences
-        text = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
         text = re.sub(r"```\s*$", "", text)
         # Attempt full JSON parse
         try:
@@ -1582,7 +1589,14 @@ class LegalDimensionExtractor(BaseAgent):
             _cm = context.metadata.get("controversy_map") or {}
             _fallback_query = str(_cm.get("controversy_query") or _cm.get("central_controversy") or "").strip()
             context.metadata["search_query"] = _fallback_query
-            context.metadata["keyword_sets"] = [_fallback_query] if _fallback_query else []
+            _ik_phrases_early: list = []
+            for _field in ("factual_trigger", "legal_claim", "central_controversy"):
+                _val = str(_cm.get(_field) or "").strip()
+                if _val:
+                    _phrase = " ".join(_val.split()[:12])
+                    if _phrase and _phrase not in _ik_phrases_early:
+                        _ik_phrases_early.append(_phrase)
+            context.metadata["keyword_sets"] = _ik_phrases_early if _ik_phrases_early else ([_fallback_query] if _fallback_query else [])
             context.metadata["dimensions"] = []
             context.dimensions = []
             return AgentResult(data={
@@ -1697,7 +1711,7 @@ class LegalDimensionExtractor(BaseAgent):
         claude_cfg = dict(pc.claude_config) if pc and pc.claude_config else {}
         raw_response = self._claude(
             prompt,
-            max_tokens=claude_cfg.pop("max_tokens", 3000),  # increased for semantic_query field
+            max_tokens=max(claude_cfg.pop("max_tokens", 3000), 3000),  # floor at 3000; DB override may be lower
             temperature=claude_cfg.pop("temperature", 0.1),
             run_id=run_id,
             user_id=user_id,
@@ -1717,7 +1731,18 @@ class LegalDimensionExtractor(BaseAgent):
             logger.warning("[LEGAL_DIM_EXTRACTOR] Insufficient valid dimensions (%d); falling back to %s seed: %r",
                            len(validated_dims), _seed_source, _fallback_query[:80])
             context.metadata["search_query"] = _fallback_query
-            context.metadata["keyword_sets"] = [_fallback_query] if _fallback_query else []
+            # Build short IK-friendly keyword phrases (IK needs ≤12 words; controversy_query is 40-60 words)
+            # Mirrors the same logic in watchdog.py:339-348
+            _ik_phrases: list = []
+            for _field in ("factual_trigger", "legal_claim", "central_controversy"):
+                _val = str(_cm.get(_field) or "").strip()
+                if _val:
+                    _phrase = " ".join(_val.split()[:12])
+                    if _phrase and _phrase not in _ik_phrases:
+                        _ik_phrases.append(_phrase)
+            if base_query and len(base_query.split()) <= 15 and base_query not in _ik_phrases:
+                _ik_phrases.insert(0, base_query)
+            context.metadata["keyword_sets"] = _ik_phrases if _ik_phrases else ([_fallback_query] if _fallback_query else [])
             context.metadata["dimensions"] = []
             context.dimensions = []
             try:
