@@ -578,10 +578,16 @@ def _search_local_semantic(
                         if q_type and q_type not in m["query_types"]:
                             m["query_types"].append(q_type)
 
-        # Force-include any admin cid that Qdrant didn't return at all (score=0.0)
+        # Force-include admin cids that Qdrant didn't return at all (score=0.0)
+        # Cap at _ADMIN_ZERO_SCORE_MAX to avoid flooding the pool with irrelevant
+        # judgments when the admin DB contains many unembedded or off-topic uploads.
+        _ADMIN_ZERO_SCORE_MAX = 10
+        _zero_score_count = 0
         _first_task = tasks[0] if tasks else {}
         for cid in admin_cids_to_search:
             if cid not in cid_meta:
+                if _zero_score_count >= _ADMIN_ZERO_SCORE_MAX:
+                    continue
                 cid_meta[cid] = {
                     "best_score":           0.0,
                     "provision_best_score": 0.0,
@@ -591,6 +597,7 @@ def _search_local_semantic(
                     "queries":              [_first_task.get("query") or ""] if _first_task.get("query") else [],
                 }
                 _new_admin.append(cid)
+                _zero_score_count += 1
 
         _new_admin = list(dict.fromkeys(_new_admin))  # deduplicate, preserve order
         logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d new admin canonical_ids added (no threshold)",

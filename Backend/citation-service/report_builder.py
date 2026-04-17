@@ -1557,12 +1557,10 @@ def _enrich_with_gemini(
             default_temperature=0.1,
             default_max_tokens=1024,
         )
-        prompt = pc.prompt.format(
-            title=title,
-            query=query,
-            raw=raw,
-            perspective_instruction=perspective_instruction,
-        )
+        # Use format_map + defaultdict so extra {vars} in the DB prompt don't raise KeyError
+        from collections import defaultdict as _dd
+        prompt = pc.prompt.format_map(_dd(str, title=title, query=query, raw=raw,
+                                          perspective_instruction=perspective_instruction))
         model       = pc.model_name
         temperature = pc.temperature
         max_tokens  = pc.max_tokens

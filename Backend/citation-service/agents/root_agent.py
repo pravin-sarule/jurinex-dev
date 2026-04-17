@@ -2224,6 +2224,24 @@ class CitationRootAgent(BaseAgent):
             report_id = str(uuid.uuid4())
             context.metadata["report_id"] = report_id
             approved_ids = list(context.judgement_ids)
+            # Deduplicate by primary_citation — same judgment can arrive via multiple
+            # admin-upload records that share an identical citation string.
+            try:
+                from db.client import judgement_get as _jget
+                _seen_citations: set = set()
+                _deduped: list = []
+                for _jid in approved_ids:
+                    _j = _jget(_jid) or {}
+                    _cit = (_j.get("primary_citation") or "").strip()
+                    if _cit and _cit in _seen_citations:
+                        logger.info("[ROOT] Deduplicated duplicate primary_citation=%r (jid=%s)", _cit, _jid)
+                        continue
+                    if _cit:
+                        _seen_citations.add(_cit)
+                    _deduped.append(_jid)
+                approved_ids = _deduped
+            except Exception as _de:
+                logger.warning("[ROOT] primary_citation dedup failed: %s", _de)
             # Build report from approved only
             _perspective = (context.metadata.get("perspective") or "all").lower().strip()
             report_format = build_report_from_judgements(
