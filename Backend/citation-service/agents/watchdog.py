@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -795,7 +796,8 @@ def _search_indian_kanoon(
     query_type: str = "keyword",
 ) -> List[Dict[str, Any]]:
     """
-    Call IK /search/ API for one query.
+    Call IK /search/ API for one query via the centralized ik_search() service
+    (which includes 3-attempt exponential-backoff retry for SSL / timeout errors).
     Tags each result with _dimension_id, _dimension_name, _query_type for traceability.
     Returns list of candidate dicts.
     """
@@ -806,29 +808,16 @@ def _search_indian_kanoon(
         return []
 
     try:
+        from services.indian_kanoon import ik_search as _ik_search_svc
         _db_log(run_id, "watchdog", "watchdog", "INFO",
                 f"📚 IK [{query_type}|dim={dimension_id}] {query[:80]!r}")
-        url = ("https://api.indiankanoon.org/search/?formInput="
-               + urllib.parse.quote(query) + "&pagenum=0")
-        req = urllib.request.Request(url, method="POST")
-        req.add_header("Authorization", f"Token {token}")
-        req.add_header("Accept", "application/json")
-        req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", errors="replace")[:200]
-            except Exception:
-                pass
-            logger.warning("[WATCHDOG] IK HTTP %s for %r: %s", getattr(e, "code", "?"), query[:80], body)
-            _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                    f"📚 IK HTTP {getattr(e, 'code', '?')} — {body[:100]}")
+        resp = _ik_search_svc(query, pagenum=0, doctypes="judgments")
+        if resp is None:
+            logger.warning("[WATCHDOG] IK search returned None for %r", query[:60])
+            _db_log(run_id, "watchdog", "watchdog", "WARNING", f"📚 IK search returned no response for: {query[:80]!r}")
             return []
 
-        docs = data.get("docs") or data.get("results") or []
+        docs = resp.get("docs") or resp.get("results") or []
         out: List[Dict[str, Any]] = []
         for d in docs[:limit]:
             out.append({
@@ -1578,7 +1567,7 @@ def run_watchdog(
                     candidate["_jurisdiction_priority"] = _jurisdiction_priority(candidate, case_state)
                     seen_tids[tid] = candidate
 
-    if not skip_ik:
+    if not skip_ik and not dimensions:
         if False:
             # ── Dimension mode: batch 5 tasks at a time with 200 ms stagger ──
             tasks = _build_dimension_query_tasks(dimensions)

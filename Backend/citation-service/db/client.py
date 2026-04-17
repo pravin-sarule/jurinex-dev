@@ -1562,6 +1562,8 @@ def judgement_search_local(
                 "primary_citation": src.get("primary_citation"),
                 "court": src.get("court_code"),
                 "ratio": src.get("holding_text") or src.get("summary_text"),
+                "full_text": src.get("full_text") or "",
+                "raw_content": src.get("full_text") or "",
                 "source": "admin_upload" if is_admin else (src.get("source_type") or "local"),
                 "source_type": src_type or (src.get("source_type") or "local"),
                 "is_local_admin": is_admin,
@@ -1605,10 +1607,13 @@ def judgement_search_local(
                             {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}}
                         ] if approved_only else [],
                         "must_not": [
-                            {"match": {"court_code": "district"}},
-                            {"match": {"court_code": "tribunal"}},
-                            {"match": {"court_code": "forum"}},
-                            {"match": {"court_code": "commission"}},
+                            {"match_phrase": {"court_code": "district court"}},
+                            {"match_phrase": {"court_code": "district judge"}},
+                            {"match_phrase": {"court_code": "sessions court"}},
+                            {"match_phrase": {"court_code": "magistrate"}},
+                            {"match_phrase": {"court_code": "tribunal"}},
+                            {"match_phrase": {"court_code": "consumer forum"}},
+                            {"match_phrase": {"court_code": "consumer commission"}},
                         ] if exclude_low_hierarchy else [],
                     }
                 },
@@ -2184,10 +2189,13 @@ def judgement_search_local(
                             {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}}
                         ] if approved_only else [],
                         "must_not": [
-                            {"match": {"court_code": "district"}},
-                            {"match": {"court_code": "tribunal"}},
-                            {"match": {"court_code": "forum"}},
-                            {"match": {"court_code": "commission"}},
+                            {"match_phrase": {"court_code": "district court"}},
+                            {"match_phrase": {"court_code": "district judge"}},
+                            {"match_phrase": {"court_code": "sessions court"}},
+                            {"match_phrase": {"court_code": "magistrate"}},
+                            {"match_phrase": {"court_code": "tribunal"}},
+                            {"match_phrase": {"court_code": "consumer forum"}},
+                            {"match_phrase": {"court_code": "consumer commission"}},
                         ] if exclude_low_hierarchy else [],
                     }
                 },

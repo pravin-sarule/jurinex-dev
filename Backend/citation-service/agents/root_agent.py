@@ -42,7 +42,7 @@ def _augment_candidates_wide_net(context: AgentContext) -> None:
     Only runs when a controversy_map with dispute_type is available and
     CITATION_WIDE_NET_ENABLED=1 (default: off until explicitly enabled).
     """
-    enabled = os.environ.get("CITATION_WIDE_NET_ENABLED", "0").strip().lower() in (
+    enabled = os.environ.get("CITATION_WIDE_NET_ENABLED", "1").strip().lower() in (
         "1", "true", "yes", "on"
     )
     if not enabled:
@@ -1479,7 +1479,7 @@ class LegalDimensionExtractor(BaseAgent):
 
         def _search_one(dim_id, dim_name, q_type, query):
             try:
-                resp = ik_search(query, pagenum=0)
+                resp = ik_search(query, pagenum=0, doctypes="judgments")
                 docs = (resp or {}).get("docs") or []
                 logger.info("[LEGAL_DIM_EXTRACTOR] IK [dim=%s|%s] %r → %d result(s)",
                             dim_id, q_type, query[:60], len(docs))
@@ -1709,7 +1709,7 @@ class LegalDimensionExtractor(BaseAgent):
         dimensions = self._parse_dimensions(raw_response or "")
         validated_dims = self._validate_dimensions(dimensions)
 
-        if len(validated_dims) < 6:
+        if not validated_dims:
             # Graceful fallback: use controversy_map seed when base_query is empty
             _cm = context.metadata.get("controversy_map") or {}
             _fallback_query = base_query or str(_cm.get("controversy_query") or _cm.get("central_controversy") or "").strip()
