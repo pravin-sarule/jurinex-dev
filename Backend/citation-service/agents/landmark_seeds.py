@@ -208,7 +208,10 @@ DISPUTE_TYPE_ROUTER: dict[str, list[str]] = {
     "civil_criminal_overlap": ["fir_quashing_commercial", "cheating_mens_rea"],
     "cheating_forgery":       ["cheating_mens_rea", "forgery_ipc_467_468", "fir_quashing_commercial"],
     "fir_quashing_ni_act":    ["fir_quashing_ni_act", "fir_quashing_commercial"],
-    "other":                  ["section_482_crpc_scope"],
+    # "other" intentionally returns no seeds — statute signals below will add relevant
+    # categories when the query/statutes contain recognisable keywords; for everything
+    # else, no seeds is far better than wrong-domain criminal seeds.
+    "other":                  [],
 }
 
 # ---------------------------------------------------------------------------

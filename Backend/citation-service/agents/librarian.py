@@ -375,7 +375,10 @@ def run_librarian(
                         "primary_citation": citation_data.get("primary_citation") or "",
                         "court": citation_data.get("court_name") or row.get("court_code") or "",
                         "ratio": citation_data.get("holding_text") or citation_data.get("summary_text") or "",
-                        "raw_content": citation_data.get("full_text") or "",
+                        # full_text lives in ES, not in the citation_data JSONB; fall back to ratio fields
+                        "raw_content": (citation_data.get("full_text")
+                                        or citation_data.get("holding_text")
+                                        or citation_data.get("summary_text") or ""),
                         "area": citation_data.get("area") or "",
                     }
         except Exception as exc:
