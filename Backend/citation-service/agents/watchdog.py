@@ -405,13 +405,9 @@ def _search_local_semantic(
     # No score threshold at Qdrant fetch time — we apply it after DB lookup below,
     # once we know whether each result is admin-uploaded or not.
     qdrant_score_threshold: Optional[float] = None
-    # Similarity thresholds applied after DB hydration.
-    # Non-admin: 0.65 (strict — only well-matched IK/Google judgments pass).
-    # Admin:     0.45 (relaxed — admin judgments may use slightly different vocabulary,
-    #                  but still must have meaningful Qdrant chunk similarity).
-    # Both are env-configurable so they can be tuned without a code deploy.
+    # Similarity threshold applied after DB hydration — non-admin judgments only.
+    # Admin uploads are always included regardless of score.
     _MIN_SCORE_NON_ADMIN = float(os.environ.get("CITATION_QDRANT_MIN_SCORE", "0.65"))
-    _MIN_SCORE_ADMIN     = float(os.environ.get("CITATION_ADMIN_QDRANT_MIN_SCORE", "0.45"))
 
     # Fetch window: large enough to capture admin chunks that rank lower than IK chunks
     # for the same query but are still genuinely relevant.
@@ -496,32 +492,34 @@ def _search_local_semantic(
         return []
 
     # ── 2b. Targeted admin search ─────────────────────────────────────────────
-    # Admin upload chunks may rank below per_task_limit in natural search because
-    # they compete with many IK/Google judgments for the same top-N slots.
-    # Fix: fetch all admin canonical_ids and run a payload-filtered Qdrant search
-    # that searches specifically within admin chunks — real 0.45 threshold applied,
-    # no force-include. Only chunks that genuinely score ≥ 0.45 are added.
+    # Admin uploads are always included — no score threshold applied.
+    # We still run a Qdrant payload-filtered search so we can record the best
+    # similarity score for ranking, but we force-include every admin canonical_id
+    # regardless of score.  Any admin cid not found in Qdrant at all is still
+    # added to cid_meta with score=0.0 so it reaches the PG fetch step.
     admin_cids_all = _fetch_admin_canonical_ids(run_id=run_id)
     admin_cids_to_search = [c for c in admin_cids_all if c not in cid_meta]
 
-    if admin_cids_to_search and any(v for v in task_vectors.values()):
+    if admin_cids_to_search:
         logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d canonical_ids not in natural results",
                     len(admin_cids_to_search))
         _admin_filter = None
-        try:
-            from qdrant_client.http import models as _qm
-            _admin_filter = _qm.Filter(
-                must=[_qm.FieldCondition(
-                    key="canonical_id",
-                    match=_qm.MatchAny(any=admin_cids_to_search[:500]),
-                )]
-            )
-        except Exception as _fe:
-            logger.warning("[WATCHDOG_QDRANT] Could not build admin filter: %s", _fe)
+        if any(v for v in task_vectors.values()):
+            try:
+                from qdrant_client.http import models as _qm
+                _admin_filter = _qm.Filter(
+                    must=[_qm.FieldCondition(
+                        key="canonical_id",
+                        match=_qm.MatchAny(any=admin_cids_to_search[:500]),
+                    )]
+                )
+            except Exception as _fe:
+                logger.warning("[WATCHDOG_QDRANT] Could not build admin filter: %s", _fe)
+
+        _new_admin: List[str] = []
 
         if _admin_filter is not None:
             fetch_limit_admin = max(30, per_task_limit)
-            _new_admin: List[str] = []
             for idx, vec in task_vectors.items():
                 if not vec:
                     continue
@@ -537,8 +535,7 @@ def _search_local_semantic(
                     if not cid or cid not in admin_cids_to_search:
                         continue
                     score = float(getattr(p, "score", 0) or 0)
-                    if score < _MIN_SCORE_ADMIN:
-                        continue  # real threshold — no force-include
+                    # No score filter — admin uploads are always included
                     ju = str(payload.get("judgment_uuid") or "").strip()
                     if ju:
                         qdrant_judgment_uuids.add(ju)
@@ -564,17 +561,26 @@ def _search_local_semantic(
                         if q_type and q_type not in m["query_types"]:
                             m["query_types"].append(q_type)
 
-            _new_admin = list(dict.fromkeys(_new_admin))  # deduplicate, preserve order
-            logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d new admin canonical_ids added (threshold=%.2f)",
-                        len(_new_admin), _MIN_SCORE_ADMIN)
-            if _new_admin:
-                _db_log(run_id, "watchdog", "watchdog", "INFO",
-                        f"✅ Admin targeted: {len(_new_admin)} admin judgment(s) score ≥ {_MIN_SCORE_ADMIN}",
-                        {"new_admin_cids": _new_admin[:10], "threshold": _MIN_SCORE_ADMIN})
-            else:
-                _db_log(run_id, "watchdog", "watchdog", "INFO",
-                        f"ℹ Admin targeted search: 0 admin judgments scored ≥ {_MIN_SCORE_ADMIN} for current queries",
-                        {"admin_cids_checked": len(admin_cids_to_search)})
+        # Force-include any admin cid that Qdrant didn't return at all (score=0.0)
+        _first_task = tasks[0] if tasks else {}
+        for cid in admin_cids_to_search:
+            if cid not in cid_meta:
+                cid_meta[cid] = {
+                    "best_score":           0.0,
+                    "provision_best_score": 0.0,
+                    "dimension_ids":        [_first_task.get("dimension_id")] if _first_task.get("dimension_id") is not None else [],
+                    "dimension_names":      [_first_task.get("dimension_name") or ""] if _first_task.get("dimension_name") else [],
+                    "query_types":          ["semantic"],
+                    "queries":              [_first_task.get("query") or ""] if _first_task.get("query") else [],
+                }
+                _new_admin.append(cid)
+
+        _new_admin = list(dict.fromkeys(_new_admin))  # deduplicate, preserve order
+        logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d new admin canonical_ids added (no threshold)",
+                    len(_new_admin))
+        _db_log(run_id, "watchdog", "watchdog", "INFO",
+                f"✅ Admin targeted: {len(_new_admin)} admin judgment(s) force-included",
+                {"new_admin_cids": _new_admin[:10], "total_admin": len(admin_cids_all)})
 
     if not cid_meta:
         return []
@@ -634,20 +640,18 @@ def _search_local_semantic(
         # Admin flag comes entirely from the DB row returned by judgements_fetch_by_canonical_ids.
         # That function checks both judgments.source_type and judgment_uploads table.
         is_admin = bool(r.get("is_local_admin"))
-        # Apply score threshold — admin gets a relaxed floor (0.45), non-admin uses strict (0.65).
-        # Both thresholds are env-configurable (CITATION_ADMIN_QDRANT_MIN_SCORE / CITATION_QDRANT_MIN_SCORE).
-        # Only chunks that actually scored above the floor are kept — no result is force-included.
-        min_score = _MIN_SCORE_ADMIN if is_admin else _MIN_SCORE_NON_ADMIN
-        if sim_score < min_score:
+        # Non-admin judgments are filtered by the strict score floor.
+        # Admin uploads are always included — no score threshold.
+        if not is_admin and sim_score < _MIN_SCORE_NON_ADMIN:
             logger.debug(
-                "[WATCHDOG_QDRANT] Dropped low-score %s: canonical_id=%s score=%.3f < threshold=%.2f",
-                "admin" if is_admin else "non-admin", cid, sim_score, min_score,
+                "[WATCHDOG_QDRANT] Dropped low-score non-admin: canonical_id=%s score=%.3f < threshold=%.2f",
+                cid, sim_score, _MIN_SCORE_NON_ADMIN,
             )
             continue
         if is_admin:
             logger.info(
-                "[WATCHDOG_QDRANT] ✅ Admin judgment included: canonical_id=%s score=%.3f (admin_min=%.2f)",
-                cid, sim_score, _MIN_SCORE_ADMIN,
+                "[WATCHDOG_QDRANT] ✅ Admin judgment included: canonical_id=%s score=%.3f (no threshold)",
+                cid, sim_score,
             )
         is_dist = _district_court_like(court_val)
         prov_strong = "provision" in q_types and prov_best >= 0.80
@@ -1140,6 +1144,106 @@ def _hints_from_local_rows(local: List[Dict[str, Any]]) -> Dict[str, Dict[str, A
     return out
 
 
+# ── Phase 3: IK candidate re-ranking via Gemini ──────────────────────────────
+
+def _rerank_ik_candidates_gemini(
+    candidates: List[Dict[str, Any]],
+    controversy_map: Optional[Dict[str, Any]],
+    run_id: Optional[str],
+    user_id: Optional[str],
+    min_score: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    Re-rank IK candidates using a Gemini LLM call against the controversy map.
+    Drops candidates with relevance score < min_score (default 2 out of 5).
+    Skips re-ranking if controversy_map is absent or candidate list is empty.
+    """
+    if not candidates or not controversy_map:
+        return candidates
+
+    _cm = controversy_map or {}
+    controversy_text = (
+        f"Dispute: {_cm.get('central_controversy', '')}\n"
+        f"Trigger: {_cm.get('factual_trigger', '')}\n"
+        f"Claim: {_cm.get('legal_claim', '')}"
+    ).strip()
+
+    # Build a compact list of candidates for the prompt
+    lines: List[str] = []
+    for i, c in enumerate(candidates):
+        title = str(c.get("title") or c.get("doc_title") or "").strip() or "(untitled)"
+        court = str(c.get("docsource") or "").strip()
+        snippet = str(c.get("headline") or c.get("snippet") or "")[:200].strip()
+        line = f"[{i + 1}] {title}"
+        if court:
+            line += f" ({court})"
+        if snippet:
+            line += f" — {snippet}"
+        lines.append(line)
+
+    prompt = (
+        "You are a senior Indian legal research analyst.\n\n"
+        "Rate each judgment below for relevance to the legal dispute. "
+        "Score 0-5 where:\n"
+        "  5=directly on point (same facts/provision/controversy)\n"
+        "  3-4=useful precedent on one key issue\n"
+        "  1-2=tangentially relevant\n"
+        "  0=wrong area or no connection\n\n"
+        f"DISPUTE:\n{controversy_text}\n\n"
+        "JUDGMENTS:\n" + "\n".join(lines) + "\n\n"
+        "Return a JSON array with one object per judgment in the SAME ORDER:\n"
+        '[{"index":1,"score":<0-5>},{"index":2,"score":<0-5>},...]\n'
+        "Return ONLY the JSON array."
+    )
+
+    try:
+        from agents.base_agent import BaseAgent
+        _tmp = BaseAgent()
+        raw = _tmp._gemini(
+            prompt,
+            max_tokens=512,
+            temperature=0.0,
+            run_id=run_id,
+            user_id=user_id or "anonymous",
+            operation="ik_rerank",
+        )
+        text = (raw or "").strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"```\s*$", "", text).strip()
+        items = json.loads(text)
+        if not isinstance(items, list):
+            raise ValueError("not a list")
+
+        # Map index → score
+        score_map: Dict[int, float] = {}
+        for item in items:
+            if isinstance(item, dict):
+                idx = int(item.get("index") or 0)
+                score = float(item.get("score") or 0)
+                score_map[idx] = score
+
+        # Annotate + filter
+        scored: List[tuple] = []
+        for i, c in enumerate(candidates):
+            score = score_map.get(i + 1, 3.0)  # default to 3 if missing
+            if score >= min_score:
+                c["_ik_relevance_score"] = score
+                scored.append((c, score))
+
+        # Sort by score descending (preserve jurisdiction priority within same score)
+        scored.sort(key=lambda x: (x[1], x[0].get("_jurisdiction_priority", 0)), reverse=True)
+        result = [c for c, _ in scored]
+        dropped = len(candidates) - len(result)
+        logger.info(
+            "[WATCHDOG] IK re-rank: %d → %d candidates (dropped %d with score < %d)",
+            len(candidates), len(result), dropped, min_score,
+        )
+        return result
+    except Exception as exc:
+        logger.warning("[WATCHDOG] IK re-rank failed (%s) — returning original order", exc)
+        return candidates
+
+
 # ── Main watchdog entry point ─────────────────────────────────────────────────
 
 def run_watchdog(
@@ -1152,6 +1256,7 @@ def run_watchdog(
     case_state: str = "",
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    controversy_map: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run Watchdog: Local DB → Indian Kanoon API (dimension-aware) → Google.
@@ -1316,6 +1421,23 @@ def run_watchdog(
                 )
                 for t in dim_tasks
             ], return_exceptions=True)
+
+        # Phase 2: inject controversy_query as an extra Qdrant task (dual-vector)
+        # Results that match the controversy vector get a composite score boost.
+        _controversy_q = ""
+        if controversy_map and isinstance(controversy_map, dict):
+            _controversy_q = str(
+                controversy_map.get("controversy_query") or
+                controversy_map.get("central_controversy") or ""
+            ).strip()
+        if _controversy_q:
+            qdrant_tasks = qdrant_tasks + [{
+                "query":          _controversy_q,
+                "q_type":         "controversy",
+                "dimension_id":   None,
+                "dimension_name": "controversy",
+            }]
+            logger.info("[WATCHDOG] Added controversy Qdrant task: %s", _controversy_q[:80])
 
         # Run all dimension semantic tasks in one batch (so all dimensions are evaluated together).
         if qdrant_tasks:
@@ -1550,6 +1672,15 @@ def run_watchdog(
         key=lambda c: c.get("_jurisdiction_priority", 0),
         reverse=True,
     )
+
+    # Phase 3: re-rank IK candidates with Gemini relevance scoring
+    if candidates_ik and controversy_map:
+        candidates_ik = _rerank_ik_candidates_gemini(
+            candidates_ik,
+            controversy_map=controversy_map,
+            run_id=run_id,
+            user_id=user_id,
+        )
 
     # ── 3. Google search ──────────────────────────────────────────────────────
     # Run Google for all dimension queries (SC/HC/Provision) when available.

@@ -178,11 +178,12 @@ class WatchdogAgent(BaseAgent):
             max_local  = 10,
             max_ik     = 10,
             max_google = 5,
-            keyword_sets = keyword_sets if not dimensions else None,
-            dimensions   = dimensions if dimensions else None,
-            case_state   = case_state,
-            run_id       = run_id,
-            user_id      = user_id,
+            keyword_sets    = keyword_sets if not dimensions else None,
+            dimensions      = dimensions if dimensions else None,
+            case_state      = case_state,
+            run_id          = run_id,
+            user_id         = user_id,
+            controversy_map = context.metadata.get("controversy_map"),
         )
 
         if result.get("error"):
@@ -267,6 +268,104 @@ class FetcherAgent(BaseAgent):
         })
 
 
+# ── Phase 4: Clerk relevance pre-check helper ─────────────────────────────────
+
+def _clerk_relevance_precheck(
+    fetched_ik: List[Dict[str, Any]],
+    fetched_go: List[Dict[str, Any]],
+    controversy_map: Dict[str, Any],
+    dimensions: List[Dict[str, Any]],
+    run_id: Optional[str],
+    user_id: str,
+    agent: "BaseAgent",
+    min_score: int = 2,
+) -> tuple:
+    """
+    Quick Gemini relevance check on fetched docs before ingest.
+    Docs scored below min_score are dropped (EXCLUDE tier) to avoid
+    polluting the DB with irrelevant content.
+    Returns (filtered_ik, filtered_go).
+    """
+    all_docs = [(d, "ik") for d in fetched_ik] + [(d, "go") for d in fetched_go]
+    if not all_docs:
+        return fetched_ik, fetched_go
+
+    cm = controversy_map or {}
+    controversy_text = (
+        f"Dispute: {cm.get('central_controversy', '')}\n"
+        f"Trigger: {cm.get('factual_trigger', '')}\n"
+        f"Claim: {cm.get('legal_claim', '')}"
+    ).strip()
+
+    # Build compact description for each doc
+    lines: List[str] = []
+    for i, (d, _src) in enumerate(all_docs):
+        title = str(d.get("title") or d.get("doc_title") or "").strip() or "(untitled)"
+        snippet = str(d.get("headline") or d.get("content") or d.get("raw_content") or "")[:200].strip()
+        line = f"[{i + 1}] {title}"
+        if snippet:
+            line += f" — {snippet}"
+        lines.append(line)
+
+    prompt = (
+        "You are a senior Indian legal research analyst.\n\n"
+        "Score each document for relevance to the legal dispute (0-5):\n"
+        "  5=directly on point   3-4=useful precedent   1-2=marginal   0=irrelevant\n\n"
+        f"DISPUTE:\n{controversy_text}\n\n"
+        "DOCUMENTS:\n" + "\n".join(lines) + "\n\n"
+        "Return JSON array ONLY: "
+        '[{"index":1,"score":<0-5>},{"index":2,"score":<0-5>},...]'
+    )
+
+    try:
+        raw = agent._gemini(
+            prompt,
+            max_tokens=512,
+            temperature=0.0,
+            run_id=run_id,
+            user_id=user_id,
+            operation="clerk_precheck",
+        )
+        import re as _re, json as _json
+        text = (raw or "").strip()
+        text = _re.sub(r"^```(?:json)?\s*", "", text)
+        text = _re.sub(r"```\s*$", "", text).strip()
+        items = _json.loads(text)
+        if not isinstance(items, list):
+            raise ValueError("not a list")
+
+        score_map: Dict[int, float] = {}
+        for item in items:
+            if isinstance(item, dict):
+                idx = int(item.get("index") or 0)
+                score = float(item.get("score") or 0)
+                score_map[idx] = score
+
+        kept_ik, kept_go = [], []
+        excluded = 0
+        for i, (d, src) in enumerate(all_docs):
+            score = score_map.get(i + 1, 3.0)
+            if score < min_score:
+                excluded += 1
+                title = str(d.get("title") or "?")[:60]
+                logger.info("[CLERK_PRECHECK] EXCLUDED (score=%.0f): %s", score, title)
+                continue
+            d["_precheck_score"] = score
+            if src == "ik":
+                kept_ik.append(d)
+            else:
+                kept_go.append(d)
+
+        logger.info(
+            "[CLERK_PRECHECK] %d → %d docs (excluded %d with score < %d)",
+            len(all_docs), len(kept_ik) + len(kept_go), excluded, min_score,
+        )
+        return kept_ik, kept_go
+    except Exception as exc:
+        logger.warning("[CLERK_PRECHECK] failed (%s) — passing all docs through", exc)
+        return fetched_ik, fetched_go
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CLERK AGENT  — OCR + Gemini extraction + chunk + embed + store
 # ══════════════════════════════════════════════════════════════════════════════
@@ -282,6 +381,16 @@ class ClerkAgent(BaseAgent):
         fetched_ik = context.metadata.get("fetched_ik", [])
         fetched_go = context.metadata.get("fetched_go", [])
         new_ids, errors = [], []
+
+        # Phase 4: relevance pre-check — drop EXCLUDE-tier docs before ingestion
+        cm   = context.metadata.get("controversy_map") or {}
+        dims = context.dimensions or []
+        if (fetched_ik or fetched_go) and (cm or dims):
+            fetched_ik, fetched_go = _clerk_relevance_precheck(
+                fetched_ik, fetched_go, cm, dims, run_id=run_id,
+                user_id=context.metadata.get("user_id") or context.user_id or "anonymous",
+                agent=self,
+            )
 
         try:
             from db.client import agent_log_insert
@@ -396,6 +505,25 @@ class LibrarianAgent(BaseAgent):
         context.metadata["rejected_ids"]        = result["rejected_ids"]
         context.metadata["hierarchy_rankings"]  = result.get("hierarchy_rankings", {})
 
+        # Phase 6: composite sort — combine hierarchy rank + relevance score
+        relevance_scores = context.metadata.get("relevance_scores") or {}
+        if relevance_scores:
+            hier = result.get("hierarchy_rankings") or {}
+            # Normalise hierarchy rank (higher rank number = better) to 0-10 range
+            # SC rank ≈ 300, HC ≈ 200, district ≈ 100 → normalise /30 capped at 10
+            def _composite(jid: str) -> float:
+                h_rank = float(hier.get(jid) or 100)
+                h_norm = min(h_rank / 30.0, 10.0)
+                r_score = float((relevance_scores.get(jid) or {}).get("score") or 5.0)
+                return 0.4 * h_norm + 0.6 * r_score
+            context.metadata["validated_ids"] = sorted(
+                result["validated_ids"], key=_composite, reverse=True
+            )
+            context.metadata["flagged_ids"] = sorted(
+                result["flagged_ids"], key=_composite, reverse=True
+            )
+            logger.info("[LIBRARIAN] Composite sort applied using relevance_scores (%d entries)", len(relevance_scores))
+
         # Log per-citation details
         details = result.get("details", {})
         try:
@@ -476,6 +604,44 @@ class AuditorAgent(BaseAgent):
         context.judgement_ids              = result.get("approved_ids", [])
         approved_count    = len(result.get("approved_ids", []))
         quarantined_count = len(result.get("quarantined_ids", []))
+
+        # Phase 7: relevance gate — move low-relevance approved IDs to HITL queue
+        relevance_scores = context.metadata.get("relevance_scores") or {}
+        hints = context.metadata.get("local_judgement_hints") or {}
+        _RELEVANCE_GATE = float(os.environ.get("CITATION_RELEVANCE_GATE_SCORE", "2.5"))
+        if relevance_scores:
+            still_approved: List[str] = []
+            relevance_hitl: List[str] = []
+            for jid in list(context.judgement_ids):
+                # Admin uploads bypass the relevance gate
+                h = hints.get(jid) or {}
+                is_admin = h.get("is_local_admin") or str(h.get("source_type") or "").lower().startswith("admin")
+                if is_admin:
+                    still_approved.append(jid)
+                    continue
+                r_score = float((relevance_scores.get(jid) or {}).get("score") or 10.0)
+                if r_score < _RELEVANCE_GATE:
+                    relevance_hitl.append(jid)
+                    context.metadata["audit_details"].setdefault(jid, {})
+                    context.metadata["audit_details"][jid]["relevance_gate"] = "NOT_RELEVANT"
+                    context.metadata["audit_details"][jid]["relevance_score"] = r_score
+                    logger.info(
+                        "[AUDITOR] Relevance gate: HITL for jid=%s score=%.1f < threshold=%.1f",
+                        jid, r_score, _RELEVANCE_GATE,
+                    )
+                else:
+                    still_approved.append(jid)
+            if relevance_hitl:
+                context.metadata["hitl_ids"] = list(
+                    dict.fromkeys((context.metadata.get("hitl_ids") or []) + relevance_hitl)
+                )
+                context.metadata["approved_ids"] = still_approved
+                context.judgement_ids = still_approved
+                approved_count = len(still_approved)
+                logger.info(
+                    "[AUDITOR] Relevance gate moved %d judgment(s) to HITL (threshold=%.1f)",
+                    len(relevance_hitl), _RELEVANCE_GATE,
+                )
 
         # Log per-citation audit outcomes
         audit_details = result.get("audit_details", {})
@@ -641,6 +807,127 @@ def _resolve_hc_name(context: AgentContext) -> str:
             if state_key in text:
                 return hc_name
     return "High Court"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTROVERSY MAPPER  — pre-LDE step that compresses the dispute into a single map
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ControversyMapperAgent(BaseAgent):
+    """
+    Runs BEFORE LegalDimensionExtractor to extract a compact 'controversy map'
+    from the query and case context.  The map is stored in
+    context.metadata["controversy_map"] and reused by:
+      - Watchdog (extra Qdrant vector query)
+      - Clerk (relevance pre-check)
+      - RelevanceRanker (scoring)
+      - ReportBuilder (dimension tagging)
+
+    Output schema:
+      {
+        "central_controversy": "one-sentence statement of the core legal dispute",
+        "factual_trigger":     "what event/action triggered the legal proceeding",
+        "legal_claim":         "which right/rule/section is invoked",
+        "disputed_outcome":    "what each side is trying to achieve",
+        "controversy_query":   "40-60 word richly factual query for Qdrant vector search"
+      }
+
+    Fast path: if the query is very short (< 15 words) and there is no case
+    context, we fall back to a simple keyword expansion without an LLM call.
+    """
+    name        = "controversy_mapper"
+    description = "Compresses the case into a compact controversy map for downstream retrieval."
+
+    _PROMPT = (
+        "You are a senior Indian legal research strategist.\n\n"
+        "Read the following case query and supporting file extracts, then produce a "
+        "controversy map — a compact analytical summary of the core legal dispute "
+        "that will drive citation retrieval.\n\n"
+        "RULES:\n"
+        "- controversy_query must be 40-60 words, richly factual, encode the actual "
+        "transaction/event, the specific offences or provisions invoked, the "
+        "procedural posture, and the decisive legal questions.\n"
+        "- Do NOT produce generic vocabulary (locus standi, violation of rights, etc.).\n"
+        "- Prefer specific section numbers, transaction types, and factual markers.\n\n"
+        "INPUT\n"
+        "Query: {base_query}\n\n"
+        "Case extracts:\n{case_context}\n\n"
+        "OUTPUT — return ONLY valid JSON, no markdown:\n"
+        '{{"central_controversy":"...","factual_trigger":"...","legal_claim":"...",'
+        '"disputed_outcome":"...","controversy_query":"..."}}'
+    )
+
+    def run(self, context: AgentContext) -> AgentResult:
+        run_id    = context.metadata.get("run_id")
+        user_id   = context.metadata.get("user_id") or context.user_id or "anonymous"
+        base_query = (context.query or "").strip()
+
+        # Build a compact case_context string (max 3000 chars)
+        parts: List[str] = []
+        for f in (context.metadata.get("case_file_context") or [])[:10]:
+            snip = (f.get("snippet") or f.get("content") or "")[:800].strip()
+            if snip:
+                name = f.get("name") or f.get("filename") or "doc"
+                parts.append(f"[{name}]\n{snip}")
+        case_context_str = "\n\n".join(parts)[:3000]
+
+        # Fast path — short bare query, no context
+        query_words = [w for w in base_query.split() if w]
+        if len(query_words) < 15 and not case_context_str:
+            cm = {
+                "central_controversy": base_query,
+                "factual_trigger": base_query,
+                "legal_claim": base_query,
+                "disputed_outcome": "",
+                "controversy_query": base_query,
+            }
+            context.metadata["controversy_map"] = cm
+            logger.info("[CONTROVERSY_MAPPER] fast-path (short query, no context)")
+            return AgentResult(data={"source": "fast_path", "controversy_map": cm})
+
+        prompt = self._PROMPT.format(
+            base_query=base_query,
+            case_context=case_context_str or "(no file context provided)",
+        )
+        try:
+            raw = self._gemini(
+                prompt,
+                max_tokens=512,
+                temperature=0.1,
+                run_id=run_id,
+                user_id=user_id,
+                operation="controversy_map",
+            )
+            text = (raw or "").strip()
+            # Strip markdown fences
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"```\s*$", "", text).strip()
+            cm = json.loads(text)
+            if not isinstance(cm, dict):
+                raise ValueError("not a dict")
+            # Ensure all keys present
+            for k in ("central_controversy", "factual_trigger", "legal_claim",
+                      "disputed_outcome", "controversy_query"):
+                if k not in cm:
+                    cm[k] = base_query
+            context.metadata["controversy_map"] = cm
+            logger.info(
+                "[CONTROVERSY_MAPPER] map ready | controversy=%s | controversy_query=%s",
+                str(cm.get("central_controversy") or "")[:80],
+                str(cm.get("controversy_query") or "")[:80],
+            )
+            return AgentResult(data={"source": "gemini", "controversy_map": cm})
+        except Exception as exc:
+            logger.warning("[CONTROVERSY_MAPPER] failed (%s) — using base query fallback", exc)
+            cm = {
+                "central_controversy": base_query,
+                "factual_trigger": base_query,
+                "legal_claim": base_query,
+                "disputed_outcome": "",
+                "controversy_query": base_query,
+            }
+            context.metadata["controversy_map"] = cm
+            return AgentResult(data={"source": "fallback", "controversy_map": cm})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1300,16 +1587,19 @@ class CitationRootAgent(BaseAgent):
 
     def __init__(self):
         super().__init__()
+        self.controversy_mapper        = ControversyMapperAgent()
         self.legal_dimension_extractor = LegalDimensionExtractor()
         self.watchdog          = WatchdogAgent()
         self.fetcher           = FetcherAgent()
         self.clerk             = ClerkAgent()
+        self.relevance_ranker  = None   # lazy import to avoid circular deps at module load
         self.librarian         = LibrarianAgent()
         self.auditor           = AuditorAgent()
         self.report_builder    = ReportBuilderAgent()
 
         # Sub-agents list (ADK convention)
         self.sub_agents = [
+            self.controversy_mapper,
             self.legal_dimension_extractor,
             self.watchdog,
             self.fetcher,
@@ -1318,6 +1608,12 @@ class CitationRootAgent(BaseAgent):
             self.auditor,
             self.report_builder,
         ]
+
+    def _get_relevance_ranker(self):
+        if self.relevance_ranker is None:
+            from agents.relevance_ranker import RelevanceRankerAgent
+            self.relevance_ranker = RelevanceRankerAgent()
+        return self.relevance_ranker
 
     def _log_agent_prompt_info(self, agent_name: str, duration: float, run_id: str, report_id: str) -> None:
         """Helper to centralize rich console prompt logging for all agents."""
@@ -1505,6 +1801,9 @@ class CitationRootAgent(BaseAgent):
                 logger.warning("[ROOT] %s", msg)
                 return AgentResult(success=False, error=msg)
 
+        # 0.5 Controversy Mapper — compress the dispute before dimension extraction
+        self._delegate(self.controversy_mapper, context, "controversy_mapper")
+
         # 1. Legal Dimension Extraction (identifies core disputes + generates 3-tier queries)
         self._delegate(self.legal_dimension_extractor, context, "legal_dimension_extractor")
 
@@ -1548,6 +1847,9 @@ class CitationRootAgent(BaseAgent):
         if not context.judgement_ids:
             logger.warning("[ROOT] No judgements found — running fallback via citation_agent")
             return self._fallback(context)
+
+        # 3.5 RelevanceRanker — score & reorder judgement_ids before Librarian
+        self._delegate(self._get_relevance_ranker(), context, "relevance_ranker")
 
         # 4. Librarian — validate & enrich
         self._delegate(self.librarian, context, "librarian")
@@ -1608,6 +1910,8 @@ class CitationRootAgent(BaseAgent):
             else:
                 logger.info("[ROOT] Retry %d produced no new external candidates; stopping retries", audit_round + 1)
                 break
+            # Re-rank new candidates before Librarian
+            self._delegate(self._get_relevance_ranker(), context, "relevance_ranker")
             # Merge accumulated_approved back so Librarian/Auditor can include them next round
             existing = set(accumulated_approved)
             merged = list(accumulated_approved)

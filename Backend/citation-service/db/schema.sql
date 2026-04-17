@@ -128,3 +128,36 @@ CREATE TABLE IF NOT EXISTS citation_blacklist (
 
 CREATE INDEX IF NOT EXISTS idx_citation_blacklist_key
     ON citation_blacklist(normalized_key);
+
+-- ---------------------------------------------------------------------------
+-- Phase 9: Indexes for relevance pipeline performance
+-- ---------------------------------------------------------------------------
+
+-- Speed up canonical_id lookups in judgments table (hot path for all agents)
+CREATE INDEX IF NOT EXISTS idx_judgments_canonical_id
+    ON judgments(canonical_id);
+
+-- Speed up verification_status filter used by Watchdog / Auditor
+CREATE INDEX IF NOT EXISTS idx_judgments_verification_status
+    ON judgments(verification_status);
+
+-- Speed up source_type lookups (admin upload bypass logic)
+CREATE INDEX IF NOT EXISTS idx_judgments_source_type
+    ON judgments(source_type);
+
+-- Speed up citation_pipeline_runs look-up by run_id (hot in agent_log_insert)
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_id
+    ON citation_pipeline_runs(id);
+
+-- Composite index for usage reporting queries
+CREATE INDEX IF NOT EXISTS idx_agent_logs_run_agent
+    ON agent_logs(run_id, agent_name);
+
+-- hitl_queue: fast lookup by canonical_id for de-duplication
+CREATE INDEX IF NOT EXISTS idx_hitl_canonical_id
+    ON hitl_queue(canonical_id);
+
+-- agent_prompts: fast lookup by name + agent_type (used by prompt resolver)
+-- (only if the table exists in Draft_DB — safe to run idempotently)
+-- CREATE INDEX IF NOT EXISTS idx_agent_prompts_name_type
+--     ON public.agent_prompts(LOWER(TRIM(name::text)), LOWER(TRIM(agent_type::text)));

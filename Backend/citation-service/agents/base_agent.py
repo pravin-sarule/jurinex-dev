@@ -69,8 +69,16 @@ class BaseAgent:
         raise NotImplementedError(f"{self.__class__.__name__}.run() not implemented")
 
     # ── Gemini helper ────────────────────────────────────────────────────────
-    def _gemini(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.1) -> Optional[str]:
-        """Call Gemini via google-genai SDK."""
+    def _gemini(
+        self,
+        prompt: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.1,
+        run_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        operation: str = "generate",
+    ) -> Optional[str]:
+        """Call Gemini via google-genai SDK with optional usage tracking."""
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             logger.warning("[%s] GEMINI_API_KEY not set", self.name)
@@ -87,6 +95,17 @@ class BaseAgent:
                     max_output_tokens=max_tokens,
                 ),
             )
+            # Usage tracking (Phase 11)
+            if run_id or user_id:
+                try:
+                    usage_meta = getattr(resp, "usage_metadata", None)
+                    ti = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
+                    to = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
+                    from utils.usage_tracker import record_gemini
+                    record_gemini(run_id, user_id or "anonymous", operation,
+                                  tokens_in=ti, tokens_out=to, model=model)
+                except Exception:
+                    pass
             return resp.text or ""
         except Exception as e:
             logger.warning("[%s] Gemini call failed: %s", self.name, e)
