@@ -755,11 +755,12 @@ Return ONLY this JSON (queries must include quotes and AND/OR):
 def _ik_search_one(query: str) -> List[Dict[str, Any]]:
     """Single IK API search. Returns list of result dicts."""
     from services.indian_kanoon import ik_search
+    _per_query = max(1, int(os.environ.get("CITATION_IK_PER_QUERY", "15")))
     try:
         resp = ik_search(query, pagenum=0, doctypes="judgments")
         docs = (resp or {}).get("docs") or []
         results = []
-        for d in docs[:8]:
+        for d in docs[:_per_query]:
             tid = str(d.get("tid", "")).strip()
             if not tid:
                 continue
@@ -2371,7 +2372,8 @@ def semantic_rerank_survivors(
         logger.warning("[PROP] semantic_rerank_survivors: db.client import failed: %s", exc)
         return survivors
 
-    min_cos = float(os.environ.get("CITATION_SEMANTIC_MIN_COSINE", "0.55"))
+    # Default 0 = cosine is tie-break only (no drops). Set >0 to hard-filter.
+    min_cos = float(os.environ.get("CITATION_SEMANTIC_MIN_COSINE", "0"))
 
     issues = legal_points.get("issues", []) or []
     issues_blurb = " | ".join(
@@ -2463,10 +2465,15 @@ def semantic_rerank_survivors(
         cos = _cosine_sim(case_vec, vec)
         scored_pairs.append((s, cos))
 
+    # Use cosine as a tie-break, NOT a hard filter. Claude score + grounding
+    # already filtered for relevance; Gemini embeddings on Indian legal text
+    # frequently sit at 0.35–0.55 even for clearly relevant judgments, so a
+    # hard drop at 0.55 was silently culling most survivors. Users who want
+    # the stricter behavior can set CITATION_SEMANTIC_MIN_COSINE > 0.
     kept = [(s, cos) for s, cos in scored_pairs if cos >= min_cos]
     dropped = len(scored_pairs) - len(kept)
     if not kept and scored_pairs:
-        # All below threshold — don't return an empty list; fall back to Claude's order.
+        # Fallback: drop-threshold killed everyone — keep Claude order.
         logger.info("[PROP] Semantic rerank: all %d survivors < min_cos=%.2f — fail-open",
                     len(scored_pairs), min_cos)
         _db_log(run_id, "PropositionPipeline", "semantic_rerank", "WARNING",
@@ -2785,7 +2792,10 @@ def run_proposition_pipeline(
         )
 
     # 4. Fetch full judgment texts in parallel
-    enriched = fetch_full_texts_parallel(raw_results, run_id, max_fetch=30)
+    enriched = fetch_full_texts_parallel(
+        raw_results, run_id,
+        max_fetch=int(os.environ.get("CITATION_MAX_FETCH", "40")),
+    )
 
     # 4b. Relevance pre-filter (Gemini grounding or cheap Claude batch) — removes
     # obvious junk before expensive _score_one() runs. Fails open on error.
@@ -2813,15 +2823,16 @@ def run_proposition_pipeline(
             item for item in scored
             if str(item.get("sourceUrl") or item.get("url") or "").strip()
         ]
+        _gpool_max = int(os.environ.get("CITATION_GROUNDING_POOL", "20"))
         _db_log(run_id, "PropositionPipeline", "grounding_validate", "INFO",
-                f"Validating top {min(len(grounding_pool), 12)} candidates via Google grounding")
+                f"Validating top {min(len(grounding_pool), _gpool_max)} candidates via Google grounding")
         grounded = google_validate_candidates(
             grounding_pool,
             legal_points,
             research_plan,
             run_id,
             user_id,
-            max_validate=12,
+            max_validate=_gpool_max,
         )
         if grounded:
             scored = grounded
@@ -2843,13 +2854,14 @@ def run_proposition_pipeline(
                                 "Grounding rejected all candidates; strict mode returning 0 citations")
                         scored = []
                     else:
+                        _soft_floor = float(os.environ.get("CITATION_SOFT_FALLBACK_FLOOR", "0.65"))
                         soft = [
                             r for r in scored
-                            if float(r.get("relevanceScore") or 0.0) >= 0.7
+                            if float(r.get("relevanceScore") or 0.0) >= _soft_floor
                             and (bool(r.get("factual_match")) or bool(r.get("legal_match")))
                         ]
                         soft.sort(key=lambda r: float(r.get("relevanceScore") or 0.0), reverse=True)
-                        soft = soft[:5]
+                        soft = soft[:8]
                         for r in soft:
                             r["groundingValidated"] = False
                             r["groundingReason"] = r.get("groundingReason") or "unverified — grounding rejected; Claude top picks kept"
