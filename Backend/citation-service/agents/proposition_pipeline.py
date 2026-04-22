@@ -752,12 +752,12 @@ Return ONLY this JSON (queries must include quotes and AND/OR):
 
 # ─── Step 3: IK parallel search ───────────────────────────────────────────────
 
-def _ik_search_one(query: str) -> List[Dict[str, Any]]:
-    """Single IK API search. Returns list of result dicts."""
+def _ik_search_one(query: str, pagenum: int = 0) -> List[Dict[str, Any]]:
+    """Single IK API search for one page. Returns list of result dicts."""
     from services.indian_kanoon import ik_search
-    _per_query = max(1, int(os.environ.get("CITATION_IK_PER_QUERY", "15")))
+    _per_query = max(1, int(os.environ.get("CITATION_IK_PER_QUERY", "10")))
     try:
-        resp = ik_search(query, pagenum=0, doctypes="judgments")
+        resp = ik_search(query, pagenum=pagenum, doctypes="judgments")
         docs = (resp or {}).get("docs") or []
         results = []
         for d in docs[:_per_query]:
@@ -773,49 +773,13 @@ def _ik_search_one(query: str) -> List[Dict[str, Any]]:
                 "url":     f"https://indiankanoon.org/doc/{tid}/",
                 "source":  "indian_kanoon",
                 "_query":  query,
+                "_page":   pagenum,
             })
-        logger.info("[PROP] IK search %r → %d result(s)", query[:60], len(results))
+        logger.info("[PROP] IK search p%d %r → %d result(s)", pagenum, query[:60], len(results))
         return results
     except Exception as exc:
-        logger.warning("[PROP] IK search failed %r: %s", query[:60], exc)
+        logger.warning("[PROP] IK search p%d failed %r: %s", pagenum, query[:60], exc)
         return []
-
-
-def search_ik_parallel(
-    ik_queries: List[str],
-    run_id: str,
-) -> List[Dict[str, Any]]:
-    """Run all IK searches in parallel. Returns deduplicated results (IK-quality first)."""
-    if not ik_queries:
-        return []
-
-    _db_log(run_id, "SearchAgent", "search", "INFO",
-            f"🔍 Running {len(ik_queries)} IK searches in parallel",
-            {"query_count": len(ik_queries)})
-
-    all_results: List[Dict] = []
-    with ThreadPoolExecutor(max_workers=_IK_SEARCH_WORKERS) as pool:
-        fut_map = {pool.submit(_ik_search_one, q): q for q in ik_queries}
-        for fut in as_completed(fut_map):
-            try:
-                all_results.extend(fut.result(timeout=25))
-            except Exception as exc:
-                logger.warning("[PROP] IK search future error: %s", exc)
-
-    # Deduplicate by tid
-    seen_tids: set = set()
-    deduped: List[Dict] = []
-    for r in all_results:
-        tid = r.get("tid", "")
-        if tid and tid not in seen_tids:
-            seen_tids.add(tid)
-            deduped.append(r)
-
-    _db_log(run_id, "SearchAgent", "search", "INFO",
-            f"✅ IK search: {len(deduped)} unique results from {len(ik_queries)} queries",
-            {"result_count": len(deduped)})
-    logger.info("[PROP] IK search done — %d unique results", len(deduped))
-    return deduped
 
 
 def _google_validate_candidate(
@@ -1036,25 +1000,28 @@ def search_ik_parallel(
     run_id: str,
     legal_points: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Run all IK searches in parallel and rank candidates by legal-keyword overlap."""
+    """Run all IK searches in parallel across multiple pages, ranked by legal-keyword overlap.
+
+    Fetches CITATION_IK_PAGES pages per query (default 2) to maximise recall.
+    Each page returns up to CITATION_IK_PER_QUERY results (default 10).
+    """
     if not ik_queries:
         return []
 
+    _pages = max(1, int(os.environ.get("CITATION_IK_PAGES", "2")))
     _db_log(
-        run_id,
-        "SearchAgent",
-        "search",
-        "INFO",
-        f"Running {len(ik_queries)} IK searches in parallel",
-        {"query_count": len(ik_queries)},
+        run_id, "SearchAgent", "search", "INFO",
+        f"Running {len(ik_queries)} IK queries × {_pages} page(s) = {len(ik_queries) * _pages} fetches",
+        {"query_count": len(ik_queries), "pages": _pages},
     )
 
+    tasks = [(q, p) for q in ik_queries for p in range(_pages)]
     all_results: List[Dict] = []
     with ThreadPoolExecutor(max_workers=_IK_SEARCH_WORKERS) as pool:
-        fut_map = {pool.submit(_ik_search_one, q): q for q in ik_queries}
+        fut_map = {pool.submit(_ik_search_one, q, p): (q, p) for q, p in tasks}
         for fut in as_completed(fut_map):
             try:
-                all_results.extend(fut.result(timeout=25))
+                all_results.extend(fut.result(timeout=30))
             except Exception as exc:
                 logger.warning("[PROP] IK search future error: %s", exc)
 
@@ -1084,14 +1051,12 @@ def search_ik_parallel(
     )
 
     _db_log(
-        run_id,
-        "SearchAgent",
-        "search",
-        "INFO",
-        f"IK search: {len(deduped)} unique results from {len(ik_queries)} queries",
-        {"result_count": len(deduped)},
+        run_id, "SearchAgent", "search", "INFO",
+        f"IK search: {len(deduped)} unique results from {len(ik_queries)} queries × {_pages} page(s)",
+        {"result_count": len(deduped), "pages": _pages},
     )
-    logger.info("[PROP] IK search done - %d unique results", len(deduped))
+    logger.info("[PROP] IK search done — %d unique results (%d queries × %d pages)",
+                len(deduped), len(ik_queries), _pages)
     return deduped
 
 
@@ -2167,7 +2132,7 @@ def prefilter_candidates(
     if mode == "off":
         return candidates
 
-    cap = max(1, int(os.environ.get("CITATION_PREFILTER_MAX", "40")))
+    cap = max(1, int(os.environ.get("CITATION_PREFILTER_MAX", "60")))
 
     curated: List[Dict[str, Any]] = []
     to_check: List[Dict[str, Any]] = []
@@ -2420,11 +2385,15 @@ Return ONLY this JSON:
 }}
 
 Rules:
-- fits=true ONLY if the judgment's dispute has the same legal question AND a
-  comparable factual context (e.g., same type of party/industry/transaction).
-- fits=false if the judgment merely cites the same statute but in an unrelated
-  dispute, or if the judgment is about a different state/industry/transaction type.
-- Be conservative: when in genuine doubt, fits=false.
+- fits=true if the judgment addresses the same legal question AND has at least
+  comparable factual context (same category of party/industry/transaction type).
+  It does NOT need to be from the same state or on identical facts.
+- fits=false ONLY if the judgment deals with a clearly different dispute —
+  different industry, wholly different transaction type, or a completely different
+  legal question despite sharing a statute name.
+- When genuinely uncertain, lean toward fits=true (the earlier scoring + grounding
+  gates already filtered hard; this check exists only to catch obvious mismatches).
+- Set confidence < 0.45 when you are unsure; >= 0.7 when clearly fits or doesn't.
 """
     v = _claude_json(system, user, max_tokens=400,
                      run_id=run_id, user_id=user_id, operation="final_fit_check")
@@ -2438,7 +2407,7 @@ Rules:
     reject_reason = str(v.get("rejected_because") or "").strip()[:240]
     item["_fitCheck"] = "pass" if fits else "fail"
     item["_fitWhy"]   = why
-    min_conf = float(os.environ.get("CITATION_FIT_MIN_CONF", "0.55"))
+    min_conf = float(os.environ.get("CITATION_FIT_MIN_CONF", "0.45"))
     if fits and conf >= min_conf:
         return item
     # Log the specific rejection so users can audit
@@ -2914,7 +2883,8 @@ def run_proposition_pipeline(
     # Semantic search fails open if Qdrant is unavailable or the collection is empty.
     with ThreadPoolExecutor(max_workers=2) as _local_pool:
         _fut_kw  = _local_pool.submit(search_local_parallel, ik_queries, run_id)
-        _fut_sem = _local_pool.submit(search_local_semantic, case_context, query, run_id, 20)
+        _fut_sem = _local_pool.submit(search_local_semantic, case_context, query, run_id,
+                                      int(os.environ.get("CITATION_LOCAL_SEMANTIC_LIMIT", "30")))
         try:
             raw_local_kw = _fut_kw.result(timeout=30)
         except Exception as exc:
@@ -2974,7 +2944,7 @@ def run_proposition_pipeline(
     # 4. Fetch full judgment texts in parallel
     enriched = fetch_full_texts_parallel(
         raw_results, run_id,
-        max_fetch=int(os.environ.get("CITATION_MAX_FETCH", "40")),
+        max_fetch=int(os.environ.get("CITATION_MAX_FETCH", "60")),
     )
 
     # 4b. Relevance pre-filter (Gemini grounding or cheap Claude batch) — removes
@@ -3093,7 +3063,7 @@ def run_proposition_pipeline(
             research_plan=research_plan,
         )
 
-    _TOP_N = int(os.environ.get("CITATION_TOP_N", "12"))
+    _TOP_N = int(os.environ.get("CITATION_TOP_N", "20"))
     # Guarantee source diversity: always include top N from local DB and IK
     # even if their scores were below threshold (scored list is already sorted desc).
     _MIN_PER_SOURCE = 0 if _grounding_available() else 3
