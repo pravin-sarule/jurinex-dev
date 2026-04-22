@@ -2369,6 +2369,164 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
     return num / (math.sqrt(da) * math.sqrt(db))
 
 
+def _fit_check_one(
+    item: Dict[str, Any],
+    case_brief: str,
+    reject_rules: List[str],
+    run_id: Optional[str],
+    user_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Final precision check: does this judgment's ACTUAL subject match our case?
+    Earlier gates saw extracted legal fields; this one sees the full case narrative
+    alongside the judgment's title + headnote + first chunk and asks a single yes/no.
+    Keeps the item on pass or on LLM failure (fail-open); drops on explicit fail.
+    """
+    title    = str(item.get("caseName") or item.get("title") or "").strip()
+    headnote = str(item.get("headnote") or item.get("headnotes") or "").strip()[:1500]
+    excerpt  = str(item.get("excertText") or item.get("excerptText") or
+                   item.get("snippet") or "").strip()[:500]
+    body     = str(item.get("full_text") or "")[:3000]
+    if not (title or headnote or body):
+        return item  # nothing to judge on — don't drop silently
+
+    system = (
+        "You are a senior Indian advocate performing a final precision check on "
+        "candidate citations before they go into a legal research report. "
+        "Reject any judgment whose actual subject matter (parties, industry, state, "
+        "transaction type, or legal question) does not line up with the user's case. "
+        "A keyword overlap on a statute or article is NOT enough — the dispute must "
+        "genuinely resemble the user's. Return ONLY valid JSON."
+    )
+    user = f"""USER'S CASE:
+{case_brief[:6000]}
+
+REJECT IF ANY OF THESE APPLY:
+{reject_rules if reject_rules else "(none provided — apply your own judgment)"}
+
+CANDIDATE JUDGMENT:
+Title: {title}
+Headnote: {headnote}
+Excerpt: {excerpt}
+Body (first 3000 chars):
+{body}
+
+Return ONLY this JSON:
+{{
+  "fits": true,
+  "confidence": 0.85,
+  "why": "one short sentence on whether/why this matches the user's case",
+  "rejected_because": ""
+}}
+
+Rules:
+- fits=true ONLY if the judgment's dispute has the same legal question AND a
+  comparable factual context (e.g., same type of party/industry/transaction).
+- fits=false if the judgment merely cites the same statute but in an unrelated
+  dispute, or if the judgment is about a different state/industry/transaction type.
+- Be conservative: when in genuine doubt, fits=false.
+"""
+    v = _claude_json(system, user, max_tokens=400,
+                     run_id=run_id, user_id=user_id, operation="final_fit_check")
+    if not isinstance(v, dict):
+        # LLM failure — fail-open (keep), tag for transparency
+        item["_fitCheck"] = "llm_error"
+        return item
+    fits = bool(v.get("fits"))
+    conf = float(v.get("confidence") or 0.0)
+    why  = str(v.get("why") or "").strip()[:240]
+    reject_reason = str(v.get("rejected_because") or "").strip()[:240]
+    item["_fitCheck"] = "pass" if fits else "fail"
+    item["_fitWhy"]   = why
+    min_conf = float(os.environ.get("CITATION_FIT_MIN_CONF", "0.55"))
+    if fits and conf >= min_conf:
+        return item
+    # Log the specific rejection so users can audit
+    logger.info(
+        "[PROP] Final fit check dropped %r (conf=%.2f): %s",
+        (title or item.get("tid"))[:80], conf, reject_reason or why or "no reason",
+    )
+    return None
+
+
+def final_case_fit_check(
+    survivors: List[Dict[str, Any]],
+    case_context: str,
+    legal_points: Dict[str, Any],
+    query: str,
+    research_plan: Optional[Dict[str, Any]],
+    run_id: str,
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Run `_fit_check_one` in parallel across all survivors. Fail-open: if the whole
+    check fails (no Claude available, etc.), return the input unchanged. Toggle off
+    via CITATION_FINAL_FIT_CHECK=off.
+    """
+    if (os.environ.get("CITATION_FINAL_FIT_CHECK", "on") or "on").strip().lower() != "on":
+        return survivors
+    if not survivors:
+        return survivors
+
+    # Build a rich case brief: full case context + user query + extracted issues
+    issues = legal_points.get("issues", []) or []
+    issues_blurb = "\n".join(
+        f"- {str(iss.get('issue_title', '')).strip()}: "
+        f"{str(iss.get('proposition', '')).strip()[:300]} "
+        f"[Acts: {', '.join(iss.get('acts_involved', [])[:4])}] "
+        f"[Wrongdoing: {str(iss.get('wrongdoing', '')).strip()[:200]}]"
+        for iss in issues[:4]
+    )
+    case_brief = (
+        f"User query: {(query or '').strip()[:600]}\n\n"
+        f"Extracted issues:\n{issues_blurb}\n\n"
+        f"Full case context:\n{(case_context or '').strip()[:5500]}"
+    )
+    reject_rules = list((research_plan or {}).get("reject_rules") or [])[:6]
+
+    kept: List[Dict[str, Any]] = []
+    workers = max(1, int(os.environ.get("CITATION_FIT_WORKERS", "4")))
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            fut_map = {
+                pool.submit(_fit_check_one, it, case_brief, reject_rules, run_id, user_id): it
+                for it in survivors
+            }
+            for fut in as_completed(fut_map):
+                it = fut_map[fut]
+                try:
+                    res = fut.result(timeout=60)
+                except Exception as exc:
+                    logger.debug("[PROP] Final fit check future failed: %s", exc)
+                    kept.append(it)  # fail-open on future error
+                    continue
+                if res is not None:
+                    kept.append(res)
+    except Exception as exc:
+        logger.warning("[PROP] final_case_fit_check pool failed (%s) — returning survivors unchanged", exc)
+        return survivors
+
+    # Preserve original relative order (survivors were already ranked).
+    order = {id(s): idx for idx, s in enumerate(survivors)}
+    kept.sort(key=lambda s: order.get(id(s), 0))
+
+    dropped = len(survivors) - len(kept)
+    _db_log(
+        run_id, "PropositionPipeline", "final_fit_check", "INFO",
+        f"Final case-fit check: kept {len(kept)}/{len(survivors)} (dropped {dropped} as unrelated)",
+        {"kept": len(kept), "total": len(survivors), "dropped": dropped},
+    )
+    # Fail-safe: if the check would empty a non-empty list, keep survivors
+    # (a buggy LLM output shouldn't zero the report).
+    if survivors and not kept:
+        _db_log(
+            run_id, "PropositionPipeline", "final_fit_check", "WARNING",
+            f"Fit check would drop all {len(survivors)} — keeping original survivors as fallback",
+        )
+        return survivors
+    return kept
+
+
 def semantic_rerank_survivors(
     survivors: List[Dict[str, Any]],
     case_context: str,
@@ -2898,7 +3056,16 @@ def run_proposition_pipeline(
                 _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
                         "Grounding unavailable; keeping scored results")
 
-    # 6. Semantic rerank on Claude survivors (tie-break + final relevance filter).
+    # 6. Final case-fit check: does each surviving judgment actually concern the
+    # same legal situation as the user's case? Uses the FULL case context + the
+    # judgment's headnote/excerpt/first chunk. Drops keyword-match-only false
+    # positives that earlier gates missed.
+    if scored:
+        scored = final_case_fit_check(
+            scored, case_context, legal_points, query, research_plan, run_id, user_id,
+        )
+
+    # 7. Semantic rerank on Claude survivors (tie-break + final relevance filter).
     if scored:
         scored = semantic_rerank_survivors(scored, case_context, legal_points, run_id)
 
