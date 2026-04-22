@@ -11,7 +11,6 @@ Dimension-aware multi-query logic (JuriNex Spec v1.1.1):
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -270,70 +269,16 @@ def _search_local(
         return []
 
 
-# ── Qdrant semantic local search ─────────────────────────────────────────────
-
-def _qdrant_search_one(
-    vector: List[float],
-    qdrant_client: Any,
-    fetch_limit: int,
-    score_threshold: Optional[float] = None,
-    query_filter: Optional[Any] = None,
-) -> List[Any]:
-    """Run one Qdrant cosine similarity query on ``legal_embeddings_v2``; tries query_points then search()."""
-    qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2").strip() or "legal_embeddings_v2"
-    kwargs_qp: Dict[str, Any] = {
-        "collection_name": qdrant_collection,
-        "query": vector,
-        "limit": fetch_limit,
-        "with_payload": True,
-    }
-    if score_threshold is not None:
-        kwargs_qp["score_threshold"] = score_threshold
-    if query_filter is not None:
-        kwargs_qp["query_filter"] = query_filter
-    try:
-        try:
-            qp = qdrant_client.query_points(**kwargs_qp)
-        except TypeError:
-            kwargs_qp.pop("score_threshold", None)
-            qp = qdrant_client.query_points(**kwargs_qp)
-        return list(getattr(qp, "points", None) or [])
-    except Exception:
-        kwargs_s: Dict[str, Any] = {
-            "collection_name": qdrant_collection,
-            "query_vector": vector,
-            "limit": fetch_limit,
-            "with_payload": True,
-        }
-        if score_threshold is not None:
-            kwargs_s["score_threshold"] = score_threshold
-        if query_filter is not None:
-            kwargs_s["query_filter"] = query_filter
-        try:
-            return qdrant_client.search(**kwargs_s) or []
-        except TypeError:
-            kwargs_s.pop("score_threshold", None)
-            try:
-                return qdrant_client.search(**kwargs_s) or []
-            except Exception as exc2:
-                logger.warning("[WATCHDOG_QDRANT] search() fallback failed: %s", exc2)
-                return []
-
-
-# Admin source_type values used to identify admin-uploaded judgments
-_ADMIN_SOURCE_TYPES = frozenset({
-    "admin", "admin_upload", "admin-upload", "admin uploaded",
-    "admin-uploaded", "adminupload", "manual_upload", "manual-upload",
-    "judgment_upload", "judgement_upload",
-})
-
+# ── Qdrant semantic search removed — citation service uses ES keyword search ──
+# ── Elasticsearch keyword search ─────────────────────────────────────────────
 
 def _fetch_admin_canonical_ids(run_id: Optional[str] = None) -> List[str]:
-    """
-    Query PostgreSQL for canonical_ids of all admin-uploaded judgments.
-    Checks both judgments.source_type and the admin upload table.
-    Returns a list of canonical_id strings (format: v-sc-YYYY-xxxxx or similar).
-    """
+    """Return canonical_ids of all admin-uploaded judgments from PostgreSQL."""
+    _admin_source_types = [
+        "admin", "admin_upload", "admin-upload", "admin uploaded",
+        "admin-uploaded", "adminupload", "manual_upload", "manual-upload",
+        "judgment_upload", "judgement_upload",
+    ]
     try:
         from db.connections import get_pg_conn
         conn = get_pg_conn()
@@ -341,446 +286,493 @@ def _fetch_admin_canonical_ids(run_id: Optional[str] = None) -> List[str]:
             return []
         try:
             cids: List[str] = []
-            admin_types = list(_ADMIN_SOURCE_TYPES)
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT canonical_id FROM judgments
-                     WHERE LOWER(COALESCE(source_type,'')) = ANY(%s)
-                       AND canonical_id IS NOT NULL AND canonical_id <> ''
-                    """,
-                    (admin_types,),
+                    "SELECT canonical_id FROM judgments "
+                    "WHERE LOWER(COALESCE(source_type,'')) = ANY(%s) "
+                    "AND canonical_id IS NOT NULL AND canonical_id <> ''",
+                    (_admin_source_types,),
                 )
                 for row in (cur.fetchall() or []):
                     cid = str(row[0] if isinstance(row, tuple) else row.get("canonical_id") or "").strip()
                     if cid:
                         cids.append(cid)
-            # Also check the admin upload table
-            try:
-                from db.client import _resolve_admin_upload_table  # noqa: PLC2701
-                upload_table = _resolve_admin_upload_table(conn) or ""
-                if upload_table:
-                    with conn.cursor() as cur2:
-                        cur2.execute(
-                            f"SELECT canonical_id FROM {upload_table} WHERE canonical_id IS NOT NULL AND canonical_id <> ''"
-                        )
-                        for row in (cur2.fetchall() or []):
-                            cid = str(row[0] if isinstance(row, tuple) else row.get("canonical_id") or "").strip()
-                            if cid and cid not in cids:
-                                cids.append(cid)
-            except Exception:
-                pass
-            logger.info("[WATCHDOG_QDRANT] Admin canonical_ids from DB: %d", len(cids))
-            _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"🔑 Admin canonical_ids: {len(cids)} found in DB",
-                    {"count": len(cids), "sample": cids[:5]})
             return cids
         finally:
             conn.close()
     except Exception as exc:
-        logger.warning("[WATCHDOG_QDRANT] _fetch_admin_canonical_ids failed: %s", exc)
+        logger.warning("[WATCHDOG] _fetch_admin_canonical_ids failed: %s", exc)
         return []
 
 
-def _search_local_semantic(
-    tasks: List[Dict[str, Any]],
-    max_total: int = 10,
+_ADMIN_SOURCE_KEYWORD_VALUES = [
+    "admin", "admin_upload", "admin-upload", "admin uploaded",
+    "admin-uploaded", "adminupload", "manual_upload", "manual-upload",
+    "judgment_upload", "judgement_upload",
+]
+
+_LOW_HIERARCHY_PHRASES = [
+    "district court", "district judge", "sessions court",
+    "magistrate", "tribunal", "consumer forum", "consumer commission",
+]
+
+
+def _es_rows_from_hits(
+    hits: List[Dict[str, Any]],
     case_state: str = "",
-    run_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Convert raw ES hits to watchdog-compatible row dicts."""
+    out: List[Dict[str, Any]] = []
+    for h in hits:
+        src = h.get("_source") or {}
+        es_score = float(h.get("_score") or 0.0)
+        cid = str(src.get("canonical_id") or h.get("_id") or "").strip()
+        if not cid:
+            continue
+        src_type = str(src.get("source_type") or "").strip().lower()
+        is_admin = (
+            src_type in set(_ADMIN_SOURCE_KEYWORD_VALUES)
+            or src_type.startswith("admin")
+        )
+        court = str(src.get("court_code") or src.get("court_name") or "").strip()
+        c_lower = court.lower()
+        local_rank = 300 if "supreme" in c_lower else (
+            (225 if (case_state or "").lower() in c_lower else 200) if "high" in c_lower else 100
+        )
+        out.append({
+            "id":               cid,
+            "canonical_id":     cid,
+            "title":            src.get("case_name") or src.get("title") or "",
+            "court":            court,
+            "primary_citation": src.get("primary_citation") or "",
+            "ratio":            src.get("holding_text") or src.get("summary_text") or "",
+            "full_text":        src.get("full_text") or "",
+            "source_type":      src_type,
+            "is_local_admin":   is_admin,
+            "has_analysis_report": bool(src.get("holding_text") or src.get("summary_text")),
+            "_es_score":        es_score,
+            "_local_rank":      local_rank,
+        })
+    return out
+
+
+def _es_search_one_keyword(
+    query: str,
+    es: Any,
+    limit: int,
+    case_state: str = "",
 ) -> List[Dict[str, Any]]:
     """
-    Semantic local DB search via Qdrant vector similarity.
-
-    Pipeline per dimension task (query + dim metadata):
-      1. Embed query with Gemini  → float vector
-      2. Qdrant similarity search → top chunk points (payload has canonical_id + score)
-      3. Batch PostgreSQL fetch   → full judgment rows for all unique canonical_ids
-      4. Filter + rank            → hierarchy rank, similarity score, admin flag
-      5. Tag with dimension info  → _dimension_id, _dimension_name, _query_type,
-                                    is_local_admin, _similarity_score
-
-    All tasks are embedded in parallel (ThreadPoolExecutor) to reduce latency.
-    A single batched PG query retrieves all canonical_ids at once.
-    Results are deduplicated by canonical_id, merging dimension metadata.
+    Run one ES multi_match query covering case_name, citations, and full text.
+    Includes admin uploads regardless of verification_status via a should-filter.
+    Returns watchdog row dicts tagged with _es_score.
     """
-    if not tasks:
+    try:
+        resp = es.search(
+            index="judgments",
+            size=limit,
+            query={
+                "bool": {
+                    "must": [{
+                        "multi_match": {
+                            "query": query,
+                            "fields": [
+                                "case_name^4",
+                                "primary_citation^3",
+                                "summary_text^2",
+                                "holding_text^2",
+                                "facts_text",
+                                "full_text",
+                            ],
+                            "type": "best_fields",
+                            "fuzziness": "AUTO",
+                            "operator": "or",
+                        }
+                    }],
+                    # Include verified judgments OR admin-uploaded ones
+                    "filter": [{
+                        "bool": {
+                            "should": [
+                                {"terms": {"verification_status.keyword": [
+                                    "APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"
+                                ]}},
+                                {"terms": {"source_type.keyword": _ADMIN_SOURCE_KEYWORD_VALUES}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }],
+                    "must_not": [
+                        {"match_phrase": {"court_code": ph}}
+                        for ph in _LOW_HIERARCHY_PHRASES
+                    ],
+                }
+            },
+        )
+        hits = resp.get("hits", {}).get("hits", [])
+        return _es_rows_from_hits(hits, case_state=case_state)
+    except Exception as exc:
+        logger.warning("[WATCHDOG_ES] ES search failed for %r: %s", query[:60], exc)
         return []
 
-    from db.connections import elasticsearch_init_failed, get_es_client, get_qdrant_client
-    from db.client import get_query_embeddings_batch, judgements_fetch_by_canonical_ids
 
-    qdr = get_qdrant_client()
-    if not qdr:
-        _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                "🏛 Qdrant client unavailable — semantic local search skipped")
+def _search_local_by_keywords(
+    keyword_sets: List[str],
+    max_total: int = 30,
+    case_state: str = "",
+    run_id: Optional[str] = None,
+    controversy_query: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Hybrid local search over local+IK judgments.
+
+    For each keyword, runs ES multi_match and tracks which judgments were returned.
+    _keyword_score = number of keyword queries that matched the judgment.
+    Also performs semantic lookup in Qdrant using controversy_query (if provided),
+    then merges and deduplicates canonical_ids.
+    Admin judgments force-included with _keyword_score=0 when not found by any query.
+    Results sorted by keyword score first, then semantic similarity.
+    Falls back to PostgreSQL _search_local when ES is unavailable.
+    """
+    if not keyword_sets:
         return []
 
-    # Force ES client probe so elasticsearch_init_failed() reflects reachability for this process.
-    get_es_client()
-    es_unreachable = elasticsearch_init_failed()
-    # No score threshold at Qdrant fetch time — we apply it after DB lookup below,
-    # once we know whether each result is admin-uploaded or not.
-    qdrant_score_threshold: Optional[float] = None
-    # Similarity threshold applied after DB hydration — non-admin judgments only.
-    # Admin uploads are always included regardless of score.
-    _MIN_SCORE_NON_ADMIN = float(os.environ.get("CITATION_QDRANT_MIN_SCORE", "0.65"))
+    from db.connections import get_es_client, elasticsearch_init_failed
+    es = get_es_client()
 
-    # Fetch window: large enough to capture admin chunks that rank lower than IK chunks
-    # for the same query but are still genuinely relevant.
-    per_task_limit = max(30, (max_total * 6) // max(len(tasks), 1))
-    if es_unreachable:
-        per_task_limit = max(per_task_limit * 2, 60)
+    if not es or elasticsearch_init_failed():
+        logger.warning("[WATCHDOG_ES] ES unavailable — falling back to PG keyword search")
+        return _search_local_pg_keywords(keyword_sets, max_total, case_state, run_id)
 
-    # ── 1. Embed all dimension queries (sc / hc / provision) in one Gemini batch ─
-    vectors_all = get_query_embeddings_batch([str(t.get("query") or "") for t in tasks])
-    task_vectors: Dict[int, Optional[List[float]]] = {}
-    for idx, t in enumerate(tasks):
-        v = vectors_all[idx] if idx < len(vectors_all) else []
-        task_vectors[idx] = v if v else None
+    per_query = max(10, (max_total * 2) // max(len(keyword_sets), 1))
+    cid_map: Dict[str, Dict[str, Any]] = {}
 
-    embedded_count = sum(1 for v in task_vectors.values() if v)
-    logger.info("[WATCHDOG_QDRANT] Embedded %d/%d task queries", embedded_count, len(tasks))
-    _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"🔢 Qdrant embed: {embedded_count}/{len(tasks)} queries vectorised")
+    for i, kw in enumerate(keyword_sets):
+        kw = (kw or "").strip()
+        if not kw:
+            continue
+        rows = _es_search_one_keyword(kw, es, per_query, case_state=case_state)
+        for r in rows:
+            cid = str(r.get("canonical_id") or r.get("id") or "").strip()
+            if not cid:
+                continue
+            if cid not in cid_map:
+                cid_map[cid] = {
+                    "row": dict(r),
+                    "keyword_score": 0,
+                    "matched_queries": [],
+                    "dimension_ids": [],
+                    "dimension_names": [],
+                }
+            entry = cid_map[cid]
+            entry["keyword_score"] += 1
+            entry["matched_queries"].append(kw[:60])
+            if (i + 1) not in entry["dimension_ids"]:
+                entry["dimension_ids"].append(i + 1)
+            if "Keyword Query" not in entry["dimension_names"]:
+                entry["dimension_names"].append("Keyword Query")
 
-    if not embedded_count:
-        logger.warning("[WATCHDOG_QDRANT] No embeddings produced — Gemini API unavailable?")
-        return []
-
-    # ── 2. Qdrant similarity search per embedded query ────────────────────────
-    # Map: canonical_id → {best_score, dimension_ids[], dimension_names[], query_types[]}
-    cid_meta: Dict[str, Dict[str, Any]] = {}
-    qdrant_judgment_uuids: set = set()
-
-    def _search_one(idx_task: Tuple[int, Dict]) -> Tuple[int, List[Any]]:
-        idx, t = idx_task
-        vec = task_vectors.get(idx)
-        if not vec:
-            return idx, []
-        return idx, _qdrant_search_one(vec, qdr, per_task_limit, qdrant_score_threshold)
-
-    with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, embedded_count)) as pool:
-        for idx, points in pool.map(_search_one, enumerate(tasks)):
-            t = tasks[idx]
-            dim_id   = t.get("dimension_id")
-            dim_name = t.get("dimension_name") or ""
-            q_type   = t.get("q_type") or "semantic"
-            query_txt = t.get("query") or ""
-
-            for p in points:
-                payload = getattr(p, "payload", None) or {}
-                cid = str(payload.get("canonical_id") or "").strip()
-                ju = str(payload.get("judgment_uuid") or "").strip()
-                if ju:
-                    qdrant_judgment_uuids.add(ju)
+    # Semantic local recall: Qdrant nearest-neighbours for controversy query.
+    sem_query = (controversy_query or "").strip()
+    if sem_query:
+        try:
+            from db.client import judgement_search_semantic
+            sem_rows = judgement_search_semantic(
+                sem_query,
+                limit=10,
+                case_state=case_state,
+                approved_only=True,
+                exclude_low_hierarchy=True,
+                qdrant_collection="legal_embeddings",
+            )
+            for r in sem_rows:
+                cid = str(r.get("canonical_id") or r.get("id") or "").strip()
                 if not cid:
                     continue
-                score = float(getattr(p, "score", 0) or 0)
-                if cid not in cid_meta:
-                    cid_meta[cid] = {
-                        "best_score":      score,
-                        "provision_best_score": score if q_type == "provision" else 0.0,
-                        "dimension_ids":   [dim_id] if dim_id is not None else [],
-                        "dimension_names": [dim_name] if dim_name else [],
-                        "query_types":     [q_type] if q_type else [],
-                        "queries":         [query_txt] if query_txt else [],
+                if cid not in cid_map:
+                    cid_map[cid] = {
+                        "row": dict(r),
+                        "keyword_score": 0,
+                        "semantic_score": float(r.get("_semantic_score") or r.get("_similarity_score") or 0.0),
+                        "matched_queries": [],
+                        "dimension_ids": [],
+                        "dimension_names": [],
                     }
-                else:
-                    m = cid_meta[cid]
-                    m["best_score"] = max(m["best_score"], score)
-                    if q_type == "provision":
-                        m["provision_best_score"] = max(
-                            float(m.get("provision_best_score") or 0.0), score,
-                        )
-                    if dim_id is not None and dim_id not in m["dimension_ids"]:
-                        m["dimension_ids"].append(dim_id)
-                    if dim_name and dim_name not in m["dimension_names"]:
-                        m["dimension_names"].append(dim_name)
-                    if q_type and q_type not in m["query_types"]:
-                        m["query_types"].append(q_type)
-
-    logger.info("[WATCHDOG_QDRANT] Unique canonical_ids from Qdrant: %d", len(cid_meta))
-    _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"🔍 Qdrant similarity: {len(cid_meta)} unique canonical_ids found",
-            {"canonical_id_count": len(cid_meta)})
-
-    if not cid_meta and not task_vectors:
-        return []
-
-    # ── 2b. Targeted admin search ─────────────────────────────────────────────
-    # Admin uploads are always included — no score threshold applied.
-    # We still run a Qdrant payload-filtered search so we can record the best
-    # similarity score for ranking, but we force-include every admin canonical_id
-    # regardless of score.  Any admin cid not found in Qdrant at all is still
-    # added to cid_meta with score=0.0 so it reaches the PG fetch step.
-    admin_cids_all = _fetch_admin_canonical_ids(run_id=run_id)
-    admin_cids_to_search = [c for c in admin_cids_all if c not in cid_meta]
-
-    if admin_cids_to_search:
-        logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d canonical_ids not in natural results",
-                    len(admin_cids_to_search))
-        _admin_filter = None
-        if any(v for v in task_vectors.values()):
-            try:
-                from qdrant_client.http import models as _qm
-                _admin_filter = _qm.Filter(
-                    must=[_qm.FieldCondition(
-                        key="canonical_id",
-                        match=_qm.MatchAny(any=admin_cids_to_search[:500]),
-                    )]
+                    continue
+                entry = cid_map[cid]
+                entry["semantic_score"] = max(
+                    float(entry.get("semantic_score") or 0.0),
+                    float(r.get("_semantic_score") or r.get("_similarity_score") or 0.0),
                 )
-            except Exception as _fe:
-                logger.warning("[WATCHDOG_QDRANT] Could not build admin filter: %s", _fe)
+                if not entry.get("row"):
+                    entry["row"] = dict(r)
+            logger.info("[WATCHDOG_ES] Qdrant semantic local → %d judgment(s)", len(sem_rows))
+            _db_log(
+                run_id, "watchdog", "watchdog", "INFO",
+                f"🏛 Qdrant semantic local → {len(sem_rows)} judgment(s)",
+                {"source": "qdrant_semantic", "count": len(sem_rows), "collection": "legal_embeddings"},
+            )
+        except Exception as exc:
+            logger.warning("[WATCHDOG_ES] Qdrant semantic lookup failed: %s", exc)
 
-        _new_admin: List[str] = []
-
-        if _admin_filter is not None:
-            fetch_limit_admin = max(30, per_task_limit)
-            for idx, vec in task_vectors.items():
-                if not vec:
+    # Force-include admin judgments not returned by any keyword query
+    admin_cids = _fetch_admin_canonical_ids(run_id=run_id)
+    missing_admin = [c for c in admin_cids if c not in cid_map]
+    if missing_admin:
+        try:
+            # Batch ES mget for missing admin cids
+            mres = es.mget(index="judgments", body={"ids": missing_admin[:100]})
+            for d in (mres.get("docs") or []):
+                if not d.get("found"):
                     continue
-                t = tasks[idx]
-                dim_id    = t.get("dimension_id")
-                dim_name  = t.get("dimension_name") or ""
-                q_type    = t.get("q_type") or "semantic"
-                query_txt = t.get("query") or ""
-                admin_pts = _qdrant_search_one(vec, qdr, fetch_limit_admin, None, _admin_filter)
-                for p in admin_pts:
-                    payload = getattr(p, "payload", None) or {}
-                    cid = str(payload.get("canonical_id") or "").strip()
-                    if not cid or cid not in admin_cids_to_search:
-                        continue
-                    score = float(getattr(p, "score", 0) or 0)
-                    # No score filter — admin uploads are always included
-                    ju = str(payload.get("judgment_uuid") or "").strip()
-                    if ju:
-                        qdrant_judgment_uuids.add(ju)
-                    if cid not in cid_meta:
-                        cid_meta[cid] = {
-                            "best_score":           score,
-                            "provision_best_score": score if q_type == "provision" else 0.0,
-                            "dimension_ids":        [dim_id] if dim_id is not None else [],
-                            "dimension_names":      [dim_name] if dim_name else [],
-                            "query_types":          [q_type] if q_type else [],
-                            "queries":              [query_txt] if query_txt else [],
-                        }
-                        _new_admin.append(cid)
-                    else:
-                        m = cid_meta[cid]
-                        m["best_score"] = max(m["best_score"], score)
-                        if q_type == "provision":
-                            m["provision_best_score"] = max(float(m.get("provision_best_score") or 0.0), score)
-                        if dim_id is not None and dim_id not in m["dimension_ids"]:
-                            m["dimension_ids"].append(dim_id)
-                        if dim_name and dim_name not in m["dimension_names"]:
-                            m["dimension_names"].append(dim_name)
-                        if q_type and q_type not in m["query_types"]:
-                            m["query_types"].append(q_type)
+                src = d.get("_source") or {}
+                cid = str(src.get("canonical_id") or d.get("_id") or "").strip()
+                if cid and cid not in cid_map:
+                    src_type = str(src.get("source_type") or "").strip().lower()
+                    court = str(src.get("court_code") or "").strip()
+                    cid_map[cid] = {
+                        "row": {
+                            "id": cid, "canonical_id": cid,
+                            "title": src.get("case_name") or "",
+                            "court": court,
+                            "primary_citation": src.get("primary_citation") or "",
+                            "ratio": src.get("holding_text") or src.get("summary_text") or "",
+                            "full_text": src.get("full_text") or "",
+                            "source_type": src_type,
+                            "is_local_admin": True,
+                            "has_analysis_report": bool(src.get("holding_text") or src.get("summary_text")),
+                            "_es_score": 0.0,
+                        },
+                        "keyword_score": 0,
+                        "semantic_score": 0.0,
+                        "matched_queries": [],
+                        "dimension_ids": [],
+                        "dimension_names": [],
+                    }
+        except Exception as exc:
+            logger.warning("[WATCHDOG_ES] Admin mget failed: %s", exc)
 
-        # Force-include admin cids that Qdrant didn't return at all (score=0.0)
-        # Cap at _ADMIN_ZERO_SCORE_MAX to avoid flooding the pool with irrelevant
-        # judgments when the admin DB contains many unembedded or off-topic uploads.
-        _ADMIN_ZERO_SCORE_MAX = 30
-        _zero_score_count = 0
-        _first_task = tasks[0] if tasks else {}
-        for cid in admin_cids_to_search:
-            if cid not in cid_meta:
-                if _zero_score_count >= _ADMIN_ZERO_SCORE_MAX:
-                    continue
-                cid_meta[cid] = {
-                    "best_score":           0.0,
-                    "provision_best_score": 0.0,
-                    "dimension_ids":        [_first_task.get("dimension_id")] if _first_task.get("dimension_id") is not None else [],
-                    "dimension_names":      [_first_task.get("dimension_name") or ""] if _first_task.get("dimension_name") else [],
-                    "query_types":          ["semantic"],
-                    "queries":              [_first_task.get("query") or ""] if _first_task.get("query") else [],
-                }
-                _new_admin.append(cid)
-                _zero_score_count += 1
-
-        _new_admin = list(dict.fromkeys(_new_admin))  # deduplicate, preserve order
-        logger.info("[WATCHDOG_QDRANT] Admin targeted search: %d new admin canonical_ids added (no threshold)",
-                    len(_new_admin))
-        _db_log(run_id, "watchdog", "watchdog", "INFO",
-                f"✅ Admin targeted: {len(_new_admin)} admin judgment(s) force-included",
-                {"new_admin_cids": _new_admin[:10], "total_admin": len(admin_cids_all)})
-
-    if not cid_meta:
-        return []
-
-    # ── 3. Batch PostgreSQL fetch ─────────────────────────────────────────────
-    # Hydrate full PG rows for all Qdrant hits (no verification_status filter — spec UI still shows source).
-    db_rows = judgements_fetch_by_canonical_ids(
-        list(cid_meta.keys()),
-        approved_only=False,
-        exclude_low_hierarchy=False,
-        judgment_uuids=list(qdrant_judgment_uuids),
-    )
-    logger.info("[WATCHDOG_QDRANT] DB returned %d row(s) for %d canonical_id(s)",
-                len(db_rows), len(cid_meta))
-    _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"🏛 DB fetch: {len(db_rows)}/{len(cid_meta)} rows retrieved",
-            {"db_rows": len(db_rows), "requested": len(cid_meta)})
-
-    # ── 4 & 5. Rank, tag, attach dimension metadata ───────────────────────────
-    def _court_rank_base(court: Any) -> int:
-        c = str(court or "").strip().lower()
-        if "supreme" in c:
-            return 300
-        if "high" in c:
-            score = 200
-            st = (case_state or "").strip().lower()
-            if st and st in c:
-                score += 25
-            if st == "maharashtra" and "bombay high court" in c:
-                score += 25
-            return score
-        return 100
-
-    def _same_state_high_court(court: Any) -> bool:
-        c = str(court or "").strip().lower()
-        if "high" not in c:
-            return False
-        st = (case_state or "").strip().lower()
-        if not st:
-            return False
-        if st in c:
-            return True
-        if st == "maharashtra" and "bombay high court" in c:
-            return True
-        return False
-
+    # Build output rows tagged with _keyword_score
     out: List[Dict[str, Any]] = []
-    for r in db_rows:
-        cid = str(r.get("canonical_id") or "").strip()
-        meta = cid_meta.get(cid) or {}
-        dim_ids   = meta.get("dimension_ids") or []
-        dim_names = meta.get("dimension_names") or []
-        q_types   = meta.get("query_types") or []
-        sim_score = meta.get("best_score", 0.0)
-        prov_best = float(meta.get("provision_best_score") or 0.0)
-        court_val = r.get("court") or r.get("court_code")
-        # Admin flag comes entirely from the DB row returned by judgements_fetch_by_canonical_ids.
-        # That function checks both judgments.source_type and judgment_uploads table.
+    for cid, entry in cid_map.items():
+        r = entry["row"]
+        ks = entry["keyword_score"]
+        sem = float(entry.get("semantic_score") or r.get("_semantic_score") or r.get("_similarity_score") or 0.0)
         is_admin = bool(r.get("is_local_admin"))
-        # Non-admin judgments are filtered by the strict score floor.
-        # Admin uploads are always included — no score threshold.
-        if not is_admin and sim_score < _MIN_SCORE_NON_ADMIN:
-            logger.debug(
-                "[WATCHDOG_QDRANT] Dropped low-score non-admin: canonical_id=%s score=%.3f < threshold=%.2f",
-                cid, sim_score, _MIN_SCORE_NON_ADMIN,
-            )
-            continue
-        if is_admin:
-            logger.info(
-                "[WATCHDOG_QDRANT] ✅ Admin judgment included: canonical_id=%s score=%.3f (no threshold)",
-                cid, sim_score,
-            )
-        is_dist = _district_court_like(court_val)
-        prov_strong = "provision" in q_types and prov_best >= 0.80
-        provision_focus = bool(
-            is_dist and (prov_strong or is_admin)
-        )
-
-        lr = _court_rank_base(court_val)
-        if is_dist:
-            if is_admin:
-                lr = max(lr, 245)
-            elif prov_strong:
-                lr = max(lr, 60)
-            else:
-                lr = min(lr, 40) if lr < 200 else 40
-
-        is_sc = "supreme" in str(court_val or "").strip().lower()
-        same_state_hc = _same_state_high_court(court_val)
-        # 3-tier priority:
-        #  3: Supreme Court
-        #  2: High Court (same state)
-        #  1: District Court (provision match)
-        #  0: everything else (kept, but lower)
-        priority_tier = 3 if is_sc else (2 if same_state_hc else (1 if provision_focus else 0))
-
-        # Primary dimension = first one attached (highest priority from Qdrant order)
-        primary_dim_id   = dim_ids[0] if dim_ids else None
+        dim_ids = entry["dimension_ids"]
+        dim_names = entry["dimension_names"]
+        primary_dim_id = dim_ids[0] if dim_ids else None
         primary_dim_name = dim_names[0] if dim_names else ""
-        primary_q_type   = q_types[0] if q_types else "semantic"
-
-        cit_tags: List[str] = []
-        rel_hint: Optional[str] = None
-        if provision_focus:
-            cit_tags.append("PROVISION FOCUS - DISTRICT COURT")
-            rel_hint = "MEDIUM"
-
-        has_analysis = bool(r.get("has_analysis_report"))
-        needs_clerk = not has_analysis
-
-        # Ensure admin source_type propagates correctly through the pipeline
-        resolved_source_type = str(r.get("source_type") or "").strip().lower()
-        if is_admin:
-            resolved_source_type = resolved_source_type or "admin-uploaded"
-
-        row = {
+        out.append({
             **r,
-            # Watchdog-standard tags (used by deduplication + clerk)
-            "_source":          "local",
-            "_dimension_id":    primary_dim_id,
-            "_dimension_name":  primary_dim_name,
-            "dimension_id":     primary_dim_id,
-            "dimension_name":   primary_dim_name,
-            "_query_type":      primary_q_type,
-            "_query":           (tasks[0].get("query") or "") if tasks else "",
-            "_dimension_ids":   dim_ids,
-            "_dimension_names": dim_names,
-            "_query_types":     q_types,
-            "_similarity_score": sim_score,
-            "_provision_best_score": prov_best,
-            "_local_rank":      lr,
-            "_priority_tier":   priority_tier,
-            # Admin source flag — passed through to report_builder → frontend
-            "is_local_admin":   is_admin,
-            "source_type":      resolved_source_type,
-            "is_provision_match": bool(is_admin and "provision" in q_types),
-            "_provision_focus_district": provision_focus,
-            "citation_tags":    cit_tags,
-            "relevance_badge_hint": rel_hint,
-            # Qdrant semantic path: Clerk enriches citation_data.analysis_report when absent
-            "_from_qdrant_semantic": True,
-            "_needs_clerk_analysis": needs_clerk,
-        }
-        out.append(row)
-        logger.info(
-            "  ├─ [QDRANT_LOCAL] canonical_id=%s | title=%-40s | score=%.3f | admin=%s | source_type=%s | court=%s",
-            cid or "—",
-            (r.get("title") or r.get("case_name") or "?")[:40],
-            sim_score,
-            is_admin,
-            resolved_source_type or "—",
-            (r.get("court") or "?")[:30],
-        )
+            "_source":              "local",
+            "_dimension_id":        primary_dim_id,
+            "_dimension_name":      primary_dim_name,
+            "dimension_id":         primary_dim_id,
+            "dimension_name":       primary_dim_name,
+            "_query_type":          "keyword",
+            "_dimension_ids":       dim_ids,
+            "_dimension_names":     dim_names,
+            "_keyword_score":       ks,
+            "_semantic_score":      sem,
+            "_similarity_score":    sem if sem > 0 else float(ks),
+            "is_local_admin":       is_admin,
+            "_needs_clerk_analysis": not bool(r.get("has_analysis_report")),
+        })
 
-    # Do NOT demote or drop district-court provision matches.
-    # Sort: scored results always beat zero-score admin force-includes, then by
-    # court priority tier, local rank, and similarity within each scored group.
     out.sort(
         key=lambda r: (
-            int(float(r.get("_similarity_score", 0.0)) > 0),  # 1=scored, 0=zero-score admin
-            int(r.get("_priority_tier", 0)),
-            int(r.get("_local_rank", 0)),
-            float(r.get("_similarity_score", 0.0)),
+            float(r.get("_keyword_score", 0) or 0.0),
+            float(r.get("_semantic_score", 0.0) or 0.0),
+            float(r.get("_es_score", 0.0) or 0.0),
         ),
         reverse=True,
     )
     result = out[:max_total]
 
-    titles = [(r.get("title") or r.get("case_name") or "?") for r in result[:5]]
-    title_str = ", ".join(t[:50] for t in titles) + (f" … +{len(result) - 5} more" if len(result) > 5 else "")
-    logger.info("[WATCHDOG_QDRANT] Semantic local → %d result(s): %s", len(result), title_str)
+    scored_count = sum(1 for r in result if r.get("_keyword_score", 0) > 0)
+    admin_zero = len(result) - scored_count
+    logger.info("[WATCHDOG_ES] ES keyword local → %d judgment(s) (%d scored, %d admin-zero)",
+                len(result), scored_count, admin_zero)
     _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"🏛 Semantic local DB → {len(result)} judgment(s)" + (f": {title_str}" if result else ""),
-            {"source": "qdrant_semantic", "count": len(result), "titles": titles})
-
+            f"🏛 ES keyword local → {len(result)} judgment(s) ({scored_count} keyword-matched, {admin_zero} admin-0)",
+            {"source": "es_keyword", "count": len(result),
+             "scored": scored_count, "admin_zero": admin_zero,
+             "keyword_count": len(keyword_sets)})
     return result
+
+
+def _search_local_pg_keywords(
+    keyword_sets: List[str],
+    max_total: int = 30,
+    case_state: str = "",
+    run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """PG ILIKE fallback when ES is unavailable."""
+    per_query = max(10, (max_total * 2) // max(len(keyword_sets), 1))
+    cid_map: Dict[str, Dict[str, Any]] = {}
+    for i, kw in enumerate(keyword_sets):
+        kw = (kw or "").strip()
+        if not kw:
+            continue
+        rows = _search_local(kw, limit=per_query, run_id=run_id, case_state=case_state,
+                             dimension_id=i + 1, dimension_name="Keyword Query", query_type="keyword")
+        for r in rows:
+            cid = str(r.get("canonical_id") or r.get("id") or "").strip()
+            if not cid:
+                continue
+            if cid not in cid_map:
+                cid_map[cid] = {"row": dict(r), "keyword_score": 0,
+                                "dimension_ids": [], "dimension_names": []}
+            e = cid_map[cid]
+            e["keyword_score"] += 1
+            if (i + 1) not in e["dimension_ids"]:
+                e["dimension_ids"].append(i + 1)
+
+    admin_cids = _fetch_admin_canonical_ids(run_id=run_id)
+    for cid in admin_cids:
+        if cid not in cid_map:
+            try:
+                from db.client import judgements_fetch_by_canonical_ids
+                rows = judgements_fetch_by_canonical_ids([cid], approved_only=False, exclude_low_hierarchy=False)
+                if rows:
+                    cid_map[cid] = {"row": dict(rows[0]), "keyword_score": 0,
+                                    "dimension_ids": [], "dimension_names": []}
+            except Exception:
+                pass
+
+    out: List[Dict[str, Any]] = []
+    for cid, entry in cid_map.items():
+        r = entry["row"]
+        ks = entry["keyword_score"]
+        dim_ids = entry["dimension_ids"]
+        out.append({
+            **r, "_source": "local",
+            "_dimension_id": dim_ids[0] if dim_ids else None,
+            "_dimension_name": "Keyword Query" if dim_ids else "",
+            "dimension_id": dim_ids[0] if dim_ids else None,
+            "_query_type": "keyword",
+            "_dimension_ids": dim_ids, "_dimension_names": ["Keyword Query"] if dim_ids else [],
+            "_keyword_score": ks, "_similarity_score": float(ks),
+            "is_local_admin": bool(r.get("is_local_admin")),
+            "_needs_clerk_analysis": not bool(r.get("has_analysis_report")),
+        })
+    out.sort(key=lambda r: float(r.get("_keyword_score", 0)), reverse=True)
+    return out[:max_total]
+
+
+def _lookup_ik_candidates_in_es(
+    ik_candidates: List[Dict[str, Any]],
+    run_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Split IK pre-fetched candidates into (already_in_es, needs_clerk).
+
+    Queries ik_document_assets by IK tid (doc_id) → canonical_id.
+    Then ES mget by canonical_id for those that exist.
+    Returns:
+      already_in_es — full ES-hydrated rows tagged _from_es=True, _needs_clerk_analysis=False
+      needs_clerk   — original IK candidates not found in ES (Clerk must fetch them)
+    """
+    if not ik_candidates:
+        return [], []
+
+    from db.connections import get_es_client, elasticsearch_init_failed, get_pg_conn
+    es = get_es_client()
+    if not es or elasticsearch_init_failed():
+        return [], ik_candidates  # all need Clerk
+
+    # Build map: tid → original candidate
+    tid_to_cand: Dict[str, Dict[str, Any]] = {}
+    for c in ik_candidates:
+        tid = str(c.get("external_id") or "").strip()
+        if tid:
+            tid_to_cand[tid] = c
+
+    if not tid_to_cand:
+        return [], ik_candidates
+
+    # Query PG ik_document_assets to map doc_id (IK tid) → canonical_id
+    tid_to_cid: Dict[str, str] = {}
+    conn = get_pg_conn()
+    if conn:
+        try:
+            tids_list = list(tid_to_cand.keys())
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT doc_id, canonical_id FROM ik_document_assets "
+                    "WHERE doc_id = ANY(%s) AND canonical_id IS NOT NULL AND canonical_id <> ''",
+                    (tids_list,)
+                )
+                for row in (cur.fetchall() or []):
+                    if isinstance(row, tuple):
+                        d, c = str(row[0] or "").strip(), str(row[1] or "").strip()
+                    else:
+                        d, c = str(row.get("doc_id") or "").strip(), str(row.get("canonical_id") or "").strip()
+                    if d and c:
+                        tid_to_cid[d] = c
+        except Exception as exc:
+            logger.warning("[WATCHDOG_ES] ik_document_assets lookup failed: %s", exc)
+        finally:
+            conn.close()
+
+    if not tid_to_cid:
+        return [], ik_candidates  # none stored yet
+
+    # ES mget for known canonical_ids
+    cids = list(set(tid_to_cid.values()))
+    cid_to_es: Dict[str, Dict[str, Any]] = {}
+    try:
+        mres = es.mget(index="judgments", body={"ids": cids})
+        for d in (mres.get("docs") or []):
+            if not d.get("found"):
+                continue
+            src = d.get("_source") or {}
+            cid = str(src.get("canonical_id") or d.get("_id") or "").strip()
+            if cid:
+                cid_to_es[cid] = src
+    except Exception as exc:
+        logger.warning("[WATCHDOG_ES] ES mget for IK candidates failed: %s", exc)
+        return [], ik_candidates
+
+    already_in_es: List[Dict[str, Any]] = []
+    needs_clerk: List[Dict[str, Any]] = []
+
+    for c in ik_candidates:
+        tid = str(c.get("external_id") or "").strip()
+        cid = tid_to_cid.get(tid, "")
+        src = cid_to_es.get(cid) if cid else None
+
+        if src:
+            src_type = str(src.get("source_type") or "indian_kanoon").strip().lower()
+            court = str(src.get("court_code") or src.get("court_name") or c.get("docsource") or "").strip()
+            row = {
+                **c,  # keep original IK metadata (tid, title, snippet, docsource)
+                "id":               cid,
+                "canonical_id":     cid,
+                "title":            src.get("case_name") or c.get("title") or "",
+                "court":            court,
+                "primary_citation": src.get("primary_citation") or "",
+                "ratio":            src.get("holding_text") or src.get("summary_text") or "",
+                "full_text":        src.get("full_text") or "",
+                "source_type":      src_type,
+                "is_local_admin":   False,
+                "_source":          "indian_kanoon",
+                "_from_es":         True,
+                "_needs_clerk_analysis": False,  # already enriched in ES
+                "_keyword_score":   0,
+                "_similarity_score": 0.0,
+            }
+            already_in_es.append(row)
+            logger.info("[WATCHDOG_ES] IK tid=%s already in ES (canonical_id=%s)", tid, cid)
+        else:
+            needs_clerk.append(c)
+
+    logger.info("[WATCHDOG_ES] IK ES lookup: %d already-in-ES, %d need Clerk",
+                len(already_in_es), len(needs_clerk))
+    _db_log(run_id, "watchdog", "watchdog", "INFO",
+            f"📚 IK ES lookup: {len(already_in_es)} already fetched, {len(needs_clerk)} need Clerk",
+            {"ik_in_es": len(already_in_es), "ik_needs_clerk": len(needs_clerk)})
+    return already_in_es, needs_clerk
 
 
 # ── Indian Kanoon search ──────────────────────────────────────────────────────
@@ -867,6 +859,17 @@ def _use_serper_for_google_search() -> bool:
     return use_claude or provider == "serper"
 
 
+def _google_query_with_legal_bias(query: str) -> str:
+    """Bias generic queries toward actual Indian judgment results."""
+    q = str(query or "").strip()
+    if not q:
+        return ""
+    low = q.lower()
+    if "indiankanoon.org" in low or "indian court judgment" in low:
+        return q
+    return f"{q} Indian court judgment site:indiankanoon.org"
+
+
 def _search_google_grounding(
     query: str,
     num_results: int = 5,
@@ -886,20 +889,67 @@ def _search_google_grounding(
 
         _db_log(run_id, "watchdog", "watchdog", "INFO",
                 f"🌐 Querying Google Search (Gemini Grounding): {query[:80]!r}")
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        biased_query = _google_query_with_legal_bias(query)
         allowed_sites = " OR ".join(f"site:{s}" for s in _GROUNDING_ALLOWED_SITES)
         search_query = (
-            f"Search for relevant Indian law judgments about: {query}. "
-            f"Strictly limit results to {allowed_sites}. "
-            f"Return up to {num_results} most relevant judgment URLs with titles."
+            "You are a legal search assistant. Perform a Google Search for the following query. "
+            "You MUST return the results as a strict JSON array of objects with keys: "
+            "'title', 'url', and 'snippet'. Do not include markdown or conversational text.\n\n"
+            f"QUERY: {biased_query}\n"
+            f"CONSTRAINTS: Strictly limit results to {allowed_sites}. "
+            f"Return up to {num_results} items."
         )
         grounding_tool = types.Tool(google_search=types.GoogleSearch())
         config = types.GenerateContentConfig(tools=[grounding_tool], max_output_tokens=2048)
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(model=model, contents=search_query, config=config)
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(model=model, contents=search_query, config=config)
+                break
+            except Exception as exc:
+                msg = str(exc or "")
+                is_rate_limited = ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg.upper())
+                if is_rate_limited and attempt < 2:
+                    logger.warning(
+                        "[WATCHDOG] Google Grounding rate-limited (attempt %d/3) for %r; retrying in 5s",
+                        attempt + 1, query[:80],
+                    )
+                    time.sleep(5)
+                    continue
+                raise
 
         results: List[Dict[str, Any]] = []
-        if response.candidates:
+        # Primary parser: strict JSON array from model text.
+        resp_text = (getattr(response, "text", None) or "").strip()
+        if resp_text:
+            try:
+                cleaned = re.sub(r"^```(?:json)?\s*", "", resp_text, flags=re.I)
+                cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, list):
+                    for i, item in enumerate(parsed[:num_results], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        uri_str = str(item.get("url") or item.get("link") or "").strip()
+                        if not uri_str or not uri_str.startswith("http") or not _is_allowed_grounding_link(uri_str):
+                            continue
+                        title = str(item.get("title") or f"Result {i}").strip()
+                        snippet = str(item.get("snippet") or "")[:500]
+                        results.append({
+                            "title": title,
+                            "link": uri_str,
+                            "external_id": uri_str,
+                            "snippet": snippet,
+                            "_source": "google",
+                            "source_type": _google_source_type_for_link(uri_str),
+                        })
+            except Exception as _json_exc:
+                logger.info("[WATCHDOG] Grounding JSON parse fallback engaged: %s", _json_exc)
+
+        # Fallback parser: grounding metadata chunks.
+        if not results and response.candidates:
             cand = response.candidates[0]
             gm = getattr(cand, "grounding_metadata", None) or getattr(cand, "groundingMetadata", None)
             if gm:
@@ -909,14 +959,15 @@ def _search_google_grounding(
                            else (ch.get("web") if isinstance(ch, dict) else None))
                     if not web:
                         continue
-                    uri   = getattr(web, "uri",   None) or (web.get("uri")   if isinstance(web, dict) else None)
+                    uri = getattr(web, "uri", None) or (web.get("uri") if isinstance(web, dict) else None)
                     title = getattr(web, "title", None) or (web.get("title") if isinstance(web, dict) else None) or ""
                     uri_str = str(uri).strip()
                     if uri_str and uri_str.startswith("http") and _is_allowed_grounding_link(uri_str):
                         results.append({
-                            "title":   str(title) if title else f"Result {i + 1}",
-                            "link":    uri_str,
-                            "snippet": (response.text or "")[:200] if response.text else "",
+                            "title": str(title) if title else f"Result {i + 1}",
+                            "link": uri_str,
+                            "external_id": uri_str,
+                            "snippet": resp_text[:200] if resp_text else "",
                             "_source": "google",
                             "source_type": _google_source_type_for_link(uri_str),
                         })
@@ -954,8 +1005,9 @@ def _search_google_serper(
         return []
     try:
         _db_log(run_id, "watchdog", "watchdog", "INFO", f"🌐 Querying Serper API: {query[:80]!r}")
+        biased_query = _google_query_with_legal_bias(query)
         search_query = (
-            f"{query} Indian law judgement Supreme Court High Court "
+            f"{biased_query} Indian law judgement Supreme Court High Court "
             "site:indiankanoon.org OR site:casemine.com OR site:app.bharatlaw.ai OR "
             "site:lawfinderlive.com OR site:judgments.ecourts.gov.in"
         )
@@ -1003,13 +1055,126 @@ def _search_google_serper(
         return []
 
 
-def _search_google(
+def _search_web_claude(
     query: str,
     num_results: int = 5,
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    """Web search via Claude web_search tool (Brave-backed)."""
+    try:
+        from claude_proxy import forward_to_claude
+    except Exception as exc:
+        logger.warning("[WATCHDOG] Claude proxy unavailable: %s", exc)
+        return []
+
+    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+    biased_query = _google_query_with_legal_bias(query)
+    prompt = (
+        "You are a legal search assistant. Use web search to find Indian court judgments for this query.\n"
+        f"Query: {biased_query}\n\n"
+        f"Return ONLY strict JSON array (max {num_results}) with keys: "
+        "title, url, snippet."
+    )
+    try:
+        resp = forward_to_claude({
+            "model": model,
+            "max_tokens": 1400,
+            "temperature": 0.0,
+            "anthropic_beta": ["web-search-2025-03-05"],
+            "tools": [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3,
+            }],
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        blocks = resp.get("content") or []
+        text_parts: List[str] = []
+        for b in blocks:
+            if isinstance(b, dict) and b.get("type") == "text":
+                text_parts.append(str(b.get("text") or ""))
+        txt = "\n".join(t for t in text_parts if t).strip()
+        if not txt:
+            return []
+        cleaned = re.sub(r"^```(?:json)?\s*", "", txt, flags=re.I)
+        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+        parsed: Any = None
+        try:
+            parsed = json.loads(cleaned)
+        except Exception:
+            # Claude often returns explanatory text around JSON; try bracket extraction.
+            m = re.search(r"\[\s*\{.*\}\s*\]", cleaned, flags=re.S)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except Exception:
+                    parsed = None
+
+        out: List[Dict[str, Any]] = []
+        if isinstance(parsed, list):
+            for i, item in enumerate(parsed[:num_results], 1):
+                if not isinstance(item, dict):
+                    continue
+                u = str(item.get("url") or item.get("link") or "").strip()
+                if not u or not u.startswith("http"):
+                    continue
+                out.append({
+                    "title": str(item.get("title") or f"Result {i}"),
+                    "link": u,
+                    "external_id": u,
+                    "snippet": str(item.get("snippet") or "")[:500],
+                    "_source": "google",
+                    "source_type": _google_source_type_for_link(u),
+                })
+
+        # Fallback: URL extraction from plain text response when JSON isn't parseable.
+        if not out:
+            seen_urls: set = set()
+            urls = re.findall(r"https?://[^\s\]\)\"'>]+", txt)
+            for i, raw_u in enumerate(urls, 1):
+                u = str(raw_u).strip().rstrip(".,;")
+                if not u.startswith("http") or u in seen_urls:
+                    continue
+                seen_urls.add(u)
+                if not _is_allowed_grounding_link(u):
+                    continue
+                out.append({
+                    "title": f"Web result {i}",
+                    "link": u,
+                    "external_id": u,
+                    "snippet": txt[:500],
+                    "_source": "google",
+                    "source_type": _google_source_type_for_link(u),
+                })
+                if len(out) >= num_results:
+                    break
+
+        if not out:
+            logger.warning("[WATCHDOG] Claude web search returned no parseable URLs. text_preview=%r", txt[:240])
+        _db_log(run_id, "watchdog", "watchdog", "INFO",
+                f"🌐 Claude web search → {len(out)} result(s)",
+                {"source": "claude_web_search", "count": len(out)})
+        return out
+    except Exception as exc:
+        logger.warning("[WATCHDOG] Claude web search failed: %s", exc)
+        _db_log(run_id, "watchdog", "watchdog", "WARNING", f"🌐 Claude web search failed: {exc}")
+        return []
+
+
+def _search_google(
+    query: str,
+    num_results: int = 5,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    provider: str = "grounding",
+) -> List[Dict[str, Any]]:
     """Google search route uses Gemini Grounding and legal-site allowlist."""
+    p = (provider or "grounding").strip().lower()
+    if p == "claude":
+        return _search_web_claude(query, num_results=num_results, run_id=run_id, user_id=user_id)
+    if p == "serper":
+        return _search_google_serper(query, num_results=num_results, run_id=run_id, user_id=user_id)
     result = _search_google_grounding(query, num_results=num_results, run_id=run_id, user_id=user_id)
     if not result and _use_serper_for_google_search():
         logger.info("[WATCHDOG] Google Grounding returned 0; falling back to Serper")
@@ -1017,102 +1182,6 @@ def _search_google(
     return result
 
 
-# ── Dimension query builder ───────────────────────────────────────────────────
-
-def _build_qdrant_dimension_tasks(
-    dimensions: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """
-    Tasks for Qdrant semantic local search: SC + HC + provision + semantic queries.
-
-    Four query types are used per dimension:
-      sc        — Supreme Court-focused phrase (8-15 words, IK-optimised)
-      hc        — High Court-focused phrase (8-15 words)
-      provision — Statute/section-focused phrase (8-15 words)
-      semantic  — Rich 25-60 word descriptive phrase that encodes full dimension
-                  context (facts, outcome, legal principle, section numbers).
-                  Falls back to reasoning + sc + hc + provision concatenation.
-
-    Using all four guarantees that:
-    - Admin-uploaded HC judgments are found (hc query)
-    - Provision-specific judgments are found (provision query)
-    - Semantically rich matches are found via denser embedding (semantic query)
-    """
-    tasks: List[Dict[str, Any]] = []
-    for dim in dimensions:
-        dim_id = dim.get("dimension_id", "?")
-        dim_name = dim.get("name", "")
-        qs = dim.get("queries") or {}
-        reasoning = (dim.get("reasoning") or "").strip()
-
-        # Standard 3-tier queries
-        for q_type, q_key in (("sc", "sc_query"), ("hc", "hc_query"), ("provision", "provision_query")):
-            q = (qs.get(q_key) or "").strip()
-            if q:
-                tasks.append({
-                    "query": q,
-                    "q_type": q_type,
-                    "dimension_id": dim_id,
-                    "dimension_name": dim_name,
-                })
-
-        # Semantic query: rich context for dense vector search — finds admin-uploaded
-        # judgments whose text doesn't match short IK-style keyword phrases.
-        sem_q = (qs.get("semantic_query") or "").strip()
-        if not sem_q:
-            # Synthesise: dimension name + reasoning + all 3 queries
-            sc_q = (qs.get("sc_query") or "").strip()
-            hc_q = (qs.get("hc_query") or "").strip()
-            pv_q = (qs.get("provision_query") or "").strip()
-            sem_q = " ".join(filter(None, [dim_name, reasoning, sc_q, hc_q, pv_q]))
-        if sem_q:
-            tasks.append({
-                "query": sem_q,
-                "q_type": "semantic",
-                "dimension_id": dim_id,
-                "dimension_name": dim_name,
-            })
-
-    return tasks
-
-
-def _build_dimension_query_tasks(
-    dimensions: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """
-    Expand dimensions into flat query-task dicts.
-    Each task: { query, q_type, dimension_id, dimension_name }
-    """
-    tasks: List[Dict[str, Any]] = []
-    for dim in dimensions:
-        dim_id   = dim.get("dimension_id", "?")
-        dim_name = dim.get("name", "")
-        qs       = dim.get("queries") or {}
-        for q_type, q_key in (("sc", "sc_query"), ("hc", "hc_query"), ("provision", "provision_query")):
-            q = (qs.get(q_key) or "").strip()
-            if q:
-                tasks.append({
-                    "query":          q,
-                    "q_type":         q_type,
-                    "dimension_id":   dim_id,
-                    "dimension_name": dim_name,
-                })
-    return tasks
-
-
-def _build_single_dimension_query_tasks(dim: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build query-task dicts for one dimension."""
-    return _build_dimension_query_tasks([dim])
-
-
-def _build_single_qdrant_dimension_tasks(dim: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build Qdrant query-task dicts for one dimension."""
-    return _build_qdrant_dimension_tasks([dim])
-
-
-def _run_async(coro):
-    """Run a coroutine from this synchronous module."""
-    return asyncio.run(coro)
 
 
 def _district_court_like(court: Any) -> bool:
@@ -1204,7 +1273,7 @@ def _rerank_ik_candidates_gemini(
             name="WatchdogIKReranker",
             agent_type="citation",
             default_prompt=_RERANK_IK_PROMPT,
-            default_model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+            default_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
             default_temperature=0.0,
             default_max_tokens=512,
         )
@@ -1275,24 +1344,22 @@ def run_watchdog(
     max_ik: int = 10,
     max_google: int = 5,
     keyword_sets: Optional[List[str]] = None,
-    dimensions: Optional[List[Dict[str, Any]]] = None,
+    keyword_data: Optional[Dict[str, Any]] = None,
+    retrieval_method: str = "indiankanoon",
+    web_search_provider: str = "grounding",
+    web_context_query: str = "",
     case_state: str = "",
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
     controversy_map: Optional[Dict[str, Any]] = None,
+    keyword_mode: bool = True,
+    # Deprecated — ignored; kept for call-site backward compat only
+    dimensions: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Run Watchdog: Local DB → Indian Kanoon API (dimension-aware) → Google.
+    Run Watchdog: Local DB (ES keyword) → Indian Kanoon API → Google.
 
-    Dimension-aware mode (when `dimensions` is provided):
-      • Expands 3 queries per dimension (SC / HC / Provision)
-      • Sends queries in batches of IK_BATCH_SIZE with IK_BATCH_STAGGER_SECS delay
-      • Drops results from low-hierarchy courts (District Court, Tribunal, etc.)
-      • Ranks surviving results: SC > same-state HC > other HC
-      • Global deduplication by tid / external_id across ALL dimension queries
-
-    Legacy mode (no dimensions): falls back to keyword_sets / single query.
-
+    Always uses keyword_sets for local DB search (ES multi_match).
     When max_ik=0: IK search is skipped entirely.
 
     Returns:
@@ -1309,6 +1376,41 @@ def run_watchdog(
                 seen.add(val)
                 out.append(val)
         return out
+
+    def _build_google_queries(
+        primary_seed: str,
+        controversy: Optional[Dict[str, Any]],
+        kw_data: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """
+        Keep Google query volume intentionally small:
+          - 1 controversy_query seed
+          - up to 2 tier_4 / tier_3 tokens
+        Never use tier_1 / tier_2 for Google.
+        """
+        cm = controversy or {}
+        tiers = (kw_data or {}).get("tiers") if isinstance(kw_data, dict) else {}
+        t3 = list((tiers or {}).get("tier_3") or [])
+        t4 = list((tiers or {}).get("tier_4") or [])
+
+        out: List[str] = []
+        seen: set = set()
+
+        seed = str(cm.get("controversy_query") or cm.get("central_controversy") or primary_seed or "").strip()
+        if seed and seed not in seen:
+            out.append(seed)
+            seen.add(seed)
+
+        # Prioritize landmark (tier_4) over doctrinal (tier_3) for web lookups.
+        tier34 = [str(x).strip() for x in (t4 + t3) if str(x).strip()]
+        for q in tier34:
+            if q in seen:
+                continue
+            seen.add(q)
+            out.append(q)
+            if len(out) >= 3:
+                break
+        return out[:3]
 
     def _dedupe_local_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         def _same_state_hc(court: Any) -> bool:
@@ -1362,8 +1464,6 @@ def run_watchdog(
                 ex.setdefault("_query_types", []).append(q_type)
             ex["_local_rank"] = max(ex.get("_local_rank", 0), r.get("_local_rank", 0))
             ex["_priority_tier"] = max(int(ex.get("_priority_tier", 0) or 0), int(r.get("_priority_tier", 0) or 0))
-            if r.get("_from_qdrant_semantic"):
-                ex["_from_qdrant_semantic"] = True
             if r.get("_needs_clerk_analysis"):
                 ex["_needs_clerk_analysis"] = True
             if r.get("dimension_id") is not None:
@@ -1385,328 +1485,90 @@ def run_watchdog(
 
     skip_ik = (max_ik == 0)
     query = (query or "").strip()
+    retrieval_method = str(retrieval_method or "indiankanoon").strip().lower()
 
-    # ── Build local/search query list from legal dimensions (preferred) ───────
-    if dimensions:
-        all_dim_queries = [t["query"] for t in _build_dimension_query_tasks(dimensions)]
-        keyword_list = all_dim_queries if all_dim_queries else ([query] if query else [])
-        # In dimension mode IK/Google use the same dimension queries
-        ik_google_queries = keyword_list
-    else:
-        ks_list = [ks for ks in (keyword_sets or []) if (ks or "").strip()]
-        # Qdrant semantic search uses the full controversy_query (long = better embedding)
-        keyword_list = [query] if query else ks_list
-        # IK/Google keyword search MUST use short phrases (≤12 words).
-        # ks_list comes from LDE fallback (factual_trigger, legal_claim, central_controversy
-        # truncated to 12 words). If empty, fall back to query but still cap to 12 words.
-        if ks_list:
-            ik_google_queries = ks_list
-        elif query:
-            # Strip common question preamble so IK can find matches
-            _q = re.sub(r'^(?:did|does|was|were|is|are|whether|how|what|why|when)\s+(?:the\s+)?', '', query.strip(), flags=re.I)
-            _q = re.sub(r'^(?:high|supreme|bombay|delhi|madras|allahabad|calcutta|gujarat|karnataka|kerala|punjab|haryana|rajasthan|orissa|andhra|telangana)\s+court\s+\w+\s+', '', _q, flags=re.I)
-            ik_google_queries = [" ".join(_q.split()[:12])] if _q.strip() else [query]
-        else:
-            ik_google_queries = []
+    # ── Build search query list from keyword_sets ──────────────────────────────
+    ks_list = [ks for ks in (keyword_sets or []) if (ks or "").strip()]
+    keyword_list = ks_list if ks_list else ([query] if query else [])
+    ik_google_queries = keyword_list
 
-    if not keyword_list and not dimensions:
+    if not keyword_list and not (web_context_query or "").strip():
         return {
-            "error": "query or keyword_sets or dimensions required",
+            "error": "query or keyword_sets required",
             "local": [], "candidates_ik": [], "candidates_google": [],
             "all_judgement_ids": [], "search_keywords_by_route": {},
             "dropped_low_hierarchy_count": 0,
         }
 
     primary_query = keyword_list[0] if keyword_list else query
-    ik_mode = "SKIPPED" if skip_ik else ("dimension-aware" if dimensions else "keyword")
+    ik_mode = "SKIPPED" if skip_ik else "keyword"
 
     logger.info("╔══ WATCHDOG ══════════════════════════════════════════════╗")
     logger.info("║  Primary query : %-42s ║", primary_query[:42])
     logger.info("║  IK mode       : %-42s ║", ik_mode[:42])
-    logger.info("║  Dimensions    : %-42s ║", str(len(dimensions) if dimensions else 0))
+    logger.info("║  Keywords      : %-42s ║", str(len(keyword_list)))
     logger.info("╚══════════════════════════════════════════════════════════╝")
-    if dimensions:
-        for t in _build_dimension_query_tasks(dimensions):
-            logger.info(
-                "[WATCHDOG] DIM_QUERY [dim=%s|%s] %s",
-                t.get("dimension_id"),
-                t.get("q_type"),
-                (t.get("query") or "")[:180],
-            )
     _db_log(run_id, "watchdog", "watchdog", "INFO",
-            f"🐕 Watchdog started — IK mode={ik_mode} | "
-            f"dims={len(dimensions) if dimensions else 0} | queries={len(keyword_list)}",
-            {"ik_mode": ik_mode, "dimension_count": len(dimensions) if dimensions else 0,
-             "keyword_count": len(keyword_list), "primary_query": primary_query[:120]})
+            f"🐕 Watchdog started — retrieval={retrieval_method} | IK mode={ik_mode} | queries={len(keyword_list)}",
+            {"retrieval_method": retrieval_method, "ik_mode": ik_mode, "keyword_count": len(keyword_list), "primary_query": primary_query[:120]})
 
-    # ── 1. Local DB search — Qdrant semantic (primary) + keyword fallback ──────
-    if dimensions:
-        all_dim_tasks = _build_dimension_query_tasks(dimensions)
-        qdrant_tasks = _build_qdrant_dimension_tasks(dimensions)
-        per_local = max(1, max_local // max(len(all_dim_tasks), 1))
-        local_rows: List[Dict[str, Any]] = []
+    web_only_mode = retrieval_method in ("web", "claude", "claude_web", "serper", "web_only")
 
-        async def _run_local_dimension_queries(dim_tasks: List[Dict[str, Any]]) -> List[Any]:
-            return await asyncio.gather(*[
-                asyncio.to_thread(
-                    _search_local,
-                    t["query"],
-                    per_local,
-                    run_id,
-                    case_state,
-                    t["dimension_id"],
-                    t["dimension_name"],
-                    t["q_type"],
-                )
-                for t in dim_tasks
-            ], return_exceptions=True)
-
-        # Phase 2: inject controversy_query as an extra Qdrant task (dual-vector)
-        # Results that match the controversy vector get a composite score boost.
-        _controversy_q = ""
-        if controversy_map and isinstance(controversy_map, dict):
-            _controversy_q = str(
-                controversy_map.get("controversy_query") or
-                controversy_map.get("central_controversy") or ""
-            ).strip()
-        if _controversy_q:
-            qdrant_tasks = qdrant_tasks + [{
-                "query":          _controversy_q,
-                "q_type":         "controversy",
-                "dimension_id":   None,
-                "dimension_name": "controversy",
-            }]
-            logger.info("[WATCHDOG] Added controversy Qdrant task: %s", _controversy_q[:80])
-
-        # Run all dimension semantic tasks in one batch (so all dimensions are evaluated together).
-        if qdrant_tasks:
-            try:
-                local_rows.extend(
-                    _search_local_semantic(
-                        tasks=qdrant_tasks,
-                        max_total=max_local,
-                        case_state=case_state,
-                        run_id=run_id,
-                        user_id=user_id,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("[WATCHDOG] Semantic local dimension batch failed: %s", exc)
-
-        # Fallback keyword retrieval for all dimension queries in parallel.
-        if len(local_rows) < max_local and all_dim_tasks:
-            local_results = _run_async(_run_local_dimension_queries(all_dim_tasks))
-            for task, result in zip(all_dim_tasks, local_results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        "[WATCHDOG] Local keyword task failed for dim=%s query=%r: %s",
-                        task.get("dimension_id", "?"), task.get("query", "")[:60], result,
-                    )
-                    continue
-                local_rows.extend(result or [])
-
-        local = _dedupe_local_rows(local_rows)
-        if len(local) < max_local and primary_query:
-            topup = _search_local(primary_query, limit=max_local, run_id=run_id, case_state=case_state)
-            local = _dedupe_local_rows(local + (topup or []))
-        local = local[:max_local]
+    # ── 1. Local DB search (ES/Qdrant hybrid) ────────────────────────────────
+    if web_only_mode:
+        local: List[Dict[str, Any]] = []
+        logger.info("[WATCHDOG] Web-only mode — skipping local DB retrieval")
     else:
-        # Legacy / no-dimension mode — semantic first, then keyword fallback
-        local = _search_local_semantic(
-            tasks=[{"query": primary_query, "q_type": "keyword",
-                    "dimension_id": None, "dimension_name": ""}],
+        local = _search_local_by_keywords(
+            keyword_sets=keyword_list,
             max_total=max_local,
             case_state=case_state,
             run_id=run_id,
-            user_id=user_id,
-        )
-        if len(local) < max_local:
-            topup = _search_local(primary_query, limit=max_local, run_id=run_id, case_state=case_state)
-            local = _dedupe_local_rows((local or []) + (topup or []))[:max_local]
+            controversy_query=str((controversy_map or {}).get("controversy_query") or ""),
+        )[:max_local]
+        logger.info("[WATCHDOG] Local ES keyword → %d results (from %d tokens)", len(local), len(keyword_list))
 
-    # ── 2. Indian Kanoon — dimension-aware batched search ────────────────────
+    # ── 2. Indian Kanoon — keyword batched search ─────────────────────────────
     seen_tids: Dict[str, Dict[str, Any]] = {}
     dropped_low_hierarchy = 0
 
-    if not skip_ik and dimensions:
-        tasks = _build_dimension_query_tasks(dimensions)
-        per_query_limit = max(2, max_ik // max(len(tasks), 1))
+    if (not skip_ik) and (not web_only_mode):
+        _ik_list = ik_google_queries if ik_google_queries else keyword_list
+        per_ik = max(1, max_ik // len(_ik_list)) if len(_ik_list) > 1 else max_ik
 
-        logger.info("[WATCHDOG] Dimension IK search: %d queries across %d dimension(s)",
-                    len(tasks), len(dimensions))
-        _db_log(run_id, "watchdog", "watchdog", "INFO",
-                f"📚 IK dimension search — {len(tasks)} queries across {len(dimensions)} dimensions",
-                {"total_queries": len(tasks), "dimension_count": len(dimensions),
-                 "per_query_limit": per_query_limit})
+        def _run_ik_keyword(args: Tuple[int, str]) -> Tuple[int, List[Dict[str, Any]]]:
+            qi, q = args
+            q = (q or "").strip()
+            if not q:
+                return qi, []
+            return qi, _search_indian_kanoon(q, limit=per_ik, run_id=run_id, user_id=user_id)
 
-        async def _run_ik_dimension_queries(dim_tasks: List[Dict[str, Any]]) -> List[Any]:
-            return await asyncio.gather(*[
-                asyncio.to_thread(
-                    _search_indian_kanoon,
-                    t["query"],
-                    per_query_limit,
-                    run_id,
-                    user_id,
-                    t["dimension_id"],
-                    t["dimension_name"],
-                    t["q_type"],
-                )
-                for t in dim_tasks
-            ], return_exceptions=True)
-
-        try:
-            # Execute all dimension queries together so all dimensions resolve in parallel.
-            dim_results = _run_async(_run_ik_dimension_queries(tasks))
-        except Exception as exc:
-            logger.warning("[WATCHDOG] IK dimension batch failed: %s", exc)
-            _db_log(run_id, "watchdog", "watchdog", "WARNING", f"📚 IK dimension batch failed: {exc}")
-            dim_results = []
-
-        for task, results in zip(tasks, dim_results):
-            dim_id = task.get("dimension_id", "?")
-            if isinstance(results, Exception):
-                logger.warning("[WATCHDOG] IK task failed for dim=%s query=%r: %s",
-                               dim_id, task.get("query", "")[:60], results)
-                _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                        f"📚 IK query failed [{task.get('q_type')}|dim={dim_id}]: {results}")
-                continue
-
-            for candidate in results:
-                q_type = str(task.get("q_type") or "").strip().lower()
-                candidate["_query_type"] = q_type
-                candidate["is_provision_match"] = (q_type == "provision")
-                candidate["_dimension_id"] = dim_id
-                candidate["_dimension_name"] = task.get("dimension_name")
-                tid = (candidate.get("external_id") or "").strip()
-                if not tid:
-                    continue
-                if _is_pending_result(candidate):
-                    continue
-                if _is_low_hierarchy(candidate.get("docsource", "")) and q_type != "provision":
-                    dropped_low_hierarchy += 1
-                    continue
-                if tid not in seen_tids:
-                    candidate["_jurisdiction_priority"] = _jurisdiction_priority(candidate, case_state)
-                    seen_tids[tid] = candidate
-
-    if not skip_ik and not dimensions:
-        if False:
-            # ── Dimension mode: batch 5 tasks at a time with 200 ms stagger ──
-            tasks = _build_dimension_query_tasks(dimensions)
-            per_query_limit = max(2, max_ik // max(len(tasks), 1))
-            batches = [tasks[i: i + IK_BATCH_SIZE] for i in range(0, len(tasks), IK_BATCH_SIZE)]
-
-            logger.info("[WATCHDOG] Dimension IK search: %d queries → %d batch(es) of %d",
-                        len(tasks), len(batches), IK_BATCH_SIZE)
-            _db_log(run_id, "watchdog", "watchdog", "INFO",
-                    f"📚 IK dimension search — {len(tasks)} queries across {len(batches)} batch(es) "
-                    f"(stagger={IK_BATCH_STAGGER_SECS * 1000:.0f}ms)",
-                    {"total_queries": len(tasks), "batch_count": len(batches),
-                     "batch_size": IK_BATCH_SIZE, "per_query_limit": per_query_limit})
-
-            for batch_idx, batch in enumerate(batches):
-                if batch_idx > 0:
-                    time.sleep(IK_BATCH_STAGGER_SECS)
-
-                batch_workers = min(SEARCH_WORKERS, len(batch))
-                with ThreadPoolExecutor(max_workers=batch_workers) as pool:
-                    fut_map = {
-                        pool.submit(
-                            _search_indian_kanoon,
-                            t["query"],
-                            per_query_limit,
-                            run_id,
-                            user_id,
-                            t["dimension_id"],
-                            t["dimension_name"],
-                            t["q_type"],
-                        ): t
-                        for t in batch
-                    }
-                    for fut in as_completed(fut_map):
-                        task = fut_map[fut]
-                        try:
-                            results = fut.result(timeout=20)
-                        except Exception as exc:
-                            logger.warning("[WATCHDOG] IK task failed for %r: %s",
-                                           task.get("query", "")[:60], exc)
-                            _db_log(run_id, "watchdog", "watchdog", "WARNING",
-                                    f"📚 IK query failed [{task.get('q_type')}|dim="
-                                    f"{task.get('dimension_id')}]: {exc}")
-                            results = []
-
-                        for candidate in results:
-                            tid = (candidate.get("external_id") or "").strip()
-                            if not tid:
-                                continue
-
-                            # ── Status filter: Approved only (spec §6) ────────
-                            if _is_pending_result(candidate):
-                                logger.debug(
-                                    "[WATCHDOG] Dropped Pending result: %s (%s)",
-                                    candidate.get("title", "?")[:60],
-                                    candidate.get("docsource", ""),
-                                )
-                                continue
-
-                            # ── Hierarchy pre-filter ──────────────────────────
-                            if _is_low_hierarchy(candidate.get("docsource", "")):
-                                dropped_low_hierarchy += 1
-                                logger.debug(
-                                    "[WATCHDOG] Dropped low-hierarchy: %s (%s)",
-                                    candidate.get("title", "?")[:60],
-                                    candidate.get("docsource", ""),
-                                )
-                                continue
-
-                            # ── Global deduplication ──────────────────────────
-                            if tid not in seen_tids:
-                                candidate["_jurisdiction_priority"] = _jurisdiction_priority(
-                                    candidate, case_state
-                                )
-                                seen_tids[tid] = candidate
-
-        else:
-            # ── Legacy keyword mode ───────────────────────────────────────────
-            # Use ik_google_queries (short IK-friendly phrases) not keyword_list
-            # (which may contain the long semantic controversy_query)
-            _ik_list = ik_google_queries if ik_google_queries else keyword_list
-            per_ik = max(1, max_ik // len(_ik_list)) if len(_ik_list) > 1 else max_ik
-
-            def _run_ik_keyword(args: Tuple[int, str]) -> Tuple[int, List[Dict[str, Any]]]:
-                qi, q = args
-                q = (q or "").strip()
-                if not q:
-                    return qi, []
-                return qi, _search_indian_kanoon(q, limit=per_ik, run_id=run_id, user_id=user_id)
-
-            active = [(qi, q) for qi, q in enumerate(_ik_list, 1) if (q or "").strip()]
-            # Still batch in groups of IK_BATCH_SIZE
-            batches = [active[i: i + IK_BATCH_SIZE] for i in range(0, len(active), IK_BATCH_SIZE)]
-            for batch_idx, batch in enumerate(batches):
-                if batch_idx > 0:
-                    time.sleep(IK_BATCH_STAGGER_SECS)
-                with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, len(batch))) as pool:
-                    futs = {pool.submit(_run_ik_keyword, item): item for item in batch}
-                    for fut in as_completed(futs):
-                        try:
-                            _, results = fut.result(timeout=20)
-                        except Exception as exc:
-                            qi, q = futs[fut]
-                            logger.warning("[WATCHDOG] Keyword IK failed #%d %r: %s", qi, q[:60], exc)
-                            results = []
-                        for c in results:
-                            tid = (c.get("external_id") or "").strip()
-                            if not tid:
-                                continue
-                            if _is_pending_result(c):
-                                continue
-                            if _is_low_hierarchy(c.get("docsource", "")):
-                                dropped_low_hierarchy += 1
-                                continue
-                            if tid not in seen_tids:
-                                c["_jurisdiction_priority"] = _jurisdiction_priority(c, case_state)
-                                seen_tids[tid] = c
+        active = [(qi, q) for qi, q in enumerate(_ik_list, 1) if (q or "").strip()]
+        batches = [active[i: i + IK_BATCH_SIZE] for i in range(0, len(active), IK_BATCH_SIZE)]
+        for batch_idx, batch in enumerate(batches):
+            if batch_idx > 0:
+                time.sleep(IK_BATCH_STAGGER_SECS)
+            with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, len(batch))) as pool:
+                futs = {pool.submit(_run_ik_keyword, item): item for item in batch}
+                for fut in as_completed(futs):
+                    try:
+                        _, results = fut.result(timeout=20)
+                    except Exception as exc:
+                        qi, q = futs[fut]
+                        logger.warning("[WATCHDOG] Keyword IK failed #%d %r: %s", qi, q[:60], exc)
+                        results = []
+                    for c in results:
+                        tid = (c.get("external_id") or "").strip()
+                        if not tid:
+                            continue
+                        if _is_pending_result(c):
+                            continue
+                        if _is_low_hierarchy(c.get("docsource", "")):
+                            dropped_low_hierarchy += 1
+                            continue
+                        if tid not in seen_tids:
+                            c["_jurisdiction_priority"] = _jurisdiction_priority(c, case_state)
+                            seen_tids[tid] = c
 
     # ── Sort IK candidates by jurisdiction priority (SC first) ───────────────
     candidates_ik = sorted(
@@ -1724,59 +1586,50 @@ def run_watchdog(
             user_id=user_id,
         )
 
-    # ── 3. Google search ──────────────────────────────────────────────────────
-    # Run Google for all dimension queries (SC/HC/Provision) when available.
-    google_queries: List[str] = []
-    if dimensions:
-        google_queries = _unique_nonempty(keyword_list)
-    if not google_queries:
-        # Use ik_google_queries (short phrases) — primary_query may be the long controversy_query
-        google_queries = _unique_nonempty(ik_google_queries) if ik_google_queries else ([primary_query] if primary_query else [])
-    # Cap Google via env so default remains safe but dimension-aware.
-    try:
-        max_google_queries = int(os.environ.get("CITATION_MAX_GOOGLE_QUERIES", "18"))
-    except Exception:
-        max_google_queries = 18
-    google_queries = google_queries[:max(1, max_google_queries)]
-
-    seen_google: Dict[str, Dict[str, Any]] = {}
-    per_google = max(1, max_google // max(len(google_queries), 1))
-
-    def _run_google_one(q: str) -> List[Dict[str, Any]]:
-        return _search_google(q, num_results=per_google, run_id=run_id, user_id=user_id)
-
-    if dimensions:
-        async def _run_google_dimension_queries(dim_queries: List[str]) -> List[Any]:
-            return await asyncio.gather(*[
-                asyncio.to_thread(_run_google_one, q) for q in dim_queries
-            ], return_exceptions=True)
-
+    # ── 3. Web search (optional per retrieval method) ─────────────────────────
+    candidates_google: List[Dict[str, Any]] = []
+    if max_google > 0:
+        provider = str(web_search_provider or "").strip().lower()
+        if provider == "claude":
+            # Direct Claude web mode: DO NOT use tier keyword fan-out.
+            direct_q = (web_context_query or query or primary_query or "").strip()
+            google_queries = [direct_q] if direct_q else []
+        else:
+            google_queries = _build_google_queries(primary_query, controversy_map, keyword_data)
+            if not google_queries:
+                google_queries = [primary_query] if primary_query else []
         try:
-            dim_results = _run_async(_run_google_dimension_queries(google_queries))
-        except Exception as exc:
-            logger.warning("[WATCHDOG] Google dimension batch failed: %s", exc)
-            dim_results = []
-        for query_text, result in zip(google_queries, dim_results):
-            if isinstance(result, Exception):
-                logger.warning("[WATCHDOG] Google query failed query=%r: %s", query_text[:60], result)
-                continue
-            for g in result:
-                link = (g.get("link") or "").strip()
-                if link and link not in seen_google:
-                    seen_google[link] = g
-    else:
-        with ThreadPoolExecutor(max_workers=min(SEARCH_WORKERS, max(1, len(google_queries)))) as pool:
-            gfuts = {pool.submit(_run_google_one, q): q for q in google_queries}
-            for fut in as_completed(gfuts):
-                try:
-                    for g in fut.result(timeout=20):
-                        link = (g.get("link") or "").strip()
-                        if link and link not in seen_google:
-                            seen_google[link] = g
-                except Exception as exc:
-                    logger.warning("[WATCHDOG] Google worker failed: %s", exc)
+            # Hard-cap to avoid provider rate limits.
+            max_google_queries = int(os.environ.get("CITATION_MAX_GOOGLE_QUERIES", "3"))
+        except Exception:
+            max_google_queries = 3
+        max_google_queries = 1 if provider == "claude" else max(1, min(3, max_google_queries))
+        google_queries = google_queries[:max_google_queries]
 
-    candidates_google = list(seen_google.values())
+        seen_google: Dict[str, Dict[str, Any]] = {}
+        per_google = max(1, max_google // max(len(google_queries), 1))
+
+        # Sequential web calls (rate-limit safe): no parallel fan-out.
+        for q in google_queries:
+            try:
+                results = _search_google(
+                    q,
+                    num_results=per_google,
+                    run_id=run_id,
+                    user_id=user_id,
+                    provider=provider or web_search_provider,
+                ) or []
+                for g in results:
+                    link = (g.get("link") or "").strip()
+                    if link and link not in seen_google:
+                        seen_google[link] = g
+            except Exception as exc:
+                logger.warning("[WATCHDOG] Web query failed for %r: %s", q[:80], exc)
+            time.sleep(2)
+
+        candidates_google = list(seen_google.values())
+    else:
+        google_queries = []
 
     # ── Summary ───────────────────────────────────────────────────────────────
     all_judgement_ids = [r["id"] for r in local if r.get("id")]
@@ -1798,32 +1651,31 @@ def run_watchdog(
         else bool(os.environ.get("SERPER_API_KEY"))
     )
     search_keywords_by_route = {
-        "local":         _unique_nonempty(keyword_list if dimensions else [primary_query]),
+        "local":         _unique_nonempty(keyword_list),
         "indian_kanoon": _unique_nonempty(keyword_list) if ik_enabled and not skip_ik else [],
         "google":        _unique_nonempty(google_queries) if google_enabled else [],
     }
 
     _db_log(run_id, "watchdog", "watchdog", "INFO",
             f"✅ Watchdog done — 🏛 {len(local)} local | 📚 {len(candidates_ik)} IK | "
-            f"🌐 {len(candidates_google)} Google | 🚫 {dropped_low_hierarchy} dropped",
-            {"local_count": len(local), "ik_count": len(candidates_ik),
+            f"🌐 {len(candidates_google)} web | 🚫 {dropped_low_hierarchy} dropped",
+            {"retrieval_method": retrieval_method, "local_count": len(local), "ik_count": len(candidates_ik),
              "google_count": len(candidates_google),
              "dropped_low_hierarchy": dropped_low_hierarchy})
 
     needing_clerk: List[str] = []
     _seen_nc = set()
-    for r in local:
-        if not r.get("_needs_clerk_analysis"):
-            continue
-        cid = str(r.get("canonical_id") or r.get("id") or "").strip()
-        if cid and cid not in _seen_nc:
-            _seen_nc.add(cid)
-            needing_clerk.append(cid)
+    if not web_only_mode:
+        for r in local:
+            if not r.get("_needs_clerk_analysis"):
+                continue
+            cid = str(r.get("canonical_id") or r.get("id") or "").strip()
+            if cid and cid not in _seen_nc:
+                _seen_nc.add(cid)
+                needing_clerk.append(cid)
     if needing_clerk:
-        logger.info(
-            "[WATCHDOG] %d Qdrant local hit(s) missing citation_data.analysis_report — queued for Clerk enrich",
-            len(needing_clerk),
-        )
+        logger.info("[WATCHDOG] %d local hit(s) missing analysis_report — queued for Clerk enrich",
+                    len(needing_clerk))
 
     return {
         "local":                     local,

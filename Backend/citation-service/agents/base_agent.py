@@ -9,7 +9,7 @@ Pattern:  RootAgent → sub-agents via .delegate()
 """
 
 from __future__ import annotations
-import json, logging, os, re
+import json, logging, os, re, time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -83,33 +83,45 @@ class BaseAgent:
         if not api_key:
             logger.warning("[%s] GEMINI_API_KEY not set", self.name)
             return None
-        try:
-            from google import genai as _genai
-            client = _genai.Client(api_key=api_key)
-            model  = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-            resp   = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=_genai.types.GenerateContentConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens,
-                ),
-            )
-            # Usage tracking (Phase 11)
-            if run_id or user_id:
-                try:
-                    usage_meta = getattr(resp, "usage_metadata", None)
-                    ti = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
-                    to = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
-                    from utils.usage_tracker import record_gemini
-                    record_gemini(run_id, user_id or "anonymous", operation,
-                                  tokens_in=ti, tokens_out=to, model=model)
-                except Exception:
-                    pass
-            return resp.text or ""
-        except Exception as e:
-            logger.warning("[%s] Gemini call failed: %s", self.name, e)
-            return None
+        _RETRY_DELAYS = [5, 10, 20]
+        last_exc: Optional[Exception] = None
+        for attempt, delay in enumerate([0] + _RETRY_DELAYS):
+            if delay:
+                logger.warning("[%s] Gemini 429 — retrying in %ds (attempt %d/3)",
+                               self.name, delay, attempt)
+                time.sleep(delay)
+            try:
+                from google import genai as _genai
+                client = _genai.Client(api_key=api_key)
+                model  = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                resp   = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=_genai.types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens,
+                    ),
+                )
+                # Usage tracking (Phase 11)
+                if run_id or user_id:
+                    try:
+                        usage_meta = getattr(resp, "usage_metadata", None)
+                        ti = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
+                        to = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
+                        from utils.usage_tracker import record_gemini
+                        record_gemini(run_id, user_id or "anonymous", operation,
+                                      tokens_in=ti, tokens_out=to, model=model)
+                    except Exception:
+                        pass
+                return resp.text or ""
+            except Exception as e:
+                last_exc = e
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    continue  # retry
+                logger.warning("[%s] Gemini call failed: %s", self.name, e)
+                return None
+        logger.warning("[%s] Gemini call failed after retries: %s", self.name, last_exc)
+        return None
 
     def _gemini_json(self, prompt: str, max_tokens: int = 1024) -> Optional[Dict]:
         """Call Gemini and parse JSON response."""

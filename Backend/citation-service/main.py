@@ -124,13 +124,19 @@ async def _fetch_firm_members(user_id: int) -> List[Dict[str, Any]]:
     Call auth service internal endpoint to get all firm members (id, email, username).
     Falls back to a single-member list on error.
     """
-    auth_url = os.environ.get("AUTH_SERVICE_URL", "http://localhost:5001/api/auth")
-    url = f"{auth_url}/internal/user/{user_id}/firm-members"
+    auth_url = (os.environ.get("AUTH_SERVICE_URL", "http://localhost:5001/api/auth") or "").strip().rstrip("/")
+    candidates = [auth_url]
+    # Common gateway prefix mismatch seen in local dev setups.
+    if "/auth/api/auth" in auth_url:
+        candidates.append(auth_url.replace("/auth/api/auth", "/api/auth"))
+
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(url)
-        if res.status_code == 200:
-            return res.json().get("members") or []
+            for base in list(dict.fromkeys([c for c in candidates if c])):
+                url = f"{base}/internal/user/{user_id}/firm-members"
+                res = await client.get(url)
+                if res.status_code == 200:
+                    return res.json().get("members") or []
     except Exception as exc:
         logger.warning("[AUTH] firm-members fetch failed for user %s: %s", user_id, exc)
     return [{"user_id": user_id, "email": str(user_id), "username": str(user_id), "auth_type": "—", "role": "—"}]
@@ -187,14 +193,18 @@ async def _fetch_users_bulk(user_ids: List[int]) -> List[Dict[str, Any]]:
     """
     if not user_ids:
         return []
-    auth_url = os.environ.get("AUTH_SERVICE_URL", "http://localhost:5001/api/auth")
+    auth_url = (os.environ.get("AUTH_SERVICE_URL", "http://localhost:5001/api/auth") or "").strip().rstrip("/")
+    candidates = [auth_url]
+    if "/auth/api/auth" in auth_url:
+        candidates.append(auth_url.replace("/auth/api/auth", "/api/auth"))
     ids_str = ",".join(str(x) for x in user_ids)
-    url = f"{auth_url}/internal/users/bulk?ids={ids_str}"
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(url)
-        if res.status_code == 200:
-            return res.json().get("users") or []
+            for base in list(dict.fromkeys([c for c in candidates if c])):
+                url = f"{base}/internal/users/bulk?ids={ids_str}"
+                res = await client.get(url)
+                if res.status_code == 200:
+                    return res.json().get("users") or []
     except Exception as exc:
         logger.warning("[AUTH] users-bulk fetch failed for ids %s: %s", user_ids[:5], exc)
     return []
@@ -384,7 +394,7 @@ async def _fetch_case_context(case_id: str, auth_header: Optional[str]):
                                case_resp.status_code, case_url, case_resp.text[:200])
                 return [], ""
             payload = case_resp.json() or {}
-            case_data = payload.get("case") or {}
+            case_data = payload.get("case") or payload or {}
 
             # Keep case title as fallback search seed
             case_title_fallback = (
@@ -394,43 +404,84 @@ async def _fetch_case_context(case_id: str, auth_header: Optional[str]):
                 or ""
             )
 
-            # --- Step 2: resolve folder name ---
-            folder_name = None
+            # --- Step 2: resolve candidate folder identifiers ---
+            folder_candidates: List[str] = []
             folders = case_data.get("folders") or []
             if folders:
                 folder = (folders or [None])[0] or {}
-                folder_name = folder.get("folder_path") or folder.get("name") or folder.get("originalname")
-            if not folder_name:
-                folder_name = case_title_fallback
-            if not folder_name:
+                for value in (
+                    folder.get("name"),
+                    folder.get("originalname"),
+                    folder.get("folder_path"),
+                ):
+                    if value and str(value).strip():
+                        folder_candidates.append(str(value).strip())
+            for value in (
+                case_data.get("folder_name"),
+                case_data.get("folder"),
+                case_data.get("folder_path"),
+                case_data.get("name"),
+                case_title_fallback,
+            ):
+                if value and str(value).strip():
+                    folder_candidates.append(str(value).strip())
+            folder_candidates = list(dict.fromkeys(folder_candidates))
+            if not folder_candidates:
                 logger.warning("[CASE_CONTEXT] No folder name found for case_id=%s; using title stub", case_id)
                 # Return a minimal stub so CHECK 1 can still proceed
                 if case_title_fallback:
                     return [{"name": "Case", "content": case_title_fallback}], case_title_fallback
                 return [], ""
 
-            # --- Step 3: fetch chunks ---
-            enc_name = quote(str(folder_name), safe='')
-            chunks_url = f"{base_url}/api/files/{enc_name}/chunks"
-            chunks_resp = await client.get(chunks_url, headers=headers)
-            if chunks_resp.status_code != 200:
-                logger.warning("[CASE_CONTEXT] Chunk fetch failed (%s) for folder=%s; using title stub",
-                               chunks_resp.status_code, folder_name)
-                # Fall back to case title so pipeline is not completely blind
-                stub_content = case_title_fallback or folder_name
-                return [{"name": "Case", "content": stub_content}], stub_content
-            chunks_payload = chunks_resp.json() or {}
-            chunks = chunks_payload.get("chunks") or []
-
-            # --- Step 4: optional summary ---
+            # --- Step 3: fetch document payload from supported /files route ---
+            chunks: List[Dict[str, Any]] = []
             summary = ""
-            summary_url = f"{base_url}/api/files/{enc_name}/summary"
-            try:
-                summary_resp = await client.get(summary_url, headers=headers)
-                if summary_resp.status_code == 200:
-                    summary = (summary_resp.json() or {}).get("summary") or ""
-            except Exception as exc:
-                logger.warning("[CASE_CONTEXT] Summary fetch failed: %s", exc)
+            resolved_folder = ""
+            for folder_name in folder_candidates:
+                enc_name = quote(str(folder_name), safe='')
+                files_url = f"{base_url}/api/files/{enc_name}/files"
+                files_resp = await client.get(files_url, headers=headers)
+                if files_resp.status_code == 200:
+                    files_payload = files_resp.json() or {}
+                    files = files_payload.get("files") or files_payload.get("data") or []
+                    for item in files:
+                        text = (
+                            item.get("full_text_content")
+                            or item.get("summary")
+                            or item.get("content")
+                            or item.get("snippet")
+                            or ""
+                        ).strip()
+                        if not text:
+                            continue
+                        chunks.append(
+                            {
+                                "filename": item.get("originalname") or item.get("name") or "document",
+                                "content": text,
+                            }
+                        )
+                        if not summary:
+                            summary = (
+                                item.get("summary")
+                                or item.get("document_summary")
+                                or item.get("abstract")
+                                or ""
+                            ).strip()
+                    if chunks:
+                        resolved_folder = folder_name
+                        break
+                elif files_resp.status_code not in (404,):
+                    logger.warning("[CASE_CONTEXT] Files fetch failed (%s) at %s: %s",
+                                   files_resp.status_code, files_url, files_resp.text[:200])
+            if not chunks:
+                logger.warning("[CASE_CONTEXT] Chunk/doc fetch failed for case_id=%s across folders=%s; using title stub",
+                               case_id, folder_candidates)
+                # Fall back to case title so pipeline is not completely blind
+                stub_content = case_title_fallback or folder_candidates[0]
+                return [{"name": "Case", "content": stub_content}], stub_content
+            if resolved_folder:
+                logger.info("[CASE_CONTEXT] Loaded %d context chunks for case_id=%s via folder=%s",
+                            len(chunks), case_id, resolved_folder)
 
     except Exception as exc:
         logger.warning("[CASE_CONTEXT] Fetch failed: %s", exc)
@@ -913,6 +964,7 @@ async def generate_citation_report(
     case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     search_results: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     use_pipeline: bool = Body(True, embed=True),
+    retrieval_method: str = Body("indiankanoon", embed=True, description="Retrieval mode: 'indiankanoon' | 'web'"),
     perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
     request: Request = None,
 ) -> Dict[str, Any]:
@@ -968,6 +1020,7 @@ async def generate_citation_report(
                     True,
                     case_file_context or [],
                     case_id,
+                    retrieval_method,
                 ),
                 timeout=SYNC_PIPELINE_TIMEOUT_SECONDS,
             )
@@ -1217,19 +1270,42 @@ async def share_report_endpoint(request: Request, report_id: str, body: Dict[str
 
 @app.get("/citation/judgements/{canonical_id}/full-text")
 async def get_judgement_full_text(canonical_id: str) -> Dict[str, Any]:
-    """Return the complete judgment text for a citation (by canonical_id). Used when user clicks 'View complete judgment'."""
+    """Return the complete judgment text for a citation. Checks judgments table first, then ik_document_assets."""
     j = judgement_get(canonical_id)
-    if not j:
-        raise HTTPException(status_code=404, detail="Judgment not found")
-    raw_full = j.get("full_text") or j.get("raw_content") or ""
-    full_text = _html_to_text(raw_full)
-    return {
-        "success": True,
-        "canonical_id": canonical_id,
-        "case_name": j.get("title") or j.get("case_name") or "Judgment",
-        "full_text": full_text,
-        "source_url": j.get("source_url") or j.get("official_source_url") or j.get("import_source_link") or "",
-    }
+    if j:
+        raw_full = j.get("full_text") or j.get("raw_content") or ""
+        return {
+            "success": True,
+            "canonical_id": canonical_id,
+            "case_name": j.get("title") or j.get("case_name") or "Judgment",
+            "full_text": _html_to_text(raw_full),
+            "source_url": j.get("source_url") or j.get("official_source_url") or j.get("import_source_link") or "",
+        }
+
+    # Fall back to ik_document_assets (canonical_id format: "ik:{tid}")
+    ik_tid = canonical_id.removeprefix("ik:").strip() if canonical_id.startswith("ik:") else canonical_id.strip()
+    if ik_tid:
+        from db.client import ik_asset_get
+        asset = ik_asset_get(ik_tid)
+        if asset:
+            raw_resp = asset.get("raw_api_response") or {}
+            raw_content = (raw_resp.get("raw_content")
+                           or _html_to_text(raw_resp.get("doc_html") or "")
+                           or "")
+            if not raw_content:
+                doc_data = raw_resp.get("doc_data") or {}
+                raw_content = _html_to_text(doc_data.get("doc") or "")
+            title = asset.get("title") or (raw_resp.get("doc_data") or {}).get("title") or "Judgment"
+            source_url = asset.get("orig_doc_url") or f"https://indiankanoon.org/doc/{ik_tid}/"
+            return {
+                "success": True,
+                "canonical_id": canonical_id,
+                "case_name": title,
+                "full_text": raw_content,
+                "source_url": source_url,
+            }
+
+    raise HTTPException(status_code=404, detail="Judgment not found")
 
 
 @app.get("/citation/reports/{report_id}")
@@ -1713,6 +1789,7 @@ async def start_citation_report(
     case_id: Optional[str] = Body(None, embed=True),
     case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     use_pipeline: bool = Body(True, embed=True),
+    retrieval_method: str = Body("indiankanoon", embed=True, description="Retrieval mode: 'indiankanoon' | 'web'"),
     perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
 ) -> Dict[str, Any]:
     """Start citation report pipeline in background. Returns run_id immediately for log polling."""
@@ -1752,26 +1829,28 @@ async def start_citation_report(
 
     def _run_bg():
         try:
-            from agents.root_agent import CitationRootAgent, AgentContext
-            context = AgentContext(
-                query=query, user_id=user_id, case_id=case_id,
-                metadata={
-                    "case_file_context": case_file_context or [],
-                    "ingest_external": True,
-                    "run_id": run_id,
-                    "user_id": user_id,
-                    "perspective": perspective,
-                },
+            from pipeline import run_pipeline
+            out = run_pipeline(
+                query=query,
+                user_id=user_id,
+                ingest_external=True,
+                case_file_context=case_file_context or [],
+                case_id=case_id,
+                retrieval_method=str(retrieval_method or "indiankanoon").strip().lower(),
             )
-            root = CitationRootAgent()
-            result = root.run(context)
-            if result.success:
-                report_format = result.data.get("report_format") or {}
+            if out.get("error"):
+                _set_run_state(run_id, {"status": "failed", "report_id": None,
+                                        "report_format": None, "error": out["error"]})
+                try:
+                    pipeline_run_update(run_id, "failed", error_message=str(out["error"] or "Pipeline failed"))
+                except Exception as exc:
+                    logger.warning("[BG_PIPELINE] pipeline_run_update failure failed: %s", exc)
+            else:
+                report_format = out.get("report_format") or {}
                 if isinstance(report_format, dict):
                     report_format = {**report_format, "perspective": perspective if perspective and perspective != "all" else "all"}
                     try:
                         from utils.pricing import inr_to_usd
-
                         usage_rows = usage_get_by_run(run_id)
                         total_inr = sum(float(r.get("cost_inr") or 0) for r in usage_rows)
                         total_usd = sum(float(r.get("cost_usd") or 0) for r in usage_rows)
@@ -1785,41 +1864,27 @@ async def start_citation_report(
                         }
                     except Exception as exc:
                         logger.warning("[START] attach run usage costs failed: %s", exc)
-                    rid_out = result.data.get("report_id")
+                    rid_out = out.get("report_id")
                     if rid_out:
                         try:
                             report_update(rid_out, report_format=report_format)
                         except Exception as exc:
                             logger.warning("[START] report_update after cost attach failed: %s", exc)
-                final_status = (
-                    result.data.get("report_status")
-                    or (report_format.get("status") if isinstance(report_format, dict) else None)
-                    or "completed"
-                )
                 _set_run_state(run_id, {
-                    "status": final_status,
-                    "report_id": result.data.get("report_id"),
+                    "status": "completed",
+                    "report_id": out.get("report_id"),
                     "report_format": report_format,
                     "error": None,
                 })
                 try:
-                    pipeline_run_update(
-                        run_id,
-                        final_status,
-                        report_id=result.data.get("report_id"),
-                        error_message=None,
-                    )
+                    pipeline_run_update(run_id, "completed",
+                                        report_id=out.get("report_id"), error_message=None)
                 except Exception as exc:
                     logger.warning("[BG_PIPELINE] pipeline_run_update success failed: %s", exc)
-            else:
-                _set_run_state(run_id, {"status": "failed", "report_id": None, "report_format": None, "error": result.error})
-                try:
-                    pipeline_run_update(run_id, "failed", error_message=str(result.error or "Pipeline failed"))
-                except Exception as exc:
-                    logger.warning("[BG_PIPELINE] pipeline_run_update failure failed: %s", exc)
         except Exception as exc:
             logger.exception("[BG_PIPELINE] crashed: %s", exc)
-            _set_run_state(run_id, {"status": "failed", "report_id": None, "report_format": None, "error": str(exc)})
+            _set_run_state(run_id, {"status": "failed", "report_id": None,
+                                    "report_format": None, "error": str(exc)})
             try:
                 pipeline_run_update(run_id, "failed", error_message=str(exc))
             except Exception as e2:

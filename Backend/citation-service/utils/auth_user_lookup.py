@@ -19,6 +19,15 @@ def _auth_base_url() -> str:
     return (os.environ.get("AUTH_SERVICE_URL") or "").strip().rstrip("/")
 
 
+def _auth_base_candidates() -> list[str]:
+    base = _auth_base_url()
+    candidates = [base] if base else []
+    if base and "/auth/api/auth" in base:
+        candidates.append(base.replace("/auth/api/auth", "/api/auth"))
+    # Preserve order while de-duping
+    return list(dict.fromkeys([c for c in candidates if c]))
+
+
 def _pick_display_name(user: dict) -> str:
     for key in ("full_name", "display_name", "name", "username", "email"):
         v = user.get(key)
@@ -38,8 +47,8 @@ def resolve_user_display_and_username(user_id: str) -> Tuple[str, str]:
     if key in _cache:
         return _cache[key]
 
-    base = _auth_base_url()
-    if not base:
+    bases = _auth_base_candidates()
+    if not bases:
         _cache[key] = ("", "")
         return "", ""
 
@@ -49,7 +58,6 @@ def resolve_user_display_and_username(user_id: str) -> Tuple[str, str]:
         _cache[key] = ("", "")
         return "", ""
 
-    url = f"{base}/internal/users/bulk?ids={uid_int}"
     headers = {}
     token = (os.environ.get("AUTH_SERVICE_INTERNAL_TOKEN") or os.environ.get("INTERNAL_SERVICE_TOKEN") or "").strip()
     if token:
@@ -60,9 +68,14 @@ def resolve_user_display_and_username(user_id: str) -> Tuple[str, str]:
 
         timeout = float(os.environ.get("AUTH_SERVICE_TIMEOUT_SECONDS", "3") or "3")
         with httpx.Client(timeout=timeout) as client:
-            res = client.get(url, headers=headers)
-        if res.status_code != 200:
-            logger.debug("[auth_user_lookup] HTTP %s for user %s", res.status_code, key)
+            res = None
+            for base in bases:
+                url = f"{base}/internal/users/bulk?ids={uid_int}"
+                res = client.get(url, headers=headers)
+                if res.status_code == 200:
+                    break
+        if not res or res.status_code != 200:
+            logger.debug("[auth_user_lookup] HTTP %s for user %s", getattr(res, "status_code", None), key)
             _cache[key] = ("", "")
             return "", ""
         users = res.json().get("users") or []

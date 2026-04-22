@@ -24,16 +24,25 @@ def forward_to_claude(body: Dict[str, Any]) -> Dict[str, Any]:
     if not api_key:
         raise ValueError("CLAUDE_API_KEY not set")
 
+    body = dict(body or {})
+    # Optional beta header support (e.g., web search tool)
+    beta = body.pop("anthropic_beta", None)
     data = json.dumps(body).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    if beta:
+        if isinstance(beta, (list, tuple)):
+            headers["anthropic-beta"] = ",".join(str(x).strip() for x in beta if str(x).strip())
+        else:
+            headers["anthropic-beta"] = str(beta).strip()
     req = urllib.request.Request(
         ANTHROPIC_URL,
         data=data,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:

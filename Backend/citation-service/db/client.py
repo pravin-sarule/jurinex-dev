@@ -206,6 +206,115 @@ def get_query_embedding(query: str) -> List[float]:
     return _get_qdrant_query_embedding(query)
 
 
+def judgement_search_semantic(
+    query: str,
+    limit: int = 10,
+    case_state: str = "",
+    approved_only: bool = True,
+    exclude_low_hierarchy: bool = True,
+    qdrant_collection: str = "legal_embeddings",
+) -> List[Dict[str, Any]]:
+    """
+    Semantic-only judgment retrieval for watchdog hybrid local search.
+
+    Uses Gemini query embedding + Qdrant ANN lookup, then hydrates canonical_ids
+    from PostgreSQL/ES via judgements_fetch_by_canonical_ids().
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+
+    qdr = get_qdrant_client()
+    if not qdr:
+        logger.info("[QDRANT] Semantic search skipped: client unavailable")
+        return []
+
+    vector = get_query_embedding(text)
+    if not vector:
+        logger.info("[QDRANT] Semantic search skipped: embedding empty for %r", text[:80])
+        return []
+
+    collection = (qdrant_collection or "").strip() or "legal_embeddings"
+    fetch_limit = max(int(limit or 10), 1)
+    points: List[Any] = []
+    try:
+        try:
+            qp = qdr.query_points(
+                collection_name=collection,
+                query=vector,
+                limit=fetch_limit,
+                with_payload=True,
+            )
+            points = list(getattr(qp, "points", None) or [])
+        except Exception:
+            points = qdr.search(
+                collection_name=collection,
+                query_vector=vector,
+                limit=fetch_limit,
+                with_payload=True,
+            ) or []
+    except Exception as exc:
+        logger.warning("[QDRANT] Semantic query failed for collection=%s: %s", collection, exc)
+        return []
+
+    if not points:
+        return []
+
+    canonical_ids: List[str] = []
+    score_by_cid: Dict[str, float] = {}
+    for p in points:
+        payload = getattr(p, "payload", None) or {}
+        cid = str(payload.get("canonical_id") or "").strip()
+        if not cid:
+            continue
+        score = float(getattr(p, "score", 0.0) or 0.0)
+        if cid not in score_by_cid:
+            canonical_ids.append(cid)
+            score_by_cid[cid] = score
+        else:
+            score_by_cid[cid] = max(score_by_cid[cid], score)
+
+    if not canonical_ids:
+        return []
+
+    def _rank_row(court_value: Any) -> int:
+        c = str(court_value or "").strip().lower()
+        if "supreme" in c:
+            return 300
+        if "high" in c:
+            score = 200
+            st = str(case_state or "").strip().lower()
+            if st and st in c:
+                score += 25
+            if st == "maharashtra" and "bombay high court" in c:
+                score += 25
+            return score
+        return 100
+
+    hydrated = judgements_fetch_by_canonical_ids(
+        canonical_ids=canonical_ids,
+        approved_only=approved_only,
+        exclude_low_hierarchy=exclude_low_hierarchy,
+    )
+    by_cid = {str(r.get("canonical_id") or r.get("id") or "").strip(): r for r in hydrated}
+
+    out: List[Dict[str, Any]] = []
+    for cid in canonical_ids:
+        row = by_cid.get(cid)
+        if not row:
+            continue
+        s = float(score_by_cid.get(cid, 0.0) or 0.0)
+        row["_semantic_score"] = s
+        row["_similarity_score"] = s
+        row["_from_qdrant"] = True
+        row["_source"] = "local"
+        row["_local_rank"] = _rank_row(row.get("court") or row.get("court_code"))
+        out.append(row)
+
+    out.sort(key=lambda r: (float(r.get("_semantic_score", 0.0) or 0.0), int(r.get("_local_rank", 0) or 0)), reverse=True)
+    return out[:fetch_limit]
+
+
 def _judgment_citation_data_has_analysis_report(cd: Any) -> bool:
     """True when citation_data already carries a persisted Clerk / analysis payload."""
     if not isinstance(cd, dict):

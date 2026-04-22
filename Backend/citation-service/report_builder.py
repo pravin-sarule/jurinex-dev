@@ -2347,6 +2347,7 @@ def _judgement_to_citation(
         ) else "",
         "isProvisionMatch":         bool(j.get("is_provision_match")),
         "similarityScore":          float(j.get("_similarity_score") or 0.0),
+        "keywordScore":             int(j.get("_keyword_score") or 0),
         # Keep sourceType in strict report buckets for UI consistency.
         # Allowed values: local, indian_kanoon, google.
         "sourceType":               (
@@ -2861,13 +2862,18 @@ def build_report_from_judgements(
 
     _indexed = list(enumerate(citations))
 
-    def _dim_sort_key(t: Tuple[int, Dict[str, Any]]) -> Tuple[int, Any, int, int]:
+    def _dim_sort_key(t: Tuple[int, Dict[str, Any]]) -> Tuple[int, int, Any, int, int]:
         idx, c = t
         did = c.get("dimensionId")
         admin_first = 0 if _is_local_admin_st(c) else 1
         if did is None:
-            return (1, 0, admin_first, idx)
-        return (0, did, admin_first, idx)
+            return (1, 0, 0, admin_first, idx)
+        # Normalize mixed dimensionId types (int/str) so Python sort never compares
+        # incomparable values like str < int.
+        did_str = str(did).strip()
+        if did_str.isdigit():
+            return (0, 0, int(did_str), admin_first, idx)
+        return (0, 1, did_str, admin_first, idx)
 
     _indexed.sort(key=_dim_sort_key)
     citations = [t[1] for t in _indexed]

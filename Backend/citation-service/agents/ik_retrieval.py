@@ -3,7 +3,7 @@ agents/ik_retrieval.py
 
 Wide-net IK retrieval using 4 strategies in parallel.
 Goal: 50-100 raw candidates with text fetched.
-IK's job is RECALL, not precision. Precision happens in HoldingFilter.
+IK's job is RECALL, not precision. Precision happens in downstream ranking.
 
 The 4 strategies:
   A. Outcome-targeted queries (not section queries)
