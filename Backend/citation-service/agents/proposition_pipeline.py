@@ -912,7 +912,7 @@ Rules:
             "groundingConfidence": confidence,
             "groundingReason": reason,
         }
-        if relevant and confidence >= 0.55:
+        if relevant and confidence >= float(os.environ.get("CITATION_GROUNDING_MIN_CONF", "0.45")):
             return validated
         return None
     except Exception as exc:
@@ -2778,9 +2778,26 @@ def run_proposition_pipeline(
                             f"Grounding rejected all candidates; using {len(strict_fallback)} strict scored fallback match(es)")
                     scored = strict_fallback
                 else:
-                    _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
-                            "Grounding validation rejected all candidates; returning no citations rather than weak matches")
-                    scored = []
+                    # Soft mode (default): rather than hand the user 0 citations, keep
+                    # the top-5 Claude-scored results tagged as unverified. Flip
+                    # CITATION_GROUNDING_REQUIRED=strict to restore the old hard-zero behavior.
+                    mode = (os.environ.get("CITATION_GROUNDING_REQUIRED", "soft") or "soft").strip().lower()
+                    if mode == "strict":
+                        _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
+                                "Grounding rejected all candidates; strict mode returning 0 citations")
+                        scored = []
+                    else:
+                        soft = sorted(
+                            scored,
+                            key=lambda r: float(r.get("relevanceScore") or 0.0),
+                            reverse=True,
+                        )[:5]
+                        for r in soft:
+                            r["groundingValidated"] = False
+                            r["groundingReason"] = r.get("groundingReason") or "unverified — grounding rejected; Claude top-5 kept"
+                        _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
+                                f"Grounding rejected all; soft fallback keeping top {len(soft)} Claude-scored results (unverified)")
+                        scored = soft
             else:
                 _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
                         "Grounding unavailable; keeping scored results")
@@ -2790,9 +2807,15 @@ def run_proposition_pipeline(
         scored = semantic_rerank_survivors(scored, case_context, legal_points, run_id)
 
     if not scored:
-        if _grounding_available():
+        # Last-chance safety net: never hand the user an empty report when we
+        # actually retrieved judgments. Prefer unranked raw results over nothing.
+        if enriched:
             _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
-                    "No judgments survived strict validation; returning empty result set")
+                    f"All validation stages returned 0; falling back to {min(len(enriched), 15)} raw enriched results")
+            scored = _results_to_citations(enriched[:15], legal_points)
+        else:
+            _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
+                    "No enriched results to fall back to; returning empty report")
             return _build_report_format(
                 [],
                 query,
@@ -2809,9 +2832,6 @@ def run_proposition_pipeline(
                 },
                 research_plan=research_plan,
             )
-        _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
-                "Deep validation returned 0 and grounding unavailable — using raw results without scoring")
-        scored = _results_to_citations(enriched[:15], legal_points)
 
     _TOP_N = int(os.environ.get("CITATION_TOP_N", "12"))
     # Guarantee source diversity: always include top N from local DB and IK
