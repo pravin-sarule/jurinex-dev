@@ -2779,24 +2779,31 @@ def run_proposition_pipeline(
                     scored = strict_fallback
                 else:
                     # Soft mode (default): rather than hand the user 0 citations, keep
-                    # the top-5 Claude-scored results tagged as unverified. Flip
-                    # CITATION_GROUNDING_REQUIRED=strict to restore the old hard-zero behavior.
+                    # Claude's top picks tagged as unverified — but require a real
+                    # relevance floor AND at least one match signal. Floors prevent
+                    # low-quality threshold=6 matches from sneaking through.
                     mode = (os.environ.get("CITATION_GROUNDING_REQUIRED", "soft") or "soft").strip().lower()
                     if mode == "strict":
                         _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
                                 "Grounding rejected all candidates; strict mode returning 0 citations")
                         scored = []
                     else:
-                        soft = sorted(
-                            scored,
-                            key=lambda r: float(r.get("relevanceScore") or 0.0),
-                            reverse=True,
-                        )[:5]
+                        soft = [
+                            r for r in scored
+                            if float(r.get("relevanceScore") or 0.0) >= 0.7
+                            and (bool(r.get("factual_match")) or bool(r.get("legal_match")))
+                        ]
+                        soft.sort(key=lambda r: float(r.get("relevanceScore") or 0.0), reverse=True)
+                        soft = soft[:5]
                         for r in soft:
                             r["groundingValidated"] = False
-                            r["groundingReason"] = r.get("groundingReason") or "unverified — grounding rejected; Claude top-5 kept"
-                        _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
-                                f"Grounding rejected all; soft fallback keeping top {len(soft)} Claude-scored results (unverified)")
+                            r["groundingReason"] = r.get("groundingReason") or "unverified — grounding rejected; Claude top picks kept"
+                        if soft:
+                            _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
+                                    f"Grounding rejected all; soft fallback keeping top {len(soft)} Claude-scored (relevance>=0.7 with match signal)")
+                        else:
+                            _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
+                                    "Grounding rejected all and no Claude result passed 0.7+match floor — returning 0 citations")
                         scored = soft
             else:
                 _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
@@ -2807,31 +2814,28 @@ def run_proposition_pipeline(
         scored = semantic_rerank_survivors(scored, case_context, legal_points, run_id)
 
     if not scored:
-        # Last-chance safety net: never hand the user an empty report when we
-        # actually retrieved judgments. Prefer unranked raw results over nothing.
-        if enriched:
-            _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
-                    f"All validation stages returned 0; falling back to {min(len(enriched), 15)} raw enriched results")
-            scored = _results_to_citations(enriched[:15], legal_points)
-        else:
-            _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
-                    "No enriched results to fall back to; returning empty report")
-            return _build_report_format(
-                [],
-                query,
-                legal_points,
-                user_id,
-                case_id,
-                run_id,
-                perspective,
-                dimensions_metadata=_build_query_dimensions(ik_queries, raw_ik, []),
-                search_keywords_by_route={
-                    "local": list(ik_queries),
-                    "indian_kanoon": list(ik_queries),
-                    "google": list(ik_queries[:3]) if raw_google else [],
-                },
-                research_plan=research_plan,
-            )
+        # Return an empty report rather than dumping unscored raw results — raw IK
+        # keyword hits are mostly irrelevant (that's the problem we're solving).
+        # If users need a fallback, they can lower CITATION_SCORE_FLOOR or re-run.
+        _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
+                "All validation stages returned 0 relevant citations; returning empty report "
+                "(unscored raw fallback disabled — would degrade relevance)")
+        return _build_report_format(
+            [],
+            query,
+            legal_points,
+            user_id,
+            case_id,
+            run_id,
+            perspective,
+            dimensions_metadata=_build_query_dimensions(ik_queries, raw_ik, []),
+            search_keywords_by_route={
+                "local": list(ik_queries),
+                "indian_kanoon": list(ik_queries),
+                "google": list(ik_queries[:3]) if raw_google else [],
+            },
+            research_plan=research_plan,
+        )
 
     _TOP_N = int(os.environ.get("CITATION_TOP_N", "12"))
     # Guarantee source diversity: always include top N from local DB and IK
