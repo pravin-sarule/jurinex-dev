@@ -1975,14 +1975,36 @@ specific co-operative bank loan renewal dispute unless it decides the exact same
     score = int(v.get("relevance_score", 0))
     factual_match = bool(v.get("factual_match", False))
     legal_match   = bool(v.get("legal_issue_match", False))
+    which_issue   = str(v.get("which_issue") or "").strip()
 
     if score < score_threshold:
         return None
-    # Borderline scores (7–8) must carry at least one real match signal.
-    # (AND-match here rejected too aggressively — see 2025 hotfix.)
-    if score_threshold <= score < 9:
+
+    # Consistency gates. Claude's own rubric says:
+    #   6  = tangential; same statute but different facts/question
+    #   7  = related principle AND ≥1 factual overlap
+    #   8–9 = very similar facts AND same legal question
+    # If Claude gives a high score but contradicts the rubric, it's over-scoring.
+    # Reject these "half-match" false positives.
+    if score == 6:
+        # Only reachable via threshold=6 fallback. Require ≥1 match signal AND
+        # a named which_issue so we don't ship raw keyword hits.
         if not (factual_match or legal_match):
             return None
+        if len(which_issue) < 8:
+            return None
+    elif score == 7:
+        # Score-7 is the most common false-positive band; tighten hardest.
+        # Require BOTH signals AND a named which_issue.
+        if not (factual_match and legal_match):
+            return None
+        if len(which_issue) < 8:
+            return None
+    elif score == 8:
+        # Score-8 already means "very similar"; allow OR-match.
+        if not (factual_match or legal_match):
+            return None
+    # score >= 9 → trust Claude.
 
     ratio_points = v.get("ratio_points", [])
     ratio_text = "\n".join(f"{i+1}. {pt}" for i, pt in enumerate(ratio_points) if pt) if ratio_points else ""
