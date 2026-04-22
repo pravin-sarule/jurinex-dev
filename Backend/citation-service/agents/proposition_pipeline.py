@@ -1922,10 +1922,10 @@ specific co-operative bank loan renewal dispute unless it decides the exact same
 
     if score < score_threshold:
         return None
-    # Balanced strictness: scores 7–8 must have BOTH factual AND legal match;
-    # only landmark scores (≥ 9) may pass with just one signal.
+    # Borderline scores (7–8) must carry at least one real match signal.
+    # (AND-match here rejected too aggressively — see 2025 hotfix.)
     if score_threshold <= score < 9:
-        if not (factual_match and legal_match):
+        if not (factual_match or legal_match):
             return None
 
     ratio_points = v.get("ratio_points", [])
@@ -2111,6 +2111,16 @@ def prefilter_candidates(
             kept = _prefilter_with_claude(inspect, legal_points, research_plan, run_id, user_id)
     except Exception as exc:
         logger.warning("[PROP] prefilter_candidates failed (%s) — falling back to original list", exc)
+        return candidates
+
+    # Fail-safe: if the filter killed every non-curated candidate it likely has bad
+    # signal for this case. Keep the original list and let Claude scoring decide.
+    if inspect and not kept and not curated:
+        _db_log(
+            run_id, "PropositionPipeline", "prefilter", "WARNING",
+            f"Prefilter ({mode}) rejected all {len(inspect)} candidates — bypassing filter",
+            {"mode": mode, "before": len(inspect), "after_kept": 0, "bypassed": True},
+        )
         return candidates
 
     final = curated + kept + pass_through
@@ -2728,13 +2738,20 @@ def run_proposition_pipeline(
         enriched, legal_points, research_plan, run_id, user_id,
     )
 
-    # 5. Deep validate + score (threshold 7, no relaxation — balanced strictness)
+    # 5. Deep validate + score — try threshold 7 first, then one-step relax to 6.
+    # (We deliberately do NOT relax further to 5; 6 keeps "related principle + one
+    # factual overlap" as a minimum so citations stay usefully on-point.)
     scored = deep_validate_and_score(legal_points, prefiltered, run_id, user_id,
                                      score_threshold=7, research_plan=research_plan)
 
     if not scored:
         _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
-                "Score ≥ 7 gave 0 — not relaxing (balanced mode); empty-result path will run")
+                "Score ≥ 7 gave 0 — relaxing once to ≥ 6")
+        scored = deep_validate_and_score(legal_points, prefiltered, run_id, user_id,
+                                         score_threshold=6, research_plan=research_plan)
+        if not scored:
+            _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
+                    "Score ≥ 6 also gave 0 — continuing to empty-result path")
 
     if scored:
         grounding_pool = [
