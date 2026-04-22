@@ -63,13 +63,22 @@ def _stable_text(value: Any) -> str:
 # ─── Claude helper ────────────────────────────────────────────────────────────
 
 def _repair_json(text: str) -> str:
-    """Best-effort repair of common Claude JSON formatting errors."""
+    """Best-effort repair of common Claude/Gemini JSON formatting errors."""
     # Remove trailing commas before } or ]
     text = re.sub(r",\s*([}\]])", r"\1", text)
     # Fix missing comma between } and { (objects in array)
     text = re.sub(r"}\s*\n\s*{", "},{", text)
     # Fix missing comma between } and " (field after object)
     text = re.sub(r"}\s*\n\s*\"", '},\n"', text)
+    # Fix missing comma between a primitive value and the next quoted key
+    # e.g. "relevant": true \n "confidence": 0.8  →  "relevant": true,\n "confidence": 0.8
+    text = re.sub(
+        r'((?:true|false|null|-?\d+(?:\.\d+)?|"(?:[^"\\]|\\.)*"))\s*\n\s*"',
+        r'\1,\n"',
+        text,
+    )
+    # Fix missing comma between a closing bracket ] and next quoted key
+    text = re.sub(r'\]\s*\n\s*"', '],\n"', text)
     # Truncate at last complete object if JSON is cut off
     for closer in ("}\n]", "}]", "}\n  ]", "}  ]"):
         idx = text.rfind(closer)
@@ -85,6 +94,31 @@ def _repair_json(text: str) -> str:
             except Exception:
                 pass
     return text
+
+
+def _extract_grounding_fields(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Last-resort regex extraction of relevant/confidence/reason when JSON parsing
+    of Gemini grounding output fails entirely. Returns None if nothing matched.
+    """
+    if not text:
+        return None
+    rel_m  = re.search(r'"relevant"\s*:\s*(true|false)', text, re.I)
+    conf_m = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+    reason_m = re.search(r'"reason"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    if not (rel_m or conf_m):
+        return None
+    out: Dict[str, Any] = {}
+    if rel_m:
+        out["relevant"] = rel_m.group(1).lower() == "true"
+    if conf_m:
+        try:
+            out["confidence"] = float(conf_m.group(1))
+        except Exception:
+            out["confidence"] = 0.0
+    if reason_m:
+        out["reason"] = reason_m.group(1)[:240]
+    return out
 
 
 def _claude_json(
@@ -896,10 +930,31 @@ Rules:
         m = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if m:
             cleaned = m.group(0)
+        parsed: Optional[Dict[str, Any]] = None
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError:
-            parsed = json.loads(_repair_json(cleaned))
+            try:
+                parsed = json.loads(_repair_json(cleaned))
+            except Exception:
+                # Final fallback: regex-extract the three fields we need.
+                parsed = _extract_grounding_fields(cleaned)
+                if parsed is None:
+                    # Gemini produced something we truly can't read. Don't silently
+                    # drop the candidate — mark as unparseable and give it benefit
+                    # of the doubt (confidence 0.5, relevant=True so the downstream
+                    # confidence gate decides). Better than treating "unparseable"
+                    # as "Gemini said no".
+                    logger.warning(
+                        "[PROP] Grounding JSON unparseable for %r (len=%d); keeping as unverified",
+                        source_url[:100], len(cleaned or ""),
+                    )
+                    return {
+                        **item,
+                        "groundingValidated": True,
+                        "groundingConfidence": 0.5,
+                        "groundingReason": "unverified — grounding output unparseable",
+                    }
         if not isinstance(parsed, dict):
             return None
 
