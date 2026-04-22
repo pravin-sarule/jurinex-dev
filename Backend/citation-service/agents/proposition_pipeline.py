@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -457,6 +458,7 @@ def _fallback_research_plan(
             "Keep judgments only if they match at least one controlling statute or doctrine and one fact pattern.",
             "Reject judgments that match only court level, generic writ language, or unrelated banking disputes.",
         ],
+        "reject_rules": [],
     }
 
 
@@ -503,8 +505,17 @@ Return ONLY this JSON:
   "validation_focus": [
     "what must be present in a relevant judgment",
     "what should be rejected as irrelevant"
+  ],
+  "reject_rules": [
+    "Reject if holding is on NI Act s.138 but our issue is SARFAESI s.13(2)",
+    "Reject if parties/industry/transaction-type do not match the case at all",
+    "Reject if judgment only mentions the statute in passing without a holding on it"
   ]
-}}"""
+}}
+
+`reject_rules` must be 3–6 short declarative sentences beginning with "Reject if ...".
+They should encode concrete disqualifiers specific to THIS case (statute vs different statute,
+correct fact pattern vs unrelated one), not generic advice."""
 
     result = _claude_json(
         system,
@@ -525,11 +536,14 @@ Return ONLY this JSON:
             "fact_patterns": list(result.get("fact_patterns") or fallback["fact_patterns"])[:8],
             "court_hint": str(result.get("court_hint") or fallback["court_hint"]).strip(),
             "validation_focus": list(result.get("validation_focus") or fallback["validation_focus"])[:4],
+            "reject_rules": list(result.get("reject_rules") or fallback.get("reject_rules") or [])[:6],
         }
 
     _db_log(run_id, "ResearchPlanner", "plan", "INFO",
             f"Research plan ready with {len(result.get('statutes', []))} statutes, "
-            f"{len(result.get('doctrines', []))} doctrines, {len(result.get('fact_patterns', []))} fact patterns",
+            f"{len(result.get('doctrines', []))} doctrines, "
+            f"{len(result.get('fact_patterns', []))} fact patterns, "
+            f"{len(result.get('reject_rules', []))} reject rules",
             {"research_plan": result})
     logger.info("[PROP] Plan core issue: %s", str(result.get("core_issue") or "")[:140])
     return result
@@ -543,7 +557,7 @@ def _plan_terms(research_plan: Optional[Dict[str, Any]]) -> List[str]:
         value = research_plan.get(key)
         if value:
             parts.append(str(value))
-    for key in ("statutes", "doctrines", "fact_patterns", "validation_focus"):
+    for key in ("statutes", "doctrines", "fact_patterns", "validation_focus", "reject_rules"):
         values = research_plan.get(key) or []
         if isinstance(values, list):
             parts.extend(str(v) for v in values if v)
@@ -812,6 +826,7 @@ def _google_validate_candidate(
     plan_doctrines = list((research_plan or {}).get("doctrines") or [])[:6]
     plan_fact_patterns = list((research_plan or {}).get("fact_patterns") or [])[:6]
     plan_validation_focus = list((research_plan or {}).get("validation_focus") or [])[:4]
+    plan_reject_rules = list((research_plan or {}).get("reject_rules") or [])[:6]
 
     prompt = f"""You are validating whether a judgment is actually relevant to a legal research query.
 Use Google grounding to verify the source URL and surrounding web evidence if needed.
@@ -828,6 +843,7 @@ Statutes: {plan_statutes}
 Doctrines: {plan_doctrines}
 Fact patterns: {plan_fact_patterns}
 Validation focus: {plan_validation_focus}
+Reject rules (hard): {plan_reject_rules}
 
 Candidate judgment:
 Title: {title}
@@ -844,6 +860,7 @@ Return ONLY strict JSON:
 Rules:
 - Mark relevant=true only if the judgment appears to address at least one of the case issues in a meaningful legal way.
 - It should also align with the research plan on statute/doctrine and on factual pattern, not just on court level.
+- If ANY reject rule above applies to this candidate, mark relevant=false.
 - If the URL/title looks mismatched, irrelevant, or only loosely related, mark relevant=false.
 - Confidence must be between 0 and 1.
 """
@@ -1342,6 +1359,97 @@ def search_local_parallel(
     return deduped
 
 
+def search_local_semantic(
+    case_context: str,
+    query: str,
+    run_id: str,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Qdrant-backed semantic local search. Fails open (returns []) if Qdrant is
+    unavailable or empty. Hydrated rows reuse `_pg_row_to_local_result` so the
+    result shape matches `search_local_parallel`.
+    """
+    text_query = ((case_context or "")[:4000] + " " + (query or "")[:400]).strip()
+    if not text_query:
+        return []
+
+    try:
+        from db.client import judgement_search_semantic
+    except Exception as exc:
+        logger.warning("[PROP] judgement_search_semantic unavailable: %s", exc)
+        return []
+
+    collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2")
+    try:
+        rows = judgement_search_semantic(
+            text_query,
+            limit=max(int(limit), 1),
+            qdrant_collection=collection,
+        ) or []
+    except Exception as exc:
+        logger.warning("[PROP] Semantic local search failed (collection=%s): %s",
+                       collection, exc)
+        return []
+
+    if not rows:
+        _db_log(run_id, "SearchAgent", "search_local_semantic", "INFO",
+                "Qdrant empty/no matches — semantic local disabled for this run")
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for r in rows:
+        norm = _pg_row_to_local_result(r, query, es_score=0.0)
+        if not norm:
+            continue
+        sem = float(r.get("_semantic_score") or r.get("_similarity_score") or 0.0)
+        norm["_semantic_score"] = sem
+        norm["_from_qdrant"] = True
+        normalized.append(norm)
+
+    for item in normalized:
+        if not item.get("full_text"):
+            try:
+                enriched = _enrich_full_text(item)
+                if enriched:
+                    item.update(enriched)
+            except Exception as exc:
+                logger.debug("[PROP] semantic enrich failed for %s: %s",
+                             item.get("canonical_id"), exc)
+
+    _db_log(run_id, "SearchAgent", "search_local_semantic", "INFO",
+            f"🧭 Local semantic: {len(normalized)} result(s)",
+            {"result_count": len(normalized)})
+    logger.info("[PROP] Local semantic search — %d result(s)", len(normalized))
+    return normalized
+
+
+def merge_local(
+    kw_results: List[Dict[str, Any]],
+    sem_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Dedup keyword + semantic local results by canonical_id/tid/url."""
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    for r in list(kw_results) + list(sem_results):
+        key = r.get("canonical_id") or r.get("tid") or r.get("url") or ""
+        if key and key in seen:
+            # Preserve any semantic score from the other source if we skip this one.
+            for existing in merged:
+                ex_key = existing.get("canonical_id") or existing.get("tid") or existing.get("url") or ""
+                if ex_key == key:
+                    sem = float(r.get("_semantic_score") or 0.0)
+                    if sem and sem > float(existing.get("_semantic_score") or 0.0):
+                        existing["_semantic_score"] = sem
+                        existing["_from_qdrant"] = True
+                    break
+            continue
+        if key:
+            seen.add(key)
+        merged.append(r)
+    return merged
+
+
 # ─── Step 3c: Google grounding search ─────────────────────────────────────────
 
 _IK_TID_RE = re.compile(r"indiankanoon\.org/doc/(\d+)")
@@ -1722,6 +1830,7 @@ def _score_one(
     research_plan: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Claude scores one judgment 1–10, extracts ratio/headnote/excerpt. Returns None if below threshold."""
+    _FT_WIN = int(os.environ.get("CITATION_FULLTEXT_WINDOW", "8000"))
     full_text = item.get("full_text") or item.get("snippet", "")
     if not full_text or len(full_text) < 50:
         return None
@@ -1738,13 +1847,15 @@ def _score_one(
     plan_statutes      = list((research_plan or {}).get("statutes") or [])[:6]
     plan_fact_patterns = list((research_plan or {}).get("fact_patterns") or [])[:6]
     plan_validation    = list((research_plan or {}).get("validation_focus") or [])[:4]
+    plan_reject_rules  = list((research_plan or {}).get("reject_rules") or [])[:6]
     plan_block = ""
     if research_plan:
         plan_block = f"""
 Research validation criteria:
 Controlling statutes/doctrines: {plan_statutes}
 Required fact patterns: {plan_fact_patterns}
-Reject if: {plan_validation}
+Validation focus: {plan_validation}
+Reject rules (hard): {plan_reject_rules}
 """
 
     system = (
@@ -1752,7 +1863,10 @@ Reject if: {plan_validation}
         "Evaluate whether a judgment is relevant to the SPECIFIC case described below — "
         "not just the broad area of law. A judgment that mentions the same statute but "
         "involves unrelated facts, different parties, or a different legal question "
-        "must receive a LOW score (≤ 5)."
+        "must receive a LOW score (≤ 5). "
+        "Scores 7–8 REQUIRE both factual_match AND legal_issue_match to be true. "
+        "If the judgment discusses the same statute but in a factually unrelated "
+        "transaction, score 1–4."
     )
     user = f"""My case legal issues:
 {prop_text[:600]}
@@ -1764,8 +1878,8 @@ Judgment to evaluate:
 Title: {item.get('title', '')}
 URL: {item.get('url', '')}
 {headnotes_block}
-Full text (first 4000 chars):
-{full_text[:4000]}
+Full text (first {_FT_WIN} chars):
+{full_text[:_FT_WIN]}
 
 Evaluate this judgment and extract its key legal points.
 
@@ -1808,9 +1922,11 @@ specific co-operative bank loan renewal dispute unless it decides the exact same
 
     if score < score_threshold:
         return None
-    # Borderline scores (at or just above threshold) must have at least one real match signal
-    if score < 9 and not (factual_match or legal_match):
-        return None
+    # Balanced strictness: scores 7–8 must have BOTH factual AND legal match;
+    # only landmark scores (≥ 9) may pass with just one signal.
+    if score_threshold <= score < 9:
+        if not (factual_match and legal_match):
+            return None
 
     ratio_points = v.get("ratio_points", [])
     ratio_text = "\n".join(f"{i+1}. {pt}" for i, pt in enumerate(ratio_points) if pt) if ratio_points else ""
@@ -1838,6 +1954,173 @@ specific co-operative bank loan renewal dispute unless it decides the exact same
         "canonical_id":    (item.get("canonical_id") or
                            (f"ik:{item['tid']}" if item.get("tid") else "")),
     }
+
+
+def _prefilter_with_gemini(
+    candidates: List[Dict[str, Any]],
+    legal_points: Dict[str, Any],
+    research_plan: Optional[Dict[str, Any]],
+    run_id: Optional[str],
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """Per-candidate Gemini grounding pre-filter, parallelised (no 2s gap — this is pre-pass)."""
+    kept: List[Dict[str, Any]] = []
+    workers = max(1, int(os.environ.get("CITATION_PREFILTER_WORKERS", "4")))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        fut_map = {
+            pool.submit(
+                _google_validate_candidate,
+                item, legal_points, research_plan, run_id, user_id,
+            ): item
+            for item in candidates
+        }
+        for fut in as_completed(fut_map):
+            item = fut_map[fut]
+            try:
+                res = fut.result(timeout=45)
+            except Exception as exc:
+                logger.debug("[PROP] prefilter candidate failed: %s", exc)
+                # Fail-open per-candidate: keep on error
+                kept.append(item)
+                continue
+            if res is None:
+                # Gemini unavailable or malformed — keep (fail-open)
+                kept.append(item)
+                continue
+            relevant = bool(res.get("groundingValidated"))
+            confidence = float(res.get("groundingConfidence") or 0.0)
+            if relevant and confidence >= 0.45:
+                kept.append(res)
+    return kept
+
+
+def _prefilter_with_claude(
+    candidates: List[Dict[str, Any]],
+    legal_points: Dict[str, Any],
+    research_plan: Optional[Dict[str, Any]],
+    run_id: Optional[str],
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """Cheap Claude batch pre-filter: 10 candidates per call, title + snippet only."""
+    issues = legal_points.get("issues", [legal_points.get("primary_proposition", {})])
+    issue_text = " | ".join(
+        str(iss.get("proposition") or iss.get("issue_title") or "").strip()
+        for iss in issues[:4]
+        if (iss.get("proposition") or iss.get("issue_title"))
+    )[:700]
+    plan_statutes      = list((research_plan or {}).get("statutes") or [])[:6]
+    plan_fact_patterns = list((research_plan or {}).get("fact_patterns") or [])[:6]
+    plan_reject_rules  = list((research_plan or {}).get("reject_rules") or [])[:6]
+
+    kept: List[Dict[str, Any]] = []
+    system = (
+        "You are a senior Indian legal researcher. For each candidate judgment below, "
+        "decide whether it is LIKELY relevant to the described case. Apply the reject "
+        "rules strictly. Be conservative — when in doubt, mark likely_relevant=false. "
+        "Return ONLY valid JSON."
+    )
+    batch_size = 10
+    for start in range(0, len(candidates), batch_size):
+        batch = candidates[start:start + batch_size]
+        items_block = "\n".join(
+            f"- id={(it.get('tid') or it.get('canonical_id') or it.get('url') or str(start+i))} | "
+            f"title={str(it.get('title') or '')[:200]} | "
+            f"snippet={str(it.get('snippet') or it.get('headnotes') or '')[:500]}"
+            for i, it in enumerate(batch)
+        )
+        user = f"""Case issues:
+{issue_text}
+
+Controlling statutes: {plan_statutes}
+Required fact patterns: {plan_fact_patterns}
+Reject rules (hard): {plan_reject_rules}
+
+Candidates:
+{items_block}
+
+Return ONLY this JSON:
+{{
+  "verdicts": [
+    {{"id": "<same id>", "likely_relevant": true, "reason": "short"}}
+  ]
+}}"""
+        result = _claude_json(
+            system, user, max_tokens=800,
+            run_id=run_id, user_id=user_id, operation="prefilter_batch",
+        )
+        if not isinstance(result, dict):
+            # Fail-open: keep the whole batch if Claude fails
+            kept.extend(batch)
+            continue
+        verdicts = result.get("verdicts") or []
+        by_id: Dict[str, bool] = {}
+        for v in verdicts:
+            if isinstance(v, dict):
+                vid = str(v.get("id") or "").strip()
+                if vid:
+                    by_id[vid] = bool(v.get("likely_relevant"))
+        for i, it in enumerate(batch):
+            iid = str(it.get("tid") or it.get("canonical_id") or it.get("url") or str(start + i))
+            # Fail-open: if Claude didn't emit a verdict for this id, keep it.
+            if by_id.get(iid, True):
+                kept.append(it)
+    return kept
+
+
+def prefilter_candidates(
+    candidates: List[Dict[str, Any]],
+    legal_points: Dict[str, Any],
+    research_plan: Optional[Dict[str, Any]],
+    run_id: str,
+    user_id: str = "anonymous",
+) -> List[Dict[str, Any]]:
+    """
+    Relevance gate between full-text fetch and Claude deep scoring. Modes:
+      - gemini (default): Gemini grounding per candidate (parallel)
+      - claude: batched Claude JSON verdict (cheaper, no Gemini key needed)
+      - off: returns candidates unchanged
+    Curated sources (admin_upload / local_db) always bypass the filter.
+    Fails open on any exception — returns the original list.
+    """
+    if not candidates:
+        return []
+
+    mode = (os.environ.get("CITATION_PREFILTER_MODE", "gemini") or "gemini").strip().lower()
+    if mode == "off":
+        return candidates
+
+    cap = max(1, int(os.environ.get("CITATION_PREFILTER_MAX", "40")))
+
+    curated: List[Dict[str, Any]] = []
+    to_check: List[Dict[str, Any]] = []
+    for it in candidates:
+        src = str(it.get("source") or "").lower()
+        if src in ("admin_upload", "local_db") or src.startswith("admin"):
+            curated.append(it)
+        else:
+            to_check.append(it)
+
+    inspect = to_check[:cap]
+    pass_through = to_check[cap:]
+
+    try:
+        if mode == "gemini" and _grounding_available():
+            kept = _prefilter_with_gemini(inspect, legal_points, research_plan, run_id, user_id)
+        else:
+            # mode == "claude", or gemini requested but key missing
+            kept = _prefilter_with_claude(inspect, legal_points, research_plan, run_id, user_id)
+    except Exception as exc:
+        logger.warning("[PROP] prefilter_candidates failed (%s) — falling back to original list", exc)
+        return candidates
+
+    final = curated + kept + pass_through
+    _db_log(
+        run_id, "PropositionPipeline", "prefilter", "INFO",
+        f"Prefilter ({mode}): {len(to_check)} → {len(kept)} (curated: {len(curated)}, deferred: {len(pass_through)})",
+        {"mode": mode, "before": len(to_check), "after_kept": len(kept),
+         "curated": len(curated), "deferred": len(pass_through)},
+    )
+    return final
 
 
 def deep_validate_and_score(
@@ -1980,6 +2263,162 @@ def _build_query_dimensions(
             "citations": [],
         })
     return dims
+
+
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    num = 0.0
+    da = 0.0
+    db = 0.0
+    for x, y in zip(a, b):
+        num += x * y
+        da  += x * x
+        db  += y * y
+    if da <= 0.0 or db <= 0.0:
+        return 0.0
+    import math
+    return num / (math.sqrt(da) * math.sqrt(db))
+
+
+def semantic_rerank_survivors(
+    survivors: List[Dict[str, Any]],
+    case_context: str,
+    legal_points: Dict[str, Any],
+    run_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Embedding-based tie-break on Claude survivors. Builds a single case vector
+    from case_context + legal issues, then for each survivor either reuses a
+    cached vector from `ik_document_assets.meta.embedding_v2` or embeds the
+    judgment's title + headnote + excerpt + first 2000 chars of full_text.
+    Drops survivors whose cosine < CITATION_SEMANTIC_MIN_COSINE (default 0.55)
+    and re-sorts by (relevanceScore desc, cosine desc). Fails open on error.
+    """
+    if (os.environ.get("CITATION_SEMANTIC_RERANK", "on") or "on").strip().lower() != "on":
+        return survivors
+    if not survivors:
+        return survivors
+
+    try:
+        from db.client import get_query_embedding, ik_asset_get, ik_asset_upsert
+    except Exception as exc:
+        logger.warning("[PROP] semantic_rerank_survivors: db.client import failed: %s", exc)
+        return survivors
+
+    min_cos = float(os.environ.get("CITATION_SEMANTIC_MIN_COSINE", "0.55"))
+
+    issues = legal_points.get("issues", []) or []
+    issues_blurb = " | ".join(
+        str(iss.get("proposition") or iss.get("issue_title") or "").strip()
+        for iss in issues[:4] if (iss.get("proposition") or iss.get("issue_title"))
+    )
+    case_text = ((case_context or "")[:3000] + " " + issues_blurb).strip()
+    if not case_text:
+        return survivors
+
+    try:
+        case_vec = get_query_embedding(case_text)
+    except Exception as exc:
+        logger.warning("[PROP] case embedding failed: %s", exc)
+        return survivors
+    if not case_vec:
+        return survivors
+
+    import hashlib
+    run_cache: Dict[str, List[float]] = {}
+    scored_pairs: List[tuple] = []
+
+    for s in survivors:
+        tid = str(s.get("tid") or "").strip()
+        cid = str(s.get("canonical_id") or (f"ik:{tid}" if tid else "")).strip()
+        cache_key = cid or tid or str(s.get("url") or "")
+
+        judg_text = "\n".join(str(x or "") for x in (
+            s.get("caseName") or s.get("title") or "",
+            s.get("headnote") or s.get("headnotes") or "",
+            s.get("excerptText") or s.get("snippet") or "",
+            (s.get("full_text") or "")[:2000],
+        )).strip()
+        if not judg_text:
+            continue
+
+        text_sha1 = hashlib.sha1(judg_text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+        vec: List[float] = []
+        # In-run cache
+        if cache_key in run_cache:
+            vec = run_cache[cache_key]
+        # Persisted cache (IK only)
+        if not vec and tid:
+            try:
+                asset = ik_asset_get(tid) or {}
+                meta = asset.get("meta") or {}
+                if isinstance(meta, dict):
+                    cached_vec = meta.get("embedding_v2")
+                    cached_sha = meta.get("embedding_text_sha1")
+                    if isinstance(cached_vec, list) and cached_sha == text_sha1:
+                        vec = [float(x) for x in cached_vec]
+            except Exception as exc:
+                logger.debug("[PROP] embedding cache read failed for %s: %s", tid, exc)
+
+        # Non-IK rows that already carry a semantic score from search_local_semantic:
+        if not vec and float(s.get("_semantic_score") or 0.0) > 0.0:
+            cos = float(s.get("_semantic_score"))
+            if cos >= min_cos:
+                scored_pairs.append((s, cos))
+            continue
+
+        # Miss → embed now
+        if not vec:
+            try:
+                vec = get_query_embedding(judg_text[:6000])
+            except Exception as exc:
+                logger.debug("[PROP] survivor embedding failed (%s): %s", cache_key, exc)
+                vec = []
+            if not vec:
+                # Fail-open: keep without rerank contribution
+                scored_pairs.append((s, 0.0))
+                continue
+            run_cache[cache_key] = vec
+
+            # Persist embedding for IK docs — read-merge-write so we don't clobber other meta keys.
+            if tid:
+                try:
+                    existing = ik_asset_get(tid) or {}
+                    merged_meta = existing.get("meta") or {}
+                    if not isinstance(merged_meta, dict):
+                        merged_meta = {}
+                    merged_meta["embedding_v2"] = vec
+                    merged_meta["embedding_text_sha1"] = text_sha1
+                    ik_asset_upsert(doc_id=tid, canonical_id=cid or None, meta=merged_meta)
+                except Exception as exc:
+                    logger.debug("[PROP] embedding cache write failed for %s: %s", tid, exc)
+
+        cos = _cosine_sim(case_vec, vec)
+        scored_pairs.append((s, cos))
+
+    kept = [(s, cos) for s, cos in scored_pairs if cos >= min_cos]
+    dropped = len(scored_pairs) - len(kept)
+    if not kept and scored_pairs:
+        # All below threshold — don't return an empty list; fall back to Claude's order.
+        logger.info("[PROP] Semantic rerank: all %d survivors < min_cos=%.2f — fail-open",
+                    len(scored_pairs), min_cos)
+        _db_log(run_id, "PropositionPipeline", "semantic_rerank", "WARNING",
+                f"Semantic rerank: 0/{len(scored_pairs)} survivors >= cosine {min_cos} — keeping Claude order")
+        return survivors
+
+    kept.sort(key=lambda p: (-float(p[0].get("relevanceScore") or 0.0), -p[1]))
+
+    out: List[Dict[str, Any]] = []
+    for s, cos in kept:
+        s["_semantic_cosine"] = round(cos, 4)
+        out.append(s)
+
+    _db_log(run_id, "PropositionPipeline", "semantic_rerank", "INFO",
+            f"Semantic rerank: kept {len(out)}/{len(scored_pairs)} (cosine >= {min_cos}), dropped {dropped}",
+            {"kept": len(out), "total": len(scored_pairs), "dropped": dropped, "min_cosine": min_cos})
+    return out
 
 
 def _build_report_format(
@@ -2187,6 +2626,25 @@ def run_proposition_pipeline(
     )
     ik_queries = [q for q in ik_queries if _legal_terms.search(q)]
 
+    # Query-quality gate: drop queries that score poorly against the research plan,
+    # but always keep at least 4 (top by plan-score) so retrieval has enough reach.
+    if ik_queries:
+        _scored_queries = sorted(
+            ik_queries,
+            key=lambda q: _score_query_against_plan(q, research_plan),
+            reverse=True,
+        )
+        _before = len(_scored_queries)
+        _strong = [
+            q for q in _scored_queries
+            if _score_query_against_plan(q, research_plan) >= 2 or _legal_terms.search(q)
+        ]
+        if len(_strong) < 4:
+            _strong = _scored_queries[: min(4, _before)]
+        ik_queries = _strong
+        _db_log(run_id, "PropositionPipeline", "query_gate", "INFO",
+                f"Query-quality gate: kept {len(ik_queries)}/{_before} queries")
+
     if not ik_queries:
         # Absolute fallback: use acts from extracted issues directly as IK queries
         all_acts = [a for iss in legal_points.get("issues", [])
@@ -2200,10 +2658,24 @@ def run_proposition_pipeline(
     #    Each stage is only triggered if the previous didn't yield enough candidates.
     _ENOUGH = 10   # skip next source if we already have this many candidates
 
-    # Stage A: Local Elasticsearch keyword search (fastest, no API quota)
-    raw_local = search_local_parallel(ik_queries, run_id)
+    # Stage A: Local keyword (ES/PG) + Local semantic (Qdrant) — run in parallel.
+    # Semantic search fails open if Qdrant is unavailable or the collection is empty.
+    with ThreadPoolExecutor(max_workers=2) as _local_pool:
+        _fut_kw  = _local_pool.submit(search_local_parallel, ik_queries, run_id)
+        _fut_sem = _local_pool.submit(search_local_semantic, case_context, query, run_id, 20)
+        try:
+            raw_local_kw = _fut_kw.result(timeout=30)
+        except Exception as exc:
+            logger.warning("[PROP] search_local_parallel failed: %s", exc)
+            raw_local_kw = []
+        try:
+            raw_local_sem = _fut_sem.result(timeout=30)
+        except Exception as exc:
+            logger.warning("[PROP] search_local_semantic failed: %s", exc)
+            raw_local_sem = []
+    raw_local = merge_local(raw_local_kw, raw_local_sem)
     _db_log(run_id, "PropositionPipeline", "search_local", "INFO",
-            f"🏛 Local ES: {len(raw_local)} result(s)")
+            f"🏛 Local: {len(raw_local)} result(s) (kw={len(raw_local_kw)}, sem={len(raw_local_sem)})")
 
     # Stage B: Indian Kanoon — always run, gives the bulk of case law
     raw_ik = search_ik_parallel(ik_queries, run_id, legal_points=legal_points)
@@ -2250,15 +2722,19 @@ def run_proposition_pipeline(
     # 4. Fetch full judgment texts in parallel
     enriched = fetch_full_texts_parallel(raw_results, run_id, max_fetch=30)
 
-    # 5. Deep validate + score (threshold 7)
-    scored = deep_validate_and_score(legal_points, enriched, run_id, user_id,
+    # 4b. Relevance pre-filter (Gemini grounding or cheap Claude batch) — removes
+    # obvious junk before expensive _score_one() runs. Fails open on error.
+    prefiltered = prefilter_candidates(
+        enriched, legal_points, research_plan, run_id, user_id,
+    )
+
+    # 5. Deep validate + score (threshold 7, no relaxation — balanced strictness)
+    scored = deep_validate_and_score(legal_points, prefiltered, run_id, user_id,
                                      score_threshold=7, research_plan=research_plan)
 
     if not scored:
         _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
-                "Score ≥ 7 gave 0 — relaxing to ≥ 5")
-        scored = deep_validate_and_score(legal_points, enriched, run_id, user_id,
-                                         score_threshold=5, research_plan=research_plan)
+                "Score ≥ 7 gave 0 — not relaxing (balanced mode); empty-result path will run")
 
     if scored:
         grounding_pool = [
@@ -2266,14 +2742,14 @@ def run_proposition_pipeline(
             if str(item.get("sourceUrl") or item.get("url") or "").strip()
         ]
         _db_log(run_id, "PropositionPipeline", "grounding_validate", "INFO",
-                f"Validating top {min(len(grounding_pool), 24)} candidates via Google grounding")
+                f"Validating top {min(len(grounding_pool), 12)} candidates via Google grounding")
         grounded = google_validate_candidates(
             grounding_pool,
             legal_points,
             research_plan,
             run_id,
             user_id,
-            max_validate=24,
+            max_validate=12,
         )
         if grounded:
             scored = grounded
@@ -2291,6 +2767,10 @@ def run_proposition_pipeline(
             else:
                 _db_log(run_id, "PropositionPipeline", "grounding_validate", "WARNING",
                         "Grounding unavailable; keeping scored results")
+
+    # 6. Semantic rerank on Claude survivors (tie-break + final relevance filter).
+    if scored:
+        scored = semantic_rerank_survivors(scored, case_context, legal_points, run_id)
 
     if not scored:
         if _grounding_available():
@@ -2316,10 +2796,11 @@ def run_proposition_pipeline(
                 "Deep validation returned 0 and grounding unavailable — using raw results without scoring")
         scored = _results_to_citations(enriched[:15], legal_points)
 
+    _TOP_N = int(os.environ.get("CITATION_TOP_N", "12"))
     # Guarantee source diversity: always include top N from local DB and IK
     # even if their scores were below threshold (scored list is already sorted desc).
     _MIN_PER_SOURCE = 0 if _grounding_available() else 3
-    top = scored[:15]
+    top = scored[:_TOP_N]
 
     def _source_key(r: Dict) -> str:
         src = str(r.get("source") or r.get("sourceType") or r.get("source_type") or "").lower()
@@ -2358,7 +2839,7 @@ def run_proposition_pipeline(
             if deficit <= 0:
                 break
 
-    top = top[:15]
+    top = top[:_TOP_N]
     dimensions_metadata = _build_query_dimensions(ik_queries, raw_ik, top)
     _db_log(run_id, "PropositionPipeline", "done", "INFO",
             f"🎉 Pipeline complete — {len(top)} citations covering "
