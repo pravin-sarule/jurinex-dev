@@ -97,7 +97,7 @@ ES_CA_CERTS = _get_env("ELASTIC_CA_CERTS", "ELASTICSEARCH_CA_CERTS")
 NEO4J_MAX_POOL_SIZE = max(1, _get_env_int("NEO4J_MAX_CONNECTION_POOL_SIZE", 20))
 
 class PooledConnWrapper:
-    """Wraps a psycopg2 connection to intercept .close() and return it to the pool instead of destroying it."""
+    """Wraps a psycopg2 connection, returning it to the pool on close (or discarding if broken)."""
     def __init__(self, pool, conn):
         self._pool = pool
         self._conn = conn
@@ -108,7 +108,11 @@ class PooledConnWrapper:
     def close(self):
         if self._conn:
             try:
-                self._pool.putconn(self._conn)
+                if self._conn.closed:
+                    # Discard broken connection so the pool doesn't reuse it.
+                    self._pool.putconn(self._conn, close=True)
+                else:
+                    self._pool.putconn(self._conn)
             except Exception:
                 pass
             self._conn = None
@@ -117,7 +121,31 @@ class PooledConnWrapper:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # If the context exited due to an OperationalError, mark connection bad.
+        if exc_type is not None:
+            import psycopg2
+            if issubclass(exc_type, psycopg2.OperationalError) and self._conn:
+                try:
+                    self._pool.putconn(self._conn, close=True)
+                except Exception:
+                    pass
+                self._conn = None
+                return  # don't re-close in close()
         self.close()
+
+
+def _is_conn_alive(conn) -> bool:
+    """Ping the connection with a cheap query. Returns False if it's dead."""
+    try:
+        if conn.closed:
+            return False
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.rollback()  # leave in clean state
+        return True
+    except Exception:
+        return False
+
 
 def get_pg_conn():
     global _pg_pool
@@ -131,21 +159,37 @@ def get_pg_conn():
             if _pg_pool is None:
                 try:
                     from psycopg2.pool import ThreadedConnectionPool
+                    # keepalives prevent the server from silently dropping idle connections
                     _pg_pool = ThreadedConnectionPool(
                         minconn=PG_POOL_MINCONN,
                         maxconn=PG_POOL_MAXCONN,
                         dsn=dsn,
+                        keepalives=1,
+                        keepalives_idle=30,
+                        keepalives_interval=10,
+                        keepalives_count=5,
                     )
                     logger.info("[PG] Connection pool ready (min=%s max=%s)", PG_POOL_MINCONN, PG_POOL_MAXCONN)
                 except Exception as exc:
                     logger.warning("[PG] Pool init failed: %s", exc)
                     return None
-    try:
-        conn = _pg_pool.getconn()
-        return PooledConnWrapper(_pg_pool, conn)
-    except Exception as exc:
-        logger.warning("[PG] getconn failed: %s", exc)
-        return None
+    # Retry up to 3 times — dead connections are discarded, fresh ones created.
+    for attempt in range(3):
+        try:
+            conn = _pg_pool.getconn()
+        except Exception as exc:
+            logger.warning("[PG] getconn failed (attempt %d): %s", attempt + 1, exc)
+            continue
+        if _is_conn_alive(conn):
+            return PooledConnWrapper(_pg_pool, conn)
+        # Connection is dead — discard it and try again.
+        logger.warning("[PG] Stale connection discarded (attempt %d), retrying", attempt + 1)
+        try:
+            _pg_pool.putconn(conn, close=True)
+        except Exception:
+            pass
+    logger.error("[PG] Could not obtain a live DB connection after 3 attempts")
+    return None
 
 
 def get_es_client():

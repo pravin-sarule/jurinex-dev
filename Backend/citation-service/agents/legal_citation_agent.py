@@ -250,6 +250,7 @@ class LegalCitationAgent:
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW())
                     ON CONFLICT (canonical_id) DO UPDATE SET
                         citation_data = EXCLUDED.citation_data
+                    RETURNING judgment_uuid
                     """,
                     (
                         judgment_uuid,
@@ -271,6 +272,9 @@ class LegalCitationAgent:
                         citation_data_payload,
                     ),
                 )
+                row = cur.fetchone()
+                if row:
+                    judgment_uuid = str(row[0])
 
                 aliases = []
                 if data.get("primary_citation"):
@@ -304,7 +308,7 @@ class LegalCitationAgent:
                         )
                         judge_id = cur.fetchone()[0]
                     cur.execute(
-                        "INSERT INTO judgment_judges (judgment_uuid, judge_id, role) VALUES (%s, %s, %s)",
+                        "INSERT INTO judgment_judges (judgment_uuid, judge_id, role) VALUES (%s, %s, %s) ON CONFLICT (judgment_uuid, judge_id) DO NOTHING",
                         (judgment_uuid, judge_id, "bench"),
                     )
 
@@ -315,9 +319,12 @@ class LegalCitationAgent:
                     cur.execute(
                         """
                         INSERT INTO statutes_cited (judgment_uuid, act_name, act_short, section, sub_section, india_code_url)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        SELECT %s, %s, %s, %s, %s, %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM statutes_cited WHERE judgment_uuid = %s AND act_name = %s
+                        )
                         """,
-                        (judgment_uuid, _safe_str(statute_str, 500), None, None, None, None),
+                        (judgment_uuid, _safe_str(statute_str, 500), None, None, None, None, judgment_uuid, _safe_str(statute_str, 500)),
                     )
 
             conn.commit()

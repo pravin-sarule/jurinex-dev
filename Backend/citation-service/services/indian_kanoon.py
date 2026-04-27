@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 _IK_BASE = "https://api.indiankanoon.org"
 _IK_RETRYABLE_EXC = (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError)
 _IK_MAX_RETRIES = 3
+_LEGAL_NOISE_WORDS = {
+    "state", "union", "of", "versus", "vs", "v", "thru", "through", "the", "and",
+}
 
 
 def _is_retryable_ik_error(exc: Exception) -> bool:
@@ -135,6 +138,28 @@ def _ik_request_raw(path: str) -> Optional[bytes]:
             return None, ""
 
 
+def _clean_case_name(case_name: str) -> str:
+    text = re.sub(r"\s*\(\d{4}\)\s*$", "", (case_name or "").strip(), flags=re.I)
+    tokens = re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+    cleaned = [t for t in tokens if t not in _LEGAL_NOISE_WORDS and len(t) > 1]
+    return " ".join(cleaned).strip()
+
+
+def _expand_query_with_court(query: str, case_metadata: Optional[Dict[str, Any]]) -> str:
+    meta_text = " ".join([
+        str((case_metadata or {}).get("court") or ""),
+        str((case_metadata or {}).get("court_name") or ""),
+        str((case_metadata or {}).get("docsource") or ""),
+        str((case_metadata or {}).get("title") or ""),
+        str((case_metadata or {}).get("case_name") or ""),
+    ]).lower()
+    if "supreme court" in meta_text:
+        return f"{query} Supreme Court".strip()
+    if "high court" in meta_text:
+        return f"{query} High Court".strip()
+    return query
+
+
 # ─── 1. Search API ────────────────────────────────────────────────────────────
 
 def ik_search(
@@ -149,6 +174,8 @@ def ik_search(
     author: Optional[str] = None,
     bench: Optional[str] = None,
     maxcites: Optional[int] = None,
+    is_case_name_search: bool = False,
+    case_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Search Indian Kanoon.
@@ -159,10 +186,15 @@ def ik_search(
       - categories: facets
       - encodedformInput: URL-encoded query string for further use
     """
-    params: Dict[str, Any] = {
-        "formInput": query,
-        "pagenum": pagenum,
-    }
+    effective_query = (query or "").strip()
+    if is_case_name_search:
+        cleaned = _clean_case_name(effective_query)
+        if cleaned:
+            effective_query = cleaned
+        effective_query = _expand_query_with_court(effective_query, case_metadata)
+        effective_query = f'title:"{effective_query}"'
+
+    params: Dict[str, Any] = {"formInput": effective_query, "pagenum": pagenum}
     if maxpages and maxpages > 1:
         params["maxpages"] = maxpages
     if doctypes:

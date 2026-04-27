@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -175,6 +176,9 @@ def run_pipeline(
     case_file_context: Optional[List[Dict[str, Any]]] = None,
     case_id: Optional[str] = None,
     retrieval_method: str = "indiankanoon",
+    custom_keywords: Optional[List[str]] = None,
+    selected_keywords: Optional[List[str]] = None,
+    selected_case_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Run the proposition-based citation pipeline (sync — called via asyncio.to_thread).
@@ -217,6 +221,9 @@ def run_pipeline(
             perspective="all",
             user_id=user_id,
             case_id=case_id,
+            custom_keywords=custom_keywords,
+            selected_keywords=selected_keywords,
+            selected_case_names=selected_case_names,
         )
     except Exception as exc:
         logger.exception("[PIPELINE] Proposition pipeline crashed: %s", exc)
@@ -230,6 +237,9 @@ def run_pipeline(
     # Persist report
     report_id = str(uuid.uuid4())
     citation_count = len((report_format or {}).get("citations", []))
+    failed_case_names = (
+        ((report_format or {}).get("metadata") or {}).get("failed_case_names") or []
+    )
     try:
         report_insert(
             report_id,
@@ -243,11 +253,36 @@ def run_pipeline(
         )
     except Exception as exc:
         logger.warning("[PIPELINE] report_insert failed: %s", exc)
+
+    # Background: ingest approved IK citations into ES + Qdrant + PG so they
+    # become searchable locally for future runs.
+    def _ingest_citations_bg(_rf=report_format, _rid=run_id):
+        try:
+            from db.client import judgment_ingest_from_ik
+            for c in (_rf or {}).get("citations", []):
+                cid = str(c.get("canonicalId") or c.get("canonical_id") or "").strip()
+                ik_tid = cid[3:] if cid.startswith("ik:") else ""
+                if not ik_tid:
+                    continue
+                judgment_ingest_from_ik(
+                    ik_tid=ik_tid,
+                    case_name=str(c.get("caseName") or c.get("case_name") or ""),
+                    full_text=str(c.get("fullText") or c.get("full_text") or c.get("excerptText") or c.get("excerpt_text") or ""),
+                    court_code=str(c.get("court") or ""),
+                    judgment_date=str(c.get("dateOfJudgment") or c.get("date") or ""),
+                    citation_data=c,
+                )
+        except Exception as _exc:
+            logger.warning("[PIPELINE_INGEST] Background ingestion error for run=%s: %s", _rid, _exc)
+
+    threading.Thread(target=_ingest_citations_bg, daemon=True, name=f"ingest-{run_id[:8]}").start()
+
     try:
         pipeline_run_update(
             run_id, "completed",
             report_id=report_id,
             citations_approved_count=citation_count,
+            failed_case_names=failed_case_names,
         )
     except Exception as exc:
         logger.warning("[PIPELINE] pipeline_run_update failed: %s", exc)

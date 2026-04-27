@@ -96,6 +96,25 @@ def _repair_json(text: str) -> str:
     return text
 
 
+def _extract_json_candidate(text: str) -> str:
+    """Return the most plausible JSON slice, even when the model truncates output."""
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text or "", flags=re.M)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned, flags=re.M).strip()
+    if not cleaned:
+        return ""
+
+    m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+    if m:
+        return m.group(0)
+
+    for opener in ("{", "["):
+        idx = cleaned.find(opener)
+        if idx != -1:
+            return cleaned[idx:].strip()
+
+    return cleaned
+
+
 def _extract_grounding_fields(text: str) -> Optional[Dict[str, Any]]:
     """
     Last-resort regex extraction of relevant/confidence/reason when JSON parsing
@@ -119,6 +138,32 @@ def _extract_grounding_fields(text: str) -> Optional[Dict[str, Any]]:
     if reason_m:
         out["reason"] = reason_m.group(1)[:240]
     return out
+
+
+def _extract_case_name_verification_fields(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Salvage the fields needed for case-name verification from truncated Gemini JSON.
+    This keeps the direct-path verifier usable when the model stops mid-object.
+    """
+    if not text:
+        return None
+
+    out: Dict[str, Any] = {}
+    match_m = re.search(r'"match_found"\s*:\s*(true|false)', text, re.I)
+    tid_m = re.search(r'"best_tid"\s*:\s*"([^"\r\n}]*)', text)
+    conf_m = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+
+    if match_m:
+        out["match_found"] = match_m.group(1).lower() == "true"
+    if tid_m:
+        out["best_tid"] = tid_m.group(1).strip()
+    if conf_m:
+        try:
+            out["confidence"] = float(conf_m.group(1))
+        except Exception:
+            out["confidence"] = 0.0
+
+    return out or None
 
 
 def _claude_json(
@@ -157,20 +202,17 @@ def _claude_json(
                           model=model)
         except Exception:
             pass
-        # Strip markdown fences
-        text = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.M)
-        text = re.sub(r"\n?```\s*$",           "", text, flags=re.M).strip()
-        # Extract outermost JSON block
-        m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-        if m:
-            text = m.group(0)
-        # Try direct parse first
+        text = _extract_json_candidate(text)
+        if not text:
+            logger.warning("[PROP] Claude returned empty response for %s", operation)
+            return None
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-        # Attempt repair
         repaired = _repair_json(text)
+        if not repaired:
+            return None
         try:
             return json.loads(repaired)
         except json.JSONDecodeError as exc:
@@ -179,6 +221,75 @@ def _claude_json(
             return None
     except Exception as exc:
         logger.warning("[PROP] Claude call failed (%s): %s", operation, exc)
+        return None
+
+
+def _gemini_json(
+    system: str,
+    user: str,
+    max_tokens: int = 1500,
+    run_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    operation: str = "proposition",
+) -> Optional[Any]:
+    """Call Gemini 2.5 Flash (no grounding) and return parsed JSON. Drop-in for _claude_json."""
+    import os, time as _time
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        logger.warning("[PROP] GEMINI_API_KEY not set — cannot call Gemini for %s", operation)
+        return None
+    try:
+        from google import genai
+        from google.genai import types
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        client = genai.Client(api_key=api_key)
+        # Disable thinking for JSON-extraction tasks: thinking tokens consume max_output_tokens
+        # budget on Gemini 2.5 Flash, leaving too few tokens for the actual JSON output.
+        thinking_config = None
+        try:
+            thinking_config = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            pass
+        config = types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            temperature=0.0,
+            **({"thinking_config": thinking_config} if thinking_config is not None else {}),
+        )
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model, contents=user, config=config,
+                )
+                break
+            except Exception as exc:
+                msg = str(exc)
+                if ("429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()) and attempt < 2:
+                    _time.sleep(5 * (attempt + 1))
+                    continue
+                raise
+        if response is None:
+            return None
+        text = _extract_json_candidate((getattr(response, "text", None) or "").strip())
+        if not text:
+            logger.warning("[PROP] Gemini returned empty response for %s", operation)
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        repaired = _repair_json(text)
+        if not repaired:
+            return None
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            logger.warning("[PROP] Gemini JSON repair failed (%s): %s — raw[:200]: %s",
+                           operation, exc, text[:200])
+            return None
+    except Exception as exc:
+        logger.warning("[PROP] Gemini call failed (%s): %s", operation, exc)
         return None
 
 
@@ -231,14 +342,69 @@ _LEGAL_KEYWORD_MAP = [
     (r"\b(election|voter|constituency)\b",     "election laws voter rights",        "RPA",       ["Representation People Act"]),
 ]
 
-def _build_fallback_legal_points(query: str) -> Dict[str, Any]:
-    """Build a minimal legal_points dict from the query text when Claude extraction fails."""
-    q_lower = query.lower()
+def _fallback_party_names(text: str) -> Dict[str, str]:
+    raw = _plain_text(text)
+    match = re.search(
+        r"([A-Z][A-Za-z0-9&.,'()/\-\s]{2,120}?)\s+(?:v(?:s\.?|ersus)?)\s+([A-Z][A-Za-z0-9&.,'()/\-\s]{2,120})",
+        raw,
+        re.I,
+    )
+    if not match:
+        return {"petitioner": "Petitioner", "respondent": "Respondent"}
+    return {
+        "petitioner": re.sub(r"\s+", " ", match.group(1)).strip(" ,.-"),
+        "respondent": re.sub(r"\s+", " ", match.group(2)).strip(" ,.-"),
+    }
+
+
+def _fallback_case_type(text: str) -> str:
+    raw = _plain_text(text).lower()
+    for needle, label in (
+        ("writ petition", "writ petition"),
+        ("civil appeal", "civil appeal"),
+        ("criminal appeal", "criminal appeal"),
+        ("special leave petition", "special leave petition"),
+        ("bail application", "bail application"),
+        ("revision application", "revision application"),
+        ("civil suit", "civil suit"),
+        ("petition", "petition"),
+        ("appeal", "appeal"),
+    ):
+        if needle in raw:
+            return label
+    return "petition"
+
+
+def _fallback_case_fact_summary(query: str, case_context: str) -> str:
+    context_text = _plain_text(case_context)
+    if not context_text:
+        return _plain_text(query)[:320]
+    lines = [
+        re.sub(r"\s+", " ", line).strip(" -:\t")
+        for line in context_text.splitlines()
+        if re.sub(r"\s+", " ", line).strip()
+    ]
+    filtered: List[str] = []
+    for line in lines:
+        lower = line.lower()
+        if lower.startswith(("in the ", "before ", "coram", "dated", "uploaded on", "downloaded on", "page ")):
+            continue
+        if len(line) < 25:
+            continue
+        filtered.append(line)
+        if len(filtered) >= 3:
+            break
+    summary = " ".join(filtered).strip() or context_text[:500]
+    return summary[:500]
+
+
+def _build_fallback_legal_points(query: str, case_context: str = "") -> Dict[str, Any]:
+    """Build a richer legal_points dict from query + judgment text when model extraction fails."""
+    combined_text = " ".join(part for part in [query, case_context] if part).strip()
     issues = []
 
     for pattern, proposition, wrongdoing, acts in _LEGAL_KEYWORD_MAP:
-        if re.search(pattern, query, re.I) and len(issues) < 3:
-            title = acts[0].replace(" ", "_").replace(".", "")[:30]
+        if re.search(pattern, combined_text, re.I) and len(issues) < 4:
             issues.append({
                 "issue_title": acts[0],
                 "proposition": proposition,
@@ -246,27 +412,31 @@ def _build_fallback_legal_points(query: str) -> Dict[str, Any]:
                 "legal_right": acts[0],
                 "acts_involved": acts,
                 "remedy": "relief as prayed",
+                "fact_summary": _fallback_case_fact_summary(query, case_context)[:220],
             })
 
     if not issues:
         # Generic fallback — strip party names, use meaningful words
-        words = [w for w in re.split(r"\s+", query) if len(w) > 3
+        words = [w for w in re.split(r"\s+", case_context or query) if len(w) > 3
                  and w.lower() not in ("vs", "versus", "and", "the", "another",
                                         "others", "anr", "ors", "s/o", "w/o", "d/o")]
         key_terms = " ".join(words[:6])
         issues.append({
             "issue_title":  "Legal Issue",
-            "proposition":  key_terms or query[:80],
-            "wrongdoing":   key_terms or query[:40],
+            "proposition":  key_terms or _plain_text(query)[:120],
+            "wrongdoing":   key_terms or _plain_text(query)[:60],
             "legal_right":  "Constitutional/statutory right",
             "acts_involved": [],
             "remedy":       "relief as prayed",
+            "fact_summary": _fallback_case_fact_summary(query, case_context)[:220],
         })
 
+    court_hint = _extract_court_hint({}, case_context) or "high court"
     return {
-        "parties":    {"petitioner": "Petitioner", "respondent": "Respondent"},
-        "case_type":  "petition",
-        "jurisdiction": "High Court",
+        "parties":    _fallback_party_names(combined_text),
+        "case_type":  _fallback_case_type(combined_text),
+        "jurisdiction": court_hint.title(),
+        "case_fact_summary": _fallback_case_fact_summary(query, case_context),
         "issues":     issues,
     }
 
@@ -274,6 +444,25 @@ def _build_fallback_legal_points(query: str) -> Dict[str, Any]:
 def _clean_query_text(text: str) -> str:
     text = re.sub(r"[^A-Za-z0-9\s./-]", " ", str(text or " "))
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _plain_text(value: Any) -> str:
+    return _strip_html(str(value or "")).strip()
+
+
+def _is_locked_selected_case(item: Dict[str, Any]) -> bool:
+    which_issue = _plain_text(item.get("which_issue") or "").lower()
+    if which_issue == "user-selected case name":
+        return True
+    return isinstance(item.get("_verification"), dict)
+
+
+def _clean_report_query_label(text: str) -> str:
+    value = _plain_text(text)
+    # Drop common model spillover / malformed suffixes from dirty query strings.
+    value = re.split(r"```|(?:^|\s)json(?:\s|$)|[{\[]", value, maxsplit=1, flags=re.I)[0]
+    value = re.sub(r"\s+", " ", value).strip(" -:\n\t")
+    return value[:80]
 
 
 def _tokenize_query_terms(text: str) -> List[str]:
@@ -413,7 +602,10 @@ def extract_all_legal_points(
     system = (
         "You are a senior Indian advocate. Extract legal issues from the case document as compact JSON. "
         "Keep each field SHORT — issue_title ≤ 6 words, proposition ≤ 25 words, wrongdoing ≤ 15 words. "
-        "Maximum 4 issues. Output ONLY valid JSON, no explanations."
+        "Maximum 4 issues. "
+        "For fact_summary: describe the STORY in plain language — who did what to whom, what went wrong, what relief is sought. "
+        "For case_fact_summary: 2-3 sentences covering all parties, the dispute, key events, and relief sought. "
+        "Output ONLY valid JSON, no explanations."
     )
     user = f"""Case document:
 {case_context[:5000] if case_context else 'Not provided.'}
@@ -425,6 +617,7 @@ Return ONLY this JSON with up to 4 issues:
   "parties": {{"petitioner": "Name", "respondent": "Name"}},
   "case_type": "writ petition",
   "jurisdiction": "Bombay High Court",
+  "case_fact_summary": "2-3 sentence summary of the entire factual matrix — parties, dispute, key events, and relief sought.",
   "issues": [
     {{
       "issue_title": "Article 300A Violation",
@@ -432,22 +625,24 @@ Return ONLY this JSON with up to 4 issues:
       "wrongdoing": "possession without compensation",
       "legal_right": "Article 300A",
       "acts_involved": ["Article 300A", "LARR Act 2013 s11"],
-      "remedy": "compensation"
+      "remedy": "compensation",
+      "fact_summary": "One-line factual description: who did what to whom, what went wrong, what relief is being sought."
     }}
   ]
 }}"""
 
-    result = _claude_json(system, user, max_tokens=1200, run_id=run_id,
+    result = _gemini_json(system, user, max_tokens=1600, run_id=run_id,
                           user_id=user_id, operation="extract_legal_points")
     if not isinstance(result, dict) or not result.get("issues"):
         logger.warning("[PROP] Legal point extraction fallback — building from query")
         # Generate basic fallback IK queries from query words directly
-        result = _build_fallback_legal_points(query)
+        result = _build_fallback_legal_points(query, case_context)
 
     issues = result.get("issues", [])
+    case_fact_summary = str(result.get("case_fact_summary") or "").strip()
     _db_log(run_id, "PropositionExtractor", "extract", "INFO",
-            f"Extracted {len(issues)} legal point(s)",
-            {"issues": [i.get("issue_title") for i in issues]})
+            f"Extracted {len(issues)} legal point(s) (fact_summary={'yes' if case_fact_summary else 'no'})",
+            {"issues": [i.get("issue_title") for i in issues], "has_case_fact_summary": bool(case_fact_summary)})
     for i, iss in enumerate(issues):
         logger.info("[PROP] Issue [%d] %s — %s",
                     i + 1, iss.get("issue_title", ""), iss.get("proposition", "")[:100])
@@ -551,10 +746,10 @@ Return ONLY this JSON:
 They should encode concrete disqualifiers specific to THIS case (statute vs different statute,
 correct fact pattern vs unrelated one), not generic advice."""
 
-    result = _claude_json(
+    result = _gemini_json(
         system,
         user,
-        max_tokens=900,
+        max_tokens=2000,
         run_id=run_id,
         user_id=user_id,
         operation="build_research_plan",
@@ -620,12 +815,94 @@ def _score_query_against_plan(query: str, research_plan: Optional[Dict[str, Any]
 
 # ─── Step 2: Generate IK keyword queries per issue ────────────────────────────
 
+_STAGE2_MULTI_STRATEGY_SYS = (
+    "You are a legal research expert specializing in Indian law. "
+    "Given a legal issue, generate exactly 3 search queries for Indian Kanoon — each targeting a DIFFERENT aspect. "
+    "Output ONLY valid JSON, no markdown or explanations."
+)
+
+
+def generate_multi_strategy_queries(
+    issue: Dict[str, Any],
+    case_fact_summary: str,
+    run_id: Optional[str] = None,
+    user_id: str = "anonymous",
+) -> List[str]:
+    """Generate 3 targeted IK queries per issue: statute+issue, legal principle, fact pattern."""
+    user = f"""## CASE CONTEXT:
+{case_fact_summary[:600] if case_fact_summary else "Not provided."}
+
+## LEGAL ISSUE:
+Title: {issue.get("issue_title", "")}
+Proposition: {issue.get("proposition", "")}
+Fact Summary: {issue.get("fact_summary", "")}
+Acts Involved: {", ".join(issue.get("acts_involved", [])[:4])}
+Wrongdoing: {issue.get("wrongdoing", "")}
+Legal Right: {issue.get("legal_right", "")}
+Remedy: {issue.get("remedy", "")}
+
+## GENERATE 3 QUERIES (each MEANINGFULLY DIFFERENT):
+
+### Query Type 1: STATUTE + ISSUE QUERY
+Combine primary statute/section with the SPECIFIC legal question being decided.
+Do NOT just list act names — include the nature of the dispute.
+Bad: "SARFAESI Act section 13 MCS Act section 101"
+Good: "SARFAESI section 13 co-operative bank applicability recovery proceedings"
+
+### Query Type 2: LEGAL PRINCIPLE QUERY
+Frame around the LEGAL PRINCIPLE or PROPOSITION being argued. Natural legal language.
+Example: "whether co-operative bank invoke SARFAESI when alternative statutory remedy available state law"
+
+### Query Type 3: FACT PATTERN QUERY (MOST IMPORTANT)
+Frame around the FACTUAL SCENARIO — party types, action taken, challenge raised.
+Include: party types (bank/borrower/tenant/employer), action (recovery/termination/eviction/arrest), challenge (jurisdiction/alternative remedy/constitutional rights).
+Example: "co-operative bank loan recovery borrower SARFAESI jurisdiction alternative remedy"
+
+## OUTPUT FORMAT (respond ONLY with this JSON):
+{{
+  "queries": [
+    {{"type": "statute_issue", "query": "..."}},
+    {{"type": "legal_principle", "query": "..."}},
+    {{"type": "fact_pattern", "query": "..."}}
+  ]
+}}
+
+## RULES:
+1. Each query: 6-15 words. Concise plain-text works best on Indian Kanoon.
+2. Do NOT include party proper names (petitioner/respondent names).
+3. Do NOT use Boolean operators (AND, OR) — plain text works better.
+4. Each query must be meaningfully different from the others."""
+
+    result = _gemini_json(
+        _STAGE2_MULTI_STRATEGY_SYS,
+        user,
+        max_tokens=1500,
+        run_id=run_id,
+        user_id=user_id,
+        operation="multi_strategy_queries",
+    )
+    if not isinstance(result, dict):
+        return []
+    queries = result.get("queries") or []
+    out: List[str] = []
+    seen: set = set()
+    for q in queries:
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("query") or "").strip()
+        if text and 4 <= len(text) <= 120 and text.lower() not in seen:
+            seen.add(text.lower())
+            out.append(text)
+    return out
+
+
 def generate_ik_queries(
     legal_points: Dict[str, Any],
     run_id: str,
     user_id: str = "anonymous",
     case_context: str = "",
     research_plan: Optional[Dict[str, Any]] = None,
+    case_fact_summary: str = "",
 ) -> List[str]:
     """Generate precise IK keyword queries grounded in extracted legal issues and case context."""
     issues = legal_points.get("issues", [])
@@ -699,10 +976,10 @@ Examples (Indian Kanoon Boolean syntax):
 Return ONLY this JSON (queries must include quotes and AND/OR):
 {{"ik": ["query1", "query2", "query3"]}}"""
 
-    r = _claude_json(
+    r = _gemini_json(
         system,
         user,
-        max_tokens=800,
+        max_tokens=1500,
         run_id=run_id,
         user_id=user_id,
         operation="generate_queries",
@@ -737,12 +1014,36 @@ Return ONLY this JSON (queries must include quotes and AND/OR):
             break
 
     ik_queries = all_ik[:12]
+
+    # Multi-strategy queries (Stage 2 enhancement): generate 3 queries per issue
+    # using statute+issue / legal-principle / fact-pattern types.
+    # These are plain-text queries and bypass _normalize_ik_query to preserve context words.
+    if case_fact_summary or (issues and any(i.get("fact_summary") for i in issues)):
+        ms_seen: set = set(q.lower() for q in ik_queries)
+        ms_queries: List[str] = []
+        for iss in issues[:4]:
+            try:
+                ms = generate_multi_strategy_queries(iss, case_fact_summary, run_id, user_id)
+                for q in ms:
+                    if q.lower() not in ms_seen:
+                        ms_seen.add(q.lower())
+                        ms_queries.append(q)
+            except Exception as _ms_exc:
+                logger.debug("[PROP] Multi-strategy query gen failed for issue %s: %s",
+                             iss.get("issue_title", ""), _ms_exc)
+        if ms_queries:
+            _db_log(run_id, "QueryGenerator", "generate", "INFO",
+                    f"Multi-strategy queries added: {len(ms_queries)}",
+                    {"ms_queries": ms_queries})
+            # Append up to 9 multi-strategy queries; cap total at 18 for IK
+            ik_queries = ik_queries + ms_queries[:9]
+
     _db_log(
         run_id,
         "QueryGenerator",
         "generate",
         "INFO",
-        f"Generated {len(ik_queries)} IK queries",
+        f"Generated {len(ik_queries)} IK queries ({len(all_ik[:12])} Boolean + {len(ik_queries) - len(all_ik[:12])} multi-strategy)",
         {"queries": ik_queries},
     )
     for i, q in enumerate(ik_queries):
@@ -751,6 +1052,139 @@ Return ONLY this JSON (queries must include quotes and AND/OR):
 
 
 # ─── Step 3: IK parallel search ───────────────────────────────────────────────
+
+def _case_name_similarity(searched: str, returned: str) -> float:
+    """Distinctive-word overlap between two case name strings (0.0–1.0).
+
+    Ignores generic legal terms (State, Authority, Corporation, Development…) and
+    stop words — only proper nouns like party/place names are counted. This prevents
+    "State of Maharashtra" from making unrelated cases look similar.
+    Returns: fraction of distinctive searched words found in the returned title.
+    """
+    _generic = {
+        # generic party labels
+        "state", "union", "india", "government", "central", "national", "republic",
+        # states / territories (common in case names)
+        "maharashtra", "gujarat", "delhi", "kerala", "karnataka", "rajasthan",
+        "punjab", "haryana", "uttar", "pradesh", "madhya", "bihar", "odisha",
+        "andhra", "telangana", "tamilnadu", "tamil", "bengal", "assam", "goa",
+        # generic org types
+        "authority", "corporation", "board", "department", "ministry", "office",
+        "commission", "committee", "council", "company", "limited", "ltd",
+        "pvt", "private", "public", "municipal", "development", "housing",
+        "finance", "bank", "trust", "society", "institute", "university",
+        # common legal party tokens
+        "another", "others", "anr", "ors", "versus", "vs", "v",
+        # stop words
+        "and", "of", "in", "the", "a", "an", "by", "for", "with", "on",
+        "at", "from", "to", "through", "between", "into", "over", "under",
+    }
+
+    def _distinctive(s: str) -> set:
+        tokens = re.sub(r'[^a-z0-9\s]', ' ', s.lower()).split()
+        return {t for t in tokens if t not in _generic and len(t) > 2}
+
+    sw = _distinctive(searched)
+    rw = _distinctive(returned)
+
+    if not sw:
+        # Nothing distinctive — broad word-overlap fallback
+        all_sw = {w for w in re.sub(r'[^a-z\s]', ' ', searched.lower()).split() if len(w) > 1}
+        all_rw = {w for w in re.sub(r'[^a-z\s]', ' ', returned.lower()).split() if len(w) > 1}
+        return len(all_sw & all_rw) / max(len(all_sw), 1)
+
+    return len(sw & rw) / len(sw)
+
+
+def _ik_search_by_case_name(case_name: str, top_n: int = 1) -> List[Dict[str, Any]]:
+    """Search IK by case name using title= for precision.
+
+    Strategy:
+      1. Full case name as title= (most precise) — accept if similarity ≥ 0.4
+      2. Fallback: first party name as title= (broader) — accept if similarity ≥ 0.3
+      3. Fallback: plain formInput keyword search, no title filter
+    Rejects results whose titles don't resemble the searched case name at all.
+    """
+    from services.indian_kanoon import ik_search
+
+    # Normalise: strip trailing year "(1978)" and trim
+    name_no_year = re.sub(r'\s*\(\d{4}\)\s*$', '', case_name.strip()).strip()
+
+    # Extract first party name (before 'v' / 'vs')
+    _v_split = re.split(r'\s+(?:v\.?s?\.?|versus)\s+', name_no_year, maxsplit=1, flags=re.I)
+    first_party = _v_split[0].strip()[:60] if _v_split else name_no_year[:60]
+
+    def _make_result(d: Dict, sim: float = 0.0) -> Optional[Dict]:
+        tid = str(d.get("tid", "")).strip()
+        if not tid:
+            return None
+        return {
+            "tid":     tid,
+            "title":   _plain_text(d.get("title", "")),
+            "snippet": _plain_text(d.get("headline", "")),
+            "court":   d.get("docsource", ""),
+            "date":    d.get("publishdate", ""),
+            "url":     f"https://indiankanoon.org/doc/{tid}/",
+            "source":  "indian_kanoon",
+            "sim":     sim,
+            "_query":  _clean_report_query_label(f"[case_name] {case_name}"),
+            "_page":   0,
+        }
+
+    def _search_best(title_param: Optional[str]) -> Optional[tuple]:
+        """Search IK and return (result, similarity_score) for the best-matching doc, or None."""
+        try:
+            resp = ik_search(
+                query=name_no_year,
+                title=title_param,
+                doctypes="judgments",
+                pagenum=0,
+            )
+            docs = (resp or {}).get("docs") or []
+            best_r, best_sim = None, -1.0
+            for d in docs[:10]:
+                r = _make_result(d)
+                if not r:
+                    continue
+                sim = _case_name_similarity(name_no_year, r["title"])
+                if sim > best_sim:
+                    best_sim, best_r = sim, r
+            return (best_r, best_sim) if best_r else None
+        except Exception as exc:
+            logger.warning("[PROP] IK search failed (title=%r): %s", title_param, exc)
+            return None
+
+    # Run all 3 strategies and pick the best match across them.
+    # Order: full-name title= → first-party title= → plain keyword (no title).
+    candidates = []
+    for label, title_param in [
+        ("full-title",     name_no_year[:120]),
+        ("party-title",    first_party),
+        ("keyword-only",   None),
+    ]:
+        hit = _search_best(title_param)
+        if hit:
+            candidates.append((label, hit[0], hit[1]))
+
+    if not candidates:
+        logger.warning("[PROP] IK returned no docs at all for case name %r", case_name)
+        return []
+
+    # Pick the candidate with the highest similarity score.
+    best_label, best_result, best_sim = max(candidates, key=lambda x: x[2])
+
+    if best_sim < 0.2:
+        logger.warning(
+            "[PROP] IK case name %r — best match too dissimilar (sim=%.2f title=%r); skipping",
+            case_name, best_sim, best_result.get("title", ""),
+        )
+        return []
+
+    best_result["sim"] = best_sim
+    logger.info("[PROP] IK case name (%s) %r → sim=%.2f title=%r",
+                best_label, case_name, best_sim, best_result.get("title", ""))
+    return [best_result]
+
 
 def _ik_search_one(query: str, pagenum: int = 0) -> List[Dict[str, Any]]:
     """Single IK API search for one page. Returns list of result dicts."""
@@ -865,10 +1299,16 @@ Rules:
 """
 
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
+    _grounding_thinking = None
+    try:
+        _grounding_thinking = types.ThinkingConfig(thinking_budget=0)
+    except Exception:
+        pass
     config = types.GenerateContentConfig(
         tools=[grounding_tool],
-        max_output_tokens=512,
+        max_output_tokens=2000,
         temperature=0.0,
+        **({"thinking_config": _grounding_thinking} if _grounding_thinking is not None else {}),
     )
     client = genai.Client(api_key=api_key)
 
@@ -984,6 +1424,10 @@ def google_validate_candidates(
     for idx, item in enumerate(top):
         if idx > 0:
             time.sleep(2)
+        title = str(item.get("caseName") or item.get("title") or "")[:60]
+        _db_log(run_id, "GroundingValidator", "grounding_validate", "INFO",
+                f"Grounding [{idx + 1}/{len(top)}]: {title}",
+                {"idx": idx, "total": len(top), "kept_so_far": len(kept)})
         try:
             validated = _google_validate_candidate(item, legal_points, research_plan, run_id, user_id)
             if validated:
@@ -1303,8 +1747,32 @@ def _search_local_one(query: str) -> List[Dict[str, Any]]:
                     _stable_text(r.get("canonical_id") or r.get("tid") or r.get("url")),
                 )
             )
-            logger.info("[PROP] ES local search %r → %d result(s) (%d with full_text)",
-                        query[:60], len(results),
+            # Supplement with admin uploads that may not be in the judgments ES index
+            try:
+                from db.client import search_admin_uploads_pg
+                admin_hits = search_admin_uploads_pg(query, limit=3)
+                seen_cids = {r.get("canonical_id") for r in results if r.get("canonical_id")}
+                for ah in admin_hits:
+                    if ah.get("canonical_id") not in seen_cids:
+                        results.append(ah)
+                        seen_cids.add(ah.get("canonical_id"))
+                        logger.info("[LOCAL] 📂 Admin-uploaded: %s (cid=%s)",
+                                    str(ah.get("title") or ah.get("case_name") or "")[:80],
+                                    ah.get("canonical_id", ""))
+            except Exception as _ae:
+                logger.debug("[PROP] Admin upload supplement failed: %s", _ae)
+
+            _admin_count = sum(1 for r in results if r.get("source") == "admin_upload")
+            _local_count = len(results) - _admin_count
+            for r in results:
+                _src_label = "📂 admin_upload" if r.get("source") == "admin_upload" else "🗄 local_db"
+                logger.info("[LOCAL] %s | %s | cid=%s | text=%d chars",
+                            _src_label,
+                            str(r.get("title") or "")[:80],
+                            r.get("canonical_id", ""),
+                            len(r.get("full_text") or ""))
+            logger.info("[PROP] ES local search %r → %d result(s) [admin=%d local_db=%d] (%d with full_text)",
+                        query[:60], len(results), _admin_count, _local_count,
                         sum(1 for r in results if len(r.get("full_text", "")) > 100))
             return results
     except Exception as exc:
@@ -1312,13 +1780,22 @@ def _search_local_one(query: str) -> List[Dict[str, Any]]:
 
     # ── PG fallback (no ES) ───────────────────────────────────────────────────
     try:
-        from db.client import judgement_search_local
+        from db.client import judgement_search_local, search_admin_uploads_pg
         rows = judgement_search_local(query, limit=6, approved_only=True,
                                       exclude_low_hierarchy=True)
         results = [r for r in (_pg_row_to_local_result(row, query) for row in rows) if r]
         # Enrich any with empty full_text
         results = [(_enrich_full_text(r) if len(r.get("full_text", "")) < 100 else r)
                    for r in results]
+        # Also pull admin uploads from judgment_uploads directly
+        try:
+            seen_cids = {r.get("canonical_id") for r in results if r.get("canonical_id")}
+            for ah in search_admin_uploads_pg(query, limit=3):
+                if ah.get("canonical_id") not in seen_cids:
+                    results.append(ah)
+                    seen_cids.add(ah.get("canonical_id"))
+        except Exception as _ae:
+            logger.debug("[PROP] Admin upload PG fallback failed: %s", _ae)
         results.sort(
             key=lambda r: (
                 _stable_text(r.get("title")),
@@ -1501,7 +1978,17 @@ def _search_google_one(
             f"QUERY: {biased}"
         )
         grounding_tool = types.Tool(google_search=types.GoogleSearch())
-        config = types.GenerateContentConfig(tools=[grounding_tool], max_output_tokens=1024)
+        _g_thinking = None
+        try:
+            _g_thinking = types.ThinkingConfig(thinking_budget=0)
+        except Exception:
+            pass
+        config = types.GenerateContentConfig(
+            tools=[grounding_tool],
+            max_output_tokens=2000,
+            temperature=0.0,
+            **({"thinking_config": _g_thinking} if _g_thinking is not None else {}),
+        )
         client = genai.Client(api_key=api_key)
 
         response = None
@@ -1822,10 +2309,16 @@ def fetch_full_texts_parallel(
             {"count": len(top)})
 
     enriched: List[Dict] = [None] * len(top)
+    _fetch_done = 0
     with ThreadPoolExecutor(max_workers=_IK_FETCH_WORKERS) as pool:
         fut_map = {pool.submit(_fetch_one_doc, item): i for i, item in enumerate(top)}
         for fut in as_completed(fut_map):
             idx = fut_map[fut]
+            _fetch_done += 1
+            if _fetch_done % 5 == 0 or _fetch_done == len(top):
+                _db_log(run_id, "FetchAgent", "fetch", "INFO",
+                        f"Fetching full texts: {_fetch_done}/{len(top)} done",
+                        {"done": _fetch_done, "total": len(top)})
             try:
                 enriched[idx] = fut.result(timeout=45)
             except Exception as exc:
@@ -1842,6 +2335,9 @@ def fetch_full_texts_parallel(
 
 # ─── Step 5: Deep validate and score ──────────────────────────────────────────
 
+_VSTATUS_FRONTEND = {"VERIFIED": "GREEN", "REVIEW": "YELLOW", "IRRELEVANT": "RED"}
+
+
 def _score_one(
     item: Dict[str, Any],
     legal_points: Dict[str, Any],
@@ -1849,153 +2345,224 @@ def _score_one(
     run_id: Optional[str],
     user_id: str,
     research_plan: Optional[Dict[str, Any]] = None,
+    case_fact_summary: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Claude scores one judgment 1–10, extracts ratio/headnote/excerpt. Returns None if below threshold."""
+    """
+    Stage 5 deep validation — 3-criteria structured evaluation with fact-pattern veto.
+
+    Criteria (each 1-5):
+      1. Fact Pattern Similarity   — veto power: if <= 2, citation is IRRELEVANT
+      2. Legal Issue Alignment     — if <= 2, capped at REVIEW
+      3. Ratio Decidendi Applicability
+
+    score_threshold maps to minimum final_relevance_score: threshold / 2.0
+    (7 → 3.5,  6 → 3.0)
+    """
+    if _is_locked_selected_case(item):
+        return {
+            **item,
+            "caseName": item.get("caseName") or item.get("title", ""),
+            "primaryCitation": item.get("primaryCitation") or item.get("ik_citation", ""),
+            "court": item.get("court", ""),
+            "dateOfJudgment": item.get("dateOfJudgment") or item.get("date", ""),
+            "coram": item.get("coram") or item.get("bench", ""),
+            "ratio": _plain_text(item.get("ratio", "")),
+            "headnote": _plain_text(item.get("headnote") or item.get("headnotes") or item.get("snippet") or "")[:1000],
+            "headnotes": _plain_text(item.get("headnotes") or item.get("headnote") or item.get("snippet") or "")[:2000],
+            "excerptText": _plain_text(item.get("excerptText") or item.get("snippet") or "")[:350],
+            "relevanceScore": max(float(item.get("relevanceScore") or 0.0), 0.95),
+            "which_issue": "user-selected case name",
+            "factual_match": True,
+            "legal_match": True,
+            "fact_pattern_score": 5,
+            "legal_issue_score": 5,
+            "ratio_applicability_score": 5,
+            "final_relevance_score": 5.0,
+            "verificationStatus": "GREEN",
+            "argumentParty": str(item.get("argumentParty") or "neutral").strip().lower(),
+            "why_relevant_or_not": "User selected exact case; preserved as verified case-name match.",
+            "sourceUrl": item.get("sourceUrl") or item.get("url", ""),
+            "ikCiteList": item.get("ikCiteList", []),
+            "ikCitedByList": item.get("ikCitedByList", []),
+            "canonical_id": (item.get("canonical_id") or (f"ik:{item['tid']}" if item.get("tid") else "")),
+        }
+
     _FT_WIN = int(os.environ.get("CITATION_FULLTEXT_WINDOW", "8000"))
     full_text = item.get("full_text") or item.get("snippet", "")
     if not full_text or len(full_text) < 50:
         return None
 
-    issues    = legal_points.get("issues", [legal_points.get("primary_proposition", {})])
+    issues = legal_points.get("issues", [legal_points.get("primary_proposition", {})])
+    primary_issue = issues[0] if issues else {}
     prop_text = " | ".join(i.get("proposition", "") for i in issues[:3])
-    acts      = list({a for iss in issues for a in iss.get("acts_involved", [])})
-    wrongdoing = " / ".join(i.get("wrongdoing", "") for i in issues[:3] if i.get("wrongdoing"))
+    effective_fact_summary = case_fact_summary or prop_text[:500]
 
     existing_headnotes = item.get("headnotes", "")
-    headnotes_block = (f"\nHeadnotes from IK:\n{existing_headnotes[:800]}"
+    headnotes_block = (f"\nHeadnote from IK:\n{existing_headnotes[:600]}"
                        if existing_headnotes else "")
 
-    plan_statutes      = list((research_plan or {}).get("statutes") or [])[:6]
-    plan_fact_patterns = list((research_plan or {}).get("fact_patterns") or [])[:6]
-    plan_validation    = list((research_plan or {}).get("validation_focus") or [])[:4]
-    plan_reject_rules  = list((research_plan or {}).get("reject_rules") or [])[:6]
-    plan_block = ""
-    if research_plan:
-        plan_block = f"""
-Research validation criteria:
-Controlling statutes/doctrines: {plan_statutes}
-Required fact patterns: {plan_fact_patterns}
-Validation focus: {plan_validation}
-Reject rules (hard): {plan_reject_rules}
-"""
-
     system = (
-        "You are a senior Indian advocate and legal researcher. "
-        "Evaluate whether a judgment is relevant to the SPECIFIC case described below — "
-        "not just the broad area of law. A judgment that mentions the same statute but "
-        "involves unrelated facts, different parties, or a different legal question "
-        "must receive a LOW score (≤ 5). "
-        "Scores 7–8 REQUIRE both factual_match AND legal_issue_match to be true. "
-        "If the judgment discusses the same statute but in a factually unrelated "
-        "transaction, score 1–4."
+        "You are a senior Indian legal researcher validating whether a judgment is relevant as precedent. "
+        "Evaluate THREE criteria independently. A judgment citing the same statute for a DIFFERENT legal "
+        "question or DIFFERENT factual scenario must score LOW on the relevant criteria. "
+        "Apply veto rules exactly as stated. Output ONLY valid JSON, no explanations."
     )
-    user = f"""My case legal issues:
-{prop_text[:600]}
 
-Acts/sections involved: {acts[:6]}
-Wrongdoing/specific facts: {wrongdoing[:200]}
-{plan_block}
-Judgment to evaluate:
+    user = f"""## CASE CONTEXT:
+{effective_fact_summary[:600]}
+
+## SPECIFIC LEGAL ISSUE BEING RESEARCHED:
+Title: {primary_issue.get("issue_title", "")}
+Proposition: {primary_issue.get("proposition", prop_text[:300])}
+Fact Summary: {primary_issue.get("fact_summary", "")}
+
+## JUDGMENT TO EVALUATE:
 Title: {item.get('title', '')}
-URL: {item.get('url', '')}
+Court: {item.get('court', '')}
+Year: {(item.get('date') or item.get('dateOfJudgment') or '')[:10]}
 {headnotes_block}
 Full text (first {_FT_WIN} chars):
 {full_text[:_FT_WIN]}
 
-Evaluate this judgment and extract its key legal points.
+---
 
-Return ONLY this JSON:
+## EVALUATE EACH CRITERION INDEPENDENTLY:
+
+### CRITERION 1: FACT PATTERN SIMILARITY (Score 1-5)
+Are the parties a similar type? Is the underlying dispute the same nature? Are circumstances analogous?
+Ask: "If I described both cases WITHOUT mentioning any law, would a layperson say these are similar situations?"
+5=Nearly identical | 4=Very similar | 3=Moderately similar | 2=Weakly similar | 1=Completely different
+
+### CRITERION 2: LEGAL ISSUE ALIGNMENT (Score 1-5)
+Is the court answering the SAME legal question? Same provision for the same purpose?
+Merely citing the same statute for a DIFFERENT question scores LOW.
+Ask: "Would the same bench say 'these raise the same point of law'?"
+5=Identical question | 4=Closely related | 3=Related but distinguishable | 2=Superficially related | 1=Different question
+
+### CRITERION 3: RATIO DECIDENDI APPLICABILITY (Score 1-5)
+Can the court's reasoning actually be CITED as precedent for this case's proposition?
+5=Directly applicable | 4=Strongly applicable | 3=Partially applicable | 2=Marginal | 1=Not applicable
+
+## VETO RULES (apply these to set verificationStatus):
+- If fact_pattern_score <= 2 → verificationStatus = "IRRELEVANT", cap final_relevance_score at 3.0
+- If legal_issue_score <= 2 → verificationStatus = "REVIEW", cap final_relevance_score at 4.0
+- If ALL three scores >= 4 → verificationStatus = "VERIFIED"
+- If average >= 3 but any score < 4 → verificationStatus = "REVIEW"
+- Otherwise → verificationStatus = "IRRELEVANT"
+
+## RESPOND IN EXACTLY THIS JSON FORMAT (no other text):
 {{
-  "case_name": "Full Party A v Party B",
-  "citation": "AIR/SCC citation e.g. (2020) 2 SCC 569 — write Unknown if not visible",
-  "relevance_score": 8,
-  "factual_match": true,
-  "legal_issue_match": true,
-  "which_issue": "Which of the case legal issues does this judgment address?",
-  "ratio_points": [
-    "Point 1: Exact legal principle/holding stated by the court",
-    "Point 2: Second distinct principle if any",
-    "Point 3: Third distinct principle if any"
-  ],
-  "headnote": "A single concise paragraph summarising what this judgment decided — facts in 1 sentence, legal issue, holding, statute applied.",
-  "excerpt": "The single most powerful sentence or passage from the judgment text that supports this case (verbatim, max 350 chars)"
-}}
+  "fact_pattern_score": 0,
+  "fact_pattern_reasoning": "...",
+  "case_facts_identified": "...",
+  "judgment_facts_identified": "...",
+  "legal_issue_score": 0,
+  "legal_issue_reasoning": "...",
+  "case_legal_issue": "...",
+  "judgment_legal_issue": "...",
+  "ratio_applicability_score": 0,
+  "ratio_applicability_reasoning": "...",
+  "ratio_decidendi": "All key legal holdings and principles laid down, listed as complete sentences. Include every distinct point decided by the court.",
+  "final_relevance_score": 0.0,
+  "verificationStatus": "VERIFIED",
+  "headnote": "2-3 sentence summary of the judgment covering the facts, issue decided, and outcome",
+  "primary_citation": "Official neutral/reporter citation if visible in the text (e.g. '(2023) 5 SCC 123'), else empty string",
+  "judgment_date": "Date of the judgment if visible in the text (YYYY-MM-DD or as written), else empty string",
+  "excerpt": "Most relevant passage verbatim (max 200 words)",
+  "argumentParty": "appellant",
+  "why_relevant_or_not": "One sentence explaining why this IS or IS NOT useful as precedent"
+}}"""
 
-SCORING GUIDE (STRICT — both facts AND legal question must align):
-10 = Landmark case — identical facts AND same legal issue
-8-9 = Very similar facts AND directly decides the same legal question
-7   = Related legal principle AND at least one overlapping factual pattern — clearly citable
-5-6 = Tangentially related — same statute but different facts or different legal question
-1-4 = Not relevant — mentions same area of law only by coincidence
-
-IMPORTANT: Do NOT score 7+ if the case involves completely different parties, industry, or
-transaction type. A SARFAESI case about an unrelated borrower is NOT relevant to a
-specific co-operative bank loan renewal dispute unless it decides the exact same legal point."""
-
-    v = _claude_json(system, user, max_tokens=1200,
+    v = _gemini_json(system, user, max_tokens=2000,
                      run_id=run_id, user_id=user_id, operation="deep_score")
     if not isinstance(v, dict):
         return None
 
-    score = int(v.get("relevance_score", 0))
-    factual_match = bool(v.get("factual_match", False))
-    legal_match   = bool(v.get("legal_issue_match", False))
-    which_issue   = str(v.get("which_issue") or "").strip()
+    # Extract three independent scores
+    fact_score  = max(0, min(5, int(v.get("fact_pattern_score") or 0)))
+    legal_score = max(0, min(5, int(v.get("legal_issue_score") or 0)))
+    ratio_score = max(0, min(5, int(v.get("ratio_applicability_score") or 0)))
 
-    if score < score_threshold:
+    # Compute average; guard against all-zero (bad Claude output)
+    if fact_score == 0 and legal_score == 0 and ratio_score == 0:
+        return None
+    avg_score = round((fact_score + legal_score + ratio_score) / 3.0, 1)
+
+    # Apply veto rules in Python as a safeguard (prompt also instructs Claude to do this)
+    claude_status = str(v.get("verificationStatus") or "").strip().upper()
+    if fact_score <= 2:
+        verification_status = "IRRELEVANT"
+        final_score = min(float(v.get("final_relevance_score") or avg_score), 3.0)
+    elif legal_score <= 2:
+        verification_status = "REVIEW"
+        final_score = min(float(v.get("final_relevance_score") or avg_score), 4.0)
+    elif fact_score >= 4 and legal_score >= 4 and ratio_score >= 4:
+        verification_status = "VERIFIED"
+        final_score = float(v.get("final_relevance_score") or avg_score)
+    elif avg_score >= 3:
+        verification_status = "REVIEW"
+        final_score = float(v.get("final_relevance_score") or avg_score)
+    else:
+        verification_status = "IRRELEVANT"
+        final_score = float(v.get("final_relevance_score") or avg_score)
+
+    # If Claude and Python agree it's IRRELEVANT, drop immediately
+    if verification_status == "IRRELEVANT":
+        logger.info("[PROP] Stage 5 IRRELEVANT: %s (fact=%d legal=%d ratio=%d avg=%.1f)",
+                    item.get("title", "")[:70], fact_score, legal_score, ratio_score, avg_score)
         return None
 
-    # Consistency gates. Claude's own rubric says:
-    #   6  = tangential; same statute but different facts/question
-    #   7  = related principle AND ≥1 factual overlap
-    #   8–9 = very similar facts AND same legal question
-    # If Claude gives a high score but contradicts the rubric, it's over-scoring.
-    # Reject these "half-match" false positives.
-    if score == 6:
-        # Only reachable via threshold=6 fallback. Require ≥1 match signal AND
-        # a named which_issue so we don't ship raw keyword hits.
-        if not (factual_match or legal_match):
-            return None
-        if len(which_issue) < 8:
-            return None
-    elif score == 7:
-        # Score-7 is the most common false-positive band; tighten hardest.
-        # Require BOTH signals AND a named which_issue.
-        if not (factual_match and legal_match):
-            return None
-        if len(which_issue) < 8:
-            return None
-    elif score == 8:
-        # Score-8 already means "very similar"; allow OR-match.
-        if not (factual_match or legal_match):
-            return None
-    # score >= 9 → trust Claude.
+    # For REVIEW, enforce the score threshold gate
+    # score_threshold (1-10) → min_final_score (1-5) = threshold / 2.0
+    min_final = score_threshold / 2.0
+    if verification_status == "REVIEW" and final_score < min_final:
+        logger.info("[PROP] Stage 5 REVIEW below threshold: %s (final=%.1f < %.1f)",
+                    item.get("title", "")[:70], final_score, min_final)
+        return None
 
-    ratio_points = v.get("ratio_points", [])
-    ratio_text = "\n".join(f"{i+1}. {pt}" for i, pt in enumerate(ratio_points) if pt) if ratio_points else ""
+    # Map to existing pipeline fields
+    factual_match = fact_score >= 3
+    legal_match   = legal_score >= 3
+    which_issue   = str(v.get("case_legal_issue") or "").strip()[:200]
+    ratio_text    = str(v.get("ratio_decidendi") or "").strip()
+    headnote_text = str(v.get("headnote") or existing_headnotes or "").strip()
 
-    headnote_text = existing_headnotes or v.get("headnote", "")
+    # Use Claude-extracted citation/date as fallback for local/admin uploads
+    # that had no metadata values for these fields.
+    claude_citation = str(v.get("primary_citation") or "").strip()
+    claude_date     = str(v.get("judgment_date") or "").strip()
 
     return {
         **item,
-        "caseName":        v.get("case_name") or item.get("title", ""),
-        "primaryCitation": v.get("citation") or item.get("ik_citation", ""),
+        "caseName":        item.get("caseName") or item.get("title", ""),
+        "primaryCitation": (item.get("primaryCitation") or item.get("ik_citation") or
+                            claude_citation or ""),
         "court":           item.get("court", ""),
-        "dateOfJudgment":  item.get("date", ""),
-        "coram":           item.get("bench", ""),
+        "dateOfJudgment":  (item.get("dateOfJudgment") or item.get("date") or
+                            claude_date or ""),
+        "coram":           item.get("coram") or item.get("bench", ""),
         "ratio":           ratio_text,
         "headnote":        headnote_text[:1000],
-        "headnotes":       existing_headnotes[:2000] if existing_headnotes else v.get("headnote", ""),
-        "excerptText":     (v.get("excerpt") or item.get("snippet", ""))[:350],
-        "relevanceScore":  round(score / 10.0, 2),
-        "which_issue":     v.get("which_issue", ""),
-        "factual_match":   v.get("factual_match", False),
-        "legal_match":     v.get("legal_issue_match", False),
+        "headnotes":       (existing_headnotes[:2000] if existing_headnotes
+                            else headnote_text[:1000]),
+        "excerptText":     (str(v.get("excerpt") or "") or item.get("snippet", ""))[:350],
+        "relevanceScore":  round(final_score / 5.0, 2),
+        "which_issue":     which_issue,
+        "factual_match":   factual_match,
+        "legal_match":     legal_match,
+        # New structured scoring fields
+        "fact_pattern_score":        fact_score,
+        "legal_issue_score":         legal_score,
+        "ratio_applicability_score": ratio_score,
+        "final_relevance_score":     final_score,
+        "verificationStatus":        _VSTATUS_FRONTEND.get(verification_status, "GREEN"),
+        "argumentParty":             str(v.get("argumentParty") or "neutral").strip().lower(),
+        "why_relevant_or_not":       str(v.get("why_relevant_or_not") or "").strip()[:300],
         "sourceUrl":       item.get("url", ""),
         "ikCiteList":      item.get("ikCiteList", []),
         "ikCitedByList":   item.get("ikCitedByList", []),
         "canonical_id":    (item.get("canonical_id") or
-                           (f"ik:{item['tid']}" if item.get("tid") else "")),
+                            (f"ik:{item['tid']}" if item.get("tid") else "")),
     }
 
 
@@ -2008,6 +2575,8 @@ def _prefilter_with_gemini(
 ) -> List[Dict[str, Any]]:
     """Per-candidate Gemini grounding pre-filter, parallelised (no 2s gap — this is pre-pass)."""
     kept: List[Dict[str, Any]] = []
+    total = len(candidates)
+    completed = 0
     workers = max(1, int(os.environ.get("CITATION_PREFILTER_WORKERS", "4")))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         fut_map = {
@@ -2019,6 +2588,11 @@ def _prefilter_with_gemini(
         }
         for fut in as_completed(fut_map):
             item = fut_map[fut]
+            completed += 1
+            if completed % 5 == 0 or completed == total:
+                _db_log(run_id, "PrefilterAgent", "prefilter", "INFO",
+                        f"Prefilter progress: {completed}/{total} checked, {len(kept)} kept",
+                        {"completed": completed, "total": total, "kept": len(kept)})
             try:
                 res = fut.result(timeout=45)
             except Exception as exc:
@@ -2087,7 +2661,7 @@ Return ONLY this JSON:
     {{"id": "<same id>", "likely_relevant": true, "reason": "short"}}
   ]
 }}"""
-        result = _claude_json(
+        result = _gemini_json(
             system, user, max_tokens=800,
             run_id=run_id, user_id=user_id, operation="prefilter_batch",
         )
@@ -2138,7 +2712,7 @@ def prefilter_candidates(
     to_check: List[Dict[str, Any]] = []
     for it in candidates:
         src = str(it.get("source") or "").lower()
-        if src in ("admin_upload", "local_db") or src.startswith("admin"):
+        if src in ("admin_upload", "local_db") or src.startswith("admin") or _is_locked_selected_case(it):
             curated.append(it)
         else:
             to_check.append(it)
@@ -2176,6 +2750,173 @@ def prefilter_candidates(
     return final
 
 
+# ─── Stage 4.5: Lightweight headnote pre-filter ───────────────────────────────
+
+def extract_headnote(judgment_text: str, max_chars: int = 2000) -> str:
+    """Extract the opening headnote / first portion of a judgment for cheap prefiltering."""
+    text = (judgment_text or "").strip()
+    if not text:
+        return ""
+    _structural_markers = ["HEADNOTE", "HEAD NOTE"]
+    search_area = text[:5000].lower()
+    for marker in _structural_markers:
+        if marker.lower() in search_area:
+            idx = search_area.index(marker.lower())
+            return text[idx : idx + max_chars]
+    return text[:max_chars]
+
+
+def _prefilter_one_headnote(
+    item: Dict[str, Any],
+    case_fact_summary: str,
+    core_legal_issue: str,
+    run_id: Optional[str],
+    user_id: str,
+) -> tuple:
+    """Single-judgment headnote prefilter. Returns (item, 'YES'|'NO'|'MAYBE')."""
+    if _is_locked_selected_case(item):
+        return item, "YES"
+    # Admin-uploaded judgments are curated by the firm — always pass prefilter
+    _src = str(item.get("source") or item.get("source_type") or "").lower()
+    if _src in _ADMIN_SOURCE_TYPES or _src.startswith("admin"):
+        return item, "YES"
+    judgment_text = item.get("full_text") or item.get("headnotes") or item.get("snippet") or ""
+    if not judgment_text or len(judgment_text) < 50:
+        return item, "MAYBE"
+
+    headnote = extract_headnote(judgment_text, max_chars=2000)
+    if not headnote:
+        return item, "MAYBE"
+
+    system = (
+        "You are a legal research assistant. Quickly determine if a judgment is POTENTIALLY "
+        "relevant to a case based only on its headnote/opening. "
+        "Respond with EXACTLY ONE WORD: YES, NO, or MAYBE."
+    )
+    user = f"""## THE CASE IS ABOUT:
+{case_fact_summary[:400] if case_fact_summary else core_legal_issue[:400]}
+
+## THE SPECIFIC LEGAL ISSUE:
+{core_legal_issue[:300]}
+
+## JUDGMENT HEADNOTE / OPENING:
+{headnote}
+
+## DECISION RULES:
+- YES: judgment addresses a SIMILAR factual scenario AND similar legal question
+- MAYBE: cannot tell from the headnote alone
+- NO if:
+  * Facts are clearly about a DIFFERENT type of dispute (e.g., case is about bank recovery but judgment is about property partition)
+  * Legal question is DIFFERENT even though the same statutes are cited
+  * Judgment is about procedural matters unrelated to the substantive issue
+
+CRITICAL: Merely citing the same Act or Section does NOT make a judgment relevant.
+Two cases can cite Section 13 of SARFAESI for completely different legal questions.
+
+Respond with EXACTLY ONE WORD: YES, NO, or MAYBE"""
+
+    try:
+        import os as _os
+        model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+        body = {
+            "model": model,
+            "max_tokens": 30,
+            "temperature": 0.0,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        from claude_proxy import forward_to_claude
+        resp = forward_to_claude(body)
+        blocks = resp.get("content") or []
+        result_text = "\n".join(
+            b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+        ).strip().upper()
+        try:
+            from utils.usage_tracker import record_claude
+            usage = resp.get("usage") or {}
+            record_claude(run_id, user_id or "anonymous", "headnote_prefilter",
+                          tokens_in=int(usage.get("input_tokens", 0)),
+                          tokens_out=int(usage.get("output_tokens", 0)),
+                          model=model)
+        except Exception:
+            pass
+        first_word = (result_text.split()[0] if result_text.split() else "")
+        decision = first_word if first_word in ("YES", "NO", "MAYBE") else "MAYBE"
+        return item, decision
+    except Exception as exc:
+        logger.debug("[PROP] Headnote prefilter call failed for %s: %s",
+                     item.get("title", "")[:60], exc)
+        return item, "MAYBE"
+
+
+def prefilter_by_headnote(
+    candidates: List[Dict[str, Any]],
+    case_fact_summary: str,
+    core_legal_issue: str,
+    run_id: str,
+    user_id: str = "anonymous",
+) -> List[Dict[str, Any]]:
+    """
+    Stage 4.5: per-judgment headnote prefilter using fact_summary context.
+    Eliminates obviously irrelevant judgments cheaply before main prefilter and deep scoring.
+    Fails open (keeps on error). Toggle off via CITATION_HEADNOTE_PREFILTER=off.
+    """
+    if (os.environ.get("CITATION_HEADNOTE_PREFILTER", "on") or "on").strip().lower() != "on":
+        return candidates
+    if not candidates:
+        return candidates
+    if not case_fact_summary and not core_legal_issue:
+        return candidates
+
+    _db_log(run_id, "PropositionPipeline", "headnote_prefilter", "INFO",
+            f"Stage 4.5: headnote prefilter on {len(candidates)} candidates",
+            {"count": len(candidates)})
+
+    workers = max(1, int(os.environ.get("CITATION_HEADNOTE_WORKERS", "8")))
+    results_with_decisions: List[Optional[tuple]] = [None] * len(candidates)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        fut_map = {
+            pool.submit(
+                _prefilter_one_headnote,
+                item, case_fact_summary, core_legal_issue, run_id, user_id,
+            ): i
+            for i, item in enumerate(candidates)
+        }
+        for fut in as_completed(fut_map):
+            idx = fut_map[fut]
+            try:
+                results_with_decisions[idx] = fut.result(timeout=30)
+            except Exception as exc:
+                logger.debug("[PROP] Headnote prefilter future error idx=%d: %s", idx, exc)
+                results_with_decisions[idx] = (candidates[idx], "MAYBE")
+
+    kept: List[Dict[str, Any]] = []
+    rejected_count = 0
+    for pair in results_with_decisions:
+        if pair is None:
+            continue
+        item, decision = pair
+        if decision == "NO":
+            rejected_count += 1
+            logger.info("[PROP] Stage 4.5 REJECTED: %s", item.get("title", "")[:70])
+        else:
+            item["_headnote_prefilter"] = decision
+            kept.append(item)
+
+    # Fail-safe: if filter killed everything, return originals unchanged
+    if candidates and not kept:
+        _db_log(run_id, "PropositionPipeline", "headnote_prefilter", "WARNING",
+                f"Headnote prefilter rejected all {len(candidates)} — bypassing filter",
+                {"bypassed": True})
+        return candidates
+
+    _db_log(run_id, "PropositionPipeline", "headnote_prefilter", "INFO",
+            f"Stage 4.5: {len(candidates)} → {len(kept)} passed (rejected {rejected_count})",
+            {"before": len(candidates), "after": len(kept), "rejected": rejected_count})
+    return kept
+
+
 def deep_validate_and_score(
     legal_points: Dict[str, Any],
     results: List[Dict[str, Any]],
@@ -2183,15 +2924,18 @@ def deep_validate_and_score(
     user_id: str = "anonymous",
     score_threshold: int = 7,
     research_plan: Optional[Dict[str, Any]] = None,
+    case_fact_summary: str = "",
 ) -> List[Dict[str, Any]]:
-    """Validate and score all results in parallel. Returns only those scoring >= threshold."""
+    """Validate and score all results in parallel using 3-criteria structured evaluation."""
     _db_log(run_id, "DeepValidator", "validate", "INFO",
-            f"Deep-validating {len(results)} results (threshold: {score_threshold}/10)")
+            f"Deep-validating {len(results)} results (threshold: {score_threshold}/10, "
+            f"fact_summary={'yes' if case_fact_summary else 'no'})")
 
     scored: List[Optional[Dict]] = []
     with ThreadPoolExecutor(max_workers=_SCORE_WORKERS) as pool:
         fut_map = {
-            pool.submit(_score_one, item, legal_points, score_threshold, run_id, user_id, research_plan): item
+            pool.submit(_score_one, item, legal_points, score_threshold, run_id, user_id,
+                        research_plan, case_fact_summary): item
             for item in results
         }
         for fut in as_completed(fut_map):
@@ -2267,16 +3011,16 @@ def _court_to_dim(court: str) -> tuple:
 
 def _keyword_group_label(citation: Dict[str, Any]) -> str:
     """Prefer the actual retrieval query for grouping; fall back to issue, then court."""
-    query_label = str(
+    query_label = _clean_report_query_label(
         citation.get("_query")
         or citation.get("search_query")
         or citation.get("query")
         or ""
-    ).strip()
+    )
     if query_label:
-        return query_label[:80]
+        return query_label
 
-    which = str(citation.get("which_issue") or "").strip()
+    which = _plain_text(citation.get("which_issue") or "")
     if which:
         return which[:80]
 
@@ -2347,6 +3091,11 @@ def _fit_check_one(
     alongside the judgment's title + headnote + first chunk and asks a single yes/no.
     Keeps the item on pass or on LLM failure (fail-open); drops on explicit fail.
     """
+    if _is_locked_selected_case(item):
+        item["_fitCheck"] = "pass"
+        item["_fitWhy"] = "User selected exact case; skipping final fit rejection."
+        return item
+
     title    = str(item.get("caseName") or item.get("title") or "").strip()
     headnote = str(item.get("headnote") or item.get("headnotes") or "").strip()[:1500]
     excerpt  = str(item.get("excertText") or item.get("excerptText") or
@@ -2395,7 +3144,7 @@ Rules:
   gates already filtered hard; this check exists only to catch obvious mismatches).
 - Set confidence < 0.45 when you are unsure; >= 0.7 when clearly fits or doesn't.
 """
-    v = _claude_json(system, user, max_tokens=400,
+    v = _gemini_json(system, user, max_tokens=400,
                      run_id=run_id, user_id=user_id, operation="final_fit_check")
     if not isinstance(v, dict):
         # LLM failure — fail-open (keep), tag for transparency
@@ -2706,19 +3455,19 @@ def _build_report_format(
 
         entry = {
             "id":                cid,
-            "caseName":          c.get("caseName") or c.get("title", ""),
+            "caseName":          _plain_text(c.get("caseName") or c.get("title", "")),
             "primaryCitation":   c.get("primaryCitation") or c.get("ik_citation", ""),
             "court":             c.get("court", ""),
             "dateOfJudgment":    c.get("dateOfJudgment") or c.get("date", ""),
             "coram":             c.get("coram") or c.get("bench", ""),
             "statutes":          statutes,
-            "ratio":             c.get("ratio", ""),
-            "headnote":          c.get("headnote", "")[:1000],
-            "headnotes":         c.get("headnotes", "")[:2000],
-            "excerptText":       c.get("excerptText", c.get("snippet", ""))[:350],
-            "fullText":          (c.get("full_text", ""))[:3000],
-            "which_issue":       c.get("which_issue", ""),
-            "searchQuery":       c.get("_query") or c.get("search_query") or c.get("query") or "",
+            "ratio":             _plain_text(c.get("ratio", "")),
+            "headnote":          _plain_text(c.get("headnote", ""))[:1000],
+            "headnotes":         _plain_text(c.get("headnotes", ""))[:2000],
+            "excerptText":       _plain_text(c.get("excerptText", c.get("snippet", "")))[:350],
+            "fullText":          _plain_text(c.get("full_text", ""))[:3000],
+            "which_issue":       _plain_text(c.get("which_issue", "")),
+            "searchQuery":       _clean_report_query_label(c.get("_query") or c.get("search_query") or c.get("query") or ""),
             "relevanceScore":    float(c.get("relevanceScore", 0.7)),
             "relevanceBadge":    "High" if float(c.get("relevanceScore", 0.7)) >= 0.75 else "Medium",
             "argumentParty":     "neutral",
@@ -2728,9 +3477,10 @@ def _build_report_format(
             "sourceUrl":         url,
             "sourceUrls":        [url] if url else [],
             "canonical_id":      c.get("canonical_id") or f"ik:{c.get('tid', '')}",
+            "canonicalId":       c.get("canonical_id") or f"ik:{c.get('tid', '')}",
             "dimensionId":       dim_id,
             "dimensionName":     dim_name,
-            "verificationStatus": "GREEN",
+            "verificationStatus": c.get("verificationStatus", "GREEN"),
             "auditStatus":       "VERIFIED",
             "partyArguments":    {"appellant": [], "respondent": [], "court": ""},
             "treatment":         {"followedList": [], "distinguishedList": [], "overruledList": []},
@@ -2744,6 +3494,10 @@ def _build_report_format(
                 "official_citation": c.get("primaryCitation") or "Not Available",
                 "source_url":        url or "Not Available",
                 "source":            src_key,
+                "cited_cases_count": len(c.get("ikCiteList", []) or []),
+                "cited_by_count":    len(c.get("ikCitedByList", []) or []),
+                "ikCiteList":        c.get("ikCiteList", []),
+                "ikCitedByList":     c.get("ikCitedByList", []),
             },
         }
         final_cits.append(entry)
@@ -2773,6 +3527,10 @@ def _build_report_format(
             "generated_at":   now,
             "service_version": "proposition-ik",
             "legal_issues":   [i.get("issue_title", "") for i in issues],
+            "case_fact_summary": _plain_text(legal_points.get("case_fact_summary", ""))[:500],
+            "parties": legal_points.get("parties") or {},
+            "case_type": _plain_text(legal_points.get("case_type", "")),
+            "jurisdiction": _plain_text(legal_points.get("jurisdiction", "")),
         },
     }
 
@@ -2790,16 +3548,18 @@ def _results_to_citations(
         tid = r.get("tid", "")
         url = r.get("url", "")
         cid = r.get("canonical_id") or (f"ik:{tid}" if tid else url)
+        title = _plain_text(r.get("title", ""))
+        snippet = _plain_text(r.get("snippet", r.get("full_text", "")))
         cits.append({
-            "caseName":        r.get("title", ""),
+            "caseName":        title,
             "primaryCitation": r.get("ik_citation", ""),
             "court":           r.get("court", ""),
             "dateOfJudgment":  r.get("date", ""),
             "coram":           r.get("bench", ""),
             "statutes":        all_acts,
-            "excerptText":     r.get("snippet", r.get("full_text", ""))[:350],
-            "ratio":           r.get("snippet", "")[:200],
-            "headnote":        r.get("headnotes", "")[:500],
+            "excerptText":     snippet[:350],
+            "ratio":           snippet[:200],
+            "headnote":        _plain_text(r.get("headnotes", ""))[:500],
             "relevanceScore":  0.6,
             "argumentParty":   "neutral",
             "source":          r.get("source", "indian_kanoon"),
@@ -2808,8 +3568,117 @@ def _results_to_citations(
             "tid":             tid,
             "ikCiteList":      r.get("ikCiteList", []),
             "ikCitedByList":   r.get("ikCitedByList", []),
+            "search_query":    _clean_report_query_label(r.get("_query") or r.get("search_query") or r.get("query") or ""),
+            "which_issue":     _plain_text(r.get("which_issue", "")),
         })
     return cits
+
+
+# ─── PATH 1: Direct case-name fetch (no AI operations) ───────────────────────
+
+def _run_case_name_direct_path(
+    selected_case_names: List[str],
+    query: str,
+    run_id: str,
+    user_id: str,
+    case_id: Optional[str],
+    perspective: str,
+    custom_keywords: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Case name chips selected → IK title search → fetch full text → build report.
+
+    No Claude operations whatsoever: no extract_legal_points, no scoring,
+    no prefilter, no grounding, no fit-check, no rerank.
+    Results are returned as GREEN citations exactly as the user chose them.
+    """
+    _db_log(run_id, "PropositionPipeline", "case_name_direct", "INFO",
+            f"PATH 1 (case name direct): {len(selected_case_names)} case name(s) → IK title search",
+            {"selected_case_names": selected_case_names})
+
+    # Parallel title search — top 1 result per case name (user explicitly chose each case).
+    all_raw: List[Dict] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {pool.submit(_ik_search_by_case_name, name, 1): name
+                for name in selected_case_names[:15]}
+        for fut in as_completed(futs, timeout=60):
+            try:
+                all_raw.extend(fut.result())
+            except Exception as exc:
+                logger.warning("[PROP][PATH1] IK title search failed: %s", exc)
+
+    # User-typed custom keywords also searched (simple keyword queries, top 1 per keyword)
+    if custom_keywords:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            ck_futs = {pool.submit(_ik_search_one, kw, 0): kw for kw in custom_keywords[:5]}
+            for fut in as_completed(ck_futs, timeout=30):
+                try:
+                    results = fut.result()
+                    all_raw.extend(results[:1])  # top 1 per keyword
+                except Exception as exc:
+                    logger.warning("[PROP][PATH1] Custom keyword search failed: %s", exc)
+
+    # Dedup by tid
+    seen_tids: set = set()
+    deduped: List[Dict] = []
+    for r in all_raw:
+        tid = r.get("tid")
+        if tid and tid not in seen_tids:
+            seen_tids.add(tid)
+            deduped.append(r)
+
+    _db_log(run_id, "PropositionPipeline", "case_name_direct_search", "INFO",
+            f"PATH 1: {len(deduped)} unique result(s) from IK title search")
+
+    if not deduped:
+        return _build_report_format([], query, {"issues": []}, user_id, case_id, run_id, perspective)
+
+    # Fetch full judgment texts
+    enriched = fetch_full_texts_parallel(deduped, run_id, max_fetch=min(len(deduped), 15))
+    selected_case_context = "\n\n".join(
+        _plain_text(item.get("full_text") or item.get("headnotes") or item.get("snippet") or "")[:5000]
+        for item in enriched
+        if item
+    ).strip()
+    legal_points = extract_all_legal_points(
+        query=query,
+        case_context=selected_case_context,
+        run_id=run_id,
+        user_id=user_id,
+    ) if selected_case_context else _build_fallback_legal_points(query, " ".join(selected_case_names))
+    issue_titles = [
+        _plain_text(iss.get("issue_title") or iss.get("proposition") or "")
+        for iss in (legal_points.get("issues") or [])
+        if _plain_text(iss.get("issue_title") or iss.get("proposition") or "")
+    ]
+    selected_issue_label = "; ".join(issue_titles[:4]) or "user-selected case name"
+
+    # Build citation entries directly — user explicitly selected these, mark as GREEN
+    citations: List[Dict] = []
+    for item in (r for r in enriched if r):
+        ft = item.get("full_text") or item.get("snippet", "")
+        headnotes = _plain_text(item.get("headnotes") or "")
+        excerpt = _plain_text(ft[:450] if ft else item.get("snippet", ""))
+        citations.append({
+            **item,
+            "caseName":           item.get("caseName") or item.get("title", ""),
+            "court":              item.get("court", ""),
+            "dateOfJudgment":     item.get("dateOfJudgment") or item.get("date", ""),
+            "verificationStatus": "GREEN",
+            "relevanceScore":     0.9,
+            "ratio":              headnotes[:250] or excerpt[:250],
+            "headnote":           headnotes[:500] or excerpt[:500],
+            "headnotes":          headnotes[:1200] or _plain_text(ft[:1200]),
+            "excerptText":        excerpt[:350],
+            "canonical_id":       f"ik:{item.get('tid', '')}",
+            "which_issue":        selected_issue_label,
+        })
+
+    _db_log(run_id, "PropositionPipeline", "case_name_direct_done", "INFO",
+            f"PATH 1 complete: {len(citations)} citation(s) — no AI validation applied")
+
+    return _build_report_format(
+        citations, query, legal_points, user_id, case_id, run_id, perspective
+    )
 
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
@@ -2821,59 +3690,165 @@ def run_proposition_pipeline(
     perspective: str,
     user_id: str,
     case_id: Optional[str],
+    custom_keywords: Optional[List[str]] = None,
+    selected_keywords: Optional[List[str]] = None,
+    selected_case_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Run the full proposition-based citation pipeline. Sync — safe to call from a thread."""
+    """Run the full proposition-based citation pipeline. Sync — safe to call from a thread.
 
+    Args:
+        custom_keywords:      User-typed comma-separated keywords.
+        selected_keywords:    Keyword chips selected from Suggest Keywords panel.
+        selected_case_names:  Case-name chips selected from Suggest Keywords panel.
+                              When present, triggers strict targeted extraction mode.
+    """
     _db_log(run_id, "PropositionPipeline", "start", "INFO",
-            f"Pipeline started — query: {query[:120]}")
+            f"Pipeline started — query: {query[:120]}",
+            {"selected_keywords": len(selected_keywords or []),
+             "selected_case_names": len(selected_case_names or [])})
 
-    # 1. Extract all legal points
-    legal_points = extract_all_legal_points(query, case_context, run_id, user_id)
+    manual_anchor_keywords: List[str] = []
+    _manual_seen: set = set()
+    for kw in (selected_keywords or []) + (custom_keywords or []):
+        kw = str(kw or "").strip()
+        if kw and kw.lower() not in _manual_seen:
+            _manual_seen.add(kw.lower())
+            manual_anchor_keywords.append(kw)
 
-    # 2. Build an explicit research plan, then generate IK keyword queries from it
-    research_plan = build_research_plan(query, case_context, legal_points, run_id, user_id)
-    ik_queries = generate_ik_queries(
-        legal_points,
-        run_id,
-        user_id,
-        case_context=case_context,
-        research_plan=research_plan,
-    )
-
-    # Filter out party-name-only queries (long proper-noun strings with no legal terms)
-    _legal_terms = re.compile(
-        r"\b(section|article|act|CrPC|IPC|writ|petition|quash|bail|acquisition|"
-        r"compensation|court|tribunal|rights|violation|breach|fraud|cheating)\b", re.I
-    )
-    ik_queries = [q for q in ik_queries if _legal_terms.search(q)]
-
-    # Query-quality gate: drop queries that score poorly against the research plan,
-    # but always keep at least 4 (top by plan-score) so retrieval has enough reach.
-    if ik_queries:
-        _scored_queries = sorted(
-            ik_queries,
-            key=lambda q: _score_query_against_plan(q, research_plan),
-            reverse=True,
+    if selected_case_names:
+        _db_log(
+            run_id,
+            "PropositionPipeline",
+            "mode_select",
+            "INFO",
+            f"Mode A: strict targeted extraction for {len(selected_case_names)} selected case(s)",
+            {"selected_case_names": selected_case_names},
         )
-        _before = len(_scored_queries)
-        _strong = [
-            q for q in _scored_queries
-            if _score_query_against_plan(q, research_plan) >= 2 or _legal_terms.search(q)
-        ]
-        if len(_strong) < 4:
-            _strong = _scored_queries[: min(4, _before)]
-        ik_queries = _strong
-        _db_log(run_id, "PropositionPipeline", "query_gate", "INFO",
-                f"Query-quality gate: kept {len(ik_queries)}/{_before} queries")
+        return _run_case_name_direct_path(
+            selected_case_names,
+            query,
+            run_id,
+            user_id,
+            case_id,
+            perspective,
+        )
 
-    if not ik_queries:
-        # Absolute fallback: use acts from extracted issues directly as IK queries
-        all_acts = [a for iss in legal_points.get("issues", [])
-                    for a in iss.get("acts_involved", [])]
+    if manual_anchor_keywords:
+        _db_log(run_id, "PropositionPipeline", "mode_select", "INFO",
+                f"Manual-keyword mode: {len(manual_anchor_keywords)} anchor keyword(s) with synonym expansion",
+                {"manual_anchor_keywords": manual_anchor_keywords})
+        # Force the full pipeline path; anchors will be prepended later after
+        # automatic query generation expands them with related legal terms.
+        selected_keywords = None
+        custom_keywords = None
+    else:
+        _db_log(run_id, "PropositionPipeline", "mode_select", "INFO",
+                "Mode B: autonomous discovery (no selected cases, no manual keywords)")
+
+    # PATH 1: Case name chips → IK title search → return directly, NO AI operations.
+
+    # Stage 1: always run (needed for Stage 5 validation context)
+    legal_points = extract_all_legal_points(query, case_context, run_id, user_id)
+    case_fact_summary = str(legal_points.get("case_fact_summary") or "").strip()
+    issues = legal_points.get("issues", [])
+    _db_log(run_id, "PropositionPipeline", "stage1", "INFO",
+            f"Stage 1: {len(issues)} issues, fact_summary={'yes' if case_fact_summary else 'no'}")
+
+    if selected_keywords:
+        # PATH 2: Keyword chips selected → Stage 2 SKIPPED, use chips directly as IK queries.
+        seen_kw: set = set()
+        ik_queries: List[str] = []
+        for kw in selected_keywords:
+            kw = str(kw or "").strip()
+            if kw and kw.lower() not in seen_kw:
+                seen_kw.add(kw.lower())
+                ik_queries.append(kw)
+        research_plan = None
+        _db_log(run_id, "PropositionPipeline", "stage2_bypass_kw", "INFO",
+                f"PATH 2: Stage 2 bypassed — using {len(ik_queries)} selected keyword(s) directly",
+                {"selected_keywords": ik_queries})
+        logger.info("[PROP] PATH 2 — Stage 2 bypassed with selected keywords: %s", ik_queries)
+    else:
+        # PATH 3: Full pipeline — Stage 2 AI query generation.
+        research_plan = build_research_plan(query, case_context, legal_points, run_id, user_id)
+        ik_queries = generate_ik_queries(
+            legal_points,
+            run_id,
+            user_id,
+            case_context=case_context,
+            research_plan=research_plan,
+            case_fact_summary=case_fact_summary,
+        )
+
+        _legal_terms = re.compile(
+            r"\b(section|article|act|CrPC|IPC|writ|petition|quash|bail|acquisition|"
+            r"compensation|court|tribunal|rights|violation|breach|fraud|cheating)\b", re.I
+        )
         ik_queries = [
-            _normalize_ik_query(a[:60], legal_points, case_context=case_context)
-            for a in all_acts[:4]
-        ] or [_normalize_ik_query(query[:80], legal_points, case_context=case_context)]
+            q for q in ik_queries
+            if _legal_terms.search(q) or len(q.split()) >= 6
+        ]
+
+        if ik_queries:
+            _scored_queries = sorted(
+                ik_queries,
+                key=lambda q: _score_query_against_plan(q, research_plan),
+                reverse=True,
+            )
+            _before = len(_scored_queries)
+            _strong = [
+                q for q in _scored_queries
+                if _score_query_against_plan(q, research_plan) >= 2
+                or _legal_terms.search(q)
+                or len(q.split()) >= 6
+            ]
+            if len(_strong) < 4:
+                _strong = _scored_queries[: min(4, _before)]
+            ik_queries = _strong
+            _db_log(run_id, "PropositionPipeline", "query_gate", "INFO",
+                    f"Query-quality gate: kept {len(ik_queries)}/{_before} queries")
+
+        if not ik_queries:
+            all_acts = [a for iss in legal_points.get("issues", [])
+                        for a in iss.get("acts_involved", [])]
+            ik_queries = [
+                _normalize_ik_query(a[:60], legal_points, case_context=case_context)
+                for a in all_acts[:4]
+            ] or [_normalize_ik_query(query[:80], legal_points, case_context=case_context)]
+
+    # Append user-typed custom keywords (textarea) — always, regardless of bypass mode.
+    if custom_keywords:
+        _ck_seen = set(q.lower() for q in ik_queries)
+        _ck_injected: List[str] = []
+        for kw in custom_keywords:
+            kw = str(kw or "").strip()
+            if kw and kw.lower() not in _ck_seen:
+                _ck_seen.add(kw.lower())
+                _ck_injected.append(kw)
+        if _ck_injected:
+            ik_queries = _ck_injected + ik_queries
+            _db_log(run_id, "PropositionPipeline", "custom_keywords", "INFO",
+                    f"Injected {len(_ck_injected)} user-typed keyword(s) into query pool",
+                    {"custom_keywords": _ck_injected})
+            logger.info("[PROP] Custom keywords injected: %s", _ck_injected)
+
+    if manual_anchor_keywords:
+        _anchor_seen = set(q.lower() for q in ik_queries)
+        _anchor_prefix: List[str] = []
+        for kw in manual_anchor_keywords:
+            if kw.lower() not in _anchor_seen:
+                _anchor_seen.add(kw.lower())
+                _anchor_prefix.append(kw)
+        if _anchor_prefix:
+            ik_queries = _anchor_prefix + ik_queries
+            _db_log(
+                run_id,
+                "PropositionPipeline",
+                "manual_keywords",
+                "INFO",
+                f"Using {len(_anchor_prefix)} manual keyword anchor(s) ahead of generated expansions",
+                {"manual_anchor_keywords": _anchor_prefix},
+            )
 
     # 3. Search sources in priority order: Local ES → Indian Kanoon → Google
     #    Each stage is only triggered if the previous didn't yield enough candidates.
@@ -2899,10 +3874,44 @@ def run_proposition_pipeline(
     _db_log(run_id, "PropositionPipeline", "search_local", "INFO",
             f"🏛 Local: {len(raw_local)} result(s) (kw={len(raw_local_kw)}, sem={len(raw_local_sem)})")
 
-    # Stage B: Indian Kanoon — always run, gives the bulk of case law
-    raw_ik = search_ik_parallel(ik_queries, run_id, legal_points=legal_points)
-    _db_log(run_id, "PropositionPipeline", "search_ik", "INFO",
-            f"📚 Indian Kanoon: {len(raw_ik)} result(s)")
+    # Stage B: Indian Kanoon — always run, gives the bulk of case law.
+    # When case names were selected, only verified exact case-name winners are merged
+    # into the broader keyword retrieval pool. This prevents lookalike titles from
+    # leaking into mixed keyword + selected-case runs.
+    if selected_case_names:
+        with ThreadPoolExecutor(max_workers=8) as _cn_pool:
+            _cn_futs = {_cn_pool.submit(_ik_search_by_case_name, name, 3): name
+                        for name in selected_case_names[:15]}
+            raw_ik_kw = search_ik_parallel(ik_queries, run_id, legal_points=legal_points) if ik_queries else []
+            raw_ik_cn: List[Dict] = []
+            failed_case_names: List[str] = []
+            for fut in as_completed(_cn_futs, timeout=60):
+                case_name = _cn_futs[fut]
+                try:
+                    candidates = fut.result() or []
+                except Exception as exc:
+                    logger.warning("[PROP] Case name search future failed for %r: %s", case_name, exc)
+                    candidates = []
+                verdict = _verify_case_name_search_results(case_name, candidates[:3], run_id, user_id)
+                if verdict.get("match_found") and float(verdict.get("confidence", 0.0) or 0.0) > 0.7:
+                    wanted_tid = str(verdict.get("best_tid") or "").strip()
+                    winner = next((c for c in candidates if str(c.get("tid", "")) == wanted_tid), None)
+                    if winner:
+                        winner["_verification"] = verdict
+                        winner["verificationStatus"] = "GREEN"
+                        winner["which_issue"] = "user-selected case name"
+                        raw_ik_cn.append(winner)
+                        continue
+                failed_case_names.append(case_name)
+        raw_ik = raw_ik_kw + raw_ik_cn
+        _db_log(run_id, "PropositionPipeline", "search_ik", "INFO",
+                f"📚 Indian Kanoon: {len(raw_ik)} result(s) "
+                f"(keyword={len(raw_ik_kw)}, case_name_verified={len(raw_ik_cn)})",
+                {"failed_case_names": failed_case_names})
+    else:
+        raw_ik = search_ik_parallel(ik_queries, run_id, legal_points=legal_points)
+        _db_log(run_id, "PropositionPipeline", "search_ik", "INFO",
+                f"📚 Indian Kanoon: {len(raw_ik)} result(s)")
 
     # Stage C: Google grounding — only if combined local+IK is still thin
     combined_so_far = len({
@@ -2947,23 +3956,32 @@ def run_proposition_pipeline(
         max_fetch=int(os.environ.get("CITATION_MAX_FETCH", "60")),
     )
 
+    # 4.5 NEW: Lightweight headnote prefilter — eliminates obviously irrelevant judgments
+    # cheaply using case_fact_summary + headnote/opening text before the heavier filters.
+    # Fact-pattern veto: rejects judgments where the factual scenario clearly doesn't match.
+    _primary_issue_prop = (issues[0].get("proposition") or query[:120]) if issues else query[:120]
+    enriched = prefilter_by_headnote(
+        enriched, case_fact_summary, _primary_issue_prop, run_id, user_id,
+    )
+
     # 4b. Relevance pre-filter (Gemini grounding or cheap Claude batch) — removes
     # obvious junk before expensive _score_one() runs. Fails open on error.
     prefiltered = prefilter_candidates(
         enriched, legal_points, research_plan, run_id, user_id,
     )
 
-    # 5. Deep validate + score — try threshold 7 first, then one-step relax to 6.
-    # (We deliberately do NOT relax further to 5; 6 keeps "related principle + one
-    # factual overlap" as a minimum so citations stay usefully on-point.)
+    # 5. Deep validate + score with 3-criteria structured evaluation + fact-pattern veto.
+    # Tries threshold 7 (final_score >= 3.5) first, relaxes once to threshold 6 (>= 3.0).
     scored = deep_validate_and_score(legal_points, prefiltered, run_id, user_id,
-                                     score_threshold=7, research_plan=research_plan)
+                                     score_threshold=7, research_plan=research_plan,
+                                     case_fact_summary=case_fact_summary)
 
     if not scored:
         _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
                 "Score ≥ 7 gave 0 — relaxing once to ≥ 6")
         scored = deep_validate_and_score(legal_points, prefiltered, run_id, user_id,
-                                         score_threshold=6, research_plan=research_plan)
+                                         score_threshold=6, research_plan=research_plan,
+                                         case_fact_summary=case_fact_summary)
         if not scored:
             _db_log(run_id, "PropositionPipeline", "validate", "WARNING",
                     "Score ≥ 6 also gave 0 — continuing to empty-result path")
@@ -2985,7 +4003,13 @@ def run_proposition_pipeline(
             max_validate=_gpool_max,
         )
         if grounded:
-            scored = grounded
+            # Items with no URL were never eligible for grounding — keep them alongside
+            # the grounded ones so they aren't silently dropped.
+            no_url_items = [
+                item for item in scored
+                if not str(item.get("sourceUrl") or item.get("url") or "").strip()
+            ]
+            scored = grounded + no_url_items
         else:
             if _grounding_available():
                 strict_fallback = _strict_scored_fallback(scored)
@@ -3030,9 +4054,11 @@ def run_proposition_pipeline(
     # same legal situation as the user's case? Uses the FULL case context + the
     # judgment's headnote/excerpt/first chunk. Drops keyword-match-only false
     # positives that earlier gates missed.
+    # case_fact_summary is prepended to the query to give the fit-check richer context.
+    _fit_query = (f"{case_fact_summary}\n\n{query}" if case_fact_summary else query).strip()
     if scored:
         scored = final_case_fit_check(
-            scored, case_context, legal_points, query, research_plan, run_id, user_id,
+            scored, case_context, legal_points, _fit_query, research_plan, run_id, user_id,
         )
 
     # 7. Semantic rerank on Claude survivors (tie-break + final relevance filter).
@@ -3040,6 +4066,38 @@ def run_proposition_pipeline(
         scored = semantic_rerank_survivors(scored, case_context, legal_points, run_id)
 
     if not scored:
+        fallback_results = list(prefiltered or enriched or raw_ik or raw_local or [])
+        fallback_results = fallback_results[:5]
+        if fallback_results:
+            _db_log(
+                run_id,
+                "PropositionPipeline",
+                "validate",
+                "WARNING",
+                f"All validation stages returned 0 relevant citations; returning {len(fallback_results)} conservative fallback citation(s)",
+            )
+            fallback_citations = _results_to_citations(fallback_results, legal_points)
+            for c in fallback_citations:
+                c["verificationStatus"] = "YELLOW"
+                c["relevanceScore"] = max(float(c.get("relevanceScore", 0.0) or 0.0), 0.55)
+                if not c.get("headnote") and c.get("excerptText"):
+                    c["headnote"] = str(c.get("excerptText") or "")[:500]
+            return _build_report_format(
+                fallback_citations,
+                query,
+                legal_points,
+                user_id,
+                case_id,
+                run_id,
+                perspective,
+                dimensions_metadata=_build_query_dimensions(ik_queries, raw_ik, fallback_citations),
+                search_keywords_by_route={
+                    "local": list(ik_queries),
+                    "indian_kanoon": list(ik_queries),
+                    "google": list(ik_queries[:3]) if raw_google else [],
+                },
+                research_plan=research_plan,
+            )
         # Return an empty report rather than dumping unscored raw results — raw IK
         # keyword hits are mostly irrelevant (that's the problem we're solving).
         # If users need a fallback, they can lower CITATION_SCORE_FLOOR or re-run.

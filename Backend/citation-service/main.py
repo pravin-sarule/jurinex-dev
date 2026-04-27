@@ -683,7 +683,7 @@ async def search_judgements(
     area: str = "",
     status: str = "",
     limit: int = 100,
-) -> Dict[str, Any]:
+ ) -> Dict[str, Any]:
     """Full-text search + filter across all indexed judgments."""
     from db.connections import get_pg_conn, get_es_client
     from psycopg2.extras import RealDictCursor
@@ -966,6 +966,9 @@ async def generate_citation_report(
     use_pipeline: bool = Body(True, embed=True),
     retrieval_method: str = Body("indiankanoon", embed=True, description="Retrieval mode: 'indiankanoon' | 'web'"),
     perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
+    custom_keywords: Optional[List[str]] = Body(None, embed=True, description="User-supplied keyword strings injected directly into the IK query pool"),
+    selected_keywords: Optional[List[str]] = Body(None, embed=True, description="Keyword chips selected from suggestion panel — bypasses Stage 2 AI query generation"),
+    selected_case_names: Optional[List[str]] = Body(None, embed=True, description="Case name chips selected from suggestion panel — searched on IK by title"),
     request: Request = None,
 ) -> Dict[str, Any]:
     """
@@ -1021,6 +1024,9 @@ async def generate_citation_report(
                     case_file_context or [],
                     case_id,
                     retrieval_method,
+                    custom_keywords or [],
+                    selected_keywords or [],
+                    selected_case_names or [],
                 ),
                 timeout=SYNC_PIPELINE_TIMEOUT_SECONDS,
             )
@@ -1274,12 +1280,32 @@ async def get_judgement_full_text(canonical_id: str) -> Dict[str, Any]:
     j = judgement_get(canonical_id)
     if j:
         raw_full = j.get("full_text") or j.get("raw_content") or ""
+        citation_data = j.get("citation_data") or {}
+        is_local_admin = bool(j.get("is_local_admin"))
+        pdf_bucket_path = (
+            j.get("ik_orig_doc_url")
+            or j.get("source_url")
+            or j.get("official_source_url")
+            or j.get("import_source_link")
+            or ""
+        )
         return {
             "success": True,
             "canonical_id": canonical_id,
             "case_name": j.get("title") or j.get("case_name") or "Judgment",
             "full_text": _html_to_text(raw_full),
             "source_url": j.get("source_url") or j.get("official_source_url") or j.get("import_source_link") or "",
+            "source": "local_db",
+            "is_local_admin": is_local_admin,
+            "pdf_bucket_path": pdf_bucket_path if is_local_admin else "",
+            "ik_cite_list": citation_data.get("ikCiteList") or citation_data.get("ik_cite_list") or [],
+            "ik_cited_by_list": citation_data.get("ikCitedByList") or citation_data.get("ik_cited_by_list") or [],
+            "metadata": {
+                "court": j.get("court_name") or j.get("court_code") or "",
+                "bench": j.get("bench") or j.get("coram") or "",
+                "date": j.get("judgment_date") or j.get("date") or "",
+                "citation": j.get("primary_citation") or "",
+            },
         }
 
     # Fall back to ik_document_assets (canonical_id format: "ik:{tid}")
@@ -1297,13 +1323,55 @@ async def get_judgement_full_text(canonical_id: str) -> Dict[str, Any]:
                 raw_content = _html_to_text(doc_data.get("doc") or "")
             title = asset.get("title") or (raw_resp.get("doc_data") or {}).get("title") or "Judgment"
             source_url = asset.get("orig_doc_url") or f"https://indiankanoon.org/doc/{ik_tid}/"
+            gcs_path = asset.get("orig_doc_gcs_path") or ""
             return {
                 "success": True,
                 "canonical_id": canonical_id,
                 "case_name": title,
                 "full_text": raw_content,
                 "source_url": source_url,
+                "source": "local_db",
+                "is_local_admin": True,
+                "pdf_bucket_path": gcs_path or source_url,
+                "ik_cite_list": raw_resp.get("cites") or raw_resp.get("citeList") or [],
+                "ik_cited_by_list": raw_resp.get("citedby") or raw_resp.get("citedbyList") or [],
+                "metadata": {
+                    "court": raw_resp.get("docsource") or "",
+                    "bench": raw_resp.get("bench") or raw_resp.get("coram") or "",
+                    "date": raw_resp.get("publishdate") or "",
+                    "citation": raw_resp.get("citation") or raw_resp.get("primarycitation") or "",
+                },
             }
+
+    # Not in any local DB — fetch live from IK API, show result directly without storing
+    if ik_tid:
+        try:
+            from services.indian_kanoon import ik_fetch_doc
+            doc_data = ik_fetch_doc(ik_tid, maxcites=20, maxcitedby=20)
+            if doc_data:
+                doc_html = doc_data.get("doc") or ""
+                raw_content = _html_to_text(doc_html)
+                title = doc_data.get("title") or "Judgment"
+                ik_url = f"https://indiankanoon.org/doc/{ik_tid}/"
+                return {
+                    "success": True,
+                    "canonical_id": canonical_id,
+                    "case_name": title,
+                    "full_text": raw_content,
+                    "source_url": ik_url,
+                    "ik_resource_url": ik_url,
+                    "source": "indiankanoon_live",
+                    "ik_cite_list": doc_data.get("cites") or doc_data.get("citeList") or [],
+                    "ik_cited_by_list": doc_data.get("citedby") or doc_data.get("citedbyList") or [],
+                    "metadata": {
+                        "court": doc_data.get("docsource") or "",
+                        "bench": doc_data.get("bench") or doc_data.get("coram") or "",
+                        "date": doc_data.get("publishdate") or doc_data.get("date") or "",
+                        "citation": doc_data.get("citation") or "",
+                    },
+                }
+        except Exception as _ik_exc:
+            logger.warning("[FULL_TEXT] Live IK fetch failed for tid=%s: %s", ik_tid, _ik_exc)
 
     raise HTTPException(status_code=404, detail="Judgment not found")
 
@@ -1778,8 +1846,196 @@ async def get_citation_usage_by_run(
 
 # In-memory run state: run_id → {status, report_id, report_format, error}
 _run_state: Dict[str, Dict[str, Any]] = {}
-STALE_RUN_TIMEOUT_SECONDS = max(60, _env_int("CITATION_STALE_RUN_TIMEOUT_SECONDS", 180))
+STALE_RUN_TIMEOUT_SECONDS = max(60, _env_int("CITATION_STALE_RUN_TIMEOUT_SECONDS", 600))
 INMEMORY_RUN_TIMEOUT_SECONDS = max(120, _env_int("CITATION_INMEMORY_RUN_TIMEOUT_SECONDS", 900))
+
+def _gemini_grounding_json(prompt: str, max_tokens: int = 1024) -> str:
+    """Call Gemini with Google Search grounding tool. Returns raw response text."""
+    import os, time as _time
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set")
+    from google import genai
+    from google.genai import types
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    grounding_tool = types.Tool(google_search=types.GoogleSearch())
+    config = types.GenerateContentConfig(
+        tools=[grounding_tool],
+        max_output_tokens=max_tokens,
+        temperature=0.0,
+    )
+    client = genai.Client(api_key=api_key)
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt, config=config)
+            return getattr(response, "text", None) or ""
+        except Exception as exc:
+            msg = str(exc)
+            if ("429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()) and attempt < 2:
+                _time.sleep(8 * (attempt + 1))
+                continue
+            raise
+
+
+@app.post("/citation/suggest-keywords")
+async def suggest_citation_keywords(
+    request: Request,
+    case_id: Optional[str] = Body(None, embed=True),
+    query: Optional[str] = Body(None, embed=True),
+    case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
+) -> Dict[str, Any]:
+    """Generate 3 categories of IK keyword suggestions + related landmark cases via Google Grounding.
+
+    Returns:
+      statute_keywords, principle_keywords, fact_keywords — lists of search phrase strings.
+      related_cases — list of { case_name, citation, relevance, url? } for lawyer reference.
+    """
+    import json as _json, re as _re
+
+    # Fetch case context if not provided
+    if case_id and not case_file_context:
+        auth_header_pre = request.headers.get("authorization")
+        case_file_context, _ = await _fetch_case_context(case_id, auth_header_pre)
+
+    # Build compact context blob
+    context_parts: List[str] = []
+    for f in (case_file_context or [])[:5]:
+        snippet = (f.get("snippet") or f.get("content") or "").strip()
+        if snippet:
+            context_parts.append(snippet[:3000])
+    context_text = "\n\n".join(context_parts)[:8000]
+    if not context_text and query:
+        context_text = query.strip()
+    if not context_text:
+        return {"statute_keywords": [], "principle_keywords": [], "fact_keywords": [], "related_cases": []}
+
+    def _clean_json(text: str) -> str:
+        text = text.strip()
+        text = _re.sub(r"^```(?:json)?\s*\n?", "", text, flags=_re.M)
+        text = _re.sub(r"\n?```\s*$", "", text, flags=_re.M).strip()
+        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        return m.group(0) if m else text
+
+    # ── Part 1: keyword suggestions via Claude ───────────────────────────────
+    kw_system = (
+        "You are a senior Indian legal researcher. Given a case description, "
+        "generate precise Indian Kanoon search keyword phrases in exactly 3 categories.\n"
+        "- statute_keywords: statutes, sections, article numbers directly at issue (e.g. 'Section 300 IPC culpable homicide')\n"
+        "- principle_keywords: legal doctrines or principles (e.g. 'res judicata bar second suit')\n"
+        "- fact_keywords: the factual scenario in plain language (e.g. 'unauthorized road construction private land municipal corporation')\n"
+        "Rules: 3-5 phrases per category. Each phrase 3-8 words. No party names. No Boolean operators.\n"
+        'Output ONLY valid JSON: {"statute_keywords":[...],"principle_keywords":[...],"fact_keywords":[...]}'
+    )
+    kw_user = f"Case description:\n{context_text[:5000]}"
+
+    # ── Part 2: related case name keywords via Google Grounding ─────────────
+    case_prompt = (
+        "You are a senior Indian advocate doing legal research. "
+        "Search Google comprehensively across the following Indian legal databases to find ALL relevant "
+        "court judgments for the case described below:\n"
+        "- site:indiankanoon.org\n"
+        "- site:scconline.com\n"
+        "- site:manupatra.com\n"
+        "- site:sci.gov.in (Supreme Court of India)\n"
+        "- site:judis.nic.in\n"
+        "- Indian Kanoon, SCC Online, Manupatra, High Court websites\n\n"
+        "Case description:\n"
+        f"{context_text[:4000]}\n\n"
+        "Find 10 to 15 Indian court judgments (Supreme Court and High Courts) that are most relevant "
+        "to the legal issues, statutes, and factual scenario of this case. Include both landmark cases "
+        "and recent judgments. Cast a wide net — include cases on the same statutes, same legal principles, "
+        "and same fact patterns.\n\n"
+        "Output ONLY a JSON object with one key 'case_keywords' whose value is a JSON array of strings. "
+        "Each string is a short case name for searching on indiankanoon.org — "
+        "format: 'Appellant v Respondent (year)'.\n"
+        "Example output:\n"
+        '{"case_keywords":["Maneka Gandhi v Union of India (1978)","Olga Tellis v Bombay Municipal Corporation (1985)","State Bank of India v Jah Developers (2019)"]}\n\n'
+        "Output only the JSON. No explanations, no citations, no URLs, no markdown."
+    )
+
+    kw_result: Dict[str, Any] = {}
+    case_keywords: List[str] = []
+
+    def _call_claude_kw() -> Dict[str, Any]:
+        import os
+        from claude_proxy import forward_to_claude
+        import re as _re2
+        model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+        raw = forward_to_claude({
+            "model": model, "max_tokens": 600, "temperature": 0.0,
+            "system": kw_system,
+            "messages": [{"role": "user", "content": kw_user}],
+        })
+        text = ""
+        for block in (raw.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                break
+        text = _re2.sub(r"^```(?:json)?\s*\n?", "", text.strip(), flags=_re2.M)
+        text = _re2.sub(r"\n?```\s*$", "", text, flags=_re2.M).strip()
+        m = _re2.search(r"\{.*\}", text, _re2.DOTALL)
+        if m:
+            text = m.group(0)
+        return _json.loads(text)
+
+    try:
+        parsed = await asyncio.to_thread(_call_claude_kw)
+        kw_result = {
+            "statute_keywords":   [str(k) for k in parsed.get("statute_keywords") or []],
+            "principle_keywords": [str(k) for k in parsed.get("principle_keywords") or []],
+            "fact_keywords":      [str(k) for k in parsed.get("fact_keywords") or []],
+        }
+    except Exception as exc:
+        logger.warning("[SUGGEST_KW] Claude keyword suggestion failed: %s", exc)
+        kw_result = {"statute_keywords": [], "principle_keywords": [], "fact_keywords": []}
+
+    try:
+        case_text = await asyncio.to_thread(_gemini_grounding_json, case_prompt, 1500)
+        logger.info("[SUGGEST_KW] Raw case grounding response (%d chars): %s",
+                    len(case_text or ""), (case_text or "")[:400])
+
+        # Strategy 1: direct JSON parse after cleaning
+        try:
+            parsed2 = _json.loads(_clean_json(case_text))
+            raw_names = parsed2.get("case_keywords") or parsed2.get("cases") or parsed2.get("case_names") or []
+            if isinstance(raw_names, list):
+                for name in raw_names:
+                    name = str(name).strip()
+                    if name:
+                        case_keywords.append(name)
+        except Exception:
+            pass
+
+        # Strategy 2: if no results yet, try parsing raw text as a JSON array
+        if not case_keywords:
+            try:
+                m = _re.search(r'\[([^\[\]]+)\]', case_text or "", _re.DOTALL)
+                if m:
+                    arr = _json.loads('[' + m.group(1) + ']')
+                    if isinstance(arr, list):
+                        for name in arr:
+                            name = str(name).strip()
+                            if name and len(name) > 5:
+                                case_keywords.append(name)
+            except Exception:
+                pass
+
+        # Strategy 3: regex extract quoted strings that look like case names (contain 'v' and year)
+        if not case_keywords:
+            for m in _re.finditer(r'"([^"]{10,120})"', case_text or ""):
+                name = m.group(1).strip()
+                if _re.search(r'\bv\.?\b|\bvs\.?\b|\bversus\b', name, _re.I) or _re.search(r'\b\d{4}\b', name):
+                    case_keywords.append(name)
+                    if len(case_keywords) >= 8:
+                        break
+
+        case_keywords = [k for k in case_keywords if len(k) > 5][:15]
+        logger.info("[SUGGEST_KW] Extracted %d case keywords", len(case_keywords))
+    except Exception as exc:
+        logger.warning("[SUGGEST_KW] Related case keywords grounding failed: %s", exc)
+
+    return {**kw_result, "case_keywords": case_keywords}
+
 
 @app.post("/citation/report/start")
 async def start_citation_report(
@@ -1791,6 +2047,9 @@ async def start_citation_report(
     use_pipeline: bool = Body(True, embed=True),
     retrieval_method: str = Body("indiankanoon", embed=True, description="Retrieval mode: 'indiankanoon' | 'web'"),
     perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
+    custom_keywords: Optional[List[str]] = Body(None, embed=True, description="User-supplied keyword strings injected directly into the IK query pool"),
+    selected_keywords: Optional[List[str]] = Body(None, embed=True, description="Keyword chips selected from suggestion panel — bypasses Stage 2 AI query generation"),
+    selected_case_names: Optional[List[str]] = Body(None, embed=True, description="Case name chips selected from suggestion panel — searched on IK by title"),
 ) -> Dict[str, Any]:
     """Start citation report pipeline in background. Returns run_id immediately for log polling."""
     import uuid as _uuid
@@ -1837,6 +2096,9 @@ async def start_citation_report(
                 case_file_context=case_file_context or [],
                 case_id=case_id,
                 retrieval_method=str(retrieval_method or "indiankanoon").strip().lower(),
+                custom_keywords=custom_keywords or [],
+                selected_keywords=selected_keywords or [],
+                selected_case_names=selected_case_names or [],
             )
             if out.get("error"):
                 _set_run_state(run_id, {"status": "failed", "report_id": None,
@@ -1957,6 +2219,10 @@ async def get_run_status(run_id: str) -> Dict[str, Any]:
                     stale_from = last_log_at or row.get("created_at")
                     if stale_from is not None:
                         try:
+                            # Normalise naive datetimes from DB to UTC before subtraction
+                            from datetime import timezone as _tz
+                            if hasattr(stale_from, "tzinfo") and stale_from.tzinfo is None:
+                                stale_from = stale_from.replace(tzinfo=_tz.utc)
                             age_seconds = (now - stale_from).total_seconds()
                             if age_seconds >= STALE_RUN_TIMEOUT_SECONDS:
                                 status = "failed"
@@ -1986,3 +2252,274 @@ async def get_run_status(run_id: str) -> Dict[str, Any]:
         finally:
             conn.close()
     return {"success": False, "run_id": run_id, "status": "unknown"}
+
+
+# ─── Manual Mode: fetch full judgment for a list of case names ────────────────
+
+@app.post("/citation/manual/fetch-case-judgments")
+async def manual_fetch_case_judgments(
+    request: Request,
+    case_names: List[str] = Body(..., embed=True),
+    user_id: Optional[str] = Body("anonymous", embed=True),
+) -> Dict[str, Any]:
+    """
+    Manual mode — fetch judgment for each selected case name.
+    Priority: local DB → Indian Kanoon → Google.
+    Stores IK/Google results to ES+Qdrant+PG in background.
+    Returns results immediately without blocking.
+    """
+    import threading as _threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+    from services.indian_kanoon import ik_fetch_doc
+
+    case_names = [str(n).strip() for n in (case_names or []) if str(n).strip()][:10]
+    if not case_names:
+        return {"success": False, "error": "case_names is required", "results": [], "not_found": []}
+
+    user_id = _resolve_citation_user_id(request, user_id)
+
+    def _fetch_one(case_name: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "case_name": case_name,
+            "matched_title": "",
+            "full_text": "",
+            "source": "not_found",
+            "source_url": "",
+            "ik_tid": "",
+            "metadata": {"court": "", "date": "", "bench": "", "citation": ""},
+        }
+
+        # Step 1 — Local ES: same query strings as IK uses for this case name
+        try:
+            from agents.proposition_pipeline import _search_local_one
+
+            # Mirror exactly the two query forms _ik_search_by_case_name sends to IK:
+            #   - name_no_year : full case name with trailing year stripped
+            #   - first_party  : text before the "v." separator (first party name)
+            _name_no_year = re.sub(r'\s*\(\d{4}\)\s*$', '', case_name.strip()).strip()
+            _v_split = re.split(r'\s+(?:v\.?s?\.?|versus)\s+', _name_no_year, maxsplit=1, flags=re.I)
+            _first_party = _v_split[0].strip()[:60] if _v_split else _name_no_year[:60]
+
+            _seen_cids: set = set()
+            _best_hit = None
+            for _q in [_name_no_year, _first_party]:
+                if not _q:
+                    continue
+                for _h in (_search_local_one(_q) or []):
+                    _cid = str(_h.get("canonical_id") or "").strip()
+                    if _cid in _seen_cids:
+                        continue
+                    _seen_cids.add(_cid)
+                    _ft = str(_h.get("full_text") or "").strip()
+                    if _ft:
+                        _best_hit = (_h, _ft)
+                        break
+                if _best_hit:
+                    break
+
+            if _best_hit:
+                h, ft = _best_hit
+                result.update({
+                    "matched_title": h.get("title") or h.get("case_name") or case_name,
+                    "full_text": ft,
+                    "source": "local_db",
+                    "source_url": h.get("url") or h.get("source_url") or "",
+                    "ik_tid": str(h.get("canonical_id") or h.get("tid") or "").removeprefix("ik:"),
+                    "canonical_id": str(h.get("canonical_id") or ""),
+                    "metadata": {
+                        "court": h.get("court") or h.get("court_code") or "",
+                        "date": str(h.get("date") or h.get("judgment_date") or ""),
+                        "bench": h.get("bench") or h.get("coram") or "",
+                        "citation": h.get("ik_citation") or h.get("primary_citation") or "",
+                    },
+                })
+                return result
+        except Exception as _exc:
+            logger.warning("[MANUAL_FETCH] Local ES search failed for %r: %s", case_name, _exc)
+
+        # Step 2 — Indian Kanoon (only if similarity is high enough)
+        try:
+            from agents.proposition_pipeline import _ik_search_by_case_name
+            ik_hits = _ik_search_by_case_name(case_name, top_n=1)
+            if ik_hits:
+                h = ik_hits[0]
+                # Require meaningful similarity — skip if IK returned an unrelated case
+                if float(h.get("sim", 0)) < 0.2:
+                    return result  # source stays "not_found"
+                tid = str(h.get("tid") or "").strip()
+                if tid:
+                    doc = ik_fetch_doc(tid, maxcites=10, maxcitedby=10)
+                    if doc:
+                        full_text = _html_to_text(doc.get("doc") or "")
+                        ik_url = f"https://indiankanoon.org/doc/{tid}/"
+                        result.update({
+                            "matched_title": doc.get("title") or h.get("title") or case_name,
+                            "full_text": full_text,
+                            "source": "indian_kanoon",
+                            "source_url": ik_url,
+                            "ik_tid": tid,
+                            "canonical_id": f"ik:{tid}",
+                            "metadata": {
+                                "court": doc.get("docsource") or h.get("court") or "",
+                                "date": str(h.get("date") or ""),
+                                "bench": doc.get("bench") or doc.get("coram") or "",
+                                "citation": doc.get("citation") or "",
+                            },
+                        })
+                        return result
+        except Exception as _exc:
+            logger.warning("[MANUAL_FETCH] IK search failed for %r: %s", case_name, _exc)
+
+        return result
+
+    results = []
+    not_found = []
+    with ThreadPoolExecutor(max_workers=min(len(case_names), 5)) as pool:
+        future_map = {pool.submit(_fetch_one, cn): cn for cn in case_names}
+        for fut in _as_completed(future_map):
+            try:
+                r = fut.result(timeout=45)
+                if r["source"] == "not_found":
+                    not_found.append(r["case_name"])
+                else:
+                    results.append(r)
+            except Exception as exc:
+                logger.warning("[MANUAL_FETCH] fetch_one error: %s", exc)
+
+    # Background storage: ingest IK/Google results that have enough full text
+    def _store_bg(_results=results):
+        from db.client import judgment_ingest_from_ik
+        for r in _results:
+            if r.get("source") in ("indian_kanoon", "google") and r.get("ik_tid") and len(r.get("full_text") or "") >= 200:
+                try:
+                    judgment_ingest_from_ik(
+                        ik_tid=r["ik_tid"],
+                        case_name=r.get("matched_title") or r.get("case_name") or "",
+                        full_text=r.get("full_text") or "",
+                        court_code=r.get("metadata", {}).get("court") or "",
+                        judgment_date=r.get("metadata", {}).get("date") or "",
+                    )
+                except Exception as exc:
+                    logger.warning("[MANUAL_FETCH_STORE] Failed for tid=%s: %s", r.get("ik_tid"), exc)
+
+    _threading.Thread(target=_store_bg, daemon=True, name="manual-fetch-store").start()
+
+    return {"success": True, "results": results, "not_found": not_found}
+
+
+# ─── Manual Mode: search local DB + IK by keywords ───────────────────────────
+
+@app.post("/citation/manual/search-by-keywords")
+async def manual_search_by_keywords(
+    request: Request,
+    keywords: List[str] = Body(..., embed=True),
+    user_id: Optional[str] = Body("anonymous", embed=True),
+    case_id: Optional[str] = Body(None, embed=True),
+) -> Dict[str, Any]:
+    """
+    Manual mode — search local DB + Indian Kanoon for each keyword.
+    Returns deduplicated results. Stores new IK hits to ES+Qdrant+PG in background.
+    """
+    import threading as _threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+    from services.indian_kanoon import ik_search as _ik_search, ik_fetch_doc as _ik_fetch_doc
+
+    keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()][:15]
+    if not keywords:
+        return {"success": False, "error": "keywords is required", "total": 0, "results": []}
+
+    user_id = _resolve_citation_user_id(request, user_id)
+
+    def _search_one(keyword: str) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+
+        # Local ES — same keyword query format as IK (_search_local_one mirrors ik_search)
+        try:
+            from agents.proposition_pipeline import _search_local_one
+            for h in _search_local_one(keyword):
+                cid = str(h.get("canonical_id") or "").strip()
+                tid = str(h.get("tid") or "").strip()
+                items.append({
+                    "case_name": h.get("title") or h.get("case_name") or "",
+                    "snippet": str(h.get("snippet") or h.get("full_text") or "")[:400],
+                    "source": h.get("source") or "local_db",
+                    "source_url": h.get("url") or h.get("source_url") or "",
+                    "ik_tid": tid or (cid.removeprefix("ik:") if cid.startswith("ik:") else ""),
+                    "canonical_id": cid,
+                    "matched_keyword": keyword,
+                    "metadata": {
+                        "court": h.get("court") or "",
+                        "date": str(h.get("date") or ""),
+                        "citation": h.get("ik_citation") or "",
+                    },
+                })
+        except Exception as _exc:
+            logger.warning("[MANUAL_KW] Local ES search failed for %r: %s", keyword, _exc)
+
+        # Indian Kanoon — same keyword string
+        try:
+            ik_resp = _ik_search(keyword, pagenum=0)
+            for doc in (ik_resp or {}).get("docs", [])[:5]:
+                tid = str(doc.get("tid") or "").strip()
+                if not tid:
+                    continue
+                items.append({
+                    "case_name": doc.get("title") or "",
+                    "snippet": _html_to_text(doc.get("headline") or "")[:400],
+                    "source": "indian_kanoon",
+                    "source_url": f"https://indiankanoon.org/doc/{tid}/",
+                    "ik_tid": tid,
+                    "canonical_id": f"ik:{tid}",
+                    "matched_keyword": keyword,
+                    "metadata": {
+                        "court": doc.get("docsource") or "",
+                        "date": "",
+                        "citation": "",
+                    },
+                })
+        except Exception as _exc:
+            logger.warning("[MANUAL_KW] IK search failed for %r: %s", keyword, _exc)
+
+        return items
+
+    all_items: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(len(keywords), 6)) as pool:
+        futures = [pool.submit(_search_one, kw) for kw in keywords]
+        for fut in _as_completed(futures):
+            try:
+                all_items.extend(fut.result(timeout=30))
+            except Exception as exc:
+                logger.warning("[MANUAL_KW] search_one error: %s", exc)
+
+    # Deduplicate by canonical_id
+    seen: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for item in all_items:
+        key = item.get("canonical_id") or item.get("ik_tid") or item.get("case_name")
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(item)
+
+    # Background storage: for IK hits fetch full text then ingest
+    def _store_kw_bg(_items=deduped):
+        from db.client import judgment_ingest_from_ik
+        for item in _items:
+            if item.get("source") == "indian_kanoon" and item.get("ik_tid"):
+                try:
+                    doc = _ik_fetch_doc(item["ik_tid"])
+                    if doc:
+                        full_text = _html_to_text(doc.get("doc") or "")
+                        if len(full_text) >= 200:
+                            judgment_ingest_from_ik(
+                                ik_tid=item["ik_tid"],
+                                case_name=item.get("case_name") or "",
+                                full_text=full_text,
+                                court_code=item.get("metadata", {}).get("court") or doc.get("docsource") or "",
+                                judgment_date=item.get("metadata", {}).get("date") or "",
+                            )
+                except Exception as exc:
+                    logger.warning("[MANUAL_KW_STORE] Failed for tid=%s: %s", item.get("ik_tid"), exc)
+
+    _threading.Thread(target=_store_kw_bg, daemon=True, name="manual-kw-store").start()
+
+    return {"success": True, "total": len(deduped), "results": deduped}

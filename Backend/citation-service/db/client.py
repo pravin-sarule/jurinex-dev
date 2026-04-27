@@ -212,7 +212,7 @@ def judgement_search_semantic(
     case_state: str = "",
     approved_only: bool = True,
     exclude_low_hierarchy: bool = True,
-    qdrant_collection: str = "legal_embeddings",
+    qdrant_collection: str = "legal_embeddings_v2",
 ) -> List[Dict[str, Any]]:
     """
     Semantic-only judgment retrieval for watchdog hybrid local search.
@@ -234,7 +234,7 @@ def judgement_search_semantic(
         logger.info("[QDRANT] Semantic search skipped: embedding empty for %r", text[:80])
         return []
 
-    collection = (qdrant_collection or "").strip() or "legal_embeddings"
+    collection = (qdrant_collection or "").strip() or "legal_embeddings_v2"
     fetch_limit = max(int(limit or 10), 1)
     points: List[Any] = []
     try:
@@ -641,8 +641,9 @@ def judgements_fetch_by_canonical_ids(
             "year":           r.get("year"),
             "citation_data":  cd,
             # Expose full content directly for Watchdog/Clerk local-path enrichment.
-            "full_text":      cd.get("full_text") or "",
-            "raw_content":    cd.get("full_text") or "",
+            # Admin uploads store content in judgment_uploads.merged_text, not citation_data.
+            "full_text":      cd.get("full_text") or (ju_u.get("merged_text") if is_admin else "") or "",
+            "raw_content":    cd.get("full_text") or (ju_u.get("merged_text") if is_admin else "") or "",
             "has_analysis_report": has_ar,
             # Full upload-lifecycle enrichment from judgment_uploads (when available).
             "original_filename": ju_u.get("original_filename"),
@@ -1713,7 +1714,19 @@ def judgement_search_local(
                             }
                         ],
                         "filter": [
-                            {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}}
+                            {
+                                "bool": {
+                                    "should": [
+                                        {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}},
+                                        {"terms": {"source_type.keyword": [
+                                            "admin", "admin_upload", "admin-upload", "admin uploaded",
+                                            "admin-uploaded", "adminupload", "manual_upload", "manual-upload",
+                                            "judgment_upload", "judgement_upload",
+                                        ]}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
                         ] if approved_only else [],
                         "must_not": [
                             {"match_phrase": {"court_code": "district court"}},
@@ -2295,7 +2308,19 @@ def judgement_search_local(
                             }
                         ],
                         "filter": [
-                            {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}}
+                            {
+                                "bool": {
+                                    "should": [
+                                        {"terms": {"verification_status.keyword": ["APPROVED", "VERIFIED", "VERIFIED_WARN", "GREEN"]}},
+                                        {"terms": {"source_type.keyword": [
+                                            "admin", "admin_upload", "admin-upload", "admin uploaded",
+                                            "admin-uploaded", "adminupload", "manual_upload", "manual-upload",
+                                            "judgment_upload", "judgement_upload",
+                                        ]}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
                         ] if approved_only else [],
                         "must_not": [
                             {"match_phrase": {"court_code": "district court"}},
@@ -2372,10 +2397,13 @@ def judgement_search_local(
                 params.append(q_like)
             hard_filters = []
             if approved_only and has_verification:
-                # Always include admin-uploaded judgments regardless of verification status
+                # Always include admin-uploaded judgments regardless of verification status.
+                # Substring checks catch any source_type the admin panel may use.
                 hard_filters.append(
                     "(COALESCE(verification_status, '') IN ('APPROVED','VERIFIED','VERIFIED_WARN','GREEN')"
-                    " OR LOWER(COALESCE(source_type,'')) IN ('admin','admin_upload','admin-upload','admin uploaded','admin-uploaded','adminupload','manual_upload','manual-upload','judgment_upload','judgement_upload'))"
+                    " OR LOWER(COALESCE(source_type,'')) IN ('admin','admin_upload','admin-upload','admin uploaded','admin-uploaded','adminupload','manual_upload','manual-upload','judgment_upload','judgement_upload')"
+                    " OR LOWER(COALESCE(source_type,'')) LIKE '%admin%'"
+                    " OR LOWER(COALESCE(source_type,'')) LIKE '%upload%')"
                 )
             if exclude_low_hierarchy:
                 hard_filters.append(
@@ -3023,6 +3051,7 @@ def pipeline_run_update(
     citations_quarantined_count: Optional[int] = None,
     citations_sent_to_hitl_count: Optional[int] = None,
     error_message: Optional[str] = None,
+    failed_case_names: Optional[List[str]] = None,
 ) -> None:
     conn = get_pg_conn()
     if not conn:
@@ -3041,8 +3070,15 @@ def pipeline_run_update(
                 updates.append("citations_quarantined_count = %s"); vals.append(citations_quarantined_count)
             if citations_sent_to_hitl_count is not None:
                 updates.append("citations_sent_to_hitl_count = %s"); vals.append(citations_sent_to_hitl_count)
+            if failed_case_names:
+                failed_text = ", ".join(str(n).strip() for n in failed_case_names if str(n).strip())
+                if failed_text:
+                    if error_message:
+                        error_message = f"{error_message} | case_name_verification_failed: {failed_text}"[:2000]
+                    else:
+                        error_message = f"case_name_verification_failed: {failed_text}"[:2000]
             if error_message is not None:
-                updates.append("error_message = %s"); vals.append(error_message)
+                updates.append("error_message = %s"); vals.append(error_message[:2000])
             vals.append(run_id)
             cur.execute(f"UPDATE citation_pipeline_runs SET {', '.join(updates)} WHERE id = %s", vals)
         conn.commit()
@@ -3697,3 +3733,285 @@ def ik_asset_list_recent(limit: int = 50) -> List[Dict]:
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+def judgment_ingest_from_ik(
+    ik_tid: str,
+    case_name: str,
+    full_text: str,
+    court_code: str = "",
+    judgment_date: str = "",
+    citation_data: Optional[Dict] = None,
+) -> Optional[str]:
+    """
+    Ingest a newly discovered IK judgment into the full store:
+      1. PostgreSQL judgments table (metadata)
+      2. Elasticsearch judgments index (full text)
+      3. Qdrant legal_embeddings collection (semantic vector)
+
+    Idempotent — skips if canonical_id already exists in PG.
+    Never raises; logs warnings on failure.
+    Returns canonical_id on success, None on failure.
+    """
+    import uuid as _uuid_mod
+
+    ik_tid = (ik_tid or "").strip()
+    if not ik_tid:
+        return None
+    if not full_text or len(full_text) < 200:
+        logger.debug("[INGEST_IK] Skipping tid=%s — full_text too short (%d chars)", ik_tid, len(full_text or ""))
+        return None
+
+    canonical_id = f"ik:{ik_tid}"
+    case_name = (case_name or "").strip() or "Judgment"
+    court_code = (court_code or "").strip()
+    judgment_date = (judgment_date or "").strip()
+    year: Optional[int] = None
+    if judgment_date and len(judgment_date) >= 4:
+        try:
+            year = int(judgment_date[:4])
+        except ValueError:
+            pass
+
+    # ── 1. PostgreSQL — skip if already exists ─────────────────────────────────
+    conn = get_pg_conn()
+    if not conn:
+        logger.warning("[INGEST_IK] No PG connection for tid=%s", ik_tid)
+        return None
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT canonical_id FROM judgments WHERE canonical_id = %s LIMIT 1", (canonical_id,))
+            if cur.fetchone():
+                logger.debug("[INGEST_IK] Already exists in PG: %s", canonical_id)
+                return canonical_id
+
+            cur.execute(
+                """INSERT INTO judgments
+                       (canonical_id, case_name, court_code, judgment_date, year,
+                        source_type, verification_status, ingested_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (canonical_id) DO NOTHING""",
+                (canonical_id, case_name[:500], (court_code or "")[:20], judgment_date or None, year,
+                 "ik_pipeline", "auto_ingested"),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                # Conflict — row already exists (race condition or prior run); skip re-indexing
+                logger.debug("[INGEST_IK] Already indexed (conflict) — skipping ES/Qdrant: %s", canonical_id)
+                return canonical_id
+            logger.info("[INGEST_IK] PG INSERT OK: %s (%s)", canonical_id, case_name[:80])
+    except Exception as exc:
+        logger.warning("[INGEST_IK] PG INSERT failed for %s: %s", canonical_id, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        conn.close()
+
+    # ── 2. Elasticsearch ───────────────────────────────────────────────────────
+    es = get_es_client()
+    if es:
+        try:
+            es.index(
+                index="judgments",
+                id=canonical_id,
+                body={
+                    "canonical_id":        canonical_id,
+                    "case_name":           case_name,
+                    "full_text":           full_text[:50000],
+                    "court_code":          court_code,
+                    "court_name":          court_code,
+                    "judgment_date":       judgment_date or None,
+                    "year":                year,
+                    "source_type":         "ik_pipeline",
+                    "verification_status": "auto_ingested",
+                    "audit_status":        "auto_ingested",
+                },
+            )
+            logger.info("[INGEST_IK] ES index OK: %s", canonical_id)
+        except Exception as exc:
+            logger.warning("[INGEST_IK] ES index failed for %s: %s", canonical_id, exc)
+
+    # ── 3. Qdrant — chunk → embed → upsert to legal_embeddings_v2 ────────────
+    qdr = get_qdrant_client()
+    if qdr:
+        try:
+            from qdrant_client.models import PointStruct
+
+            qdrant_collection = (
+                os.environ.get("QDRANT_COLLECTION")
+                or os.environ.get("QDRANT_COLLECTION_NAME")
+                or "legal_embeddings_v2"
+            )
+
+            # Chunk full_text: 1500-char windows with 200-char overlap
+            _CHUNK_SIZE = 1500
+            _OVERLAP    = 200
+            _text = full_text.strip()
+            _chunks: List[str] = []
+            _start = 0
+            while _start < len(_text):
+                _chunks.append(_text[_start: _start + _CHUNK_SIZE])
+                if _start + _CHUNK_SIZE >= len(_text):
+                    break
+                _start += _CHUNK_SIZE - _OVERLAP
+            if not _chunks:
+                _chunks = [_text[:_CHUNK_SIZE]]
+
+            # Embed all chunks in a single batch call
+            vectors = _embed_strings_gemini(_chunks)
+
+            points_to_upsert = []
+            for _i, (_chunk, _vec) in enumerate(zip(_chunks, vectors)):
+                if not _vec:
+                    continue
+                points_to_upsert.append(PointStruct(
+                    id=str(_uuid_mod.uuid4()),
+                    vector=_vec,
+                    payload={
+                        "canonical_id":  canonical_id,
+                        "case_name":     case_name,
+                        "court_code":    court_code,
+                        "judgment_date": judgment_date or "",
+                        "year":          year,
+                        "source_type":   "ik_pipeline",
+                        "chunk_index":   _i,
+                        "chunk_text":    _chunk[:500],
+                    },
+                ))
+
+            if points_to_upsert:
+                qdr.upsert(collection_name=qdrant_collection, points=points_to_upsert)
+                logger.info(
+                    "[INGEST_IK] Qdrant upsert OK: %s — %d chunk(s) → %s",
+                    canonical_id, len(points_to_upsert), qdrant_collection,
+                )
+
+                # Update PG es_doc_id
+                pg2 = get_pg_conn()
+                if pg2:
+                    try:
+                        with pg2.cursor() as cur2:
+                            cur2.execute(
+                                "UPDATE judgments SET es_doc_id=%s WHERE canonical_id=%s",
+                                (canonical_id, canonical_id),
+                            )
+                            pg2.commit()
+                    except Exception as exc2:
+                        logger.warning("[INGEST_IK] PG UPDATE es_doc_id failed for %s: %s", canonical_id, exc2)
+                    finally:
+                        pg2.close()
+            else:
+                logger.warning("[INGEST_IK] Qdrant skipped — no valid embeddings for %s", canonical_id)
+        except Exception as exc:
+            logger.warning("[INGEST_IK] Qdrant upsert failed for %s: %s", canonical_id, exc)
+
+    return canonical_id
+
+
+def search_admin_uploads_pg(
+    query: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Full-text search directly against the judgment_uploads table (admin-uploaded judgments).
+    Supplements ES when admin uploads are not yet in the judgments ES index.
+    Returns results in the same shape as _search_local_one.
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+    conn = get_pg_conn()
+    if not conn:
+        return []
+    results: List[Dict[str, Any]] = []
+    try:
+        table = _resolve_admin_upload_table(conn) or ""
+        if not table:
+            return []
+        upload_cols = _get_table_columns(conn, table)
+        if "merged_text" not in upload_cols:
+            return []
+
+        select_cols = ["canonical_id", "judgment_uuid", "es_doc_id", "original_filename",
+                       "source_url", "merged_text", "status", "metadata"]
+        sel = ", ".join(c for c in select_cols if c in upload_cols)
+        if not sel:
+            return []
+
+        import json as _json2
+        q_like = f"%{query[:80]}%"
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT {sel}
+                  FROM {table}
+                 WHERE COALESCE(status, '') NOT IN ('failed', 'error', 'rejected')
+                   AND (
+                       (merged_text IS NOT NULL AND (
+                           to_tsvector('english', merged_text) @@ plainto_tsquery('english', %s)
+                           OR original_filename ILIKE %s
+                       ))
+                       OR COALESCE(metadata->>'case_name', '') ILIKE %s
+                       OR COALESCE(metadata->>'caseName', '') ILIKE %s
+                       OR COALESCE(metadata->>'title', '') ILIKE %s
+                       OR original_filename ILIKE %s
+                   )
+                 LIMIT %s
+                """,
+                (query, q_like, q_like, q_like, q_like, q_like, limit),
+            )
+            rows = cur.fetchall() or []
+
+        for r in rows:
+            meta = r.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = _json2.loads(meta)
+                except Exception:
+                    meta = {}
+            cid = str(r.get("canonical_id") or r.get("es_doc_id") or "").strip()
+            ft  = str(r.get("merged_text") or "").strip()
+            if not ft and not cid:
+                continue
+            # Use explicit metadata headnote when available; leave empty so
+            # _score_one's Claude extraction fills it rather than a raw text slice.
+            meta_headnote = str(
+                meta.get("headnote") or meta.get("headnotes") or
+                meta.get("head_note") or ""
+            ).strip()
+            results.append({
+                "canonical_id":  cid,
+                "tid":           "",
+                "title":         (meta.get("case_name") or meta.get("caseName") or
+                                  meta.get("title") or
+                                  str(r.get("original_filename") or "").rsplit(".", 1)[0] or ""),
+                "court":         str(meta.get("court_code") or meta.get("court") or
+                                     meta.get("courtName") or ""),
+                "date":          str(meta.get("judgment_date") or meta.get("date") or
+                                     meta.get("judgmentDate") or meta.get("decided_on") or ""),
+                "snippet":       ft[:400],
+                "full_text":     ft,
+                "headnotes":     meta_headnote,
+                "bench":         str(meta.get("bench") or meta.get("coram") or
+                                     meta.get("judges") or ""),
+                "ik_citation":   str(meta.get("primary_citation") or meta.get("citation") or
+                                     meta.get("primaryCitation") or meta.get("cite") or ""),
+                "url":           str(r.get("source_url") or ""),
+                "source":        "admin_upload",
+                "_es_score":     1.0,
+                "ikCiteList":    [],
+                "ikCitedByList": [],
+                "_query":        query,
+            })
+    except Exception as exc:
+        logger.warning("[ADMIN_UPLOAD_SEARCH] PG search failed for %r: %s", query[:80], exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    logger.info("[ADMIN_UPLOAD_SEARCH] %r → %d admin upload result(s)", query[:60], len(results))
+    return results
