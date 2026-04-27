@@ -8,11 +8,12 @@ import asyncio
 import base64
 import importlib.metadata
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, Callable, Awaitable
 
 from app.services.db import get_db_connection, is_db_available
 from app.services.search import search_documents, format_chunks_for_context
+from app.services.token_usage_service import log_token_usage
 
 logger = logging.getLogger("ai_chatbot.chatbot")
 
@@ -101,6 +102,13 @@ class ChatbotConfig:
     volume_gain_db: float    = 0.0
     system_prompt: str       = _DEFAULT_SYSTEM_PROMPT
     audio_system_prompt: str = _DEFAULT_AUDIO_SYSTEM_PROMPT
+
+
+@dataclass
+class ChatResult:
+    answer: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 _config_cache: ChatbotConfig | None = None
@@ -195,10 +203,11 @@ def _make_audio_transcription_config(gt, _language_code: str):
 
 # ── text chat ─────────────────────────────────────────────────────────────────
 
-def text_chat(user_message: str) -> str:
+def text_chat(user_message: str) -> ChatResult:
     """
     Sends user_message to Gemini with search_documents tool.
     Gemini calls the tool → backend executes search → Gemini answers.
+    Returns ChatResult with the answer text and input/output token counts.
     """
     logger.info("USER ASK: %s", user_message)
 
@@ -209,7 +218,7 @@ def text_chat(user_message: str) -> str:
 
         api_key = get_settings().gemini_api_key
         if not api_key:
-            return "Service not configured — missing GEMINI_API_KEY."
+            return ChatResult(answer="Service not configured — missing GEMINI_API_KEY.")
 
         cfg = load_chatbot_config()
         client = genai.Client(api_key=api_key)
@@ -269,11 +278,17 @@ def text_chat(user_message: str) -> str:
 
         answer = response.text or "I couldn't generate a response."
         logger.info("BOT REPLY: %s", answer)
-        return answer
+
+        usage = getattr(response, "usage_metadata", None)
+        input_tokens  = int(getattr(usage, "prompt_token_count",     0) or 0)
+        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+        logger.info("TEXT TOKENS input=%d output=%d model=%s", input_tokens, output_tokens, cfg.model_text)
+
+        return ChatResult(answer=answer, input_tokens=input_tokens, output_tokens=output_tokens)
 
     except Exception as exc:
         logger.exception("text_chat error")
-        return f"AI service error: {exc}"
+        return ChatResult(answer=f"AI service error: {exc}")
 
 
 # ── audio chat (Gemini Live) ──────────────────────────────────────────────────
@@ -284,6 +299,9 @@ SendFn = Callable[[dict], Awaitable[None]]
 async def handle_audio_session(
     receive_audio: AsyncGenerator[bytes, None],
     send_response: SendFn,
+    *,
+    session_id: str | None = None,
+    ip_address: str | None = None,
 ) -> None:
     """
     Bridges a client WebSocket audio stream with the Gemini Live API.
@@ -366,6 +384,9 @@ async def handle_audio_session(
             forwarded_bytes = 0
             received_events = 0
             input_done_at: float | None = None
+            # Accumulate token counts across all turns (Gemini Live reports cumulative totals)
+            audio_input_tokens: int = 0
+            audio_output_tokens: int = 0
             logger.info("Gemini Live connected model=%s", model_name)
 
             # ── Task 1: forward mic audio → Gemini via send_realtime_input ──
@@ -403,13 +424,27 @@ async def handle_audio_session(
 
             # ── Task 2: receive Gemini responses → client ──────────────────
             async def _receive_responses() -> None:
-                nonlocal received_events
+                nonlocal received_events, audio_input_tokens, audio_output_tokens
                 while True:
                     got_model_output = False
                     turn = session.receive()
                     async for response in turn:
                         received_events += 1
                         logger.debug("Gemini Live event #%d raw=%r", received_events, response)
+
+                        # ── token usage (Gemini Live reports cumulative totals per turn) ──
+                        usage = getattr(response, "usage_metadata", None)
+                        if usage:
+                            _in  = int(getattr(usage, "prompt_token_count",     0) or 0)
+                            _out = int(
+                                getattr(usage, "candidates_token_count", None)
+                                or getattr(usage, "response_token_count", None)
+                                or 0
+                            )
+                            if _in  > audio_input_tokens:
+                                audio_input_tokens  = _in
+                            if _out > audio_output_tokens:
+                                audio_output_tokens = _out
 
                         # ── tool calls ──
                         tool_call = getattr(response, "tool_call", None)
@@ -523,6 +558,23 @@ async def handle_audio_session(
                 for task in (forward_task, receive_task):
                     if not task.done():
                         task.cancel()
+
+                logger.info(
+                    "AUDIO TOKENS input=%d output=%d model=%s session=%s ip=%s",
+                    audio_input_tokens, audio_output_tokens, model_name, session_id, ip_address,
+                )
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: log_token_usage(
+                        session_id=session_id,
+                        mode="audio",
+                        model_name=model_name,
+                        input_tokens=audio_input_tokens,
+                        output_tokens=audio_output_tokens,
+                        ip_address=ip_address,
+                    ),
+                )
 
     except Exception as exc:
         logger.error("handle_audio_session error: %s", exc)

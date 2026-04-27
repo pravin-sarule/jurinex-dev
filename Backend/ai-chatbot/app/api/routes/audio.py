@@ -21,6 +21,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services.chatbot import handle_audio_session
+from app.services.session_service import get_or_create_session
 
 router = APIRouter(tags=["audio"])
 logger = logging.getLogger("ai_chatbot.audio_route")
@@ -29,7 +30,9 @@ logger = logging.getLogger("ai_chatbot.audio_route")
 @router.websocket("/ws/audio")
 async def audio_chat_ws(websocket: WebSocket) -> None:
     await websocket.accept()
-    logger.info("Audio WebSocket connected client=%s", websocket.client)
+    ip_address = websocket.client.host if websocket.client else None
+    session_id = get_or_create_session(None, mode="audio")
+    logger.info("Audio WebSocket connected client=%s session=%s", websocket.client, session_id)
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
     done = asyncio.Event()
@@ -112,8 +115,13 @@ async def audio_chat_ws(websocket: WebSocket) -> None:
 
     receive_task = asyncio.create_task(_receive_from_client())
     try:
-        logger.info("Audio session handler starting")
-        await handle_audio_session(_audio_generator(), _send_to_client)
+        logger.info("Audio session handler starting session=%s", session_id)
+        await handle_audio_session(
+            _audio_generator(),
+            _send_to_client,
+            session_id=session_id,
+            ip_address=ip_address,
+        )
     except Exception as exc:
         logger.exception("Audio session error: %s", exc)
     finally:
