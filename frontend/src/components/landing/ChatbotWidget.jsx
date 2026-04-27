@@ -71,7 +71,18 @@ const BotAvatar = () => (
       boxShadow: "0 2px 8px rgba(13,148,136,0.35)",
     }}
   >
-    <img src={gavelIcon} alt="" className="w-4 h-4 object-contain brightness-[10]" />
+    <svg width="16" height="16" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <line x1="16" y1="2" x2="16" y2="6" stroke="white" strokeWidth="1.8" strokeLinecap="round"/>
+      <circle cx="16" cy="2" r="1.5" fill="white"/>
+      <rect x="5" y="6" width="22" height="16" rx="4" fill="white"/>
+      <rect x="2" y="11" width="3" height="6" rx="1.5" fill="white"/>
+      <rect x="27" y="11" width="3" height="6" rx="1.5" fill="white"/>
+      <circle cx="11.5" cy="13" r="2.5" fill="#0d9488"/>
+      <circle cx="11.5" cy="13" r="1" fill="white"/>
+      <circle cx="20.5" cy="13" r="2.5" fill="#0d9488"/>
+      <circle cx="20.5" cy="13" r="1" fill="white"/>
+      <path d="M11 19.5 Q16 22.5 21 19.5" stroke="#0d9488" strokeWidth="1.8" strokeLinecap="round" fill="none"/>
+    </svg>
   </div>
 )
 
@@ -876,14 +887,33 @@ const ChatbotWidget = () => {
               </svg>
             </Motion.span>
           ) : (
-            <Motion.span key="gavel"
+            <Motion.span key="bot"
               initial={{ rotate: 90, opacity: 0, scale: 0.7 }}
               animate={{ rotate: 0, opacity: 1, scale: 1 }}
               exit={{ rotate: -90, opacity: 0, scale: 0.7 }}
               transition={{ duration: 0.2 }}
               className="flex items-center justify-center"
             >
-              <img src={gavelIcon} alt="" className="w-7 h-7 object-contain brightness-[10]" />
+              {/* AI Chatbot icon */}
+              <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                {/* Antenna */}
+                <line x1="16" y1="2" x2="16" y2="6" stroke="white" strokeWidth="1.8" strokeLinecap="round"/>
+                <circle cx="16" cy="2" r="1.5" fill="white"/>
+                {/* Head */}
+                <rect x="5" y="6" width="22" height="16" rx="4" fill="white"/>
+                {/* Left ear */}
+                <rect x="2" y="11" width="3" height="6" rx="1.5" fill="white"/>
+                {/* Right ear */}
+                <rect x="27" y="11" width="3" height="6" rx="1.5" fill="white"/>
+                {/* Left eye */}
+                <circle cx="11.5" cy="13" r="2.5" fill="#0d9488"/>
+                <circle cx="11.5" cy="13" r="1" fill="white"/>
+                {/* Right eye */}
+                <circle cx="20.5" cy="13" r="2.5" fill="#0d9488"/>
+                <circle cx="20.5" cy="13" r="1" fill="white"/>
+                {/* Smile */}
+                <path d="M11 19.5 Q16 22.5 21 19.5" stroke="#0d9488" strokeWidth="1.8" strokeLinecap="round" fill="none"/>
+              </svg>
             </Motion.span>
           )}
         </AnimatePresence>
