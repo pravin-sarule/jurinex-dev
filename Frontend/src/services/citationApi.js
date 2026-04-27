@@ -56,11 +56,13 @@ export const citationApi = {
    * perspective: 'all' | 'appellant' | 'respondent' | 'court'
    *   When set to a specific party, citations are filtered to show only that party's arguments.
    */
-  async generateReport(query, userId = 'anonymous', usePipeline = true, caseFileContext = null, caseId = null, perspective = 'all') {
+  async generateReport(query, userId = 'anonymous', usePipeline = true, caseFileContext = null, caseId = null, perspective = 'all', retrievalMethod = 'indiankanoon', customKeywords = null) {
     const body = { query, user_id: coalesceUserId(userId), use_pipeline: usePipeline };
     if (caseFileContext && caseFileContext.length > 0) body.case_file_context = caseFileContext;
     if (caseId) body.case_id = caseId;
     if (perspective && perspective !== 'all') body.perspective = perspective;
+    if (retrievalMethod) body.retrieval_method = retrievalMethod;
+    if (customKeywords?.length) body.custom_keywords = customKeywords;
     const res = await fetch(`${CITATION_SERVICE_URL}/citation/report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
@@ -146,11 +148,15 @@ export const citationApi = {
    * Start citation report pipeline in background. Returns run_id immediately.
    * perspective: 'all' | 'appellant' | 'respondent' | 'court'
    */
-  async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null, perspective = 'all') {
+  async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null, perspective = 'all', retrievalMethod = 'indiankanoon', customKeywords = null, selectedKeywords = null, selectedCaseNames = null) {
     const body = { query, user_id: coalesceUserId(userId), use_pipeline: true };
     if (caseId) body.case_id = caseId;
     if (caseFileContext?.length) body.case_file_context = caseFileContext;
     if (perspective && perspective !== 'all') body.perspective = perspective;
+    if (retrievalMethod) body.retrieval_method = retrievalMethod;
+    if (customKeywords?.length) body.custom_keywords = customKeywords;
+    if (selectedKeywords?.length) body.selected_keywords = selectedKeywords;
+    if (selectedCaseNames?.length) body.selected_case_names = selectedCaseNames;
     const endpoint = `${CITATION_SERVICE_URL}/citation/report/start`;
     let res;
     try {
@@ -316,6 +322,56 @@ export const citationApi = {
       body: JSON.stringify({ shared_with: sharedWith }),
     });
     if (!res.ok) throw new Error('Failed to share report');
+    return res.json();
+  },
+
+  /**
+   * Generate keyword suggestions for a case in 3 categories.
+   * POST /citation/suggest-keywords
+   * Returns { statute_keywords, principle_keywords, fact_keywords }
+   */
+  async suggestKeywords(caseId = null, query = null, caseFileContext = null) {
+    const body = {};
+    if (caseId) body.case_id = caseId;
+    if (query) body.query = query;
+    if (caseFileContext?.length) body.case_file_context = caseFileContext;
+    const res = await fetch(`${CITATION_SERVICE_URL}/citation/suggest-keywords`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return { statute_keywords: [], principle_keywords: [], fact_keywords: [] };
+    return res.json();
+  },
+
+  /**
+   * Manual mode — fetch full judgment for each selected case name.
+   * Priority: local DB → IK → Google. Stores results in background.
+   * POST /citation/manual/fetch-case-judgments
+   */
+  async manualFetchCaseJudgments(caseNames, userId = 'anonymous') {
+    const res = await fetch(`${CITATION_SERVICE_URL}/citation/manual/fetch-case-judgments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ case_names: caseNames, user_id: userId }),
+    });
+    if (!res.ok) throw new Error('Failed to fetch case judgments');
+    return res.json();
+  },
+
+  /**
+   * Manual mode — search local DB + IK for each keyword. Stores IK results in background.
+   * POST /citation/manual/search-by-keywords
+   */
+  async manualSearchByKeywords(keywords, userId = 'anonymous', caseId = null) {
+    const body = { keywords, user_id: userId };
+    if (caseId) body.case_id = caseId;
+    const res = await fetch(`${CITATION_SERVICE_URL}/citation/manual/search-by-keywords`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error('Failed to search by keywords');
     return res.json();
   },
 

@@ -672,7 +672,7 @@ const CitationsPanel = ({ citations = [], dimensions = null, fileId, folderName,
               }}
             >
               <div style={{ fontSize: 10, fontWeight: 700, color: '#6B7280', marginBottom: 6, letterSpacing: '.05em' }}>
-                DIMENSIONS
+                KEYWORDS
               </div>
               {dimensionSections.map((section, idx) => (
                 <button
@@ -692,7 +692,7 @@ const CitationsPanel = ({ citations = [], dimensions = null, fileId, folderName,
                     color: '#374151',
                   }}
                 >
-                  <div style={{ fontWeight: 700, color: '#0F766E' }}>Dim {idx + 1}</div>
+                  <div style={{ fontWeight: 700, color: '#0F766E' }}>🔑 {idx + 1}</div>
                   <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{section.name}</div>
                 </button>
               ))}

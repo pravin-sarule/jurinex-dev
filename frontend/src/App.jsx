@@ -617,6 +617,16 @@ function App() {
               }
             />
             <Route
+              path="/citation/reports"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <CitationReportPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
               path="/citation/reports/:reportId"
               element={
                 <AuthChecker>

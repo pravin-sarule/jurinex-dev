@@ -9,6 +9,7 @@ import CTASection from "../components/landing/CTASection"
 import Footer from "../components/landing/Footer"
 import BookDemoModal from "../components/landing/BookDemoModal"
 import PolicyModal from "../components/landing/PolicyModal"
+import ChatbotWidget from "../components/landing/ChatbotWidget"
 
 // Popup schedule: first show → 15 s, after 1st close → 30 s, after 2nd close → 60 s
 const POPUP_DELAYS = [15_000, 30_000, 60_000]
@@ -84,6 +85,8 @@ const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendin
           onClose={() => setPolicyKey(null)}
         />
       )}
+
+      <ChatbotWidget />
     </div>
   )
 }

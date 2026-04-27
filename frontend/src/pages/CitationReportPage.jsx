@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import citationApi, { resolveCitationUserId } from '../services/citationApi';
+import citationV1Api from '../services/citationV1Api';
 import documentApi from '../services/documentApi';
 import { CITATION_SERVICE_URL } from '../config/apiConfig';
 import html2pdf from 'html2pdf.js';
@@ -2775,6 +2776,16 @@ export default function CitationReportPage({ embedded = false }) {
   const [queryCount, setQueryCount] = useState(0);
   const [refDocs, setRefDocs] = useState([]);
   const [selectedPerspective, setSelectedPerspective] = useState('all');
+  const [retrievalMethod, setRetrievalMethod] = useState('indiankanoon');
+  const [customKeywordsInput, setCustomKeywordsInput] = useState('');
+  const [suggestedKeywords, setSuggestedKeywords] = useState(null);
+  const [suggestingKeywords, setSuggestingKeywords] = useState(false);
+  const [selectedKeywordChips, setSelectedKeywordChips] = useState(new Set());
+  const [selectedCaseChips, setSelectedCaseChips] = useState(new Set());
+  const [runMode, setRunMode] = useState(null); // null | 'auto' | 'manual'
+  const [manualSearchResults, setManualSearchResults] = useState(null);
+  const [manualSearching, setManualSearching] = useState(false);
+  const [useV1, setUseV1] = useState(false);
   const [selectedDimension, setSelectedDimension] = useState('all');
   const fileRef = useRef(null);
   // case-specific report history
@@ -2792,6 +2803,7 @@ export default function CitationReportPage({ embedded = false }) {
     documentApi.getCases().then(r => { const l = r?.cases ?? r?.data ?? (Array.isArray(r) ? r : []); setCases(Array.isArray(l) ? l : []); }).catch(() => setCases([])).finally(() => setCasesLoading(false));
   }, []);
 
+
   useEffect(() => { loadCases(); }, [loadCases]);
 
   // Close case dropdown on outside click
@@ -2804,13 +2816,15 @@ export default function CitationReportPage({ embedded = false }) {
 
   useEffect(() => {
     if (!reportId) return;
-    citationApi.getReport(reportId).then(d => {
-      setReport(d);
-      setQuery(d?.query || '');
-      setSelectedPerspective(prev => normalizePerspectiveKey(d?.report_format?.perspective || prev || 'all', 'all'));
-      setSelectedDimension('all');
-      setShowReport(true);
-    }).catch(() => { });
+    citationApi.getReport(reportId)
+      .then(d => {
+        if (!d || !d.report_format) return;
+        setReport(d);
+        setQuery(d?.query || '');
+        setSelectedPerspective(prev => normalizePerspectiveKey(d?.report_format?.perspective || prev || 'all', 'all'));
+        setSelectedDimension('all');
+        setShowReport(true);
+      }).catch(() => { });
   }, [reportId]);
 
   // Load case-specific reports when case selection changes
@@ -2824,15 +2838,18 @@ export default function CitationReportPage({ embedded = false }) {
         setCaseReports(list);
         // Auto-open latest report for selected case when user opens a case from dropdown.
         if (list.length > 0 && !reportId) {
-          const latest = list[0];
-          const data = await citationApi.getReport(latest.id).catch(() => null);
-          if (data) {
-            setReport(data);
-            setQuery(data.query || '');
-            setSelectedPerspective(prev => normalizePerspectiveKey(data?.report_format?.perspective || prev || 'all', 'all'));
-            setSelectedDimension('all');
-            setShowReport(true);
-            navigate(`/citation/reports/${latest.id}`, { replace: true });
+          // Try reports in order until we find one that actually exists
+          for (const candidate of list.slice(0, 3)) {
+            const data = await citationApi.getReport(candidate.id).catch(() => null);
+            if (data?.report_format) {
+              setReport(data);
+              setQuery(data.query || '');
+              setSelectedPerspective(prev => normalizePerspectiveKey(data?.report_format?.perspective || prev || 'all', 'all'));
+              setSelectedDimension('all');
+              setShowReport(true);
+              navigate(`/citation/reports/${candidate.id}`, { replace: true });
+              break;
+            }
           }
         }
       })
@@ -2955,13 +2972,100 @@ export default function CitationReportPage({ embedded = false }) {
     if (statusPollRef.current) { clearInterval(statusPollRef.current); statusPollRef.current = null; }
   }, []);
 
+  // Reset all report/input state when the user switches to a different case
+  const resetForNewCase = useCallback(() => {
+    stopPolling();
+    setInput('');
+    setReport(null);
+    setQuery('');
+    setShowReport(false);
+    setMsgs([]);
+    setReportError(null);
+    setAgentLogs([]);
+    setRunId(null);
+    setSuggestedKeywords(null);
+    setSelectedKeywordChips(new Set());
+    setSelectedCaseChips(new Set());
+    setCustomKeywordsInput('');
+    setRunMode(null);
+    setManualSearchResults(null);
+    navigate('/citation/reports', { replace: true });
+  }, [stopPolling, navigate]);
+
   useEffect(() => {
     return () => Object.values({ logPollRef, statusPollRef }).forEach(ref => {
       if (ref.current) clearInterval(ref.current);
     });
   }, []);
 
-  const handleSend = async (force = false) => {
+  const handleSuggestKeywords = async () => {
+    if (suggestingKeywords) return;
+    setSuggestingKeywords(true);
+    setSuggestedKeywords(null);
+    try {
+      let ctx = null;
+      if (selCase) {
+        try {
+          const cr = await documentApi.getCaseById(selCase);
+          const cd = cr?.case ?? cr;
+          const fn = cd?.folders?.[0]?.name ?? cd?.folders?.[0]?.originalname;
+          if (fn) {
+            const fr = await documentApi.getDocumentsInFolder(fn);
+            const files = fr?.files ?? fr?.data ?? (Array.isArray(fr) ? fr : []);
+            ctx = (Array.isArray(files) ? files : []).map(f => ({ name: f.originalname || f.name || 'doc', snippet: (f.summary || f.full_text_content || '').slice(0, 4000) })).filter(f => f.snippet);
+          }
+        } catch (e) { console.warn(e); }
+      }
+      const suggestions = await citationApi.suggestKeywords(
+        selCase || null,
+        input.trim() || selCaseName || null,
+        ctx?.length ? ctx : null,
+      );
+      setSuggestedKeywords(suggestions);
+    } catch (e) {
+      console.warn('Keyword suggestion failed:', e);
+    } finally {
+      setSuggestingKeywords(false);
+    }
+  };
+
+  const handleManualKeywordSearch = async () => {
+    const keywords = customKeywordsInput.split(',').map(k => k.trim()).filter(Boolean);
+    if (!keywords.length) return;
+    setManualSearching(true);
+    setManualSearchResults(null);
+    try {
+      const data = await citationApi.manualSearchByKeywords(keywords, resolveCitationUserId(), selCase || null);
+      setManualSearchResults({ type: 'keywords', data });
+    } catch (e) { console.error(e); }
+    finally { setManualSearching(false); }
+  };
+
+  const handleManualKeywordChipSearch = async () => {
+    const keywords = [...selectedKeywordChips];
+    if (!keywords.length) return;
+    setManualSearching(true);
+    setManualSearchResults(null);
+    try {
+      const data = await citationApi.manualSearchByKeywords(keywords, resolveCitationUserId(), selCase || null);
+      setManualSearchResults({ type: 'keywords', data });
+    } catch (e) { console.error(e); }
+    finally { setManualSearching(false); }
+  };
+
+  const handleManualCaseSearch = async () => {
+    const caseNames = [...selectedCaseChips];
+    if (!caseNames.length) return;
+    setManualSearching(true);
+    setManualSearchResults(null);
+    try {
+      const data = await citationApi.manualFetchCaseJudgments(caseNames, resolveCitationUserId());
+      setManualSearchResults({ type: 'cases', data });
+    } catch (e) { console.error(e); }
+    finally { setManualSearching(false); }
+  };
+
+  const handleSend = async (force = false, overrideCaseNames = null, overrideKeywords = null) => {
     const q = (input).trim();
     const hasContext = Boolean(selCase) || refDocs.length > 0;
     if (sending) return;
@@ -3001,13 +3105,33 @@ export default function CitationReportPage({ embedded = false }) {
           refDocs.map(d => ({ name: d.name, snippet: d.content.slice(0, 4000) })),
         );
       }
-      if ((!ctx || ctx.length === 0) && selCaseName) ctx = [{ name: 'case', snippet: selCaseName }];
+      // If no real document content, send null so the backend fetches proper RAG chunks via case_id.
+      // Sending just the case name as context causes Claude to generate generic keywords for every case.
+      if (ctx && ctx.length === 0) ctx = null;
 
       // Start async pipeline — get run_id immediately
       const generationPerspective = ['all', 'appellant', 'respondent', 'court'].includes(selectedPerspective)
         ? selectedPerspective
         : 'all';
-      const startData = await citationApi.startReport(q, uid, selCase || null, ctx, generationPerspective);
+      const activeApi = useV1 ? citationV1Api : citationApi;
+      const apiQuery = q || selCaseName || 'Find relevant citations for this case';
+      const parsedKeywords = customKeywordsInput
+        .split(',')
+        .map(k => k.trim())
+        .filter(Boolean);
+      const selKwArr = overrideKeywords ?? [...selectedKeywordChips];
+      const selCnArr = overrideCaseNames ?? [...selectedCaseChips];
+      const startData = await activeApi.startReport(
+        apiQuery,
+        uid,
+        selCase || null,
+        ctx,
+        generationPerspective,
+        useV1 ? 'serper' : retrievalMethod,
+        parsedKeywords.length ? parsedKeywords : null,
+        selKwArr.length ? selKwArr : null,
+        selCnArr.length ? selCnArr : null,
+      );
       const rid = startData.run_id;
       setRunId(rid);
 
@@ -3019,7 +3143,7 @@ export default function CitationReportPage({ embedded = false }) {
         if (logPollInFlight) return;
         logPollInFlight = true;
         try {
-          const logData = await citationApi.getRunLogs(rid, lastLogTime);
+          const logData = await activeApi.getRunLogs(rid, lastLogTime);
           const newLogs = logData.logs || [];
           if (newLogs.length > 0) {
             lastLogTime = newLogs[newLogs.length - 1].created_at;
@@ -3053,7 +3177,7 @@ export default function CitationReportPage({ embedded = false }) {
         }
         statusPollInFlight = true;
         try {
-          const st = await citationApi.getRunStatus(rid);
+          const st = await activeApi.getRunStatus(rid);
           statusPollErrors = 0;
           lastProgressAt = Date.now();
           const terminalSuccessStates = new Set(['completed', 'pending_hitl']);
@@ -3061,7 +3185,7 @@ export default function CitationReportPage({ embedded = false }) {
           if (terminalSuccessStates.has(st.status) || terminalFailureStates.has(st.status)) {
             stopPolling();
             // Final log fetch
-            const finalLogs = await citationApi.getRunLogs(rid, lastLogTime);
+            const finalLogs = await activeApi.getRunLogs(rid, lastLogTime);
             if (finalLogs.logs?.length) setAgentLogs(prev => [...prev, ...finalLogs.logs]);
 
             if (terminalSuccessStates.has(st.status)) {
@@ -3069,7 +3193,7 @@ export default function CitationReportPage({ embedded = false }) {
               if (st.report_format) {
                 rpt = { report_id: st.report_id, report_format: st.report_format, run_id: rid };
               } else if (st.report_id) {
-                rpt = await citationApi.getReport(st.report_id);
+                rpt = await activeApi.getReport(st.report_id);
               }
               if (rpt) {
                 setReport(rpt); setQuery(q);
@@ -3198,6 +3322,10 @@ export default function CitationReportPage({ embedded = false }) {
         caseName: data.case_name || caseName,
         fullText: data.full_text || '',
         sourceUrl: data.source_url || '',
+        source: data.source || 'local_db',
+        ikResourceUrl: data.ik_resource_url || data.source_url || '',
+        isLocalAdmin: !!data.is_local_admin,
+        pdfBucketPath: data.pdf_bucket_path || '',
       });
     } catch {
       setFullJudgmentModal({ error: true, caseName: caseName || 'Judgment' });
@@ -3213,6 +3341,10 @@ export default function CitationReportPage({ embedded = false }) {
       caseName: data.case_name || caseName || 'Judgment',
       fullText: data.full_text || '',
       sourceUrl: data.source_url || '',
+      source: data.source || 'local_db',
+      ikResourceUrl: data.ik_resource_url || data.source_url || '',
+      isLocalAdmin: !!data.is_local_admin,
+      pdfBucketPath: data.pdf_bucket_path || '',
     };
   }, []);
 
@@ -3591,6 +3723,58 @@ export default function CitationReportPage({ embedded = false }) {
                 )}
                 {!fullJudgmentModal.loading && !fullJudgmentModal.error && (
                   <>
+                    {fullJudgmentModal.source === 'indiankanoon_live' && (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+                        padding: '8px 12px', background: '#EFF6FF', borderRadius: 8,
+                        border: '1px solid #BFDBFE', fontSize: 12, color: '#1D4ED8',
+                        flexWrap: 'wrap',
+                      }}>
+                        <span style={{ fontWeight: 700 }}>Live from Indian Kanoon</span>
+                        <span style={{ color: '#93C5FD' }}>·</span>
+                        <span style={{ color: '#475569' }}>Not stored — fetched directly from IK API</span>
+                        {fullJudgmentModal.ikResourceUrl && (
+                          <>
+                            <span style={{ color: '#93C5FD' }}>·</span>
+                            <a
+                              href={fullJudgmentModal.ikResourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: '#1D4ED8', fontWeight: 600, textDecoration: 'underline' }}
+                            >
+                              View on Indian Kanoon ↗
+                            </a>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {fullJudgmentModal.isLocalAdmin && fullJudgmentModal.pdfBucketPath && (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+                        padding: '8px 12px', background: '#F0FDF4', borderRadius: 8,
+                        border: '1px solid #BBF7D0', fontSize: 12, color: '#166534',
+                        flexWrap: 'wrap',
+                      }}>
+                        <span style={{ fontWeight: 700 }}>Admin Upload</span>
+                        <span style={{ color: '#86EFAC' }}>·</span>
+                        <span style={{ color: '#475569', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                          {fullJudgmentModal.pdfBucketPath}
+                        </span>
+                        {/^https?:\/\//.test(fullJudgmentModal.pdfBucketPath) && (
+                          <>
+                            <span style={{ color: '#86EFAC' }}>·</span>
+                            <a
+                              href={fullJudgmentModal.pdfBucketPath}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: '#166534', fontWeight: 600, textDecoration: 'underline' }}
+                            >
+                              Open PDF ↗
+                            </a>
+                          </>
+                        )}
+                      </div>
+                    )}
                     <div
                       style={{
                         fontFamily: "'Source Serif 4',Georgia,serif",
@@ -3649,7 +3833,102 @@ export default function CitationReportPage({ embedded = false }) {
 
       {/* AI Research tab */}
       {activeTab === 'research' && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 340px', gap: 0, overflow: 'hidden' }}>
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: (suggestedKeywords && runMode !== 'manual') ? `280px 1fr 340px` : '1fr 340px', gap: 0, overflow: 'hidden', transition: 'grid-template-columns .25s ease' }}>
+
+          {/* ── LEFT suggestions panel (appears after Suggest Keywords, hidden in manual mode) ── */}
+          {suggestedKeywords && runMode !== 'manual' && (() => {
+            const kwGroups = [
+              { label: 'Statute / Section',  key: 'statute_keywords',   color: '#3B6FE8', isCase: false },
+              { label: 'Legal Principle',     key: 'principle_keywords', color: '#7C3AED', isCase: false },
+              { label: 'Fact Pattern',        key: 'fact_keywords',      color: '#0891B2', isCase: false },
+              { label: 'Related Cases',       key: 'case_keywords',      color: '#6D28D9', isCase: true  },
+            ];
+            const totalSelected = selectedKeywordChips.size + selectedCaseChips.size;
+            const handleChipClick = (kw, isCase) => {
+              const setter = isCase ? setSelectedCaseChips : setSelectedKeywordChips;
+              setter(prev => {
+                const next = new Set(prev);
+                if (next.has(kw)) next.delete(kw); else next.add(kw);
+                return next;
+              });
+            };
+            return (
+              <div className="sc" style={{ borderRight: `1px solid ${g200}`, background: `linear-gradient(180deg,#F0F4FF 0%,${g50} 100%)`, overflowY: 'auto', display: 'flex', flexDirection: 'column', animation: 'fdUp .22s ease' }}>
+                {/* Header */}
+                <div style={{ padding: '12px 14px 10px', borderBottom: `1px solid ${g200}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, background: W }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: N, letterSpacing: '-.01em' }}>Keyword Suggestions</div>
+                    <div style={{ fontSize: 10, color: g400, marginTop: 1 }}>Click to select — bypasses AI generation</div>
+                  </div>
+                  <button
+                    onClick={() => { setSuggestedKeywords(null); setSelectedKeywordChips(new Set()); setSelectedCaseChips(new Set()); }}
+                    style={{ width: 22, height: 22, border: 'none', background: g100, borderRadius: '50%', color: g500, fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, flexShrink: 0 }}
+                  >×</button>
+                </div>
+                {/* Selection badge */}
+                {totalSelected > 0 ? (
+                  <div style={{ padding: '6px 14px', background: '#ECFDF5', borderBottom: `1px solid #A7F3D0`, display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <span style={{ fontSize: 11 }}>⚡</span>
+                    <span style={{ fontSize: 10, color: '#065F46', fontWeight: 700 }}>
+                      {totalSelected} selected — AI query generation bypassed
+                      {selectedCaseChips.size > 0 && ` · ${selectedCaseChips.size} case name(s) searched by title on IK`}
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ padding: '6px 14px', background: '#EEF2FF', borderBottom: `1px solid #E0E7FF`, display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                    <span style={{ fontSize: 11 }}>🔍</span>
+                    <span style={{ fontSize: 10, color: '#4338CA', fontWeight: 600 }}>Claude + Google Grounding</span>
+                  </div>
+                )}
+                {/* Chip groups */}
+                <div style={{ padding: '10px 12px', flex: 1, minHeight: 0 }}>
+                  {kwGroups.map(grp => {
+                    const kws = suggestedKeywords[grp.key] || [];
+                    if (!kws.length) return null;
+                    const selectedSet = grp.isCase ? selectedCaseChips : selectedKeywordChips;
+                    return (
+                      <div key={grp.key} style={{ marginBottom: 14 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: grp.color, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 4 }}>
+                          {grp.label}
+                          {grp.isCase && <span style={{ marginLeft: 5, fontSize: 9, fontWeight: 600, color: g400, textTransform: 'none' }}>searched by title on IK</span>}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                          {kws.map((kw, i) => {
+                            const selected = selectedSet.has(kw);
+                            return (
+                              <button
+                                key={i}
+                                onClick={() => handleChipClick(kw, grp.isCase)}
+                                title={selected ? 'Click to deselect' : 'Click to select for direct IK search'}
+                                style={{
+                                  padding: '4px 10px',
+                                  background: selected ? grp.color : W,
+                                  color: selected ? W : g700,
+                                  border: `1.5px solid ${grp.color}`,
+                                  borderRadius: 20,
+                                  fontSize: 11,
+                                  fontFamily: "'DM Sans',sans-serif",
+                                  cursor: 'pointer',
+                                  fontWeight: selected ? 700 : 500,
+                                  transition: 'all .15s',
+                                  textAlign: 'left',
+                                  lineHeight: 1.4,
+                                  boxShadow: selected ? `0 2px 8px ${grp.color}55` : 'none',
+                                }}
+                              >
+                                {selected ? '✓ ' : '+ '}{kw}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Chat area */}
           <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1, background: W, borderRight: `1px solid ${g200}` }}>
             {/* Messages — scrollable */}
@@ -3672,7 +3951,7 @@ export default function CitationReportPage({ embedded = false }) {
                     const STEPS = [
                       { id: 'start',     label: 'Starting pipeline',            keywords: ['start', 'initializ', 'begin', 'run_id'] },
                       { id: 'docs',      label: 'Loading case documents',       keywords: ['document', 'folder', 'file', 'context', 'fetch'] },
-                      { id: 'dims',      label: 'Extracting legal dimensions',  keywords: ['dimension', 'extract', 'legal dim', 'identify'] },
+                      { id: 'dims',      label: 'Extracting keywords',          keywords: ['keyword', 'dimension', 'extract', 'legal dim', 'identify'] },
                       { id: 'search',    label: 'Searching citation database',  keywords: ['search', 'query', 'ik', 'indiakant', 'retriev'] },
                       { id: 'verify',    label: 'Verifying citations',          keywords: ['verif', 'watchdog', 'status', 'check', 'valid'] },
                       { id: 'build',     label: 'Building report',              keywords: ['build', 'report', 'generat', 'compil', 'format'] },
@@ -3734,7 +4013,7 @@ export default function CitationReportPage({ embedded = false }) {
 
                   <h3 style={{ fontSize: 22, fontWeight: 800, color: N, marginBottom: 6, letterSpacing: '-.03em', lineHeight: 1.2, textAlign: 'center' }}>AI Legal Research</h3>
                   <p style={{ fontSize: 12.5, color: T, maxWidth: 340, lineHeight: 1.65, margin: '0 auto 22px', textAlign: 'center', fontWeight: 500 }}>
-                    Find verified citations from Supreme Court & High Courts,<br />grouped by your case's legal dimensions.
+                    Find verified citations from Supreme Court & High Courts,<br />grouped by extracted keywords from your case document.
                   </p>
 
                   {/* ── Custom case selector card ── */}
@@ -3772,7 +4051,7 @@ export default function CitationReportPage({ embedded = false }) {
                         <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
                           {selCase && (
                             <span
-                              onClick={e => { e.stopPropagation(); setSelCase(''); setSelCaseName(''); setCaseDropOpen(false); }}
+                              onClick={e => { e.stopPropagation(); resetForNewCase(); setSelCase(''); setSelCaseName(''); setCaseDropOpen(false); }}
                               style={{ width: 20, height: 20, borderRadius: '50%', background: g100, color: g500, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, cursor: 'pointer', lineHeight: 1 }}
                             >×</span>
                           )}
@@ -3804,7 +4083,7 @@ export default function CitationReportPage({ embedded = false }) {
                               <button
                                 key={c.id}
                                 type="button"
-                                onClick={() => { setSelCase(c.id); setSelCaseName(name); setCaseDropOpen(false); }}
+                                onClick={() => { resetForNewCase(); setSelCase(c.id); setSelCaseName(name); setCaseDropOpen(false); }}
                                 style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 9, border: 'none', background: isSel ? `linear-gradient(135deg,rgba(33,193,182,.1),rgba(27,42,74,.06))` : 'transparent', cursor: 'pointer', textAlign: 'left', transition: 'background .14s', fontFamily: "'DM Sans',sans-serif", marginBottom: idx < cases.length - 1 ? 2 : 0 }}
                                 onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = g50; }}
                                 onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = 'transparent'; }}
@@ -3829,15 +4108,225 @@ export default function CitationReportPage({ embedded = false }) {
                     )}
                   </div>
 
-                  {/* Find Citations button — below the card */}
-                  {selCase && (
+                  {/* Mode selector — shown after case is selected */}
+                  {selCase && runMode === null && (
+                    <div style={{ width: '100%', maxWidth: 580, marginTop: 16, display: 'flex', gap: 12 }}>
+                      <button
+                        onClick={() => { setSuggestedKeywords(null); setSelectedKeywordChips(new Set()); setSelectedCaseChips(new Set()); setRunMode('auto'); }}
+                        style={{ flex: 1, padding: '20px 16px', background: W, border: `2px solid ${g200}`, borderRadius: 14, cursor: 'pointer', textAlign: 'left', fontFamily: "'DM Sans',sans-serif", transition: 'border-color .2s, box-shadow .2s' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.boxShadow = `0 4px 18px rgba(33,193,182,.15)`; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = g200; e.currentTarget.style.boxShadow = 'none'; }}
+                      >
+                        <div style={{ fontSize: 22, marginBottom: 8 }}>⚡</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: N }}>Automatic</div>
+                        <div style={{ fontSize: 11, color: g400, marginTop: 4, lineHeight: 1.5 }}>
+                          AI extracts keywords from your case, searches Indian Kanoon, validates citations, and generates a full report.
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => setRunMode('manual')}
+                        style={{ flex: 1, padding: '20px 16px', background: W, border: `2px solid ${g200}`, borderRadius: 14, cursor: 'pointer', textAlign: 'left', fontFamily: "'DM Sans',sans-serif", transition: 'border-color .2s, box-shadow .2s' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.boxShadow = `0 4px 18px rgba(33,193,182,.15)`; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = g200; e.currentTarget.style.boxShadow = 'none'; }}
+                      >
+                        <div style={{ fontSize: 22, marginBottom: 8 }}>🔍</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: N }}>Manual</div>
+                        <div style={{ fontSize: 11, color: g400, marginTop: 4, lineHeight: 1.5 }}>
+                          Type keywords, browse AI-suggested keywords by category, or select specific case names.
+                        </div>
+                      </button>
+                    </div>
+                  )}
+                  {selCase && runMode !== null && (
                     <button
-                      onClick={() => handleSend(true)}
-                      disabled={sending}
-                      style={{ width: '100%', maxWidth: 580, marginTop: 14, padding: '13px 0', background: sending ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, boxShadow: sending ? 'none' : `0 4px 16px rgba(33,193,182,.35)`, transition: 'all .2s', fontFamily: "'DM Sans',sans-serif", letterSpacing: '.01em' }}
-                    >
-                      {sending ? <><Spin /> Generating…</> : <>⚡ Find Citations</>}
-                    </button>
+                      onClick={() => { setRunMode(null); setManualSearchResults(null); setSuggestedKeywords(null); setSelectedKeywordChips(new Set()); setSelectedCaseChips(new Set()); }}
+                      style={{ fontSize: 11, color: T, background: 'none', border: 'none', cursor: 'pointer', marginTop: 8, paddingLeft: 0, fontFamily: "'DM Sans',sans-serif", fontWeight: 600 }}
+                    >← Change mode</button>
+                  )}
+
+                  {/* Automatic mode */}
+                  {selCase && runMode === 'auto' && (
+                    <div style={{ width: '100%', maxWidth: 580, marginTop: 12 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                        Judgment Retrieval Method
+                      </div>
+                      <select
+                        className="sel-in"
+                        value={retrievalMethod}
+                        onChange={(e) => setRetrievalMethod(String(e.target.value || 'indiankanoon'))}
+                        style={{ height: 42, marginBottom: 12 }}
+                      >
+                        <option value="indiankanoon">Indian Kanoon</option>
+                        <option value="web">Web Search (Claude)</option>
+                      </select>
+                      <button
+                        onClick={() => handleSend(true)}
+                        disabled={sending}
+                        style={{ width: '100%', padding: '13px 0', background: sending ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, boxShadow: sending ? 'none' : `0 4px 16px rgba(33,193,182,.35)`, transition: 'all .2s', fontFamily: "'DM Sans',sans-serif" }}
+                      >
+                        {sending ? <><Spin /> Generating…</> : <>⚡ Start Automatic Scan</>}
+                      </button>
+                      <div style={{ fontSize: 11, color: g400, marginTop: 6, textAlign: 'center' }}>
+                        AI generates keywords from your case context and runs the full citation pipeline.
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Manual mode */}
+                  {selCase && runMode === 'manual' && (
+                    <div style={{ width: '100%', maxWidth: 580, marginTop: 12 }}>
+                      {/* Section A — Custom Keywords */}
+                      <div style={{ marginBottom: 14, padding: 14, background: g50, borderRadius: 12, border: `1px solid ${g200}` }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '.08em' }}>A — Custom Keywords</div>
+                        <textarea
+                          value={customKeywordsInput}
+                          onChange={(e) => setCustomKeywordsInput(e.target.value)}
+                          placeholder="e.g. Section 300 IPC, anticipatory bail, res judicata"
+                          rows={2}
+                          style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", color: g700, background: W, resize: 'vertical', outline: 'none', lineHeight: 1.5 }}
+                        />
+                        <div style={{ fontSize: 11, color: g400, marginTop: 3, marginBottom: 8 }}>Comma-separated — searches Indian Kanoon and local DB.</div>
+                        <button
+                          onClick={handleManualKeywordSearch}
+                          disabled={manualSearching || !customKeywordsInput.trim()}
+                          style={{ padding: '8px 18px', background: manualSearching || !customKeywordsInput.trim() ? g100 : `linear-gradient(135deg,${T},${TD})`, color: manualSearching || !customKeywordsInput.trim() ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: manualSearching || !customKeywordsInput.trim() ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: "'DM Sans',sans-serif" }}
+                        >
+                          {manualSearching ? <><Spin /> Searching…</> : 'Search Keywords'}
+                        </button>
+                      </div>
+
+                      {/* Section B — Suggest Keywords */}
+                      <div style={{ marginBottom: 14, padding: 14, background: g50, borderRadius: 12, border: `1px solid ${g200}` }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '.08em' }}>B — Suggest Keywords</div>
+                        <button
+                          onClick={handleSuggestKeywords}
+                          disabled={suggestingKeywords}
+                          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: suggestingKeywords ? g100 : `linear-gradient(135deg,${T},${TD})`, color: suggestingKeywords ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: suggestingKeywords ? 'not-allowed' : 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .2s' }}
+                        >
+                          {suggestingKeywords ? <><Spin /> Suggesting…</> : <>✦ Suggest Keywords</>}
+                        </button>
+                        {suggestedKeywords && (() => {
+                          const manualGroups = [
+                            { label: 'Statutes & Laws',    key: 'statute_keywords',   color: '#3B6FE8', isCase: false },
+                            { label: 'Legal Principles',   key: 'principle_keywords', color: '#7C3AED', isCase: false },
+                            { label: 'Facts & Patterns',   key: 'fact_keywords',      color: '#0891B2', isCase: false },
+                            { label: 'Related Cases',      key: 'case_keywords',      color: '#6D28D9', isCase: true  },
+                          ];
+                          const toggleManualChip = (kw, isCase) => {
+                            const setter = isCase ? setSelectedCaseChips : setSelectedKeywordChips;
+                            setter(prev => { const next = new Set(prev); if (next.has(kw)) next.delete(kw); else next.add(kw); return next; });
+                          };
+                          return (
+                            <div style={{ marginTop: 12 }}>
+                              {manualGroups.map(grp => {
+                                const chips = suggestedKeywords[grp.key] || [];
+                                if (!chips.length) return null;
+                                const selectedSet = grp.isCase ? selectedCaseChips : selectedKeywordChips;
+                                return (
+                                  <div key={grp.key} style={{ marginBottom: 10 }}>
+                                    <div style={{ fontSize: 10, fontWeight: 700, color: grp.color, marginBottom: 5, textTransform: 'uppercase', letterSpacing: '.06em' }}>{grp.label}</div>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                                      {chips.map(kw => {
+                                        const sel = selectedSet.has(kw);
+                                        return (
+                                          <button key={kw} onClick={() => toggleManualChip(kw, grp.isCase)}
+                                            style={{ padding: '4px 10px', borderRadius: 20, border: `1.5px solid ${sel ? grp.color : g200}`, background: sel ? grp.color : W, color: sel ? W : g700, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .15s' }}>
+                                            {kw}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                                {selectedKeywordChips.size > 0 && (
+                                  <button
+                                    onClick={handleManualKeywordChipSearch}
+                                    disabled={manualSearching}
+                                    style={{ padding: '7px 14px', background: manualSearching ? g100 : `linear-gradient(135deg,${T},${TD})`, color: manualSearching ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: manualSearching ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'DM Sans',sans-serif" }}
+                                  >
+                                    {manualSearching ? <><Spin /> Searching…</> : `Search ${selectedKeywordChips.size} keyword(s)`}
+                                  </button>
+                                )}
+                                {selectedCaseChips.size > 0 && (
+                                  <button
+                                    onClick={handleManualCaseSearch}
+                                    disabled={manualSearching}
+                                    style={{ padding: '7px 14px', background: manualSearching ? g100 : `linear-gradient(135deg,#6D28D9,#7C3AED)`, color: manualSearching ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: manualSearching ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'DM Sans',sans-serif" }}
+                                  >
+                                    {manualSearching ? <><Spin /> Fetching…</> : `Find ${selectedCaseChips.size} case(s)`}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Manual search results */}
+                      {manualSearchResults && (
+                        <div style={{ marginTop: 16 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: N }}>
+                              {manualSearchResults.type === 'cases'
+                                ? `${manualSearchResults.data?.results?.length || 0} judgment(s) found`
+                                : `${manualSearchResults.data?.total || manualSearchResults.data?.results?.length || 0} result(s)`}
+                            </div>
+                            {(() => {
+                              const found = (manualSearchResults.data?.results || []).filter(r => r.source !== 'not_found');
+                              if (!found.length) return null;
+                              const onClick = () => {
+                                if (manualSearchResults.type === 'cases') {
+                                  const names = found.map(r => r.matched_title || r.case_name).filter(Boolean);
+                                  handleSend(true, names, null);
+                                } else {
+                                  const kws = [...new Set(found.map(r => r.matched_keyword).filter(Boolean))];
+                                  handleSend(true, null, kws.length ? kws : null);
+                                }
+                              };
+                              return (
+                                <button
+                                  onClick={onClick}
+                                  disabled={sending}
+                                  style={{ padding: '6px 14px', background: sending ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'DM Sans',sans-serif", boxShadow: sending ? 'none' : `0 2px 8px rgba(33,193,182,.3)` }}
+                                >
+                                  {sending ? <><Spin /> Generating…</> : <>⚡ Generate Full Report</>}
+                                </button>
+                              );
+                            })()}
+                          </div>
+                          {(manualSearchResults.data?.results || []).map((r, i) => {
+                            const canonicalId = r.canonical_id || (r.ik_tid ? `ik:${r.ik_tid}` : null);
+                            const displayName = r.matched_title || r.case_name;
+                            return (
+                              <div key={i} style={{ padding: '12px 14px', background: W, border: `1px solid ${g200}`, borderRadius: 10, marginBottom: 8 }}>
+                                <div style={{ fontSize: 13, fontWeight: 700, color: N }}>{displayName}</div>
+                                <div style={{ fontSize: 11, color: g400, marginTop: 3, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                  {r.metadata?.court && <span>{r.metadata.court}</span>}
+                                  {r.metadata?.date && <span>· {r.metadata.date}</span>}
+                                  <span style={{ padding: '2px 8px', background: r.source === 'local_db' ? '#F0FDF4' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#EFF6FF' : '#FFF7ED', borderRadius: 12, fontSize: 10, fontWeight: 700, color: r.source === 'local_db' ? '#065F46' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#1D4ED8' : '#92400E' }}>
+                                    {r.source === 'local_db' ? 'Local DB' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? 'Indian Kanoon' : 'Google'}
+                                  </span>
+                                </div>
+                                {r.snippet && <div style={{ fontSize: 12, color: g600, marginTop: 6, lineHeight: 1.6 }}>{String(r.snippet).slice(0, 300)}…</div>}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8, flexWrap: 'wrap' }}>
+                                  {canonicalId && (
+                                    <button
+                                      onClick={() => handleViewFullJudgment(canonicalId, displayName)}
+                                      style={{ fontSize: 11, fontWeight: 700, color: W, background: `linear-gradient(135deg,${T},${TD})`, border: 'none', borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontFamily: "'DM Sans',sans-serif" }}
+                                    >View Full Judgment</button>
+                                  )}
+                                  {r.source_url && (
+                                    <a href={r.source_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: T, fontWeight: 600 }}>View on Indian Kanoon →</a>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -3874,7 +4363,7 @@ export default function CitationReportPage({ embedded = false }) {
                   <div style={{ fontSize: 11, fontWeight: 600, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>{selCaseName || selCase}</div>
                 </div>
                 <button
-                  onClick={() => { setSelCase(''); setSelCaseName(''); }}
+                  onClick={() => { resetForNewCase(); setSelCase(''); setSelCaseName(''); }}
                   style={{ flexShrink: 0, width: 18, height: 18, borderRadius: '50%', border: 'none', background: g100, color: g500, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}
                   title="Clear case"
                 >×</button>
@@ -3941,7 +4430,7 @@ export default function CitationReportPage({ embedded = false }) {
               <div style={{ background: W, borderRadius: 14, padding: '13px 13px 10px', border: `1px solid ${g200}`, boxShadow: '0 2px 8px rgba(27,42,74,.06)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
                   <div style={{ width: 22, height: 22, borderRadius: 6, background: 'linear-gradient(135deg,#7C3AED,#5B21B6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>⚖️</div>
-                  <div className="sidebar-label" style={{ marginBottom: 0 }}>Legal Dimensions</div>
+                  <div className="sidebar-label" style={{ marginBottom: 0 }}>Keywords</div>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                   {(report.report_format.dimensionGroups).map((dg, idx) => (
@@ -3949,13 +4438,13 @@ export default function CitationReportPage({ embedded = false }) {
                       style={{ width: '100%', textAlign: 'left', padding: '7px 10px', borderRadius: 8, border: `1px solid ${g200}`, background: g50, cursor: 'pointer', color: N, fontSize: 11, fontWeight: 600, transition: 'all .15s' }}
                       onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.background = '#F0FEFB'; }}
                       onMouseLeave={e => { e.currentTarget.style.borderColor = g200; e.currentTarget.style.background = g50; }}>
-                      <div style={{ fontSize: 9.5, color: T, fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '.06em' }}>Dim {idx + 1}</div>
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dg.name || `Dimension ${idx + 1}`}</div>
+                      <div style={{ fontSize: 9.5, color: T, fontWeight: 700, marginBottom: 2, textTransform: 'uppercase', letterSpacing: '.06em' }}>🔑 KW {idx + 1}</div>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dg.name || `Keyword Group ${idx + 1}`}</div>
                     </button>
                   ))}
                 </div>
                 <div style={{ marginTop: 8, fontSize: 10, color: g400, textAlign: 'center' }}>
-                  {(report.report_format.citations || []).length} citations · {(report.report_format.dimensionGroups || []).length} dimensions
+                  {(report.report_format.citations || []).length} citations · {(report.report_format.dimensionGroups || []).length} keyword groups
                 </div>
               </div>
             )}
@@ -4466,6 +4955,51 @@ export default function CitationReportPage({ embedded = false }) {
           <div style={{ fontSize: 40 }}>{TABS.find(t => t.id === activeTab)?.label.split(' ')[0]}</div>
           <div style={{ fontSize: 16, fontWeight: 700, color: g600 }}>{TABS.find(t => t.id === activeTab)?.label.replace(/^\S+\s/, '')}</div>
           <div style={{ fontSize: 12 }}>Coming soon</div>
+        </div>
+      )}
+
+      {/* Full judgment modal — also needed in onboarding/manual view */}
+      {fullJudgmentModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 24 }} onClick={() => setFullJudgmentModal(null)}>
+          <div style={{ background: W, borderRadius: 12, boxShadow: '0 20px 60px rgba(0,0,0,.25)', maxWidth: 720, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: "'DM Sans',sans-serif" }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '16px 20px', borderBottom: `1px solid ${g200}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: N, margin: 0 }}>{fullJudgmentModal.caseName || 'Complete judgment'}</h2>
+              <button type="button" onClick={() => setFullJudgmentModal(null)} style={{ padding: '6px 12px', border: 'none', background: g200, borderRadius: 6, fontSize: 12, fontWeight: 600, color: g700, cursor: 'pointer' }}>Close</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 20 }}>
+              {fullJudgmentModal.loading && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 40, justifyContent: 'center' }}>
+                  <Spin /><span style={{ fontSize: 13, color: g500 }}>Loading judgment…</span>
+                </div>
+              )}
+              {fullJudgmentModal.error && (
+                <div style={{ padding: 24, textAlign: 'center', color: R, fontSize: 13 }}>Could not load the complete judgment. It may not be available for this citation.</div>
+              )}
+              {!fullJudgmentModal.loading && !fullJudgmentModal.error && (
+                <>
+                  {fullJudgmentModal.source === 'indiankanoon_live' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px', background: '#EFF6FF', borderRadius: 8, border: '1px solid #BFDBFE', fontSize: 12, color: '#1D4ED8', flexWrap: 'wrap' }}>
+                      <span style={{ fontWeight: 700 }}>Live from Indian Kanoon</span>
+                      <span style={{ color: '#93C5FD' }}>·</span>
+                      <span style={{ color: '#475569' }}>Not stored — fetched directly from IK API</span>
+                      {fullJudgmentModal.ikResourceUrl && (<><span style={{ color: '#93C5FD' }}>·</span><a href={fullJudgmentModal.ikResourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#1D4ED8', fontWeight: 600, textDecoration: 'underline' }}>View on Indian Kanoon ↗</a></>)}
+                    </div>
+                  )}
+                  {fullJudgmentModal.isLocalAdmin && fullJudgmentModal.pdfBucketPath && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px', background: '#F0FDF4', borderRadius: 8, border: '1px solid #BBF7D0', fontSize: 12, color: '#166534', flexWrap: 'wrap' }}>
+                      <span style={{ fontWeight: 700 }}>Admin Upload</span>
+                      <span style={{ color: '#86EFAC' }}>·</span>
+                      <span style={{ color: '#475569', fontFamily: 'monospace', wordBreak: 'break-all' }}>{fullJudgmentModal.pdfBucketPath}</span>
+                      {/^https?:\/\//.test(fullJudgmentModal.pdfBucketPath) && (<><span style={{ color: '#86EFAC' }}>·</span><a href={fullJudgmentModal.pdfBucketPath} target="_blank" rel="noopener noreferrer" style={{ color: '#166534', fontWeight: 600, textDecoration: 'underline' }}>Open PDF ↗</a></>)}
+                    </div>
+                  )}
+                  <div style={{ fontFamily: "'Source Serif 4',Georgia,serif", fontSize: 14, lineHeight: 1.85, color: '#1E293B', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {fullJudgmentModal.fullText || 'No full text available for this judgment.'}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

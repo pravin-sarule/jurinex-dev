@@ -41,7 +41,10 @@ function normalizeSearch(value) {
 
 function normalizeCourt(value) {
   const raw = normalizeSearch(value);
-  return !raw || raw === 'court not specified' || raw === '-' ? 'unknown' : raw;
+  if (!raw || raw === 'court not specified' || raw === '-') return 'unknown';
+  if (/^(sc|supreme)$/i.test(raw) || raw.includes('supreme court')) return 'supreme court';
+  if (/^(hc|high)$/i.test(raw) || raw.includes('high court')) return 'high court';
+  return raw;
 }
 
 function normalizeDimensionKey(value) {
@@ -57,13 +60,17 @@ function normalizeDimensionKey(value) {
   return compact;
 }
 
-function getDimensionDisplayLabel(group, fallbackIndex = 0) {
-  const raw = group?.id;
-  const n = Number(raw);
-  if (!Number.isNaN(n) && Number.isFinite(n) && n > 0) {
-    return `Dimension ${n}`;
+function getKeywordLabel(group, fallbackIndex = 0) {
+  const name = (group?.name || '').trim();
+  if (name && name.toLowerCase() !== 'ungrouped' && name.toLowerCase() !== 'other relevant citations') {
+    return name.length > 32 ? name.slice(0, 30) + '…' : name;
   }
-  return `Dimension ${fallbackIndex + 1}`;
+  return `Keyword Group ${fallbackIndex + 1}`;
+}
+
+// Keep old name as alias for any other callers
+function getDimensionDisplayLabel(group, fallbackIndex = 0) {
+  return getKeywordLabel(group, fallbackIndex);
 }
 
 function effectiveParty(citation) {
@@ -227,12 +234,18 @@ function getSourceMeta(citation) {
 }
 
 function formatSourceTypeLabel(citation) {
-  const raw = String(citation?.sourceType || citation?.source_type || citation?.source || '').trim();
+  const raw = String(
+    citation?.sourceType
+    || citation?.sourceStored
+    || citation?.source
+    || citation?.source_type
+    || ''
+  ).trim().toLowerCase();
   if (!raw) return 'Not Available';
-  return raw
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+  if (raw === 'indian_kanoon') return 'indian_kanoon';
+  if (raw === 'google') return 'google search';
+  if (raw === 'local' || raw === 'admin_upload') return 'local db';
+  return 'local db';
 }
 
 function decodeHtmlEntities(text) {
@@ -509,7 +522,7 @@ function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, d
     >
       <div className="cc-top">
         <span className={`court-badge ${courtBadgeClass}`}>{getCourtLabel(citation.court)}</span>
-        <span className="dimension-badge">{dimensionLabel}</span>
+        <span className="dimension-badge" title={dimensionLabel}>🔑 {dimensionLabel}</span>
         <span className="source-badge" title={sourceMeta.label}>
           <span className="source-icon" aria-hidden="true">{sourceMeta.icon}</span>
           {sourceMeta.label}
@@ -547,7 +560,7 @@ function DimensionGroup({
   return (
     <div className="dim-group">
       <button className="dim-header dim-toggle" onClick={() => onToggle(group.id)}>
-        <span className="dim-pill">{getDimensionDisplayLabel(group, index)}</span>
+        <span className="dim-pill">🔑 Keyword</span>
         <span className="dim-title">{group.name}</span>
         <span className="dim-count">{group.citations.length} citations</span>
       </button>
@@ -598,7 +611,7 @@ export default function RedesignedCitationReportDoc({
   const [activeId, setActiveId] = useState(null);
   const [activeTab, setActiveTab] = useState('rep'); // 'rep' or 'fj'
   const [collapsedGroups, setCollapsedGroups] = useState({});
-  const [fullJudgmentState, setFullJudgmentState] = useState({ loading: false, error: '', text: '', sourceUrl: '' });
+  const [fullJudgmentState, setFullJudgmentState] = useState({ loading: false, error: '', text: '', sourceUrl: '', source: '', ikResourceUrl: '', isLocalAdmin: false, pdfBucketPath: '' });
 
   const reportFormat = report?.report_format || {};
   const queryLabel =
@@ -611,8 +624,14 @@ export default function RedesignedCitationReportDoc({
   const all = (reportFormat.citations || []).map((citation, index) => ({
     ...citation,
     id: citation.id || citation.canonicalId || citation.canonical_id || `citation_${index}`,
+    canonicalId: citation.canonicalId || citation.canonical_id || '',
     argumentParty: normalizePerspective(citation.argumentParty || citation.argument_party || citation.partyBadge || citation.party_badge || citation.perspective || 'neutral', 'neutral'),
-    normalizedCourt: normalizeCourt(citation.court),
+    normalizedCourt: normalizeCourt(
+      citation.court
+      || citation.court_code
+      || citation.courtCode
+      || citation.metadata?.court
+    ),
     searchableText: normalizeSearch([
       citation.caseName,
       citation.primaryCitation,
@@ -633,7 +652,7 @@ export default function RedesignedCitationReportDoc({
   useEffect(() => setPerspective(normalizePerspective(initialPerspective || 'all', 'all')), [initialPerspective]);
   useEffect(() => setDimension(initialDimension || 'all'), [initialDimension]);
   useEffect(() => { if (typeof onPerspectiveChange === 'function') onPerspectiveChange(perspective); }, [onPerspectiveChange, perspective]);
-  useEffect(() => { setDimension('all'); setCourtFilter('all'); setSearch(''); setActiveId(null); setCollapsedGroups({}); setFullJudgmentState({ loading: false, error: '', text: '', sourceUrl: '' }); }, [report?.id, report?.report_id]);
+  useEffect(() => { setDimension('all'); setCourtFilter('all'); setSearch(''); setActiveId(null); setCollapsedGroups({}); setFullJudgmentState({ loading: false, error: '', text: '', sourceUrl: '', source: '', ikResourceUrl: '', isLocalAdmin: false, pdfBucketPath: '' }); }, [report?.id, report?.report_id]);
   const term = normalizeSearch(search);
   const selectedDimension = normalizeDimensionKey(dimension) || 'all';
   const selectedDimensionName = normalizeSearch(String(dimension || ''));
@@ -657,17 +676,18 @@ export default function RedesignedCitationReportDoc({
 
   const visible = filtered.flatMap((group) => group.citations);
   const active = visible.find((citation) => citation.id === activeId) || null;
+  const activeDocId = String(active?.canonicalId || '').replace(/^ik:/i, '');
   useEffect(() => {
     let cancelled = false;
     if (activeTab !== 'fj' || !active?.canonicalId || typeof onFetchFullJudgment !== 'function') {
       return undefined;
     }
-    setFullJudgmentState({ loading: true, error: '', text: '', sourceUrl: '' });
+    setFullJudgmentState({ loading: true, error: '', text: '', sourceUrl: '', source: '', ikResourceUrl: '', isLocalAdmin: false, pdfBucketPath: '' });
     Promise.resolve(onFetchFullJudgment(active.canonicalId, active.caseName))
       .then((data) => {
         if (cancelled) return;
         if (!data || !data.fullText) {
-          setFullJudgmentState({ loading: false, error: 'No full judgment text available.', text: '', sourceUrl: data?.sourceUrl || '' });
+          setFullJudgmentState({ loading: false, error: 'No full judgment text available.', text: '', sourceUrl: data?.sourceUrl || '', source: data?.source || '', ikResourceUrl: data?.ikResourceUrl || '', isLocalAdmin: !!data?.isLocalAdmin, pdfBucketPath: data?.pdfBucketPath || '' });
           return;
         }
         setFullJudgmentState({
@@ -675,10 +695,14 @@ export default function RedesignedCitationReportDoc({
           error: '',
           text: String(data.fullText || ''),
           sourceUrl: data.sourceUrl || '',
+          source: data.source || '',
+          ikResourceUrl: data.ikResourceUrl || '',
+          isLocalAdmin: !!data.isLocalAdmin,
+          pdfBucketPath: data.pdfBucketPath || '',
         });
       })
       .catch(() => {
-        if (!cancelled) setFullJudgmentState({ loading: false, error: 'Failed to load full judgment text.', text: '', sourceUrl: '' });
+        if (!cancelled) setFullJudgmentState({ loading: false, error: 'Failed to load full judgment text.', text: '', sourceUrl: '', source: '', ikResourceUrl: '', isLocalAdmin: false, pdfBucketPath: '' });
       });
     return () => { cancelled = true; };
   }, [activeTab, active?.canonicalId, active?.caseName, onFetchFullJudgment]);
@@ -694,13 +718,15 @@ export default function RedesignedCitationReportDoc({
   }
 
   const getCourtBadgeClass = (courtName) => {
-    if ((courtName || '').toLowerCase().includes('supreme')) return 'sc-b';
+    const normalized = normalizeCourt(courtName);
+    if (normalized.includes('supreme')) return 'sc-b';
     return 'hc-b';
   };
 
   const getCourtLabel = (courtName) => {
-    if ((courtName || '').toLowerCase().includes('supreme')) return 'Supreme Court';
-    if ((courtName || '').toLowerCase().includes('high')) return 'High Court';
+    const normalized = normalizeCourt(courtName);
+    if (normalized.includes('supreme')) return 'Supreme Court';
+    if (normalized.includes('high')) return 'High Court';
     return courtName || 'Court';
   };
 
@@ -726,10 +752,10 @@ export default function RedesignedCitationReportDoc({
         
         {/* SIDEBAR */}
         <div className="sidebar">
-          <div className="sb-label">Dimensions</div>
-          
+          <div className="sb-label">Keywords</div>
+
           <div className={`dim-chip ${selectedDimension === 'all' ? 'active' : ''}`} onClick={() => { setDimension('all'); setActiveId(null); }}>
-            <span className="chip-num">All dimensions</span>
+            <span className="chip-num">All keywords</span>
             {verified.length} citations total
           </div>
 
@@ -742,8 +768,13 @@ export default function RedesignedCitationReportDoc({
               ) ? 'active' : ''}`}
               onClick={() => { setDimension((group.name || '').trim() || normalizeDimensionKey(group.id) || group.id); setActiveId(null); }}
             >
-              <span className="chip-num">{getDimensionDisplayLabel(group, index)}</span>
-              {group.name}
+              <span className="chip-num">🔑</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {getKeywordLabel(group, index)}
+              </span>
+              <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--text-dim, #6B7280)' }}>
+                {group.citations.length}
+              </span>
             </div>
           ))}
           
@@ -757,7 +788,7 @@ export default function RedesignedCitationReportDoc({
             <>
               <div className="panel-header">
                 <div className="panel-title">Find Citations</div>
-                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> legal dimensions</div>
+                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> keyword groups</div>
               </div>
 
               <div className="filter-row">
@@ -832,7 +863,8 @@ export default function RedesignedCitationReportDoc({
                 const headnotePoints = active.headnote ? parseTextToPoints(active.headnote) : [];
                 const matchQuery = active.ikFragment?.formInput || active.ikFragment?.headline || '';
                 const ikScore = active.ikFragment?.matchScore ?? active.ikMatchScore ?? null;
-                const semScore = active.semanticScore ?? active.semantic_score ?? null;
+                const kwScore = (active.keywordScore !== undefined && active.keywordScore !== null) ? active.keywordScore : null;
+                const semScore = (kwScore === null) ? (active.semanticScore ?? active.semantic_score ?? null) : null;
                 const judgmentSourceUrl =
                   String(
                     active.importSourceLink
@@ -1103,18 +1135,18 @@ export default function RedesignedCitationReportDoc({
                         )}
 
                         {/* Proposition Verification */}
-                        {(matchQuery || ikScore !== null || semScore !== null) && (
+                        {(matchQuery || ikScore !== null || semScore !== null || kwScore !== null) && (
                           <div className="ld-proposition">
                             <div className="ld-prop-hdr">
                               PROPOSITION VERIFICATION
-                              <span className="ld-prop-tag">DETAILED SEMANTIC MAPPING</span>
+                              <span className="ld-prop-tag">{kwScore !== null ? 'KEYWORD MATCH' : 'DETAILED SEMANTIC MAPPING'}</span>
                             </div>
                             {matchQuery && (
                               <div className="ld-prop-query">
                                 Query: <em>{matchQuery.slice(0, 120)}{matchQuery.length > 120 ? '…' : ''}</em>
                               </div>
                             )}
-                            {(ikScore !== null || semScore !== null) && (
+                            {(ikScore !== null || semScore !== null || kwScore !== null) && (
                               <div className="ld-scores">
                                 {ikScore !== null && (
                                   <div className="ld-score-row">
@@ -1123,6 +1155,15 @@ export default function RedesignedCitationReportDoc({
                                       <div className="ld-score-bar ld-score-bar-green" style={{ width: `${Math.min(100, Math.round(Number(ikScore) * 100))}%` }} />
                                     </div>
                                     <span className="ld-score-val">{(Number(ikScore) * 100).toFixed(0)} / 100</span>
+                                  </div>
+                                )}
+                                {kwScore !== null && (
+                                  <div className="ld-score-row">
+                                    <span className="ld-score-lbl">Keyword Matches</span>
+                                    <div className="ld-score-bar-wrap">
+                                      <div className="ld-score-bar ld-score-bar-blue" style={{ width: kwScore > 0 ? `${Math.min(100, kwScore * 20)}%` : '2%' }} />
+                                    </div>
+                                    <span className="ld-score-val">{kwScore > 0 ? `${kwScore} match${kwScore !== 1 ? 'es' : ''}` : 'Admin (0)'}</span>
                                   </div>
                                 )}
                                 {semScore !== null && (
@@ -1136,7 +1177,7 @@ export default function RedesignedCitationReportDoc({
                                 )}
                               </div>
                             )}
-                            <div className="ld-match-confirmed">MATCH CONFIRMED</div>
+                            <div className="ld-match-confirmed">{kwScore !== null && kwScore === 0 ? 'ADMIN UPLOAD' : 'MATCH CONFIRMED'}</div>
                           </div>
                         )}
                       </div>
@@ -1226,8 +1267,8 @@ export default function RedesignedCitationReportDoc({
                           <div className="ld-footer-meta">Authenticated Research Document</div>
                         </div>
                         <div className="ld-footer-actions">
-                          {active.canonicalId && (
-                            <button className="ld-btn-ghost" onClick={() => window.open(`https://indiankanoon.org/doc/${active.canonicalId}/`, '_blank')}>
+                          {activeDocId && (
+                            <button className="ld-btn-ghost" onClick={() => window.open(`https://indiankanoon.org/doc/${activeDocId}/`, '_blank')}>
                               VIEW SOURCE ↗
                             </button>
                           )}
@@ -1316,6 +1357,59 @@ export default function RedesignedCitationReportDoc({
                       {!fullJudgmentState.loading && fullJudgmentState.error && (
                         <div className="jdoc-state-box jdoc-error">
                           <span>⚠ {fullJudgmentState.error}</span>
+                        </div>
+                      )}
+
+                      {/* ── IK Live Source Badge ── */}
+                      {!fullJudgmentState.loading && !fullJudgmentState.error && fullJudgmentState.source === 'indiankanoon_live' && (
+                        <div style={{
+                          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+                          padding: '8px 12px', background: '#EFF6FF', borderRadius: 8,
+                          border: '1px solid #BFDBFE', fontSize: 12, color: '#1D4ED8', flexWrap: 'wrap',
+                        }}>
+                          <span style={{ fontWeight: 700 }}>Live from Indian Kanoon</span>
+                          <span style={{ color: '#93C5FD' }}>·</span>
+                          <span style={{ color: '#475569' }}>Not stored — fetched directly from IK API</span>
+                          {fullJudgmentState.ikResourceUrl && (
+                            <>
+                              <span style={{ color: '#93C5FD' }}>·</span>
+                              <a
+                                href={fullJudgmentState.ikResourceUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ color: '#1D4ED8', fontWeight: 600, textDecoration: 'underline' }}
+                              >
+                                View on Indian Kanoon ↗
+                              </a>
+                            </>
+                          )}
+                        </div>
+                      )}
+                      {/* ── Admin Upload PDF Bucket Path ── */}
+                      {!fullJudgmentState.loading && !fullJudgmentState.error && fullJudgmentState.isLocalAdmin && fullJudgmentState.pdfBucketPath && (
+                        <div style={{
+                          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+                          padding: '8px 12px', background: '#F0FDF4', borderRadius: 8,
+                          border: '1px solid #BBF7D0', fontSize: 12, color: '#166534', flexWrap: 'wrap',
+                        }}>
+                          <span style={{ fontWeight: 700 }}>Admin Upload</span>
+                          <span style={{ color: '#86EFAC' }}>·</span>
+                          <span style={{ color: '#475569', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                            {fullJudgmentState.pdfBucketPath}
+                          </span>
+                          {/^https?:\/\//.test(fullJudgmentState.pdfBucketPath) && (
+                            <>
+                              <span style={{ color: '#86EFAC' }}>·</span>
+                              <a
+                                href={fullJudgmentState.pdfBucketPath}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ color: '#166534', fontWeight: 600, textDecoration: 'underline' }}
+                              >
+                                Open PDF ↗
+                              </a>
+                            </>
+                          )}
                         </div>
                       )}
 

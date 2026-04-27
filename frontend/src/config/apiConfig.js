@@ -92,10 +92,21 @@ export const CITATION_SERVICE_URL =
     ? 'http://localhost:8001'
     : 'https://citation-service-120280829617.asia-south1.run.app');
 
+// Citation service v1 — Google ADK + Claude + Serper pipeline (port 8002 local)
+export const CITATION_V1_SERVICE_URL =
+  import.meta.env.VITE_APP_CITATION_V1_SERVICE_URL ||
+  (IS_LOCAL_DEV_HOST
+    ? 'http://localhost:8002'
+    : 'https://citation-service-v1-120280829617.asia-south1.run.app');
+
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
 export const DRAFTING_SERVICE_URL =
   import.meta.env.VITE_DRAFTING_SERVICE_URL ||
   'https://drafting-service-120280829617.asia-south1.run.app';
+
+// AI Chatbot support agent (port 8095)
+export const AI_CHATBOT_URL =
+  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://ai-chatbot-120280829617.asia-south1.run.app';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
@@ -174,6 +185,7 @@ const apiConfig = {
   USER_RESOURCES_SERVICE_URL,
   CHAT_SERVICE_URL,
   CITATION_SERVICE_URL,
+  CITATION_V1_SERVICE_URL,
   DRAFTING_SERVICE_URL,
   DOCS_BASE_URL,
   FILES_BASE_URL,
