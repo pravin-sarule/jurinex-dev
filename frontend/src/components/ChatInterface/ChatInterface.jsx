@@ -3731,7 +3731,7 @@ const ChatInterface = () => {
       ws.onerror = () => {
         setAudioMessages(prev => [...prev, {
           role: 'error',
-          text: 'Could not connect to voice service. Check microphone permissions.',
+          text: 'Could not connect to voice service. Please try again.',
         }]);
         stopDocumentAudio();
       };
@@ -6099,8 +6099,12 @@ const ChatInterface = () => {
 
   if (!selectedFolder) {
     return (
-      <div className="flex items-center justify-center h-full text-gray-400 text-lg bg-white">
-        Select a folder to start chatting.
+      <div className="flex flex-col items-center justify-center h-full bg-white gap-3">
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: '#f0fdfb' }}>
+          <MessageSquare className="w-7 h-7" style={{ color: '#21C1B6' }} />
+        </div>
+        <p className="text-gray-500 text-sm font-medium">Select a folder to start chatting</p>
+        <p className="text-gray-400 text-xs">Choose a case folder from the sidebar</p>
       </div>
     );
   }
@@ -6156,29 +6160,30 @@ const ChatInterface = () => {
       {/* ── Chat Session Sidebar (Left) — full list or collapsed rail ── */}
       {hasSessions && chatHistorySidebarOpen && (
         <div
-          className={`flex-shrink-0 flex flex-col border-r border-gray-100 bg-white ${!showMainArea ? 'flex-1' : ''}`}
-          style={{ width: showMainArea ? '280px' : undefined, height: '100%' }}
+          className={`flex-shrink-0 flex flex-col border-r border-gray-100 ${!showMainArea ? 'flex-1' : ''}`}
+          style={{ width: showMainArea ? '272px' : undefined, height: '100%', background: '#fafafa' }}
         >
-          <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2 min-w-0">
-              <MessageSquare className="w-4 h-4 text-[#21C1B6] flex-shrink-0" />
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-2" style={{ background: '#fff' }}>
+            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest flex items-center gap-2 min-w-0">
+              <MessageSquare className="w-3.5 h-3.5 text-[#21C1B6] flex-shrink-0" />
               <span className="truncate">Chat History</span>
             </h3>
-            <div className="flex items-center gap-1 flex-shrink-0">
+            <div className="flex items-center gap-1.5 flex-shrink-0">
               <button
                 type="button"
                 onClick={handleNewChat}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg hover:border-[#21C1B6] hover:text-[#21C1B6] transition-all text-xs font-medium text-gray-700"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white transition-all"
+                style={{ background: '#21C1B6' }}
                 title="Start New Chat"
               >
-                <Plus className="w-4 h-4" />
+                <Plus className="w-3.5 h-3.5" />
                 <span>New Chat</span>
               </button>
               {showMainArea && (
                 <button
                   type="button"
                   onClick={() => setChatHistorySidebarOpen(false)}
-                  className="p-1.5 bg-white border border-gray-200 rounded-lg hover:border-gray-300 text-gray-500 hover:text-gray-800 transition-all"
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
                   title="Hide chat history"
                   aria-label="Hide chat history"
                 >
@@ -6187,7 +6192,7 @@ const ChatInterface = () => {
               )}
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 scrollbar-custom">
+          <div className="flex-1 overflow-y-auto p-2 scrollbar-custom">
             {loadingSessions ? (
               <div className="flex justify-center py-10">
                 <Loader2 className="h-6 w-6 animate-spin text-[#21C1B6]" />
@@ -6206,15 +6211,15 @@ const ChatInterface = () => {
         </div>
       )}
       {hasSessions && !chatHistorySidebarOpen && showMainArea && (
-        <div className="flex-shrink-0 flex flex-col items-center border-r border-gray-100 bg-white w-11 py-3 gap-2">
+        <div className="flex-shrink-0 flex flex-col items-center border-r border-gray-100 bg-white w-10 py-3 gap-2">
           <button
             type="button"
             onClick={() => setChatHistorySidebarOpen(true)}
-            className="p-2 rounded-lg border border-gray-200 hover:border-[#21C1B6] text-gray-600 hover:text-[#11766f] transition-colors"
+            className="p-2 rounded-xl hover:bg-gray-50 text-gray-400 hover:text-[#21C1B6] transition-colors"
             title="Show chat history"
             aria-label="Show chat history"
           >
-            <MessageSquare className="w-4 h-4 text-[#21C1B6]" />
+            <MessageSquare className="w-4 h-4" />
           </button>
         </div>
       )}
@@ -6234,14 +6239,18 @@ const ChatInterface = () => {
         }}>
 
           {/* top bar */}
-          <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-shrink-0 bg-white">
-            <span className="text-sm font-medium text-gray-700">
-              {selectedChatSessionId ? (chatSessions.find(s => s.sessionId === selectedChatSessionId)?.title || "Active Chat") : "New Conversation"}
-            </span>
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between px-5 py-2.5 border-b border-gray-100 flex-shrink-0 bg-white">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-1.5 h-4 rounded-full flex-shrink-0" style={{ background: '#21C1B6' }} />
+              <span className="text-xs font-semibold text-gray-600 truncate">
+                {selectedChatSessionId ? (chatSessions.find(s => s.sessionId === selectedChatSessionId)?.title || "Active Chat") : "New Conversation"}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
               {(chatSessions.length > 0 || currentChatHistory.length > 0) && (
-                <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all" className="p-1 text-gray-400 hover:text-red-500 transition-colors">
-                  <Trash2 className="w-4 h-4" />
+                <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all"
+                  className="p-1.5 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 transition-colors">
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               )}
               {hasResponse && !selectedMessageIsLearning && (
@@ -6249,11 +6258,12 @@ const ChatInterface = () => {
                   type="button"
                   onClick={() => panelOpen ? closePanel() : openPanel('response', { response: activeResponseContent, messageId: selectedMessageId })}
                   title={panelOpen ? 'Close split view' : 'Open split view'}
-                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors inline-flex items-center gap-1.5 ${
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1.5 ${
                     panelOpen
-                      ? 'text-[#11766f] bg-[#E0F7F6] border border-[#21C1B6]'
-                      : 'text-[#11766f] bg-white border border-[#21C1B6] hover:bg-[#f0fdfa]'
+                      ? 'text-white border border-transparent'
+                      : 'text-[#21C1B6] bg-[#f0fdfb] border border-[#21C1B6] hover:bg-[#e6faf9]'
                   }`}
+                  style={panelOpen ? { background: '#21C1B6' } : {}}
                 >
                   <PanelRight className="w-3.5 h-3.5" />
                   <span>{panelOpen ? 'Close Split' : 'Split View'}</span>
@@ -6614,11 +6624,11 @@ const ChatInterface = () => {
           </div>
 
           {/* Input Area */}
-          <div className="flex-shrink-0 border-t border-gray-200 p-2 bg-white">
+          <div className="flex-shrink-0 border-t border-gray-100 px-3 py-3" style={{ background: '#f8fafc' }}>
             {/* Voice session status bar */}
             {audioMicStatus !== 'idle' && (
-              <div className={`flex items-center justify-between px-3 py-1.5 mb-2 rounded-lg text-xs font-medium
-                ${audioMicStatus === 'live' ? 'bg-red-50 text-red-600' : 'bg-teal-50 text-teal-700'}`}>
+              <div className={`flex items-center justify-between px-3 py-1.5 mb-2 rounded-xl text-xs font-medium
+                ${audioMicStatus === 'live' ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-teal-50 text-teal-700 border border-teal-100'}`}>
                 <div className="flex items-center gap-2">
                   {audioMicStatus === 'live' && (
                     <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
@@ -6628,7 +6638,7 @@ const ChatInterface = () => {
                 </div>
                 {audioMicStatus === 'live' && (
                   <button type="button" onClick={stopDocumentAudio}
-                    className="text-red-500 hover:text-red-700 font-semibold">
+                    className="text-red-500 hover:text-red-700 font-bold text-xs">
                     Stop
                   </button>
                 )}
@@ -6640,18 +6650,21 @@ const ChatInterface = () => {
                 if (isGenerating) handleStopGeneration();
                 else handleNewMessage().catch(console.error);
               }}
-              className="flex items-center space-x-3 bg-white rounded-xl border border-[#21C1B6] px-4 py-4 focus-within:ring-[#21C1B6]"
+              className="flex items-center gap-2 bg-white rounded-2xl border border-gray-200 px-3 py-2.5 shadow-sm"
+              style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}
             >
               <div className="relative flex-shrink-0" ref={dropdownRef}>
-                <button type="button" onClick={() => setShowDropdown(!showDropdown)} className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg">
+                <button type="button" onClick={() => setShowDropdown(!showDropdown)}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl hover:border-[#21C1B6] hover:text-[#21C1B6] transition-colors">
                   <BookOpen className="h-3.5 w-3.5" />
                   <span>{isLoadingSecrets ? "Loading..." : activeDropdown}</span>
-                  <ChevronDown className="h-3.5 w-3.5" />
+                  <ChevronDown className="h-3 w-3 text-gray-400" />
                 </button>
                 {showDropdown && !isLoadingSecrets && (
-                  <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
+                  <div className="absolute bottom-full left-0 mb-2 w-52 bg-white border border-gray-100 rounded-2xl shadow-xl z-20 max-h-60 overflow-y-auto py-1">
                     {secrets.map((s) => (
-                      <button key={s.id} type="button" onClick={() => handleDropdownSelect(s.name, s.id, s.llm_name)} className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50">{s.name}</button>
+                      <button key={s.id} type="button" onClick={() => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                        className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-gray-50 hover:text-[#21C1B6] transition-colors">{s.name}</button>
                     ))}
                   </div>
                 )}
@@ -6660,7 +6673,7 @@ const ChatInterface = () => {
                 <button
                   type="button"
                   onClick={() => setShowStyleDropdown(!showStyleDropdown)}
-                  className="flex items-center space-x-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl hover:border-[#21C1B6] hover:text-[#21C1B6] transition-colors"
                   title="Mode settings"
                 >
                   <Settings2 className="h-3.5 w-3.5" />
@@ -6671,11 +6684,11 @@ const ChatInterface = () => {
                   )}
                 </button>
                 {showStyleDropdown && (
-                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-100 rounded-2xl shadow-xl z-20 overflow-hidden py-1">
                     <button
                       type="button"
                       onClick={() => { setLearningModeActive(false); setShowStyleDropdown(false); closePanel(); }}
-                      className="w-full flex items-center justify-between px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
                         <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />
@@ -6686,7 +6699,7 @@ const ChatInterface = () => {
                     <button
                       type="button"
                       onClick={() => { setLearningModeActive(true); setShowStyleDropdown(false); }}
-                      className="w-full flex items-center justify-between px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
                         <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
@@ -6697,26 +6710,31 @@ const ChatInterface = () => {
                   </div>
                 )}
               </div>
+
+              {/* Divider */}
+              <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
+
               {/* Voice Document Agent mic button */}
               <button
                 type="button"
                 onClick={audioMicStatus === 'live' ? stopDocumentAudio : startDocumentAudio}
                 disabled={loadingChat || audioMicStatus === 'connecting' || audioMicStatus === 'stopping' || !_normalizeFolderName(selectedFolder)}
-                className={`relative flex-shrink-0 p-2 rounded-full transition-all duration-200
+                className={`relative flex-shrink-0 p-2 rounded-xl transition-all duration-200
                   ${audioMicStatus === 'live'
-                    ? 'bg-red-500 text-white shadow-md scale-110'
+                    ? 'text-white shadow-md scale-110'
                     : 'text-[#21C1B6] hover:bg-teal-50 disabled:opacity-40 disabled:cursor-not-allowed'
                   }`}
+                style={audioMicStatus === 'live' ? { background: '#ef4444' } : {}}
                 title={audioMicStatus === 'live' ? 'Stop voice session' : 'Start Voice Document Agent'}
               >
                 {audioMicStatus === 'connecting' || audioMicStatus === 'stopping'
-                  ? <Loader2 className="h-5 w-5 animate-spin" />
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
                   : audioMicStatus === 'live'
-                    ? <MicOff className="h-5 w-5" />
-                    : <Mic className="h-5 w-5" />
+                    ? <MicOff className="h-4 w-4" />
+                    : <Mic className="h-4 w-4" />
                 }
                 {audioMicStatus === 'live' && (
-                  <span className="absolute inset-0 rounded-full animate-ping bg-red-400 opacity-40 pointer-events-none" />
+                  <span className="absolute inset-0 rounded-xl animate-ping bg-red-400 opacity-40 pointer-events-none" />
                 )}
               </button>
 
@@ -6725,13 +6743,14 @@ const ChatInterface = () => {
                 value={chatInput}
                 onChange={handleChatInputChange}
                 placeholder={isSecretPromptSelected ? `Analysis: ${activeDropdown}` : "How can I help you today?"}
-                className="flex-grow bg-transparent border-none outline-none text-gray-900 text-sm font-medium py-2 min-w-0"
+                className="flex-grow bg-transparent border-none outline-none text-gray-800 text-sm py-1 min-w-0 placeholder-gray-400"
                 disabled={loadingChat}
               />
               <button
                 type="submit"
                 disabled={!isGenerating && (loadingChat || (!chatInput.trim() && !isSecretPromptSelected))}
-                className="p-2 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex-shrink-0"
+                className="flex-shrink-0 p-2 text-white rounded-xl transition-all disabled:cursor-not-allowed disabled:opacity-40"
+                style={{ background: (!isGenerating && (loadingChat || (!chatInput.trim() && !isSecretPromptSelected))) ? '#d1d5db' : '#21C1B6' }}
                 title={isGenerating ? "Stop" : loadingChat ? "Sending…" : "Send"}
               >
                 {isGenerating ? (

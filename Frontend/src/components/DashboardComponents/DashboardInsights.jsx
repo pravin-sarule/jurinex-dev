@@ -1,44 +1,47 @@
 import React from 'react';
+import { ArrowRight } from 'lucide-react';
 
 const DashboardInsights = ({ insights }) => {
   return (
-    <div className="mb-6 sm:mb-8 px-2 sm:px-0">
-      <h2 className="text-base sm:text-lg font-semibold text-gray-900 mb-3 sm:mb-4">
-        Insights & Recommendations
-      </h2>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 lg:gap-6">
+    <div className="mb-8">
+      <div className="flex items-center gap-3 mb-5">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">
+          Quick Actions
+        </h2>
+        <div className="flex-1 h-px bg-gray-100" />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {insights.map((insight, index) => (
-          <div 
+          <div
             key={index}
-            className="bg-white border border-gray-200 rounded-lg sm:rounded-xl p-4 sm:p-5 lg:p-6 shadow-sm hover:shadow-md transition-shadow"
+            className="group bg-white border border-gray-100 rounded-2xl p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-0.5 cursor-pointer"
+            style={{ borderLeft: `3px solid ${insight.color}` }}
+            onClick={insight.onClick}
           >
-            <div className="flex items-start gap-2.5 sm:gap-3 mb-3 sm:mb-4">
-              <div 
-                className="p-1.5 sm:p-2 rounded-lg text-white flex-shrink-0"
+            <div className="flex items-start gap-3 mb-3">
+              <div
+                className="w-10 h-10 rounded-xl flex items-center justify-center text-white flex-shrink-0"
                 style={{ backgroundColor: insight.color }}
               >
-                <div className="w-4 h-4 sm:w-5 sm:h-5 flex items-center justify-center">
-                  {insight.icon}
-                </div>
+                {insight.icon}
               </div>
-              <h3 className="font-semibold text-gray-900 flex-1 text-sm sm:text-base leading-tight">
+              <h3 className="font-semibold text-gray-900 text-sm leading-snug mt-1 flex-1">
                 {insight.title}
               </h3>
             </div>
-            <p className="text-xs sm:text-sm text-gray-600 mb-3 sm:mb-4 leading-relaxed">
+            <p className="text-xs text-gray-500 leading-relaxed mb-4 line-clamp-2">
               {insight.description}
             </p>
-            <button 
-              className="text-xs sm:text-sm font-medium flex items-center gap-1 transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#21C1B6] focus:ring-offset-2 rounded px-1 -mx-1"
-              style={{ color: '#21C1B6' }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = '#1AA49B')}
-              onMouseLeave={(e) => (e.currentTarget.style.color = '#21C1B6')}
-              onClick={insight.onClick}
-              aria-label={insight.action}
+            <div
+              className="flex items-center gap-1.5 text-xs font-semibold"
+              style={{ color: insight.color }}
             >
               <span>{insight.action}</span>
-              <span className="transition-transform group-hover:translate-x-1">→</span>
-            </button>
+              <ArrowRight
+                size={13}
+                className="transition-transform duration-200 group-hover:translate-x-1"
+              />
+            </div>
           </div>
         ))}
       </div>

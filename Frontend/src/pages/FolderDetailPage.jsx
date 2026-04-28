@@ -151,61 +151,76 @@ const FolderDetailPage = () => {
   };
 
   return (
-    <div className="h-screen bg-white text-gray-800 overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent" style={{marginLeft: '0px', marginRight: '0px'}}>
+    <div className="h-screen overflow-hidden" style={{ background: '#f8fafc', marginLeft: '0px', marginRight: '0px' }}>
       <div className="h-full flex flex-col mx-auto">
-        <div className="flex-shrink-0 p-0">
+
+        {/* ── Top bar ── */}
+        <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-white relative" style={{ minHeight: '3rem' }}>
+          {/* Back button */}
           <button
-            onClick={() => navigate("/documents")}
-            className="flex items-center text-gray-600 hover:text-gray-800 transition-colors duration-200"
+            onClick={() => navigate('/documents')}
+            className="flex items-center gap-1.5 text-xs font-semibold text-gray-400 hover:text-[#21C1B6] transition-colors group"
           >
-            <ArrowLeft className="w-4 h-4 mr-1" />
-            <span className="text-sm">All projects</span>
+            <ArrowLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
+            <span>All projects</span>
           </button>
-          {showMoreMenu && (
-            <div className="absolute top-8 right-0 bg-white border border-gray-200 rounded-md shadow-lg p-2 z-50 min-w-[160px]">
-              <button
-                className="w-full text-left px-4 py-2 hover:bg-red-50 text-sm text-red-600 flex items-center gap-2 rounded"
-                onClick={handleDeleteFolder}
-                disabled={isDeleting}
-              >
-                <Trash2 className="w-4 h-4" />
-                {isDeleting ? 'Deleting...' : 'Delete Case'}
-              </button>
-            </div>
-          )}
-        </div>
-        <div className="flex-shrink-0 relative flex items-start justify-center px-10 py-1 min-h-[2.25rem]">
-          <h1 className="text-xl font-bold text-center text-[#0f172a] max-w-[min(100%,42rem)] break-words">
-            {selectedFolder || "Document Upload"}
+
+          {/* Case title — centred */}
+          <h1 className="absolute left-1/2 -translate-x-1/2 text-sm font-bold text-gray-800 max-w-[min(60%,40rem)] truncate text-center px-2">
+            {selectedFolder || 'Document Upload'}
           </h1>
-          <div className="absolute right-0 top-0 flex items-center space-x-2 flex-shrink-0">
-            <button type="button" onClick={() => setShowMoreMenu((prev) => !prev)} aria-label="Case menu">
-              <MoreVertical className="w-4 h-4 text-gray-600" />
+
+          {/* Actions */}
+          <div className="flex items-center gap-1 relative">
+            <button
+              type="button"
+              onClick={handleToggleStar}
+              aria-label="Star case"
+              className="p-1.5 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Star className={`w-4 h-4 transition-colors ${isStarred ? 'text-amber-400 fill-amber-400' : 'text-gray-300 hover:text-amber-300'}`} />
             </button>
-            <button type="button" onClick={handleToggleStar} aria-label="Star case">
-              <Star
-                className={`w-4 h-4 ${
-                  isStarred ? "text-yellow-400 fill-yellow-400" : "text-gray-400"
-                }`}
-              />
+            <button
+              type="button"
+              onClick={() => setShowMoreMenu((prev) => !prev)}
+              aria-label="Case menu"
+              className="p-1.5 rounded-lg hover:bg-gray-50 transition-colors text-gray-400 hover:text-gray-600"
+            >
+              <MoreVertical className="w-4 h-4" />
             </button>
+            {showMoreMenu && (
+              <div className="absolute top-full right-0 mt-1 bg-white border border-gray-100 rounded-xl shadow-xl z-50 overflow-hidden min-w-[160px]">
+                <button
+                  className="w-full text-left px-4 py-2.5 text-xs font-medium text-red-500 hover:bg-red-50 flex items-center gap-2 transition-colors"
+                  onClick={handleDeleteFolder}
+                  disabled={isDeleting}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {isDeleting ? 'Deleting…' : 'Delete Case'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
-        <div className={`flex-1 flex ${(!hasAiResponse && !selectedChatSessionId) ? 'space-x-2' : ''} overflow-hidden bg-white`}>
-          <div className="flex-1 h-full flex flex-col scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent min-w-0 bg-white">
+
+        {/* ── Main content ── */}
+        <div className={`flex-1 flex ${(!hasAiResponse && !selectedChatSessionId) ? 'gap-2 p-2' : ''} overflow-hidden`}>
+          <div className="flex-1 h-full flex flex-col min-w-0 overflow-hidden rounded-xl bg-white"
+            style={{ boxShadow: (!hasAiResponse && !selectedChatSessionId) ? '0 1px 4px rgba(0,0,0,0.05)' : 'none' }}>
             <ChatInterface />
           </div>
           {!selectedChatSessionId && !hasAiResponse && (
-            <div className="w-1/3 flex flex-col h-full overflow-hidden scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent flex-shrink-0">
-              <div className="bg-white p-2 rounded border border-gray-200 flex-1 flex flex-col overflow-hidden">
-                <div className="flex justify-between items-center mb-1 flex-shrink-0">
-                  <h3 className="text-sm font-semibold">Files</h3>
+            <div className="w-1/3 flex flex-col h-full overflow-hidden flex-shrink-0">
+              <div className="bg-white rounded-xl border border-gray-100 flex-1 flex flex-col overflow-hidden p-3"
+                style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
+                <div className="flex items-center gap-2 mb-2 flex-shrink-0 pb-2 border-b border-gray-100">
+                  <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: '#f0fdfb' }}>
+                    <span className="text-[8px] font-bold" style={{ color: '#21C1B6' }}>F</span>
+                  </div>
+                  <h3 className="text-xs font-semibold text-gray-600">Files</h3>
                 </div>
                 {selectedDocument ? (
-                  <DocumentPreviewModal
-                    document={selectedDocument}
-                    onClose={handleClosePreview}
-                  />
+                  <DocumentPreviewModal document={selectedDocument} onClose={handleClosePreview} />
                 ) : (
                   <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                     <FolderContent onDocumentClick={handleDocumentClick} />
