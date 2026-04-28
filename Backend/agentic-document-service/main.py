@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.routes.audio_chat import router as audio_chat_router
 from app.api.routes.cases import router as cases_router
 from app.api.routes.content import router as content_router
 from app.api.routes.files import router as files_router
@@ -86,6 +87,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(summarization_config_admin_router)
+    app.include_router(audio_chat_router)
     app.include_router(cases_router)
     app.include_router(content_router)
     app.include_router(rbac_router)

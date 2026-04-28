@@ -795,6 +795,63 @@ class LegalCasePipelineService:
                 scored.append(item)
         return scored[:top_k]
 
+    def retrieve_context_text(
+        self,
+        case_id: str,
+        query: str,
+        file_ids: list[str],
+        top_k: int = 5,
+    ) -> str:
+        """Retrieval-only path for audio agent RAG — hybrid search, no LLM generation."""
+        valid_file_ids = [str(f) for f in file_ids if f]
+        query_embedding = embeddings.embed_text(query)
+        if not query_embedding:
+            return "Could not generate query embedding."
+
+        if not valid_file_ids or not is_db_available():
+            hits = self._vector_store.search(
+                case_id=case_id,
+                query=query,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                required_doc_types=[],
+            )
+            if not hits:
+                return "No relevant content found."
+            return "\n\n".join(
+                f"[From: {c.document_name}]\n{c.text}" for c, _ in hits
+            )
+
+        audio_request = QueryRequest(user_id="audio", case_id=case_id, query=query)
+        llm_config = get_llm_chat_config()
+        params = dict(self._resolve_retrieval_params(audio_request, llm_config))
+        params["top_k"] = max(1, int(top_k))
+        params["use_hybrid_search"] = True
+        params["use_rrf"] = True
+        try:
+            rows = self._search_db_chunks(
+                request=audio_request,
+                valid_file_ids=valid_file_ids,
+                query_embedding=query_embedding,
+                params=params,
+            )
+        except Exception as exc:
+            logger.error("[AudioRAG] DB search failed case_id=%s error=%s", case_id, exc)
+            return "Document search failed."
+
+        if not rows:
+            return "No relevant content found in your documents."
+
+        parts = []
+        for row in rows:
+            doc_name = str(row.get("document_name") or "document")
+            section = (str(row.get("section_title") or "")).strip()
+            content = (str(row.get("content") or "")).strip()
+            if content:
+                header = f"[From: {doc_name}" + (f" — {section}" if section else "") + "]"
+                parts.append(f"{header}\n{content}")
+        return "\n\n".join(parts) if parts else "No relevant content found."
+
     def answer_query_for_files(
         self,
         request: QueryRequest,

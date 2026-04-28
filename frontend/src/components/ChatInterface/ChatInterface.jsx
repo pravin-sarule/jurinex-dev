@@ -2511,7 +2511,7 @@
 import React, { useState, useEffect, useContext, useRef, useMemo, useCallback, startTransition } from "react";
 import { FileManagerContext } from "../../context/FileManagerContext";
 import documentApi from "../../services/documentApi";
-import { API_BASE_URL, DOCS_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from "../../config/apiConfig";
+import { API_BASE_URL, DOCS_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCUMENT_SERVICE_URL, getUserIdForDrafting } from "../../config/apiConfig";
 import {
   Plus,
   Search,
@@ -2533,6 +2533,7 @@ import {
   Settings2,
   PanelRight,
   ChevronLeft,
+  Volume2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -3463,6 +3464,11 @@ const ChatInterface = () => {
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
 
+  // ── Voice Document Agent (inline) ─────────────────────────────────────────
+  const [audioMicStatus, setAudioMicStatus] = useState('idle'); // idle|connecting|live|stopping
+  const [audioMessages, setAudioMessages] = useState([]);
+  const [audioInputTranscript, setAudioInputTranscript] = useState('');
+
   // Speech recognition setup
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -3511,6 +3517,249 @@ const ChatInterface = () => {
       }
     }
   };
+
+  // ── Voice Document Agent helpers ───────────────────────────────────────────
+
+  const _docAudioGetPlayCtx = () => {
+    if (!audioPlayCtxRef.current || audioPlayCtxRef.current.state === 'closed') {
+      audioPlayCtxRef.current = new AudioContext({ sampleRate: 24000 });
+      audioNextPlayRef.current = 0;
+    }
+    return audioPlayCtxRef.current;
+  };
+
+  const _docAudioDownsample = (input, inputRate) => {
+    if (inputRate === 16000) return input;
+    const ratio = inputRate / 16000;
+    const out = new Float32Array(Math.max(1, Math.round(input.length / ratio)));
+    for (let i = 0; i < out.length; i++) {
+      const s = Math.floor(i * ratio), e = Math.min(Math.floor((i + 1) * ratio), input.length);
+      let sum = 0; for (let j = s; j < e; j++) sum += input[j];
+      out[i] = sum / Math.max(e - s, 1);
+    }
+    return out;
+  };
+
+  const _docAudioResample = (input, fromRate, toRate) => {
+    if (!input?.length || fromRate === toRate) return input;
+    const ratio = fromRate / toRate;
+    const out = new Float32Array(Math.max(1, Math.round(input.length / ratio)));
+    for (let i = 0; i < out.length; i++) {
+      const si = i * ratio, idx = Math.floor(si), frac = si - idx;
+      const a = input[idx] ?? 0, b = input[Math.min(idx + 1, input.length - 1)] ?? a;
+      out[i] = a + (b - a) * frac;
+    }
+    return out;
+  };
+
+  const _docPcm16ToBase64 = (samples) => {
+    const bytes = new Uint8Array(samples.buffer);
+    let bin = ''; const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk)
+      bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    return btoa(bin);
+  };
+
+  const _docScheduleAudio = (base64Data, mimeType) => {
+    try {
+      const srcRate = mimeType?.includes('24000') ? 24000 : 16000;
+      const raw = atob(base64Data);
+      const int16 = new Int16Array(raw.length / 2);
+      for (let i = 0; i < int16.length; i++)
+        int16[i] = (raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8));
+      let f32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+      const ctx = _docAudioGetPlayCtx();
+      if (ctx.sampleRate !== srcRate) f32 = _docAudioResample(f32, srcRate, ctx.sampleRate);
+      const fade = Math.min(128, Math.floor(f32.length / 2));
+      if (fade > 0) {
+        for (let i = 0; i < fade; i++) {
+          f32[i] *= i / fade;
+          f32[f32.length - 1 - i] *= (fade - i) / fade;
+        }
+      }
+      const buf = ctx.createBuffer(1, f32.length, ctx.sampleRate);
+      buf.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf; src.connect(ctx.destination);
+      const now = ctx.currentTime;
+      if (!audioNextPlayRef.current) audioNextPlayRef.current = now + 0.06;
+      else if (audioNextPlayRef.current < now + 0.02) audioNextPlayRef.current = now + 0.02;
+      src.start(audioNextPlayRef.current);
+      audioNextPlayRef.current += buf.duration;
+    } catch (_) {}
+  };
+
+  const _docCleanupAudio = () => {
+    audioSourceRef.current?.disconnect();
+    audioProcessorRef.current?.disconnect();
+    audioCtxRef.current?.close();
+    audioStreamRef.current?.getTracks().forEach(t => t.stop());
+    audioCtxRef.current = null;
+    audioSourceRef.current = null;
+    audioProcessorRef.current = null;
+    audioStreamRef.current = null;
+    audioNextPlayRef.current = 0;
+  };
+
+  const stopDocumentAudio = () => {
+    audioVoiceDoneRef.current = true;
+    audioAwaitingFinalRef.current = true;
+    try { audioWsRef.current?.send(JSON.stringify({ type: 'end' })); } catch (_) {}
+    _docCleanupAudio();
+    setAudioMicStatus('stopping');
+    clearTimeout(audioStopTimeoutRef.current);
+    audioStopTimeoutRef.current = setTimeout(() => {
+      try { audioWsRef.current?.close(); } catch (_) {}
+      audioWsRef.current = null;
+      audioAwaitingFinalRef.current = false;
+      setAudioMicStatus('idle');
+    }, 12000);
+  };
+
+  const startDocumentAudio = async () => {
+    const folderName = _normalizeFolderName(selectedFolder);
+    if (!folderName) return;
+    const userId = getUserIdForDrafting() || 'anonymous';
+    setAudioMicStatus('connecting');
+    audioVoiceDoneRef.current = false;
+    audioVoiceBufferRef.current = '';
+    setAudioInputTranscript('');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      const ctx = new AudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      audioSourceRef.current = source;
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      audioProcessorRef.current = processor;
+      const silent = ctx.createGain(); silent.gain.value = 0;
+
+      const base = DOCUMENT_SERVICE_URL
+        .replace(/^https:\/\//, 'wss://')
+        .replace(/^http:\/\//, 'ws://')
+        .replace(/\/$/, '');
+      const wsUrl = `${base}/api/v1/audio/chat?folder_name=${encodeURIComponent(folderName)}&user_id=${encodeURIComponent(userId)}`;
+      const ws = new WebSocket(wsUrl);
+      audioWsRef.current = ws;
+
+      ws.onopen = () => {
+        setAudioMicStatus('live');
+        processor.onaudioprocess = (e) => {
+          if (audioVoiceDoneRef.current || ws.readyState !== WebSocket.OPEN) return;
+          const pcm = _docAudioDownsample(e.inputBuffer.getChannelData(0), ctx.sampleRate);
+          const int16 = new Int16Array(pcm.length);
+          for (let i = 0; i < pcm.length; i++)
+            int16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32768));
+          ws.send(JSON.stringify({ type: 'audio', data: _docPcm16ToBase64(int16) }));
+        };
+        source.connect(processor);
+        processor.connect(silent);
+        silent.connect(ctx.destination);
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'audio' && msg.data) _docScheduleAudio(msg.data, msg.mime_type);
+
+          if (msg.type === 'input_transcript' && msg.content) {
+            setAudioInputTranscript(String(msg.content).trim());
+          }
+
+          if (msg.type === 'text' && msg.content) {
+            const chunk = String(msg.content || '').trim();
+            if (chunk) {
+              const cur = audioVoiceBufferRef.current;
+              if (chunk.startsWith(cur)) audioVoiceBufferRef.current = chunk;
+              else if (!cur.endsWith(chunk))
+                audioVoiceBufferRef.current = `${cur} ${chunk}`.trim().replace(/\s+/g, ' ');
+              const full = audioVoiceBufferRef.current;
+              setAudioMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last?.role === 'assistant' && last.streaming)
+                  return [...prev.slice(0, -1), { ...last, text: full }];
+                return [...prev, { role: 'assistant', text: full, streaming: true }];
+              });
+            }
+          }
+
+          if (msg.type === 'tool_call') {
+            setAudioInputTranscript(`Searching: ${msg.query || ''}`);
+          }
+
+          if (msg.type === 'turn_complete') {
+            audioNextPlayRef.current = 0;
+            const userSpeech = audioInputTranscript || audioVoiceBufferRef.current;
+            if (audioAwaitingFinalRef.current) {
+              clearTimeout(audioStopTimeoutRef.current);
+              audioAwaitingFinalRef.current = false;
+              try { audioWsRef.current?.close(); } catch (_) {}
+              audioWsRef.current = null;
+              setAudioMicStatus('idle');
+              setAudioInputTranscript('');
+              setAudioMessages(prev =>
+                prev.map(m => m.streaming ? { role: m.role, text: m.text } : m)
+              );
+            } else if (!audioVoiceDoneRef.current) {
+              setAudioMicStatus('live');
+              // commit the user speech bubble
+              if (userSpeech) {
+                setAudioMessages(prev => {
+                  const hasUser = prev.length > 0 && prev[prev.length - 1]?.role === 'user' && prev[prev.length - 1]?.pending;
+                  return hasUser ? prev : [...prev, { role: 'user', text: userSpeech }];
+                });
+              }
+              setAudioInputTranscript('');
+              audioVoiceBufferRef.current = '';
+            }
+          }
+
+          if (msg.type === 'error') {
+            setAudioMessages(prev => [...prev, {
+              role: 'error',
+              text: msg.message || 'Voice service error.',
+            }]);
+            stopDocumentAudio();
+          }
+        } catch (_) {}
+      };
+
+      ws.onerror = () => {
+        setAudioMessages(prev => [...prev, {
+          role: 'error',
+          text: 'Could not connect to voice service. Check microphone permissions.',
+        }]);
+        stopDocumentAudio();
+      };
+
+      ws.onclose = () => {
+        clearTimeout(audioStopTimeoutRef.current);
+        audioAwaitingFinalRef.current = false;
+        setAudioMicStatus('idle');
+      };
+
+    } catch (err) {
+      audioVoiceDoneRef.current = true;
+      setAudioMessages(prev => [...prev, {
+        role: 'error',
+        text: err?.message || 'Microphone access denied. Please allow permissions and try again.',
+      }]);
+      setAudioMicStatus('idle');
+    }
+  };
+
+  // Cleanup audio on unmount
+  useEffect(() => {
+    return () => {
+      clearTimeout(audioStopTimeoutRef.current);
+      _docCleanupAudio();
+      audioPlayCtxRef.current?.close();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const responseHasTable = useMemo(() => {
     if (!animatedResponseContent) return false;
@@ -3628,6 +3877,19 @@ const ChatInterface = () => {
   const panelStatesSetRef = useRef(false);
   const fetchedFoldersRef = useRef(new Set());
   const folderFilesCacheRef = useRef(new Map());
+
+  // Voice Document Agent refs
+  const audioWsRef          = useRef(null);
+  const audioCtxRef         = useRef(null);
+  const audioPlayCtxRef     = useRef(null);
+  const audioSourceRef      = useRef(null);
+  const audioProcessorRef   = useRef(null);
+  const audioStreamRef      = useRef(null);
+  const audioNextPlayRef    = useRef(0);
+  const audioStopTimeoutRef = useRef(null);
+  const audioVoiceDoneRef   = useRef(false);
+  const audioAwaitingFinalRef = useRef(false);
+  const audioVoiceBufferRef = useRef('');
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -6265,12 +6527,114 @@ const ChatInterface = () => {
                   )}
                 </>
               )}
+
+              {/* ── Voice Document Agent inline messages ── */}
+              {audioMessages.length > 0 && (
+                <div className="flex flex-col gap-3 pt-2">
+                  {audioMessages.map((msg, i) => {
+                    if (msg.role === 'user') {
+                      return (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                          <div style={{
+                            background: '#f0fdfa',
+                            color: '#1a1a1a',
+                            borderRadius: '18px 18px 4px 18px',
+                            border: '1px solid #21C1B6',
+                            padding: '10px 16px',
+                            maxWidth: '72%',
+                            fontSize: '17px',
+                            fontWeight: '500',
+                            lineHeight: '1.55',
+                            fontFamily: 'Inter, sans-serif',
+                            wordBreak: 'break-word',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                          }}>
+                            <Mic className="h-4 w-4 flex-shrink-0 text-teal-500" />
+                            {msg.text}
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (msg.role === 'assistant') {
+                      return (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                          <div style={{ maxWidth: '100%', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                            <div className="flex items-start gap-2">
+                              <div className="flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center mt-0.5"
+                                style={{ background: 'linear-gradient(135deg,#21C1B6,#1AA49B)' }}>
+                                <Volume2 className="h-3.5 w-3.5 text-white" />
+                              </div>
+                              <div>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>
+                                  {msg.text}
+                                </ReactMarkdown>
+                                {msg.streaming && <span className="inline-block w-0.5 h-4 bg-teal-400 ml-1 animate-pulse align-middle" />}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (msg.role === 'error') {
+                      return (
+                        <div key={i} className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                          {msg.text}
+                        </div>
+                      );
+                    }
+                    return null;
+                  })}
+                </div>
+              )}
+
+              {/* In-progress voice transcript */}
+              {audioInputTranscript && audioMicStatus !== 'idle' && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <div style={{
+                    background: '#f0fdfa',
+                    color: '#6b7280',
+                    borderRadius: '18px 18px 4px 18px',
+                    border: '1px dashed #21C1B6',
+                    padding: '8px 14px',
+                    maxWidth: '72%',
+                    fontSize: '14px',
+                    fontStyle: 'italic',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}>
+                    <Mic className="h-3.5 w-3.5 text-teal-400" />
+                    {audioInputTranscript}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
           {/* Input Area */}
           <div className="flex-shrink-0 border-t border-gray-200 p-2 bg-white">
-            <form 
+            {/* Voice session status bar */}
+            {audioMicStatus !== 'idle' && (
+              <div className={`flex items-center justify-between px-3 py-1.5 mb-2 rounded-lg text-xs font-medium
+                ${audioMicStatus === 'live' ? 'bg-red-50 text-red-600' : 'bg-teal-50 text-teal-700'}`}>
+                <div className="flex items-center gap-2">
+                  {audioMicStatus === 'live' && (
+                    <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                  )}
+                  {audioMicStatus === 'live' ? 'Voice session active — listening' :
+                   audioMicStatus === 'connecting' ? 'Connecting to Voice Agent…' : 'Processing…'}
+                </div>
+                {audioMicStatus === 'live' && (
+                  <button type="button" onClick={stopDocumentAudio}
+                    className="text-red-500 hover:text-red-700 font-semibold">
+                    Stop
+                  </button>
+                )}
+              </div>
+            )}
+            <form
               onSubmit={(e) => {
                 e.preventDefault();
                 if (isGenerating) handleStopGeneration();
@@ -6333,6 +6697,29 @@ const ChatInterface = () => {
                   </div>
                 )}
               </div>
+              {/* Voice Document Agent mic button */}
+              <button
+                type="button"
+                onClick={audioMicStatus === 'live' ? stopDocumentAudio : startDocumentAudio}
+                disabled={loadingChat || audioMicStatus === 'connecting' || audioMicStatus === 'stopping' || !_normalizeFolderName(selectedFolder)}
+                className={`relative flex-shrink-0 p-2 rounded-full transition-all duration-200
+                  ${audioMicStatus === 'live'
+                    ? 'bg-red-500 text-white shadow-md scale-110'
+                    : 'text-[#21C1B6] hover:bg-teal-50 disabled:opacity-40 disabled:cursor-not-allowed'
+                  }`}
+                title={audioMicStatus === 'live' ? 'Stop voice session' : 'Start Voice Document Agent'}
+              >
+                {audioMicStatus === 'connecting' || audioMicStatus === 'stopping'
+                  ? <Loader2 className="h-5 w-5 animate-spin" />
+                  : audioMicStatus === 'live'
+                    ? <MicOff className="h-5 w-5" />
+                    : <Mic className="h-5 w-5" />
+                }
+                {audioMicStatus === 'live' && (
+                  <span className="absolute inset-0 rounded-full animate-ping bg-red-400 opacity-40 pointer-events-none" />
+                )}
+              </button>
+
               <input
                 type="text"
                 value={chatInput}
