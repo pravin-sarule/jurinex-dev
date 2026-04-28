@@ -135,7 +135,7 @@ def book_demo(name: str, email: str, slot_id: int, company: str = "") -> dict:
                 cur.execute(
                     """
                     INSERT INTO demo_bookings (name, email, company, slot_id, scheduled_at, status)
-                    VALUES (%s, %s, %s, %s, %s, 'confirmed')
+                    VALUES (%s, %s, %s, %s, %s, 'pending')
                     ON CONFLICT (email, slot_id) DO NOTHING
                     RETURNING id
                     """,
