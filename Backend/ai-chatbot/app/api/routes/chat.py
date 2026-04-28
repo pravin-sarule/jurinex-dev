@@ -19,7 +19,7 @@ def chat_endpoint(body: ChatRequest, request: Request) -> ChatResponse:
     session_id = get_or_create_session(body.session_id, mode="text")
     logger.debug("POST /api/chat  resolved_session=%s", session_id)
 
-    result = text_chat(body.message)
+    result = text_chat(body.message, session_id=session_id)
     logger.debug("POST /api/chat  answer_len=%d  answer=%r", len(result.answer or ""), result.answer)
 
     save_exchange(session_id, body.message, result.answer)

@@ -77,7 +77,10 @@ def _keyword_search(query: str, top_k: int) -> list[dict]:
                         NULL::numeric AS similarity
                     FROM document_chunks dc
                     JOIN documents d ON d.id = dc.document_id
-                    WHERE d.processing_status = 'active'
+                    -- Include partially-processed docs too: operators may upload
+                    -- platform guides where chunking succeeded but status wasn't
+                    -- promoted to 'active' yet.
+                    WHERE (d.processing_status IN ('active', 'failed') OR d.processing_status IS NULL)
                       AND ({' OR '.join(where_parts)})
                     ORDER BY dc.chunk_index
                     LIMIT %s
@@ -102,8 +105,8 @@ def search_documents(query: str, top_k: int = 5) -> list[dict]:
     logger.info("SEARCH QUERY: %r  (top_k=%d)", query, top_k)
     query_vec = embed_query(query)
     if not query_vec:
-        logger.warning("Embedding failed for query — returning empty results")
-        return []
+        logger.warning("Embedding failed — falling back to keyword-only search")
+        return _keyword_search(query, top_k)
 
     logger.info("EMBEDDING: dim=%d  first5=%s", len(query_vec), query_vec[:5])
 
@@ -126,7 +129,10 @@ def search_documents(query: str, top_k: int = 5) -> list[dict]:
                     FROM chunk_embeddings ce
                     JOIN document_chunks dc ON dc.id = ce.chunk_id
                     JOIN documents       d  ON d.id  = dc.document_id
-                    WHERE d.processing_status = 'active'
+                    -- Vector search only applies to chunks that have embeddings.
+                    -- Allow non-active docs too so operators can test content even
+                    -- if processing status wasn't updated.
+                    WHERE (d.processing_status IN ('active', 'failed') OR d.processing_status IS NULL)
                     ORDER BY ce.embedding <=> %s::vector
                     LIMIT %s
                     """,
@@ -136,9 +142,27 @@ def search_documents(query: str, top_k: int = 5) -> list[dict]:
         vector_chunks = [dict(row) for row in rows]
         keyword_chunks = _keyword_search(query, top_k)
 
+        # Hybrid ranking:
+        # - Vector similarity captures semantics when embeddings exist
+        # - Keyword score rescues partially-processed docs (e.g., guides without embeddings yet)
+        # We rank by a combined score rather than always trusting vector-first ordering.
+        merged = vector_chunks + keyword_chunks
+        for c in merged:
+            kw = _keyword_score(query, c)
+            try:
+                sim = float(c.get("similarity") or 0.0)
+            except Exception:
+                sim = 0.0
+            dtype = (c.get("document_type") or "").lower()
+            dtype_bonus = 200 if dtype in ("technical", "guide", "product", "platform") else 0
+            c["_kw_score"] = kw
+            c["_hybrid_score"] = (sim * 1000.0) + kw + dtype_bonus
+
+        merged.sort(key=lambda c: float(c.get("_hybrid_score") or 0.0), reverse=True)
+
         seen: set[tuple[str, int | None, str]] = set()
         chunks: list[dict] = []
-        for chunk in keyword_chunks + vector_chunks:
+        for chunk in merged:
             key = (
                 chunk.get("file_name") or "",
                 chunk.get("page_number"),
@@ -147,6 +171,8 @@ def search_documents(query: str, top_k: int = 5) -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
+            chunk.pop("_kw_score", None)
+            chunk.pop("_hybrid_score", None)
             chunks.append(chunk)
             if len(chunks) >= top_k:
                 break

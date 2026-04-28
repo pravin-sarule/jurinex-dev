@@ -20,6 +20,17 @@ class ChatResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Demo Booking
+# ---------------------------------------------------------------------------
+
+class BookDemoRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: str = Field(..., min_length=3, max_length=150)
+    slot_id: int = Field(..., gt=0)
+    company: Optional[str] = Field(None, max_length=150)
+
+
+# ---------------------------------------------------------------------------
 # Admin config
 # ---------------------------------------------------------------------------
 

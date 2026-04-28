@@ -28,11 +28,25 @@ logger = logging.getLogger("ai_chatbot.audio_route")
 
 
 @router.websocket("/ws/audio")
-async def audio_chat_ws(websocket: WebSocket) -> None:
+async def audio_chat_ws(websocket: WebSocket, mode: str = "landing") -> None:
+    """
+    mode="app"     → in-app assistant audio (search only, no demo booking)
+    mode="landing" → landing page audio (search + demo booking)
+    mode="booking" → landing page audio, agent opens by announcing available demo slots
+    """
     await websocket.accept()
     ip_address = websocket.client.host if websocket.client else None
+    is_in_app = (mode == "app")
+    # booking mode: inject opening message so agent speaks first
+    initial_message = (
+        "I want to book a JuriNex product demo. Please fetch and announce the available time slots right away."
+        if mode == "booking" else None
+    )
     session_id = get_or_create_session(None, mode="audio")
-    logger.info("Audio WebSocket connected client=%s session=%s", websocket.client, session_id)
+    logger.info(
+        "Audio WebSocket connected client=%s session=%s mode=%s",
+        websocket.client, session_id, mode,
+    )
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
     done = asyncio.Event()
@@ -110,17 +124,21 @@ async def audio_chat_ws(websocket: WebSocket) -> None:
                 safe_msg["data"] = f"<base64 {len(msg.get('data') or '')} chars>"
             logger.debug("Audio WebSocket send #%d payload=%r", sent_messages, safe_msg)
             await websocket.send_json(msg)
+        except RuntimeError as exc:
+            logger.debug("Audio WebSocket send skipped (connection closed): %s", exc)
         except Exception as exc:
             logger.exception("Audio WebSocket send failed: %s", exc)
 
     receive_task = asyncio.create_task(_receive_from_client())
     try:
-        logger.info("Audio session handler starting session=%s", session_id)
+        logger.info("Audio session handler starting session=%s is_in_app=%s", session_id, is_in_app)
         await handle_audio_session(
             _audio_generator(),
             _send_to_client,
             session_id=session_id,
             ip_address=ip_address,
+            is_in_app=is_in_app,
+            initial_message=initial_message,
         )
     except Exception as exc:
         logger.exception("Audio session error: %s", exc)

@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
-from app.api.routes import health, chat, audio, admin
+from app.api.routes import health, chat, audio, admin, demo
 
 # Force our log format onto the root logger regardless of what uvicorn pre-configured
 logging.config.dictConfig({
@@ -97,6 +97,7 @@ app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(audio.router)
 app.include_router(admin.router)
+app.include_router(demo.router)
 
 
 if __name__ == "__main__":

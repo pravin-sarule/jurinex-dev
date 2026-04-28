@@ -1,6 +1,12 @@
 """
-Core chatbot logic — text (Gemini function-calling) and audio (Gemini Live).
+Core chatbot logic — two separate agents (landing page + in-app) plus Gemini Live audio.
 All runtime parameters are loaded from the chatbot_config DB table.
+
+Agents:
+  landing_page_agent  — public chatbot: legal search + demo booking tools
+  app_panel_agent     — in-app assistant: search only, strict step-by-step format
+  text_chat           — dispatcher: routes based on [APP CONTEXT: ...] prefix
+  handle_audio_session — Gemini Live audio (supports is_in_app flag)
 """
 from __future__ import annotations
 
@@ -8,6 +14,7 @@ import asyncio
 import base64
 import importlib.metadata
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Callable, Awaitable
 
@@ -34,43 +41,55 @@ Operating rules:
   rely on retrieved context before answering.
 - Summarize the core legal principle first. Include citations when available in
   the retrieved context, but do not over-list citations unless asked.
-- Default to English. If the user speaks Marathi, Hindi, or Hinglish, respond in
-  that language.
+- LANGUAGE: Always reply in the exact same language the user used. If the user
+  writes in Marathi → reply in Marathi. Hindi → Hindi. English → English.
+  Hinglish (mixed) → match the same mix. Never switch languages unprompted.
 - Keep initial answers concise. If the topic is complex, offer to provide more
   detail.
 - If no retrieved context is available, say: "My current database doesn't have
   the specific document, but based on general legal principles..." and clearly
   mark the answer as general legal information.
+
+RESPONSE FORMATTING — always use rich Markdown:
+- Use **bold** for legal terms, section names, and key points.
+- Use numbered lists for step-by-step legal procedures.
+- Use bullet lists for provisions, rights, or comparisons.
+- Use ## or ### headings to separate sections (e.g. "## Key Provisions").
+- Use | tables | for comparing statutes, penalties, or timeframes.
+- Use > blockquotes for important warnings or legal notes.
+- Never write long unbroken paragraphs — keep answers scannable.
 """.strip()
 
 _DEFAULT_AUDIO_SYSTEM_PROMPT = """
-You are the JuriNex AI Legal Assistant, a voice-first legal intelligence agent
-for the Indian legal system.
+You are the JuriNex AI Assistant, a voice-first guide for the JuriNex legal platform.
 
 Voice behavior:
 - Speak clearly, professionally, and conversationally.
-- Keep initial spoken answers under 45 seconds.
-- Summarize the legal principle first. Avoid reading long citation lists unless
-  the user asks.
+- Always call search_documents first for every question — the knowledge base has
+  step-by-step platform guides and legal documents.
+- When you find relevant guide content, read the steps aloud in order:
+  "Step 1: ... Step 2: ... Step 3: ..."
+- Keep spoken answers clear and structured — read numbered steps one at a time.
 - Default to English. If the user speaks Marathi, Hindi, or Hinglish, respond in
-  that language.
+  that language but keep the step numbering ("Step 1", "Step 2", etc.) clear.
+- If interrupted, stop and listen for the new question.
 
 Retrieval behavior:
-- Always call search_documents before answering legal questions, especially when
-  the user mentions a case name, section number, statute, or legal doctrine.
-- Prioritize retrieved context over general training data, especially for BNS,
-  BNSS, and BSA versus IPC, CrPC, and IEA.
-- If retrieval returns no useful result, say: "My current database doesn't have
-  the specific document, but based on general legal principles..." and keep the
-  answer clearly framed as legal information, not legal advice.
-- If interrupted, stop speaking and listen for the new context.
+- Call search_documents for EVERY question — platform guides are uploaded in the DB.
+- If the retrieved context has step-by-step instructions, follow them exactly.
+- If no relevant content is found, answer from general JuriNex platform knowledge.
+- For legal questions: prioritize retrieved context, especially for BNS, BNSS, BSA.
+- If retrieval returns nothing useful: "My knowledge base doesn't have that specific
+  document, but here is what I know about this topic..."
 """.strip()
 
 _SEARCH_FN_DECLARATION = {
     "name": "search_documents",
     "description": (
-        "Searches the JuriNex knowledge base to find technical answers. "
-        "Always call this before answering any user question."
+        "Searches the JuriNex knowledge base — platform step-by-step guides, legal documents, "
+        "case law, statutes, and uploaded user documents — using vector + keyword search. "
+        "CALL THIS IMMEDIATELY for every user question. Do NOT ask for clarification first. "
+        "Do NOT compose any answer before calling this tool."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -84,6 +103,107 @@ _SEARCH_FN_DECLARATION = {
     },
 }
 
+_GET_SLOTS_FN_DECLARATION = {
+    "name": "getAvailableSlots",
+    "description": (
+        "Fetches all available JuriNex product demo time slots. "
+        "Call this immediately when the user asks to book, schedule, or see a demo."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {},
+    },
+}
+
+_BOOK_DEMO_FN_DECLARATION = {
+    "name": "bookDemo",
+    "description": "Books a JuriNex product demo for the user after collecting their details.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "name":    {"type": "STRING",  "description": "Full name of the person"},
+            "email":   {"type": "STRING",  "description": "Email address"},
+            "company": {"type": "STRING",  "description": "Company or organisation name (optional)"},
+            "slot_id": {"type": "INTEGER", "description": "ID of the selected demo slot"},
+        },
+        "required": ["name", "email", "slot_id"],
+    },
+}
+
+_IN_APP_SYSTEM_PROMPT = """
+You are the JuriNex Platform Assistant. You operate inside the JuriNex legal platform.
+The knowledge base contains uploaded step-by-step platform guides. You must search and
+use those guides to answer every question.
+
+━━━ ABSOLUTE RULES - NEVER BREAK THESE ━━━
+1. LANGUAGE: ALWAYS reply in the EXACT same language the user used. If the user writes
+   or speaks in Marathi → reply fully in Marathi. Hindi → reply in Hindi. English → English.
+   Hinglish (mixed) → match the same mix. Never switch languages unless the user does first.
+2. NEVER ask the user for clarification. NEVER say "what do you mean", "could you clarify",
+   "are you asking about", or any similar phrase. Just search and answer immediately.
+3. NEVER reply with a paragraph of prose. ALWAYS use numbered steps (1. 2. 3.).
+4. ALWAYS call search_documents as the very first action for every single question.
+5. Assume every question is about JuriNex platform features unless proven otherwise.
+   "Create a case" = creating a case inside JuriNex.
+   "Upload" = uploading a document in JuriNex.
+   "Analysis" = running AI analysis in JuriNex. Never ask which context — just search.
+
+━━━ WORKFLOW - FOLLOW THIS EXACTLY ━━━
+Step A → Call search_documents immediately with the user's question as the query.
+Step B → Read the retrieved chunks.
+Step C → If chunks are relevant: write a numbered step-by-step answer quoting the guide.
+          If chunks are NOT relevant: answer from the CURRENT PAGE context below,
+          still in numbered steps, using the button names and actions listed there.
+Step D → NEVER produce a response without first completing Step A.
+
+━━━ ANSWER FORMAT - MANDATORY ━━━
+Every answer must be structured like this:
+
+## [Short Title of What You Are Explaining]
+
+1. **Step one action** - brief explanation
+2. **Step two action** - brief explanation
+3. **Step three action** - brief explanation
+
+> **Tip:** any helpful note or warning
+
+Rules:
+- Keep answers SHORT — 3 to 5 steps maximum. No padding, no long explanations.
+- **Bold** every button name, field name, tab name, and action
+- Use numbered lists for all sequences and workflows
+- Use bullet lists (- item) for feature lists or options
+- Use > blockquotes for tips and warnings only when essential
+- Never write long unbroken paragraphs
+- Never ask for clarification — search first, answer from results
+- Never offer demo booking, never call getAvailableSlots or bookDemo
+""".strip()
+
+# Regex to extract [APP CONTEXT: ...] prefix that the frontend injects
+_APP_CONTEXT_RE = re.compile(
+    r"^\[APP CONTEXT:\s*(?P<ctx>[^\]]+)\]\s*\nUSER:\s*(?P<question>.+)$",
+    re.DOTALL,
+)
+
+_DEMO_TEXT_ADDENDUM = """
+DEMO BOOKING CAPABILITY:
+- When the user asks to book, schedule, or see a demo — IMMEDIATELY call getAvailableSlots().
+- After getAvailableSlots() returns, reply with ONLY this raw JSON (no extra text before or after):
+  {"type":"slot_selection","message":"Great choice! Here are our available demo slots — pick a time that works for you and I'll collect your details.","slots":[{"id":<id>,"label":"<label>"},...]}
+- If no slots are returned, respond warmly: "I'm sorry, no demo slots are available right now. Please check back tomorrow or drop us an email at demo@jurinex.com."
+- After the user selects a slot and provides their name and email, call bookDemo() immediately to confirm — do not ask the user to fill any form.
+- On successful bookDemo(), confirm warmly: "Your demo is confirmed for <slot label>! We'll send details to <email> shortly."
+""".strip()
+
+_DEMO_AUDIO_ADDENDUM = """
+DEMO BOOKING CAPABILITY:
+- When the user asks to book or schedule a demo, IMMEDIATELY call getAvailableSlots().
+- Read the available slots aloud clearly, e.g.: "We have slots available: Option 1 — Monday, May 5th at 10 AM. Option 2 — Tuesday, May 6th at 2 PM." Then say: "A slot selection panel has appeared on your screen — please tap a slot to choose."
+- After the user picks a slot, ask: "What is your full name?" then "What is your email address?" then "Which company are you from?" (optional).
+- Once you have name, email and slot, call bookDemo() immediately to confirm the booking.
+- Confirm aloud: "Your demo is confirmed! We'll send details to your email shortly."
+- If no slots are available, apologise warmly and suggest trying again tomorrow.
+""".strip()
+
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -91,7 +211,7 @@ _SEARCH_FN_DECLARATION = {
 class ChatbotConfig:
     model_text: str          = "gemini-2.5-flash"
     model_audio: str         = "gemini-3.1-flash-live-preview"
-    max_tokens: int          = 150
+    max_tokens: int          = 2048
     temperature: float       = 0.1
     top_p: float             = 0.95
     top_k_results: int       = 5
@@ -150,7 +270,6 @@ def load_chatbot_config() -> ChatbotConfig:
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Ensure a default row exists so DB-level defaults are applied first.
                 cur.execute(
                     "INSERT INTO chatbot_config (config_key) VALUES ('default') "
                     "ON CONFLICT (config_key) DO NOTHING"
@@ -176,10 +295,8 @@ def load_chatbot_config() -> ChatbotConfig:
             cfg.system_prompt    = row["system_prompt"]        if row.get("system_prompt") is not None else cfg.system_prompt
             cfg.audio_system_prompt = row["audio_system_prompt"] if row.get("audio_system_prompt") is not None else cfg.audio_system_prompt
             logger.info(
-                "Loaded chatbot config from DB: model_text=%s model_audio=%s "
-                "system_prompt=%r... audio_system_prompt=%r...",
+                "Loaded chatbot config from DB: model_text=%s model_audio=%s",
                 cfg.model_text, cfg.model_audio,
-                cfg.system_prompt[:60], cfg.audio_system_prompt[:60],
             )
             _config_cache = cfg
             return _config_cache
@@ -194,23 +311,152 @@ def invalidate_config_cache() -> None:
 
 
 def _make_audio_transcription_config(gt, _language_code: str):
-    """
-    Build AudioTranscriptionConfig in the most broadly compatible way.
-    `language_codes` is skipped because some Gemini SDK/API versions reject it.
-    """
     return gt.AudioTranscriptionConfig()
 
 
-# ── text chat ─────────────────────────────────────────────────────────────────
+# ── shared helpers ─────────────────────────────────────────────────────────────
 
-def text_chat(user_message: str) -> ChatResult:
-    """
-    Sends user_message to Gemini with search_documents tool.
-    Gemini calls the tool → backend executes search → Gemini answers.
-    Returns ChatResult with the answer text and input/output token counts.
-    """
-    logger.info("USER ASK: %s", user_message)
+def _execute_text_tool(name: str, args: dict, cfg: ChatbotConfig, top_k_override: int | None = None) -> object:
+    """Execute a tool call during the text-chat agentic loop."""
+    if name == "search_documents":
+        query = args.get("query", "")
+        top_k = top_k_override if top_k_override is not None else cfg.top_k_results
+        logger.info("TEXT TOOL: search_documents query=%r top_k=%d", query, top_k)
+        chunks = search_documents(query, top_k=top_k)
+        logger.info("TEXT TOOL: search_documents returned %d chunks", len(chunks))
+        return format_chunks_for_context(chunks) or "No relevant documents found."
 
+    if name == "getAvailableSlots":
+        logger.info("TEXT TOOL: getAvailableSlots")
+        from app.services.demo_service import get_available_slots
+        slots = get_available_slots()
+        if not slots:
+            return {"available": False, "message": "No demo slots available. Please try again tomorrow."}
+        return {"available": True, "slots": [{"id": s["id"], "label": s["label"]} for s in slots]}
+
+    if name == "bookDemo":
+        logger.info("TEXT TOOL: bookDemo args=%r", args)
+        from app.services.demo_service import book_demo
+        return book_demo(
+            name=str(args.get("name", "")),
+            email=str(args.get("email", "")),
+            slot_id=int(args.get("slot_id", 0)),
+            company=str(args.get("company", "")),
+        )
+
+    logger.warning("TEXT TOOL: unknown tool name=%s", name)
+    return {"error": f"Unknown tool: {name}"}
+
+
+def _load_history_contents(session_id: str | None, gt) -> list:
+    """Load recent chat history as Gemini Content list for multi-turn context."""
+    if not session_id or session_id == "no-db":
+        return []
+    try:
+        from app.services.session_service import get_history
+        history = get_history(session_id, limit=6)  # last 3 Q&A turns
+        contents = []
+        for msg in history:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append(gt.Content(role=role, parts=[gt.Part(text=msg["content"])]))
+        return contents
+    except Exception as exc:
+        logger.warning("Could not load conversation history: %s", exc)
+        return []
+
+
+def _run_agentic_loop(
+    client,
+    cfg: ChatbotConfig,
+    system_instruction: str,
+    tools: list,
+    clean_question: str,
+    history_contents: list,
+    is_in_app: bool,
+) -> ChatResult:
+    """
+    Shared agentic loop — builds Gemini contents from history + current question,
+    executes up to 6 tool-call rounds, returns the final answer.
+    """
+    from google.genai import types as gt  # type: ignore
+
+    _IN_APP_MIN_TOKENS = 300
+    effective_max_tokens = (
+        _IN_APP_MIN_TOKENS if is_in_app
+        else max(_MIN_TEXT_OUTPUT_TOKENS, min(cfg.max_tokens, _MAX_TEXT_OUTPUT_TOKENS))
+    )
+
+    gen_cfg = gt.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=cfg.temperature,
+        max_output_tokens=effective_max_tokens,
+        top_p=cfg.top_p,
+        tools=tools,
+    )
+
+    # Prior turns (history) + current question
+    contents = list(history_contents) + [
+        gt.Content(role="user", parts=[gt.Part(text=clean_question)])
+    ]
+
+    total_input = 0
+    total_output = 0
+    response = None
+    _in_app_top_k = 12 if is_in_app else None
+
+    for _round in range(6):
+        response = client.models.generate_content(
+            model=cfg.model_text,
+            contents=contents,
+            config=gen_cfg,
+        )
+        logger.debug("AGENT ROUND %d response=%r", _round, response)
+
+        usage = getattr(response, "usage_metadata", None)
+        total_input  = max(total_input,  int(getattr(usage, "prompt_token_count",     0) or 0))
+        total_output = max(total_output, int(getattr(usage, "candidates_token_count", 0) or 0))
+
+        candidate = response.candidates[0] if response.candidates else None
+        if not candidate or not candidate.content:
+            break
+
+        parts = candidate.content.parts or []
+        fn_calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+
+        if not fn_calls:
+            break  # final text response
+
+        fn_response_parts = []
+        for fc in fn_calls:
+            result = _execute_text_tool(fc.name, dict(fc.args or {}), cfg, top_k_override=_in_app_top_k)
+            fn_response_parts.append(
+                gt.Part(
+                    function_response=gt.FunctionResponse(
+                        name=fc.name,
+                        response={"result": result},
+                    )
+                )
+            )
+
+        contents.append(candidate.content)
+        contents.append(gt.Content(role="user", parts=fn_response_parts))
+
+    answer = (response.text if response else None) or "I couldn't generate a response."
+    logger.info("BOT REPLY (%s): %s", "app" if is_in_app else "landing", answer[:200])
+    logger.info("TOKENS input=%d output=%d model=%s", total_input, total_output, cfg.model_text)
+
+    return ChatResult(answer=answer, input_tokens=total_input, output_tokens=total_output)
+
+
+# ── landing page agent ────────────────────────────────────────────────────────
+
+def landing_page_agent(user_message: str, session_id: str | None = None) -> ChatResult:
+    """
+    Landing page chatbot agent.
+    Tools: search_documents + getAvailableSlots + bookDemo.
+    Conversational, markdown-rich, legal-focused responses.
+    """
+    logger.info("LANDING AGENT session=%s msg=%r", session_id, user_message[:100])
     try:
         from google import genai  # type: ignore
         from google.genai import types as gt
@@ -222,73 +468,92 @@ def text_chat(user_message: str) -> ChatResult:
 
         cfg = load_chatbot_config()
         client = genai.Client(api_key=api_key)
-        effective_max_tokens = max(
-            _MIN_TEXT_OUTPUT_TOKENS,
-            min(cfg.max_tokens, _MAX_TEXT_OUTPUT_TOKENS),
-        )
 
+        system_instruction = cfg.system_prompt + "\n\n" + _DEMO_TEXT_ADDENDUM
+        tools = [gt.Tool(function_declarations=[
+            gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
+            gt.FunctionDeclaration(**_GET_SLOTS_FN_DECLARATION),
+            gt.FunctionDeclaration(**_BOOK_DEMO_FN_DECLARATION),
+        ])]
+
+        history_contents = _load_history_contents(session_id, gt)
         logger.debug(
-            "TEXT CONFIG model=%s max_tokens=%s effective_max_tokens=%s temperature=%s top_p=%s top_k=%s",
-            cfg.model_text,
-            cfg.max_tokens,
-            effective_max_tokens,
-            cfg.temperature,
-            cfg.top_p,
-            cfg.top_k_results,
+            "LANDING AGENT model=%s history_turns=%d temperature=%s top_k=%s",
+            cfg.model_text, len(history_contents) // 2, cfg.temperature, cfg.top_k_results,
         )
 
-        chunks = search_documents(user_message, top_k=cfg.top_k_results)
-        context = format_chunks_for_context(chunks)
-        logger.info("TEXT RAG: %d chunk(s) returned", len(chunks))
-        logger.debug("TEXT RAG CONTEXT length=%d preview=%r", len(context), context[:2000])
-
-        if chunks:
-            prompt = (
-                "Use the retrieved legal/document context below as the primary authority. "
-                "Answer the user's question from this context first. If the context has "
-                "citations, section numbers, or case names, mention the most relevant ones "
-                "briefly. Do not invent citations.\n"
-                f"Keep the final answer very short and under {effective_max_tokens} output tokens.\n\n"
-                f"RETRIEVED CONTEXT:\n{context}\n\n"
-                f"USER QUESTION:\n{user_message}"
-            )
-        else:
-            prompt = (
-                "No relevant RAG context was retrieved for this query. Begin with: "
-                "\"My current database doesn't have the specific document, but based on "
-                "general legal principles...\" Then provide concise general legal "
-                "information only, not legal advice.\n"
-                f"Keep the final answer very short and under {effective_max_tokens} output tokens.\n\n"
-                f"USER QUESTION:\n{user_message}"
-            )
-        gen_cfg = gt.GenerateContentConfig(
-            system_instruction=cfg.system_prompt,
-            temperature=cfg.temperature,
-            max_output_tokens=effective_max_tokens,
-            top_p=cfg.top_p,
-            thinking_config=gt.ThinkingConfig(thinking_budget=0),
+        return _run_agentic_loop(
+            client, cfg, system_instruction, tools,
+            user_message, history_contents, is_in_app=False,
         )
-
-        response = client.models.generate_content(
-            model=cfg.model_text,
-            contents=prompt,
-            config=gen_cfg,
-        )
-        logger.debug("TEXT GEMINI RAW RESPONSE=%r", response)
-
-        answer = response.text or "I couldn't generate a response."
-        logger.info("BOT REPLY: %s", answer)
-
-        usage = getattr(response, "usage_metadata", None)
-        input_tokens  = int(getattr(usage, "prompt_token_count",     0) or 0)
-        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-        logger.info("TEXT TOKENS input=%d output=%d model=%s", input_tokens, output_tokens, cfg.model_text)
-
-        return ChatResult(answer=answer, input_tokens=input_tokens, output_tokens=output_tokens)
 
     except Exception as exc:
-        logger.exception("text_chat error")
+        logger.exception("landing_page_agent error")
         return ChatResult(answer=f"AI service error: {exc}")
+
+
+# ── in-app panel agent ────────────────────────────────────────────────────────
+
+def app_panel_agent(user_message: str, session_id: str | None = None) -> ChatResult:
+    """
+    In-app platform assistant agent.
+    Parses [APP CONTEXT: page] prefix injected by the frontend.
+    Tools: search_documents only — no demo booking.
+    Strict numbered step-by-step format.
+    """
+    m = _APP_CONTEXT_RE.match(user_message.strip())
+    if m:
+        page_context = m.group("ctx").strip()
+        clean_question = m.group("question").strip()
+    else:
+        page_context = "JuriNex Platform"
+        clean_question = user_message
+
+    logger.info("APP AGENT session=%s page=%r question=%r", session_id, page_context, clean_question[:100])
+    try:
+        from google import genai  # type: ignore
+        from google.genai import types as gt
+        from app.core.config import get_settings
+
+        api_key = get_settings().gemini_api_key
+        if not api_key:
+            return ChatResult(answer="Service not configured — missing GEMINI_API_KEY.")
+
+        cfg = load_chatbot_config()
+        client = genai.Client(api_key=api_key)
+
+        system_instruction = _IN_APP_SYSTEM_PROMPT + f"\n\nCURRENT PAGE: {page_context}"
+        tools = [gt.Tool(function_declarations=[
+            gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
+        ])]
+
+        history_contents = _load_history_contents(session_id, gt)
+        logger.debug(
+            "APP AGENT model=%s history_turns=%d page=%r",
+            cfg.model_text, len(history_contents) // 2, page_context,
+        )
+
+        return _run_agentic_loop(
+            client, cfg, system_instruction, tools,
+            clean_question, history_contents, is_in_app=True,
+        )
+
+    except Exception as exc:
+        logger.exception("app_panel_agent error")
+        return ChatResult(answer=f"AI service error: {exc}")
+
+
+# ── dispatcher ────────────────────────────────────────────────────────────────
+
+def text_chat(user_message: str, session_id: str | None = None) -> ChatResult:
+    """
+    Routes to app_panel_agent (when [APP CONTEXT: ...] prefix is present)
+    or landing_page_agent for public chatbot messages.
+    """
+    m = _APP_CONTEXT_RE.match(user_message.strip())
+    if m:
+        return app_panel_agent(user_message, session_id=session_id)
+    return landing_page_agent(user_message, session_id=session_id)
 
 
 # ── audio chat (Gemini Live) ──────────────────────────────────────────────────
@@ -302,14 +567,14 @@ async def handle_audio_session(
     *,
     session_id: str | None = None,
     ip_address: str | None = None,
+    is_in_app: bool = False,
+    initial_message: str | None = None,
 ) -> None:
     """
     Bridges a client WebSocket audio stream with the Gemini Live API.
-    Follows the official Google Gemini Live cookbook pattern:
-      https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_started_LiveAPI.py
 
-    receive_audio  — async generator of raw PCM-16 bytes @ 16 kHz mono
-    send_response  — async callable that pushes JSON dicts to the client
+    is_in_app=True  → in-app panel audio: search only, no demo booking
+    is_in_app=False → landing page audio: search + demo booking
     """
     try:
         from google import genai  # type: ignore
@@ -324,14 +589,53 @@ async def handle_audio_session(
             return
 
         cfg = load_chatbot_config()
-        logger.debug(
-            "AUDIO CONFIG model=%s voice=%s temperature=%s top_k=%s prompt_prefix=%r",
-            cfg.model_audio,
-            cfg.voice_name,
-            cfg.temperature,
-            cfg.top_k_results,
-            cfg.audio_system_prompt[:500],
-        )
+
+        # ── agent-specific tools and system instruction ───────────────────────
+        if is_in_app:
+            audio_system_instruction = (
+                _IN_APP_SYSTEM_PROMPT
+                + "\n\n"
+                  "━━━ VOICE MODE — THESE RULES OVERRIDE EVERYTHING ABOVE ━━━\n"
+                  "THIS IS AN AUDIO/VOICE RESPONSE. The output is spoken aloud by a text-to-speech engine.\n"
+                  "\n"
+                  "ABSOLUTE PROHIBITION — NEVER output ANY of these in voice mode:\n"
+                  "  - Markdown headers: ##, ###, ####\n"
+                  "  - Bold or italic: **, __, *, _\n"
+                  "  - Bullet symbols: -, *, +\n"
+                  "  - Tables: | column |\n"
+                  "  - Blockquotes: >\n"
+                  "  - Code blocks: ``` or `\n"
+                  "  - Any symbol that is formatting, not natural speech\n"
+                  "\n"
+                  "SPEAK LIKE THIS instead:\n"
+                  "  - Replace numbered list → say 'First... Second... Third...'\n"
+                  "  - Replace bold term → just say the word normally\n"
+                  "  - Replace heading → say 'Here is how to...' as an intro sentence\n"
+                  "  - Keep answers to 3–5 spoken steps. Short, clear sentences.\n"
+                  "\n"
+                  "LANGUAGE: Detect the language the user spoke and reply in that exact language throughout.\n"
+                  "ALWAYS call search_documents first before answering.\n"
+                  "Never offer demo booking in the in-app panel.\n"
+            )
+            audio_tools = [gt.Tool(function_declarations=[
+                gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
+            ])]
+            logger.debug("AUDIO CONFIG (in-app) model=%s voice=%s", cfg.model_audio, cfg.voice_name)
+        else:
+            audio_system_instruction = (
+                cfg.audio_system_prompt
+                + "\n\n" + _DEMO_AUDIO_ADDENDUM
+                + "\nAlways call search_documents with the user's question before answering. "
+                  "Use retrieved context first. If no useful context is returned, say the "
+                  "database does not have the specific document and give only general "
+                  "information, not legal advice."
+            )
+            audio_tools = [gt.Tool(function_declarations=[
+                gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
+                gt.FunctionDeclaration(**_GET_SLOTS_FN_DECLARATION),
+                gt.FunctionDeclaration(**_BOOK_DEMO_FN_DECLARATION),
+            ])]
+            logger.debug("AUDIO CONFIG (landing) model=%s voice=%s", cfg.model_audio, cfg.voice_name)
 
         # ── MUST use api_version=v1beta for Gemini 3.1 Flash Live ──
         client = genai.Client(
@@ -339,7 +643,6 @@ async def handle_audio_session(
             http_options={"api_version": "v1beta"},
         )
 
-        # GenAI SDK Live examples use model ids without the "models/" prefix.
         model_name = cfg.model_audio.removeprefix("models/")
 
         live_config = gt.LiveConnectConfig(
@@ -351,8 +654,8 @@ async def handle_audio_session(
                     disabled=False,
                     start_of_speech_sensitivity=gt.StartSensitivity.START_SENSITIVITY_HIGH,
                     end_of_speech_sensitivity=gt.EndSensitivity.END_SENSITIVITY_LOW,
-                    prefix_padding_ms=20,
-                    silence_duration_ms=600,
+                    prefix_padding_ms=300,
+                    silence_duration_ms=1000,
                 )
             ),
             speech_config=gt.SpeechConfig(
@@ -362,18 +665,8 @@ async def handle_audio_session(
                     )
                 )
             ),
-            tools=[gt.Tool(
-                function_declarations=[
-                    gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION)
-                ]
-            )],
-            system_instruction=(
-                cfg.audio_system_prompt
-                + "\nAlways call search_documents with the user's question before answering. "
-                  "Use retrieved context first. If no useful context is returned, say the "
-                  "database does not have the specific document and give only general legal "
-                  "information, not legal advice."
-            ),
+            tools=audio_tools,
+            system_instruction=audio_system_instruction,
         )
 
         async with client.aio.live.connect(
@@ -384,55 +677,64 @@ async def handle_audio_session(
             forwarded_bytes = 0
             received_events = 0
             input_done_at: float | None = None
-            # Accumulate token counts across all turns (Gemini Live reports cumulative totals)
             audio_input_tokens: int = 0
             audio_output_tokens: int = 0
-            logger.info("Gemini Live connected model=%s", model_name)
+            # Track transcripts per turn for DB storage
+            _last_input_transcript: str = ""
+            _last_output_transcript: str = ""
 
-            # ── Task 1: forward mic audio → Gemini via send_realtime_input ──
+            logger.info(
+                "Gemini Live connected model=%s mode=%s session=%s",
+                model_name, "app" if is_in_app else "landing", session_id,
+            )
+
+            # ── Task 1: forward mic audio → Gemini ────────────────────────────
             async def _forward_audio() -> None:
                 nonlocal forwarded_chunks, forwarded_bytes, input_done_at
                 try:
+                    if initial_message:
+                        logger.info("Injecting initial message for booking mode: %r", initial_message)
+                        await session.send(input=initial_message, end_of_turn=True)
+
                     async for audio_bytes in receive_audio:
                         forwarded_chunks += 1
                         forwarded_bytes += len(audio_bytes)
                         logger.debug(
-                            "Gemini Live forwarding audio chunk=%d bytes=%d total_bytes=%d",
-                            forwarded_chunks,
-                            len(audio_bytes),
-                            forwarded_bytes,
+                            "Gemini Live forward chunk=%d bytes=%d total=%d",
+                            forwarded_chunks, len(audio_bytes), forwarded_bytes,
                         )
-                        # Keep this as realtime audio input for low-latency streaming.
                         await session.send_realtime_input(
                             audio=gt.Blob(data=audio_bytes, mime_type="audio/pcm;rate=16000")
                         )
                 finally:
                     try:
                         logger.info(
-                            "Gemini Live sending audio_stream_end chunks=%d bytes=%d",
-                            forwarded_chunks,
-                            forwarded_bytes,
+                            "Gemini Live audio_stream_end chunks=%d bytes=%d",
+                            forwarded_chunks, forwarded_bytes,
                         )
+                        # Only signal audio end — server-side VAD already fired at silence_duration_ms
+                        # and the model has started responding. Sending end_of_turn here would
+                        # interrupt the in-progress response.
                         await session.send_realtime_input(audio_stream_end=True)
-                        # Explicitly mark end_of_turn to force model generation
-                        # in SDK/API variants that don't auto-close a turn on audio_stream_end.
-                        await session.send(input=".", end_of_turn=True)
                     except Exception as exc:
                         logger.debug("Could not send audio_stream_end: %s", exc)
                     input_done_at = asyncio.get_running_loop().time()
                     input_done.set()
 
-            # ── Task 2: receive Gemini responses → client ──────────────────
+            # ── Task 2: receive Gemini responses → client ─────────────────────
             async def _receive_responses() -> None:
                 nonlocal received_events, audio_input_tokens, audio_output_tokens
+                nonlocal _last_input_transcript, _last_output_transcript
                 while True:
                     got_model_output = False
+                    turn_input_transcript = ""
+                    turn_output_transcript = ""
                     turn = session.receive()
                     async for response in turn:
                         received_events += 1
                         logger.debug("Gemini Live event #%d raw=%r", received_events, response)
 
-                        # ── token usage (Gemini Live reports cumulative totals per turn) ──
+                        # ── token usage ───────────────────────────────────────
                         usage = getattr(response, "usage_metadata", None)
                         if usage:
                             _in  = int(getattr(usage, "prompt_token_count",     0) or 0)
@@ -441,28 +743,21 @@ async def handle_audio_session(
                                 or getattr(usage, "response_token_count", None)
                                 or 0
                             )
-                            if _in  > audio_input_tokens:
-                                audio_input_tokens  = _in
-                            if _out > audio_output_tokens:
-                                audio_output_tokens = _out
+                            if _in  > audio_input_tokens:  audio_input_tokens  = _in
+                            if _out > audio_output_tokens: audio_output_tokens = _out
 
-                        # ── tool calls ──
+                        # ── tool calls ────────────────────────────────────────
                         tool_call = getattr(response, "tool_call", None)
                         if tool_call:
                             fn_responses: list[gt.FunctionResponse] = []
                             for fc in tool_call.function_calls:
                                 if fc.name == "search_documents":
                                     audio_query = fc.args.get("query", "")
-                                    logger.info("AUDIO TOOL CALL: search_documents(query=%r)", audio_query)
+                                    logger.info("AUDIO TOOL: search_documents(query=%r)", audio_query)
                                     chunks = await asyncio.get_event_loop().run_in_executor(
                                         None, search_documents, audio_query, cfg.top_k_results
                                     )
-                                    logger.info("AUDIO TOOL RESULT: %d chunk(s) returned", len(chunks))
-                                    logger.debug(
-                                        "AUDIO TOOL CONTEXT query=%r context=%r",
-                                        audio_query,
-                                        format_chunks_for_context(chunks)[:2000],
-                                    )
+                                    logger.info("AUDIO TOOL: %d chunk(s) returned", len(chunks))
                                     fn_responses.append(
                                         gt.FunctionResponse(
                                             id=fc.id,
@@ -471,19 +766,60 @@ async def handle_audio_session(
                                         )
                                     )
                                     await send_response({"type": "tool_call", "tool": "search_documents", "query": audio_query})
+
+                                elif fc.name == "getAvailableSlots" and not is_in_app:
+                                    logger.info("AUDIO TOOL: getAvailableSlots")
+                                    from app.services.demo_service import get_available_slots
+                                    slots = await asyncio.get_event_loop().run_in_executor(None, get_available_slots)
+                                    if slots:
+                                        formatted = [{"id": s["id"], "label": s["label"]} for s in slots]
+                                        await send_response({
+                                            "type": "slot_selection",
+                                            "message": "Here are the available demo slots. Please select one:",
+                                            "slots": formatted,
+                                        })
+                                        fn_responses.append(
+                                            gt.FunctionResponse(
+                                                id=fc.id, name=fc.name,
+                                                response={"result": {"available": True, "slots": formatted}},
+                                            )
+                                        )
+                                    else:
+                                        fn_responses.append(
+                                            gt.FunctionResponse(
+                                                id=fc.id, name=fc.name,
+                                                response={"result": {"available": False, "message": "No slots available."}},
+                                            )
+                                        )
+
+                                elif fc.name == "bookDemo" and not is_in_app:
+                                    args = dict(fc.args or {})
+                                    logger.info("AUDIO TOOL: bookDemo args=%r", args)
+                                    from app.services.demo_service import book_demo
+                                    result = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        lambda: book_demo(
+                                            name=str(args.get("name", "")),
+                                            email=str(args.get("email", "")),
+                                            slot_id=int(args.get("slot_id", 0)),
+                                            company=str(args.get("company", "")),
+                                        ),
+                                    )
+                                    fn_responses.append(
+                                        gt.FunctionResponse(id=fc.id, name=fc.name, response={"result": result})
+                                    )
+
                             if fn_responses:
                                 await session.send_tool_response(function_responses=fn_responses)
 
-                        # ── newer SDK response shape (primary path) ──
-                        # Always check server_content first. The older response.data /
-                        # response.text shortcuts are SDK aliases to the same underlying
-                        # data, so only use them as fallback to avoid sending duplicates.
+                        # ── response content ──────────────────────────────────
                         sent_audio = False
                         sent_text = False
                         server_content = getattr(response, "server_content", None)
                         if server_content:
                             input_tx = getattr(server_content, "input_transcription", None)
                             if input_tx and getattr(input_tx, "text", None):
+                                turn_input_transcript += input_tx.text
                                 logger.info("AUDIO INPUT TRANSCRIPT: %r", input_tx.text)
                                 await send_response({"type": "input_transcript", "content": input_tx.text})
 
@@ -491,6 +827,7 @@ async def handle_audio_session(
                             if output_tx and getattr(output_tx, "text", None):
                                 got_model_output = True
                                 sent_text = True
+                                turn_output_transcript += output_tx.text
                                 logger.info("AUDIO OUTPUT TRANSCRIPT: %r", output_tx.text)
                                 await send_response({"type": "text", "content": output_tx.text})
 
@@ -503,7 +840,6 @@ async def handle_audio_session(
                                         got_model_output = True
                                         sent_audio = True
                                         mime_type = getattr(inline_data, "mime_type", "audio/pcm;rate=24000")
-                                        logger.debug("Gemini Live audio response bytes=%d", len(inline_data.data))
                                         await send_response({
                                             "type": "audio",
                                             "data": base64.b64encode(inline_data.data).decode(),
@@ -512,14 +848,11 @@ async def handle_audio_session(
                                     if not sent_text and getattr(part, "text", None):
                                         got_model_output = True
                                         sent_text = True
+                                        turn_output_transcript += part.text
                                         await send_response({"type": "text", "content": part.text})
 
-                        # ── older SDK response shape (fallback only) ──
-                        # Only used when server_content did not carry audio/text,
-                        # preventing double-send on current SDK versions.
                         if not sent_audio and getattr(response, "data", None):
                             got_model_output = True
-                            logger.debug("Gemini Live audio response (legacy) bytes=%d", len(response.data))
                             await send_response({
                                 "type": "audio",
                                 "data": base64.b64encode(response.data).decode(),
@@ -527,15 +860,29 @@ async def handle_audio_session(
                             })
                         if not sent_text and getattr(response, "text", None):
                             got_model_output = True
-                            logger.info("AUDIO TRANSCRIPT (legacy): %r", response.text)
+                            turn_output_transcript += response.text
                             await send_response({"type": "text", "content": response.text})
 
                     await send_response({"type": "turn_complete"})
+
+                    # Save this turn's Q&A to DB
+                    if turn_input_transcript or turn_output_transcript:
+                        _last_input_transcript = turn_input_transcript or _last_input_transcript
+                        _last_output_transcript = turn_output_transcript
+                        if session_id and session_id != "no-db" and turn_input_transcript and turn_output_transcript:
+                            loop = asyncio.get_running_loop()
+                            try:
+                                from app.services.session_service import save_exchange
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda: save_exchange(session_id, turn_input_transcript, turn_output_transcript),
+                                )
+                            except Exception as exc:
+                                logger.debug("Audio save_exchange failed (non-fatal): %s", exc)
+
                     logger.info(
                         "Gemini Live turn complete input_done=%s events=%d got_output=%s",
-                        input_done.is_set(),
-                        received_events,
-                        got_model_output,
+                        input_done.is_set(), received_events, got_model_output,
                     )
 
                     if input_done.is_set():
@@ -545,7 +892,7 @@ async def handle_audio_session(
                             elapsed = asyncio.get_running_loop().time() - input_done_at
                             if elapsed > 20:
                                 logger.warning(
-                                    "Gemini Live produced no model output %.1fs after audio_stream_end; closing session",
+                                    "Gemini Live no output %.1fs after audio_stream_end; closing",
                                     elapsed,
                                 )
                                 return

@@ -3706,13 +3706,6 @@ const ChatInterface = () => {
               );
             } else if (!audioVoiceDoneRef.current) {
               setAudioMicStatus('live');
-              // commit the user speech bubble
-              if (userSpeech) {
-                setAudioMessages(prev => {
-                  const hasUser = prev.length > 0 && prev[prev.length - 1]?.role === 'user' && prev[prev.length - 1]?.pending;
-                  return hasUser ? prev : [...prev, { role: 'user', text: userSpeech }];
-                });
-              }
               setAudioInputTranscript('');
               audioVoiceBufferRef.current = '';
             }

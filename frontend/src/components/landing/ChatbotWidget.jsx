@@ -132,6 +132,15 @@ const ChatbotWidget = () => {
   const [micStatus, setMicStatus]     = useState("idle")
   const [showSuggestions, setShowSuggestions] = useState(true)
 
+  // Demo booking state
+  const [demoSlots, setDemoSlots]         = useState([])
+  const [showSlotModal, setShowSlotModal] = useState(false)
+  const [selectedSlot, setSelectedSlot]   = useState(null)
+  const [bookingForm, setBookingForm]     = useState({ name: "", email: "", company: "" })
+  const [bookingStep, setBookingStep]     = useState("slots") // slots | form | confirming | done | error
+  const [bookingMsg, setBookingMsg]       = useState("")
+  const [bookingLoading, setBookingLoading] = useState(false)
+
   const wsRef                  = useRef(null)
   const audioCtxRef            = useRef(null)
   const playCtxRef             = useRef(null)
@@ -183,7 +192,28 @@ const ChatbotWidget = () => {
       const data = await res.json()
       chatbotLog("text response body", data)
       setSessionId(data.session_id)
-      setMessages(prev => [...prev, { role: "assistant", text: data.answer }])
+
+      // Detect slot_selection response (plain JSON or embedded in text)
+      let slotPayload = null
+      const rawAnswer = data.answer || ""
+      try {
+        const parsed = JSON.parse(rawAnswer)
+        if (parsed?.type === "slot_selection" && Array.isArray(parsed.slots)) slotPayload = parsed
+      } catch {}
+      if (!slotPayload) {
+        const m = rawAnswer.match(/\{[\s\S]*?"type"\s*:\s*"slot_selection"[\s\S]*?\}/)
+        if (m) { try { const p = JSON.parse(m[0]); if (p?.type === "slot_selection") slotPayload = p } catch {} }
+      }
+
+      if (slotPayload) {
+        setDemoSlots(slotPayload.slots || [])
+        setShowSlotModal(true)
+        setBookingStep("slots")
+        setSelectedSlot(null)
+        setMessages(prev => [...prev, { role: "assistant", text: slotPayload.message || "Please select a demo slot:" }])
+      } else {
+        setMessages(prev => [...prev, { role: "assistant", text: rawAnswer }])
+      }
     } catch (err) {
       chatbotError("text request failed", err)
       setMessages(prev => [...prev, {
@@ -228,8 +258,18 @@ const ChatbotWidget = () => {
       wsRef.current = null
       awaitingFinalResponseRef.current = false
       setMicStatus("idle")
-    }, 12000)
+    }, 45000)
   }, [])
+
+  const lastVoiceAtRef = useRef(0)
+  const hasSpokenRef = useRef(false)
+  const VOICE_RMS_THRESHOLD = 0.012
+
+  useEffect(() => {
+    if (micStatus === "live" || micStatus === "idle" || micStatus === "error") {
+      setBookingLoading(false)
+    }
+  }, [micStatus])
 
   const getPlayCtx = useCallback(() => {
     if (!playCtxRef.current || playCtxRef.current.state === "closed") {
@@ -330,12 +370,16 @@ const ChatbotWidget = () => {
     playCtxRef.current?.close()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startAudio = useCallback(async () => {
-    chatbotLog("audio start requested")
+  const startAudio = useCallback(async (bookingMode = false) => {
+    chatbotLog("audio start requested", { bookingMode })
     setMicStatus("connecting")
     voiceTurnFinishedRef.current = false
+    lastVoiceAtRef.current = Date.now()
+    hasSpokenRef.current = false
     voiceReplyBufferRef.current = ""
     setShowSuggestions(false)
+    // booking mode: patient VAD so user has time to respond between turns
+    const SILENCE_END_MS = bookingMode ? 5000 : 2000
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       chatbotLog("microphone stream granted", stream.getAudioTracks().map(t => ({ label: t.label, state: t.readyState })))
@@ -351,24 +395,43 @@ const ChatbotWidget = () => {
       const silentOutput = ctx.createGain()
       silentOutput.gain.value = 0
 
-      const wsUrl = `${AI_CHATBOT_DIRECT_WS_URL}/ws/audio`
+      const wsUrl = bookingMode
+        ? `${AI_CHATBOT_DIRECT_WS_URL}/ws/audio?mode=booking`
+        : `${AI_CHATBOT_DIRECT_WS_URL}/ws/audio`
       chatbotLog("opening voice websocket", wsUrl)
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onopen = () => {
-        chatbotLog("voice websocket open")
+        chatbotLog("voice websocket open", { bookingMode })
         setMicStatus("live")
         setMessages(prev => [
           ...prev.filter(m => m.role !== "system"),
-          { role: "system", text: "Listening — speak naturally" },
+          {
+            role: "system",
+            text: bookingMode ? "Agent is connecting — please wait…" : "Listening — speak naturally",
+          },
         ])
         let sentChunks = 0
         let sentBytes = 0
         processor.onaudioprocess = (e) => {
           if (voiceTurnFinishedRef.current) return
           if (ws.readyState !== WebSocket.OPEN) return
-          const pcm = downsampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate)
+          const ch0 = e.inputBuffer.getChannelData(0)
+          let sumSq = 0
+          for (let i = 0; i < ch0.length; i++) sumSq += ch0[i] * ch0[i]
+          const rms = Math.sqrt(sumSq / Math.max(ch0.length, 1))
+          const nowMs = Date.now()
+          if (rms >= VOICE_RMS_THRESHOLD) {
+            hasSpokenRef.current = true
+            lastVoiceAtRef.current = nowMs
+          } else if (hasSpokenRef.current && nowMs - lastVoiceAtRef.current >= SILENCE_END_MS) {
+            chatbotLog("auto end-of-turn on silence", { silenceMs: nowMs - lastVoiceAtRef.current })
+            stopAudio()
+            return
+          }
+
+          const pcm = downsampleTo16k(ch0, ctx.sampleRate)
           const int16 = new Int16Array(pcm.length)
           for (let i = 0; i < pcm.length; i++)
             int16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32768))
@@ -388,6 +451,12 @@ const ChatbotWidget = () => {
           const msg = JSON.parse(ev.data)
           chatbotLog("voice websocket message", msg.type === "audio" ? { ...msg, data: `<base64 ${msg.data?.length || 0} chars>` } : msg)
           if (msg.type === "audio" && msg.data) scheduleAudioChunk(msg.data, msg.mime_type)
+          if (msg.type === "slot_selection" && Array.isArray(msg.slots)) {
+            setDemoSlots(msg.slots)
+            setShowSlotModal(true)
+            setBookingStep("slots")
+            setSelectedSlot(null)
+          }
           if (msg.type === "text" && msg.content) {
             const chunk = String(msg.content || "").trim()
             if (chunk) {
@@ -472,6 +541,82 @@ const ChatbotWidget = () => {
   }, [stopAudio, scheduleAudioChunk, downsampleTo16k, pcm16ToBase64])
 
   const toggleMic = () => micStatus === "live" ? stopAudio() : startAudio()
+
+  // ── demo booking ─────────────────────────────────────────────────────────────
+
+  const closeDemoModal = () => {
+    setShowSlotModal(false)
+    setBookingStep("slots")
+    setSelectedSlot(null)
+    setBookingForm({ name: "", email: "", company: "" })
+    setBookingMsg("")
+  }
+
+  const handleBookDemoClick = async () => {
+    setBookingLoading(true)
+    try {
+      const res = await fetch(`${AI_CHATBOT_DIRECT_URL}/api/demo-slots`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const slots = await res.json()
+      if (slots.length > 0) {
+        setDemoSlots(slots)
+        setShowSlotModal(true)
+        setBookingStep("slots")
+        setSelectedSlot(null)
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: "Great! Here are the available demo slots. Select a time that works for you and I'll confirm your booking.",
+        }])
+      } else {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: "I'm sorry, no demo slots are available right now. Please check back tomorrow or email us at demo@jurinex.com.",
+        }])
+      }
+    } catch (err) {
+      chatbotError("demo slots fetch failed", err)
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        text: "I couldn't load available slots right now. Please try again in a moment.",
+        error: true,
+      }])
+    } finally {
+      setBookingLoading(false)
+    }
+  }
+
+  const handleBookDemo = async () => {
+    if (!selectedSlot || !bookingForm.name.trim() || !bookingForm.email.trim()) return
+    setBookingStep("confirming")
+    try {
+      const res = await fetch(`${AI_CHATBOT_DIRECT_URL}/api/book-demo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: bookingForm.name.trim(),
+          email: bookingForm.email.trim(),
+          company: bookingForm.company.trim() || undefined,
+          slot_id: selectedSlot.id,
+        }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setBookingStep("done")
+        setBookingMsg(data.message || "Demo booked successfully!")
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          text: `Demo booked! ${data.message}`,
+        }])
+        setTimeout(closeDemoModal, 4000)
+      } else {
+        setBookingStep("error")
+        setBookingMsg(data.error || "Booking failed. Please try again.")
+      }
+    } catch {
+      setBookingStep("error")
+      setBookingMsg("Network error. Please try again.")
+    }
+  }
 
   // ── render ───────────────────────────────────────────────────────────────────
 
@@ -593,21 +738,38 @@ const ChatbotWidget = () => {
                 </button>
               </div>
 
-              {/* Capability pills */}
-              <div className="relative z-10 flex gap-1.5 px-4 pb-3.5 overflow-x-auto scrollbar-none">
-                {["Case Law", "BNS / IPC", "Legal Drafts", "Procedures"].map(tag => (
-                  <span
-                    key={tag}
-                    className="flex-shrink-0 text-[10px] font-dmSans font-medium px-2.5 py-1 rounded-full"
-                    style={{
-                      background: "rgba(20,184,166,0.18)",
-                      border: "1px solid rgba(20,184,166,0.30)",
-                      color: "rgba(153,246,228,0.9)",
-                    }}
-                  >
-                    {tag}
-                  </span>
-                ))}
+              {/* Book Demo CTA in header */}
+              <div className="relative z-10 px-4 pb-3.5">
+                <Motion.button
+                  onClick={handleBookDemoClick}
+                  disabled={bookingLoading || textLoading || isLive || micStatus === "connecting"}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.97 }}
+                  className="w-full flex items-center justify-center gap-2 py-2 rounded-xl font-dmSans font-semibold text-[12px] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    background: "rgba(255,255,255,0.13)",
+                    border: "1px solid rgba(255,255,255,0.28)",
+                    color: "#ffffff",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.22)" }}
+                  onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.13)" }}
+                >
+                  {bookingLoading ? (
+                    <Motion.svg
+                      className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24"
+                      stroke="currentColor" strokeWidth={2}
+                      animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                    >
+                      <path strokeLinecap="round" d="M12 3a9 9 0 010 18" />
+                    </Motion.svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                  )}
+                  {bookingLoading ? "Loading slots…" : "Book a Free Demo"}
+                </Motion.button>
               </div>
             </div>
 
@@ -718,6 +880,154 @@ const ChatbotWidget = () => {
               {textLoading && <TypingIndicator />}
               <div ref={bottomRef} />
             </div>
+
+            {/* ── Demo Booking Modal ───────────────────────────────────────── */}
+            <AnimatePresence>
+              {showSlotModal && (
+                <Motion.div
+                  key="demo-modal"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  transition={{ duration: 0.22 }}
+                  className="flex-shrink-0 overflow-hidden"
+                  style={{
+                    borderTop: "1.5px solid rgba(13,148,136,0.18)",
+                    background: "linear-gradient(180deg,#f0fdfa 0%,#ffffff 100%)",
+                    maxHeight: "290px",
+                  }}
+                >
+                  {/* Modal header */}
+                  <div className="flex items-center justify-between px-4 pt-3 pb-1.5">
+                    <div className="flex items-center gap-2">
+                      {bookingStep === "form" && (
+                        <button
+                          onClick={() => { setBookingStep("slots"); setSelectedSlot(null) }}
+                          className="w-6 h-6 rounded-lg flex items-center justify-center"
+                          style={{ background: "rgba(13,148,136,0.10)", color: "#0f766e" }}
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                          </svg>
+                        </button>
+                      )}
+                      <span className="text-[12px] font-dmSans font-semibold" style={{ color: "#0f766e" }}>
+                        {bookingStep === "done" ? "Booking Confirmed!" : bookingStep === "error" ? "Booking Failed" : "Book a Demo"}
+                      </span>
+                    </div>
+                    <button onClick={closeDemoModal} className="w-6 h-6 rounded-lg flex items-center justify-center" style={{ background: "rgba(0,0,0,0.05)" }}>
+                      <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+
+                  <div className="overflow-y-auto px-4 pb-3" style={{ maxHeight: "230px" }}>
+
+                    {/* Step: slot list */}
+                    {bookingStep === "slots" && (
+                      <div className="flex flex-col gap-1.5 pt-1">
+                        <p className="text-[10.5px] text-gray-500 font-dmSans mb-1">Select an available time slot:</p>
+                        {demoSlots.length === 0 ? (
+                          <p className="text-[11px] text-gray-400 font-dmSans py-2">No slots available. Please try again tomorrow.</p>
+                        ) : demoSlots.map(slot => (
+                          <button
+                            key={slot.id}
+                            onClick={() => { setSelectedSlot(slot); setBookingStep("form") }}
+                            className="text-left text-[11.5px] font-dmSans px-3 py-2 rounded-xl transition-all"
+                            style={{
+                              background: "rgba(13,148,136,0.07)",
+                              border: "1px solid rgba(13,148,136,0.20)",
+                              color: "#134e4a",
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.background = "rgba(13,148,136,0.15)"; e.currentTarget.style.borderColor = "rgba(13,148,136,0.40)" }}
+                            onMouseLeave={e => { e.currentTarget.style.background = "rgba(13,148,136,0.07)"; e.currentTarget.style.borderColor = "rgba(13,148,136,0.20)" }}
+                          >
+                            {slot.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Step: details form */}
+                    {bookingStep === "form" && selectedSlot && (
+                      <div className="flex flex-col gap-2 pt-1">
+                        <div className="text-[10.5px] font-dmSans font-medium px-2.5 py-1.5 rounded-lg" style={{ background: "rgba(13,148,136,0.10)", color: "#0f766e" }}>
+                          {selectedSlot.label}
+                        </div>
+                        {[
+                          { key: "name",    label: "Full Name *",  type: "text",  ph: "John Doe" },
+                          { key: "email",   label: "Email *",      type: "email", ph: "john@company.com" },
+                          { key: "company", label: "Company",      type: "text",  ph: "Optional" },
+                        ].map(({ key, label, type, ph }) => (
+                          <div key={key}>
+                            <label className="text-[10px] font-dmSans font-medium text-gray-500 block mb-0.5">{label}</label>
+                            <input
+                              type={type}
+                              value={bookingForm[key]}
+                              onChange={e => setBookingForm(prev => ({ ...prev, [key]: e.target.value }))}
+                              placeholder={ph}
+                              className="w-full text-[12px] font-dmSans px-3 py-1.5 rounded-xl outline-none transition-all"
+                              style={{ border: "1.5px solid #e2e8f0", background: "#f8fafc", color: "#1a202c" }}
+                              onFocus={e => { e.target.style.borderColor = "#0d9488"; e.target.style.boxShadow = "0 0 0 2px rgba(13,148,136,0.12)" }}
+                              onBlur={e => { e.target.style.borderColor = "#e2e8f0"; e.target.style.boxShadow = "none" }}
+                            />
+                          </div>
+                        ))}
+                        <button
+                          onClick={handleBookDemo}
+                          disabled={!bookingForm.name.trim() || !bookingForm.email.trim()}
+                          className="w-full text-[12px] font-dmSans font-semibold py-2 rounded-xl mt-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                          style={{ background: "linear-gradient(135deg,#0d9488,#0f766e)", color: "#fff", boxShadow: "0 3px 10px rgba(13,148,136,0.35)" }}
+                        >
+                          Confirm Booking
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Step: confirming */}
+                    {bookingStep === "confirming" && (
+                      <div className="flex flex-col items-center gap-2 py-4">
+                        <Motion.svg
+                          className="w-7 h-7" style={{ color: "#0d9488" }}
+                          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                          animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        >
+                          <path strokeLinecap="round" d="M12 3a9 9 0 010 18" />
+                        </Motion.svg>
+                        <p className="text-[11px] font-dmSans text-gray-500">Confirming your booking…</p>
+                      </div>
+                    )}
+
+                    {/* Step: done */}
+                    {bookingStep === "done" && (
+                      <div className="flex flex-col items-center gap-2 py-3">
+                        <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "rgba(13,148,136,0.12)" }}>
+                          <svg className="w-5 h-5" style={{ color: "#0d9488" }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                        <p className="text-[11px] font-dmSans font-medium text-center" style={{ color: "#0f766e" }}>{bookingMsg}</p>
+                      </div>
+                    )}
+
+                    {/* Step: error */}
+                    {bookingStep === "error" && (
+                      <div className="flex flex-col items-center gap-2 py-3">
+                        <p className="text-[11px] font-dmSans text-red-500 text-center">{bookingMsg}</p>
+                        <button
+                          onClick={() => setBookingStep(selectedSlot ? "form" : "slots")}
+                          className="text-[11px] font-dmSans font-semibold px-4 py-1.5 rounded-xl"
+                          style={{ background: "rgba(13,148,136,0.10)", color: "#0f766e" }}
+                        >
+                          Try Again
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </Motion.div>
+              )}
+            </AnimatePresence>
 
             {/* ── Input bar ────────────────────────────────────────────────── */}
             <div
