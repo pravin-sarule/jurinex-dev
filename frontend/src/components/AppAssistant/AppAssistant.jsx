@@ -584,6 +584,13 @@ export default function AppAssistant() {
   const startAudio = useCallback(async () => {
     setMicStatus("connecting")
     voiceDoneRef.current = false
+    // Stop any audio still playing from a previous session before starting fresh.
+    // Without this, old scheduled buffers overlap with the new session's audio.
+    if (playCtxRef.current && playCtxRef.current.state !== "closed") {
+      playCtxRef.current.close().catch(() => {})
+      playCtxRef.current = null
+      nextPlayRef.current = 0
+    }
     // Warm up playback AudioContext inside the user-gesture scope so it starts
     // in "running" state (browsers block AudioContext created outside gestures).
     getPlayCtx()

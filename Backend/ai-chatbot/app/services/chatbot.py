@@ -215,7 +215,7 @@ class ChatbotConfig:
     temperature: float       = 0.1
     top_p: float             = 0.95
     top_k_results: int       = 5
-    voice_name: str          = "Puck"
+    voice_name: str          = "Aoede"
     language_code: str       = "en-US"
     speaking_rate: float     = 1.0
     pitch: float             = 0.0
@@ -380,9 +380,9 @@ def _run_agentic_loop(
     """
     from google.genai import types as gt  # type: ignore
 
-    _IN_APP_MIN_TOKENS = 300
+    _IN_APP_MAX_TOKENS = 1024
     effective_max_tokens = (
-        _IN_APP_MIN_TOKENS if is_in_app
+        _IN_APP_MAX_TOKENS if is_in_app
         else max(_MIN_TEXT_OUTPUT_TOKENS, min(cfg.max_tokens, _MAX_TEXT_OUTPUT_TOKENS))
     )
 

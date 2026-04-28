@@ -8,9 +8,8 @@ const AI_CHATBOT_DIRECT_URL = (
 
 const AI_CHATBOT_DIRECT_WS_URL = AI_CHATBOT_DIRECT_URL.replace(/^http/, "ws")
 const CHATBOT_DEBUG = false
-const INITIAL_PLAYBACK_LEAD_SEC = 0.14
-const RECOVERY_PLAYBACK_LEAD_SEC = 0.09
-const CHUNK_FADE_SAMPLES = 4
+const INITIAL_PLAYBACK_LEAD_SEC = 0.30
+const RECOVERY_PLAYBACK_LEAD_SEC = 0.18
 
 const chatbotLog = (...args) => {
   if (CHATBOT_DEBUG) console.log("[JuriNexChatbot]", ...args)
@@ -334,15 +333,8 @@ const ChatbotWidget = () => {
       if (ctx.sampleRate !== sourceSampleRate)
         float32 = resampleFloat32(float32, sourceSampleRate, ctx.sampleRate)
 
-      const fadeSamples = Math.min(CHUNK_FADE_SAMPLES, Math.floor(float32.length / 2))
-      if (fadeSamples > 0) {
-        for (let i = 0; i < fadeSamples; i++) {
-          const gainIn = i / fadeSamples
-          const gainOut = (fadeSamples - i) / fadeSamples
-          float32[i] *= gainIn
-          float32[float32.length - 1 - i] *= gainOut
-        }
-      }
+      // No per-chunk fade — Gemini streams continuous PCM. Fading chunk
+      // boundaries creates rapid amplitude modulation (stutter) on speech.
       const playCtx = playCtxRef.current
       const buf = playCtx.createBuffer(1, float32.length, playCtx.sampleRate)
       buf.copyToChannel(float32, 0)
@@ -378,6 +370,12 @@ const ChatbotWidget = () => {
     hasSpokenRef.current = false
     voiceReplyBufferRef.current = ""
     setShowSuggestions(false)
+    // Stop any audio still playing from the previous session before starting fresh.
+    if (playCtxRef.current && playCtxRef.current.state !== "closed") {
+      playCtxRef.current.close().catch(() => {})
+      playCtxRef.current = null
+      nextPlayTimeRef.current = 0
+    }
     // booking mode: patient VAD so user has time to respond between turns
     const SILENCE_END_MS = bookingMode ? 5000 : 2000
     try {
