@@ -125,7 +125,7 @@ _BOOK_DEMO_FN_DECLARATION = {
             "name":    {"type": "STRING",  "description": "Full name of the person"},
             "email":   {"type": "STRING",  "description": "Email address"},
             "company": {"type": "STRING",  "description": "Company or organisation name (optional)"},
-            "slot_id": {"type": "INTEGER", "description": "ID of the selected demo slot"},
+            "slot_id": {"type": "INTEGER", "description": "The exact numeric `id` field returned by getAvailableSlots (e.g. if getAvailableSlots returned [{\"id\": 12, ...}], pass slot_id=12). Never use the option number or position — always use the id value."},
         },
         "required": ["name", "email", "slot_id"],
     },
@@ -210,19 +210,39 @@ DEMO BOOKING CAPABILITY:
 
 @dataclass
 class ChatbotConfig:
-    model_text: str          = "gemini-2.5-flash"
-    model_audio: str         = "gemini-3.1-flash-live-preview"
-    max_tokens: int          = 2048
-    temperature: float       = 0.1
-    top_p: float             = 0.95
-    top_k_results: int       = 5
-    voice_name: str          = "Aoede"
-    language_code: str       = "en-US"
-    speaking_rate: float     = 1.0
-    pitch: float             = 0.0
-    volume_gain_db: float    = 0.0
-    system_prompt: str       = _DEFAULT_SYSTEM_PROMPT
-    audio_system_prompt: str = _DEFAULT_AUDIO_SYSTEM_PROMPT
+    model_text: str             = "gemini-2.5-flash"
+    model_audio: str            = "gemini-3.1-flash-live-preview"
+    max_tokens: int             = 2048
+    temperature: float          = 0.1
+    top_p: float                = 0.95
+    top_k_results: int          = 5
+    voice_name: str             = "Aoede"
+    language_code: str          = "en-US"
+    speaking_rate: float        = 1.0
+    pitch: float                = 0.0
+    volume_gain_db: float       = 0.0
+    system_prompt: str          = _DEFAULT_SYSTEM_PROMPT
+    audio_system_prompt: str    = _DEFAULT_AUDIO_SYSTEM_PROMPT
+    in_app_system_prompt: str   = _IN_APP_SYSTEM_PROMPT
+    in_app_audio_override: str  = (
+        "━━━ VOICE MODE — THESE RULES OVERRIDE EVERYTHING ABOVE ━━━\n"
+        "ABSOLUTE PROHIBITION — NEVER output ANY of these in voice mode:\n"
+        "  - Markdown headers: ##, ###  |  Bold/italic: **, __, *, _\n"
+        "  - Bullet symbols: -, *, +    |  Tables: | column |\n"
+        "  - Blockquotes: >             |  Code blocks: ``` or `\n"
+        "\n"
+        "SPEAK LIKE THIS instead:\n"
+        "  - Replace numbered list → say 'First... Second... Third...'\n"
+        "  - Replace bold term → just say the word normally\n"
+        "  - Replace heading → say 'Here is how to...' as an intro sentence\n"
+        "  - Keep answers to 3–5 spoken steps. Short, clear sentences.\n"
+        "\n"
+        "LANGUAGE: Detect the language the user spoke and reply in that exact language.\n"
+        "ALWAYS call search_documents first before answering.\n"
+        "Never offer demo booking in the in-app panel."
+    )
+    demo_text_addendum: str     = _DEMO_TEXT_ADDENDUM
+    demo_audio_addendum: str    = _DEMO_AUDIO_ADDENDUM
 
 
 @dataclass
@@ -263,10 +283,10 @@ def _ensure_current_live_sdk() -> None:
     logger.debug("google-genai SDK version ok: %s", version)
 
 
-def load_chatbot_config() -> ChatbotConfig:
+def load_chatbot_config(bypass_cache: bool = False) -> ChatbotConfig:
     global _config_cache, _config_loaded_at
     now = time.monotonic()
-    if _config_cache is not None and (now - _config_loaded_at) < _CONFIG_CACHE_TTL:
+    if not bypass_cache and _config_cache is not None and (now - _config_loaded_at) < _CONFIG_CACHE_TTL:
         return _config_cache
     if not is_db_available():
         logger.warning("DB unavailable — using default ChatbotConfig")
@@ -296,8 +316,12 @@ def load_chatbot_config() -> ChatbotConfig:
             cfg.speaking_rate    = float(row["speaking_rate"]) if row.get("speaking_rate") is not None else cfg.speaking_rate
             cfg.pitch            = float(row["pitch"])          if row.get("pitch")         is not None else cfg.pitch
             cfg.volume_gain_db   = float(row["volume_gain_db"]) if row.get("volume_gain_db") is not None else cfg.volume_gain_db
-            cfg.system_prompt    = row["system_prompt"]        if row.get("system_prompt") is not None else cfg.system_prompt
-            cfg.audio_system_prompt = row["audio_system_prompt"] if row.get("audio_system_prompt") is not None else cfg.audio_system_prompt
+            cfg.system_prompt         = row["system_prompt"]          if row.get("system_prompt")          is not None else cfg.system_prompt
+            cfg.audio_system_prompt   = row["audio_system_prompt"]    if row.get("audio_system_prompt")    is not None else cfg.audio_system_prompt
+            cfg.in_app_system_prompt  = row["in_app_system_prompt"]   if row.get("in_app_system_prompt")   is not None else cfg.in_app_system_prompt
+            cfg.in_app_audio_override = row["in_app_audio_override"]  if row.get("in_app_audio_override")  is not None else cfg.in_app_audio_override
+            cfg.demo_text_addendum    = row["demo_text_addendum"]     if row.get("demo_text_addendum")     is not None else cfg.demo_text_addendum
+            cfg.demo_audio_addendum   = row["demo_audio_addendum"]    if row.get("demo_audio_addendum")    is not None else cfg.demo_audio_addendum
             logger.info(
                 "Loaded chatbot config from DB: model_text=%s model_audio=%s voice=%s",
                 cfg.model_text, cfg.model_audio, cfg.voice_name,
@@ -316,7 +340,7 @@ def invalidate_config_cache() -> None:
     _config_loaded_at = 0.0
 
 
-def _make_audio_transcription_config(gt, _language_code: str):
+def _make_audio_transcription_config(gt):
     return gt.AudioTranscriptionConfig()
 
 
@@ -386,11 +410,7 @@ def _run_agentic_loop(
     """
     from google.genai import types as gt  # type: ignore
 
-    _IN_APP_MAX_TOKENS = 1024
-    effective_max_tokens = (
-        _IN_APP_MAX_TOKENS if is_in_app
-        else max(_MIN_TEXT_OUTPUT_TOKENS, min(cfg.max_tokens, _MAX_TEXT_OUTPUT_TOKENS))
-    )
+    effective_max_tokens = max(_MIN_TEXT_OUTPUT_TOKENS, min(cfg.max_tokens, _MAX_TEXT_OUTPUT_TOKENS))
 
     gen_cfg = gt.GenerateContentConfig(
         system_instruction=system_instruction,
@@ -419,8 +439,8 @@ def _run_agentic_loop(
         logger.debug("AGENT ROUND %d response=%r", _round, response)
 
         usage = getattr(response, "usage_metadata", None)
-        total_input  = max(total_input,  int(getattr(usage, "prompt_token_count",     0) or 0))
-        total_output = max(total_output, int(getattr(usage, "candidates_token_count", 0) or 0))
+        total_input  += int(getattr(usage, "prompt_token_count",     0) or 0)
+        total_output += int(getattr(usage, "candidates_token_count", 0) or 0)
 
         candidate = response.candidates[0] if response.candidates else None
         if not candidate or not candidate.content:
@@ -475,7 +495,7 @@ def landing_page_agent(user_message: str, session_id: str | None = None) -> Chat
         cfg = load_chatbot_config()
         client = genai.Client(api_key=api_key)
 
-        system_instruction = cfg.system_prompt + "\n\n" + _DEMO_TEXT_ADDENDUM
+        system_instruction = cfg.system_prompt + "\n\n" + cfg.demo_text_addendum
         tools = [gt.Tool(function_declarations=[
             gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
             gt.FunctionDeclaration(**_GET_SLOTS_FN_DECLARATION),
@@ -528,7 +548,7 @@ def app_panel_agent(user_message: str, session_id: str | None = None) -> ChatRes
         cfg = load_chatbot_config()
         client = genai.Client(api_key=api_key)
 
-        system_instruction = _IN_APP_SYSTEM_PROMPT + f"\n\nCURRENT PAGE: {page_context}"
+        system_instruction = cfg.in_app_system_prompt + f"\n\nCURRENT PAGE: {page_context}"
         tools = [gt.Tool(function_declarations=[
             gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
         ])]
@@ -575,12 +595,15 @@ async def handle_audio_session(
     ip_address: str | None = None,
     is_in_app: bool = False,
     initial_message: str | None = None,
+    text_inject_queue: asyncio.Queue | None = None,
 ) -> None:
     """
     Bridges a client WebSocket audio stream with the Gemini Live API.
 
     is_in_app=True  → in-app panel audio: search only, no demo booking
     is_in_app=False → landing page audio: search + demo booking
+    text_inject_queue → optional queue of text strings to inject into the session
+                        (used when the frontend sends a UI-driven slot selection)
     """
     try:
         from google import genai  # type: ignore
@@ -594,35 +617,14 @@ async def handle_audio_session(
             await send_response({"type": "error", "message": "Missing GEMINI_API_KEY."})
             return
 
-        cfg = load_chatbot_config()
+        # Always read fresh from DB for each audio session so voice/model changes
+        # from the admin panel take effect immediately without waiting for TTL
+        # and without being affected by stale caches in other worker processes.
+        cfg = load_chatbot_config(bypass_cache=True)
 
         # ── agent-specific tools and system instruction ───────────────────────
         if is_in_app:
-            audio_system_instruction = (
-                _IN_APP_SYSTEM_PROMPT
-                + "\n\n"
-                  "━━━ VOICE MODE — THESE RULES OVERRIDE EVERYTHING ABOVE ━━━\n"
-                  "THIS IS AN AUDIO/VOICE RESPONSE. The output is spoken aloud by a text-to-speech engine.\n"
-                  "\n"
-                  "ABSOLUTE PROHIBITION — NEVER output ANY of these in voice mode:\n"
-                  "  - Markdown headers: ##, ###, ####\n"
-                  "  - Bold or italic: **, __, *, _\n"
-                  "  - Bullet symbols: -, *, +\n"
-                  "  - Tables: | column |\n"
-                  "  - Blockquotes: >\n"
-                  "  - Code blocks: ``` or `\n"
-                  "  - Any symbol that is formatting, not natural speech\n"
-                  "\n"
-                  "SPEAK LIKE THIS instead:\n"
-                  "  - Replace numbered list → say 'First... Second... Third...'\n"
-                  "  - Replace bold term → just say the word normally\n"
-                  "  - Replace heading → say 'Here is how to...' as an intro sentence\n"
-                  "  - Keep answers to 3–5 spoken steps. Short, clear sentences.\n"
-                  "\n"
-                  "LANGUAGE: Detect the language the user spoke and reply in that exact language throughout.\n"
-                  "ALWAYS call search_documents first before answering.\n"
-                  "Never offer demo booking in the in-app panel.\n"
-            )
+            audio_system_instruction = cfg.in_app_system_prompt + "\n\n" + cfg.in_app_audio_override
             audio_tools = [gt.Tool(function_declarations=[
                 gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
             ])]
@@ -630,7 +632,7 @@ async def handle_audio_session(
         else:
             audio_system_instruction = (
                 cfg.audio_system_prompt
-                + "\n\n" + _DEMO_AUDIO_ADDENDUM
+                + "\n\n" + cfg.demo_audio_addendum
                 + "\nAlways call search_documents with the user's question before answering. "
                   "Use retrieved context first. If no useful context is returned, say the "
                   "database does not have the specific document and give only general "
@@ -651,10 +653,23 @@ async def handle_audio_session(
 
         model_name = cfg.model_audio.removeprefix("models/")
 
+        # speaking_rate / pitch / volume_gain_db are stored in DB config but are not
+        # parameters of the Gemini Live API (they belong to Google Cloud TTS). Logged
+        # here so the values are visible and ready if the voice backend ever changes.
+        logger.info(
+            "AUDIO SESSION cfg: model=%s voice=%s lang=%s speaking_rate=%s pitch=%s volume_gain_db=%s",
+            model_name, cfg.voice_name, cfg.language_code,
+            cfg.speaking_rate, cfg.pitch, cfg.volume_gain_db,
+        )
+
         live_config = gt.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            output_audio_transcription=_make_audio_transcription_config(gt, cfg.language_code),
-            input_audio_transcription=_make_audio_transcription_config(gt, cfg.language_code),
+            output_audio_transcription=_make_audio_transcription_config(gt),
+            input_audio_transcription=_make_audio_transcription_config(gt),
+            generation_config=gt.GenerationConfig(
+                temperature=cfg.temperature,
+                top_p=cfg.top_p,
+            ),
             realtime_input_config=gt.RealtimeInputConfig(
                 automatic_activity_detection=gt.AutomaticActivityDetection(
                     disabled=False,
@@ -665,6 +680,7 @@ async def handle_audio_session(
                 )
             ),
             speech_config=gt.SpeechConfig(
+                language_code=cfg.language_code,
                 voice_config=gt.VoiceConfig(
                     prebuilt_voice_config=gt.PrebuiltVoiceConfig(
                         voice_name=cfg.voice_name
@@ -703,6 +719,17 @@ async def handle_audio_session(
                         await session.send(input=initial_message, end_of_turn=True)
 
                     async for audio_bytes in receive_audio:
+                        # Drain any UI-injected text (e.g. slot selection tapped on screen)
+                        # before sending the next audio chunk so the model sees the context.
+                        if text_inject_queue:
+                            while not text_inject_queue.empty():
+                                try:
+                                    text = text_inject_queue.get_nowait()
+                                    logger.info("AUDIO TEXT INJECT: %r", text)
+                                    await session.send(input=text, end_of_turn=True)
+                                except asyncio.QueueEmpty:
+                                    break
+
                         forwarded_chunks += 1
                         forwarded_bytes += len(audio_bytes)
                         logger.debug(

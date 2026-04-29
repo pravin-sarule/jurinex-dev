@@ -262,9 +262,26 @@ const ChatbotWidget = () => {
     }, 45000)
   }, [])
 
-  const lastVoiceAtRef = useRef(0)
-  const hasSpokenRef = useRef(false)
-  const VOICE_RMS_THRESHOLD = 0.012
+  // Hard reset used by X button — tears down immediately, no waiting for AI response
+  const forceCloseAudio = useCallback(() => {
+    clearTimeout(stopTimeoutRef.current)
+    voiceTurnFinishedRef.current = true
+    awaitingFinalResponseRef.current = false
+    try { wsRef.current?.send(JSON.stringify({ type: "end" })) } catch {}
+    try { wsRef.current?.close() } catch {}
+    wsRef.current = null
+    sourceRef.current?.disconnect()
+    processorRef.current?.disconnect()
+    audioCtxRef.current?.close()
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    audioCtxRef.current = null
+    sourceRef.current = null; processorRef.current = null; streamRef.current = null
+    playCtxRef.current?.close().catch(() => {})
+    playCtxRef.current = null
+    nextPlayTimeRef.current = 0
+    setMicStatus("idle")
+  }, [])
+
 
   useEffect(() => {
     if (micStatus === "live" || micStatus === "idle" || micStatus === "error") {
@@ -360,16 +377,22 @@ const ChatbotWidget = () => {
 
   useEffect(() => () => {
     clearTimeout(stopTimeoutRef.current)
-    stopAudio()
+    forceCloseAudio()
     playCtxRef.current?.close()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const startAudio = useCallback(async (bookingMode = false) => {
     chatbotLog("audio start requested", { bookingMode })
+    // Kill any existing WebSocket session before starting a new one — prevents
+    // two simultaneous sessions both playing audio at the same time.
+    if (wsRef.current) {
+      try { wsRef.current.close() } catch {}
+      wsRef.current = null
+    }
+    clearTimeout(stopTimeoutRef.current)
     setMicStatus("connecting")
     voiceTurnFinishedRef.current = false
-    lastVoiceAtRef.current = Date.now()
-    hasSpokenRef.current = false
+
     voiceReplyBufferRef.current = ""
     voiceInputBufferRef.current = ""
     setShowSuggestions(false)
@@ -379,10 +402,15 @@ const ChatbotWidget = () => {
       playCtxRef.current = null
       nextPlayTimeRef.current = 0
     }
-    // booking mode: patient VAD so user has time to respond between turns
-    const SILENCE_END_MS = bookingMode ? 5000 : 2000
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      })
       chatbotLog("microphone stream granted", stream.getAudioTracks().map(t => ({ label: t.label, state: t.readyState })))
       streamRef.current = stream
       const ctx = new AudioContext()
@@ -415,23 +443,13 @@ const ChatbotWidget = () => {
         ])
         let sentChunks = 0
         let sentBytes = 0
+        // Stream mic audio continuously — Gemini Live's built-in VAD detects
+        // speech start/end and triggers responses automatically. Never auto-stop
+        // from the frontend; only stopAudio() called by the user's click disconnects.
         processor.onaudioprocess = (e) => {
           if (voiceTurnFinishedRef.current) return
           if (ws.readyState !== WebSocket.OPEN) return
           const ch0 = e.inputBuffer.getChannelData(0)
-          let sumSq = 0
-          for (let i = 0; i < ch0.length; i++) sumSq += ch0[i] * ch0[i]
-          const rms = Math.sqrt(sumSq / Math.max(ch0.length, 1))
-          const nowMs = Date.now()
-          if (rms >= VOICE_RMS_THRESHOLD) {
-            hasSpokenRef.current = true
-            lastVoiceAtRef.current = nowMs
-          } else if (hasSpokenRef.current && nowMs - lastVoiceAtRef.current >= SILENCE_END_MS) {
-            chatbotLog("auto end-of-turn on silence", { silenceMs: nowMs - lastVoiceAtRef.current })
-            stopAudio()
-            return
-          }
-
           const pcm = downsampleTo16k(ch0, ctx.sampleRate)
           const int16 = new Int16Array(pcm.length)
           for (let i = 0; i < pcm.length; i++)
@@ -448,6 +466,9 @@ const ChatbotWidget = () => {
       }
 
       ws.onmessage = (ev) => {
+        // Reject messages from a stale WebSocket — happens when a new session
+        // starts before the old one fully closes and its buffered messages fire.
+        if (wsRef.current !== ws) return
         try {
           const msg = JSON.parse(ev.data)
           chatbotLog("voice websocket message", msg.type === "audio" ? { ...msg, data: `<base64 ${msg.data?.length || 0} chars>` } : msg)
@@ -516,15 +537,16 @@ const ChatbotWidget = () => {
                 })
               )
             } else if (!voiceTurnFinishedRef.current) {
-              // Do NOT reset nextPlayTimeRef here — turn 1 audio is still scheduled
-              // in the Web Audio buffer. Resetting to 0 would start turn 2 audio
-              // immediately and overlap with turn 1 still playing (two voices).
+              // Multi-turn: session stays open, mic keeps streaming. Gemini Live
+              // VAD will detect the next question automatically.
+              // Do NOT reset nextPlayTimeRef — turn N audio is still in the Web
+              // Audio schedule buffer; resetting causes turn N+1 to overlap.
               voiceInputBufferRef.current = ""
               voiceReplyBufferRef.current = ""
               setMicStatus("live")
               setMessages(prev => [
                 ...prev.filter(m => m.role !== "system").map(m => m.voiceInput ? { role: m.role, text: m.text } : m),
-                { role: "system", text: "Ask another question" },
+                { role: "system", text: "Listening — ask another question" },
               ])
             }
           }
@@ -569,7 +591,11 @@ const ChatbotWidget = () => {
     }
   }, [stopAudio, scheduleAudioChunk, downsampleTo16k, pcm16ToBase64])
 
-  const toggleMic = () => micStatus === "live" ? stopAudio() : startAudio()
+  const toggleMic = () => {
+    if (micStatus === "connecting") return  // prevent double-session while previous is still tearing down
+    if (micStatus === "live") stopAudio()
+    else startAudio()
+  }
 
   // ── demo booking ─────────────────────────────────────────────────────────────
 
@@ -754,7 +780,7 @@ const ChatbotWidget = () => {
                 </div>
 
                 <button
-                  onClick={() => { setOpen(false); stopAudio() }}
+                  onClick={() => { setOpen(false); forceCloseAudio() }}
                   className="w-8 h-8 rounded-xl flex items-center justify-center transition-all"
                   style={{
                     background: "rgba(255,255,255,0.1)",
@@ -964,7 +990,24 @@ const ChatbotWidget = () => {
                         ) : demoSlots.map(slot => (
                           <button
                             key={slot.id}
-                            onClick={() => { setSelectedSlot(slot); setBookingStep("form") }}
+                            onClick={() => {
+                              setSelectedSlot(slot)
+                              if (micStatus === "live" || micStatus === "connecting") {
+                                // Voice mode — inject the exact slot_id into the AI session
+                                // so it uses the correct numeric ID, then let AI collect
+                                // name/email verbally. Close the modal.
+                                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                                  wsRef.current.send(JSON.stringify({
+                                    type: "text",
+                                    content: `The user tapped and selected slot_id=${slot.id} (${slot.label}). Now ask for their full name and email address to complete the booking.`,
+                                  }))
+                                }
+                                setShowSlotModal(false)
+                              } else {
+                                // Text mode — proceed to form
+                                setBookingStep("form")
+                              }
+                            }}
                             className="text-left text-[11.5px] font-dmSans px-3 py-2 rounded-xl transition-all"
                             style={{
                               background: "rgba(13,148,136,0.07)",

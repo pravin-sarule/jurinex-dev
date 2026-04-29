@@ -49,6 +49,7 @@ async def audio_chat_ws(websocket: WebSocket, mode: str = "landing") -> None:
     )
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
+    text_inject_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
     done = asyncio.Event()
     received_audio_chunks = 0
     received_audio_bytes = 0
@@ -82,6 +83,14 @@ async def audio_chat_ws(websocket: WebSocket, mode: str = "landing") -> None:
                         audio_queue.put_nowait(raw)
                     except asyncio.QueueFull:
                         logger.warning("Audio queue full - dropping chunk index=%d", received_audio_chunks)
+                elif msg_type == "text":
+                    content = str(data.get("content", "")).strip()
+                    if content:
+                        try:
+                            text_inject_queue.put_nowait(content)
+                            logger.info("Audio WebSocket text inject queued: %r", content[:120])
+                        except asyncio.QueueFull:
+                            logger.warning("Text inject queue full — dropping message")
                 elif msg_type == "end":
                     logger.info(
                         "Audio WebSocket received end chunks=%d bytes=%d queue_size=%d",
@@ -139,6 +148,7 @@ async def audio_chat_ws(websocket: WebSocket, mode: str = "landing") -> None:
             ip_address=ip_address,
             is_in_app=is_in_app,
             initial_message=initial_message,
+            text_inject_queue=text_inject_queue,
         )
     except Exception as exc:
         logger.exception("Audio session error: %s", exc)
