@@ -576,26 +576,50 @@ export default function AppAssistant() {
       wsRef.current = null
       awaitingFinalRef.current = false
       setMicStatus("idle")
-    }, 15000)
+    }, 45000)
   }, [cleanupAudio])
 
-  useEffect(() => () => { clearTimeout(stopTimeoutRef.current); stopAudio(); playCtxRef.current?.close() }, []) // eslint-disable-line
+  // Hard reset for panel close / unmount — no waiting for AI response
+  const forceCloseAudio = useCallback(() => {
+    clearTimeout(stopTimeoutRef.current)
+    voiceDoneRef.current = true
+    awaitingFinalRef.current = false
+    try { wsRef.current?.send(JSON.stringify({ type: "end" })) } catch {}
+    try { wsRef.current?.close() } catch {}
+    wsRef.current = null
+    cleanupAudio()
+    playCtxRef.current?.close().catch(() => {})
+    playCtxRef.current = null
+    nextPlayRef.current = 0
+    setMicStatus("idle")
+  }, [cleanupAudio])
+
+  useEffect(() => () => { clearTimeout(stopTimeoutRef.current); forceCloseAudio(); }, []) // eslint-disable-line
 
   const startAudio = useCallback(async () => {
+    // Kill any existing session before opening a new one
+    if (wsRef.current) {
+      try { wsRef.current.close() } catch {}
+      wsRef.current = null
+    }
+    clearTimeout(stopTimeoutRef.current)
     setMicStatus("connecting")
     voiceDoneRef.current = false
-    // Stop any audio still playing from a previous session before starting fresh.
-    // Without this, old scheduled buffers overlap with the new session's audio.
     if (playCtxRef.current && playCtxRef.current.state !== "closed") {
       playCtxRef.current.close().catch(() => {})
       playCtxRef.current = null
       nextPlayRef.current = 0
     }
-    // Warm up playback AudioContext inside the user-gesture scope so it starts
-    // in "running" state (browsers block AudioContext created outside gestures).
     getPlayCtx()
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      })
       streamRef.current = stream
       const ctx = new AudioContext()
       if (ctx.state === "suspended") await ctx.resume()
@@ -615,26 +639,11 @@ export default function AppAssistant() {
           ...prev.filter(m => m.role !== "system"),
           { role: "user", text: "Voice question...", voicePlaceholder: true },
         ])
-        // Safety timeout — auto-stop after 30 s if Gemini never sends turn_complete
-        clearTimeout(stopTimeoutRef.current)
-        stopTimeoutRef.current = setTimeout(() => stopAudio(), 30000)
-        let lastSpeechMs = Date.now()
-        let hasSpeech = false
-        const SILENCE_THRESHOLD = 0.01
-        const SILENCE_END_MS = 2000  // stop mic after 2 s of silence post-speech
-
+        // Stream mic audio continuously — Gemini Live VAD handles turn detection.
+        // Session stays alive until user clicks stop.
         processor.onaudioprocess = (e) => {
           if (voiceDoneRef.current || ws.readyState !== WebSocket.OPEN) return
           const raw = e.inputBuffer.getChannelData(0)
-          // RMS silence detection — stop mic after speech then 2 s of silence
-          let sq = 0
-          for (let i = 0; i < raw.length; i++) sq += raw[i] * raw[i]
-          const rms = Math.sqrt(sq / raw.length)
-          if (rms >= SILENCE_THRESHOLD) { hasSpeech = true; lastSpeechMs = Date.now() }
-          else if (hasSpeech && Date.now() - lastSpeechMs >= SILENCE_END_MS) {
-            stopAudio()  // sends "end" to backend, keeps WebSocket open for response
-            return
-          }
           const ratio = ctx.sampleRate / 16000
           const out = new Float32Array(Math.max(1, Math.round(raw.length / ratio)))
           for (let i = 0; i < out.length; i++) {
@@ -652,6 +661,7 @@ export default function AppAssistant() {
       }
 
       ws.onmessage = (ev) => {
+        if (wsRef.current !== ws) return  // reject stale messages from old sessions
         try {
           const msg = JSON.parse(ev.data)
           if (msg.type === "audio" && msg.data) scheduleAudio(msg.data, msg.mime_type)
@@ -708,24 +718,34 @@ export default function AppAssistant() {
             }
           }
           if (msg.type === "turn_complete") {
-            nextPlayRef.current = 0
-            // Always end the session after Gemini finishes its response
-            clearTimeout(stopTimeoutRef.current)
-            awaitingFinalRef.current = false
-            voiceDoneRef.current = true
-            cleanupAudio()
-            try { wsRef.current?.send(JSON.stringify({ type: "end" })) } catch {}
-            try { wsRef.current?.close() } catch {}
-            wsRef.current = null
-            setMicStatus("idle")
-            setMessages(prev =>
-              prev.filter(m => m.role !== "system")
-                  .map(m => {
-                    if (m.voiceStreaming) return { role: m.role, text: m.text }
-                    if (m.voicePlaceholder) return { role: m.role, text: m.text, voicePlaceholder: true }
-                    return m
-                  })
-            )
+            if (awaitingFinalRef.current) {
+              // User clicked stop — close session cleanly
+              nextPlayRef.current = 0
+              clearTimeout(stopTimeoutRef.current)
+              awaitingFinalRef.current = false
+              voiceDoneRef.current = true
+              cleanupAudio()
+              try { wsRef.current?.close() } catch {}
+              wsRef.current = null
+              setMicStatus("idle")
+              setMessages(prev =>
+                prev.filter(m => m.role !== "system")
+                    .map(m => {
+                      if (m.voiceStreaming) return { role: m.role, text: m.text }
+                      if (m.voicePlaceholder) return { role: m.role, text: m.text, voicePlaceholder: true }
+                      return m
+                    })
+              )
+            } else if (!voiceDoneRef.current) {
+              // Multi-turn: session stays open, mic keeps streaming.
+              // Do NOT reset nextPlayRef — current turn audio is still buffered.
+              setMicStatus("live")
+              setMessages(prev => [
+                ...prev.filter(m => m.role !== "system")
+                       .map(m => m.voicePlaceholder ? { role: m.role, text: m.text } : m),
+                { role: "user", text: "Voice question...", voicePlaceholder: true },
+              ])
+            }
           }
           if (msg.type === "error") {
             setMessages(prev => [...prev.filter(m => m.role !== "system"), { role: "assistant", text: msg.message || "Voice error. Please try again.", error: true }])
@@ -752,7 +772,11 @@ export default function AppAssistant() {
     }
   }, [stopAudio, scheduleAudio, pcm16ToBase64])
 
-  const toggleMic = () => micStatus === "live" ? stopAudio() : startAudio()
+  const toggleMic = () => {
+    if (micStatus === "connecting") return
+    if (micStatus === "live") stopAudio()
+    else startAudio()
+  }
 
   // ── text chat — RAG pipeline via /api/chat, page-context aware ───────────────
 

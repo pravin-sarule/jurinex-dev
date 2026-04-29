@@ -133,8 +133,8 @@ async def audio_chat_ws(websocket: WebSocket, mode: str = "landing") -> None:
                 safe_msg["data"] = f"<base64 {len(msg.get('data') or '')} chars>"
             logger.debug("Audio WebSocket send #%d payload=%r", sent_messages, safe_msg)
             await websocket.send_json(msg)
-        except RuntimeError as exc:
-            logger.debug("Audio WebSocket send skipped (connection closed): %s", exc)
+        except (RuntimeError, WebSocketDisconnect) as exc:
+            logger.debug("Audio WebSocket send skipped (client disconnected): %s", exc)
         except Exception as exc:
             logger.exception("Audio WebSocket send failed: %s", exc)
 
