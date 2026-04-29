@@ -15,6 +15,7 @@ import base64
 import importlib.metadata
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Callable, Awaitable
 
@@ -232,6 +233,8 @@ class ChatResult:
 
 
 _config_cache: ChatbotConfig | None = None
+_config_loaded_at: float = 0.0
+_CONFIG_CACHE_TTL: float = 120.0  # re-read DB every 2 minutes so voice/model changes apply without restart
 
 
 def _parse_version(version: str) -> tuple[int, int, int]:
@@ -261,8 +264,9 @@ def _ensure_current_live_sdk() -> None:
 
 
 def load_chatbot_config() -> ChatbotConfig:
-    global _config_cache
-    if _config_cache is not None:
+    global _config_cache, _config_loaded_at
+    now = time.monotonic()
+    if _config_cache is not None and (now - _config_loaded_at) < _CONFIG_CACHE_TTL:
         return _config_cache
     if not is_db_available():
         logger.warning("DB unavailable — using default ChatbotConfig")
@@ -295,10 +299,11 @@ def load_chatbot_config() -> ChatbotConfig:
             cfg.system_prompt    = row["system_prompt"]        if row.get("system_prompt") is not None else cfg.system_prompt
             cfg.audio_system_prompt = row["audio_system_prompt"] if row.get("audio_system_prompt") is not None else cfg.audio_system_prompt
             logger.info(
-                "Loaded chatbot config from DB: model_text=%s model_audio=%s",
-                cfg.model_text, cfg.model_audio,
+                "Loaded chatbot config from DB: model_text=%s model_audio=%s voice=%s",
+                cfg.model_text, cfg.model_audio, cfg.voice_name,
             )
             _config_cache = cfg
+            _config_loaded_at = time.monotonic()
             return _config_cache
     except Exception as exc:
         logger.warning("Could not load chatbot config from DB: %s", exc)
@@ -306,8 +311,9 @@ def load_chatbot_config() -> ChatbotConfig:
 
 
 def invalidate_config_cache() -> None:
-    global _config_cache
+    global _config_cache, _config_loaded_at
     _config_cache = None
+    _config_loaded_at = 0.0
 
 
 def _make_audio_transcription_config(gt, _language_code: str):
@@ -729,6 +735,7 @@ async def handle_audio_session(
                     got_model_output = False
                     turn_input_transcript = ""
                     turn_output_transcript = ""
+                    turn_audio_sent = False  # tracks whether inline_data audio was sent this turn
                     turn = session.receive()
                     async for response in turn:
                         received_events += 1
@@ -839,6 +846,7 @@ async def handle_audio_session(
                                     if inline_data and getattr(inline_data, "data", None):
                                         got_model_output = True
                                         sent_audio = True
+                                        turn_audio_sent = True
                                         mime_type = getattr(inline_data, "mime_type", "audio/pcm;rate=24000")
                                         await send_response({
                                             "type": "audio",
@@ -851,8 +859,9 @@ async def handle_audio_session(
                                         turn_output_transcript += part.text
                                         await send_response({"type": "text", "content": part.text})
 
-                        if not sent_audio and getattr(response, "data", None):
+                        if not turn_audio_sent and not sent_audio and getattr(response, "data", None):
                             got_model_output = True
+                            turn_audio_sent = True
                             await send_response({
                                 "type": "audio",
                                 "data": base64.b64encode(response.data).decode(),

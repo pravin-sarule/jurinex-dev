@@ -151,6 +151,7 @@ const ChatbotWidget = () => {
   const awaitingFinalResponseRef = useRef(false)
   const stopTimeoutRef         = useRef(null)
   const voiceReplyBufferRef    = useRef("")
+  const voiceInputBufferRef    = useRef("")
   const bottomRef              = useRef(null)
   const inputRef               = useRef(null)
 
@@ -369,6 +370,7 @@ const ChatbotWidget = () => {
     lastVoiceAtRef.current = Date.now()
     hasSpokenRef.current = false
     voiceReplyBufferRef.current = ""
+    voiceInputBufferRef.current = ""
     setShowSuggestions(false)
     // Stop any audio still playing from the previous session before starting fresh.
     if (playCtxRef.current && playCtxRef.current.state !== "closed") {
@@ -474,11 +476,30 @@ const ChatbotWidget = () => {
               })
             }
           }
-          if (msg.type === "input_transcript" && msg.content)
+          if (msg.type === "input_transcript" && msg.content) {
             chatbotLog("voice input transcript", msg.content)
+            const chunk = String(msg.content || "").trim()
+            if (chunk) {
+              const cur = voiceInputBufferRef.current
+              if (chunk.startsWith(cur)) {
+                voiceInputBufferRef.current = chunk
+              } else if (!cur.endsWith(chunk)) {
+                voiceInputBufferRef.current = `${cur} ${chunk}`.trim().replace(/\s+/g, " ")
+              }
+              const fullTranscript = voiceInputBufferRef.current
+              setMessages(prev => {
+                const withoutSystem = prev.filter(m => m.role !== "system")
+                const last = withoutSystem[withoutSystem.length - 1]
+                if (last?.role === "user" && last.voiceInput) {
+                  return [...withoutSystem.slice(0, -1), { ...last, text: fullTranscript }]
+                }
+                return [...withoutSystem, { role: "user", text: fullTranscript, voiceInput: true }]
+              })
+            }
+          }
           if (msg.type === "turn_complete") {
-            nextPlayTimeRef.current = 0
             if (awaitingFinalResponseRef.current) {
+              nextPlayTimeRef.current = 0
               clearTimeout(stopTimeoutRef.current)
               awaitingFinalResponseRef.current = false
               chatbotLog("voice turn complete after stop: closing websocket")
@@ -487,12 +508,21 @@ const ChatbotWidget = () => {
               setMicStatus("idle")
               setMessages(prev => prev
                 .filter(m => m.role !== "system")
-                .map(m => (m.voiceStreaming ? { role: m.role, text: m.text, error: m.error } : m))
+                .map(m => {
+                  if (m.voiceStreaming) return { role: m.role, text: m.text, error: m.error }
+                  if (m.voiceInput) return { role: m.role, text: m.text }
+                  return m
+                })
               )
             } else if (!voiceTurnFinishedRef.current) {
+              // Do NOT reset nextPlayTimeRef here — turn 1 audio is still scheduled
+              // in the Web Audio buffer. Resetting to 0 would start turn 2 audio
+              // immediately and overlap with turn 1 still playing (two voices).
+              voiceInputBufferRef.current = ""
+              voiceReplyBufferRef.current = ""
               setMicStatus("live")
               setMessages(prev => [
-                ...prev.filter(m => m.role !== "system"),
+                ...prev.filter(m => m.role !== "system").map(m => m.voiceInput ? { role: m.role, text: m.text } : m),
                 { role: "system", text: "Ask another question" },
               ])
             }

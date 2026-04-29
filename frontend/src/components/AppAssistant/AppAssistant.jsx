@@ -655,6 +655,29 @@ export default function AppAssistant() {
         try {
           const msg = JSON.parse(ev.data)
           if (msg.type === "audio" && msg.data) scheduleAudio(msg.data, msg.mime_type)
+          if (msg.type === "input_transcript" && msg.content) {
+            const chunk = String(msg.content).trim()
+            if (chunk) {
+              setMessages(prev => {
+                const clean = prev.filter(m => m.role !== "system")
+                let placeholderIdx = -1
+                for (let i = clean.length - 1; i >= 0; i--) {
+                  if (clean[i].role === "user" && clean[i].voicePlaceholder) { placeholderIdx = i; break }
+                }
+                if (placeholderIdx !== -1) {
+                  const cur = clean[placeholderIdx].text === "Voice question..." ? "" : clean[placeholderIdx].text
+                  let newText
+                  if (chunk.startsWith(cur)) newText = chunk
+                  else if (!cur.endsWith(chunk)) newText = `${cur} ${chunk}`.trim().replace(/\s+/g, " ")
+                  else newText = cur
+                  const updated = [...clean]
+                  updated[placeholderIdx] = { ...clean[placeholderIdx], text: newText }
+                  return updated
+                }
+                return clean
+              })
+            }
+          }
           if (msg.type === "text" && msg.content) {
             const chunk = String(msg.content).trim()
             if (chunk) {
@@ -697,7 +720,11 @@ export default function AppAssistant() {
             setMicStatus("idle")
             setMessages(prev =>
               prev.filter(m => m.role !== "system")
-                  .map(m => m.voiceStreaming ? { role: m.role, text: m.text } : m)
+                  .map(m => {
+                    if (m.voiceStreaming) return { role: m.role, text: m.text }
+                    if (m.voicePlaceholder) return { role: m.role, text: m.text, voicePlaceholder: true }
+                    return m
+                  })
             )
           }
           if (msg.type === "error") {
