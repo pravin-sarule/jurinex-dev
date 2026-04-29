@@ -152,6 +152,7 @@ const ChatbotWidget = () => {
   const stopTimeoutRef         = useRef(null)
   const voiceReplyBufferRef    = useRef("")
   const voiceInputBufferRef    = useRef("")
+  const userClosedDemoRef      = useRef(false)
   const bottomRef              = useRef(null)
   const inputRef               = useRef(null)
 
@@ -207,7 +208,7 @@ const ChatbotWidget = () => {
 
       if (slotPayload) {
         setDemoSlots(slotPayload.slots || [])
-        setShowSlotModal(true)
+        if (!userClosedDemoRef.current) setShowSlotModal(true)
         setBookingStep("slots")
         setSelectedSlot(null)
         setMessages(prev => [...prev, { role: "assistant", text: slotPayload.message || "Please select a demo slot:" }])
@@ -453,7 +454,7 @@ const ChatbotWidget = () => {
           if (msg.type === "audio" && msg.data) scheduleAudioChunk(msg.data, msg.mime_type)
           if (msg.type === "slot_selection" && Array.isArray(msg.slots)) {
             setDemoSlots(msg.slots)
-            setShowSlotModal(true)
+            if (!userClosedDemoRef.current) setShowSlotModal(true)
             setBookingStep("slots")
             setSelectedSlot(null)
           }
@@ -573,6 +574,7 @@ const ChatbotWidget = () => {
   // ── demo booking ─────────────────────────────────────────────────────────────
 
   const closeDemoModal = () => {
+    userClosedDemoRef.current = true
     setShowSlotModal(false)
     setBookingStep("slots")
     setSelectedSlot(null)
@@ -581,6 +583,7 @@ const ChatbotWidget = () => {
   }
 
   const handleBookDemoClick = async () => {
+    userClosedDemoRef.current = false
     setBookingLoading(true)
     try {
       const res = await fetch(`${AI_CHATBOT_DIRECT_URL}/api/demo-slots`)
