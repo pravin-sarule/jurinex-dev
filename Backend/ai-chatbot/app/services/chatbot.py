@@ -14,6 +14,7 @@ import asyncio
 import base64
 import importlib.metadata
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -425,7 +426,14 @@ def _run_agentic_loop(
         gt.Content(role="user", parts=[gt.Part(text=clean_question)])
     ]
 
-    total_input = 0
+    # total_input is set to the LAST round's prompt_token_count only.
+    # Each round's prompt_token_count grows as tool results are appended to the
+    # context window — summing across rounds would count earlier tokens multiple
+    # times and inflate the figure massively (the reported 8→18939 bug).
+    # The final round's prompt_token_count already reflects the full accumulated
+    # context, so it is the correct single number to record for input cost.
+    # Output tokens are summed because each round generates independent tokens.
+    last_input_tokens = 0
     total_output = 0
     response = None
     _in_app_top_k = 12 if is_in_app else None
@@ -439,8 +447,11 @@ def _run_agentic_loop(
         logger.debug("AGENT ROUND %d response=%r", _round, response)
 
         usage = getattr(response, "usage_metadata", None)
-        total_input  += int(getattr(usage, "prompt_token_count",     0) or 0)
-        total_output += int(getattr(usage, "candidates_token_count", 0) or 0)
+        if usage:
+            round_input = int(getattr(usage, "prompt_token_count", 0) or 0)
+            if round_input > 0:
+                last_input_tokens = round_input  # keep updating; final value = last round
+            total_output += int(getattr(usage, "candidates_token_count", 0) or 0)
 
         candidate = response.candidates[0] if response.candidates else None
         if not candidate or not candidate.content:
@@ -466,6 +477,8 @@ def _run_agentic_loop(
 
         contents.append(candidate.content)
         contents.append(gt.Content(role="user", parts=fn_response_parts))
+
+    total_input = last_input_tokens
 
     answer = (response.text if response else None) or "I couldn't generate a response."
     logger.info("BOT REPLY (%s): %s", "app" if is_in_app else "landing", answer[:200])
@@ -696,11 +709,11 @@ async def handle_audio_session(
         ) as session:
             input_done = asyncio.Event()
             forwarded_chunks = 0
-            forwarded_bytes = 0
+            forwarded_bytes = 0        # raw PCM-16 bytes sent to Gemini @ 16 kHz
+            audio_output_bytes = 0     # raw PCM-16 bytes received from Gemini @ 24 kHz
+            last_text_input_tokens = 0 # prompt_token_count from Gemini Live usage_metadata (system prompt + chunks)
             received_events = 0
             input_done_at: float | None = None
-            audio_input_tokens: int = 0
-            audio_output_tokens: int = 0
             # Track transcripts per turn for DB storage
             _last_input_transcript: str = ""
             _last_output_transcript: str = ""
@@ -756,7 +769,7 @@ async def handle_audio_session(
 
             # ── Task 2: receive Gemini responses → client ─────────────────────
             async def _receive_responses() -> None:
-                nonlocal received_events, audio_input_tokens, audio_output_tokens
+                nonlocal received_events, audio_output_bytes, last_text_input_tokens
                 nonlocal _last_input_transcript, _last_output_transcript
                 while True:
                     got_model_output = False
@@ -767,18 +780,6 @@ async def handle_audio_session(
                     async for response in turn:
                         received_events += 1
                         logger.debug("Gemini Live event #%d raw=%r", received_events, response)
-
-                        # ── token usage ───────────────────────────────────────
-                        usage = getattr(response, "usage_metadata", None)
-                        if usage:
-                            _in  = int(getattr(usage, "prompt_token_count",     0) or 0)
-                            _out = int(
-                                getattr(usage, "candidates_token_count", None)
-                                or getattr(usage, "response_token_count", None)
-                                or 0
-                            )
-                            if _in  > audio_input_tokens:  audio_input_tokens  = _in
-                            if _out > audio_output_tokens: audio_output_tokens = _out
 
                         # ── tool calls ────────────────────────────────────────
                         tool_call = getattr(response, "tool_call", None)
@@ -874,6 +875,7 @@ async def handle_audio_session(
                                         got_model_output = True
                                         sent_audio = True
                                         turn_audio_sent = True
+                                        audio_output_bytes += len(inline_data.data)
                                         mime_type = getattr(inline_data, "mime_type", "audio/pcm;rate=24000")
                                         await send_response({
                                             "type": "audio",
@@ -889,6 +891,7 @@ async def handle_audio_session(
                         if not turn_audio_sent and not sent_audio and getattr(response, "data", None):
                             got_model_output = True
                             turn_audio_sent = True
+                            audio_output_bytes += len(response.data)
                             await send_response({
                                 "type": "audio",
                                 "data": base64.b64encode(response.data).decode(),
@@ -898,6 +901,15 @@ async def handle_audio_session(
                             got_model_output = True
                             turn_output_transcript += response.text
                             await send_response({"type": "text", "content": response.text})
+
+                        # Track text token count (system prompt + document chunks) from API metadata.
+                        # This mirrors the text model rule: use the last positive prompt_token_count.
+                        # Audio bytes are counted separately via duration formula in the finally block.
+                        usage = getattr(response, "usage_metadata", None)
+                        if usage:
+                            _t = int(getattr(usage, "prompt_token_count", 0) or 0)
+                            if _t > 0:
+                                last_text_input_tokens = _t
 
                     await send_response({"type": "turn_complete"})
 
@@ -942,9 +954,23 @@ async def handle_audio_session(
                     if not task.done():
                         task.cancel()
 
+                # Hybrid token counting for audio model:
+                #   Text context (system prompt + document chunks): API usage_metadata.prompt_token_count
+                #   User audio input: PCM-16 @ 16 kHz → 32000 bytes/sec → tokens = seconds × 32
+                #                     = forwarded_bytes / 32000 × 32 = forwarded_bytes / 1000
+                #   AI audio output:  PCM-16 @ 24 kHz → 48000 bytes/sec → tokens = seconds × 32
+                #                     = audio_output_bytes / 48000 × 32 = audio_output_bytes / 1500
+                audio_input_tokens = math.ceil(forwarded_bytes / 1000) if forwarded_bytes > 0 else 0
+                computed_input_tokens  = last_text_input_tokens + audio_input_tokens
+                computed_output_tokens = math.ceil(audio_output_bytes / 1500) if audio_output_bytes > 0 else 0
+
                 logger.info(
-                    "AUDIO TOKENS input=%d output=%d model=%s session=%s ip=%s",
-                    audio_input_tokens, audio_output_tokens, model_name, session_id, ip_address,
+                    "AUDIO TOKENS input=%d (text=%d audio=%d) output=%d "
+                    "(in_bytes=%d out_bytes=%d) model=%s session=%s ip=%s",
+                    computed_input_tokens, last_text_input_tokens, audio_input_tokens,
+                    computed_output_tokens,
+                    forwarded_bytes, audio_output_bytes,
+                    model_name, session_id, ip_address,
                 )
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
@@ -953,8 +979,8 @@ async def handle_audio_session(
                         session_id=session_id,
                         mode="audio",
                         model_name=model_name,
-                        input_tokens=audio_input_tokens,
-                        output_tokens=audio_output_tokens,
+                        input_tokens=computed_input_tokens,
+                        output_tokens=computed_output_tokens,
                         ip_address=ip_address,
                     ),
                 )
