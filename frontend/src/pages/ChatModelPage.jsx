@@ -1,5 +1,8 @@
 import '../styles/AnalysisPage.css';
+import PromptChipsBar from '../components/PromptChipsBar';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { flushSync } from 'react-dom';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
@@ -1291,30 +1294,18 @@ const ChatModelPage = () => {
     }
   };
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, {
-        method: 'GET',
-        headers,
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secrets: ${response.status}`);
-      }
-      const secretsData = await response.json();
-      console.log('[fetchSecrets] Raw secrets data:', secretsData);
-      const secretsList = secretsData || [];
+      const secretsList = await fetchSecretsList();
       setSecrets(secretsList);
-     
+
       if (selectedSecretId) {
         const secretExists = secretsList.find((s) => s.id === selectedSecretId);
         if (!secretExists) {
-          console.warn('[fetchSecrets] Previously selected secret ID no longer exists:', selectedSecretId);
-          console.warn('[fetchSecrets] Available secrets:', secretsList.map(s => ({ id: s.id, name: s.name })));
           setSelectedSecretId(null);
           setIsSecretPromptSelected(false);
           setActiveDropdown('Custom Query');
@@ -2317,12 +2308,10 @@ const ChatModelPage = () => {
   };
 
   const handleDropdownSelect = (secretName, secretId, llmName) => {
-    console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
-   
+    if (isLoading || isGeneratingInsights) return;
+
     const secret = secrets.find((s) => s.id === secretId);
     if (!secret) {
-      console.error('[handleDropdownSelect] Secret ID not found in secrets list:', secretId);
-      console.error('[handleDropdownSelect] Available secrets:', secrets.map(s => ({ id: s.id, name: s.name })));
       setError(`Selected analysis prompt "${secretName}" is no longer available. Please refresh the page.`);
       setActiveDropdown('Custom Query');
       setSelectedSecretId(null);
@@ -2331,75 +2320,19 @@ const ChatModelPage = () => {
       setShowDropdown(false);
       return;
     }
-   
-    setActiveDropdown(secretName);
-    setSelectedSecretId(secretId);
-    setSelectedLlmName(llmName);
-    setIsSecretPromptSelected(true);
-    setChatInput('');
-    setShowDropdown(false);
-   
-    console.log('[handleDropdownSelect] Looking for messages with secret_id:', secretId, 'file_id:', fileId);
-    console.log('[handleDropdownSelect] Total messages (session):', sessionMessages.length);
-    console.log('[handleDropdownSelect] Messages with secret prompts:', sessionMessages.filter(m => m.used_secret_prompt).map(m => ({
-      id: m.id,
-      secret_id: m.secret_id,
-      prompt_label: m.prompt_label,
-      file_id: m.file_id
-    })));
-   
-    const messagesForThisPrompt = sessionMessages.filter(
-      (msg) => {
-        const matches = msg.used_secret_prompt &&
-                       msg.secret_id === secretId &&
-                       (msg.file_id === fileId || !fileId || !msg.file_id);
-        if (matches) {
-          console.log('[handleDropdownSelect] Found matching message:', {
-            id: msg.id,
-            secret_id: msg.secret_id,
-            prompt_label: msg.prompt_label,
-            file_id: msg.file_id
-          });
-        }
-        return matches;
-      }
+
+    flushSync(() => {
+      setActiveDropdown(secretName);
+      setSelectedSecretId(secretId);
+      setSelectedLlmName(llmName);
+      setIsSecretPromptSelected(true);
+      setChatInput('');
+      setShowDropdown(false);
+    });
+    void handleSend(
+      { preventDefault: () => {} },
+      { secretId, llmName, secretName }
     );
-   
-    console.log('[handleDropdownSelect] Found', messagesForThisPrompt.length, 'messages for this secret prompt');
-   
-    const messageForThisPrompt = messagesForThisPrompt.length > 0
-      ? messagesForThisPrompt.sort((a, b) => {
-          const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
-          const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
-          return timeB - timeA;
-        })[0]
-      : null;
-   
-    if (messageForThisPrompt) {
-      console.log('[handleDropdownSelect] Displaying message:', {
-        id: messageForThisPrompt.id,
-        secret_id: messageForThisPrompt.secret_id,
-        prompt_label: messageForThisPrompt.prompt_label,
-        answer_length: (messageForThisPrompt.answer || '').length
-      });
-      setSelectedMessageId(messageForThisPrompt.id);
-      const rawAnswer = messageForThisPrompt.answer || messageForThisPrompt.response || '';
-      const isStructured = messageForThisPrompt.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-      const responseToDisplay = isStructured
-        ? renderSecretPromptResponse(rawAnswer)
-        : convertJsonToPlainText(rawAnswer);
-      setCurrentResponse(responseToDisplay);
-      setAnimatedResponseContent(responseToDisplay);
-      setHasResponse(true);
-    } else {
-      console.log('[handleDropdownSelect] No message found for this secret prompt, clearing response');
-      setCurrentResponse('');
-      setAnimatedResponseContent('');
-      setSelectedMessageId(null);
-      streamBufferRef.current = '';
-      setIsAnimatingResponse(false);
-      setHasResponse(false);
-    }
   };
 
   const handleChatInputChange = (e) => {
@@ -2415,25 +2348,27 @@ const ChatModelPage = () => {
     }
   };
 
-  const handleSend = async (e) => {
-    e.preventDefault();
+  const handleSend = async (e, secretOverride = null) => {
+    if (e?.preventDefault) e.preventDefault();
+
+    const secretPromptMode = Boolean(secretOverride?.secretId) || isSecretPromptSelected;
+    const effectiveSecretId = secretOverride?.secretId ?? selectedSecretId;
+    const effectiveLlmName = secretOverride?.llmName ?? selectedLlmName;
 
     const hasFile = Boolean(fileId);
 
-    if (isSecretPromptSelected) {
+    if (secretPromptMode) {
       if (!hasFile) {
         setError('Please upload a document before running an analysis prompt.');
         return;
       }
-      if (!selectedSecretId) {
+      if (!effectiveSecretId) {
         setError('Please select an analysis type.');
         return;
       }
      
-      const selectedSecret = secrets.find((s) => s.id === selectedSecretId);
+      const selectedSecret = secrets.find((s) => s.id === effectiveSecretId);
       if (!selectedSecret) {
-        console.error('[handleSend] Selected secret ID not found in secrets list:', selectedSecretId);
-        console.error('[handleSend] Available secrets:', secrets.map(s => ({ id: s.id, name: s.name })));
         setError(`Selected analysis prompt is no longer available. Please select a different one.`);
         setSelectedSecretId(null);
         setIsSecretPromptSelected(false);
@@ -2441,7 +2376,7 @@ const ChatModelPage = () => {
         return;
       }
      
-      const promptLabel = selectedSecret.name || 'Secret Prompt';
+      const promptLabel = secretOverride?.secretName || selectedSecret.name || 'Secret Prompt';
       const secretAttachmentIds =
         chatAttachmentFileIdsRef.current.length > 0
           ? chatAttachmentFileIdsRef.current
@@ -2452,12 +2387,12 @@ const ChatModelPage = () => {
         setIsGeneratingInsights(true);
         setError(null);
         console.log('[handleSend] Triggering secret analysis with streaming:', {
-          secretId: selectedSecretId,
+          secretId: effectiveSecretId,
           fileId: secretAttachmentIds[0],
           file_ids: secretAttachmentIds.length > 1 ? secretAttachmentIds : undefined,
           additionalInput: chatInput.trim(),
           promptLabel: promptLabel,
-          llmName: selectedLlmName,
+          llmName: effectiveLlmName,
         });
        
         setCurrentResponse('');
@@ -2495,7 +2430,7 @@ const ChatModelPage = () => {
           type: 'chat',
           used_secret_prompt: true,
           prompt_label: promptLabel,
-          secret_id: selectedSecretId,
+          secret_id: effectiveSecretId,
           isStreaming: true,
         };
         setMessages((prev) => [...prev, newChat]);
@@ -2591,14 +2526,14 @@ const ChatModelPage = () => {
            
             console.log('[Secret Prompt] Updating message:', {
               messageId,
-              selectedSecretId,
+              secretId: effectiveSecretId,
               promptLabel,
               responseLength: responseToStore.length
             });
             setMessages((prev) => {
               const updated = prev.map((msg) => {
                 if (msg.id === messageId) {
-                  console.log('[Secret Prompt] Updating message with secret_id:', selectedSecretId, 'prompt_label:', promptLabel);
+                  console.log('[Secret Prompt] Updating message with secret_id:', effectiveSecretId, 'prompt_label:', promptLabel);
                   return {
                     ...msg,
                     answer: responseToStore,
@@ -2606,7 +2541,7 @@ const ChatModelPage = () => {
                     isStreaming: false,
                     used_secret_prompt: true,
                     prompt_label: promptLabel,
-                    secret_id: selectedSecretId,
+                    secret_id: effectiveSecretId,
                     learning_payload: doneData?.learning_payload || null,
                     learning_mode: !!doneData?.learning_mode,
                   };
@@ -2645,11 +2580,11 @@ const ChatModelPage = () => {
             setStreamingMessage('');
             clearProcessingTimeline();
           },
-          selectedSecretId,
+          effectiveSecretId,
           true,
           promptLabel,
           chatInput.trim() || '',
-          selectedLlmName,
+          effectiveLlmName,
           {
             ...chatModelStreamFetchParams,
             learning_mode: learningModeActive,
@@ -2945,7 +2880,7 @@ const ChatModelPage = () => {
   }, []);
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
     fetchChatSessions();
   }, []);
 
@@ -3758,6 +3693,18 @@ const ChatModelPage = () => {
               </div>
             )}
             <form onSubmit={handleSend} className="mx-auto mt-4">
+              {(isLoadingSecrets || secrets.length > 0) && (
+                <PromptChipsBar
+                  secrets={secrets}
+                  isLoading={isLoadingSecrets}
+                  selectedSecretId={selectedSecretId}
+                  activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                  onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                  disabled={isLoading || isGeneratingInsights}
+                  className="mb-1"
+                />
+              )}
+
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                 <UploadOptionsMenu
                   fileInputRef={fileInputRef}
@@ -3776,38 +3723,7 @@ const ChatModelPage = () => {
                   disabled={isUploading || isChatUploading}
                   multiple
                 />
-                <div className="relative flex-shrink-0" ref={dropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => setShowDropdown(!showDropdown)}
-                    disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <BookOpen className="h-3 w-3 sm:h-4 sm:w-4" />
-                    <span className="hidden sm:inline">{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                    <span className="inline sm:hidden">{isLoadingSecrets ? '...' : 'Prompts'}</span>
-                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
-                  </button>
-                  {showDropdown && !isLoadingSecrets && (
-                    <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                      {secrets.length > 0 ? (
-                        secrets.map((secret) => (
-                          <button
-                            key={secret.id}
-                            type="button"
-                            onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                            className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                          >
-                            {secret.name}
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+<div className="relative flex-shrink-0" ref={styleDropdownRef}>
                   <button
                     type="button"
                     onClick={() => setShowStyleDropdown((s) => !s)}
@@ -4242,6 +4158,18 @@ const ChatModelPage = () => {
                 </div>
               )}
               <form onSubmit={handleSend}>
+                  {(isLoadingSecrets || secrets.length > 0) && (
+                    <PromptChipsBar
+                      secrets={secrets}
+                      isLoading={isLoadingSecrets}
+                      selectedSecretId={selectedSecretId}
+                      activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                      onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                      disabled={isLoading || isGeneratingInsights}
+                      size="compact"
+                      className="mb-1"
+                    />
+                  )}
                 <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                   <UploadOptionsMenu
                     fileInputRef={fileInputRef}
@@ -4260,37 +4188,7 @@ const ChatModelPage = () => {
                     disabled={isUploading || isChatUploading}
                     multiple
                   />
-                  <div className="relative flex-shrink-0" ref={dropdownRef}>
-                    <button
-                      type="button"
-                      onClick={() => setShowDropdown(!showDropdown)}
-                      disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <BookOpen className="h-3 w-3" />
-                      <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                      <ChevronDown className="h-3 w-3" />
-                    </button>
-                    {showDropdown && !isLoadingSecrets && (
-                      <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                        {secrets.length > 0 ? (
-                          secrets.map((secret) => (
-                            <button
-                              key={secret.id}
-                              type="button"
-                              onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                              className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                            >
-                              {secret.name}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+<div className="relative flex-shrink-0" ref={styleDropdownRef}>
                     <button
                       type="button"
                       onClick={() => setShowStyleDropdown((s) => !s)}

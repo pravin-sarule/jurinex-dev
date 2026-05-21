@@ -161,6 +161,8 @@ export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 export const DOCUMENT_SERVICE_DIRECT = DOCUMENT_SERVICE_URL;
 export const AGENTIC_DOCUMENT_SERVICE_URL = DOCUMENT_SERVICE_DIRECT;
+/** Google Cloud STT for mic input (not LLM). POST multipart audio to transcribe. */
+export const SPEECH_TRANSCRIBE_URL = `${DOCUMENT_SERVICE_DIRECT}/api/v1/speech/transcribe`;
 export const CONTENT_SERVICE_DIRECT = `${DOCUMENT_SERVICE_DIRECT}/api/content`;
 
 // Export default object for convenience

@@ -492,6 +492,8 @@ import UserManagementPage from './pages/UserManagementPage';
 import GetHelpPage from './pages/GetHelpPage';
 import CitationReportPage from './pages/CitationReportPage';
 import EnterpriseAnalyticsPage from './pages/EnterpriseAnalyticsPage';
+import BrandingProfilesPage from './pages/BrandingProfilesPage';
+import BrandingProfileEditorPage from './pages/BrandingProfileEditorPage';
 import CaseDetailView from './components/DashboardComponents/CaseDetailView';
 import GoogleDriveCallback from './pages/GoogleDriveCallback';
 import { SidebarProvider } from './context/SidebarContext';
@@ -985,6 +987,26 @@ function App() {
                 <AuthChecker>
                   <MainLayout>
                     <EnterpriseAnalyticsPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/branding"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <BrandingProfilesPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/branding/:id"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <BrandingProfileEditorPage />
                   </MainLayout>
                 </AuthChecker>
               }

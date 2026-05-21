@@ -1,5 +1,8 @@
 import '../styles/AnalysisPage.css';
+import PromptChipsBar from '../components/PromptChipsBar';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import { FileManagerContext } from '../context/FileManagerContext';
@@ -570,22 +573,13 @@ const AnalysisPage = () => {
     }
   };
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, {
-        method: 'GET',
-        headers,
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secrets: ${response.status}`);
-      }
-      const secretsData = await response.json();
-      console.log('[fetchSecrets] Raw secrets data:', secretsData);
+      const secretsData = await fetchSecretsList();
       setSecrets(secretsData || []);
       setActiveDropdown('Custom Query');
       setSelectedSecretId(null);
@@ -1887,44 +1881,19 @@ const AnalysisPage = () => {
   };
 
   const handleDropdownSelect = (secretName, secretId, llmName) => {
-    console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
-    setActiveDropdown(secretName);
-    setSelectedSecretId(secretId);
-    setSelectedLlmName(llmName);
-    setIsSecretPromptSelected(true);
-    setChatInput('');
-    setShowDropdown(false);
-    
-    const messagesForThisPrompt = messages.filter(
-      (msg) => msg.used_secret_prompt && msg.secret_id === secretId && msg.file_id === fileId
+    if (isLoading || isGeneratingInsights) return;
+    flushSync(() => {
+      setActiveDropdown(secretName);
+      setSelectedSecretId(secretId);
+      setSelectedLlmName(llmName);
+      setIsSecretPromptSelected(true);
+      setChatInput('');
+      setShowDropdown(false);
+    });
+    void handleSend(
+      { preventDefault: () => {} },
+      { secretId, llmName, secretName }
     );
-    
-    const messageForThisPrompt = messagesForThisPrompt.length > 0
-      ? messagesForThisPrompt.sort((a, b) => {
-          const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
-          const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
-          return timeB - timeA;
-        })[0]
-      : null;
-    
-    if (messageForThisPrompt) {
-      setSelectedMessageId(messageForThisPrompt.id);
-      const rawAnswer = messageForThisPrompt.answer || messageForThisPrompt.response || '';
-      const isStructured = messageForThisPrompt.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-      const responseToDisplay = isStructured
-        ? renderSecretPromptResponse(rawAnswer)
-        : convertJsonToPlainText(rawAnswer);
-      setCurrentResponse(responseToDisplay);
-      setAnimatedResponseContent(responseToDisplay);
-      setHasResponse(true);
-    } else {
-      setCurrentResponse('');
-      setAnimatedResponseContent('');
-      setSelectedMessageId(null);
-      streamBufferRef.current = '';
-      setIsAnimatingResponse(false);
-      setHasResponse(false);
-    }
   };
 
   const handleStyleSelect = (style) => {
@@ -1945,8 +1914,12 @@ const AnalysisPage = () => {
     }
   };
 
-  const handleSend = async (e) => {
-    e.preventDefault();
+  const handleSend = async (e, secretOverride = null) => {
+    if (e?.preventDefault) e.preventDefault();
+
+    const secretPromptMode = Boolean(secretOverride?.secretId) || isSecretPromptSelected;
+    const effectiveSecretId = secretOverride?.secretId ?? selectedSecretId;
+    const effectiveLlmName = secretOverride?.llmName ?? selectedLlmName;
 
     const hasFile = Boolean(fileId);
     const currentStatus = processingStatus?.status;
@@ -1960,7 +1933,7 @@ const AnalysisPage = () => {
     const isProcessingComplete =
       !currentStatus || currentStatus === 'processed' || currentProgress >= 100;
 
-    if (isSecretPromptSelected) {
+    if (secretPromptMode) {
       if (!hasFile && !activeFolderName) {
         setError('Please upload a document or select a case folder before running an analysis prompt.');
         return;
@@ -1975,16 +1948,16 @@ const AnalysisPage = () => {
           return;
         }
       }
-      if (!selectedSecretId) {
+      if (!effectiveSecretId) {
         setError('Please select an analysis type.');
         return;
       }
-      const selectedSecret = secrets.find((s) => s.id === selectedSecretId);
-      const promptLabel = selectedSecret?.name || 'Secret Prompt';
+      const selectedSecret = secrets.find((s) => s.id === effectiveSecretId);
+      const promptLabel = secretOverride?.secretName || selectedSecret?.name || 'Secret Prompt';
       
-      const currentSecretId = selectedSecretId;
+      const currentSecretId = effectiveSecretId;
       const currentPromptLabel = promptLabel;
-      const currentLlmName = selectedLlmName;
+      const currentLlmName = effectiveLlmName;
       
       const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       currentRequestIdRef.current = requestId;
@@ -2586,7 +2559,7 @@ const AnalysisPage = () => {
   }, []);
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
   }, []);
 
 
@@ -3303,6 +3276,18 @@ const AnalysisPage = () => {
               </div>
             )}
             <form onSubmit={handleSend} className="mx-auto mt-4">
+              {(isLoadingSecrets || secrets.length > 0) && (
+                <PromptChipsBar
+                  secrets={secrets}
+                  isLoading={isLoadingSecrets}
+                  selectedSecretId={selectedSecretId}
+                  activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                  onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                  disabled={isLoading || isGeneratingInsights}
+                  className="mb-1"
+                />
+              )}
+
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                 <UploadOptionsMenu
                   fileInputRef={fileInputRef}
@@ -3320,38 +3305,7 @@ const AnalysisPage = () => {
                   disabled={isUploading}
                   multiple
                 />
-                <div className="relative flex-shrink-0" ref={dropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => setShowDropdown(!showDropdown)}
-                    disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <BookOpen className="h-3 w-3 sm:h-4 sm:w-4" />
-                    <span className="hidden sm:inline">{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                    <span className="inline sm:hidden">{isLoadingSecrets ? '...' : 'Prompts'}</span>
-                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
-                  </button>
-                  {showDropdown && !isLoadingSecrets && (
-                    <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                      {secrets.length > 0 ? (
-                        secrets.map((secret) => (
-                          <button
-                            key={secret.id}
-                            type="button"
-                            onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                            className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                          >
-                            {secret.name}
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+<div className="relative flex-shrink-0" ref={styleDropdownRef}>
                   <button
                     type="button"
                     onClick={() => setShowStyleDropdown((prev) => !prev)}
@@ -3629,6 +3583,18 @@ const AnalysisPage = () => {
                 </div>
               )}
               <form onSubmit={handleSend}>
+                  {(isLoadingSecrets || secrets.length > 0) && (
+                    <PromptChipsBar
+                      secrets={secrets}
+                      isLoading={isLoadingSecrets}
+                      selectedSecretId={selectedSecretId}
+                      activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                      onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                      disabled={isLoading || isGeneratingInsights}
+                      size="compact"
+                      className="mb-1"
+                    />
+                  )}
                 <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                   <UploadOptionsMenu
                     fileInputRef={fileInputRef}
@@ -3646,37 +3612,7 @@ const AnalysisPage = () => {
                     disabled={isUploading}
                     multiple
                   />
-                  <div className="relative flex-shrink-0" ref={dropdownRef}>
-                    <button
-                      type="button"
-                      onClick={() => setShowDropdown(!showDropdown)}
-                      disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <BookOpen className="h-3 w-3" />
-                      <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                      <ChevronDown className="h-3 w-3" />
-                    </button>
-                    {showDropdown && !isLoadingSecrets && (
-                      <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                        {secrets.length > 0 ? (
-                          secrets.map((secret) => (
-                            <button
-                              key={secret.id}
-                              type="button"
-                              onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                              className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                            >
-                              {secret.name}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+<div className="relative flex-shrink-0" ref={styleDropdownRef}>
                     <button
                       type="button"
                       onClick={() => setShowStyleDropdown((prev) => !prev)}

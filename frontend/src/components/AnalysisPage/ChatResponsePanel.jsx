@@ -1,12 +1,14 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Bot, MessageSquare, Copy, Download, ArrowRight } from 'lucide-react';
+import { Bot, MessageSquare, Copy, Download, FileText, ArrowRight, Printer, Code } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
-import jsPDF from 'jspdf';
 import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../../utils/renderSecretPromptResponse';
+import { getCleanText, downloadAsHtml, printResponse } from '../../utils/responseExportUtils';
+import { ensureTableSeparators, markdownTableComponents } from '../../utils/markdownUtils';
+import BrandingDownloadModal from '../BrandingDownload/BrandingDownloadModal';
 import '../../styles/ChatInterface.css';
 
 const ChatResponsePanel = ({
@@ -30,7 +32,8 @@ const ChatResponsePanel = ({
  const stickyScrollbarRef = useRef(null);
  const horizontalScrollRef = useRef(null);
  const [scrollbarWidth, setScrollbarWidth] = useState(0);
- const [isPdfLoading, setIsPdfLoading] = useState(false);
+ const [showDownloadModal, setShowDownloadModal] = useState(false);
+ const [showWordModal, setShowWordModal] = useState(false);
 
  useEffect(() => {
  if (responseRef.current && isAnimatingResponse) {
@@ -107,407 +110,39 @@ const ChatResponsePanel = ({
 
  const handleCopyResponse = async () => {
  try {
- const textToCopy = animatedResponseContent || currentResponse;
- if (textToCopy) {
- const tempDiv = document.createElement('div');
- tempDiv.innerHTML = textToCopy;
- await navigator.clipboard.writeText(tempDiv.innerText);
- setSuccess('AI response copied to clipboard!');
- } else {
- setError('No response to copy.');
- }
+   // Use the rendered DOM's innerText — gives clean text with no markdown symbols
+   const text = getCleanText(markdownOutputRef.current, animatedResponseContent || currentResponse);
+   if (text && text.trim()) {
+     await navigator.clipboard.writeText(text.trim());
+     setSuccess('AI response copied to clipboard!');
+   } else {
+     setError('No response to copy.');
+   }
  } catch (err) {
- console.error('Failed to copy AI response:', err);
- setError('Failed to copy response.');
+   console.error('Failed to copy AI response:', err);
+   setError('Failed to copy response.');
  }
  };
 
- const handleDownloadPdf = async () => {
- const element = markdownOutputRef.current;
- if (!element) {
- setError('No content to download as PDF.');
- return;
- }
-
- setIsPdfLoading(true);
- setError(null);
- setSuccess(null);
-
- try {
- const clonedElement = element.cloneNode(true);
-
- const now = new Date();
- const year = now.getFullYear();
- const month = String(now.getMonth() + 1).padStart(2, '0');
- const day = String(now.getDate()).padStart(2, '0');
- let hours = now.getHours();
- const minutes = String(now.getMinutes()).padStart(2, '0');
- const ampm = hours >= 12 ? 'PM' : 'AM';
- hours = hours % 12;
- hours = hours ? hours : 12;
- const formattedTime = `${year}-${month}-${day}_${hours}-${minutes}${ampm}`;
-
- const pdf = new jsPDF('p', 'mm', 'a4');
- const pageWidth = 210;
- const pageHeight = 297;
- const margin = 20;
- const contentWidth = pageWidth - (2 * margin);
- let currentY = margin;
- const lineHeight = 7;
- const spacing = 5;
-
- const checkPageBreak = (requiredHeight) => {
- if (currentY + requiredHeight > pageHeight - margin) {
- pdf.addPage();
- currentY = margin;
- return true;
- }
- return false;
+ const handleDownloadPdf = () => {
+   if (!markdownOutputRef.current) {
+     setError('No content to download as PDF.');
+     return;
+   }
+   setShowDownloadModal(true);
  };
 
- const addText = (text, fontSize = 12, isBold = false, color = [0, 0, 0]) => {
- if (!text || text.trim() === '') return 0;
 
- pdf.setFontSize(fontSize);
- pdf.setFont('helvetica', isBold ? 'bold' : 'normal');
- pdf.setTextColor(color[0], color[1], color[2]);
-
- const lines = pdf.splitTextToSize(text, contentWidth);
- const textHeight = lines.length * (fontSize * 0.35);
-
- checkPageBreak(textHeight);
-
- lines.forEach((line) => {
- if (currentY > pageHeight - margin - 10) {
- pdf.addPage();
- currentY = margin;
- }
- pdf.text(line, margin, currentY);
- currentY += fontSize * 0.35;
- });
-
- return textHeight;
- };
-
- const getPlainText = (element) => {
- if (!element) return '';
- if (element.nodeType === Node.TEXT_NODE) {
- return element.textContent || '';
- }
- let text = '';
- for (const node of element.childNodes) {
- if (node.nodeType === Node.TEXT_NODE) {
- text += node.textContent || '';
- } else if (node.nodeType === Node.ELEMENT_NODE) {
- text += getPlainText(node);
- }
- }
- return text;
- };
-
- const addFormattedText = (element, fontSize = 12, baseColor = [31, 41, 55]) => {
- if (!element) return;
-
- const processNode = (node, isBold = false, isItalic = false) => {
- if (node.nodeType === Node.TEXT_NODE) {
- const text = node.textContent || '';
- if (text.trim()) {
- pdf.setFontSize(fontSize);
- pdf.setFont('helvetica', isBold ? (isItalic ? 'bolditalic' : 'bold') : (isItalic ? 'italic' : 'normal'));
- pdf.setTextColor(baseColor[0], baseColor[1], baseColor[2]);
- 
- const lines = pdf.splitTextToSize(text, contentWidth);
- const textHeight = lines.length * (fontSize * 0.35);
- checkPageBreak(textHeight);
- 
- lines.forEach(line => {
- if (currentY > pageHeight - margin - 10) {
- pdf.addPage();
- currentY = margin;
- }
- pdf.text(line, margin, currentY);
- currentY += fontSize * 0.35;
- });
- }
- } else if (node.nodeType === Node.ELEMENT_NODE) {
- const tag = node.tagName ? node.tagName.toLowerCase() : '';
- let newBold = isBold;
- let newItalic = isItalic;
- 
- if (tag === 'strong' || tag === 'b') newBold = true;
- if (tag === 'em' || tag === 'i') newItalic = true;
- 
- for (const child of node.childNodes) {
- processNode(child, newBold, newItalic);
- }
- }
- };
-
- processNode(element);
- };
-
- const processElement = (el) => {
- if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
-
- const tagName = el.tagName ? el.tagName.toLowerCase() : '';
- const textContent = getPlainText(el).trim();
-
- if (['script', 'style'].includes(tagName)) return;
- if (!textContent && !['table', 'hr', 'img', 'ul', 'ol'].includes(tagName)) {
- if (el.children.length === 0) return;
- }
-
- switch (tagName) {
- case 'h1':
- checkPageBreak(lineHeight * 2.5);
- currentY += spacing;
- addText(textContent, 20, true, [17, 24, 39]);
- currentY += spacing;
- pdf.setDrawColor(229, 231, 235);
- pdf.line(margin, currentY, pageWidth - margin, currentY);
- currentY += spacing;
- break;
-
- case 'h2':
- checkPageBreak(lineHeight * 2);
- currentY += spacing;
- addText(textContent, 18, true, [17, 24, 39]);
- currentY += spacing;
- pdf.setDrawColor(229, 231, 235);
- pdf.line(margin, currentY, pageWidth - margin, currentY);
- currentY += spacing;
- break;
-
- case 'h3':
- checkPageBreak(lineHeight * 1.8);
- currentY += spacing;
- addText(textContent, 16, true, [31, 41, 55]);
- currentY += spacing;
- break;
-
- case 'h4':
- case 'h5':
- case 'h6':
- checkPageBreak(lineHeight * 1.5);
- currentY += spacing;
- addText(textContent, 14, true, [31, 41, 55]);
- currentY += spacing;
- break;
-
- case 'p':
- if (textContent) {
- checkPageBreak(lineHeight * 1.5);
- addFormattedText(el, 12, [31, 41, 55]);
- currentY += spacing;
- }
- break;
-
- case 'ul':
- case 'ol':
- const listItems = el.querySelectorAll('li');
- let listIndex = 0;
- listItems.forEach((li) => {
- const liText = getPlainText(li).trim();
- if (liText) {
- const bullet = tagName === 'ul' ? '• ' : `${listIndex + 1}. `;
- checkPageBreak(lineHeight * 1.5);
- pdf.setFontSize(12);
- pdf.setFont('helvetica', 'normal');
- pdf.setTextColor(31, 41, 55);
- const fullText = bullet + liText;
- const lines = pdf.splitTextToSize(fullText, contentWidth - 10);
- const textHeight = lines.length * 4.2;
- checkPageBreak(textHeight);
- lines.forEach(line => {
- if (currentY > pageHeight - margin - 10) {
- pdf.addPage();
- currentY = margin;
- }
- pdf.text(line, margin + 5, currentY);
- currentY += 4.2;
- });
- listIndex++;
- currentY += spacing / 2;
- }
- });
- currentY += spacing;
- break;
-
- case 'table':
- const tableRows = el.querySelectorAll('tr');
- if (tableRows.length === 0) break;
-
- const firstRow = tableRows[0];
- const cellCount = firstRow.querySelectorAll('th, td').length;
- if (cellCount === 0) break;
- const cellWidth = contentWidth / cellCount;
-
- tableRows.forEach((row) => {
- const cells = row.querySelectorAll('th, td');
- if (cells.length === 0) return;
- 
- const isHeader = row.querySelector('th') !== null;
- let maxCellHeight = 0;
- const cellHeights = [];
-
- cells.forEach((cell, cellIndex) => {
- const cellText = getPlainText(cell).trim();
- if (cellText) {
- pdf.setFontSize(isHeader ? 10 : 11);
- pdf.setFont('helvetica', isHeader ? 'bold' : 'normal');
- const cellLines = pdf.splitTextToSize(cellText, cellWidth - 4);
- const cellHeight = cellLines.length * (isHeader ? 3.5 : 3.85) + 2;
- cellHeights[cellIndex] = cellHeight;
- maxCellHeight = Math.max(maxCellHeight, cellHeight);
- } else {
- cellHeights[cellIndex] = isHeader ? 5 : 4;
- maxCellHeight = Math.max(maxCellHeight, cellHeights[cellIndex]);
- }
- });
-
- checkPageBreak(maxCellHeight + 2);
-
- pdf.setDrawColor(209, 213, 219);
- if (isHeader) {
- pdf.setFillColor(243, 244, 246);
- pdf.rect(margin, currentY, contentWidth, maxCellHeight, 'FD');
- } else {
- pdf.rect(margin, currentY, contentWidth, maxCellHeight, 'D');
- }
-
- cells.forEach((cell, cellIndex) => {
- const cellText = getPlainText(cell).trim();
- if (cellText) {
- pdf.setFontSize(isHeader ? 10 : 11);
- pdf.setFont('helvetica', isHeader ? 'bold' : 'normal');
- if (isHeader) {
- pdf.setTextColor(55, 65, 81);
- } else {
- pdf.setTextColor(31, 41, 55);
- }
- 
- const cellLines = pdf.splitTextToSize(cellText, cellWidth - 4);
- const x = margin + (cellIndex * cellWidth) + 2;
- let y = currentY + (isHeader ? 3.5 : 3.85);
- 
- cellLines.forEach((line) => {
- pdf.text(line, x, y);
- y += isHeader ? 3.5 : 3.85;
- });
- }
-
- if (cellIndex < cells.length - 1) {
- const borderX = margin + ((cellIndex + 1) * cellWidth);
- pdf.line(borderX, currentY, borderX, currentY + maxCellHeight);
- }
- });
-
- currentY += maxCellHeight + 2;
- });
-
- currentY += spacing;
- break;
-
- case 'pre':
- if (textContent) {
- pdf.setFont('courier');
- pdf.setFontSize(10);
- pdf.setTextColor(249, 250, 251);
- pdf.setFillColor(31, 41, 55);
- const codeLines = pdf.splitTextToSize(textContent, contentWidth - 4);
- const codeHeight = codeLines.length * 3.5 + 4;
- checkPageBreak(codeHeight);
- pdf.rect(margin, currentY, contentWidth, codeHeight, 'F');
- pdf.setTextColor(249, 250, 251);
- let codeY = currentY + 3.5;
- codeLines.forEach((line) => {
- pdf.text(line, margin + 2, codeY);
- codeY += 3.5;
- });
- pdf.setFont('helvetica');
- currentY += codeHeight + spacing;
- }
- break;
-
- case 'code':
- if (textContent && el.closest('pre') === null) {
- pdf.setFont('courier');
- pdf.setFontSize(11);
- pdf.setTextColor(220, 38, 38);
- pdf.setFillColor(243, 244, 246);
- const codeText = ' ' + textContent + ' ';
- const textWidth = pdf.getTextWidth(codeText);
- const textHeight = 4;
- checkPageBreak(textHeight);
- pdf.rect(margin, currentY - textHeight, textWidth + 2, textHeight, 'F');
- pdf.text(codeText, margin + 1, currentY - 1);
- pdf.setFont('helvetica');
- }
- break;
-
- case 'blockquote':
- if (textContent) {
- checkPageBreak(lineHeight * 2);
- pdf.setDrawColor(59, 130, 246);
- pdf.setFillColor(239, 246, 255);
- const quoteHeight = lineHeight * 2;
- pdf.rect(margin, currentY, 4, quoteHeight, 'F');
- pdf.rect(margin, currentY, contentWidth, quoteHeight, 'FD');
- pdf.setTextColor(30, 64, 175);
- pdf.setFont('helvetica', 'italic');
- pdf.setFontSize(12);
- const quoteLines = pdf.splitTextToSize(textContent, contentWidth - 10);
- let quoteY = currentY + 4;
- quoteLines.forEach((line) => {
- pdf.text(line, margin + 6, quoteY);
- quoteY += 4;
- });
- pdf.setFont('helvetica', 'normal');
- currentY += quoteHeight + spacing;
- }
- break;
-
- case 'hr':
- checkPageBreak(lineHeight);
- pdf.setDrawColor(229, 231, 235);
- pdf.setLineWidth(0.5);
- pdf.line(margin, currentY, pageWidth - margin, currentY);
- pdf.setLineWidth(0.2);
- currentY += spacing * 2;
- break;
-
- default:
- if (el.children && el.children.length > 0) {
- Array.from(el.children).forEach(child => processElement(child));
- } else if (textContent && !['strong', 'b', 'em', 'i', 'a'].includes(tagName)) {
- addText(textContent, 12, false, [31, 41, 55]);
- }
- break;
- }
- };
-
- const children = Array.from(clonedElement.children);
- if (children.length === 0) {
- processElement(clonedElement);
- } else {
- children.forEach(child => processElement(child));
- }
-
- const filename = `AI_Response_${formattedTime}.pdf`;
-
- pdf.save(filename);
- setSuccess('AI response downloaded as PDF!');
- setTimeout(() => setSuccess(null), 3000);
- } catch (err) {
- console.error('Failed to generate PDF:', err);
- setError(`Failed to download PDF: ${err.message}. Please try again.`);
- setTimeout(() => setError(null), 5000);
- } finally {
- setIsPdfLoading(false);
- }
+ const handleDownloadWord = () => {
+   if (!markdownOutputRef.current) {
+     setError('No content to download as Word document.');
+     return;
+   }
+   setShowWordModal(true);
  };
 
  const markdownComponents = {
+ ...markdownTableComponents,
  h1: ({node, ...props}) => (
  <h1 className="text-4xl font-bold mb-8 mt-8 text-gray-900 border-b-2 border-blue-500 pb-4 analysis-page-ai-response tracking-tight" {...props} />
  ),
@@ -651,7 +286,7 @@ const ChatResponsePanel = ({
  <div className="flex items-center space-x-2 text-sm text-gray-500">
  <button
  onClick={handleCopyResponse}
- className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
+ className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
  title="Copy AI Response"
  >
  <Copy className="h-4 w-4 mr-1" />
@@ -659,16 +294,35 @@ const ChatResponsePanel = ({
  </button>
  <button
  onClick={handleDownloadPdf}
- disabled={isPdfLoading}
- className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+ className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
  title="Download AI Response as PDF"
  >
- {isPdfLoading ? (
- <span className="h-4 w-4 mr-1 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></span>
- ) : (
  <Download className="h-4 w-4 mr-1" />
- )}
  PDF
+ </button>
+ <button
+ onClick={handleDownloadWord}
+ className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
+ title="Download AI Response as Word document"
+ >
+ <FileText className="h-4 w-4 mr-1" />
+ Word
+ </button>
+ <button
+ onClick={() => downloadAsHtml(markdownOutputRef.current, `AI_Response_${new Date().toISOString().slice(0, 10)}.html`)}
+ className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
+ title="Download AI Response as HTML file"
+ >
+ <Code className="h-4 w-4 mr-1" />
+ HTML
+ </button>
+ <button
+ onClick={() => printResponse(markdownOutputRef.current)}
+ className="flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
+ title="Print AI Response"
+ >
+ <Printer className="h-4 w-4 mr-1" />
+ Print
  </button>
  {messages.find(msg => msg.id === selectedMessageId)?.timestamp && (
  <span>{formatDate(messages.find(msg => msg.id === selectedMessageId).timestamp)}</span>
@@ -761,10 +415,11 @@ ref={horizontalScrollRef}
       {containsHTML ? (
         <div 
           dangerouslySetInnerHTML={{ __html: responseContent }}
-          style={{ 
-            fontFamily: "'Times New Roman', serif",
-            lineHeight: '1.6',
-            color: '#1a1a1a'
+          style={{
+            fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+            lineHeight: '1.75',
+            color: '#1f1f1f',
+            fontSize: '15px'
           }}
         />
       ) : (
@@ -773,7 +428,7 @@ ref={horizontalScrollRef}
           rehypePlugins={[rehypeRaw, rehypeSanitize]}
           components={markdownComponents}
         >
-          {responseContent}
+          {ensureTableSeparators(responseContent)}
         </ReactMarkdown>
       )}
       
@@ -819,6 +474,22 @@ ref={horizontalScrollRef}
  </div>
  )}
 
+ <BrandingDownloadModal
+   isOpen={showDownloadModal}
+   onClose={() => setShowDownloadModal(false)}
+   contentRef={markdownOutputRef}
+   filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.pdf`}
+   format="pdf"
+   module="analysis-response"
+ />
+ <BrandingDownloadModal
+   isOpen={showWordModal}
+   onClose={() => setShowWordModal(false)}
+   contentRef={markdownOutputRef}
+   filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.docx`}
+   format="word"
+   module="analysis-response"
+ />
  </div>
  );
 };

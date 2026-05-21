@@ -11,6 +11,7 @@ import { BookOpen, ChevronDown, MessageSquare, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import { fetchSecretsList, peekSecretsList, fetchSecretById } from '../services/secretsService';
 
 const DocumentChatView = () => {
   const { selectedFolder, chatSessions, setChatSessions, selectedChatSessionId, setSelectedChatSessionId } = useContext(FileManagerContext);
@@ -96,28 +97,14 @@ const DocumentChatView = () => {
     return null;
   };
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setChatError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) { headers['Authorization'] = `Bearer ${token}`; }
-
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=true`, {
-        method: 'GET',
-        headers,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secrets: ${response.status}`);
-      }
-      const secretsData = await response.json();
+      const secretsData = await fetchSecretsList();
       setSecrets(secretsData || []);
-      if (secretsData && secretsData.length > 0) {
-        setActiveDropdown(secretsData[0].name);
-        setSelectedSecretId(secretsData[0].id);
-      }
     } catch (error) {
       console.error('Error fetching secrets:', error);
       setChatError(`Failed to load analysis prompts: ${error.message}`);
@@ -132,18 +119,7 @@ const DocumentChatView = () => {
       if (existingSecret && existingSecret.value) {
         return existingSecret.value;
       }
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) { headers['Authorization'] = `Bearer ${token}`; }
-
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets/${secretId}`, {
-        method: 'GET',
-        headers,
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secret value: ${response.status}`);
-      }
-      const secretData = await response.json();
+      const secretData = await fetchSecretById(secretId);
       const promptValue = secretData.value || secretData.prompt || secretData.content || secretData;
       setSecrets(prevSecrets =>
         prevSecrets.map(secret =>
@@ -170,7 +146,7 @@ const DocumentChatView = () => {
   }, [selectedFolder, setChatSessions, setSelectedChatSessionId]);
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
   }, []);
 
   useEffect(() => {

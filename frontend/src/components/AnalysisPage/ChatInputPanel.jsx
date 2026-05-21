@@ -1,14 +1,13 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Send, Loader2, BookOpen, ChevronDown, Bot, X, Square, Mic, MicOff } from 'lucide-react';
+import { Send, Loader2, Bot, X, Square, Mic, MicOff } from 'lucide-react';
 import UploadOptionsMenu from '../UploadOptionsMenu';
+import PromptChipsBar from '../PromptChipsBar';
 
 const ChatInputPanel = ({
   fileInputRef,
   isUploading,
   handleFileUpload,
   handleGoogleDriveUpload,
-  showDropdown,
-  setShowDropdown,
   fileId,
   processingStatus,
   isLoading,
@@ -33,7 +32,6 @@ const ChatInputPanel = ({
   folderName = null,
   setChatInput, // Need this to update input from voice
 }) => {
-  const dropdownRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
 
@@ -87,19 +85,6 @@ const ChatInputPanel = ({
     }
   };
 
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
-        setShowDropdown(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [setShowDropdown]);
-
   const isGenerating = isLoading || isGeneratingInsights;
 
   return (
@@ -115,6 +100,17 @@ const ChatInputPanel = ({
       
       <div className={`${isSplitView ? 'w-full' : 'w-full max-w-4xl px-6'}`}>
         <form onSubmit={handleSend} className="mx-auto">
+          {(isLoadingSecrets || secrets.length > 0) && (
+            <PromptChipsBar
+              secrets={secrets}
+              isLoading={isLoadingSecrets}
+              activeLabel={isSecretPromptSelected ? activeDropdown : null}
+              onSelect={(secret) => handleDropdownSelect(secret.name, secret.id)}
+              disabled={!fileId || processingStatus?.status !== 'processed' || isGenerating}
+              size={isSplitView ? 'compact' : 'default'}
+              className={isSplitView ? 'mb-1' : 'mb-1.5'}
+            />
+          )}
           <div className={`flex items-center space-x-2 bg-gray-50 rounded-xl border border-gray-300 ${isSplitView ? 'px-2 py-1.5' : 'px-5 py-4'} focus-within:border-blue-400 focus-within:bg-white focus-within:shadow-sm transition-all`}>
             <UploadOptionsMenu
               fileInputRef={fileInputRef}
@@ -134,40 +130,6 @@ const ChatInputPanel = ({
               disabled={isUploading}
               multiple
             />
-
-            <div className="relative flex-shrink-0" ref={dropdownRef}>
-              <button
-                type="button"
-                onClick={() => setShowDropdown(!showDropdown)}
-                disabled={!fileId || processingStatus?.status !== 'processed' || isLoading || isGeneratingInsights || isLoadingSecrets}
-                className={`flex items-center space-x-1.5 ${isSplitView ? 'px-1.5 py-1 text-xs' : 'px-3 py-1.5 text-sm'} font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
-              >
-                <BookOpen className={`${isSplitView ? 'h-3 w-3' : 'h-4 w-4'}`} />
-                <span className="truncate max-w-[80px]">{isLoadingSecrets ? 'Load...' : activeDropdown}</span>
-                <ChevronDown className={`${isSplitView ? 'h-3 w-3' : 'h-4 w-4'}`} />
-              </button>
-
-              {showDropdown && !isLoadingSecrets && (
-                <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                  {secrets.length > 0 ? (
-                    secrets.map((secret) => (
-                      <button
-                        key={secret.id}
-                        type="button"
-                        onClick={() => handleDropdownSelect(secret.name, secret.id)}
-                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg transition-colors"
-                      >
-                        {secret.name}
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-4 py-2.5 text-sm text-gray-500">
-                      No analysis prompts available
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
 
             <input
               type="text"

@@ -12,6 +12,22 @@ import { AI_CHATBOT_URL } from "../../config/apiConfig"
 const WS_URL = AI_CHATBOT_URL.replace(/^http/, "ws")
 const INITIAL_PLAYBACK_LEAD = 0.30   // 300 ms initial buffer — absorbs first burst jitter
 const RECOVERY_PLAYBACK_LEAD = 0.18  // 180 ms recovery — bridges tool-call pauses
+const VOICE_PLACEHOLDER = "Voice question..."
+
+function isRealSpeech(text) {
+  const t = String(text || "").trim()
+  return t.length > 0 && t !== VOICE_PLACEHOLDER
+}
+
+function mergeTranscriptChunk(current, chunk) {
+  const c = String(chunk || "").trim()
+  if (!c) return String(current || "").trim()
+  const cur = String(current || "").trim()
+  if (!cur || cur === VOICE_PLACEHOLDER) return c
+  if (c.startsWith(cur)) return c
+  if (cur.endsWith(c)) return cur
+  return `${cur} ${c}`.trim().replace(/\s+/g, " ")
+}
 
 // Brand palette — matches #21C1B6 teal used across the app
 const T = {
@@ -635,10 +651,6 @@ export default function AppAssistant() {
 
       ws.onopen = () => {
         setMicStatus("live")
-        setMessages(prev => [
-          ...prev.filter(m => m.role !== "system"),
-          { role: "user", text: "Voice question...", voicePlaceholder: true },
-        ])
         // Stream mic audio continuously — Gemini Live VAD handles turn detection.
         // Session stays alive until user clicks stop.
         processor.onaudioprocess = (e) => {
@@ -670,21 +682,12 @@ export default function AppAssistant() {
             if (chunk) {
               setMessages(prev => {
                 const clean = prev.filter(m => m.role !== "system")
-                let placeholderIdx = -1
-                for (let i = clean.length - 1; i >= 0; i--) {
-                  if (clean[i].role === "user" && clean[i].voicePlaceholder) { placeholderIdx = i; break }
+                const last = clean[clean.length - 1]
+                if (last?.role === "user" && last.voicePending) {
+                  const newText = mergeTranscriptChunk(last.text, chunk)
+                  return [...clean.slice(0, -1), { role: "user", text: newText, voicePending: true }]
                 }
-                if (placeholderIdx !== -1) {
-                  const cur = clean[placeholderIdx].text === "Voice question..." ? "" : clean[placeholderIdx].text
-                  let newText
-                  if (chunk.startsWith(cur)) newText = chunk
-                  else if (!cur.endsWith(chunk)) newText = `${cur} ${chunk}`.trim().replace(/\s+/g, " ")
-                  else newText = cur
-                  const updated = [...clean]
-                  updated[placeholderIdx] = { ...clean[placeholderIdx], text: newText }
-                  return updated
-                }
-                return clean
+                return [...clean, { role: "user", text: chunk, voicePending: true }]
               })
             }
           }
@@ -695,7 +698,6 @@ export default function AppAssistant() {
                 const clean = prev.filter(m => m.role !== "system")
                 const last = clean[clean.length - 1]
                 if (last?.role === "assistant" && last.voiceStreaming) {
-                  // Merge into existing streaming message — preserve newlines for markdown
                   const cur = last.text || ""
                   let full
                   if (chunk.startsWith(cur)) full = chunk
@@ -703,17 +705,11 @@ export default function AppAssistant() {
                   else full = cur
                   return [...clean.slice(0, -1), { ...last, text: full }]
                 }
-                // New voice answer starting — check if placeholder already present
-                const lastIsVoicePlaceholder = last?.role === "user" && last?.voicePlaceholder
-                if (lastIsVoicePlaceholder) {
+                const lastUser = [...clean].reverse().find(m => m.role === "user")
+                if (lastUser && isRealSpeech(lastUser.text)) {
                   return [...clean, { role: "assistant", text: chunk, voiceStreaming: true }]
                 }
-                // Second+ question in same session — insert placeholder then answer
-                return [
-                  ...clean,
-                  { role: "user", text: "Voice question...", voicePlaceholder: true },
-                  { role: "assistant", text: chunk, voiceStreaming: true },
-                ]
+                return clean
               })
             }
           }
@@ -732,19 +728,27 @@ export default function AppAssistant() {
                 prev.filter(m => m.role !== "system")
                     .map(m => {
                       if (m.voiceStreaming) return { role: m.role, text: m.text }
-                      if (m.voicePlaceholder) return { role: m.role, text: m.text, voicePlaceholder: true }
+                      if (m.voicePending) {
+                        if (!isRealSpeech(m.text)) return null
+                        return { role: m.role, text: m.text.trim(), voiceInput: true }
+                      }
                       return m
                     })
+                    .filter(Boolean)
               )
             } else if (!voiceDoneRef.current) {
-              // Multi-turn: session stays open, mic keeps streaming.
-              // Do NOT reset nextPlayRef — current turn audio is still buffered.
               setMicStatus("live")
-              setMessages(prev => [
-                ...prev.filter(m => m.role !== "system")
-                       .map(m => m.voicePlaceholder ? { role: m.role, text: m.text } : m),
-                { role: "user", text: "Voice question...", voicePlaceholder: true },
-              ])
+              setMessages(prev =>
+                prev.filter(m => m.role !== "system")
+                    .map(m => {
+                      if (m.voicePending) {
+                        if (!isRealSpeech(m.text)) return null
+                        return { role: m.role, text: m.text.trim(), voiceInput: true }
+                      }
+                      return m
+                    })
+                    .filter(Boolean)
+              )
             }
           }
           if (msg.type === "error") {
@@ -953,8 +957,12 @@ export default function AppAssistant() {
                       while (i < visible.length) {
                         const msg = visible[i]
                         if (msg.role === "user") {
+                          if (!isRealSpeech(msg.text) && (msg.voicePlaceholder || msg.voicePending)) {
+                            i++
+                            continue
+                          }
                           const next = visible[i + 1]
-                          const isVoice = !!msg.voicePlaceholder
+                          const isVoice = !!(msg.voiceInput || msg.voicePending)
                           if (next?.role === "assistant") {
                             turns.push({ id: i, question: msg.text, answer: next, isVoice })
                             i += 2
@@ -1077,24 +1085,16 @@ export default function AppAssistant() {
         )}
 
         <AnimatePresence mode="wait" initial={false}>
-          {open ? (
-            <Motion.svg key="x" className="w-4 h-4"
-              initial={{ rotate: -90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: 90, opacity: 0 }}
-              transition={{ duration: 0.18 }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </Motion.svg>
-          ) : (
-            <Motion.svg key="ai" className="w-4 h-4"
-              initial={{ rotate: 90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: -90, opacity: 0 }}
-              transition={{ duration: 0.18 }} viewBox="0 0 24 24" fill="none">
-              <path d="M12 2l1.09 3.26L16.5 6l-3.41 1.09L12 10.5l-1.09-3.41L7.5 6l3.41-1.74L12 2z" fill="rgba(255,255,255,0.95)" />
-              <path d="M18 12l.73 2.18L21 15l-2.27.73L18 18l-.73-2.27L15 15l2.27-.73L18 12z" fill="rgba(255,255,255,0.70)" />
-              <path d="M6 16l.55 1.64L8 18l-1.45.55L6 20l-.55-1.45L4 18l1.45-.55L6 16z" fill="rgba(255,255,255,0.50)" />
-            </Motion.svg>
-          )}
+          <Motion.svg key="ai" className="w-4 h-4"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+            transition={{ duration: 0.18 }} viewBox="0 0 24 24" fill="none">
+            <path d="M12 2l1.09 3.26L16.5 6l-3.41 1.09L12 10.5l-1.09-3.41L7.5 6l3.41-1.74L12 2z" fill="rgba(255,255,255,0.95)" />
+            <path d="M18 12l.73 2.18L21 15l-2.27.73L18 18l-.73-2.27L15 15l2.27-.73L18 12z" fill="rgba(255,255,255,0.70)" />
+            <path d="M6 16l.55 1.64L8 18l-1.45.55L6 20l-.55-1.45L4 18l1.45-.55L6 16z" fill="rgba(255,255,255,0.50)" />
+          </Motion.svg>
         </AnimatePresence>
 
-        <span>{open ? "Close" : "AI Help"}</span>
+        <span>AI Help</span>
 
         {!open && (
           <span className="w-2 h-2 rounded-full flex-shrink-0"

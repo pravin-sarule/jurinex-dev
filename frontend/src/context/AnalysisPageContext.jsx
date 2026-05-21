@@ -6,6 +6,7 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import {
   Search, Send, FileText, Layers, Trash2, RotateCcw,
   ArrowRight, ChevronRight, AlertTriangle, Clock, Loader2,
@@ -122,20 +123,13 @@ export const AnalysisPageProvider = ({
   };
 
   const fetchSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, { method: 'GET', headers });
-      if (!response.ok) throw new Error(`Failed to fetch secrets: ${response.status}`);
-
-      const secretsData = await response.json();
-      console.log('[fetchSecrets] Raw secrets data:', secretsData);
+      const secretsData = await fetchSecretsList();
       setSecrets(secretsData || []);
-      
       if (secretsData && secretsData.length > 0) {
         setActiveDropdown(secretsData[0].name);
         setSelectedSecretId(secretsData[0].id);

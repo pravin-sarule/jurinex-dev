@@ -135,7 +135,7 @@ const ChatbotWidget = () => {
   const [demoSlots, setDemoSlots]         = useState([])
   const [showSlotModal, setShowSlotModal] = useState(false)
   const [selectedSlot, setSelectedSlot]   = useState(null)
-  const [bookingForm, setBookingForm]     = useState({ name: "", email: "", company: "" })
+  const [bookingForm, setBookingForm]     = useState({ name: "", email: "", phone: "", company: "" })
   const [bookingStep, setBookingStep]     = useState("slots") // slots | form | confirming | done | error
   const [bookingMsg, setBookingMsg]       = useState("")
   const [bookingLoading, setBookingLoading] = useState(false)
@@ -149,6 +149,7 @@ const ChatbotWidget = () => {
   const streamRef              = useRef(null)
   const voiceTurnFinishedRef   = useRef(false)
   const awaitingFinalResponseRef = useRef(false)
+  const voiceHadSuccessfulTurnRef = useRef(false)
   const stopTimeoutRef         = useRef(null)
   const voiceReplyBufferRef    = useRef("")
   const voiceInputBufferRef    = useRef("")
@@ -231,38 +232,33 @@ const ChatbotWidget = () => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText() }
   }
 
-  // ── audio ────────────────────────────────────────────────────────────────────
+  // ── audio helpers (mirrors AppAssistant pattern exactly) ────────────────────
+
+  const cleanupAudio = useCallback(() => {
+    sourceRef.current?.disconnect()
+    processorRef.current?.disconnect()
+    audioCtxRef.current?.close().catch(() => {})
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    audioCtxRef.current = null; sourceRef.current = null
+    processorRef.current = null; streamRef.current = null
+    nextPlayTimeRef.current = 0
+  }, [])
 
   const stopAudio = useCallback(() => {
     voiceTurnFinishedRef.current = true
     awaitingFinalResponseRef.current = true
-    try {
-      chatbotLog("audio stop: sending end before close")
-      wsRef.current?.send(JSON.stringify({ type: "end" }))
-    } catch {
-      chatbotError("Could not notify voice service before closing.")
-    }
-    chatbotLog("audio stop: stopping mic, waiting for final server response")
-    sourceRef.current?.disconnect()
-    processorRef.current?.disconnect()
-    audioCtxRef.current?.close()
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    audioCtxRef.current = null
-    sourceRef.current = null; processorRef.current = null; streamRef.current = null
-    nextPlayTimeRef.current = 0
+    try { wsRef.current?.send(JSON.stringify({ type: "end" })) } catch {}
+    cleanupAudio()
     setMicStatus("connecting")
-
     clearTimeout(stopTimeoutRef.current)
     stopTimeoutRef.current = setTimeout(() => {
-      chatbotLog("audio stop fallback: closing websocket after timeout")
       try { wsRef.current?.close() } catch {}
       wsRef.current = null
       awaitingFinalResponseRef.current = false
       setMicStatus("idle")
     }, 45000)
-  }, [])
+  }, [cleanupAudio])
 
-  // Hard reset used by X button — tears down immediately, no waiting for AI response
   const forceCloseAudio = useCallback(() => {
     clearTimeout(stopTimeoutRef.current)
     voiceTurnFinishedRef.current = true
@@ -270,18 +266,12 @@ const ChatbotWidget = () => {
     try { wsRef.current?.send(JSON.stringify({ type: "end" })) } catch {}
     try { wsRef.current?.close() } catch {}
     wsRef.current = null
-    sourceRef.current?.disconnect()
-    processorRef.current?.disconnect()
-    audioCtxRef.current?.close()
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    audioCtxRef.current = null
-    sourceRef.current = null; processorRef.current = null; streamRef.current = null
+    cleanupAudio()
     playCtxRef.current?.close().catch(() => {})
     playCtxRef.current = null
     nextPlayTimeRef.current = 0
     setMicStatus("idle")
-  }, [])
-
+  }, [cleanupAudio])
 
   useEffect(() => {
     if (micStatus === "live" || micStatus === "idle" || micStatus === "error") {
@@ -294,86 +284,56 @@ const ChatbotWidget = () => {
       playCtxRef.current = new AudioContext({ sampleRate: 24000 })
       nextPlayTimeRef.current = 0
     }
+    if (playCtxRef.current.state === "suspended") {
+      playCtxRef.current.resume().catch(() => {})
+    }
     return playCtxRef.current
   }, [])
 
-  const downsampleTo16k = useCallback((input, inputRate) => {
-    if (inputRate === 16000) return input
-    const ratio = inputRate / 16000
-    const outputLength = Math.max(1, Math.round(input.length / ratio))
-    const output = new Float32Array(outputLength)
-    for (let i = 0; i < outputLength; i++) {
-      const start = Math.floor(i * ratio)
-      const end = Math.min(Math.floor((i + 1) * ratio), input.length)
-      let sum = 0
-      for (let j = start; j < end; j++) sum += input[j]
-      output[i] = sum / Math.max(end - start, 1)
+  const resample = useCallback((input, from, to) => {
+    if (!input?.length || from === to) return input
+    const ratio = from / to
+    const out = new Float32Array(Math.max(1, Math.round(input.length / ratio)))
+    for (let i = 0; i < out.length; i++) {
+      const idx = Math.floor(i * ratio)
+      const frac = i * ratio - idx
+      out[i] = (input[idx] ?? 0) + ((input[Math.min(idx + 1, input.length - 1)] ?? input[idx] ?? 0) - (input[idx] ?? 0)) * frac
     }
-    return output
-  }, [])
-
-  const resampleFloat32 = useCallback((input, fromRate, toRate) => {
-    if (!input?.length || fromRate === toRate) return input
-    const ratio = fromRate / toRate
-    const outputLength = Math.max(1, Math.round(input.length / ratio))
-    const output = new Float32Array(outputLength)
-    for (let i = 0; i < outputLength; i++) {
-      const srcIndex = i * ratio
-      const idx = Math.floor(srcIndex)
-      const frac = srcIndex - idx
-      const a = input[idx] ?? 0
-      const b = input[Math.min(idx + 1, input.length - 1)] ?? a
-      output[i] = a + (b - a) * frac
-    }
-    return output
+    return out
   }, [])
 
   const pcm16ToBase64 = useCallback((samples) => {
     const bytes = new Uint8Array(samples.buffer)
-    let binary = ""
-    const chunkSize = 0x8000
-    for (let i = 0; i < bytes.length; i += chunkSize)
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
-    return btoa(binary)
+    let bin = ""
+    for (let i = 0; i < bytes.length; i += 0x8000)
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+    return btoa(bin)
   }, [])
 
-  const scheduleAudioChunk = useCallback((base64Data, mimeType) => {
+  const scheduleAudio = useCallback((b64, mime) => {
     try {
-      chatbotLog("audio playback chunk", { chars: base64Data?.length || 0, mimeType })
-      const sourceSampleRate = mimeType?.includes("24000") ? 24000 : 16000
-      const raw = atob(base64Data)
+      const sr = mime?.includes("24000") ? 24000 : 16000
+      const raw = atob(b64)
       const int16 = new Int16Array(raw.length / 2)
       for (let i = 0; i < int16.length; i++)
-        int16[i] = (raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8))
-      let float32 = new Float32Array(int16.length)
-      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
-
+        int16[i] = raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8)
+      let f32 = new Float32Array(int16.length)
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
       const ctx = getPlayCtx()
-      if (ctx.sampleRate !== sourceSampleRate)
-        float32 = resampleFloat32(float32, sourceSampleRate, ctx.sampleRate)
-
-      // No per-chunk fade — Gemini streams continuous PCM. Fading chunk
-      // boundaries creates rapid amplitude modulation (stutter) on speech.
-      const playCtx = playCtxRef.current
-      const buf = playCtx.createBuffer(1, float32.length, playCtx.sampleRate)
-      buf.copyToChannel(float32, 0)
-      const src = playCtx.createBufferSource()
-      src.buffer = buf
-      src.connect(playCtx.destination)
-
-      const now = playCtx.currentTime
-      if (!nextPlayTimeRef.current) {
-        nextPlayTimeRef.current = now + INITIAL_PLAYBACK_LEAD_SEC
-      } else if (nextPlayTimeRef.current < now + RECOVERY_PLAYBACK_LEAD_SEC) {
-        nextPlayTimeRef.current = now + RECOVERY_PLAYBACK_LEAD_SEC
-      }
-      const startAt = nextPlayTimeRef.current
-      src.start(startAt)
-      nextPlayTimeRef.current = startAt + buf.duration
+      if (ctx.sampleRate !== sr) f32 = resample(f32, sr, ctx.sampleRate)
+      const buf = ctx.createBuffer(1, f32.length, ctx.sampleRate)
+      buf.copyToChannel(f32, 0)
+      const src = ctx.createBufferSource()
+      src.buffer = buf; src.connect(ctx.destination)
+      const now = ctx.currentTime
+      if (!nextPlayTimeRef.current) nextPlayTimeRef.current = now + INITIAL_PLAYBACK_LEAD_SEC
+      else if (nextPlayTimeRef.current < now + RECOVERY_PLAYBACK_LEAD_SEC) nextPlayTimeRef.current = now + RECOVERY_PLAYBACK_LEAD_SEC
+      src.start(nextPlayTimeRef.current)
+      nextPlayTimeRef.current += buf.duration
     } catch (err) {
-      chatbotError("scheduleAudioChunk error:", err)
+      chatbotError("scheduleAudio error:", err)
     }
-  }, [getPlayCtx, resampleFloat32])
+  }, [getPlayCtx, resample])
 
   useEffect(() => () => {
     clearTimeout(stopTimeoutRef.current)
@@ -383,25 +343,26 @@ const ChatbotWidget = () => {
 
   const startAudio = useCallback(async (bookingMode = false) => {
     chatbotLog("audio start requested", { bookingMode })
-    // Kill any existing WebSocket session before starting a new one — prevents
-    // two simultaneous sessions both playing audio at the same time.
     if (wsRef.current) {
       try { wsRef.current.close() } catch {}
       wsRef.current = null
     }
     clearTimeout(stopTimeoutRef.current)
+    // Always allow the slot popup to appear in a new audio session
+    userClosedDemoRef.current = false
     setMicStatus("connecting")
     voiceTurnFinishedRef.current = false
-
+    voiceHadSuccessfulTurnRef.current = false
     voiceReplyBufferRef.current = ""
     voiceInputBufferRef.current = ""
     setShowSuggestions(false)
-    // Stop any audio still playing from the previous session before starting fresh.
     if (playCtxRef.current && playCtxRef.current.state !== "closed") {
       playCtxRef.current.close().catch(() => {})
       playCtxRef.current = null
       nextPlayTimeRef.current = 0
     }
+    // Create playback AudioContext synchronously within user-gesture before any await
+    getPlayCtx()
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -421,8 +382,7 @@ const ChatbotWidget = () => {
       sourceRef.current = source
       const processor = ctx.createScriptProcessor(4096, 1, 1)
       processorRef.current = processor
-      const silentOutput = ctx.createGain()
-      silentOutput.gain.value = 0
+      const silent = ctx.createGain(); silent.gain.value = 0
 
       const wsUrl = bookingMode
         ? `${AI_CHATBOT_DIRECT_WS_URL}/ws/audio?mode=booking`
@@ -441,43 +401,43 @@ const ChatbotWidget = () => {
             text: bookingMode ? "Agent is connecting — please wait…" : "Listening — speak naturally",
           },
         ])
-        let sentChunks = 0
-        let sentBytes = 0
-        // Stream mic audio continuously — Gemini Live's built-in VAD detects
-        // speech start/end and triggers responses automatically. Never auto-stop
-        // from the frontend; only stopAudio() called by the user's click disconnects.
+        // Stream mic audio — Gemini Live VAD handles turn detection automatically
         processor.onaudioprocess = (e) => {
-          if (voiceTurnFinishedRef.current) return
-          if (ws.readyState !== WebSocket.OPEN) return
-          const ch0 = e.inputBuffer.getChannelData(0)
-          const pcm = downsampleTo16k(ch0, ctx.sampleRate)
-          const int16 = new Int16Array(pcm.length)
-          for (let i = 0; i < pcm.length; i++)
-            int16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32768))
-          const b64 = pcm16ToBase64(int16)
-          sentChunks += 1
-          sentBytes += int16.byteLength
-          chatbotLog("voice websocket send audio", { chunk: sentChunks, bytes: int16.byteLength, totalBytes: sentBytes, b64Chars: b64.length })
-          ws.send(JSON.stringify({ type: "audio", data: b64 }))
+          if (voiceTurnFinishedRef.current || ws.readyState !== WebSocket.OPEN) return
+          const raw = e.inputBuffer.getChannelData(0)
+          const ratio = ctx.sampleRate / 16000
+          const out = new Float32Array(Math.max(1, Math.round(raw.length / ratio)))
+          for (let i = 0; i < out.length; i++) {
+            const start = Math.floor(i * ratio)
+            const end = Math.min(Math.floor((i + 1) * ratio), raw.length)
+            let sum = 0
+            for (let j = start; j < end; j++) sum += raw[j]
+            out[i] = sum / Math.max(end - start, 1)
+          }
+          const int16 = new Int16Array(out.length)
+          for (let i = 0; i < out.length; i++) int16[i] = Math.max(-32768, Math.min(32767, out[i] * 32768))
+          ws.send(JSON.stringify({ type: "audio", data: pcm16ToBase64(int16) }))
         }
-        source.connect(processor)
-        processor.connect(silentOutput)
-        silentOutput.connect(ctx.destination)
+        source.connect(processor); processor.connect(silent); silent.connect(ctx.destination)
       }
 
       ws.onmessage = (ev) => {
-        // Reject messages from a stale WebSocket — happens when a new session
-        // starts before the old one fully closes and its buffered messages fire.
         if (wsRef.current !== ws) return
         try {
           const msg = JSON.parse(ev.data)
           chatbotLog("voice websocket message", msg.type === "audio" ? { ...msg, data: `<base64 ${msg.data?.length || 0} chars>` } : msg)
-          if (msg.type === "audio" && msg.data) scheduleAudioChunk(msg.data, msg.mime_type)
+          if (msg.type === "audio" && msg.data) scheduleAudio(msg.data, msg.mime_type)
           if (msg.type === "slot_selection" && Array.isArray(msg.slots)) {
             setDemoSlots(msg.slots)
             if (!userClosedDemoRef.current) setShowSlotModal(true)
             setBookingStep("slots")
             setSelectedSlot(null)
+          }
+          if (msg.type === "booking_confirmed") {
+            setBookingStep("done")
+            setBookingMsg(msg.message || "Demo booked successfully!")
+            setShowSlotModal(true)
+            setTimeout(closeDemoModal, 4000)
           }
           if (msg.type === "text" && msg.content) {
             const chunk = String(msg.content || "").trim()
@@ -537,12 +497,9 @@ const ChatbotWidget = () => {
                 })
               )
             } else if (!voiceTurnFinishedRef.current) {
-              // Multi-turn: session stays open, mic keeps streaming. Gemini Live
-              // VAD will detect the next question automatically.
-              // Do NOT reset nextPlayTimeRef — turn N audio is still in the Web
-              // Audio schedule buffer; resetting causes turn N+1 to overlap.
               voiceInputBufferRef.current = ""
               voiceReplyBufferRef.current = ""
+              voiceHadSuccessfulTurnRef.current = true
               setMicStatus("live")
               setMessages(prev => [
                 ...prev.filter(m => m.role !== "system").map(m => m.voiceInput ? { role: m.role, text: m.text } : m),
@@ -551,11 +508,19 @@ const ChatbotWidget = () => {
             }
           }
           if (msg.type === "error") {
-            setMessages(prev => [
-              ...prev.filter(m => m.role !== "system"),
-              { role: "assistant", text: msg.message || "Voice service error. Please try again.", error: true },
-            ])
-            stopAudio()
+            if (voiceHadSuccessfulTurnRef.current) {
+              // Session ended after successful exchange (e.g. post-booking teardown) — close silently
+              forceCloseAudio()
+              return
+            }
+            const errText = msg.message || "Voice service error. Please try again."
+            setMessages(prev => {
+              const cleaned = prev.filter(m => m.role !== "system")
+              const last = cleaned[cleaned.length - 1]
+              if (last?.role === "assistant" && last.error && last.text === errText) return cleaned
+              return [...cleaned, { role: "assistant", text: errText, error: true }]
+            })
+            forceCloseAudio()
           }
         } catch {
           chatbotError("Ignoring malformed voice service message.", ev.data)
@@ -564,11 +529,18 @@ const ChatbotWidget = () => {
 
       ws.onerror = (event) => {
         chatbotError("voice websocket error", event)
-        setMessages(prev => [
-          ...prev.filter(m => m.role !== "system"),
-          { role: "assistant", text: "Could not connect to voice service. Please check microphone permissions.", error: true },
-        ])
-        stopAudio()
+        if (voiceHadSuccessfulTurnRef.current) {
+          forceCloseAudio()
+          return
+        }
+        const errText = "Voice connection lost. Please check that the AI service is running and try again."
+        setMessages(prev => {
+          const cleaned = prev.filter(m => m.role !== "system")
+          const last = cleaned[cleaned.length - 1]
+          if (last?.role === "assistant" && last.error && last.text === errText) return cleaned
+          return [...cleaned, { role: "assistant", text: errText, error: true }]
+        })
+        forceCloseAudio()
       }
 
       ws.onclose = () => {
@@ -589,7 +561,7 @@ const ChatbotWidget = () => {
       setMicStatus("error")
       setTimeout(() => setMicStatus("idle"), 2000)
     }
-  }, [stopAudio, scheduleAudioChunk, downsampleTo16k, pcm16ToBase64])
+  }, [stopAudio, forceCloseAudio, scheduleAudio, pcm16ToBase64, getPlayCtx])
 
   const toggleMic = () => {
     if (micStatus === "connecting") return  // prevent double-session while previous is still tearing down
@@ -604,7 +576,7 @@ const ChatbotWidget = () => {
     setShowSlotModal(false)
     setBookingStep("slots")
     setSelectedSlot(null)
-    setBookingForm({ name: "", email: "", company: "" })
+    setBookingForm({ name: "", email: "", phone: "", company: "" })
     setBookingMsg("")
   }
 
@@ -643,7 +615,7 @@ const ChatbotWidget = () => {
   }
 
   const handleBookDemo = async () => {
-    if (!selectedSlot || !bookingForm.name.trim() || !bookingForm.email.trim()) return
+    if (!selectedSlot || !bookingForm.name.trim() || !bookingForm.email.trim() || !bookingForm.phone.trim()) return
     setBookingStep("confirming")
     try {
       const res = await fetch(`${AI_CHATBOT_DIRECT_URL}/api/book-demo`, {
@@ -652,6 +624,7 @@ const ChatbotWidget = () => {
         body: JSON.stringify({
           name: bookingForm.name.trim(),
           email: bookingForm.email.trim(),
+          phone: bookingForm.phone.trim(),
           company: bookingForm.company.trim() || undefined,
           slot_id: selectedSlot.id,
         }),
@@ -678,8 +651,8 @@ const ChatbotWidget = () => {
   // ── render ───────────────────────────────────────────────────────────────────
 
   const isLive  = micStatus === "live"
-  const isBusy  = textLoading || micStatus === "connecting"
-  const canSend = input.trim().length > 0 && !isBusy && !isLive
+  const isBusy  = textLoading
+  const canSend = input.trim().length > 0 && !isBusy
 
   return (
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
@@ -999,7 +972,7 @@ const ChatbotWidget = () => {
                                 if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                                   wsRef.current.send(JSON.stringify({
                                     type: "text",
-                                    content: `The user tapped and selected slot_id=${slot.id} (${slot.label}). Now ask for their full name and email address to complete the booking.`,
+                                    content: `The user tapped and selected slot_id=${slot.id} (${slot.label}). Now ask for their full name, email address, and mobile number to complete the booking.`,
                                   }))
                                 }
                                 setShowSlotModal(false)
@@ -1030,9 +1003,10 @@ const ChatbotWidget = () => {
                           {selectedSlot.label}
                         </div>
                         {[
-                          { key: "name",    label: "Full Name *",  type: "text",  ph: "John Doe" },
-                          { key: "email",   label: "Email *",      type: "email", ph: "john@company.com" },
-                          { key: "company", label: "Company",      type: "text",  ph: "Optional" },
+                          { key: "name",    label: "Full Name *",     type: "text",  ph: "John Doe" },
+                          { key: "email",   label: "Email *",         type: "email", ph: "john@company.com" },
+                          { key: "phone",   label: "Mobile Number *", type: "tel",   ph: "+91 98765 43210" },
+                          { key: "company", label: "Company",         type: "text",  ph: "Optional" },
                         ].map(({ key, label, type, ph }) => (
                           <div key={key}>
                             <label className="text-[10px] font-dmSans font-medium text-gray-500 block mb-0.5">{label}</label>
@@ -1050,7 +1024,7 @@ const ChatbotWidget = () => {
                         ))}
                         <button
                           onClick={handleBookDemo}
-                          disabled={!bookingForm.name.trim() || !bookingForm.email.trim()}
+                          disabled={!bookingForm.name.trim() || !bookingForm.email.trim() || !bookingForm.phone.trim()}
                           className="w-full text-[12px] font-dmSans font-semibold py-2 rounded-xl mt-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                           style={{ background: "linear-gradient(135deg,#0d9488,#0f766e)", color: "#fff", boxShadow: "0 3px 10px rgba(13,148,136,0.35)" }}
                         >
@@ -1149,23 +1123,16 @@ const ChatbotWidget = () => {
                 >
                   {isLive ? (
                     <Motion.svg
-                      className="w-4 h-4 text-white"
-                      fill="currentColor"
-                      viewBox="0 0 20 20"
-                      animate={{ scale: [1, 0.85, 1] }}
-                      transition={{ duration: 0.7, repeat: Infinity }}
+                      className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20"
+                      animate={{ scale: [1, 0.85, 1] }} transition={{ duration: 0.7, repeat: Infinity }}
                     >
                       <rect x="5" y="5" width="10" height="10" rx="2.5" />
                     </Motion.svg>
                   ) : micStatus === "connecting" ? (
                     <Motion.svg
-                      className="w-4 h-4 text-white"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={2}
-                      animate={{ rotate: 360 }}
-                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                      className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24"
+                      stroke="currentColor" strokeWidth={2}
+                      animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                     >
                       <path strokeLinecap="round" d="M12 3a9 9 0 010 18" />
                     </Motion.svg>

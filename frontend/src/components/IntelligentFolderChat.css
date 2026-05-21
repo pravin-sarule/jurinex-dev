@@ -336,15 +336,98 @@
 
 .ai-message {
   background: white;
-  color: #212529;
+  color: #1f1f1f;
   padding: 12px 16px;
   border-radius: 12px;
   border-top-left-radius: 4px;
-  max-width: 85%;
+  max-width: min(92%, calc(100vw - 80px));
   align-self: flex-start;
   word-wrap: break-word;
-  line-height: 1.6;
+  overflow-x: hidden;
+  line-height: 1.75;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+}
+
+/* Scrollable wrapper injected by markdownTableComponents */
+.ai-message .md-table-scroll {
+  overflow-x: auto;
+  margin: 10px 0;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+.ai-message table {
+  border-collapse: collapse;
+  min-width: 480px;
+  width: max-content;
+  font-size: 13px;
+  font-family: 'DM Sans', sans-serif;
+  margin: 0;
+}
+
+.ai-message table th {
+  background: #f8fafc;
+  font-weight: 600;
+  border: 1px solid #d1d5db;
+  padding: 7px 12px;
+  text-align: left;
+  white-space: nowrap;
+  color: #1f2937;
+}
+
+.ai-message table td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 12px;
+  vertical-align: top;
+  text-align: left;
+  word-break: normal;
+  word-wrap: normal;
+  white-space: normal;
+  min-width: 70px;
+  color: #374151;
+  line-height: 1.55;
+}
+
+.ai-message table tbody tr:nth-child(even) td {
+  background: #f9fafb;
+}
+
+.ai-message table tbody tr:hover td {
+  background: #eff6ff;
+}
+
+.ai-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  max-width: 85%;
+  padding: 0 2px;
+}
+
+.ai-msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  font-family: 'DM Sans', sans-serif;
+  white-space: nowrap;
+}
+
+.ai-msg-action-btn:hover {
+  color: #111827;
+  background: #f3f4f6;
+  border-color: #d1d5db;
 }
 
 .learning-card {

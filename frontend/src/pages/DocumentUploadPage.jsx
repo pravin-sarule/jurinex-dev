@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette } from 'lucide-react';
 import { FileManagerContext } from '../context/FileManagerContext';
 import { useAuth } from '../context/AuthContext';
 import CreateFolderModal from '../components/FolderBrowser/CreateFolderModal';
@@ -283,18 +283,28 @@ const DocumentUploadPage = () => {
             </div>
             <p className="text-sm text-gray-400 ml-10">Manage and organize your legal case files</p>
           </div>
-          <button
-            onClick={handleStartCaseFlow}
-            disabled={!canCreateCases}
-            className={`flex items-center gap-2 text-white text-sm font-semibold px-4 py-2.5 rounded-xl shadow-sm transition-all duration-200 flex-shrink-0 ${canCreateCases ? 'hover:shadow-md hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'}`}
-            style={{ background: '#21C1B6' }}
-            onMouseEnter={(e) => { if (canCreateCases) e.currentTarget.style.background = '#1AA49B'; }}
-            onMouseLeave={(e) => (e.currentTarget.style.background = '#21C1B6')}
-            title={!canCreateCases ? 'You do not have permission to create new cases' : undefined}
-          >
-            <Plus className="w-4 h-4" />
-            Create New Case
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => navigate('/branding')}
+              className="flex items-center gap-2 text-sm font-semibold px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:border-gray-300 shadow-sm transition-all duration-200 cursor-pointer"
+              title="Manage Custom Branding"
+            >
+              <Palette className="w-4 h-4 text-teal-600" />
+              Custom Branding
+            </button>
+            <button
+              onClick={handleStartCaseFlow}
+              disabled={!canCreateCases}
+              className={`flex items-center gap-2 text-white text-sm font-semibold px-4 py-2.5 rounded-xl shadow-sm transition-all duration-200 ${canCreateCases ? 'hover:shadow-md hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'}`}
+              style={{ background: '#21C1B6' }}
+              onMouseEnter={(e) => { if (canCreateCases) e.currentTarget.style.background = '#1AA49B'; }}
+              onMouseLeave={(e) => (e.currentTarget.style.background = '#21C1B6')}
+              title={!canCreateCases ? 'You do not have permission to create new cases' : undefined}
+            >
+              <Plus className="w-4 h-4" />
+              Create New Case
+            </button>
+          </div>
         </div>
 
         {/* ── Search & Filters ── */}

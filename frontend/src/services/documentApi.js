@@ -899,10 +899,8 @@ const documentApi = {
   },
 
   getSecrets: async () => {
-    const response = await axios.get(`${SECRETS_API_BASE}/secrets?fetch=true`, {
-      headers: getAuthHeader(),
-    });
-    return response.data;
+    const { fetchSecretsList } = await import('./secretsService');
+    return fetchSecretsList();
   },
 
   getSecretById: async (secretId) => {

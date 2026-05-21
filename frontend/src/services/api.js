@@ -121,14 +121,14 @@ class ApiService {
   }
 
   async registerSoloLawyer(userData) {
-    return this.request("/api/auth/register/solo", {
+    return this.request(`${AUTH_SERVICE_URL}/api/auth/register/solo`, {
       method: "POST",
       body: JSON.stringify(userData),
     });
   }
 
   async registerFirm(firmData) {
-    return this.request("/api/auth/register/firm", {
+    return this.request(`${AUTH_SERVICE_URL}/api/auth/register/firm`, {
       method: "POST",
       body: JSON.stringify(firmData),
     });
@@ -481,7 +481,7 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
 
  async getSecrets() {
  const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
- return this.request(`${base}/secrets?fetch=true`);
+ return this.request(`${base}/secrets?fetch=false`);
  }
 
  async getSecretById(secretId) {
