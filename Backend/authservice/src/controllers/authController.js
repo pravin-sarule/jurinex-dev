@@ -101,16 +101,17 @@ const registerSoloLawyer = async (req, res) => {
     pin_code,
     pan_number,
     gst_number,
-    password
+    password,
+    domain_role,
+    role_id
   } = req.body;
 
   try {
     // Validate required fields
-    if (!full_name || !bar_enrollment_number || !state_bar_council || !email || !mobile || 
-        !office_address || !city || !state || !pin_code || !pan_number || !password) {
-      return res.status(400).json({ 
+    if (!full_name || !email || !mobile || !password) {
+      return res.status(400).json({
         success: false,
-        message: 'All mandatory fields are required' 
+        message: 'All mandatory fields are required'
       });
     }
 
@@ -127,6 +128,10 @@ const registerSoloLawyer = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user
+    const resolvedDomainRole = domain_role && VALID_DOMAIN_ROLES.includes(domain_role.toUpperCase())
+      ? domain_role.toUpperCase()
+      : 'LEGAL_PROFESSIONAL';
+
     const user = await User.create({
       username: full_name,
       email,
@@ -137,25 +142,16 @@ const registerSoloLawyer = async (req, res) => {
       first_login: false,
       is_active: true,
       phone: mobile,
-      location: `${city}, ${state}`
+      location: city && state ? `${city}, ${state}` : null,
+      domain_role: resolvedDomainRole,
+      role_id: role_id || null,
     });
 
-    // Create professional profile with solo lawyer data
-    const profile = await UserProfessionalProfile.findOrCreate(user.id);
-    await UserProfessionalProfile.update(user.id, {
-      full_name,
-      state_bar_council,
-      email,
-      mobile,
-      office_address,
-      city,
-      state,
-      pin_code,
-      pan_number,
-      gst_number: gst_number || null,
-      bar_enrollment_number,
-      is_profile_completed: true
-    });
+    await UserProfessionalProfile.findOrCreate(user.id);
+    const profileUpdate = { is_profile_completed: false };
+    if (bar_enrollment_number) profileUpdate.bar_enrollment_number = bar_enrollment_number;
+    if (state_bar_council) profileUpdate.primary_jurisdiction = state_bar_council;
+    await UserProfessionalProfile.update(user.id, profileUpdate);
 
     // Generate token and create session
     const activeUser = await markUserActiveSession(user.id) || user;
@@ -202,16 +198,17 @@ const registerFirm = async (req, res) => {
     state,
     pin_code,
     pan_number,
-    gst_number
+    gst_number,
+    domain_role,
+    role_id
   } = req.body;
 
   try {
-    // Validate required fields (bar_enrollment_number, enrollment_date, state_bar_council, establishment_date are optional)
-    if (!firm_name || !registering_advocate_name || !firm_type ||
-        !email || !mobile || !office_address || !city || !state || !pin_code || !pan_number) {
-      return res.status(400).json({ 
+    // Validate required fields
+    if (!firm_name || !registering_advocate_name || !firm_type || !email || !mobile) {
+      return res.status(400).json({
         success: false,
-        message: 'All mandatory fields are required' 
+        message: 'All mandatory fields are required'
       });
     }
 
@@ -238,6 +235,10 @@ const registerFirm = async (req, res) => {
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
     // Create firm admin user
+    const firmDomainRole = domain_role && VALID_DOMAIN_ROLES.includes(domain_role.toUpperCase())
+      ? domain_role.toUpperCase()
+      : 'LEGAL_PROFESSIONAL';
+
     const adminUser = await User.create({
       username: registering_advocate_name,
       email,
@@ -248,7 +249,9 @@ const registerFirm = async (req, res) => {
       first_login: true,
       is_active: false,
       phone: mobile,
-      location: `${city}, ${state}`
+      location: city && state ? `${city}, ${state}` : null,
+      domain_role: firmDomainRole,
+      role_id: role_id || null,
     });
 
     // Create firm record
@@ -310,15 +313,30 @@ const registerFirm = async (req, res) => {
   }
 };
 
+const VALID_DOMAIN_ROLES = [
+  'LEGAL_PROFESSIONAL',
+  'CHARTERED_ACCOUNTANT',
+  'FINANCE_PROFESSIONAL',
+  'BANKING_PROFESSIONAL',
+  'CORPORATE_ADVISOR',
+  'TAX_CONSULTANT',
+  'COMPLIANCE_OFFICER',
+  'OTHER',
+];
+
 // Legacy register endpoint (keeping for backward compatibility)
 const register = async (req, res) => {
-  const { username, email, password } = req.body;
+  const { username, email, password, phone, domain_role, role_id } = req.body;
 
   try {
     const existingUser = await User.findByEmail(email);
     if (existingUser) {
       return res.status(400).json({ message: 'User already exists' });
     }
+
+    const resolvedDomainRole = domain_role && VALID_DOMAIN_ROLES.includes(domain_role.toUpperCase())
+      ? domain_role.toUpperCase()
+      : 'OTHER';
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -327,6 +345,9 @@ const register = async (req, res) => {
       email,
       password: hashedPassword,
       auth_type: 'manual',
+      phone: phone || null,
+      domain_role: resolvedDomainRole,
+      role_id: role_id || null,
     });
 
     const token = generateToken(user);
@@ -338,7 +359,9 @@ const register = async (req, res) => {
         id: user.id,
         username: user.username,
         email: user.email,
+        phone: user.phone,
         role: user.role,
+        domain_role: user.domain_role,
         is_blocked: user.is_blocked,
       },
     });

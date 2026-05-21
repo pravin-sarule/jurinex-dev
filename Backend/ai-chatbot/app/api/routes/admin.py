@@ -4,6 +4,8 @@ Changes take effect immediately (config cache is invalidated on update).
 """
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.models import ConfigResponse, ConfigUpdateRequest
@@ -13,9 +15,7 @@ from app.services.db import get_db_connection, is_db_available
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-@router.get("/config", response_model=ConfigResponse, summary="Get active chatbot config")
-def get_config() -> ConfigResponse:
-    cfg = load_chatbot_config()
+def _build_config_response(cfg) -> ConfigResponse:
     return ConfigResponse(
         config_key="default",
         model_text=cfg.model_text,
@@ -34,8 +34,15 @@ def get_config() -> ConfigResponse:
     )
 
 
+@router.get("/config", response_model=ConfigResponse, summary="Get active chatbot config")
+async def get_config() -> ConfigResponse:
+    loop = asyncio.get_running_loop()
+    cfg = await loop.run_in_executor(None, load_chatbot_config)
+    return _build_config_response(cfg)
+
+
 @router.put("/config", response_model=ConfigResponse, summary="Update chatbot config")
-def update_config(request: ConfigUpdateRequest) -> ConfigResponse:
+async def update_config(request: ConfigUpdateRequest) -> ConfigResponse:
     if not is_db_available():
         raise HTTPException(status_code=503, detail="Database not available")
 
@@ -46,14 +53,17 @@ def update_config(request: ConfigUpdateRequest) -> ConfigResponse:
     set_clause = ", ".join(f"{col} = %s" for col in updates)
     values = list(updates.values())
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE chatbot_config SET {set_clause}, updated_at = NOW() "
-                f"WHERE config_key = 'default'",
-                values,
-            )
-        conn.commit()
+    def _do_update():
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE chatbot_config SET {set_clause}, updated_at = NOW() "
+                    f"WHERE config_key = 'default'",
+                    values,
+                )
+            conn.commit()
+        invalidate_config_cache()
 
-    invalidate_config_cache()
-    return get_config()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _do_update)
+    return await get_config()

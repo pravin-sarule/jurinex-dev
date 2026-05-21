@@ -68,16 +68,20 @@ const generateToken = (user) => {
   const userUuid = generateUserUUID(numericId);
   const role = user.role || 'user';
   const accountType = getAccountType(user);
+  const domainRole = user.domain_role || 'OTHER';
+  const roleId = user.role_id || null;
 
-  console.log(`[JWT] Generating token for user: id=${numericId}, role=${role}, account_type=${accountType}`);
+  console.log(`[JWT] Generating token for user: id=${numericId}, role=${role}, account_type=${accountType}, domain_role=${domainRole}, role_id=${roleId}`);
 
   return jwt.sign(
     {
-      id: numericId,           // KEEP: numeric ID for existing services
-      user_uuid: userUuid,     // ADD: UUID for new services (drafting-template-service)
-      email: user.email,       // KEEP: email unchanged
+      id: numericId,
+      user_uuid: userUuid,
+      email: user.email,
       role,
-      account_type: accountType  // SOLO | FIRM_ADMIN | FIRM_USER - document-service skips plan limits for FIRM_ADMIN
+      account_type: accountType,
+      domain_role: domainRole,
+      role_id: roleId,
     },
     process.env.JWT_SECRET,
     { expiresIn: '24h' }

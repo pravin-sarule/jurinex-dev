@@ -311,4 +311,32 @@ router.get('/user/:userId/firm-members', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/internal/roles/by-name/:roleName
+ * Returns the role record from the `roles` table matching the given name (case-insensitive).
+ * Used by document-service to resolve a user's domain_role string → role id for secret_manager filtering.
+ */
+router.get('/roles/by-name/:roleName', async (req, res) => {
+  try {
+    const { roleName } = req.params;
+    if (!roleName) return res.status(400).json({ error: 'roleName is required' });
+    const pool = require('../config/db');
+
+    // Normalise both sides: replace spaces/underscores and compare UPPER.
+    // Handles JWT domain_role format "CHARTERED_ACCOUNTANT" matching DB name
+    // "Chartered Accountant" or "CHARTERED_ACCOUNTANT" stored in roles table.
+    const result = await pool.query(
+      `SELECT id, name FROM roles
+       WHERE UPPER(REPLACE(name, ' ', '_')) = UPPER(REPLACE($1, ' ', '_'))
+       LIMIT 1`,
+      [roleName]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Role not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('[Internal] Error fetching role by name:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

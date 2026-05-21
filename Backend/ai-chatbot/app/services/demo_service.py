@@ -94,7 +94,7 @@ def get_available_slots() -> list[dict]:
         return []
 
 
-def book_demo(name: str, email: str, slot_id: int, company: str = "") -> dict:
+def book_demo(name: str, email: str, slot_id: int, company: str = "", phone: str = "") -> dict:
     """
     Book a demo slot atomically.
     Returns {success, booking_id, scheduled_at, message} or {success, error}.
@@ -134,12 +134,12 @@ def book_demo(name: str, email: str, slot_id: int, company: str = "") -> dict:
                 # Insert booking record
                 cur.execute(
                     """
-                    INSERT INTO demo_bookings (name, email, company, slot_id, scheduled_at, status)
-                    VALUES (%s, %s, %s, %s, %s, 'pending')
+                    INSERT INTO demo_bookings (name, email, phone, company, slot_id, scheduled_at, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending')
                     ON CONFLICT (email, slot_id) DO NOTHING
                     RETURNING id
                     """,
-                    (name, email, company or None, slot_id, slot["start_time"]),
+                    (name, email, phone or None, company or None, slot_id, slot["start_time"]),
                 )
                 booking = cur.fetchone()
 
@@ -153,15 +153,51 @@ def book_demo(name: str, email: str, slot_id: int, company: str = "") -> dict:
 
                 conn.commit()
                 label = _fmt_label(slot["start_time"], slot["end_time"])
+
+                # Create Google Calendar event and generate Meet link
+                cal_result: dict = {}
+                try:
+                    from app.services.calendar_service import create_calendar_event
+                    cal_result = create_calendar_event(
+                        name=name,
+                        email=email,
+                        start_time=slot["start_time"],
+                        end_time=slot["end_time"],
+                        company=company or "",
+                        phone=phone or "",
+                    )
+                except Exception:
+                    logger.exception("calendar_service error — booking still confirmed")
+
+                if not cal_result.get("success"):
+                    logger.warning(
+                        "Calendar event not created for booking_id=%s: %s",
+                        booking["id"],
+                        cal_result.get("error", "unknown"),
+                    )
+                elif cal_result.get("event_id"):
+                    with get_db_connection() as upd_conn:
+                        with upd_conn.cursor() as upd_cur:
+                            upd_cur.execute(
+                                "UPDATE demo_bookings SET status = 'confirmed' WHERE id = %s",
+                                (booking["id"],),
+                            )
+                        upd_conn.commit()
+
+                meeting_link = cal_result.get("meeting_link", "")
+                meet_note = (
+                    f" A Google Meet link ({meeting_link}) has been sent to {email}."
+                    if meeting_link
+                    else f" We'll send details to {email} shortly!"
+                )
                 return {
                     "success": True,
                     "booking_id": booking["id"],
                     "scheduled_at": slot["start_time"].isoformat(),
                     "label": label,
-                    "message": (
-                        f"Your demo is confirmed for {label}. "
-                        f"We'll send details to {email} shortly!"
-                    ),
+                    "meeting_link": meeting_link,
+                    "calendar_event_id": cal_result.get("event_id", ""),
+                    "message": f"Your demo is confirmed for {label}.{meet_note}",
                 }
     except Exception as exc:
         logger.exception("book_demo error slot_id=%s", slot_id)

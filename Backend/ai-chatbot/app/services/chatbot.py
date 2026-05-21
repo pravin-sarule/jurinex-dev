@@ -125,10 +125,11 @@ _BOOK_DEMO_FN_DECLARATION = {
         "properties": {
             "name":    {"type": "STRING",  "description": "Full name of the person"},
             "email":   {"type": "STRING",  "description": "Email address"},
+            "phone":   {"type": "STRING",  "description": "Mobile phone number (required)"},
             "company": {"type": "STRING",  "description": "Company or organisation name (optional)"},
             "slot_id": {"type": "INTEGER", "description": "The exact numeric `id` field returned by getAvailableSlots (e.g. if getAvailableSlots returned [{\"id\": 12, ...}], pass slot_id=12). Never use the option number or position — always use the id value."},
         },
-        "required": ["name", "email", "slot_id"],
+        "required": ["name", "email", "phone", "slot_id"],
     },
 }
 
@@ -192,17 +193,20 @@ DEMO BOOKING CAPABILITY:
 - After getAvailableSlots() returns, reply with ONLY this raw JSON (no extra text before or after):
   {"type":"slot_selection","message":"Great choice! Here are our available demo slots — pick a time that works for you and I'll collect your details.","slots":[{"id":<id>,"label":"<label>"},...]}
 - If no slots are returned, respond warmly: "I'm sorry, no demo slots are available right now. Please check back tomorrow or drop us an email at demo@jurinex.com."
-- After the user selects a slot and provides their name and email, call bookDemo() immediately to confirm — do not ask the user to fill any form.
+- After the user selects a slot and provides their name, email, and mobile number, call bookDemo() immediately to confirm — do not ask the user to fill any form.
 - On successful bookDemo(), confirm warmly: "Your demo is confirmed for <slot label>! We'll send details to <email> shortly."
 """.strip()
 
 _DEMO_AUDIO_ADDENDUM = """
 DEMO BOOKING CAPABILITY:
 - When the user asks to book or schedule a demo, IMMEDIATELY call getAvailableSlots().
-- Read the available slots aloud clearly, e.g.: "We have slots available: Option 1 — Monday, May 5th at 10 AM. Option 2 — Tuesday, May 6th at 2 PM." Then say: "A slot selection panel has appeared on your screen — please tap a slot to choose."
-- After the user picks a slot, ask: "What is your full name?" then "What is your email address?" then "Which company are you from?" (optional).
-- Once you have name, email and slot, call bookDemo() immediately to confirm the booking.
-- Confirm aloud: "Your demo is confirmed! We'll send details to your email shortly."
+- Read the available slots aloud clearly as numbered options, e.g.: "We have slots available: Option 1 — Monday May 5th at 10 AM. Option 2 — Tuesday May 6th at 2 PM. Which one works for you?"
+- A slot selection panel also appears on screen. The user may EITHER tap a slot on screen OR say the option number aloud — both are valid. Do NOT wait for a UI tap; accept verbal selection immediately.
+- When the user says their choice (e.g. "option 1", "the first one", "Monday 10 AM"), identify the matching slot from the getAvailableSlots result and remember its exact numeric id.
+- If the user taps a slot on screen, you will receive a message like "The user tapped and selected slot_id=X (label)." — use that slot_id.
+- After the slot is chosen (verbally or via tap), ask in order: "What is your full name?" then "What is your email address?" then "What is your mobile number?" then "Which company are you from?" (optional — skip if user says none).
+- Once you have name, email, mobile number, and slot_id, call bookDemo() IMMEDIATELY. Never ask the user to fill a form.
+- After bookDemo() succeeds, confirm: "Your demo is confirmed for <slot label>! We will send details to <email> shortly."
 - If no slots are available, apologise warmly and suggest trying again tomorrow.
 """.strip()
 
@@ -373,6 +377,7 @@ def _execute_text_tool(name: str, args: dict, cfg: ChatbotConfig, top_k_override
             email=str(args.get("email", "")),
             slot_id=int(args.get("slot_id", 0)),
             company=str(args.get("company", "")),
+            phone=str(args.get("phone", "")),
         )
 
     logger.warning("TEXT TOOL: unknown tool name=%s", name)
@@ -675,6 +680,9 @@ async def handle_audio_session(
             cfg.speaking_rate, cfg.pitch, cfg.volume_gain_db,
         )
 
+        # Native audio models (e.g. gemini-3.1-flash-live-preview) support AUDIO only.
+        # TEXT in response_modalities causes immediate 1011 disconnect — use
+        # output_audio_transcription for on-screen text instead.
         live_config = gt.LiveConnectConfig(
             response_modalities=["AUDIO"],
             output_audio_transcription=_make_audio_transcription_config(gt),
@@ -687,9 +695,9 @@ async def handle_audio_session(
                 automatic_activity_detection=gt.AutomaticActivityDetection(
                     disabled=False,
                     start_of_speech_sensitivity=gt.StartSensitivity.START_SENSITIVITY_HIGH,
-                    end_of_speech_sensitivity=gt.EndSensitivity.END_SENSITIVITY_LOW,
-                    prefix_padding_ms=300,
-                    silence_duration_ms=1000,
+                    end_of_speech_sensitivity=gt.EndSensitivity.END_SENSITIVITY_HIGH,
+                    prefix_padding_ms=200,
+                    silence_duration_ms=500,
                 )
             ),
             speech_config=gt.SpeechConfig(
@@ -704,6 +712,7 @@ async def handle_audio_session(
             system_instruction=audio_system_instruction,
         )
 
+        _gather_completed = False
         async with client.aio.live.connect(
             model=model_name, config=live_config
         ) as session:
@@ -838,8 +847,17 @@ async def handle_audio_session(
                                             email=str(args.get("email", "")),
                                             slot_id=int(args.get("slot_id", 0)),
                                             company=str(args.get("company", "")),
+                                            phone=str(args.get("phone", "")),
                                         ),
                                     )
+                                    # Push booking result to frontend so it can show confirmation UI
+                                    if result.get("success"):
+                                        await send_response({
+                                            "type": "booking_confirmed",
+                                            "label": result.get("label", ""),
+                                            "message": result.get("message", ""),
+                                            "booking_id": result.get("booking_id"),
+                                        })
                                     fn_responses.append(
                                         gt.FunctionResponse(id=fc.id, name=fc.name, response={"result": result})
                                     )
@@ -949,6 +967,7 @@ async def handle_audio_session(
             receive_task = asyncio.create_task(_receive_responses())
             try:
                 await asyncio.gather(forward_task, receive_task)
+                _gather_completed = True
             finally:
                 for task in (forward_task, receive_task):
                     if not task.done():
@@ -986,5 +1005,20 @@ async def handle_audio_session(
                 )
 
     except Exception as exc:
+        err_str = str(exc)
+        # 1011 is Gemini Live's internal server close code — it fires when Gemini
+        # terminates the session (quota, timeout, or post-function-call teardown).
+        # After a normal gather completion, suppress it so the client sees a clean
+        # ws.onclose instead of an error banner. Mid-session 1011 gets a friendlier msg.
+        if locals().get("_gather_completed"):
+            logger.info("Gemini Live closed after normal completion: %s", exc)
+            return
+        if "1011" in err_str:
+            logger.warning("Gemini Live disconnected with code 1011: %s", exc)
+            await send_response({
+                "type": "error",
+                "message": "The voice session was disconnected. Please tap the mic to start a new session.",
+            })
+            return
         logger.error("handle_audio_session error: %s", exc)
-        await send_response({"type": "error", "message": str(exc)})
+        await send_response({"type": "error", "message": err_str})

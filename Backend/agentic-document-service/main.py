@@ -8,12 +8,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes.audio_chat import router as audio_chat_router
+from app.api.routes.speech import router as speech_router
 from app.api.routes.cases import router as cases_router
 from app.api.routes.content import router as content_router
 from app.api.routes.files import router as files_router
 from app.api.routes.health import router as health_router
 from app.api.routes.rbac import router as rbac_router
+from app.api.routes.branding import router as branding_router
 from app.api.routes.summarization_config_admin import router as summarization_config_admin_router
 from app.core.config import BASE_DIR, get_settings
 from app.core.logging import configure_logging
@@ -86,8 +87,9 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router)
+    app.include_router(branding_router)
     app.include_router(summarization_config_admin_router)
-    app.include_router(audio_chat_router)
+    app.include_router(speech_router)
     app.include_router(cases_router)
     app.include_router(content_router)
     app.include_router(rbac_router)

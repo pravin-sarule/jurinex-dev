@@ -25,7 +25,9 @@ class User {
     first_login = true,
     is_active = true,
     phone = null,
-    location = null
+    location = null,
+    domain_role = 'OTHER',
+    role_id = null
   }) {
     const result = await pool.query(
       `INSERT INTO users (
@@ -33,12 +35,12 @@ class User {
         auth_type, profile_image, firebase_uid,
         role, is_blocked, razorpay_customer_id,
         account_type, approval_status, first_login, is_active,
-        phone, location,
+        phone, location, domain_role, role_id,
         created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       RETURNING *`,
-      [username, email, password, google_uid, auth_type, profile_image, firebase_uid, role, is_blocked, razorpay_customer_id, account_type, approval_status, first_login, is_active, phone, location]
+      [username, email, password, google_uid, auth_type, profile_image, firebase_uid, role, is_blocked, razorpay_customer_id, account_type, approval_status, first_login, is_active, phone, location, domain_role, role_id]
     );
     return result.rows[0];
   }

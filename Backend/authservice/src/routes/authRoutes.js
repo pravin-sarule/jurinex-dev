@@ -50,4 +50,16 @@ router.get('/firm/info', protect, getFirmInfo);
 // Google Drive OAuth routes
 router.use('/', googleDriveRoutes);
 
+// Public: list all professional roles for registration dropdowns
+router.get('/roles', async (req, res) => {
+  try {
+    const pool = require('../config/db');
+    const result = await pool.query('SELECT id, name FROM roles ORDER BY name ASC');
+    res.json({ roles: result.rows });
+  } catch (error) {
+    console.error('[AuthRoutes] Error fetching roles:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
+from app.core.limiter import limiter
+from app.core.config import get_settings
 from app.schemas.models import ChatRequest, ChatResponse
 from app.services.chatbot import text_chat
 from app.services.session_service import get_or_create_session, save_exchange, get_history
@@ -12,22 +17,37 @@ logger = logging.getLogger("ai_chatbot.chat")
 
 
 @router.post("", response_model=ChatResponse, summary="Text chat (Gemini function-calling)")
-def chat_endpoint(body: ChatRequest, request: Request) -> ChatResponse:
+@limiter.limit(lambda: get_settings().rate_limit_chat)
+async def chat_endpoint(
+    body: ChatRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> ChatResponse:
     ip_address = request.client.host if request.client else None
-    logger.info("POST /api/chat  message=%r  session=%s  ip=%s", body.message, body.session_id, ip_address)
+    logger.info("POST /api/chat  session=%s  ip=%s", body.session_id, ip_address)
 
-    session_id = get_or_create_session(body.session_id, mode="text")
+    loop = asyncio.get_running_loop()
+
+    # Session lookup/create — fast DB query, but still blocking so run in thread
+    session_id = await loop.run_in_executor(
+        None, get_or_create_session, body.session_id, "text"
+    )
     logger.debug("POST /api/chat  resolved_session=%s", session_id)
 
-    result = text_chat(body.message, session_id=session_id)
-    logger.debug("POST /api/chat  answer_len=%d  answer=%r", len(result.answer or ""), result.answer)
+    # Gemini API call (2–6 s, blocking) — runs in thread pool so the event loop
+    # stays free to serve other requests concurrently
+    result = await loop.run_in_executor(None, text_chat, body.message, session_id)
+    logger.debug("POST /api/chat  answer_len=%d", len(result.answer or ""))
 
-    save_exchange(session_id, body.message, result.answer)
-
-    log_token_usage(
+    # DB writes happen AFTER the response is returned to the user.
+    # This cuts ~20–50 ms off perceived latency without losing any data.
+    model_name = _get_text_model()
+    background_tasks.add_task(save_exchange, session_id, body.message, result.answer)
+    background_tasks.add_task(
+        log_token_usage,
         session_id=session_id,
         mode="text",
-        model_name=_get_text_model(),
+        model_name=model_name,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         ip_address=ip_address,
@@ -38,11 +58,11 @@ def chat_endpoint(body: ChatRequest, request: Request) -> ChatResponse:
 
 
 @router.get("/history/{session_id}", summary="Fetch conversation history")
-def chat_history(session_id: str, limit: int = 20) -> list[dict]:
-    """Returns past messages for a session, oldest first."""
-    logger.info("GET /api/chat/history/%s limit=%s", session_id, limit)
-    messages = get_history(session_id, limit=limit)
-    logger.debug("GET /api/chat/history/%s returned=%d", session_id, len(messages))
+async def chat_history(session_id: str, limit: int = 20) -> list[dict]:
+    loop = asyncio.get_running_loop()
+    messages = await loop.run_in_executor(
+        None, lambda: get_history(session_id, limit=limit)
+    )
     if not messages:
         raise HTTPException(status_code=404, detail="Session not found or empty")
     return messages

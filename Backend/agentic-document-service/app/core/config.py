@@ -236,20 +236,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("STT_MAX_CONCURRENT"),
     )
 
-    # ── Audio chat (Gemini Live) ───────────────────────────────────────────────
-    audio_model: str = Field(
-        default="gemini-3.1-flash-live-preview",
-        validation_alias=AliasChoices("AUDIO_MODEL", "GEMINI_AUDIO_MODEL"),
-    )
-    audio_voice_name: str = Field(
-        default="Puck",
-        validation_alias=AliasChoices("AUDIO_VOICE_NAME"),
-    )
-    audio_top_k_results: int = Field(
-        default=5,
-        validation_alias=AliasChoices("AUDIO_TOP_K_RESULTS"),
-    )
-
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:

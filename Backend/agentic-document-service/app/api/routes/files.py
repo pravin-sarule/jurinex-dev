@@ -187,11 +187,64 @@ def get_internal_user_analytics(body: InternalAnalyticsRequest) -> dict[str, Any
     return {"success": True, "data": analytics_map}
 
 
-@router.get("/secrets")
-def list_secrets_endpoint(fetch: str | None = Query(None)) -> list[dict[str, Any]]:
-    """List secret prompts from `secret_manager` (+ optional GCP values when fetch=true)."""
+def _extract_role_id_from_token(authorization: str | None) -> str | None:
+    """Decode JWT Bearer token and return the user's role_id UUID.
+
+    Falls back to resolving role_id via authservice using domain_role for tokens
+    issued before role_id was added to the JWT payload.
+    """
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1]
     try:
-        return list_secret_prompts(fetch=fetch)
+        import jwt as pyjwt
+        secret = get_settings().jwt_secret
+        if not secret:
+            return None
+        payload = pyjwt.decode(token, secret, algorithms=["HS256"])
+        role_id = payload.get("role_id")
+        if role_id:
+            return str(role_id)
+        # Fallback: old token has no role_id — resolve from domain_role via authservice
+        domain_role = payload.get("domain_role")
+        if domain_role and domain_role != "OTHER":
+            return _resolve_role_id_from_authservice(domain_role)
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_role_id_from_authservice(domain_role: str) -> str | None:
+    """Call authservice to resolve a domain_role string → role UUID."""
+    try:
+        import httpx
+        base = str(get_settings().auth_service_url or "").rstrip("/")
+        if not base:
+            return None
+        response = httpx.get(
+            f"{base}/api/auth/internal/roles/by-name/{domain_role}",
+            timeout=3.0,
+        )
+        if response.status_code == 200:
+            return str(response.json().get("id") or "") or None
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@router.get("/secrets")
+def list_secrets_endpoint(
+    fetch: str | None = Query(None),
+    authorization: str | None = Header(None),
+) -> list[dict[str, Any]]:
+    """List secret prompts from `secret_manager` filtered by the caller's role_id from JWT."""
+    user_role_id = _extract_role_id_from_token(authorization)
+    logger.debug("[secrets] list request role_id=%s", user_role_id)
+    try:
+        return list_secret_prompts(fetch=fetch, user_role_id=user_role_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
