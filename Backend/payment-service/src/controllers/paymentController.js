@@ -3,6 +3,8 @@ const crypto = require("crypto");
 const db = require("../config/db");
 const TokenUsageService = require("../services/tokenUsageService");
 const { sendPurchaseConfirmationEmail } = require("../services/purchaseEmailService");
+const { resolveEffectivePlan } = require("../services/effectivePlanService");
+const { syncUserActivePlanToAuth } = require("../services/userPlanSyncService");
 const axios = require('axios'); // Import axios for HTTP requests
 
 const razorpay = new Razorpay({
@@ -62,45 +64,6 @@ const createOneTimeOrder = async (req, res) => {
     });
   }
 };
-
-const verifyOneTimePayment = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan_name } = req.body || {};
-
-    if (!userId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-      return res.status(400).json({ success: false, message: "Missing verification data" });
-    }
-
-    const generatedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_SECRET)
-      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-      .digest("hex");
-
-    if (generatedSignature !== razorpay_signature) {
-      return res.status(400).json({ success: false, message: "Invalid payment signature" });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Payment verified successfully",
-      payment: {
-        order_id: razorpay_order_id,
-        payment_id: razorpay_payment_id,
-        plan_name: plan_name || null,
-      },
-    });
-  } catch (err) {
-    console.error("🔥 verifyOneTimePayment error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Payment verification failed",
-      error: err?.message || "Unknown verification error",
-    });
-  }
-};
-
-
 
 const startSubscription = async (req, res) => {
   try {
@@ -876,6 +839,10 @@ const verifyPersistedOneTimePayment = async (req, res) => {
     );
 
     if (existingPayment.rows.length > 0) {
+      const { activePlan } = await resolveEffectivePlan(userId);
+      if (activePlan) {
+        await syncUserActivePlanToAuth(userId, activePlan);
+      }
       await db.query('COMMIT');
       return res.status(200).json({
         success: true,
@@ -883,8 +850,10 @@ const verifyPersistedOneTimePayment = async (req, res) => {
         payment: {
           order_id: razorpay_order_id,
           payment_id: razorpay_payment_id,
-          plan_name: plan_name || null,
+          plan_name: plan_name || activePlan?.plan_name || null,
+          plan_id: activePlan?.plan_id || null,
         },
+        activePlan,
       });
     }
 
@@ -901,13 +870,13 @@ const verifyPersistedOneTimePayment = async (req, res) => {
     let planQuery;
     if (plan_id) {
       planQuery = await db.query(
-        `SELECT * FROM subscription_plans WHERE id = $1 AND is_active = true LIMIT 1`,
+        `SELECT * FROM subscription_plans WHERE id = $1 AND (is_active IS NOT FALSE) LIMIT 1`,
         [plan_id]
       );
     } else if (plan_name) {
       planQuery = await db.query(
         `SELECT * FROM subscription_plans
-         WHERE LOWER(name) = LOWER($1) AND is_active = true
+         WHERE LOWER(name) = LOWER($1) AND (is_active IS NOT FALSE)
          ORDER BY price DESC
          LIMIT 1`,
         [plan_name]
@@ -918,7 +887,7 @@ const verifyPersistedOneTimePayment = async (req, res) => {
 
     if (planQuery.rows.length === 0) {
       await db.query('ROLLBACK');
-      return res.status(404).json({ success: false, message: "Purchased plan not found" });
+      return res.status(404).json({ success: false, message: "Purchased plan not found in subscription_plans. Check plan_id or plan_name." });
     }
 
     const resolvedPlan = planQuery.rows[0];
@@ -1012,6 +981,12 @@ const verifyPersistedOneTimePayment = async (req, res) => {
 
     await db.query('COMMIT');
 
+    const { activePlan } = await resolveEffectivePlan(userId);
+
+    if (activePlan) {
+      await syncUserActivePlanToAuth(userId, activePlan);
+    }
+
     sendPurchaseConfirmationEmail({
       to: req.user?.email,
       customerName: req.user?.email ? req.user.email.split('@')[0] : `User ${userId}`,
@@ -1037,6 +1012,7 @@ const verifyPersistedOneTimePayment = async (req, res) => {
         plan_name: resolvedPlan.name || plan_name || null,
       },
       subscription: userSubscription,
+      activePlan,
     });
   } catch (err) {
     await db.query('ROLLBACK');

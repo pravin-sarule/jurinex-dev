@@ -235,16 +235,59 @@ def _resolve_role_id_from_authservice(domain_role: str) -> str | None:
         return None
 
 
+def _extract_plan_id_from_token(authorization: str | None) -> int | None:
+    """Decode JWT, extract user_id, then look up their active subscription plan_id."""
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1]
+    try:
+        import jwt as pyjwt
+        secret = get_settings().jwt_secret
+        if not secret:
+            return None
+        payload = pyjwt.decode(token, secret, algorithms=["HS256"])
+        raw_uid = payload.get("id") or payload.get("userId") or payload.get("user_id")
+        if not raw_uid:
+            return None
+        uid_int = int(raw_uid)
+        from app.services.payment_plan_service import get_user_active_plan
+
+        plan = get_user_active_plan(uid_int, authorization=authorization)
+        return int(plan["id"]) if plan and plan.get("id") is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @router.get("/secrets")
 def list_secrets_endpoint(
     fetch: str | None = Query(None),
     authorization: str | None = Header(None),
+    x_user_plan_id: str | None = Header(None),
 ) -> list[dict[str, Any]]:
-    """List secret prompts from `secret_manager` filtered by the caller's role_id from JWT."""
+    """List secret prompts from `secret_manager` filtered by the caller's role_id and plan_id.
+
+    The gateway injects `x-user-plan-id` (resolved from the payment service) before
+    forwarding here, so no separate payment DB connection is required.
+    """
     user_role_id = _extract_role_id_from_token(authorization)
-    logger.debug("[secrets] list request role_id=%s", user_role_id)
+    # Prefer header injected by gateway; fall back to direct payment DB lookup
+    if x_user_plan_id and x_user_plan_id.strip().lstrip("-").isdigit():
+        user_plan_id: int | None = int(x_user_plan_id)
+    else:
+        user_plan_id = _extract_plan_id_from_token(authorization)
+    if not user_role_id or user_plan_id is None:
+        logger.debug(
+            "[secrets] list skipped — missing role_id=%s or plan_id=%s",
+            user_role_id,
+            user_plan_id,
+        )
+        return []
+    logger.debug("[secrets] list request role_id=%s plan_id=%s", user_role_id, user_plan_id)
     try:
-        return list_secret_prompts(fetch=fetch, user_role_id=user_role_id)
+        return list_secret_prompts(fetch=fetch, user_role_id=user_role_id, user_plan_id=user_plan_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -804,11 +847,11 @@ async def get_llm_limits_for_client(
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Upload caps from `summarization_chat_config` (same source as assert_upload_allowed)."""
+    """Upload caps from `summarization_chat_config` merged with the user's active plan limits."""
     user_id = _resolve_user_id(x_user_id, authorization)
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
-    cfg = get_llm_chat_config()
+    cfg = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
     ceiling = get_request_upload_ceiling_mb(cfg)
     return {
         "success": True,
@@ -820,6 +863,14 @@ async def get_llm_limits_for_client(
             "max_upload_files": cfg.get("max_upload_files"),
             "max_file_upload_per_day": cfg.get("max_file_upload_per_day"),
             "max_document_pages": cfg.get("max_document_pages"),
+            "max_context_documents": cfg.get("max_context_documents"),
+            "max_conversation_history": cfg.get("max_conversation_history"),
+            "total_tokens_per_day": cfg.get("total_tokens_per_day"),
+            "messages_per_hour": cfg.get("messages_per_hour"),
+            "chats_per_day": cfg.get("chats_per_day"),
+            "quota_chats_per_minute": cfg.get("quota_chats_per_minute"),
+            "plan_name": cfg.get("_plan_name"),
+            "plan_id": cfg.get("_plan_id"),
         },
     }
 
@@ -919,7 +970,7 @@ async def upload_for_processing(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    llm_config = get_llm_chat_config()
+    llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
     # Keep temp folder style aligned with document-service uploadForProcessing flow.
     folder_name = f"temp-{uuid.uuid4().hex[:12]}"
     logger.info(
@@ -959,7 +1010,7 @@ async def upload_documents_to_folder(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    llm_config = get_llm_chat_config()
+    llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
     logger.info(
         "[Route:upload_documents_to_folder] status=received user_id=%s folder=%s files=%s",
         user_id,
@@ -998,7 +1049,7 @@ def import_google_drive_documents(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    llm_config = get_llm_chat_config()
+    llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
     file_ids = [str(item).strip() for item in (request.file_ids or []) if str(item).strip()]
     if not file_ids:
         raise HTTPException(status_code=400, detail="file_ids is required")
@@ -1070,7 +1121,7 @@ def import_google_drive_documents(
     return queue_result
 
 
-def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUploadUrlRequest) -> dict[str, Any]:
+def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUploadUrlRequest, llm_config: dict[str, Any] | None = None) -> dict[str, Any]:
     safe_name = (request.filename or f"upload-{uuid.uuid4().hex[:8]}").replace("\\", "_").replace("/", "_")
     object_path = str(PurePosixPath(user_id) / "documents" / folder_name / f"{uuid.uuid4().hex[:10]}_{safe_name}")
     signed_url = gcs.signed_upload_url(
@@ -1078,7 +1129,8 @@ def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUpload
         content_type=request.mimetype or "application/octet-stream",
         bucket_type="input",
     )
-    llm_config = get_llm_chat_config()
+    if llm_config is None:
+        llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
     settings = get_settings()
     bucket_name = settings.gcs_input_bucket_name or settings.gcs_bucket_name or "fileinputbucket"
     return {
@@ -1087,6 +1139,13 @@ def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUpload
         "gcsPath": f"gs://{bucket_name}/{object_path}",
         "filename": safe_name,
         "maxAllowedSizeMb": get_request_upload_ceiling_mb(llm_config),
+        "planLimits": {
+            "max_document_size_mb": llm_config.get("max_document_size_mb") or 0,
+            "max_document_pages": llm_config.get("max_document_pages") or 0,
+            "max_file_upload_per_day": llm_config.get("max_file_upload_per_day") or 0,
+            "max_upload_files": llm_config.get("max_upload_files") or 0,
+            "plan_name": llm_config.get("_plan_name"),
+        },
     }
 
 
@@ -1099,9 +1158,10 @@ def generate_upload_url_for_folder(
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     try:
+        llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
         check = assert_upload_allowed(
             user_id,
-            get_llm_chat_config(),
+            llm_config,
             files_count=1,
             size_bytes=int(request.size or 0),
             mimetype=request.mimetype,
@@ -1109,7 +1169,7 @@ def generate_upload_url_for_folder(
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
-        return _build_signed_upload(user_id, folder_name, request)
+        return _build_signed_upload(user_id, folder_name, request, llm_config)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1126,13 +1186,25 @@ def complete_upload_for_folder(
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     try:
+        llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
+        # For PDFs, download from GCS so we can enforce the page-count limit.
+        name = (request.filename or "").lower()
+        mime = (request.mimetype or "").lower()
+        is_pdf = mime == "application/pdf" or name.endswith(".pdf")
+        pdf_buffer: bytes | None = None
+        if is_pdf and request.gcsPath:
+            try:
+                pdf_buffer = gcs.download_bytes(request.gcsPath)
+            except Exception as dl_exc:
+                logger.warning("[Route:complete_upload] PDF download for page check failed: %s", dl_exc)
         check = assert_upload_allowed(
             user_id,
-            get_llm_chat_config(),
+            llm_config,
             files_count=1,
             size_bytes=int(request.size or 0),
             mimetype=request.mimetype,
             originalname=request.filename,
+            buffer=pdf_buffer,
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
@@ -1461,7 +1533,11 @@ def generate_learning_question(
     excerpt = format_chunks_for_prompt(chunks, max_chars=10000)
     if not excerpt.strip():
         raise HTTPException(status_code=400, detail="No indexed chunks returned for this query.")
-    llm_config = get_llm_chat_config(user_id=user_id, force_refresh=False)
+    llm_config = get_llm_chat_config(
+        user_id=user_id,
+        force_refresh=False,
+        plan_limit_mode="summarization",
+    )
     prompt = (
         "You create ONE document-grounded multiple-choice verification question.\n"
         f"Target concept/topic: {concept_q}\n"
@@ -1793,7 +1869,11 @@ async def intelligent_chat_stream(
 
         loop = asyncio.get_running_loop()
         chat_request = request
-        llm_config = getattr(fastapi_request.state, "llm_chat_config", None) or get_llm_chat_config()
+        llm_config = getattr(fastapi_request.state, "llm_chat_config", None) or get_llm_chat_config(
+            user_id=user_id,
+            force_refresh=False,
+            plan_limit_mode="summarization",
+        )
         llm_config = merge_folder_chat_request_llm_overrides(llm_config, chat_request)
         try:
             user_profile = await _run_blocking(

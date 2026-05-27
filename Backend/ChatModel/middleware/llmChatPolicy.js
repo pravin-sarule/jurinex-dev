@@ -21,7 +21,7 @@ async function enforceLLMChatPolicy(req, res, next) {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
 
-    const llmConfig = await getLLMConfig(userId);
+    const llmConfig = await getLLMConfig(userId, 'chat');
     req.llmChatConfig = llmConfig;
 
     const check = await assertChatAllowed(Number(userId), llmConfig);

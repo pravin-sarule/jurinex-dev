@@ -1,6 +1,5 @@
 const pool = require('../config/db');
-const axios = require('axios');
-const { getUserUsageAndPlanUrl, usageRequestHeaders } = require('../utils/documentUsageUrl');
+const { fetchUserUsageAndPlan } = require('../utils/documentUsageUrl');
 
 /**
  * Sync token usage from document service to payment service
@@ -14,48 +13,18 @@ class TokenUsageSyncService {
    * @returns {Promise<Object>} Token usage data
    */
   static async fetchTokenUsageFromDocumentService(userId, authorizationHeader) {
-    try {
-      const url = getUserUsageAndPlanUrl(userId);
-      console.log(`📊 [TokenUsageSync] Fetching token usage from: ${url}`);
-      
-      const response = await axios.get(url, {
-        headers: usageRequestHeaders(authorizationHeader, userId),
-        timeout: 10000
+    const payload = await fetchUserUsageAndPlan(userId, authorizationHeader);
+    const usage = payload?.usage || null;
+    if (usage) {
+      console.log(`✅ [TokenUsageSync] Fetched usage data for user ${userId}:`, {
+        tokens_used: usage.tokens_used,
+        documents_used: usage.documents_used,
+        ai_analysis_used: usage.ai_analysis_used,
+        storage_used_gb: usage.storage_used_gb,
+        carry_over_tokens: usage.carry_over_tokens,
       });
-
-      console.log(`📊 [TokenUsageSync] Response status: ${response.status}`);
-      console.log(`📊 [TokenUsageSync] Response data structure:`, JSON.stringify(response.data, null, 2));
-
-      if (response.data && response.data.success && response.data.data) {
-        const usage = response.data.data.usage || null;
-        if (usage) {
-          console.log(`✅ [TokenUsageSync] Fetched usage data for user ${userId}:`, {
-            tokens_used: usage.tokens_used,
-            documents_used: usage.documents_used,
-            ai_analysis_used: usage.ai_analysis_used,
-            storage_used_gb: usage.storage_used_gb,
-            carry_over_tokens: usage.carry_over_tokens
-          });
-        } else {
-          console.warn(`⚠️ [TokenUsageSync] Usage data is null or undefined in response`);
-        }
-        return usage;
-      } else {
-        console.warn(`⚠️ [TokenUsageSync] Invalid response structure:`, {
-          hasData: !!response.data,
-          hasSuccess: !!(response.data && response.data.success),
-          hasDataData: !!(response.data && response.data.data)
-        });
-      }
-      return null;
-    } catch (error) {
-      console.error(`❌ [TokenUsageSync] Error fetching token usage from document service for user ${userId}:`, error.message);
-      if (error.response) {
-        console.error(`❌ [TokenUsageSync] Response status: ${error.response.status}`);
-        console.error(`❌ [TokenUsageSync] Response data:`, error.response.data);
-      }
-      return null;
     }
+    return usage;
   }
 
   /**

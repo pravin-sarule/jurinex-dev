@@ -7,6 +7,7 @@ require('dotenv').config({ path: './.env' });
 const db = require('./src/config/db');
 const paymentRoutes = require('./src/routes/paymentRoutes');
 const userResourceRoutes = require('./src/routes/userResourcesRoutes');
+const userplanRoutes = require('./src/routes/userplanRoutes');
 const { initializeFirmAnalyticsSchema } = require('./src/utils/firmAnalyticsDb');
 
 const app = express();
@@ -17,6 +18,7 @@ app.use(morgan('dev'));
 
 // Routes must be after body parsing middleware
 app.use('/api/user-resources', userResourceRoutes);
+app.use('/api/plans', userplanRoutes);
 
 const allowedOrigins = [
   'https://nexintelagent.netlify.app',

@@ -17,7 +17,7 @@ class UserService {
     try {
       const endpoints = [];
       if (API_GATEWAY_URL) {
-        endpoints.push(`${API_GATEWAY_URL}/auth/users/${userId}`);
+        endpoints.push(`${API_GATEWAY_URL}/api/auth/users/${userId}`);
       }
       if (AUTH_SERVICE_URL) {
         endpoints.push(`${AUTH_SERVICE_URL}/api/auth/users/${userId}`);
@@ -93,8 +93,8 @@ class UserService {
     try {
       const endpoints = [];
       if (API_GATEWAY_URL) {
-        endpoints.push(`${API_GATEWAY_URL}/auth/users/active`);
-        endpoints.push(`${API_GATEWAY_URL}/auth/users?is_blocked=false`);
+        endpoints.push(`${API_GATEWAY_URL}/api/auth/users/active`);
+        endpoints.push(`${API_GATEWAY_URL}/api/auth/users?is_blocked=false`);
       }
       if (AUTH_SERVICE_URL) {
         endpoints.push(`${AUTH_SERVICE_URL}/api/auth/users/active`);

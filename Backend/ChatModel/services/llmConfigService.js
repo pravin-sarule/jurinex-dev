@@ -1,4 +1,6 @@
 const pool = require('../config/db');
+const paymentPool = require('../config/paymentDb');
+const authPool = require('../config/authDb');
 
 function parseAliasMap(raw) {
   if (!raw) return {};
@@ -86,6 +88,149 @@ function normalizeUserId(userId) {
   return n;
 }
 
+const ACTIVE_SUBSCRIPTION_SQL = `
+  SELECT sp.*
+  FROM user_subscriptions us
+  JOIN subscription_plans sp ON us.plan_id = sp.id
+  WHERE us.user_id = $1
+    AND LOWER(COALESCE(us.status, 'active')) = 'active'
+    AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+  ORDER BY us.activated_at DESC NULLS LAST, us.start_date DESC NULLS LAST, us.updated_at DESC
+  LIMIT 1
+`;
+
+async function getPlanRowById(planId) {
+  const pid = Number(planId);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    const { rows } = await paymentPool.query(
+      'SELECT * FROM subscription_plans WHERE id = $1 LIMIT 1',
+      [pid]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    console.warn('[LLMConfig] subscription_plans lookup failed:', err.message);
+    return null;
+  }
+}
+
+async function getUserActivePlanFromAuth(userId) {
+  if (!authPool) return null;
+  try {
+    const { rows } = await authPool.query(
+      `SELECT active_plan_id, active_plan_name
+       FROM users
+       WHERE id = $1 AND active_plan_id IS NOT NULL
+       LIMIT 1`,
+      [userId]
+    );
+    const planId = rows[0]?.active_plan_id;
+    if (planId == null) return null;
+    const plan = await getPlanRowById(planId);
+    if (plan) {
+      console.log(
+        `[LLMConfig] Resolved plan via users.active_plan_id=${planId} ("${plan.name || rows[0].active_plan_name}")`
+      );
+    }
+    return plan;
+  } catch (err) {
+    console.warn('[LLMConfig] Auth active_plan_id lookup failed:', err.message);
+    return null;
+  }
+}
+
+async function getUserActivePlan(userId) {
+  const uid = normalizeUserId(userId);
+  if (!uid) return null;
+
+  try {
+    const { rows } = await paymentPool.query(ACTIVE_SUBSCRIPTION_SQL, [uid]);
+    if (rows.length > 0) {
+      return rows[0];
+    }
+  } catch (err) {
+    console.warn('[LLMConfig] user_subscriptions lookup failed:', err.message);
+  }
+
+  return getUserActivePlanFromAuth(uid);
+}
+
+/**
+ * Overlay subscription_plans onto admin llm_chat_config defaults.
+ * NULL plan column = keep admin default. Non-null > 0 = override.
+ * Legacy document_limit applies when chat_* columns are unset.
+ */
+function applyPlanLimitsToConfig(cfg, plan, service = 'chat') {
+  if (!plan || !cfg) return cfg;
+
+  const planInt = (colName, fallback) => {
+    const v = plan[colName];
+    if (v == null) return fallback;
+    const n = finiteNumber(v, 0);
+    return n > 0 ? n : fallback;
+  };
+
+  const planColSet = (colName) => {
+    const v = plan[colName];
+    return v != null && finiteNumber(v, 0) > 0;
+  };
+
+  const legacyDocLimit = finiteNumber(plan.document_limit, 0);
+
+  if (service === 'summarization') {
+    cfg.total_tokens_per_day = planInt('summarization_token_limit', cfg.total_tokens_per_day);
+    cfg.messages_per_hour = planInt('sum_messages_per_hour', cfg.messages_per_hour);
+    cfg.chats_per_day = planInt('sum_chats_per_day', cfg.chats_per_day);
+    cfg.quota_chats_per_minute = planInt('sum_quota_per_minute', cfg.quota_chats_per_minute);
+    cfg.max_document_pages = planInt('sum_max_document_pages', cfg.max_document_pages);
+    cfg.max_document_size_mb = planInt('sum_max_document_size_mb', cfg.max_document_size_mb);
+    cfg.max_file_upload_per_day = planInt('sum_max_file_upload_per_day', cfg.max_file_upload_per_day);
+    cfg.max_upload_files = planInt('sum_max_upload_files', cfg.max_upload_files);
+    cfg.max_context_documents = planInt('sum_max_context_documents', cfg.max_context_documents ?? 0);
+    cfg.max_conversation_history = planInt(
+      'sum_max_conversation_history',
+      cfg.max_conversation_history ?? 0
+    );
+    if (legacyDocLimit > 0) {
+      if (!planColSet('sum_max_upload_files')) {
+        cfg.max_upload_files = legacyDocLimit;
+      }
+      if (!planColSet('sum_max_file_upload_per_day')) {
+        cfg.max_file_upload_per_day = legacyDocLimit;
+      }
+    }
+  } else {
+    cfg.total_tokens_per_day = planInt('chat_token_limit', cfg.total_tokens_per_day);
+    cfg.messages_per_hour = planInt('chat_messages_per_hour', cfg.messages_per_hour);
+    cfg.chats_per_day = planInt('chat_chats_per_day', cfg.chats_per_day);
+    cfg.quota_chats_per_minute = planInt('chat_quota_per_minute', cfg.quota_chats_per_minute);
+    cfg.max_document_pages = planInt('chat_max_document_pages', cfg.max_document_pages);
+    cfg.max_document_size_mb = planInt('chat_max_document_size_mb', cfg.max_document_size_mb);
+    cfg.max_file_upload_per_day = planInt('chat_max_file_upload_per_day', cfg.max_file_upload_per_day);
+    cfg.max_upload_files = planInt('chat_max_upload_files', cfg.max_upload_files);
+
+    if (legacyDocLimit > 0) {
+      if (!planColSet('chat_max_upload_files')) {
+        cfg.max_upload_files = legacyDocLimit;
+      }
+      if (!planColSet('chat_max_file_upload_per_day')) {
+        cfg.max_file_upload_per_day = legacyDocLimit;
+      }
+      if (!planColSet('chat_max_document_pages')) {
+        cfg.max_document_pages = legacyDocLimit;
+      }
+      if (!planColSet('chat_max_document_size_mb') && plan.storage_limit_gb > 0) {
+        const storageMb = Math.ceil(finiteNumber(plan.storage_limit_gb, 0) * 1024);
+        if (storageMb > 0) cfg.max_document_size_mb = storageMb;
+      }
+    }
+  }
+
+  cfg._plan_id = plan.id;
+  cfg._plan_name = plan.name;
+  return cfg;
+}
+
 async function getBaseLLMConfigRow() {
   const result = await pool.query(
     `SELECT *
@@ -101,18 +246,31 @@ async function getBaseLLMConfigRow() {
   return result.rows[0];
 }
 
-async function getLLMConfig(userId = null) {
+async function getLLMConfig(userId = null, service = 'chat') {
   try {
     const uid = normalizeUserId(userId);
     console.log(
-      `\n[LLMConfig] Fetching effective llm_chat_config from DB${uid ? ` for user ${uid}` : ' (global default)'}...`
+      `\n[LLMConfig] Fetching effective llm_chat_config from DB${uid ? ` for user ${uid}` : ' (global default)'} [service=${service}]...`
     );
 
     const baseRow = await getBaseLLMConfigRow();
     const cfg = mapRowToConfig(baseRow);
 
-    console.log('[LLMConfig] Config loaded from DB:');
-    console.log(`   - scope                : global`);
+    if (!uid) {
+      console.log('[LLMConfig] No user — returning global defaults');
+      return cfg;
+    }
+
+    const plan = await getUserActivePlan(uid);
+    if (!plan) {
+      console.log(`[LLMConfig] No active plan for user ${uid} — using global defaults`);
+    } else {
+      console.log(`[LLMConfig] Active plan for user ${uid}: "${plan.name}" (id=${plan.id})`);
+      applyPlanLimitsToConfig(cfg, plan, service);
+    }
+
+    console.log('[LLMConfig] Effective config:');
+    console.log(`   - scope                : ${plan ? `plan "${cfg._plan_name}" (id=${cfg._plan_id})` : 'global'}`);
     console.log(`   - llm_provider         : ${cfg.llm_provider}`);
     console.log(`   - llm_model / vertex   : ${cfg.llm_model} -> ${resolveVertexModelId(cfg)}`);
     console.log(`   - max_output_tokens    : ${cfg.max_output_tokens}`);
@@ -199,6 +357,8 @@ function mergeRequestLlmOverrides(baseConfig, body = {}) {
 
 module.exports = {
   getLLMConfig,
+  getUserActivePlan,
+  applyPlanLimitsToConfig,
   invalidateConfigCache,
   resolveVertexModelId,
   getMulterUploadCeilingMb,

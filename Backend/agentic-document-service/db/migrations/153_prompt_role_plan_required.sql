@@ -1,0 +1,18 @@
+-- Prompt visibility: BOTH role and plan must be set on each prompt row.
+--
+-- secret_manager:
+--   plan_id  = subscription_plans.id the user must be on
+--   role_id  = roles.id (UUID) the user must have (from JWT role_id / domain_role)
+--
+-- preset_prompts:
+--   allowed_roles     = text[] role slugs, e.g. '{banking,family}'
+--   allowed_plan_ids  = integer[] plan ids, e.g. '{25,3}'
+--   BOTH arrays must be non-empty; user must match one value in EACH array.
+--
+-- Example: Pro + banking secret
+--   UPDATE secret_manager SET plan_id = 25, role_id = '<banking-role-uuid>' WHERE id = 1;
+--
+-- Example: Pro + banking preset
+--   UPDATE preset_prompts
+--   SET allowed_roles = ARRAY['banking'], allowed_plan_ids = ARRAY[25]
+--   WHERE id = 'your-preset-id';

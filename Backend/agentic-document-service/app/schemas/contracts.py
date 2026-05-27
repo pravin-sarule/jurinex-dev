@@ -136,6 +136,8 @@ class PresetPrompt(BaseModel):
     prompt_template: str
     required_doc_types: list[DocumentType] = Field(default_factory=list)
     output_format: str = "structured"
+    allowed_roles: list[str] = Field(default_factory=list)
+    allowed_plan_ids: list[int] = Field(default_factory=list)
 
 
 class PresetExecutionRequest(BaseModel):

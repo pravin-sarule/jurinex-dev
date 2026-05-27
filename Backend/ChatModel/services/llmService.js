@@ -12,16 +12,7 @@ const {
 const VERTEX_FILE_SIZE_LIMIT_BYTES = 50 * 1024 * 1024;
 const PDF_CHUNK_TARGET_BYTES = 48 * 1024 * 1024;
 
-const MODEL_MAX_OUTPUT_TOKENS = {
-  'gemini-2.0-flash-lite': 8192,
-  'gemini-2.0-flash-lite-001': 8192,
-  'gemini-2.0-flash': 8192,
-  'gemini-2.0-flash-001': 8192,
-  'gemini-2.5-flash': 8192,
-  'gemini-2.5-flash-001': 8192,
-  'gemini-2.5-flash-lite': 8192,
-  'gemini-2.5-pro': 8192,
-};
+// Per-model output caps removed — use llm_chat_config.max_output_tokens and max_output_tokens_cap only.
 
 const MODEL_FALLBACKS = {
   'gemini-flash-lite-latest': [
@@ -82,6 +73,11 @@ const MODEL_FALLBACKS = {
   ],
   'gemini-2.5-flash-001': [
     'gemini-2.5-flash-001',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+  ],
+  'gemini-2.5-pro': [
+    'gemini-2.5-pro',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
   ],
@@ -367,6 +363,23 @@ function aggregateCandidateText(candidate) {
   for (const part of candidate.content.parts) {
     if (!part?.thought && part.text) out += part.text;
   }
+  const thoughtFallback = extractVertexThoughtTextFromCandidate(candidate);
+  if (!out.trim()) {
+    if (thoughtFallback.trim()) {
+      console.warn(
+        '[LLM] Candidate had no non-thought text parts; using thought parts as answer fallback.'
+      );
+      return thoughtFallback;
+    }
+    return out;
+  }
+  // Gemini 2.5 Pro may tag the visible body as "thought" after a short header.
+  if (thoughtFallback.length > out.length * 2 && thoughtFallback.length > 400) {
+    console.warn(
+      `[LLM] Thought parts (${thoughtFallback.length} chars) exceed visible answer (${out.length} chars); merging into output.`
+    );
+    return `${out}\n\n${thoughtFallback}`;
+  }
   return out;
 }
 
@@ -386,9 +399,17 @@ function getMimeTypeFromPath(filePath) {
   return mimeTypes[ext] || 'application/octet-stream';
 }
 
+const STATIC_MODEL_ALIASES = {
+  'gemini-pro-2.5': 'gemini-2.5-pro',
+  'gemini-flash-2.5': 'gemini-2.5-flash',
+  'gemini-flash-lite-2.5': 'gemini-2.5-flash-lite',
+};
+
 function normalizeModelName(modelName) {
   if (!modelName) return '';
-  return String(modelName).trim().replace(/^models\//i, '');
+  const stripped = String(modelName).trim().replace(/^models\//i, '');
+  const key = stripped.toLowerCase();
+  return STATIC_MODEL_ALIASES[key] || STATIC_MODEL_ALIASES[stripped] || stripped;
 }
 
 function dedupeModelNames(modelNames) {
@@ -436,27 +457,6 @@ function buildModelList(llmConfig, preferredModelName = '') {
   return candidates;
 }
 
-/**
- * When max output is limited (below model cap), tell the model to stay complete and concise
- * so answers are not cut off mid-sentence at MAX_TOKENS.
- */
-function buildOutputBudgetHint(maxOutputTokens) {
-  const n = Math.floor(Number(maxOutputTokens));
-  if (!Number.isFinite(n) || n < 1) return '';
-  const MODEL_CAP = 8192;
-  if (n >= MODEL_CAP) return '';
-  const approxWords = Math.max(40, Math.floor(n * 0.65));
-  return `\n\n---\nOUTPUT LENGTH (required): The server allows about ${n} output tokens (~${approxWords} words). Reply with a complete, self-contained answer: use short paragraphs or bullet points, cover only what fits, finish every sentence, and end with a clear closing line. Do not begin detailed sections you cannot complete. If the topic is broad, give a structured summary of the most important points only.\n---`;
-}
-
-/** Short system line for tight budgets (paired with buildOutputBudgetHint). */
-function buildBudgetSystemInstruction(maxOutputTokens) {
-  const n = Math.floor(Number(maxOutputTokens));
-  if (!Number.isFinite(n) || n < 1) return '';
-  if (n >= 8192) return '';
-  return 'Always produce a finished answer within the output budget: concise, structured, and with no incomplete sentences or trailing fragments.';
-}
-
 function buildGenerationConfig(llmConfig, modelName = '') {
   const minOut = Number(llmConfig?.min_output_tokens);
   const cap = Number(llmConfig?.max_output_tokens_cap);
@@ -474,11 +474,6 @@ function buildGenerationConfig(llmConfig, modelName = '') {
     maxOutputTokens = Math.min(Math.floor(raw), maxCap);
   }
 
-  const modelCap = MODEL_MAX_OUTPUT_TOKENS[normalizeModelName(modelName)];
-  if (Number.isFinite(modelCap)) {
-    maxOutputTokens = Math.min(maxOutputTokens, modelCap);
-  }
-
   let tMin = Number(llmConfig?.temperature_min);
   let tMax = Number(llmConfig?.temperature_max);
   if (!Number.isFinite(tMin)) tMin = 0;
@@ -494,11 +489,12 @@ function buildGenerationConfig(llmConfig, modelName = '') {
   if (!Number.isFinite(temperature)) temperature = 1;
   temperature = Math.min(tMax, Math.max(tMin, temperature));
 
-  const config = { maxOutputTokens, temperature };
-  if (/^gemini-2\.5-/i.test(normalizeModelName(modelName))) {
-    config.thinkingConfig = { includeThoughts: true };
-  }
-  return config;
+  // Return the computed values as-is so plan-level caps are respected.
+  // frequency/presence penalties are NOT used: gemini-2.5-flash and related
+  // Gemini models reject them with a 400 error on both Google AI Studio and
+  // Vertex AI endpoints. Repetition prevention is handled by the system prompt
+  // and the frontend circuit breaker instead.
+  return { maxOutputTokens, temperature };
 }
 
 function extractVertexThoughtTextFromCandidate(candidate) {
@@ -632,11 +628,9 @@ async function askLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata 
         console.log(`   - max_output_tokens: ${generationConfig.maxOutputTokens}`);
         console.log(`   - temperature      : ${generationConfig.temperature}`);
 
-        const budgetHint = buildOutputBudgetHint(generationConfig.maxOutputTokens);
-        const userText = budgetHint ? `${promptText}${budgetHint}` : promptText;
-        const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
+        const userText = promptText;
         const chatModelSys = metadata.chatModelSystemInstruction || '';
-        const mergedSystem = [chatModelSys, sysBudget].filter(Boolean).join('\n\n');
+        const mergedSystem = chatModelSys || '';
         const fileParts = buildFilePartsFromGcsUris(uris);
         const contextualParts = preparedContext.contextHeader
           ? [{ text: preparedContext.contextHeader }, ...fileParts]
@@ -677,7 +671,12 @@ async function askLLMWithGCS(question, gcsUriOrUris, userContext = '', metadata 
             modelName,
           };
           console.log(
-            `Token usage - Input: ${usageData.inputTokens}, Output: ${usageData.outputTokens}, Total: ${usageData.totalTokens}`
+            `\n📊 [askLLMWithGCS] Token Summary` +
+            `\n   model          : ${modelName}` +
+            `\n   max_output_tokens (cap): ${generationConfig.maxOutputTokens}` +
+            `\n   input tokens   : ${usageData.inputTokens}` +
+            `\n   output tokens  : ${usageData.outputTokens}  (used ${((usageData.outputTokens / generationConfig.maxOutputTokens) * 100).toFixed(1)}% of cap)` +
+            `\n   total tokens   : ${usageData.totalTokens}`
           );
         }
 
@@ -732,17 +731,16 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
     let lastError;
 
     for (const modelName of modelNames) {
+      let hasYielded = false;
       try {
         const generationConfig = buildGenerationConfig(llmConfig, modelName);
         console.log(`Streaming with Vertex AI model: ${modelName}`);
         console.log(`   - max_output_tokens: ${generationConfig.maxOutputTokens}`);
         console.log(`   - temperature      : ${generationConfig.temperature}`);
 
-        const budgetHint = buildOutputBudgetHint(generationConfig.maxOutputTokens);
-        const userText = budgetHint ? `${promptText}${budgetHint}` : promptText;
-        const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
+        const userText = promptText;
         const chatModelSys = metadata.chatModelSystemInstruction || '';
-        const mergedSystem = [chatModelSys, sysBudget].filter(Boolean).join('\n\n');
+        const mergedSystem = chatModelSys || '';
         const fileParts = buildFilePartsFromGcsUris(uris);
         const contextualParts = preparedContext.contextHeader
           ? [{ text: preparedContext.contextHeader }, ...fileParts]
@@ -758,7 +756,7 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
         });
 
         let totalChunks = 0;
-        let streamedLen = 0;
+        let streamedAnswer = '';
         let agg = null;
         for await (const chunk of streamingResp) {
           agg = chunk;
@@ -768,27 +766,55 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
           }
           if (answerText.length > 0) {
             totalChunks++;
-            streamedLen += answerText.length;
+            streamedAnswer += answerText;
+            hasYielded = true;
             yield { type: 'chunk', text: answerText };
+          } else if (thoughtText.length > 0 && !streamedAnswer.trim()) {
+            totalChunks++;
+            streamedAnswer += thoughtText;
+            hasYielded = true;
+            yield { type: 'chunk', text: thoughtText };
+            console.warn(
+              '[LLM streamLLMWithGCS] Stream chunk had only thought text; using as visible answer.'
+            );
           }
         }
 
         const cand = agg?.candidates?.[0];
         const finishReason = cand?.finishReason;
-        if (finishReason === 'MAX_TOKENS') {
+        const aggText = cand ? aggregateCandidateText(cand) : '';
+        if (aggText.length > streamedAnswer.length) {
+          const tail = aggText.slice(streamedAnswer.length);
+          if (tail.length > 0) {
+            totalChunks++;
+            streamedAnswer = aggText;
+            yield { type: 'chunk', text: tail };
             console.warn(
-              `[LLM streamLLMWithGCS] finishReason=MAX_TOKENS — model hit output cap (${generationConfig.maxOutputTokens}). Increase max_output_tokens in llm_chat_config if answers should be longer.`
+              `[LLM streamLLMWithGCS] Flushed ${tail.length} chars from final candidate (stream missed tail).`
             );
           }
-
-        let textLenForUsage = streamedLen;
-        if (agg?.candidates?.[0]) {
-          const aggText = aggregateCandidateText(agg.candidates[0]);
-          if (aggText && aggText.length > textLenForUsage) textLenForUsage = aggText.length;
         }
 
+        if (finishReason === 'MAX_TOKENS') {
+          console.warn(
+            `[LLM streamLLMWithGCS] finishReason=MAX_TOKENS — model hit output cap (${generationConfig.maxOutputTokens}). Increase max_output_tokens in llm_chat_config if answers should be longer.`
+          );
+        }
+
+        const textLenForUsage = streamedAnswer.length || (aggText ? aggText.length : 0);
+        const u = normalizeVertexUsageForLog(agg, textLenForUsage);
+
+        console.log(
+          `\n📊 [streamLLMWithGCS] Token Summary` +
+          `\n   model          : ${modelName}` +
+          `\n   max_output_tokens (cap): ${generationConfig.maxOutputTokens}` +
+          `\n   input tokens   : ${u.inputTokens}` +
+          `\n   output tokens  : ${u.outputTokens}  (used ${((u.outputTokens / generationConfig.maxOutputTokens) * 100).toFixed(1)}% of cap)` +
+          `\n   total tokens   : ${u.totalTokens}` +
+          `\n   finish reason  : ${finishReason || 'STOP'}`
+        );
+
         if (metadata.userId) {
-          const u = normalizeVertexUsageForLog(agg, textLenForUsage);
           logLLMUsage({
             userId: Number(metadata.userId),
             modelName,
@@ -801,11 +827,29 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
           }).catch((err) => console.error('Failed to log LLM usage:', err.message));
         }
 
+        yield {
+          type: 'usage',
+          inputTokens: u.inputTokens,
+          outputTokens: u.outputTokens,
+          totalTokens: u.totalTokens,
+          modelName,
+          finishReason: finishReason || null,
+          outputTruncated: finishReason === 'MAX_TOKENS',
+        };
+
         console.log(`Streamed ${totalChunks} chunks from ${modelName}`);
         return;
       } catch (err) {
         console.warn(`Model ${modelName} streaming failed: ${err.message}`);
         lastError = err;
+        
+        // If we already sent chunks to the user, we CANNOT retry with a fallback model,
+        // because it will append a brand new response to the half-finished one, causing duplication!
+        if (hasYielded) {
+          console.warn(`[LLM] Stream aborted mid-way. Cannot retry. Sending error to frontend.`);
+          yield { type: 'error', message: 'Stream interrupted mid-generation.', details: err.message };
+          return;
+        }
       }
     }
 
@@ -828,16 +872,15 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
     let lastError;
 
     for (const modelName of modelNames) {
+      let hasYielded = false;
       try {
         const generationConfig = buildGenerationConfig(llmConfig, modelName);
         console.log(`[General] Streaming with Vertex AI model: ${modelName}`);
         console.log(`   - max_output_tokens: ${generationConfig.maxOutputTokens}`);
         console.log(`   - temperature      : ${generationConfig.temperature}`);
 
-        const budgetHint = buildOutputBudgetHint(generationConfig.maxOutputTokens);
-        const userText = budgetHint ? `${promptText}${budgetHint}` : promptText;
-        const sysBudget = buildBudgetSystemInstruction(generationConfig.maxOutputTokens);
-        const mergedSystem = [systemInstruction, sysBudget].filter(Boolean).join('\n\n');
+        const userText = promptText;
+        const mergedSystem = systemInstruction || '';
 
         const streamingResp = await vertex_ai.models.generateContentStream({
           model: modelName,
@@ -849,7 +892,7 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
         });
 
         let totalChunks = 0;
-        let streamedChars = 0;
+        let streamedAnswer = '';
         let agg = null;
         for await (const chunk of streamingResp) {
           agg = chunk;
@@ -859,19 +902,55 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
           }
           if (answerText.length > 0) {
             totalChunks++;
-            streamedChars += answerText.length;
+            streamedAnswer += answerText;
+            hasYielded = true;
             yield { type: 'chunk', text: answerText };
+          } else if (thoughtText.length > 0 && !streamedAnswer.trim()) {
+            totalChunks++;
+            streamedAnswer += thoughtText;
+            hasYielded = true;
+            yield { type: 'chunk', text: thoughtText };
+            console.warn(
+              '[LLM streamLLMWithGCS] Stream chunk had only thought text; using as visible answer.'
+            );
           }
         }
 
-        let textLenForUsage = streamedChars;
-        if (agg?.candidates?.[0]) {
-          const aggText = aggregateCandidateText(agg.candidates[0]);
-          if (aggText && aggText.length > textLenForUsage) textLenForUsage = aggText.length;
+        const cand = agg?.candidates?.[0];
+        const finishReason = cand?.finishReason;
+        const aggText = cand ? aggregateCandidateText(cand) : '';
+        if (aggText.length > streamedAnswer.length) {
+          const tail = aggText.slice(streamedAnswer.length);
+          if (tail.length > 0) {
+            totalChunks++;
+            streamedAnswer = aggText;
+            yield { type: 'chunk', text: tail };
+            console.warn(
+              `[LLM streamLLMGeneral] Flushed ${tail.length} chars from final candidate (stream missed tail).`
+            );
+          }
         }
 
+        if (finishReason === 'MAX_TOKENS') {
+          console.warn(
+            `[LLM streamLLMGeneral] finishReason=MAX_TOKENS — model hit output cap (${generationConfig.maxOutputTokens}).`
+          );
+        }
+
+        const textLenForUsage = streamedAnswer.length || (aggText ? aggText.length : 0);
+        const u = normalizeVertexUsageForLog(agg, textLenForUsage);
+
+        console.log(
+          `\n📊 [streamLLMGeneral] Token Summary` +
+          `\n   model          : ${modelName}` +
+          `\n   max_output_tokens (cap): ${generationConfig.maxOutputTokens}` +
+          `\n   input tokens   : ${u.inputTokens}` +
+          `\n   output tokens  : ${u.outputTokens}  (used ${((u.outputTokens / generationConfig.maxOutputTokens) * 100).toFixed(1)}% of cap)` +
+          `\n   total tokens   : ${u.totalTokens}` +
+          `\n   finish reason  : ${finishReason || 'STOP'}`
+        );
+
         if (metadata.userId) {
-          const u = normalizeVertexUsageForLog(agg, textLenForUsage);
           logLLMUsage({
             userId: Number(metadata.userId),
             modelName,
@@ -884,11 +963,27 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
           }).catch((err) => console.error('Failed to log LLM usage:', err.message));
         }
 
+        yield {
+          type: 'usage',
+          inputTokens: u.inputTokens,
+          outputTokens: u.outputTokens,
+          totalTokens: u.totalTokens,
+          modelName,
+          finishReason: finishReason || null,
+          outputTruncated: finishReason === 'MAX_TOKENS',
+        };
+
         console.log(`[General] Streamed ${totalChunks} chunks from ${modelName}`);
         return;
       } catch (err) {
         console.warn(`[General] Model ${modelName} streaming failed: ${err.message}`);
         lastError = err;
+
+        if (hasYielded) {
+          console.warn(`[General] Stream aborted mid-way. Cannot retry. Sending error to frontend.`);
+          yield { type: 'error', message: 'Stream interrupted mid-generation.', details: err.message };
+          return;
+        }
       }
     }
 
@@ -899,4 +994,34 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
   }
 }
 
-module.exports = { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral };
+/**
+ * Count tokens for one or more GCS files using Vertex AI's countTokens API.
+ * This is a free, non-generating call — no billing quota consumed.
+ * Supports PDFs, images, audio, video, and text via GCS URI.
+ *
+ * @param {string|string[]} gcsUriOrUris  One or more gs:// URIs
+ * @param {string} modelName  The model to use for tokenization (default: gemini-2.5-flash)
+ * @returns {Promise<{totalTokens: number, promptTokenCount: number}>}
+ */
+async function countTokensFromGCS(gcsUriOrUris, modelName = 'gemini-2.5-flash') {
+  const vertex_ai = initializeVertexAI();
+  const uris = normalizeGcsUris(gcsUriOrUris);
+  if (!uris.length) {
+    throw new Error('countTokensFromGCS: No valid gs:// URIs provided');
+  }
+
+  const fileParts = buildFilePartsFromGcsUris(uris);
+
+  console.log(`[countTokens] Counting tokens for ${uris.length} file(s) with model: ${modelName}`);
+
+  const result = await vertex_ai.models.countTokens({
+    model: modelName,
+    contents: [{ role: 'user', parts: fileParts }],
+  });
+
+  const total = result.totalTokens || 0;
+  console.log(`[countTokens] Result: ${total} tokens for ${uris.join(', ')}`);
+  return { totalTokens: total, promptTokenCount: total };
+}
+
+module.exports = { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral, countTokensFromGCS };

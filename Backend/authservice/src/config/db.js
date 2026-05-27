@@ -8,13 +8,13 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-pool.connect()
+pool
+  .query('SELECT 1')
   .then(() => console.log('Database connected successfully.'))
-  .catch(err => console.error('Database connection failed:', err));
+  .catch((err) => console.error('Database connection failed:', err));
 
 pool.on('error', (err) => {
-  console.error('Unexpected error on idle client', err);
-  process.exit(-1);
+  console.error('Unexpected error on idle pool client:', err.message);
 });
 
 module.exports = pool;

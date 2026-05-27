@@ -84,6 +84,14 @@ def create_calendar_event(
     calendar_id = settings.google_calendar_id or "primary"
     calendar_tz = settings.google_calendar_tz or "UTC"
     subject = (settings.google_calendar_subject or "").strip()
+    # DWD "sub" must be a Workspace user email — not a label or status string.
+    if subject and "@" not in subject:
+        logger.warning(
+            "GOOGLE_CALENDAR_SUBJECT=%r is not a valid email — skipping impersonation. "
+            "Leave blank for group calendars, or set to the Workspace user to impersonate.",
+            subject,
+        )
+        subject = ""
 
     if not sa_json:
         logger.warning("GOOGLE_SERVICE_ACCOUNT_JSON not configured — skipping calendar event")

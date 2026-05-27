@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
+import json
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from agents.legal_case_management.agent import (
     answer_case_question,
@@ -26,6 +28,28 @@ from app.services.container import get_pipeline_service
 
 router = APIRouter(prefix="/api/v1", tags=["cases"])
 logger = logging.getLogger("agentic_document_service.api.cases")
+
+
+def _extract_user_id(request: Request, query_param: str | None) -> str | None:
+    if query_param:
+        return query_param
+    uid = request.headers.get("x-user-id")
+    if uid:
+        return uid
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        try:
+            parts = token.split(".")
+            if len(parts) == 3:
+                payload = parts[1]
+                payload += "=" * ((4 - len(payload) % 4) % 4)
+                decoded = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+                uid = decoded.get("id") or decoded.get("userId") or decoded.get("user_id") or decoded.get("sub")
+                return str(uid) if uid is not None else None
+        except Exception:
+            pass
+    return None
 
 
 @router.post("/intake", response_model=IntakeResponse)
@@ -93,8 +117,15 @@ def answer_query(case_id: str, request: QueryRequest) -> QueryResponse:
 
 
 @router.get("/presets", response_model=list[PresetPrompt])
-def list_presets() -> list[PresetPrompt]:
-    return get_pipeline_service().list_presets()
+def list_presets(
+    request: Request,
+    user_id: str | None = Query(default=None),
+) -> list[PresetPrompt]:
+    resolved_uid = _extract_user_id(request, user_id)
+    return get_pipeline_service().list_presets(
+        user_id=resolved_uid,
+        authorization=request.headers.get("authorization"),
+    )
 
 
 @router.post("/cases/{case_id}/presets/{preset_id}:execute", response_model=PresetExecutionResponse)

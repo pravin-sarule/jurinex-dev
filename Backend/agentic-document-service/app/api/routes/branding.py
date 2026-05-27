@@ -5,9 +5,11 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.services import branding_service
+from app.services import branding_pdf_service
 from app.services.db import is_db_available
 
 router = APIRouter(prefix="/api/branding", tags=["branding"])
@@ -33,47 +35,70 @@ class ProfilePayload(BaseModel):
 
 
 class ExportPdfRequest(BaseModel):
-    profileId: str
-    contentHtml: str = ""
+    """Full HTML from frontend buildBrandedHtml(..., { forPdf: true })."""
+
+    html: str = Field(min_length=1, description="Complete HTML document for Chromium print")
     filename: str | None = Field(default="export.pdf", max_length=255)
+    profileId: str | None = Field(default=None, description="Optional DB profile id")
+    profile: dict[str, Any] | None = Field(
+        default=None,
+        description="Inline branding profile (footer/margins) when profile is only in localStorage",
+    )
 
 
-# ── Export PDF (production: Playwright / Puppeteer) ───────────────────────────
+# ── Export PDF (Chromium / Playwright) ────────────────────────────────────────
 
 
 @router.post("/export-pdf")
 def export_branded_pdf(
     body: ExportPdfRequest,
     x_user_id: str | None = Header(default=None),
-) -> None:
+) -> Response:
     """
-    Planned production path: fetch profile, merge defaults, render HTML, PDF via headless browser.
-    Returns 501 until Playwright/Puppeteer is wired; frontend falls back to html2pdf.js.
+    Primary branded PDF path: HTML from frontend → Chromium print → PDF bytes.
+    Requires Playwright with Chromium installed on the server.
     """
-    user_id = _require_user(x_user_id)
-    _require_db()
+    _require_user(x_user_id)
+    if not branding_pdf_service.is_pdf_renderer_available():
+        raise HTTPException(
+            status_code=503,
+            detail="PDF export unavailable. Install Playwright: pip install playwright && playwright install chromium",
+        )
+
+    profile: dict[str, Any] | None = body.profile if isinstance(body.profile, dict) else None
+    if body.profileId:
+        _require_db()
+        db_profile = branding_service.get_profile(x_user_id, body.profileId)
+        if db_profile:
+            profile = {**(profile or {}), **db_profile}
+        elif not profile:
+            raise HTTPException(status_code=404, detail="Branding profile not found")
+
     t0 = time.monotonic()
-    profile = branding_service.get_profile(user_id, body.profileId)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Branding profile not found")
-    content_len = len(body.contentHtml or "")
-    has_logo = bool(profile.get("logo"))
-    wm_on = bool(profile.get("watermark"))
-    wm_txt = bool(profile.get("watermarkText"))
-    logger.info(
-        "[BrandingExport] pdf_request user=%s profile_id=%s content_len=%s has_logo=%s watermark_enabled=%s watermark_text=%s engine=unconfigured",
-        user_id,
-        body.profileId,
-        content_len,
-        has_logo,
-        wm_on,
-        wm_txt,
-    )
+    try:
+        pdf_bytes = branding_pdf_service.html_to_pdf(body.html, profile)
+    except Exception as exc:
+        logger.exception("[BrandingExport] pdf_render_failed user=%s: %s", x_user_id, exc)
+        raise HTTPException(status_code=500, detail=f"PDF rendering failed: {exc}") from exc
+
+    safe_name = branding_pdf_service.safe_filename(body.filename)
     duration_ms = round((time.monotonic() - t0) * 1000)
-    logger.info("[BrandingExport] pdf_reject status=501 duration_ms=%s", duration_ms)
-    raise HTTPException(
-        status_code=501,
-        detail="Server-side PDF export is not enabled. Install Playwright/Puppeteer and implement HTML→PDF rendering.",
+    logger.info(
+        "[BrandingExport] pdf_ok user=%s profile_id=%s content_len=%s bytes=%s duration_ms=%s engine=playwright",
+        x_user_id,
+        body.profileId,
+        len(body.html),
+        len(pdf_bytes),
+        duration_ms,
+    )
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
     )
 
 
@@ -162,7 +187,7 @@ def delete_profile(
         raise HTTPException(status_code=404, detail="Branding profile not found")
 
 
-# ── Set default ───────────────────────────────────────────────────────────────
+# ── Set default ─────────────────────────────────────────────────────────────
 
 @router.post("/profiles/{profile_id}/set-default")
 def set_default(

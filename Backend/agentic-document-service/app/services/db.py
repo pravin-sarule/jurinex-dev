@@ -28,3 +28,20 @@ def get_db_connection() -> Iterator[Any]:
         yield conn
     finally:
         conn.close()
+
+
+def is_payment_db_available() -> bool:
+    settings = get_settings()
+    return bool(psycopg and settings.payment_db_url)
+
+
+@contextmanager
+def get_payment_db_connection() -> Iterator[Any]:
+    settings = get_settings()
+    if not psycopg or not settings.payment_db_url:
+        raise RuntimeError("Payment database access is not configured.")
+    conn = psycopg.connect(settings.payment_db_url, row_factory=dict_row)
+    try:
+        yield conn
+    finally:
+        conn.close()

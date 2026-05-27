@@ -162,16 +162,16 @@ app.use(["/api/auth", "/api/rbac"], express.json({ limit: '10mb' }), async (req,
 // Note: authProxy is no longer needed — all /api/auth/* routes are handled above
 app.use(fileProxy);
 
-// Local dev: no payment microservice — answer /user-resources (and /api/user-resources for backends) on the gateway
+// User-resources always proxy to payment-service (real plan data after checkout).
+app.use(paymentProxy);
+
+// Optional fallback only when payment microservice is unreachable (SKIP_PAYMENT_SERVICE=true).
 if (process.env.SKIP_PAYMENT_SERVICE === "true") {
   console.log(
-    "[Gateway] SKIP_PAYMENT_SERVICE=true — mocking user-resources (payment service not required)"
+    "[Gateway] SKIP_PAYMENT_SERVICE=true — user-resources fallback forwarder enabled"
   );
   app.use(require("./routes/mockUserResourcesRoutes"));
 }
-
-// app.use(paymentProxy);
-app.use(paymentProxy);
 app.use("/support", supportProxy);
 // Mount msdraftProxy FIRST to handle Microsoft Word auth routes (token in query)
 // This must come before draftProxy to catch auth routes

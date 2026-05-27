@@ -178,6 +178,18 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
     Map only `summarization_chat_config` columns (plus id timestamps). No llm_chat_config / other tables.
     """
     default_model = resolve_chat_llm_model(settings.adk_model, "gemini-2.5-pro")
+    # Env-backed defaults — set in .env, override only when DB row is missing/null
+    d_tokens       = max(0, int(settings.default_tokens_per_day))
+    d_msg_hr       = max(0, int(settings.default_messages_per_hour))
+    d_chats_min    = max(0, int(settings.default_chats_per_minute))
+    d_chats_day    = max(0, int(settings.default_chats_per_day))
+    d_upload_files = max(0, int(settings.default_max_upload_files))
+    d_doc_mb       = max(0, int(settings.default_max_document_size_mb))
+    d_doc_pages    = max(0, int(settings.default_max_document_pages))
+    d_uploads_day  = max(0, int(settings.default_max_file_upload_per_day))
+    d_ctx_docs     = max(0, int(settings.default_max_context_documents))
+    d_conv_hist    = max(0, int(settings.default_max_conversation_history))
+
     if not row:
         max_out = 25000
         max_file_mb = 100
@@ -190,11 +202,11 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
             "model_temperature": 0.7,
             "max_output_tokens": max_out,
             "streaming_delay": 0,
-            "max_upload_files": 10,
+            "max_upload_files": d_upload_files,
             "max_file_size_mb": max_file_mb,
-            "max_document_size_mb": 40,
-            "max_document_pages": 400,
-            "max_context_documents": 8,
+            "max_document_size_mb": d_doc_mb,
+            "max_document_pages": d_doc_pages,
+            "max_context_documents": d_ctx_docs,
             "embedding_provider": "google",
             "embedding_model": settings.embedding_model or "gemini-embedding-001",
             "embedding_dimension": 768,
@@ -204,12 +216,12 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
             "semantic_weight": 0.7,
             "keyword_weight": 0.3,
             "text_search_language": "english",
-            "total_tokens_per_day": 300000,
-            "messages_per_hour": 60,
-            "quota_chats_per_minute": 20,
-            "chats_per_day": 80,
-            "max_file_upload_per_day": 15,
-            "max_conversation_history": 25,
+            "total_tokens_per_day": d_tokens,
+            "messages_per_hour": d_msg_hr,
+            "quota_chats_per_minute": d_chats_min,
+            "chats_per_day": d_chats_day,
+            "max_file_upload_per_day": d_uploads_day,
+            "max_conversation_history": d_conv_hist,
             "updated_by": None,
         }
 
@@ -229,11 +241,11 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
         "model_temperature": _clamp_float(row.get("model_temperature"), 0.0, 1.0, 0.7),
         "max_output_tokens": max_out,
         "streaming_delay": _finite_int(row.get("streaming_delay"), 0),
-        "max_upload_files": max(0, min(1000, _finite_int(row.get("max_upload_files"), 10))),
+        "max_upload_files": max(0, min(1000, _finite_int(row.get("max_upload_files"), d_upload_files))),
         "max_file_size_mb": max_file_mb,
-        "max_document_size_mb": max(0, min(_MAX_DOC_MB_CEILING, _finite_int(row.get("max_document_size_mb"), 40))),
-        "max_document_pages": max(0, min(_MAX_DOC_PAGES_CEILING, _finite_int(row.get("max_document_pages"), 400))),
-        "max_context_documents": max(0, min(10_000, _finite_int(row.get("max_context_documents"), 8))),
+        "max_document_size_mb": max(0, min(_MAX_DOC_MB_CEILING, _finite_int(row.get("max_document_size_mb"), d_doc_mb))),
+        "max_document_pages": max(0, min(_MAX_DOC_PAGES_CEILING, _finite_int(row.get("max_document_pages"), d_doc_pages))),
+        "max_context_documents": max(0, min(10_000, _finite_int(row.get("max_context_documents"), d_ctx_docs))),
         "embedding_provider": str(row.get("embedding_provider") or "google").strip().lower(),
         "embedding_model": str(row.get("embedding_model") or settings.embedding_model or "gemini-embedding-001").strip(),
         "embedding_dimension": max(0, min(16_384, _finite_int(row.get("embedding_dimension"), 768))),
@@ -245,13 +257,13 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
         "text_search_language": str(row.get("text_search_language") or "english").strip() or "english",
         "total_tokens_per_day": max(
             0,
-            min(_TOTAL_TOKENS_PER_DAY_CEILING, _finite_int(row.get("total_tokens_per_day"), 300000)),
+            min(_TOTAL_TOKENS_PER_DAY_CEILING, _finite_int(row.get("total_tokens_per_day"), d_tokens)),
         ),
-        "messages_per_hour": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("messages_per_hour"), 60))),
-        "quota_chats_per_minute": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("quota_chats_per_minute"), 20))),
-        "chats_per_day": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("chats_per_day"), 80))),
-        "max_file_upload_per_day": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("max_file_upload_per_day"), 15))),
-        "max_conversation_history": max(0, min(10_000, _finite_int(row.get("max_conversation_history"), 25))),
+        "messages_per_hour": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("messages_per_hour"), d_msg_hr))),
+        "quota_chats_per_minute": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("quota_chats_per_minute"), d_chats_min))),
+        "chats_per_day": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("chats_per_day"), d_chats_day))),
+        "max_file_upload_per_day": max(0, min(_RATE_LIMIT_CEILING, _finite_int(row.get("max_file_upload_per_day"), d_uploads_day))),
+        "max_conversation_history": max(0, min(10_000, _finite_int(row.get("max_conversation_history"), d_conv_hist))),
         "updated_by": row.get("updated_by"),
     }
 
@@ -330,10 +342,107 @@ def get_request_upload_ceiling_mb(config: dict[str, Any] | None) -> int:
     return min(positives) if positives else 100
 
 
+def _get_user_active_plan(uid_int: int, authorization: str | None = None) -> dict[str, Any] | None:
+    from app.services.payment_plan_service import get_user_active_plan
+
+    try:
+        return get_user_active_plan(uid_int, authorization=authorization)
+    except Exception as exc:
+        logger.warning("[SummarizationConfig] Failed to fetch active plan for user %s: %s", uid_int, exc)
+    return None
+
+
+def _merge_plan_limits(
+    cfg: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    plan_limit_mode: str = "chat",
+) -> dict[str, Any]:
+    """
+    Overlay subscription_plans onto admin defaults.
+    NULL plan column = keep admin default. Non-null > 0 = override.
+    chat_* columns apply to intelligent chat; sum_* to summarization flows.
+    """
+    out = dict(cfg)
+    mode = (plan_limit_mode or "chat").strip().lower()
+
+    def plan_int(col: str, fallback: int) -> int:
+        v = plan.get(col)
+        if v is None:
+            return fallback
+        n = _finite_int(v, 0)
+        return n if n > 0 else fallback
+
+    def plan_col_set(col: str) -> bool:
+        v = plan.get(col)
+        return v is not None and _finite_int(v, 0) > 0
+
+    legacy_doc_limit = _finite_int(plan.get("document_limit"), 0)
+
+    if mode == "summarization":
+        out["total_tokens_per_day"] = plan_int(
+            "summarization_token_limit", out["total_tokens_per_day"]
+        )
+        out["messages_per_hour"] = plan_int("sum_messages_per_hour", out["messages_per_hour"])
+        out["chats_per_day"] = plan_int("sum_chats_per_day", out["chats_per_day"])
+        out["quota_chats_per_minute"] = plan_int(
+            "sum_quota_per_minute", out["quota_chats_per_minute"]
+        )
+        out["max_document_pages"] = plan_int("sum_max_document_pages", out["max_document_pages"])
+        out["max_document_size_mb"] = plan_int(
+            "sum_max_document_size_mb", out["max_document_size_mb"]
+        )
+        out["max_file_upload_per_day"] = plan_int(
+            "sum_max_file_upload_per_day", out["max_file_upload_per_day"]
+        )
+        out["max_upload_files"] = plan_int("sum_max_upload_files", out["max_upload_files"])
+        out["max_context_documents"] = plan_int(
+            "sum_max_context_documents", out["max_context_documents"]
+        )
+        out["max_conversation_history"] = plan_int(
+            "sum_max_conversation_history", out["max_conversation_history"]
+        )
+        if legacy_doc_limit > 0:
+            if not plan_col_set("sum_max_upload_files"):
+                out["max_upload_files"] = legacy_doc_limit
+            if not plan_col_set("sum_max_file_upload_per_day"):
+                out["max_file_upload_per_day"] = legacy_doc_limit
+    else:
+        out["total_tokens_per_day"] = plan_int("chat_token_limit", out["total_tokens_per_day"])
+        out["messages_per_hour"] = plan_int("chat_messages_per_hour", out["messages_per_hour"])
+        out["chats_per_day"] = plan_int("chat_chats_per_day", out["chats_per_day"])
+        out["quota_chats_per_minute"] = plan_int(
+            "chat_quota_per_minute", out["quota_chats_per_minute"]
+        )
+        out["max_document_pages"] = plan_int(
+            "chat_max_document_pages", out["max_document_pages"]
+        )
+        out["max_document_size_mb"] = plan_int(
+            "chat_max_document_size_mb", out["max_document_size_mb"]
+        )
+        out["max_file_upload_per_day"] = plan_int(
+            "chat_max_file_upload_per_day", out["max_file_upload_per_day"]
+        )
+        out["max_upload_files"] = plan_int("chat_max_upload_files", out["max_upload_files"])
+        if legacy_doc_limit > 0:
+            if not plan_col_set("chat_max_upload_files"):
+                out["max_upload_files"] = legacy_doc_limit
+            if not plan_col_set("chat_max_file_upload_per_day"):
+                out["max_file_upload_per_day"] = legacy_doc_limit
+            if not plan_col_set("chat_max_document_pages"):
+                out["max_document_pages"] = legacy_doc_limit
+
+    out["_plan_id"] = plan.get("id")
+    out["_plan_name"] = plan.get("name")
+    out["_plan_limit_mode"] = mode
+    return out
+
+
 def get_llm_chat_config(
     *,
     user_id: str | int | None = None,
     force_refresh: bool = False,
+    plan_limit_mode: str = "chat",
 ) -> dict[str, Any]:
     """
     Effective limits/models from `public.summarization_chat_config` only.
@@ -379,6 +488,22 @@ def get_llm_chat_config(
             "user_merged" if uid_int is not None else "global"
         )
         cfg["summarization_config_user_id"] = uid_int
+
+        if uid_int is not None:
+            plan = _get_user_active_plan(uid_int)
+            if plan:
+                cfg = _merge_plan_limits(cfg, plan, plan_limit_mode=plan_limit_mode)
+                cfg["summarization_config_scope"] = f"plan_merged_{plan_limit_mode}"
+                logger.info(
+                    "[SummarizationConfig] plan applied (%s) for user %s: \"%s\" (id=%s)",
+                    plan_limit_mode,
+                    uid_int,
+                    plan.get("name"),
+                    plan.get("id"),
+                )
+            else:
+                logger.debug("[SummarizationConfig] No active plan for user %s — using global defaults", uid_int)
+
         row = merged_row or {}
         logger.info(
             "[SummarizationConfig] table=%s scope=%s user_id=%s config_id=%s updated_at=%s "
@@ -413,8 +538,12 @@ def get_summarization_chat_config(
     user_id: str | int | None = None,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
-    """Alias for get_llm_chat_config (name matches the DB table)."""
-    return get_llm_chat_config(user_id=user_id, force_refresh=force_refresh)
+    """Summarization flows: apply sum_* columns from subscription_plans."""
+    return get_llm_chat_config(
+        user_id=user_id,
+        force_refresh=force_refresh,
+        plan_limit_mode="summarization",
+    )
 
 
 def invalidate_summarization_chat_config_cache() -> None:

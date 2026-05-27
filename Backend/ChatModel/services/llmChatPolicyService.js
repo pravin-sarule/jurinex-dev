@@ -10,12 +10,29 @@
  */
 
 const pool = require('../config/db');
+const paymentPool = require('../config/paymentDb');
 const pdfParse = require('pdf-parse');
 
 /** 0 or NaN = unlimited for rate limits */
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Format a Date as IST string: "DD MMM YYYY, HH:MM AM/PM IST" */
+function toISTString(date) {
+  if (!date) return null;
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }) + ' IST';
 }
 
 /**
@@ -29,40 +46,54 @@ function getNextUtcMidnightIsoString() {
   return next.toISOString();
 }
 
-async function getUserDailyTokenSum(userId) {
-  const { rows } = await pool.query(`
-    SELECT COALESCE(SUM(total_tokens), 0)::bigint AS s
+/**
+ * Compute rolling-window reset time: oldest_entry + window_ms.
+ * Falls back to now + window_ms when no oldest entry is available.
+ */
+function rollingResetTime(oldestTs, windowMs) {
+  const base = oldestTs ? new Date(oldestTs) : new Date();
+  if (isNaN(base.getTime())) return new Date(Date.now() + windowMs);
+  return new Date(base.getTime() + windowMs);
+}
+
+/**
+ * Single consolidated query: counts + oldest timestamps + 24h token sum.
+ * llm_usage_logs lives in Payment_DB (paymentPool).
+ */
+async function getUserUsageStats(userId) {
+  const { rows } = await paymentPool.query(`
+    SELECT
+      COALESCE(SUM(total_tokens) FILTER (WHERE used_at > now() - interval '24 hours'), 0)::bigint AS tokens_24h,
+      COUNT(*) FILTER (WHERE used_at > now() - interval '1 minute')::int  AS per_minute,
+      COUNT(*) FILTER (WHERE used_at > now() - interval '1 hour')::int    AS per_hour,
+      COUNT(*) FILTER (WHERE used_at > now() - interval '24 hours')::int  AS per_day,
+      MIN(used_at) FILTER (WHERE used_at > now() - interval '1 minute')   AS oldest_1min,
+      MIN(used_at) FILTER (WHERE used_at > now() - interval '1 hour')     AS oldest_1hr,
+      MIN(used_at) FILTER (WHERE used_at > now() - interval '24 hours')   AS oldest_24h
     FROM public.llm_usage_logs
     WHERE user_id = $1
-      AND used_at > now() - interval '24 hours'
   `, [userId]);
-  return Number(rows[0]?.s || 0);
+  const r = rows[0] || {};
+  return {
+    tokens24h:   Number(r.tokens_24h || 0),
+    perMinute:   Number(r.per_minute  || 0),
+    perHour:     Number(r.per_hour    || 0),
+    perDay:      Number(r.per_day     || 0),
+    oldest1min:  r.oldest_1min || null,
+    oldest1hr:   r.oldest_1hr  || null,
+    oldest24h:   r.oldest_24h  || null,
+  };
+}
+
+// Keep these for external callers that import them individually.
+async function getUserDailyTokenSum(userId) {
+  const stats = await getUserUsageStats(userId);
+  return stats.tokens24h;
 }
 
 async function getUserRecentCounts(userId) {
-  const uid = userId;
-  const [perMinute, perHour, perDay] = await Promise.all([
-    pool.query(
-      `SELECT COUNT(*)::int AS c FROM public.llm_usage_logs
-       WHERE user_id = $1 AND used_at > now() - interval '1 minute'`,
-      [uid]
-    ),
-    pool.query(
-      `SELECT COUNT(*)::int AS c FROM public.llm_usage_logs
-       WHERE user_id = $1 AND used_at > now() - interval '1 hour'`,
-      [uid]
-    ),
-    pool.query(
-      `SELECT COUNT(*)::int AS c FROM public.llm_usage_logs
-       WHERE user_id = $1 AND used_at > now() - interval '24 hours'`,
-      [uid]
-    ),
-  ]);
-  return {
-    perMinute: perMinute.rows[0]?.c ?? 0,
-    perHour: perHour.rows[0]?.c ?? 0,
-    perDay: perDay.rows[0]?.c ?? 0,
-  };
+  const stats = await getUserUsageStats(userId);
+  return { perMinute: stats.perMinute, perHour: stats.perHour, perDay: stats.perDay };
 }
 
 /**
@@ -74,11 +105,9 @@ async function assertChatAllowed(userId, llmConfig) {
   const perHour = Math.max(0, Math.floor(num(llmConfig.messages_per_hour)));
   const perDay = Math.max(0, Math.floor(num(llmConfig.chats_per_day)));
 
-  let userTokens24h;
-  let counts;
+  let stats;
   try {
-    userTokens24h = await getUserDailyTokenSum(userId);
-    counts = await getUserRecentCounts(userId);
+    stats = await getUserUsageStats(userId);
   } catch (err) {
     console.error('[LLM Policy] Usage query failed:', err.message);
     if (process.env.LLM_POLICY_LENIENT === 'true') {
@@ -92,60 +121,70 @@ async function assertChatAllowed(userId, llmConfig) {
     };
   }
 
-  const nextResetUtc = getNextUtcMidnightIsoString();
-
   if (perUserTokenCap > 0) {
     console.log(
-      `[LLM Policy] Per-user tokens (rolling 24h): user=${userId}, used=${userTokens24h} / cap=${perUserTokenCap}`
+      `[LLM Policy] Per-user tokens (rolling 24h): user=${userId}, used=${stats.tokens24h} / cap=${perUserTokenCap}`
     );
   }
 
-  if (perUserTokenCap > 0 && userTokens24h >= perUserTokenCap) {
+  if (perUserTokenCap > 0 && stats.tokens24h >= perUserTokenCap) {
+    const resetAt = rollingResetTime(stats.oldest24h, 24 * 60 * 60 * 1000);
     return {
       ok: false,
       code: 'RATE_LIMIT_TOTAL_TOKENS_PER_DAY',
-      message:
-        'Your token budget for the last 24 hours has been reached. Try again after older usage rolls out of the window.',
+      message: `Your token budget for the last 24 hours has been reached. Resets at ${toISTString(resetAt)}.`,
       details: {
-        used_tokens_last_24h: userTokens24h,
+        used_tokens_last_24h: stats.tokens24h,
         limit: perUserTokenCap,
-        next_reset_utc: nextResetUtc,
+        next_reset_ist: toISTString(resetAt),
+        next_reset_utc: resetAt.toISOString(),
         reset_basis: 'rolling_24h_per_user_tokens',
-        note:
-          'Sum of total_tokens in llm_usage_logs for this user over the rolling last 24 hours. Increase total_tokens_per_day in llm_chat_config or wait for usage to age out.',
       },
     };
   }
 
-  if (perMin > 0 && counts.perMinute >= perMin) {
+  if (perMin > 0 && stats.perMinute >= perMin) {
+    const resetAt = rollingResetTime(stats.oldest1min, 60 * 1000);
     return {
       ok: false,
       code: 'RATE_LIMIT_PER_MINUTE',
-      message: 'Too many chat requests. Please wait a minute and try again.',
-      details: { limit_per_minute: perMin, used_last_minute: counts.perMinute },
+      message: `Too many chat requests. Please wait until ${toISTString(resetAt)}.`,
+      details: {
+        limit_per_minute: perMin,
+        used_last_minute: stats.perMinute,
+        next_reset_ist: toISTString(resetAt),
+        next_reset_utc: resetAt.toISOString(),
+      },
     };
   }
 
-  if (perHour > 0 && counts.perHour >= perHour) {
+  if (perHour > 0 && stats.perHour >= perHour) {
+    const resetAt = rollingResetTime(stats.oldest1hr, 60 * 60 * 1000);
     return {
       ok: false,
       code: 'RATE_LIMIT_MESSAGES_PER_HOUR',
-      message: 'Your hourly message quota has been reached. Try again later.',
-      details: { limit_per_hour: perHour, used_last_hour: counts.perHour },
+      message: `Your hourly message quota has been reached. Resets at ${toISTString(resetAt)}.`,
+      details: {
+        limit_per_hour: perHour,
+        used_last_hour: stats.perHour,
+        next_reset_ist: toISTString(resetAt),
+        next_reset_utc: resetAt.toISOString(),
+      },
     };
   }
 
-  if (perDay > 0 && counts.perDay >= perDay) {
+  if (perDay > 0 && stats.perDay >= perDay) {
+    const resetAt = rollingResetTime(stats.oldest24h, 24 * 60 * 60 * 1000);
     return {
       ok: false,
       code: 'RATE_LIMIT_CHATS_PER_DAY',
-      message:
-        'Your chat quota for the last 24 hours has been reached (all sessions combined). Try again later.',
+      message: `Your daily chat quota has been reached. Resets at ${toISTString(resetAt)}.`,
       details: {
         limit_per_24h: perDay,
-        used_last_24h: counts.perDay,
+        used_last_24h: stats.perDay,
+        next_reset_ist: toISTString(resetAt),
+        next_reset_utc: resetAt.toISOString(),
         reset_basis: 'rolling_24h_per_user',
-        note: 'Counted from llm_usage_logs for this user over the rolling last 24 hours, not per session.',
       },
     };
   }
@@ -247,8 +286,10 @@ module.exports = {
   assertChatAllowed,
   assertUploadAllowed,
   assertStoredFileMeetsDashboardLimits,
+  getUserUsageStats,
   getUserDailyTokenSum,
   getUserRecentCounts,
   getUserUploadCountToday,
   getNextUtcMidnightIsoString,
+  toISTString,
 };

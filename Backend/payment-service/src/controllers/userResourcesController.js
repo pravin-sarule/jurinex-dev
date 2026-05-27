@@ -1,9 +1,9 @@
 const pool = require('../config/db');
-const axios = require('axios'); // Import axios for HTTP requests
 const TokenUsageService = require('../services/tokenUsageService');
 const TokenUsageSyncService = require('../services/tokenUsageSyncService');
 const { resolveEffectivePlan } = require('../services/effectivePlanService');
-const { getUserUsageAndPlanUrl, usageRequestHeaders } = require('../utils/documentUsageUrl');
+const { clearUserActivePlanInAuth } = require('../services/userPlanSyncService');
+const { fetchUserUsageAndPlan } = require('../utils/documentUsageUrl');
 
 exports.getPlanAndResourceDetails = async (req, res) => {
     console.log("DEBUG: getPlanAndResourceDetails - Controller entered.");
@@ -30,7 +30,7 @@ exports.getPlanAndResourceDetails = async (req, res) => {
                 razorpay_payment_id,
                 razorpay_order_id,
                 subscription_id,
-                TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS payment_date
+                TO_CHAR(created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD"T"HH24:MI:SS.MS"+05:30"') AS payment_date
             FROM payments
             WHERE user_id = $1
             ORDER BY created_at DESC
@@ -40,6 +40,9 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         const latestPayment = latestPaymentResult.rows[0] || null;
 
         if (!activePlan) {
+            clearUserActivePlanInAuth(userId).catch((err) => {
+                console.warn(`[PlanDetails] Failed to clear auth active_plan for user ${userId}:`, err.message);
+            });
             return res.status(200).json({
                 activePlan: null,
                 resourceUtilization: {
@@ -59,22 +62,11 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         let userPlanFromDocumentService = null;
         let timeLeftUntilReset = null;
 
-        try {
-            const usageUrl = getUserUsageAndPlanUrl(userId);
-            const documentServiceResponse = await axios.get(usageUrl, {
-                headers: usageRequestHeaders(authorizationHeader, userId),
-                timeout: 10000 // 10 seconds
-            });
-
-            if (documentServiceResponse.status === 200 && documentServiceResponse.data.success) {
-                userUsageFromDocumentService = documentServiceResponse.data.data.usage;
-                userPlanFromDocumentService = documentServiceResponse.data.data.plan;
-                timeLeftUntilReset = documentServiceResponse.data.data.timeLeft;
-            } else {
-                console.error('❌ Document Service returned an error:', documentServiceResponse.data);
-            }
-        } catch (err) {
-            console.error('❌ Error fetching user usage and plan from Document Service:', err.message);
+        const usagePayload = await fetchUserUsageAndPlan(userId, authorizationHeader);
+        if (usagePayload) {
+            userUsageFromDocumentService = usagePayload.usage;
+            userPlanFromDocumentService = usagePayload.plan;
+            timeLeftUntilReset = usagePayload.timeLeft;
         }
 
         const effectivePlan = activePlan;
@@ -189,12 +181,12 @@ exports.getUserTransactions = async (req, res) => {
                 currency,
                 status,
                 payment_method,
-                TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS transaction_date,
+                TO_CHAR(created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD"T"HH24:MI:SS.MS"+05:30"') AS transaction_date,
                 'payment' AS type,
                 razorpay_payment_id,
                 razorpay_order_id,
                 razorpay_signature,
-                TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS payment_date,
+                TO_CHAR(created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD"T"HH24:MI:SS.MS"+05:30"') AS payment_date,
                 subscription_id
             FROM
                 payments
@@ -237,22 +229,11 @@ exports.getUserResourceUtilization = async (req, res) => {
         let userPlanFromDocumentService = null;
         let timeLeftUntilReset = null;
 
-        try {
-            const usageUrl = getUserUsageAndPlanUrl(userId);
-            const documentServiceResponse = await axios.get(usageUrl, {
-                headers: usageRequestHeaders(authorizationHeader, userId),
-                timeout: 10000 // 10 seconds
-            });
-
-            if (documentServiceResponse.status === 200 && documentServiceResponse.data.success) {
-                userUsageFromDocumentService = documentServiceResponse.data.data.usage;
-                userPlanFromDocumentService = documentServiceResponse.data.data.plan;
-                timeLeftUntilReset = documentServiceResponse.data.data.timeLeft;
-            } else {
-                console.error('❌ Document Service returned an error:', documentServiceResponse.data);
-            }
-        } catch (err) {
-            console.error('❌ Error fetching user usage and plan from Document Service:', err.message);
+        const usagePayload = await fetchUserUsageAndPlan(userId, authorizationHeader);
+        if (usagePayload) {
+            userUsageFromDocumentService = usagePayload.usage;
+            userPlanFromDocumentService = usagePayload.plan;
+            timeLeftUntilReset = usagePayload.timeLeft;
         }
 
         const { activePlan: effectivePlan } = await resolveEffectivePlan(userId);

@@ -29,8 +29,78 @@ from app.services.adapters.document_ai import DocumentAIAdapter, _call_gemini_fo
 from app.services.adapters.vector_store import ChunkRecord, InMemoryVectorStore
 from app.services.db import get_db_connection, is_db_available
 from app.services.llm_chat_config import get_llm_chat_config
+from app.services.prompt_visibility import normalize_role_slug, preset_matches_user
 
 logger = logging.getLogger("agentic_document_service.pipeline")
+
+
+def _parse_uid_int(user_id: str | None) -> int | None:
+    try:
+        n = int(str(user_id or "").strip())
+        return n if n > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+_DOMAIN_ROLE_ALIASES: dict[str, str] = {
+    "banking_professional": "banking",
+    "finance_professional": "banking",
+    "legal_professional": "legal",
+    "chartered_accountant": "corporate",
+    "corporate_advisor": "corporate",
+    "tax_consultant": "corporate",
+    "compliance_officer": "corporate",
+}
+
+
+def _normalize_user_role(raw_role: str | None) -> str | None:
+    if not raw_role:
+        return None
+    normalized = normalize_role_slug(raw_role)
+    if not normalized:
+        return None
+    return _DOMAIN_ROLE_ALIASES.get(normalized, normalized)
+
+
+def _get_user_role_from_db(uid: int) -> str | None:
+    if not is_db_available():
+        return None
+    try:
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, domain_role FROM users WHERE id = %s LIMIT 1",
+                (uid,),
+            )
+            row = cur.fetchone()
+            if row:
+                for key in ("domain_role", "role"):
+                    resolved = _normalize_user_role(row.get(key))
+                    if resolved:
+                        return resolved
+    except Exception:
+        pass
+    return None
+
+
+def _get_user_plan_id(uid: int, authorization: str | None = None) -> int | None:
+    try:
+        from app.services.payment_plan_service import get_user_active_plan
+
+        plan = get_user_active_plan(uid, authorization=authorization)
+        if plan and plan.get("id") is not None:
+            return int(plan["id"])
+    except Exception:
+        pass
+    return None
+
+
+def _preset_visible(preset: "PresetPrompt", user_role: str | None, user_plan_id: int | None) -> bool:
+    return preset_matches_user(
+        preset.allowed_roles,
+        preset.allowed_plan_ids,
+        user_role,
+        user_plan_id,
+    )
 
 
 DEFAULT_PRESETS: list[dict[str, Any]] = [
@@ -130,7 +200,9 @@ class LegalCasePipelineService:
                       name,
                       prompt_template,
                       required_doc_types,
-                      output_format
+                      output_format,
+                      COALESCE(allowed_roles,    ARRAY[]::text[])    AS allowed_roles,
+                      COALESCE(allowed_plan_ids, ARRAY[]::integer[]) AS allowed_plan_ids
                     FROM preset_prompts
                     WHERE is_active = TRUE
                     ORDER BY name ASC
@@ -150,6 +222,8 @@ class LegalCasePipelineService:
                     prompt_template=str(row.get("prompt_template") or "").strip(),
                     required_doc_types=self._coerce_doc_types(row.get("required_doc_types")),
                     output_format=str(row.get("output_format") or "structured").strip() or "structured",
+                    allowed_roles=list(row.get("allowed_roles") or []),
+                    allowed_plan_ids=[int(x) for x in (row.get("allowed_plan_ids") or []) if x is not None],
                 )
             )
         return [preset for preset in presets if preset.prompt_template]
@@ -991,12 +1065,25 @@ class LegalCasePipelineService:
             generated_at=datetime.now(tz=UTC),
         )
 
-    def list_presets(self) -> list[PresetPrompt]:
-        presets = self._fetch_presets_from_db()
-        return presets or self._get_default_presets()
+    def list_presets(
+        self,
+        user_id: str | None = None,
+        authorization: str | None = None,
+    ) -> list[PresetPrompt]:
+        all_presets = self._fetch_presets_from_db() or self._get_default_presets()
+        uid_int = _parse_uid_int(user_id)
+        if uid_int is None:
+            return []
+        user_role = _get_user_role_from_db(uid_int)
+        user_plan_id = _get_user_plan_id(uid_int, authorization=authorization)
+        logger.debug(
+            "[Pipeline] list_presets user_id=%s role=%s plan_id=%s total=%s",
+            uid_int, user_role, user_plan_id, len(all_presets),
+        )
+        return [p for p in all_presets if _preset_visible(p, user_role, user_plan_id)]
 
     def execute_preset(self, request: PresetExecutionRequest) -> PresetExecutionResponse:
-        preset = next((item for item in self.list_presets() if item.id == request.preset_id), None)
+        preset = next((item for item in self.list_presets(user_id=request.user_id) if item.id == request.preset_id), None)
         if not preset:
             raise ValueError(f"Preset '{request.preset_id}' was not found.")
         additional_context = (request.additional_context or "").strip()

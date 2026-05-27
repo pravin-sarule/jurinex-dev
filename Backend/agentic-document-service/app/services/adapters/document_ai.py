@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.schemas.contracts import DocumentReference, DocumentType
-from app.services.llm_chat_config import get_llm_chat_config, resolve_model_name
+from app.services.llm_chat_config import get_summarization_chat_config, resolve_model_name
 
 logger = logging.getLogger("agentic_document_service.document_ai")
 _gemini_extract_unavailable_logged = False
@@ -341,7 +341,7 @@ def _generation_config(
             )
 
     # ── Fallback: summarization_chat_config (no agent_name or agent load error) ──
-    config = summarization_llm_config or get_llm_chat_config(user_id=user_id)
+    config = summarization_llm_config or get_summarization_chat_config(user_id=user_id)
     model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
     max_tokens = _max_tokens_from_summarization_config(config, for_summary=for_summary)
     temperature = float(config.get("model_temperature") or 0.7)

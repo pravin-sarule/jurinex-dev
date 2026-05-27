@@ -45,8 +45,11 @@ cd Backend/agentic-document-service
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+playwright install chromium
 uvicorn main:app --reload --port 8092
 ```
+
+Branded PDF export (`POST /api/branding/export-pdf`) requires Chromium via Playwright (same print engine as Puppeteer).
 
 By default the service now loads environment values from:
 

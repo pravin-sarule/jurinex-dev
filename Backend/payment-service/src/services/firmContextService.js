@@ -11,7 +11,7 @@ function buildCandidateUrls(path) {
   }
 
   if (API_GATEWAY_URL) {
-    candidates.push(`${String(API_GATEWAY_URL).replace(/\/$/, '')}/auth/internal${path}`);
+    candidates.push(`${String(API_GATEWAY_URL).replace(/\/$/, '')}/api/auth/internal${path}`);
   }
 
   return candidates;

@@ -3,21 +3,9 @@ const { fetchFirmContext } = require('./firmContextService');
 
 const ACTIVE_SUBSCRIPTION_QUERY = `
   SELECT
+    sp.*,
     sp.id AS plan_id,
     sp.name AS plan_name,
-    sp.description,
-    sp.price,
-    sp.currency,
-    sp.interval,
-    sp.type,
-    sp.token_limit,
-    sp.carry_over_limit,
-    sp.document_limit,
-    sp.ai_analysis_limit,
-    sp.template_access,
-    sp.storage_limit_gb,
-    sp.drafting_type,
-    sp.limits,
     us.start_date,
     us.end_date,
     us.status AS subscription_status,
@@ -25,8 +13,9 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
   FROM user_subscriptions us
   JOIN subscription_plans sp ON us.plan_id = sp.id
   WHERE us.user_id = $1
-    AND LOWER(us.status) = 'active'
-  ORDER BY us.start_date DESC
+    AND LOWER(COALESCE(us.status, 'active')) = 'active'
+    AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+  ORDER BY us.activated_at DESC NULLS LAST, us.start_date DESC, us.updated_at DESC
   LIMIT 1
 `;
 
@@ -40,6 +29,7 @@ function decoratePlan(plan, metadata = {}) {
 
   return {
     ...plan,
+    id: plan.plan_id,
     is_inherited_from_firm: !!metadata.isInheritedFromFirm,
     plan_owner_user_id: metadata.planOwnerUserId ?? plan.subscription_user_id ?? null,
     firm_id: metadata.firmId ?? null,

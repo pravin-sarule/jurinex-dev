@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const chatController = require('../controllers/chatController');
+const geminiCacheController = require('../controllers/geminiCacheController');
 const { protect } = require('../middleware/auth');
 const { enforceLLMChatPolicy } = require('../middleware/llmChatPolicy');
+
 
 /** Limits from DB (`llm_chat_config`) for client-side validation — no quota side effect */
 router.get('/limits', protect, chatController.getChatLlmLimits);
@@ -93,4 +95,26 @@ router.get(
   chatController.getGeneralChatSessions
 );
 
+router.get(
+  '/document-sessions',
+  protect,
+  chatController.getAllDocumentSessions
+);
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Token Counting (free, non-generating) — mirrors Google AI Studio behaviour
+───────────────────────────────────────────────────────────────────────── */
+router.post('/count-tokens', protect, chatController.countFileTokens);
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Gemini Context Caching Routes
+───────────────────────────────────────────────────────────────────────── */
+router.post('/cache/create', protect, geminiCacheController.createCache);
+router.post('/cache/ask', protect, geminiCacheController.askQuestion);
+router.post('/cache/ask/stream', protect, geminiCacheController.askQuestionStream);
+router.get('/cache/status/:sessionId', protect, geminiCacheController.getStatus);
+router.get('/cache/file-status/:fileId', protect, geminiCacheController.getFileStatus);
+router.post('/cache/delete', protect, geminiCacheController.deleteCache);
+
 module.exports = router;
+

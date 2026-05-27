@@ -1,5 +1,6 @@
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const express = require("express");
+const axios = require("axios");
 const { authMiddleware } = require("../middlewares/authMiddleware");
 
 const router = express.Router();
@@ -15,6 +16,64 @@ router.use("/files", authMiddleware);
 router.use("/docs", authMiddleware);
 router.use("/mindmap", authMiddleware);
 
+// For secrets list: resolve user's active plan from payment service and inject as header
+// Runs after authMiddleware (req.user is available), before the proxy forwards the request
+router.get("/files/secrets", async (req, res, next) => {
+  const userId = req.user?.id;
+  if (userId) {
+    const paymentUrl = (process.env.PAYMENT_SERVICE_URL || "http://localhost:5003").replace(/\/$/, "");
+    try {
+      const resp = await axios.get(
+        `${paymentUrl}/api/user-resources/user-plan/${userId}`,
+        { headers: { Authorization: req.headers.authorization }, timeout: 3000 }
+      );
+      const planData = resp.data?.data ?? resp.data ?? null;
+      const planId = planData?.plan_id ?? planData?.id ?? null;
+      if (planId != null) {
+        req.headers["x-user-plan-id"] = String(planId);
+        console.log(`[Gateway] Injected x-user-plan-id=${planId} for user ${userId}`);
+      }
+    } catch (err) {
+      console.warn(`[Gateway] Plan lookup failed for user ${userId}: ${err.message} — proceeding without plan filter`);
+    }
+  }
+  next();
+});
+
+// Analysis prompts: ChatModel implements the same /secrets contract and is the
+// service used for /chat in local dev. Proxying here avoids 504s when
+// agentic-document-service (FILE_SERVICE_URL :8092) is not running.
+const chatServiceTarget = process.env.CHAT_SERVICE_URL || "http://localhost:8080";
+
+router.use(
+  "/files/secrets",
+  createProxyMiddleware({
+    target: chatServiceTarget,
+    changeOrigin: true,
+    pathRewrite: (path) => `/api/chat/secrets${path || ""}`,
+    onProxyReq: (proxyReq, req) => {
+      if (req.user?.id) {
+        proxyReq.setHeader("x-user-id", String(req.user.id));
+      }
+      if (req.headers.authorization) {
+        proxyReq.setHeader("Authorization", req.headers.authorization);
+      }
+      console.log(`[Gateway] Proxying secrets to ChatModel: ${proxyReq.path}`);
+    },
+    proxyTimeout: 30000,
+    timeout: 30000,
+    onError: (err, req, res) => {
+      console.error("[Gateway] Secrets (ChatModel) proxy error:", err.message);
+      if (!res.headersSent) {
+        res.status(502).json({
+          error: "Analysis prompts service is unavailable",
+          message: err.message,
+        });
+      }
+    },
+  })
+);
+
 // Proxy: /files/* → File Service /api/files/*
 router.use(
   "/files",
@@ -28,6 +87,10 @@ router.use(
       // Inject user ID from JWT into header for Document Service
       if (req.user && req.user.id) {
         proxyReq.setHeader("x-user-id", req.user.id);
+      }
+      // Forward plan id resolved by the plan-lookup middleware above
+      if (req.headers["x-user-plan-id"]) {
+        proxyReq.setHeader("x-user-plan-id", req.headers["x-user-plan-id"]);
       }
     },
     logLevel: "debug", // shows proxy details

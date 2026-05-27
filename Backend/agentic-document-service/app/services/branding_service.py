@@ -18,6 +18,8 @@ _PROFILE_FIELDS = [
     "footer_enabled", "footer_pattern", "footer_position", "footer_font_size",
     "watermark", "watermark_text", "watermark_opacity", "watermark_angle",
     "font_family", "font_size", "line_height", "primary_color",
+    "firm_name_font_size", "firm_name_color", "tagline_font_size", "tagline_color",
+    "meta_font_size", "meta_color", "header_color", "footer_color", "body_text_color",
     "page_size", "orientation",
 ]
 
@@ -46,6 +48,15 @@ _CAMEL_TO_SNAKE: dict[str, str] = {
     "fontSize": "font_size",
     "lineHeight": "line_height",
     "primaryColor": "primary_color",
+    "firmNameFontSize": "firm_name_font_size",
+    "firmNameColor": "firm_name_color",
+    "taglineFontSize": "tagline_font_size",
+    "taglineColor": "tagline_color",
+    "metaFontSize": "meta_font_size",
+    "metaColor": "meta_color",
+    "headerColor": "header_color",
+    "footerColor": "footer_color",
+    "bodyTextColor": "body_text_color",
     "pageSize": "page_size",
 }
 _SNAKE_TO_CAMEL: dict[str, str] = {v: k for k, v in _CAMEL_TO_SNAKE.items()}

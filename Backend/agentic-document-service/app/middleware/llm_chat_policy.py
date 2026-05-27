@@ -38,7 +38,11 @@ class LLMChatPolicyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Response]) -> Response:
         user_id = _resolve_user_id_from_request(request)
         # Per-user merge from summarization_chat_config; cache TTL via SUMMARIZATION_CHAT_CONFIG_CACHE_SECONDS (0 = always DB).
-        config = get_llm_chat_config(user_id=user_id, force_refresh=False)
+        config = get_llm_chat_config(
+            user_id=user_id,
+            force_refresh=False,
+            plan_limit_mode="summarization",
+        )
         request.state.llm_chat_config = config
         request.state.user_id = user_id
 

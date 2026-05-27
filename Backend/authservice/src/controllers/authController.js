@@ -65,6 +65,7 @@
 
 
 
+const http = require('http');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Session = require('../models/Session');
@@ -76,6 +77,43 @@ const { createAndSendOTP, verifyOTP, sendPasswordSetEmail } = require('../servic
 const admin = require('../config/firebase'); // Import Firebase Admin SDK
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// Fire-and-forget: assign the free plan to a newly registered user via payment service.
+// Failure is logged but does not block registration.
+function assignFreePlanToUser(userId) {
+  return new Promise((resolve) => {
+    try {
+      const paymentServiceUrl = process.env.PAYMENT_SERVICE_URL || 'http://localhost:5003';
+      const url = new URL('/api/plans/internal/assign-free-plan', paymentServiceUrl);
+      const body = JSON.stringify({ userId: String(userId) });
+      const options = {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      };
+      const req = http.request(options, (res) => {
+        res.resume();
+        resolve();
+      });
+      req.on('error', (err) => {
+        console.warn(`[Registration] Free plan assignment failed for user ${userId}:`, err.message);
+        resolve();
+      });
+      req.setTimeout(5000, () => {
+        req.destroy();
+        console.warn(`[Registration] Free plan assignment timed out for user ${userId}`);
+        resolve();
+      });
+      req.write(body);
+      req.end();
+    } catch (err) {
+      console.warn(`[Registration] Free plan assignment error for user ${userId}:`, err.message);
+      resolve();
+    }
+  });
+}
 
 async function markUserActiveSession(userId) {
   if (!userId) return null;
@@ -152,6 +190,9 @@ const registerSoloLawyer = async (req, res) => {
     if (bar_enrollment_number) profileUpdate.bar_enrollment_number = bar_enrollment_number;
     if (state_bar_council) profileUpdate.primary_jurisdiction = state_bar_council;
     await UserProfessionalProfile.update(user.id, profileUpdate);
+
+    // Assign free plan (non-blocking)
+    assignFreePlanToUser(user.id).catch(() => {});
 
     // Generate token and create session
     const activeUser = await markUserActiveSession(user.id) || user;
@@ -284,6 +325,9 @@ const registerFirm = async (req, res) => {
       role: 'ADMIN'
     });
 
+    // Assign free plan to firm admin (non-blocking)
+    assignFreePlanToUser(adminUser.id).catch(() => {});
+
     // TODO: Send email to admin with credentials (tempPassword)
     // For now, we'll return it in response (remove in production)
     console.log(`[Firm Registration] Admin credentials for ${email}: Password: ${tempPassword}`);
@@ -349,6 +393,9 @@ const register = async (req, res) => {
       domain_role: resolvedDomainRole,
       role_id: role_id || null,
     });
+
+    // Assign free plan (non-blocking)
+    assignFreePlanToUser(user.id).catch(() => {});
 
     const token = generateToken(user);
 

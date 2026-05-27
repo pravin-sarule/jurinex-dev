@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     enable_legacy_proxy: bool = False
 
     database_url: str = Field(default="", validation_alias=AliasChoices("DATABASE_URL"))
+    payment_db_url: str = Field(default="", validation_alias=AliasChoices("PAYMENT_DB_URL"))
     # Optional DB override for reading public.agent_prompts.
     # Use this when agent prompts live in Draft_DB while runtime tables stay in Document_DB.
     agent_prompts_database_url: str = Field(
@@ -180,6 +181,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LEGACY_DOCUMENT_SERVICE_URL"),
     )
     proxy_timeout_seconds: float = 300.0
+
+    # ── Default rate / upload limits (fallback when summarization_chat_config has no row) ──
+    # These are used when the DB config table is empty AND no per-plan override exists.
+    default_tokens_per_day: int = Field(default=300000, validation_alias=AliasChoices("DEFAULT_TOKENS_PER_DAY"))
+    default_messages_per_hour: int = Field(default=60, validation_alias=AliasChoices("DEFAULT_MESSAGES_PER_HOUR"))
+    default_chats_per_minute: int = Field(default=20, validation_alias=AliasChoices("DEFAULT_CHATS_PER_MINUTE"))
+    default_chats_per_day: int = Field(default=80, validation_alias=AliasChoices("DEFAULT_CHATS_PER_DAY"))
+    default_max_upload_files: int = Field(default=10, validation_alias=AliasChoices("DEFAULT_MAX_UPLOAD_FILES"))
+    default_max_document_size_mb: int = Field(default=40, validation_alias=AliasChoices("DEFAULT_MAX_DOCUMENT_SIZE_MB"))
+    default_max_document_pages: int = Field(default=400, validation_alias=AliasChoices("DEFAULT_MAX_DOCUMENT_PAGES"))
+    default_max_file_upload_per_day: int = Field(default=15, validation_alias=AliasChoices("DEFAULT_MAX_FILE_UPLOAD_PER_DAY"))
+    default_max_context_documents: int = Field(default=8, validation_alias=AliasChoices("DEFAULT_MAX_CONTEXT_DOCUMENTS"))
+    default_max_conversation_history: int = Field(default=25, validation_alias=AliasChoices("DEFAULT_MAX_CONVERSATION_HISTORY"))
+
     # 0 = always read latest summarization_chat_config from DB (recommended when admins edit often).
     summarization_chat_config_cache_seconds: float = Field(
         default=0.0,

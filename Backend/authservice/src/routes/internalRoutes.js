@@ -86,6 +86,64 @@ router.get('/user/:userId/tokens', async (req, res) => {
 });
 
 /**
+ * PUT /api/auth/internal/user/:userId/active-plan
+ * Called by payment-service after checkout to store denormalized plan on the user row.
+ */
+router.put('/user/:userId/active-plan', async (req, res) => {
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    const planIdRaw = req.body?.plan_id;
+    const planName = req.body?.plan_name ? String(req.body.plan_name).trim() : null;
+
+    if (!userId || Number.isNaN(userId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user ID' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    if (planIdRaw === null || planIdRaw === undefined || planIdRaw === '') {
+      await User.update(userId, {
+        active_plan_id: null,
+        active_plan_name: null,
+        active_plan_updated_at: new Date(),
+      });
+
+      return res.status(200).json({
+        success: true,
+        user_id: userId,
+        active_plan_id: null,
+        active_plan_name: null,
+        cleared: true,
+      });
+    }
+
+    const planId = parseInt(planIdRaw, 10);
+    if (!planId || Number.isNaN(planId)) {
+      return res.status(400).json({ success: false, message: 'plan_id is required' });
+    }
+
+    await User.update(userId, {
+      active_plan_id: planId,
+      active_plan_name: planName,
+      active_plan_updated_at: new Date(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      user_id: userId,
+      active_plan_id: planId,
+      active_plan_name: planName,
+    });
+  } catch (error) {
+    console.error('[Internal] Error updating active plan:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/auth/internal/user/:userId/account-type
  * Get user's account_type from DB (for document-service when JWT has old payload without account_type)
  */

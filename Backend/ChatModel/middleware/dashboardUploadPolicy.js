@@ -20,7 +20,7 @@ async function enforceDashboardUploadPolicy(req, res, next) {
       return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
-    const config = await getLLMConfig(userId);
+    const config = await getLLMConfig(userId, 'chat');
     req.llmChatConfig = config;
 
     const filesInRequest = Array.isArray(req.files)

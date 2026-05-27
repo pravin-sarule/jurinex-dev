@@ -1,122 +1,102 @@
 /**
- * When SKIP_PAYMENT_SERVICE=true, answers plan/usage endpoints locally so the
- * gateway does not depend on the payment microservice (avoids 504/502 in dev).
- * Register these routes before paymentProxy so they take precedence.
+ * When SKIP_PAYMENT_SERVICE=true, forward user-resources to the real payment service when
+ * it is reachable. Only returns empty/mock payloads if payment is down.
  */
 const express = require("express");
+const axios = require("axios");
 const { authMiddleware } = require("../middlewares/authMiddleware");
 
 const router = express.Router();
 
-const MOCK_ACTIVE_PLAN = {
-  plan_id: 0,
-  plan_name: "Development",
-  description: "Local / internal — payment service bypassed",
-  price: 0,
-  currency: "USD",
-  interval: "month",
-  type: "internal",
-  token_limit: 999999999,
-  carry_over_limit: 0,
-  document_limit: 999999,
-  ai_analysis_limit: 999999,
-  template_access: true,
-  storage_limit_gb: 999,
-  drafting_type: "full",
-  limits: {},
-  start_date: null,
-  end_date: null,
-  subscription_status: "active",
-};
+const PAYMENT_BASE = (process.env.PAYMENT_SERVICE_URL || "http://localhost:5003").replace(/\/$/, "");
 
-function planDetailsHandler(req, res) {
-  res.status(200).json({
-    activePlan: MOCK_ACTIVE_PLAN,
+function paymentHeaders(req) {
+  const headers = { "Content-Type": "application/json" };
+  if (req.headers.authorization) {
+    headers.Authorization = req.headers.authorization;
+  }
+  if (req.user?.id) {
+    headers["x-user-id"] = String(req.user.id);
+  }
+  return headers;
+}
+
+async function forwardToPayment(req, res, apiPath) {
+  const url = `${PAYMENT_BASE}/api/user-resources${apiPath}`;
+  try {
+    const resp = await axios({
+      method: req.method,
+      url,
+      headers: paymentHeaders(req),
+      params: req.query,
+      data: req.body,
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    res.status(resp.status).json(resp.data);
+    return true;
+  } catch (error) {
+    console.warn(`[Gateway] Payment forward failed ${url}:`, error.message);
+    return false;
+  }
+}
+
+function emptyPlanDetails() {
+  return {
+    activePlan: null,
     resourceUtilization: {
-      tokens: {
-        remaining: 999999999,
-        limit: 999999999,
-        total_used: 0,
-        percentage_used: 0,
-        status: "within_limit",
-        cost: 0,
-        total_tokens: 0,
-      },
-      queries: {
-        remaining: 999999999,
-        limit: 999999999,
-        total_used: 0,
-        percentage_used: 0,
-        status: "within_limit",
-      },
-      documents: { used: 0, limit: 999999, percentage_used: 0, status: "within_limit" },
+      tokens: { remaining: 0, limit: 0, total_used: 0, percentage_used: 0, status: "no_plan" },
+      queries: { remaining: 0, limit: 0, total_used: 0, percentage_used: 0, status: "no_plan" },
+      documents: { used: 0, limit: 0, percentage_used: 0, status: "no_plan" },
       storage: {
         used_gb: 0,
-        limit_gb: 999,
+        limit_gb: 0,
         percentage_used: 0,
-        status: "within_limit",
+        status: "no_plan",
+        note: "Payment service unavailable.",
       },
       timeLeftUntilReset: "N/A",
     },
-    allPlanConfigurations: [{ ...MOCK_ACTIVE_PLAN, id: 0, is_active_plan: true }],
+    allPlanConfigurations: [],
     latestPayment: null,
-  });
+  };
 }
 
-function transactionsHandler(req, res) {
-  res.status(200).json({ transactions: [] });
+async function planDetailsHandler(req, res) {
+  if (await forwardToPayment(req, res, "/plan-details")) return;
+  return res.status(200).json(emptyPlanDetails());
 }
 
-function tokenUsageHandler(req, res) {
-  res.status(200).json({
-    success: true,
-    data: {
-      tokens_used: 0,
-      documents_used: 0,
-      ai_analysis_used: 0,
-      storage_used_gb: 0,
-      carry_over_tokens: 0,
-      period_start: null,
-      period_end: null,
-      updated_at: null,
-    },
-  });
+async function transactionsHandler(req, res) {
+  if (await forwardToPayment(req, res, "/transactions")) return;
+  return res.status(200).json({ transactions: [] });
 }
 
-function llmUsageHandler(req, res) {
-  res.status(200).json({
-    success: true,
-    data: {
-      logs: [],
-      summary: {
-        total_requests: 0,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_input_cost: 0,
-        total_output_cost: 0,
-        total_cost: 0,
-        unique_models: 0,
-      },
-      by_model: [],
-      active_users: [],
-    },
-  });
+async function tokenUsageHandler(req, res) {
+  if (await forwardToPayment(req, res, "/token-usage")) return;
+  return res.status(200).json({ success: true, data: { tokens_used: 0, documents_used: 0 } });
 }
 
-function userPlanByIdHandler(req, res) {
-  res.status(200).json({ success: true, data: MOCK_ACTIVE_PLAN });
+async function llmUsageHandler(req, res) {
+  if (await forwardToPayment(req, res, "/llm-usage")) return;
+  return res.status(200).json({ success: true, data: { logs: [], summary: {} } });
 }
 
-/** Document service posts here; no JWT — match payment service behavior */
+async function userPlanByIdHandler(req, res) {
+  const userId = req.params.userId;
+  if (await forwardToPayment(req, res, `/user-plan/${userId}`)) return;
+  return res.status(404).json({ success: false, message: "No active plan found for this user." });
+}
+
 function llmUsageLogHandler(req, res) {
-  res.status(201).json({
-    success: true,
-    data: {
-      id: "mock-skip-payment",
-      ...req.body,
-    },
-  });
+  const url = `${PAYMENT_BASE}/api/user-resources/llm-usage-log`;
+  axios
+    .post(url, req.body, { headers: paymentHeaders(req), timeout: 10000, validateStatus: () => true })
+    .then((resp) => res.status(resp.status).json(resp.data))
+    .catch((err) => {
+      console.warn("[Gateway] llm-usage-log forward failed:", err.message);
+      res.status(201).json({ success: true, data: { id: "mock-skip-payment", ...req.body } });
+    });
 }
 
 const withAuth = [

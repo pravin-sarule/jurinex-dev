@@ -10,6 +10,7 @@ from typing import Any
 from fastapi.encoders import jsonable_encoder
 
 from app.services.db import get_db_connection, is_db_available
+from app.services.prompt_visibility import secret_sql_filters, user_context_ready
 from app.services.secret_prompt_display import _fetch_secret_value_from_gcp, _fetch_secret_value_from_gcp_rest
 
 logger = logging.getLogger("agentic_document_service.secret_manager_api")
@@ -19,27 +20,37 @@ def _want_fetch(fetch: str | None) -> bool:
     return (fetch or "").strip().lower() in ("1", "true", "yes")
 
 
-def list_secret_prompts(*, fetch: str | None, user_role_id: str | None = None) -> list[dict[str, Any]]:
+def list_secret_prompts(
+    *,
+    fetch: str | None,
+    user_role_id: str | None = None,
+    user_plan_id: int | None = None,
+) -> list[dict[str, Any]]:
     if not is_db_available():
         raise RuntimeError("Database is not configured (DATABASE_URL).")
 
     include_values = _want_fetch(fetch)
 
-    if not user_role_id:
+    # Both plan and role must be present on the user AND on each secret_manager row.
+    if not user_context_ready(user_plan_id, user_role_id):
         return []
+
+    plan_clause, role_clause = secret_sql_filters()
+    params: list[Any] = [user_plan_id, str(user_role_id)]
 
     with get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 s.*,
                 l.name AS llm_name
             FROM secret_manager s
             LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
-            WHERE s.role_id::text = %s
+            WHERE {plan_clause}
+              AND {role_clause}
             ORDER BY s.created_at DESC
             """,
-            (user_role_id,),
+            params,
         )
         rows = cur.fetchall()
 

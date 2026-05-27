@@ -149,9 +149,10 @@ const {
   downloadObjectBuffer,
   deleteObjectIfExists,
 } = require('../services/gcsService');
-const { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral } = require('../services/llmService');
+const { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral, countTokensFromGCS } = require('../services/llmService');
 const {
   getLLMConfig,
+  getUserActivePlan,
   getStreamingDelayMs,
   mergeRequestLlmOverrides,
   flattenLlmRequestBody,
@@ -176,6 +177,39 @@ const {
 // Import Google Drive service from ChatModel services
 const { downloadFile: downloadFileFromGoogleDrive } = require('../services/googleDriveService');
 const { buildChatModelSystemInstruction } = require('../services/chatModelSystemPromptService');
+const geminiCacheService = require('../services/geminiCacheService');
+
+function canUseGeminiContextCache(fileIds) {
+  if (String(process.env.DISABLE_GEMINI_CONTEXT_CACHE || '').toLowerCase() === 'true') {
+    return false;
+  }
+  if (!String(process.env.GEMINI_API_KEY || '').trim()) {
+    return false;
+  }
+  return Array.isArray(fileIds) && fileIds.length === 1;
+}
+
+// ── GCP Secret Manager in-process cache ──────────────────────────────────────
+// Avoids a round-trip to GCP Secret Manager on every chat request.
+// Prompts are static per deployment; 5-minute TTL is more than sufficient.
+const SECRET_VALUE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const _secretValueCache = new Map(); // gcpSecretName → { value, expiresAt }
+
+async function getSecretValueCached(gcpSecretName) {
+  const now = Date.now();
+  const hit = _secretValueCache.get(gcpSecretName);
+  if (hit && hit.expiresAt > now) {
+    console.log(`🔐 [SecretCache] HIT  ${gcpSecretName}`);
+    return hit.value;
+  }
+  console.log(`🔐 [SecretCache] MISS ${gcpSecretName} — fetching from GCP`);
+  const secretClient = new SecretManagerServiceClient();
+  const [accessResponse] = await secretClient.accessSecretVersion({ name: gcpSecretName });
+  const value = accessResponse.payload.data.toString('utf8');
+  _secretValueCache.set(gcpSecretName, { value, expiresAt: now + SECRET_VALUE_CACHE_TTL_MS });
+  return value;
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 /** SSE cannot use wildcard Origin when the browser sends credentials; echo request Origin instead. */
 function setSseCorsHeaders(req, res) {
@@ -387,6 +421,8 @@ exports.getChatLlmLimits = async (req, res) => {
         next_daily_reset_utc: getNextUtcMidnightIsoString(),
         llm_model: cfg.llm_model,
         llm_provider: cfg.llm_provider,
+        plan_id: cfg._plan_id ?? null,
+        plan_name: cfg._plan_name ?? null,
       },
     });
   } catch (err) {
@@ -1150,25 +1186,28 @@ exports.askQuestion = async (req, res) => {
     const historyForStorage = simplifyHistory(previousChats);
 
     if (conversationContext) {
-      console.log(`📜 Previous Conversation Context (${previousChats.length} messages):`);
-      console.log('─'.repeat(80));
-      
+      const historyChars  = conversationContext.length;
+      const historyTokensEst = Math.round(historyChars / 4);
+      console.log(`\n📜 [History → LLM] ${previousChats.length} previous turn(s) sent with this prompt`);
+      console.log(`   estimated chars : ${historyChars}  |  estimated tokens : ~${historyTokensEst}`);
       previousChats.forEach((chat, index) => {
-        console.log(`\n[Previous Message ${index + 1}]`);
-        console.log(`  Q: ${(chat.question || '').substring(0, 150)}${(chat.question || '').length > 150 ? '...' : ''}`);
-        console.log(`  A: ${(chat.answer || '').substring(0, 150)}${(chat.answer || '').length > 150 ? '...' : ''}`);
-        console.log(`  Time: ${chat.created_at || 'N/A'}`);
+        const q = (chat.question || '').substring(0, 120);
+        const a = (chat.answer   || '').substring(0, 120);
+        const qChars = (chat.question || '').length;
+        const aChars = (chat.answer   || '').length;
+        console.log(
+          `   [Turn ${index + 1}]` +
+          `\n      Q (${qChars} chars): ${q}${qChars > 120 ? '…' : ''}` +
+          `\n      A (${aChars} chars): ${a}${aChars > 120 ? '…' : ''}`
+        );
       });
-      
-      console.log('\n📝 Formatted Context for LLM:');
-      console.log(conversationContext);
-      console.log('─'.repeat(80));
     } else {
-      console.log(`📜 No previous conversation context available (new conversation)`);
+      console.log(`📜 [History → LLM] No previous turns — fresh conversation`);
     }
 
     const fullProfile = await UserProfileService.getFullProfile(userId, authorizationHeader);
-    const userContext = buildUserContextFromProfile(fullProfile);
+    // userContext (plain-text profile) is NOT prepended to the prompt here —
+    // it is already embedded in the Vertex system instruction via buildChatModelSystemInstruction.
 
     let finalQuestion = question?.trim() || '';
     let finalPromptLabel = prompt_label || null;
@@ -1232,12 +1271,8 @@ exports.askQuestion = async (req, res) => {
         });
       }
 
-      const secretClient = new SecretManagerServiceClient();
       const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
-      console.log(`🔐 [ChatModel] Fetching secret from GCP: ${gcpSecretName}`);
-
-      const [accessResponse] = await secretClient.accessSecretVersion({ name: gcpSecretName });
-      let secretValue = accessResponse.payload.data.toString('utf8');
+      let secretValue = await getSecretValueCached(gcpSecretName);
 
       if (!secretValue?.trim()) {
         return res.status(500).json({
@@ -1283,14 +1318,13 @@ exports.askQuestion = async (req, res) => {
     }
 
     let promptText = finalQuestion || question.trim();
-    if (conversationContext) {
+    if (conversationContext && !usedSecretPrompt) {
       promptText = appendConversationToPrompt(promptText, conversationContext);
+      console.log(`📜 [ChatModel] Appended previous conversation to prompt.`);
+    } else if (conversationContext && usedSecretPrompt) {
+      console.log(`📜 [ChatModel] Skipped appending conversation context because this is a Secret Prompt.`);
     }
     
-    if (userContext) {
-      promptText = `USER CONTEXT:\n${userContext}\n\n${promptText}`;
-    }
-
     if (files.length > 1) {
       const names = files.map((f) => f.originalname || f.filename || 'document').join(', ');
       promptText = `The user attached ${files.length} documents (${names}). Use information from all of them when answering.\n\n${promptText}`;
@@ -1584,19 +1618,23 @@ exports.askQuestionStream = async (req, res) => {
     const historyForStorage = simplifyHistory(previousChats);
 
     if (conversationContext) {
-      console.log(`\n📜 [DB Context] Sending ${previousChats.length} messages as conversation context to LLM:`);
-      console.log('─'.repeat(80));
+      const historyChars  = conversationContext.length;
+      const historyTokensEst = Math.round(historyChars / 4);
+      console.log(`\n📜 [History → LLM] ${previousChats.length} previous turn(s) sent with this prompt`);
+      console.log(`   estimated chars : ${historyChars}  |  estimated tokens : ~${historyTokensEst}`);
       previousChats.forEach((chat, index) => {
-        console.log(`\n[Previous Message ${index + 1}]`);
-        console.log(`  Q: ${(chat.question || '').substring(0, 150)}${(chat.question || '').length > 150 ? '...' : ''}`);
-        console.log(`  A: ${(chat.answer || '').substring(0, 150)}${(chat.answer || '').length > 150 ? '...' : ''}`);
-        console.log(`  Time: ${chat.created_at || 'N/A'}`);
+        const q = (chat.question || '').substring(0, 120);
+        const a = (chat.answer   || '').substring(0, 120);
+        const qChars = (chat.question || '').length;
+        const aChars = (chat.answer   || '').length;
+        console.log(
+          `   [Turn ${index + 1}]` +
+          `\n      Q (${qChars} chars): ${q}${qChars > 120 ? '…' : ''}` +
+          `\n      A (${aChars} chars): ${a}${aChars > 120 ? '…' : ''}`
+        );
       });
-      console.log('\n📝 Formatted Context for LLM:');
-      console.log(conversationContext);
-      console.log('─'.repeat(80));
     } else {
-      console.log(`📜 [DB Context] No previous conversation context — this is a fresh conversation`);
+      console.log(`📜 [History → LLM] No previous turns — fresh conversation`);
     }
 
     sendStatus('analyzing', 'Analyzing document and preparing context...');
@@ -1611,7 +1649,8 @@ exports.askQuestionStream = async (req, res) => {
     console.log(`   - streaming_delay_ms   : ${getStreamingDelayMs(llmChatConfig)}`);
 
     const fullProfile = await UserProfileService.getFullProfile(userId, authorizationHeader);
-    const userContext = buildUserContextFromProfile(fullProfile);
+    // userContext (plain-text profile) is NOT prepended to the prompt here —
+    // it is already embedded in the Vertex system instruction via buildChatModelSystemInstruction.
 
     let finalQuestion = question?.trim() || '';
     let finalPromptLabel = prompt_label || null;
@@ -1669,19 +1708,15 @@ exports.askQuestionStream = async (req, res) => {
       }
 
       sendStatus('fetching', 'Retrieving secret prompt from GCP...');
-      const secretClient = new SecretManagerServiceClient();
       const gcpSecretName = `projects/${GCLOUD_PROJECT_ID}/secrets/${secret_manager_id}/versions/${version}`;
-      console.log(`🔐 [ChatModel Stream] Fetching secret from GCP: ${gcpSecretName}`);
-
-      const [accessResponse] = await secretClient.accessSecretVersion({ name: gcpSecretName });
-      let secretValue = accessResponse.payload.data.toString('utf8');
+      let secretValue = await getSecretValueCached(gcpSecretName);
 
       if (!secretValue?.trim()) {
         sendError('Secret value is empty in GCP');
         return;
       }
 
-      console.log(`🔐 [ChatModel Stream] Secret value retrieved (${secretValue.length} chars)`);
+      console.log(`🔐 [ChatModel Stream] Secret value retrieved (${secretValue.length} chars, cached)`);
 
       let templateData = { inputTemplate: null, outputTemplate: null, hasTemplates: false };
       if (input_template_id || output_template_id) {
@@ -1717,15 +1752,20 @@ exports.askQuestionStream = async (req, res) => {
       console.log(`🔐 [ChatModel Stream] Using secret prompt: "${secretName}"`);
     }
 
+    const useGeminiCache = canUseGeminiContextCache(fileIds);
+
     let promptText = finalQuestion || question.trim();
-    if (conversationContext) {
-      promptText = appendConversationToPrompt(promptText, conversationContext);
+    if (conversationContext && !usedSecretPrompt) {
+      if (useGeminiCache) {
+        console.log(`📜 [ChatModel Stream] Conversation history will be sent via Gemini cache session (not inlined in prompt).`);
+      } else {
+        promptText = appendConversationToPrompt(promptText, conversationContext);
+        console.log(`📜 [ChatModel Stream] Appended previous conversation to prompt.`);
+      }
+    } else if (conversationContext && usedSecretPrompt) {
+      console.log(`📜 [ChatModel Stream] Skipped appending conversation context because this is a Secret Prompt.`);
     }
     
-    if (userContext) {
-      promptText = `USER CONTEXT:\n${userContext}\n\n${promptText}`;
-    }
-
     if (files.length > 1) {
       const names = files.map((f) => f.originalname || f.filename || 'document').join(', ');
       promptText = `The user attached ${files.length} documents (${names}). Use information from all of them when answering.\n\n${promptText}`;
@@ -1756,13 +1796,66 @@ exports.askQuestionStream = async (req, res) => {
 
     let fullAnswer = '';
     let chunkCount = 0;
+    let capturedUsage = null;
+    let usedGeminiCache = false;
     const streamingDelayMs = getStreamingDelayMs(llmChatConfig);
     const chatModelSystemInstruction = await buildChatModelSystemInstruction(fullProfile);
     let preparedFilesForSnapshot = [];
     try {
-      console.log('🔄 Starting to stream LLM response...');
-      
-      for await (const chunk of streamLLMWithGCS(promptText, activeGcsUris, '', {
+      if (useGeminiCache) {
+        console.log('🔄 [ChatModel Stream] Using Gemini context cache for all document chat (single file)...');
+        const primaryFile = files[0];
+        const getFileBuffer = async () => {
+          const buf = await downloadObjectBuffer(bucketName, primaryFile.gcs_path);
+          if (!buf) throw new Error('Failed to download document from storage.');
+          return buf;
+        };
+        const displayName = primaryFile.originalname || primaryFile.filename || 'Legal Chat Cache';
+        const historyQuestion = usedSecretPrompt
+          ? (finalPromptLabel || 'Analysis')
+          : (question?.trim() || 'Question');
+
+        const cacheResult = await geminiCacheService.askWithAutoCacheStream(
+          sanitizedFileId,
+          promptText,
+          getFileBuffer,
+          primaryFile.mimetype,
+          primaryFile.originalname,
+          displayName,
+          (statusData) => sendStatus(statusData.status, statusData.message),
+          (text) => {
+            if (!text) return;
+            fullAnswer += text;
+            chunkCount += 1;
+            res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
+            if (res.flush && typeof res.flush === 'function') {
+              res.flush();
+            }
+          },
+          userId,
+          finalSessionId,
+          historyQuestion,
+          chatModelSystemInstruction
+        );
+
+        usedGeminiCache = true;
+        const tu = cacheResult.tokenUsage || {};
+        capturedUsage = {
+          inputTokens: tu.totalInputTokens || tu.newPromptTokens || 0,
+          outputTokens: tu.outputTokens || 0,
+          totalTokens: (tu.totalInputTokens || 0) + (tu.outputTokens || 0),
+          modelName: 'gemini-2.5-flash',
+          cachedTokens: tu.cachedTokens || 0,
+          sessionMetrics: cacheResult.sessionMetrics || null,
+        };
+        console.log(
+          `✅ [ChatModel Stream] Gemini cache completed: ${chunkCount} chunks, ${fullAnswer.length} chars`
+        );
+      } else {
+        console.log('🔄 Starting to stream LLM response (Vertex / GCS)...');
+      }
+
+      if (!usedGeminiCache) for await (const chunk of streamLLMWithGCS(promptText, activeGcsUris, '', {
         modelName: resolvedModelName,
         llmConfig: llmConfigForRequest,
         userId,
@@ -1783,13 +1876,18 @@ exports.askQuestionStream = async (req, res) => {
           continue;
         }
 
+        if (chunk?.type === 'usage') {
+          capturedUsage = chunk;
+          continue;
+        }
+
         if (chunk?.type === 'chunk' && typeof chunk.text === 'string' && chunk.text.length > 0) {
           fullAnswer += chunk.text;
           chunkCount++;
-          
+
           const chunkData = JSON.stringify({ type: 'chunk', text: chunk.text });
           res.write(`data: ${chunkData}\n\n`);
-          
+
           if (res.flush && typeof res.flush === 'function') {
             res.flush();
           }
@@ -1797,7 +1895,7 @@ exports.askQuestionStream = async (req, res) => {
           if (streamingDelayMs > 0) {
             await sleep(streamingDelayMs);
           }
-          
+
           if (chunkCount % 10 === 0) {
             console.log(`📊 Streamed ${chunkCount} chunks, total length: ${fullAnswer.length} chars`);
           }
@@ -1811,10 +1909,55 @@ exports.askQuestionStream = async (req, res) => {
       }
       
     } catch (streamError) {
-      console.error('❌ Streaming error:', streamError);
-      console.error('❌ Error details:', streamError.stack);
-      sendError('Streaming failed', streamError.message);
-      return;
+      if (useGeminiCache && !usedGeminiCache) {
+        const cacheFailReason = geminiCacheService.isCacheTooSmallError(streamError)
+          ? 'document below Gemini cache minimum even with system prompt'
+          : streamError.message;
+        console.warn('[ChatModel Stream] Gemini cache failed, retrying with Vertex:', cacheFailReason);
+        try {
+          fullAnswer = '';
+          chunkCount = 0;
+          capturedUsage = null;
+          for await (const chunk of streamLLMWithGCS(promptText, activeGcsUris, '', {
+            modelName: resolvedModelName,
+            llmConfig: llmConfigForRequest,
+            userId,
+            fileId: sanitizedFileId,
+            sessionId: finalSessionId,
+            endpoint: '/api/chat/ask/stream',
+            chatModelSystemInstruction,
+            onPreparedFiles: (preparedFiles) => {
+              preparedFilesForSnapshot = Array.isArray(preparedFiles) ? preparedFiles : [];
+            },
+          })) {
+            if (chunk?.type === 'thought' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+              res.write(`data: ${JSON.stringify({ type: 'thought', text: chunk.text })}\n\n`);
+              if (res.flush && typeof res.flush === 'function') res.flush();
+              continue;
+            }
+            if (chunk?.type === 'usage') {
+              capturedUsage = chunk;
+              continue;
+            }
+            if (chunk?.type === 'chunk' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+              fullAnswer += chunk.text;
+              chunkCount += 1;
+              res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk.text })}\n\n`);
+              if (res.flush && typeof res.flush === 'function') res.flush();
+              if (streamingDelayMs > 0) await sleep(streamingDelayMs);
+            }
+          }
+        } catch (vertexErr) {
+          console.error('❌ Streaming error (Vertex fallback):', vertexErr);
+          sendError('Streaming failed', vertexErr.message);
+          return;
+        }
+      } else {
+        console.error('❌ Streaming error:', streamError);
+        console.error('❌ Error details:', streamError.stack);
+        sendError('Streaming failed', streamError.message);
+        return;
+      }
     }
 
     sendStatus('saving', 'Saving conversation to database...');
@@ -1872,7 +2015,18 @@ exports.askQuestionStream = async (req, res) => {
       chunks_received: chunkCount,
       used_secret_prompt: usedSecretPrompt,
       prompt_label: finalPromptLabel,
-      secret_id: secretIdToSave
+      secret_id: secretIdToSave,
+      output_truncated: !!capturedUsage?.outputTruncated,
+      finish_reason: capturedUsage?.finishReason || null,
+      used_gemini_cache: usedGeminiCache,
+      token_usage: capturedUsage ? {
+        inputTokens: capturedUsage.inputTokens,
+        outputTokens: capturedUsage.outputTokens,
+        totalTokens: capturedUsage.totalTokens,
+        modelName: capturedUsage.modelName,
+        cachedTokens: capturedUsage.cachedTokens,
+      } : null,
+      cache_session_metrics: usedGeminiCache ? (capturedUsage?.sessionMetrics || null) : undefined,
     };
     
     res.write(`data: ${JSON.stringify(completionData)}\n\n`);
@@ -2247,6 +2401,7 @@ exports.askGeneralQuestionStream = async (req, res) => {
 
     let fullAnswer = '';
     let chunkCount = 0;
+    let capturedUsageGeneral = null;
     const streamingDelayMs = getStreamingDelayMs(llmChatConfig);
 
     try {
@@ -2259,6 +2414,10 @@ exports.askGeneralQuestionStream = async (req, res) => {
         if (chunk && typeof chunk === 'object' && chunk.type === 'thought' && typeof chunk.text === 'string' && chunk.text.length > 0) {
           res.write(`data: ${JSON.stringify({ type: 'thought', text: chunk.text })}\n\n`);
           if (res.flush) res.flush();
+          continue;
+        }
+        if (chunk && typeof chunk === 'object' && chunk.type === 'usage') {
+          capturedUsageGeneral = chunk;
           continue;
         }
         const chunkText =
@@ -2329,6 +2488,14 @@ exports.askGeneralQuestionStream = async (req, res) => {
       answer_length: fullAnswer.length,
       chunks_received: chunkCount,
       is_general_chat: true,
+      output_truncated: !!capturedUsageGeneral?.outputTruncated,
+      finish_reason: capturedUsageGeneral?.finishReason || null,
+      token_usage: capturedUsageGeneral ? {
+        inputTokens: capturedUsageGeneral.inputTokens,
+        outputTokens: capturedUsageGeneral.outputTokens,
+        totalTokens: capturedUsageGeneral.totalTokens,
+        modelName: capturedUsageGeneral.modelName,
+      } : null,
     };
 
     res.write(`data: ${JSON.stringify(completionData)}\n\n`);
@@ -2460,22 +2627,107 @@ exports.getGeneralChatSessions = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// List all document-based chat sessions for the current user (file_id IS NOT NULL)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getAllDocumentSessions = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT
+         fc.session_id,
+         fc.file_id,
+         f.originalname AS filename,
+         MIN(fc.created_at)  AS first_message_at,
+         MAX(fc.created_at)  AS last_message_at,
+         COUNT(*)::int       AS message_count,
+         (array_agg(fc.question ORDER BY fc.created_at ASC))[1]  AS first_question,
+         (array_agg(fc.question ORDER BY fc.created_at DESC))[1] AS last_question
+       FROM file_chats fc
+       LEFT JOIN user_files f ON f.id = fc.file_id
+       WHERE fc.user_id = $1 AND fc.file_id IS NOT NULL AND fc.chat_type = 'chat_model'
+       GROUP BY fc.session_id, fc.file_id, f.originalname
+       ORDER BY MAX(fc.created_at) DESC`,
+      [userId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        sessions: result.rows.map(row => ({
+          session_id: row.session_id,
+          file_id: row.file_id,
+          filename: row.filename,
+          first_message_at: row.first_message_at,
+          last_message_at: row.last_message_at,
+          message_count: row.message_count,
+          first_question: row.first_question,
+          last_question: row.last_question,
+          is_general_chat: false,
+        })),
+        count: result.rows.length,
+      }
+    });
+  } catch (error) {
+    console.error('❌ [All Document Sessions] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch document sessions',
+      error: error.message
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Secret prompts (same DB + GCP as ask/stream) — no document-service HTTP calls
 // ─────────────────────────────────────────────────────────────────────────────
 exports.listSecretPrompts = async (req, res) => {
   const includeValues = String(req.query.fetch || '').toLowerCase() === 'true';
 
   try {
+    const userId = req.user?.id;
+
+    // Extract role_id from JWT — middleware only sets id/email/role, not role_id
+    let userRoleId = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+      const token = (authHeader.split(' ')[1] || '').trim();
+      if (token) {
+        try {
+          const decoded = jwt.decode(token);
+          userRoleId = decoded?.role_id ? String(decoded.role_id) : null;
+        } catch { /* ignore malformed token */ }
+      }
+    }
+
+    // Get active subscription plan id
+    let userPlanId = null;
+    if (userId) {
+      const plan = await getUserActivePlan(userId);
+      userPlanId = plan?.id ?? null;
+    }
+
+    // Visible only when user's plan AND role both match the prompt row (strict AND).
+    if (userPlanId == null || !userRoleId) {
+      return res.status(200).json([]);
+    }
+
+    const params = [userPlanId, userRoleId];
+
     const query = `
       SELECT
         s.*,
         l.name AS llm_name
       FROM secret_manager s
       LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+      WHERE s.plan_id IS NOT NULL
+        AND s.plan_id = $1
+        AND s.role_id IS NOT NULL
+        AND s.role_id::text = $2
       ORDER BY s.created_at DESC
     `;
 
-    const result = await pool.query(query);
+    const result = await pool.query(query, params);
     const rows = result.rows;
 
     if (!includeValues) {
@@ -2553,5 +2805,55 @@ exports.getSecretPromptById = async (req, res) => {
   } catch (err) {
     console.error('🚨 [ChatModel] getSecretPromptById:', err.message);
     return res.status(500).json({ error: 'Internal Server Error: ' + err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Count tokens for an uploaded file (free, non-generating Vertex AI API call).
+// Replicates the Google AI Studio "live token count" behaviour: call immediately
+// after upload so the header chip updates before the user asks their first question.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.countFileTokens = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { file_id, model_name } = req.body;
+
+    if (!file_id) {
+      return res.status(400).json({ success: false, message: 'file_id is required' });
+    }
+
+    const file = await File.findById(file_id);
+    if (!file) {
+      return res.status(404).json({ success: false, message: 'File not found' });
+    }
+    if (String(file.user_id) !== String(userId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    if (!file.gcs_path) {
+      return res.status(400).json({ success: false, message: 'File is not yet available in GCS — try again in a moment' });
+    }
+
+    const bucketName = process.env.GCS_BUCKET_NAME;
+    const gcsUri = `gs://${bucketName}/${file.gcs_path}`;
+    const modelName = (typeof model_name === 'string' && model_name.trim()) ? model_name.trim() : 'gemini-2.5-flash';
+
+    console.log(`[countFileTokens] user=${userId} file=${file_id} model=${modelName} uri=${gcsUri}`);
+
+    const { totalTokens } = await countTokensFromGCS(gcsUri, modelName);
+
+    return res.json({
+      success: true,
+      data: {
+        fileId: file_id,
+        totalTokens,
+        modelName,
+        mimeType: file.mimetype || null,
+        filename: file.originalname || file.filename || null,
+        maxContextTokens: 1_048_576,
+      },
+    });
+  } catch (error) {
+    console.error('[countFileTokens] Error:', error.message);
+    return res.status(500).json({ success: false, message: `Token count failed: ${error.message}` });
   }
 };
