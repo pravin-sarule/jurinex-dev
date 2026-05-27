@@ -1,1 +1,1 @@
-export { ensureTableSeparators, markdownTableComponents } from './markdownUtils.jsx';
+export { ensureTableSeparators, markdownTableComponents, splitMarkdownIntoRenderChunks } from './markdownUtils.jsx';

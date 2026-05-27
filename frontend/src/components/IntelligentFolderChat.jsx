@@ -13,11 +13,16 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
-import { ensureTableSeparators, markdownTableComponents } from '../utils/markdownUtils';
+import {
+  ensureTableSeparators,
+  markdownTableComponents,
+  splitMarkdownIntoRenderChunks,
+} from '../utils/markdownUtils';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCS_BASE_URL } from '../config/apiConfig';
 import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import ChatQuotaErrorModal from './ChatQuotaErrorModal';
+import UpgradePlanBanner from './UpgradePlanBanner';
 
 export default function IntelligentFolderChat({
   folderName,
@@ -882,19 +887,24 @@ export default function IntelligentFolderChat({
                         onOptionSelect={handleQuickReply}
                       />
                     ) : msg.text ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                        components={markdownTableComponents}
-                      >
-                        {(() => {
-                          const rawResponse = msg.text || '';
-                          if (!rawResponse) return '';
-                          const isStructured = isStructuredJsonResponse(rawResponse);
-                          if (isStructured) return renderSecretPromptResponse(rawResponse);
-                          return ensureTableSeparators(convertJsonToPlainText(rawResponse));
-                        })()}
-                      </ReactMarkdown>
+                      {(() => {
+                        const rawResponse = msg.text || '';
+                        if (!rawResponse) return null;
+                        const isStructured = isStructuredJsonResponse(rawResponse);
+                        const prepared = isStructured
+                          ? renderSecretPromptResponse(rawResponse)
+                          : ensureTableSeparators(convertJsonToPlainText(rawResponse));
+                        return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
+                          <ReactMarkdown
+                            key={`${index}-${chunk.length}`}
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                            components={markdownTableComponents}
+                          >
+                            {chunk}
+                          </ReactMarkdown>
+                        ));
+                      })()}
                     ) : (
                       msg.isStreaming && !msg.thinking ? 'Generating response...' : ''
                     )}
@@ -1004,6 +1014,7 @@ export default function IntelligentFolderChat({
         <div ref={messagesEndRef} />
       </div>
 
+      <UpgradePlanBanner className="chat-upgrade-banner mb-2" />
       <form onSubmit={handleSubmit} className="chat-input-form">
         <div className="input-container flex items-center space-x-2 bg-white rounded-xl border border-[#21C1B6] px-4 py-2 focus-within:ring-2 focus-within:ring-[#21C1B6]/20 transition-all">
           {learningMode && (
@@ -1142,4 +1153,3 @@ export default function IntelligentFolderChat({
     </div>
   );
 }
-

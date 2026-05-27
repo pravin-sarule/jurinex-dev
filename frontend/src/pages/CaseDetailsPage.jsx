@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { DOCS_BASE_URL } from '../config/apiConfig';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 import {
   ArrowLeft,

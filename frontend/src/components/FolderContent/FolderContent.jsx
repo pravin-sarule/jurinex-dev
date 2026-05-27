@@ -5,6 +5,7 @@ import DocumentCard from "./DocumentCard";
 import { toast } from 'react-toastify';
 import { DOCS_BASE_URL, getUserIdForDrafting } from "../../config/apiConfig";
 import GoogleDrivePicker from "../GoogleDrivePicker";
+import { extractUploadPolicyErrorMessage } from "../../utils/llmQuotaMessages";
 
 const FolderContent = ({ onDocumentClick }) => {
  const {
@@ -340,6 +341,13 @@ const FolderContent = ({ onDocumentClick }) => {
   setUploading(true);
   try {
   const res = await documentApi.uploadDocuments(selectedFolder, files);
+
+  // Surface server-side rejection messages (429 rate limit, 413 file policy, etc.)
+  if (res.success === false && res.message) {
+    toast.error(res.message, { autoClose: 7000 });
+    return;
+  }
+
   const uploaded = res.documents || res.files || [];
   const getTrackedFileId = (doc) =>
     doc?.id ||
@@ -377,7 +385,14 @@ const FolderContent = ({ onDocumentClick }) => {
  setTimeout(() => startStatusPolling(info), 800);
  } catch (e) {
  console.error("❌ Upload failed:", e);
- setError(`Upload failed: ${e.message}`);
+ const policyMsg = extractUploadPolicyErrorMessage(e);
+ const data = e?.response?.data;
+ const serverMsg = policyMsg ||
+   (data?.detail && typeof data.detail === 'object' ? data.detail.message : null) ||
+   (typeof data?.detail === 'string' ? data.detail : null) ||
+   data?.message ||
+   null;
+ toast.error(serverMsg || e.message || 'Upload failed. Please try again.', { autoClose: 7000 });
  } finally {
   setUploading(false);
     }

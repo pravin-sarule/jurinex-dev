@@ -371,6 +371,7 @@
 
 import axios from 'axios';
 import { DOCS_BASE_URL, getUserIdForDrafting, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import { extractUploadPolicyErrorMessage } from '../utils/llmQuotaMessages';
 
 // Docs and cases both go through the docs gateway prefix (`/docs/*` → document-service `/api/files/*`).
 const API_BASE_URL = DOCS_BASE_URL;
@@ -505,7 +506,13 @@ const documentApi = {
           console.log(`[📤 SIGNED URL UPLOAD] ✅ Upload completed successfully!`);
           console.log(`[📤 SIGNED URL UPLOAD] 🎉 File ${file.name} is now being processed`);
 
-          uploadedDocuments.push(completeResponse.data.document || completeResponse.data);
+          const batch = completeResponse.data.document || completeResponse.data;
+          const batchDocs = batch.uploadedFiles || batch.documents || batch.uploaded_files || [];
+          if (batchDocs.length > 0) {
+            uploadedDocuments.push(...batchDocs);
+          } else {
+            uploadedDocuments.push(batch);
+          }
         } else {
           console.log(`[📦 REGULAR UPLOAD] Uploading small file: ${file.name} (${fileSizeMB}MB)`);
           console.log(`[📦 REGULAR UPLOAD] Environment: ${environment}`);
@@ -540,18 +547,35 @@ const documentApi = {
       } catch (error) {
         const uploadMethod = isLarge ? 'SIGNED URL UPLOAD' : 'REGULAR UPLOAD';
         console.error(`[${uploadMethod}] ❌ Upload failed for ${file.name}:`, error);
-        console.error(`[${uploadMethod}] Error details:`, error.message);
-        
-        if (error.response && error.response.status === 403) {
+
+        // Extract the real server message from the response body — prefer formatted policy message.
+        const policyMsg = extractUploadPolicyErrorMessage(error);
+        const data = error?.response?.data;
+        const serverMessage = policyMsg ||
+          (data?.detail && typeof data.detail === 'object' ? data.detail.message : null) ||
+          (typeof data?.detail === 'string' ? data.detail : null) ||
+          data?.message ||
+          data?.error ||
+          null;
+        const serverCode =
+          (data?.detail && typeof data.detail === 'object' ? data.detail.code : null) ||
+          data?.code ||
+          null;
+        const status = error?.response?.status;
+
+        // For rate-limit and file-policy rejections, surface the real reason immediately.
+        if (status === 429 || status === 413 || status === 403) {
           return {
             success: false,
-            message: error.response.data.message || 'Token exhausted.',
+            code: serverCode,
+            message: serverMessage || (status === 429 ? 'Usage limit reached.' : status === 413 ? 'File too large or too many pages.' : 'Access denied.'),
             documents: uploadedDocuments,
           };
         }
+
         uploadedDocuments.push({
           originalname: file.name,
-          error: error.message || 'Upload failed',
+          error: serverMessage || error.message || 'Upload failed',
           status: 'failed',
         });
       }
@@ -696,6 +720,17 @@ const documentApi = {
       };
     } catch (error) {
       console.error('[uploadDocumentsForProcessing] ❌ Error:', error);
+
+      // Extract the real server message: prefer formatted upload-policy messages, then raw server text.
+      const extractMsg = (err) => {
+        const policyMsg = extractUploadPolicyErrorMessage(err);
+        if (policyMsg) return policyMsg;
+        const d = err?.response?.data;
+        return (d?.detail && typeof d.detail === 'object' ? d.detail.message : null) ||
+          (typeof d?.detail === 'string' ? d.detail : null) ||
+          d?.message || d?.error || null;
+      };
+
       const isNetworkSignedUrlError =
         String(error?.message || '').toLowerCase().includes('failed to fetch') ||
         String(error?.message || '').toLowerCase().includes('signed url');
@@ -704,15 +739,10 @@ const documentApi = {
           return await fallbackToDirectUpload();
         } catch (fallbackError) {
           console.error('[uploadDocumentsForProcessing] ❌ Fallback upload failed:', fallbackError);
-          throw new Error(
-            fallbackError.response?.data?.message ||
-            fallbackError.response?.data?.error ||
-            fallbackError.message ||
-            'Failed to upload documents'
-          );
+          throw new Error(extractMsg(fallbackError) || fallbackError.message || 'Failed to upload documents');
         }
       }
-      throw new Error(error.response?.data?.message || error.response?.data?.error || error.message || 'Failed to upload documents');
+      throw new Error(extractMsg(error) || error.message || 'Failed to upload documents');
     }
   },
 
@@ -781,7 +811,10 @@ const documentApi = {
       };
     } catch (error) {
       console.error('[extractCaseFieldsFromFolder] ❌ Error:', error);
-      throw new Error(error.response?.data?.message || error.response?.data?.error || error.message || 'Failed to extract case fields');
+      const msg = extractUploadPolicyErrorMessage(error) ||
+        (() => { const d = error?.response?.data; return (d?.detail && typeof d.detail === 'object' ? d.detail.message : null) || (typeof d?.detail === 'string' ? d.detail : null) || d?.message || d?.error || null; })() ||
+        error.message || 'Failed to extract case fields';
+      throw new Error(msg);
     }
   },
 
@@ -825,11 +858,10 @@ const documentApi = {
         throw new Error('Request timed out. Processing may still be in progress.');
       }
       
-      if (error.response?.data) {
-        throw new Error(error.response.data.message || error.response.data.error || 'Failed to upload and extract case fields');
-      }
-      
-      throw new Error(error.message || 'Failed to upload and extract case fields. Please try again.');
+      const msg = extractUploadPolicyErrorMessage(error) ||
+        (() => { const d = error?.response?.data; return (d?.detail && typeof d.detail === 'object' ? d.detail.message : null) || (typeof d?.detail === 'string' ? d.detail : null) || d?.message || d?.error || null; })() ||
+        error.message || 'Failed to upload and extract case fields. Please try again.';
+      throw new Error(msg);
     }
   },
 

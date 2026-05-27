@@ -3,6 +3,8 @@ import PropTypes from "prop-types"
 import { motion as Motion } from "framer-motion"
 import { PAYMENT_SERVICE_URL } from "../../config/apiConfig"
 import apiService from "../../services/api"
+import { buildPlanLimitSections, toDisplayString } from "../../utils/planDisplayConfig"
+import PlanLimitsDisplay from "../PlanLimitsDisplay"
 
 const PLANS = [
   {
@@ -166,6 +168,32 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
       document.body.appendChild(script)
     })
 
+  const resolveBackendPlanForCard = (uiPlan, annual) => {
+    const targetIntervals = annual
+      ? ["year", "yearly", "annual"]
+      : ["month", "monthly"]
+    const nameHints = {
+      enterprise: ["enterprise"],
+      "law-firm": ["law firm", "lawfirm", "business", "team"],
+      free: ["sololite", "solo lite", "free", "starter", "basic"],
+      "solo-lawyer": ["solo lawyer", "solo"],
+    }
+    const hints = nameHints[uiPlan.id] || [uiPlan.name.toLowerCase()]
+    const activePlans = plansCatalog.filter((p) => p?.is_active !== false)
+    const matchingInterval = activePlans.filter((plan) =>
+      targetIntervals.includes(String(plan?.interval || "").toLowerCase())
+    )
+    return (
+      matchingInterval.find((plan) =>
+        hints.some((hint) => String(plan?.name || "").toLowerCase().includes(hint))
+      ) ||
+      activePlans.find((plan) =>
+        hints.some((hint) => String(plan?.name || "").toLowerCase().includes(hint))
+      ) ||
+      null
+    )
+  }
+
   const resolvePlanIdForCheckout = (uiPlan, annual) => {
     const targetIntervals = annual
       ? ["year", "yearly", "annual"]
@@ -296,7 +324,9 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
 
       const instance = new window.Razorpay(options)
       instance.on("payment.failed", (failed) => {
-        setPaymentError(failed?.error?.description || "Payment failed. Please try again.")
+        setPaymentError(
+          toDisplayString(failed?.error?.description, "Payment failed. Please try again.")
+        )
         setProcessingPlanId(null)
       })
       instance.open()
@@ -372,6 +402,11 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
             const ctaLabel =
               plan.id === "enterprise" && !isAnnual ? "Contact Us" : plan.cta
             const isProcessing = processingPlanId === plan.id
+            const backendPlan = resolveBackendPlanForCard(plan, isAnnual)
+            const planLimitSections = backendPlan
+              ? buildPlanLimitSections(backendPlan)
+              : { marketing: plan.features, sections: [] }
+
             return (
               <Motion.div
                 key={plan.id}
@@ -388,7 +423,7 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
 
                 {/* Description */}
                 <p className="mt-2 text-center font-dmSans text-xs leading-snug text-juri-muted">
-                  {plan.description}
+                  {toDisplayString(plan.description, "")}
                 </p>
 
                 {/* Price */}
@@ -425,16 +460,10 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
                 <hr className="my-5 border-teal-300/60" />
 
                 {/* Features */}
-                <ul className="flex flex-col gap-3">
-                  {plan.features.map((feature) => (
-                    <li key={feature} className="flex items-start gap-2.5">
-                      <CheckIcon />
-                      <span className="font-dmSans text-xs leading-snug text-teal-700">
-                        {feature}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                <PlanLimitsDisplay
+                  plan={backendPlan || plan}
+                  planLimitSections={planLimitSections}
+                />
               </Motion.div>
             )
           })}
@@ -442,7 +471,7 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
 
         {paymentError && (
           <p className="mt-8 text-center font-dmSans text-sm text-red-600">
-            {paymentError}
+            {toDisplayString(paymentError, "")}
           </p>
         )}
 

@@ -36,7 +36,7 @@
 // import UserProfileMenu from './UserProfileMenu';
 // import QuickTools from './QuickTools';
 // import { useFileManager } from '../context/FileManagerContext';
-// import { useAuth } from '../context/AuthContext';
+// import { useAuth } from '../context';
 // import { useSidebar } from '../context/SidebarContext';
 // import { createPortal } from 'react-dom';
 // import JuriNexLogoImg from '/src/assets/JuriNex_gavel_logo.png';
@@ -401,7 +401,7 @@
 //             className={`absolute bottom-full ${isSidebarCollapsed && !isMobileView ? 'left-0 w-64 ml-[-50%]' : 'left-0 w-full'} mb-2 bg-[#161b22] border border-gray-800 rounded-xl shadow-2xl z-50 overflow-hidden max-w-xs`}
 //             style={{ transform: isSidebarCollapsed && !isMobileView ? 'translateX(-50%)' : 'none' }}
 //           >
-//             <UserProfileMenu userData={userData} navigate={navigate} />
+//             <UserProfileMenu userData={userData || user} navigate={navigate} />
 //           </div>
 //         )}
 //       </div>
@@ -434,7 +434,7 @@
 //           width: '256px',
 //         }}
 //       >
-//         <UserProfileMenu userData={userData} navigate={navigate} />
+//         <UserProfileMenu userData={userData || user} navigate={navigate} />
 //       </div>,
 //       document.body
 //     );
@@ -580,7 +580,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import UserProfileMenu from './UserProfileMenu';
 import QuickTools from './QuickTools';
 import { useFileManager } from '../context/FileManagerContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import { useSidebar } from '../context/SidebarContext';
 import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 import { createPortal } from 'react-dom';
@@ -968,7 +968,7 @@ const Sidebar = () => {
             className={`absolute bottom-full ${isSidebarCollapsed && !isMobileView ? 'left-0 w-64 ml-[-50%]' : 'left-0 w-full'} mb-2 bg-[#161b22] border border-gray-800 rounded-xl shadow-2xl z-50 overflow-hidden max-w-xs`}
             style={{ transform: isSidebarCollapsed && !isMobileView ? 'translateX(-50%)' : 'none' }}
           >
-            <UserProfileMenu userData={userData} navigate={navigate} />
+            <UserProfileMenu userData={userData || user} navigate={navigate} />
           </div>
         )}
       </div>
@@ -1001,7 +1001,7 @@ const Sidebar = () => {
           width: '256px',
         }}
       >
-        <UserProfileMenu userData={userData} navigate={navigate} />
+        <UserProfileMenu userData={userData || user} navigate={navigate} />
       </div>,
       document.body
     );

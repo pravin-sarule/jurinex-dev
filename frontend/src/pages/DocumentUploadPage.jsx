@@ -2,7 +2,7 @@ import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette } from 'lucide-react';
 import { FileManagerContext } from '../context/FileManagerContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import CreateFolderModal from '../components/FolderBrowser/CreateFolderModal';
 import CaseCreationFlow from './CreateCase/CaseCreationFlow';
 import { CONTENT_SERVICE_DIRECT } from '../config/apiConfig';

@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save, Edit2, X } from 'lucide-react';
 import documentApi from '../../services/documentApi';
 import { toast } from 'react-toastify';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context';
 import { canUsePermission, PERMISSION_KEYS } from '../../utils/permissions';
 
 const CaseDetailView = () => {

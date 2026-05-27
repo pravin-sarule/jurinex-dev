@@ -4,7 +4,7 @@ import { Eye, EyeOff, CheckCircle, ArrowLeft } from "lucide-react";
 import { auth, googleProvider } from '../../config/firebase';
 import { AUTH_SERVICE_URL } from '../../config/apiConfig';
 import { signInWithPopup } from 'firebase/auth';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context';
 import JuriNexLogo from '../../assets/JuriNex_gavel_logo.png';
 import AdvocateImage from '../../assets/advocate.png';
 

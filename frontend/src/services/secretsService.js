@@ -1,4 +1,9 @@
-import { SECRET_PROMPTS_API_BASE, CHAT_MODEL_BASE_URL } from '../config/apiConfig';
+import {
+  SECRET_PROMPTS_API_BASE,
+  CHAT_MODEL_BASE_URL,
+  GATEWAY_BASE_URL,
+  DOCS_BASE_URL,
+} from '../config/apiConfig';
 
 const CACHE_KEY = 'jurinex_secrets_list_v1';
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -68,20 +73,63 @@ export function invalidateSecretsListCache() {
   }
 }
 
+function buildSecretsApiBases() {
+  const seen = new Set();
+  const bases = [];
+
+  const add = (raw) => {
+    const base = String(raw || '').trim().replace(/\/$/, '');
+    if (!base || seen.has(base)) return;
+    seen.add(base);
+    bases.push(base);
+  };
+
+  add(SECRET_PROMPTS_API_BASE);
+  add(`${GATEWAY_BASE_URL}/chat`);
+  add(DOCS_BASE_URL);
+  add(CHAT_MODEL_BASE_URL);
+
+  return bases;
+}
+
 async function requestSecretsFromApi(includeValues) {
   const token = getAuthToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '');
-  const url = `${base}/secrets?fetch=${includeValues ? 'true' : 'false'}`;
+  const query = `fetch=${includeValues ? 'true' : 'false'}`;
+  const bases = buildSecretsApiBases();
+  let lastStatus = null;
+  let lastError = null;
 
-  const response = await fetch(url, { method: 'GET', headers });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch secrets: ${response.status}`);
+  for (const base of bases) {
+    const url = `${base}/secrets?${query}`;
+    try {
+      const response = await fetch(url, { method: 'GET', headers });
+      lastStatus = response.status;
+      if (response.ok) {
+        const data = await response.json();
+        return Array.isArray(data) ? data : [];
+      }
+      if ([502, 503, 504].includes(response.status)) {
+        continue;
+      }
+      throw new Error(`Failed to fetch secrets: ${response.status}`);
+    } catch (err) {
+      lastError = err;
+      if (err instanceof TypeError) {
+        continue;
+      }
+      if (String(err.message || '').includes('Failed to fetch secrets:')) {
+        throw err;
+      }
+    }
   }
-  const data = await response.json();
-  return Array.isArray(data) ? data : [];
+
+  if (lastStatus != null) {
+    throw new Error(`Failed to fetch secrets: ${lastStatus}`);
+  }
+  throw lastError || new Error('Failed to fetch secrets: network error');
 }
 
 /**
@@ -126,10 +174,17 @@ export async function fetchSecretById(secretId) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '');
-  const response = await fetch(`${base}/secrets/${secretId}`, { method: 'GET', headers });
-  if (!response.ok) {
+  let lastStatus = null;
+  for (const base of buildSecretsApiBases()) {
+    const response = await fetch(`${base}/secrets/${secretId}`, { method: 'GET', headers });
+    lastStatus = response.status;
+    if (response.ok) {
+      return response.json();
+    }
+    if ([502, 503, 504].includes(response.status)) {
+      continue;
+    }
     throw new Error(`Failed to fetch secret value: ${response.status}`);
   }
-  return response.json();
+  throw new Error(`Failed to fetch secret value: ${lastStatus ?? 'network error'}`);
 }

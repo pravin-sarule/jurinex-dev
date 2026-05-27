@@ -89,6 +89,7 @@ function normalizeAsterisks(text) {
  */
 export function convertMarkdownBoldMarkers(text) {
   if (!text || typeof text !== 'string') return text;
+  if (text.length > 120000) return normalizeAsterisks(text);
 
   let converted = normalizeAsterisks(text);
 
@@ -108,8 +109,32 @@ export function convertMarkdownBoldMarkers(text) {
   return converted;
 }
 
+/** True when text still looks like raw JSON (should not be shown to users). */
+export function looksLikeRawJsonString(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  if (/^```(?:json)?\s*/i.test(t)) return true;
+  if ((t.startsWith('{') || t.startsWith('[')) && /"[^"]+"\s*:/.test(t)) return true;
+  return false;
+}
+
+/** True when formatted output has no readable content (only rules, pipes, or HTML shell). */
+export function isEmptyFormattedChatContent(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return true;
+  const visible = t
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\|/g, ' ')
+    .replace(/-{3,}/g, ' ')
+    .replace(/\s+/g, '')
+    .trim();
+  return visible.length === 0;
+}
+
 export function formatChatResponseForDisplay(raw) {
   if (raw == null || raw === '') return '';
+
+  const rawString = typeof raw === 'string' ? raw.trim() : '';
 
   let text;
   if (typeof raw === 'object') {
@@ -120,7 +145,37 @@ export function formatChatResponseForDisplay(raw) {
     text = convertJsonToPlainText(raw);
   }
 
-  if (!text) return '';
+  if ((!text || isEmptyFormattedChatContent(text) || looksLikeRawJsonString(text)) && rawString) {
+    if (isStructuredJsonResponse(rawString) || isStructuredJsonResponse(raw)) {
+      const structured = renderSecretPromptResponse(rawString || raw);
+      if (structured && !isEmptyFormattedChatContent(structured) && !looksLikeRawJsonString(structured)) {
+        text = structured;
+      }
+    }
+    if (!text || isEmptyFormattedChatContent(text) || looksLikeRawJsonString(text)) {
+      const plain = convertJsonToPlainText(rawString || raw);
+      if (plain && !looksLikeRawJsonString(plain)) text = plain;
+    }
+  }
+
+  if (!text || isEmptyFormattedChatContent(text)) {
+    // Final safety net: if the raw string is a JSON code block, try stripping fences and converting once more
+    if (rawString) {
+      const stripped = rawString
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```\s*$/i, '')
+        .trim();
+      if (stripped && stripped !== rawString) {
+        const recovered = convertJsonToPlainText(stripped);
+        if (recovered && !isEmptyFormattedChatContent(recovered) && !looksLikeRawJsonString(recovered)) {
+          text = recovered;
+        } else if (recovered && recovered.length > 30) {
+          text = recovered;
+        }
+      }
+    }
+    if (!text || isEmptyFormattedChatContent(text)) return '';
+  }
 
   if (!/<[a-z][\s>]/i.test(text)) {
     text = convertAsciiLegalBoxes(text);
@@ -128,6 +183,21 @@ export function formatChatResponseForDisplay(raw) {
   }
 
   text = convertMarkdownBoldMarkers(text);
+
+  if (looksLikeRawJsonString(text)) {
+    // Strip code fences and try one more conversion pass before giving up
+    const stripped = String(text)
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+      .trim();
+    const converted = convertJsonToPlainText(stripped);
+    if (converted && !looksLikeRawJsonString(converted) && !isEmptyFormattedChatContent(converted)) {
+      return converted;
+    }
+    // Show the raw stripped content rather than a blank screen
+    if (stripped && stripped.length > 20) return stripped;
+    return '';
+  }
 
   return text;
 }

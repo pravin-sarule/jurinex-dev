@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, Clock, AlertCircle } from 'lucide-react';
-import { coerceChatErrorDisplay } from '../utils/llmQuotaMessages';
+import { coerceChatErrorDisplay, formatUtcIsoInIST } from '../utils/llmQuotaMessages';
+import UpgradePlanCta from './UpgradePlanCta';
 
 /**
  * Same fixed toast/modal pattern as ChatModelPage for quota and generic chat errors.
@@ -9,9 +10,12 @@ export default function ChatQuotaErrorModal({ error, onDismiss }) {
   const display = coerceChatErrorDisplay(error);
   if (!display) return null;
 
-  const { isLimit, title, body, limitType } = display;
+  const { isLimit, title, body, limitType, showUpgrade } = display;
+  const resetUtc = error?.details?.next_reset_utc ?? error?.response?.data?.details?.next_reset_utc;
+  const resetIst = formatUtcIsoInIST(resetUtc);
   const limitIcons = { minute: '⏱️', hour: '🕐', daily: '📅', tokens: '🔋' };
   const limitEmoji = isLimit ? limitIcons[limitType] || '🚫' : null;
+  const showUpgradeCta = isLimit && (showUpgrade ?? true);
 
   if (isLimit) {
     return (
@@ -33,19 +37,25 @@ export default function ChatQuotaErrorModal({ error, onDismiss }) {
           </div>
           <div className="bg-[#eef5f2] px-5 py-4">
             <p className="text-sm text-[#2b3528] leading-relaxed">{body}</p>
-            <div className="mt-4 pt-3 border-t border-[#cfe1db] flex items-center justify-between">
-              <div className="flex items-center space-x-1.5 text-xs text-[#1f6b5f]/70">
-                <Clock className="h-3 w-3" />
-                <span>Limits reset automatically</span>
-              </div>
-              <button
-                type="button"
-                onClick={onDismiss}
-                className="px-4 py-1.5 bg-[#21C1B6] hover:bg-[#1AA49B] text-white text-xs font-semibold rounded-lg transition-colors"
-              >
-                Got it
-              </button>
+            <div className="mt-3 flex items-center space-x-1.5 text-xs text-[#1f6b5f]/70">
+              <Clock className="h-3 w-3 shrink-0" />
+              <span>{resetIst ? `Resets at ${resetIst} IST` : 'Limits reset automatically'}</span>
             </div>
+            {showUpgradeCta ? (
+              <div className="mt-4 pt-3 border-t border-[#cfe1db]">
+                <UpgradePlanCta onDismiss={onDismiss} />
+              </div>
+            ) : (
+              <div className="mt-4 pt-3 border-t border-[#cfe1db] flex justify-end">
+                <button
+                  type="button"
+                  onClick={onDismiss}
+                  className="px-4 py-1.5 bg-[#21C1B6] hover:bg-[#1AA49B] text-white text-xs font-semibold rounded-lg transition-colors"
+                >
+                  Got it
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

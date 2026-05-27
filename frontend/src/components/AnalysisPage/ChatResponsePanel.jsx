@@ -7,7 +7,11 @@ import rehypeSanitize from 'rehype-sanitize';
 import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../../utils/renderSecretPromptResponse';
 import { getCleanText, downloadAsHtml, printResponse } from '../../utils/responseExportUtils';
-import { ensureTableSeparators, markdownTableComponents } from '../../utils/markdownUtils';
+import {
+  ensureTableSeparators,
+  markdownTableComponents,
+  splitMarkdownIntoRenderChunks,
+} from '../../utils/markdownUtils';
 import BrandingDownloadModal from '../BrandingDownload/BrandingDownloadModal';
 import '../../styles/ChatInterface.css';
 
@@ -423,13 +427,16 @@ ref={horizontalScrollRef}
           }}
         />
       ) : (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeRaw, rehypeSanitize]}
-          components={markdownComponents}
-        >
-          {ensureTableSeparators(responseContent)}
-        </ReactMarkdown>
+        {splitMarkdownIntoRenderChunks(ensureTableSeparators(responseContent)).map((chunk, index) => (
+          <ReactMarkdown
+            key={`${index}-${chunk.length}`}
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+            components={markdownComponents}
+          >
+            {chunk}
+          </ReactMarkdown>
+        ))}
       )}
       
       {isAnimatingResponse && (

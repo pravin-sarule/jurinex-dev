@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import UserManagementTable from '../components/Rbac_pages/UserManagementTable';
 import FirmAnalyticsTab from '../components/Rbac_pages/FirmAnalyticsTab';
 import SupportTicketsTab from '../components/Rbac_pages/SupportTicketsTab';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 
 const UserManagementPage = () => {
   const { user } = useAuth();

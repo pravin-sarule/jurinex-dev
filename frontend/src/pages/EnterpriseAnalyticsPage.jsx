@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { BarChart3, Users, FileSearch, Clock, TrendingUp, RefreshCw, AlertCircle, DollarSign } from 'lucide-react';
 import citationApi from '../services/citationApi';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import { useNavigate } from 'react-router-dom';
 
 const TEAL = '#21C1B6';

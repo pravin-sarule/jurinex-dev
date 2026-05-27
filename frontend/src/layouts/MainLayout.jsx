@@ -3,7 +3,7 @@ import Sidebar from '../components/Sidebar';
 import MainContent from '../components/MainContent';
 import AppAssistant from '../components/AppAssistant/AppAssistant';
 import { useSidebar } from '../context/SidebarContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 
 const MainLayout = ({ children, useNoPadding = false }) => {
   const { isSidebarHidden, setIsSidebarHidden } = useSidebar();

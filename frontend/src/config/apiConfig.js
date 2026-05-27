@@ -47,7 +47,7 @@ export const SECRET_PROMPTS_API_BASE =
 
 export const PAYMENT_SERVICE_URL =
   import.meta.env.VITE_APP_PAYMENT_SERVICE_URL ||
-  'https://payment-service-120280829617.asia-south1.run.app';
+  'http://localhost:5003';
 export const VISUAL_SERVICE_URL =
   import.meta.env.VITE_APP_VISUAL_SERVICE_URL ||
   'https://visual-service-120280829617.asia-south1.run.app';

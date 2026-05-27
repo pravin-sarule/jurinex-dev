@@ -1,4 +1,4 @@
-﻿import { logBrandingExport, normalizeBrandingProfile } from './brandingProfileDefaults';
+import { logBrandingExport, normalizeBrandingProfile } from './brandingProfileDefaults';
 import {
   buildBrandedHtml,
   buildBrandedWordHtml,
@@ -164,7 +164,7 @@ function buildPdfHtml(inner, profile) {
 }
 
 /**
- * Branded PDF: buildBrandedHtml → POST /api/branding/export-pdf → Chromium print.
+ * Branded PDF: buildBrandedHtml ? POST /api/branding/export-pdf ? Chromium print.
  */
 export async function downloadBrandedPdfUnified({
   element,

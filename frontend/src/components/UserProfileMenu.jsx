@@ -1,8 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { useAuth } from '../context/AuthContext';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useAuth } from '../context';
 import { USER_RESOURCES_SERVICE_URL } from '../config/apiConfig';
 import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 import { getPlanDisplayName } from '../utils/planUtils';
+import {
+  clearScopedPlanInfo,
+  getStoredUserId,
+  readScopedPlanInfo,
+  writeScopedPlanInfo,
+} from '../utils/planStorage';
 
 const INVALID_PLAN_LABELS = new Set([
   'development',
@@ -17,6 +23,35 @@ const sanitizePlanName = (value) => {
   const trimmed = value.trim();
   if (!trimmed) return null;
   return INVALID_PLAN_LABELS.has(trimmed.toLowerCase()) ? null : trimmed;
+};
+
+/** Prefer paid plan from API/subscription; never show placeholder "Free plan" when DB has a plan. */
+const resolveDisplayPlan = (planInfo, userInfo) => {
+  const subscription = planInfo?.subscription;
+  const planId = planInfo?.planId ?? subscription?.plan_id ?? subscription?.id ?? null;
+  const hasPaidPlan = planId != null && Number(planId) > 0;
+
+  const candidates = [
+    planInfo?.plan,
+    planInfo?.planName,
+    subscription?.plan_name,
+    subscription?.planName,
+    subscription?.name,
+  ];
+
+  for (const raw of candidates) {
+    const label = sanitizePlanName(raw);
+    if (label) return label;
+    if (hasPaidPlan && typeof raw === 'string' && raw.trim()) {
+      return raw.trim();
+    }
+  }
+
+  if (hasPaidPlan) {
+    return `Plan #${planId}`;
+  }
+
+  return null;
 };
 
 const deriveAccountLabel = (planInfo, userInfo) => {
@@ -44,17 +79,19 @@ const deriveAccountLabel = (planInfo, userInfo) => {
 };
 
 const UserProfileMenu = ({ userData, navigate, onLogout }) => {
-  const [userPlan, setUserPlan] = useState('Free plan');
+  const [userPlan, setUserPlan] = useState('');
   const [accountLabel, setAccountLabel] = useState('Professional Account');
   const [userEmail, setUserEmail] = useState('');
   const [userName, setUserName] = useState('');
-  const [userInitials, setUserInitials] = useState('U');
+  const [userInitials, setUserInitials] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const { logout: authLogout, planInfo: contextPlanInfo, user: contextUser } = useAuth();
+  const { logout: authLogout, planInfo: contextPlanInfo, user: contextUser, refreshPlan } = useAuth();
+  const contextPlanInfoRef = useRef(contextPlanInfo);
+  contextPlanInfoRef.current = contextPlanInfo;
+  const planBootstrappedRef = useRef(false);
   const permissionUser = contextUser || userData;
   const canViewSettings = canUsePermission(permissionUser, PERMISSION_KEYS.VIEW_ACCOUNT_SETTINGS);
-
   const fetchPlanFromAPI = useCallback(async () => {
     try {
       const token = localStorage.getItem('token');
@@ -81,29 +118,40 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       console.log('✅ Fetched plan data from API:', data);
 
       const activePlan = data.activePlan || data.userSubscription || data.subscription;
-      if (activePlan && (activePlan.plan_name || activePlan.planName || activePlan.name)) {
+      const planId = activePlan?.plan_id ?? activePlan?.id ?? null;
+      const hasPaidPlan = planId != null && Number(planId) > 0;
+
+      if (!activePlan || !hasPaidPlan) {
+        clearScopedPlanInfo();
+        setUserPlan('');
+        return null;
+      }
+
+      if (activePlan.plan_name || activePlan.planName || activePlan.name || hasPaidPlan) {
         const planName = sanitizePlanName(
-          getPlanDisplayName(activePlan) || activePlan.plan_name || activePlan.planName || activePlan.name
+          getPlanDisplayName(activePlan) ||
+            activePlan.plan_name ||
+            activePlan.planName ||
+            activePlan.name ||
+            'Active plan'
         );
         if (!planName) {
+          clearScopedPlanInfo();
+          setUserPlan('');
           return null;
         }
         console.log('✅ Plan name from API:', planName);
-        
-        try {
-          const existingUserInfo = localStorage.getItem('userInfo');
-          const userInfoData = existingUserInfo ? JSON.parse(existingUserInfo) : {};
-          userInfoData.plan = planName;
-          userInfoData.lastFetched = new Date().toISOString();
-          localStorage.setItem('userInfo', JSON.stringify(userInfoData));
-          console.log('✅ Updated localStorage with plan from API:', planName);
-        } catch (storageError) {
-          console.error('⚠️ Failed to update localStorage:', storageError);
-        }
 
+        const userId = getStoredUserId();
+        if (userId != null) {
+          writeScopedPlanInfo(userId, { plan: planName, planId });
+        }
+        setUserPlan(planName);
         return planName;
       }
 
+      clearScopedPlanInfo();
+      setUserPlan('');
       return null;
     } catch (error) {
       console.error('❌ Error fetching plan from API:', error);
@@ -271,6 +319,29 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       .trim();
   }, []);
 
+  const syncUserProfile = useCallback(() => {
+    const userInfo = userData || contextUser || getFromStorage('user');
+    if (!userInfo?.email && !userInfo?.username && !userInfo?.id) {
+      return false;
+    }
+
+    const email = userInfo.email || '';
+    const name =
+      userInfo.displayName ||
+      userInfo.username ||
+      userInfo.name ||
+      getDisplayNameFromEmail(email) ||
+      (email ? email.split('@')[0] : '');
+
+    setUserEmail(email);
+    setUserName(name || 'User');
+    setUserInitials(generateInitials(name, email));
+
+    const storedPlanInfo = readScopedPlanInfo(userInfo?.id || contextUser?.id || getStoredUserId());
+    setAccountLabel(deriveAccountLabel(contextPlanInfoRef.current || storedPlanInfo, userInfo));
+    return true;
+  }, [userData, contextUser, getFromStorage, generateInitials, getDisplayNameFromEmail]);
+
   const updateUserInfo = useCallback(async () => {
     console.log('🔍 UserProfileMenu: Starting updateUserInfo (optimized)...');
     
@@ -292,111 +363,103 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
       }
     }
 
-    if (contextPlanInfo && (contextPlanInfo.plan || contextPlanInfo.planName)) {
+    const uid = userInfo?.id || contextUser?.id || getStoredUserId();
+    if (
+      contextPlanInfo?.subscription &&
+      contextPlanInfo?.planId > 0 &&
+      (contextPlanInfo.plan || contextPlanInfo.planName)
+    ) {
       planInfo = contextPlanInfo;
       console.log('⚡ INSTANT: Found plan in RAM (AuthContext):', planInfo.plan || planInfo.planName);
     } else {
-      planInfo = getFromStorage('userInfo');
-      if (planInfo && planInfo.plan) {
-        console.log('✅ Found plan data in localStorage["userInfo"]:', planInfo.plan);
+      const scoped = readScopedPlanInfo(uid);
+      if (scoped?.plan && scoped?.planId > 0) {
+        planInfo = { ...scoped, subscription: contextPlanInfo?.subscription || null };
+        console.log('✅ Found scoped plan cache:', scoped.plan);
       } else {
-        console.log('⚠️ No plan in context or localStorage["userInfo"], checking other keys...');
-        const planKeys = ['plan', 'subscription', 'userPlan', 'planInfo', 'userSubscription'];
-        for (const key of planKeys) {
-          const data = getFromStorage(key);
-          if (data) {
-            if (typeof data === 'object' && data.plan) {
-              planInfo = data;
-              console.log(`✅ Found plan data in localStorage["${key}"]`, planInfo);
-              break;
-            } else if (typeof data === 'string') {
-              planInfo = { plan: data };
-              console.log(`✅ Found plan as string in localStorage["${key}"]`, data);
-              break;
-            }
-          }
-        }
-      }
-
-      if (!planInfo || !(planInfo.plan || planInfo.planName)) {
-        console.log('🌐 No plan found, fetching from API in background...');
-        fetchPlanFromAPI().then(apiPlan => {
+        planInfo = null;
+        console.log('🌐 No verified plan, fetching from API in background...');
+        fetchPlanFromAPI().then((apiPlan) => {
           if (apiPlan) {
-            console.log('✅ Got plan from API (background):', apiPlan);
             setUserPlan(apiPlan);
+          } else {
+            setUserPlan('');
           }
-        }).catch(err => {
+        }).catch((err) => {
           console.error('❌ Background API fetch failed:', err);
+          setUserPlan('');
         });
       }
     }
 
     if (userInfo) {
-      const email = userInfo.email || '';
-      const name = userInfo.displayName || userInfo.username || getDisplayNameFromEmail(email);
-      
-      let plan = 'No active plan';
-      const contextOrStoragePlan = sanitizePlanName(planInfo?.plan || planInfo?.planName);
-      const directUserPlan = sanitizePlanName(userInfo.plan);
+      syncUserProfile();
 
-      if (contextOrStoragePlan) {
-        plan = contextOrStoragePlan;
-        console.log('✅ Plan set from localStorage["userInfo"]:', plan);
-        console.log('📊 Plan details:', { plan, lastPayment: planInfo.lastPayment });
-      } else if (directUserPlan) {
-        plan = directUserPlan;
-        console.log('✅ Plan set from user.plan:', plan);
+      const resolved = resolveDisplayPlan(planInfo, userInfo);
+      const plan = resolved || '';
+      if (resolved) {
+        console.log('✅ Plan label resolved:', plan);
       } else {
         console.log('❌ No plan data found, using default:', plan);
       }
 
-      const initials = generateInitials(name, email);
-      const nextAccountLabel = deriveAccountLabel(planInfo, userInfo);
-
-      setUserEmail(email);
-      setUserName(name || 'User');
       setUserPlan(plan);
-      setAccountLabel(nextAccountLabel);
-      setUserInitials(initials);
 
       console.log('🎉 Final user info update:', {
         id: userInfo.id,
-        email,
+        email: userInfo.email,
         username: userInfo.username,
         displayName: userInfo.displayName,
-        name: name || 'User',
-        role: userInfo.role,
-        is_blocked: userInfo.is_blocked,
         plan,
-        accountLabel: nextAccountLabel,
-        initials,
         lastPayment: planInfo?.lastPayment,
       });
     } else {
       console.log('❌ No user data found in prop or localStorage');
       setUserEmail('');
       setUserName('');
-      setUserPlan('No active plan');
+      setUserPlan('');
       setAccountLabel('Professional Account');
-      setUserInitials('U');
+      setUserInitials('');
     }
     
-  }, [getFromStorage, generateInitials, getDisplayNameFromEmail, userData, fetchPlanFromAPI, contextPlanInfo, contextUser]);
+  }, [getFromStorage, userData, fetchPlanFromAPI, contextPlanInfo, contextUser, syncUserProfile]);
+
+  const updateUserInfoRef = useRef(updateUserInfo);
+  updateUserInfoRef.current = updateUserInfo;
 
   useEffect(() => {
-    updateUserInfo();
+    const loadPlan = async () => {
+      const scoped = readScopedPlanInfo(getStoredUserId());
+      const hasPlan =
+        (contextPlanInfoRef.current?.planId > 0 && contextPlanInfoRef.current?.subscription) ||
+        (scoped?.planId > 0 && scoped?.plan);
 
+      if (!planBootstrappedRef.current && !hasPlan) {
+        planBootstrappedRef.current = true;
+        if (typeof refreshPlan === 'function') {
+          await refreshPlan().catch((err) => console.error('Profile plan refresh failed:', err));
+        } else {
+          await fetchPlanFromAPI();
+        }
+      }
+
+      updateUserInfoRef.current();
+    };
+    loadPlan();
+
+    let customUpdateTimer = null;
     const handleStorageChange = (e) => {
       const userDataKeys = ['user', 'userInfo', 'userData', 'currentUser', 'authUser', 'auth', 'profile', 'plan', 'subscription', 'userPlan', 'planInfo'];
       if (userDataKeys.includes(e.key)) {
-        console.log(`Storage change detected for key: ${e.key}`);
-        updateUserInfo();
+        updateUserInfoRef.current();
       }
     };
 
     const handleCustomUpdate = () => {
-      console.log('Custom user info update event received');
-      updateUserInfo();
+      if (customUpdateTimer) window.clearTimeout(customUpdateTimer);
+      customUpdateTimer = window.setTimeout(() => {
+        updateUserInfoRef.current();
+      }, 200);
     };
 
     window.addEventListener('storage', handleStorageChange);
@@ -404,20 +467,20 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
     window.addEventListener('userDataChanged', handleCustomUpdate);
 
     return () => {
+      if (customUpdateTimer) window.clearTimeout(customUpdateTimer);
       window.removeEventListener('storage', handleStorageChange);
       window.removeEventListener('userInfoUpdated', handleCustomUpdate);
       window.removeEventListener('userDataChanged', handleCustomUpdate);
     };
-  }, [updateUserInfo]);
+  }, [refreshPlan, fetchPlanFromAPI, getFromStorage]);
 
   useEffect(() => {
-    if (contextPlanInfo && (contextPlanInfo.plan || contextPlanInfo.planName)) {
-      const nextPlan = sanitizePlanName(contextPlanInfo.plan || contextPlanInfo.planName);
-      if (!nextPlan) return;
-      console.log('⚡ UserProfileMenu: Plan updated from context:', nextPlan);
-      setUserPlan(nextPlan);
+    syncUserProfile();
+    const nextPlan = resolveDisplayPlan(contextPlanInfo, contextUser || userData);
+    if (nextPlan) {
+      setUserPlan((prev) => (prev === nextPlan ? prev : nextPlan));
     }
-  }, [contextPlanInfo]);
+  }, [contextPlanInfo, contextUser, userData, syncUserProfile]);
 
   const handleLogout = useCallback(() => {
     try {
@@ -498,14 +561,14 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
           onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1AA49B')}
           onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
         >
-          {userInitials}
+          {userInitials || (userName || userEmail || 'U').charAt(0).toUpperCase()}
         </div>
         <div className="flex-1 min-w-0">
-          {userName && <div className="text-sm font-semibold text-gray-900 truncate">{userName}</div>}
-          {userEmail && <div className="text-sm text-gray-600 truncate">{userEmail}</div>}
+          <div className="text-sm font-semibold text-gray-900 truncate">{userName || 'User'}</div>
+          {userEmail ? <div className="text-sm text-gray-600 truncate">{userEmail}</div> : null}
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center rounded-full bg-[#dff7f3] px-2.5 py-1 text-xs font-semibold text-[#0f766e]">
-              {userPlan}
+              {userPlan || (isLoading ? 'Loading plan…' : 'No active plan')}
             </span>
             <span className="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-xs font-medium text-gray-600 border border-[#d8efe9]">
               {accountLabel}

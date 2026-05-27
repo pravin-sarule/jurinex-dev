@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -331,6 +331,7 @@ const DocumentViewer = ({
   const [needsHorizontalScroll, setNeedsHorizontalScroll] = useState(false);
   const [scrollbarWidth, setScrollbarWidth] = useState(0);
   const [isDownloadingWord, setIsDownloadingWord] = useState(false);
+  const [visiblePageCount, setVisiblePageCount] = useState(1);
 
   useEffect(() => {
     const horizontalElement = horizontalScrollRef.current;
@@ -411,7 +412,33 @@ const DocumentViewer = ({
     question: 'Streaming response',
     timestamp: new Date().toISOString(),
   };
-  const pages = useMemo(() => paginateMarkdownContent(responseText), [responseText]);
+  const isLiveStream = isStreaming || isAnimatingResponse;
+  const hasMeaningfulText = (text) => {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    return t.replace(/<[^>]+>/g, '').replace(/\|/g, '').replace(/-{3,}/g, '').replace(/\s/g, '').length > 0;
+  };
+  const pages = useMemo(() => {
+    const text = (responseText || '').trim();
+    if (!hasMeaningfulText(text)) return [];
+    // During streaming use a single raw-text page — no expensive pagination yet.
+    if (isLiveStream) return [text];
+    return paginateMarkdownContent(responseText);
+  }, [responseText, isLiveStream]);
+
+  // Reset visible count whenever the message or page list changes.
+  useEffect(() => {
+    setVisiblePageCount(1);
+  }, [selectedMessageId, pages.length]);
+
+  // Progressively reveal subsequent pages so the UI thread is never blocked.
+  useEffect(() => {
+    if (isLiveStream || visiblePageCount >= pages.length) return undefined;
+    const timer = setTimeout(() => {
+      setVisiblePageCount((prev) => Math.min(prev + 1, pages.length));
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [pages.length, visiblePageCount, isLiveStream]);
 
   if ((!selectedMessageId && !hasContent) || (!hasContent && !isStreaming)) {
     return (
@@ -491,7 +518,7 @@ const DocumentViewer = ({
       >
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
           <div ref={exportContentRef ?? null} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px', width: '100%' }}>
-            {pages.length ? pages.map((pageContent, index) => (
+            {pages.length ? pages.slice(0, visiblePageCount).map((pageContent, index) => (
               <div key={`page-wrap-${index}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 {/* Page label */}
                 <div style={{ color: '#6b7280', fontSize: '11px', marginBottom: '6px', userSelect: 'none', letterSpacing: '0.04em' }}>
@@ -542,13 +569,28 @@ const DocumentViewer = ({
                     style={{ flex: 1 }}
                     ref={index === 0 ? markdownOutputRef : undefined}
                   >
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={COURT_DOC_MD_COMPONENTS}
-                    >
-                      {pageContent}
-                    </ReactMarkdown>
-                    {index === pages.length - 1 && (isAnimatingResponse || isStreaming) && (
+                    {isLiveStream ? (
+                      <pre
+                        style={{
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          margin: 0,
+                          fontFamily: '"Times New Roman", Times, serif',
+                          fontSize: '12pt',
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {pageContent}
+                      </pre>
+                    ) : (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={COURT_DOC_MD_COMPONENTS}
+                      >
+                        {pageContent}
+                      </ReactMarkdown>
+                    )}
+                    {index === pages.length - 1 && isLiveStream && (
                       <span style={{ display: 'inline-block', width: '2px', height: '16px', background: '#21C1B6', marginLeft: '2px', verticalAlign: 'middle', animation: 'pulse 1s infinite' }} />
                     )}
                   </div>
@@ -571,10 +613,25 @@ const DocumentViewer = ({
                 </article>
               </div>
             )) : (
-              // Empty placeholder page
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                <div style={{ color: '#ccc', fontSize: '11px', marginBottom: '6px' }}>Page 1</div>
-                <div style={{ width: '794px', minHeight: '1123px', background: '#ffffff', boxShadow: '0 4px 20px rgba(0,0,0,0.45)', padding: '96px 96px 80px 120px', boxSizing: 'border-box' }} />
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
+                <div
+                  style={{
+                    width: '794px',
+                    minHeight: '240px',
+                    background: '#ffffff',
+                    boxShadow: '0 8px 24px rgba(15, 23, 42, 0.10)',
+                    padding: '48px 64px',
+                    boxSizing: 'border-box',
+                    color: '#6b7280',
+                    fontSize: '13pt',
+                    fontFamily: 'Arial, sans-serif',
+                    textAlign: 'center',
+                  }}
+                >
+                  {isStreaming
+                    ? 'Waiting for response text…'
+                    : 'No response content was received. Try asking again or use a shorter question.'}
+                </div>
               </div>
             )}
           </div>

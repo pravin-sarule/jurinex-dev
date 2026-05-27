@@ -11,6 +11,8 @@ const UploadOptionsMenu = ({
   folderName = null,
   isSplitView = false,
   disabled = false,
+  /** Chat inputs sit at the bottom — open menu downward so "Upload files" is not clipped. */
+  menuPlacement = 'below',
 }) => {
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef(null);
@@ -56,6 +58,10 @@ const UploadOptionsMenu = ({
   const menuItemPadding = isSplitView ? 'px-3 py-2' : 'px-4 py-2.5';
   const fontSize = isSplitView ? 'text-xs' : 'text-sm';
   const menuIconSize = isSplitView ? 'h-4 w-4' : 'h-5 w-5';
+  const menuPositionClass =
+    menuPlacement === 'above'
+      ? 'bottom-full left-0 mb-2'
+      : 'top-full left-0 mt-2';
 
   return (
     <div className="relative" ref={menuRef}>
@@ -76,7 +82,9 @@ const UploadOptionsMenu = ({
 
       {/* Dropdown Menu */}
       {showMenu && !isUploading && (
-        <div className="absolute bottom-full left-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-lg z-30 min-w-[180px] overflow-hidden py-1">
+        <div
+          className={`absolute ${menuPositionClass} bg-white border border-gray-200 rounded-xl shadow-lg z-[100] min-w-[200px] overflow-visible py-1`}
+        >
           {/* Upload files Option */}
           <button
             type="button"

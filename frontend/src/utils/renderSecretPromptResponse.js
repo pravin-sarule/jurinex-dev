@@ -86,10 +86,10 @@ function convertMarkdownToHtml(text) {
 function convertMarkdownTableToHtml(tableLines) {
   if (!tableLines || tableLines.length < 2) return null;
   
-  // Filter out separator lines (lines with only dashes and pipes)
+  // Filter out separator lines (lines with only dashes, colons, pipes, and spaces)
   const validLines = tableLines.filter(line => {
     const trimmed = line.trim();
-    return trimmed && !/^\|[\s\-:]+\|\s*$/.test(trimmed);
+    return trimmed && !/^\|[\s\-:|]+\|?\s*$/.test(trimmed);
   });
   
   if (validLines.length === 0) return null;
@@ -149,8 +149,8 @@ function processTextWithTables(text) {
     
     // Check if this is a table line (contains | and has proper format)
     const isTableLine = trimmedLine.includes('|') && trimmedLine.split('|').length >= 2;
-    const isSeparator = /^\|[\s\-:]+\|\s*$/.test(trimmedLine);
-    
+    const isSeparator = /^\|[\s\-:|]+\|?\s*$/.test(trimmedLine);
+
     if (isTableLine || isSeparator) {
       if (!inTable) {
         // Start of a table
@@ -158,12 +158,12 @@ function processTextWithTables(text) {
         tableLines = [];
       }
       tableLines.push(line);
-      
+
       // Check if next line is not a table line (end of table)
       if (i < lines.length - 1) {
         const nextLine = lines[i + 1].trim();
         const nextIsTableLine = nextLine.includes('|') && nextLine.split('|').length >= 2;
-        const nextIsSeparator = /^\|[\s\-:]+\|\s*$/.test(nextLine);
+        const nextIsSeparator = /^\|[\s\-:|]+\|?\s*$/.test(nextLine);
         
         if (!nextIsTableLine && !nextIsSeparator && nextLine.length > 0) {
           // End of table

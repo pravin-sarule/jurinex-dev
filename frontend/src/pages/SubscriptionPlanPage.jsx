@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { CheckIcon } from '@heroicons/react/20/solid';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { useNavigate, useLocation } from 'react-router-dom';
 import apiService from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import { getPlanDisplayName } from '../utils/planUtils';
+import { invalidateSecretsListCache } from '../services/secretsService';
+import { buildPlanLimitSections, toDisplayString } from '../utils/planDisplayConfig';
+import PlanLimitsDisplay from '../components/PlanLimitsDisplay';
 
 import { PAYMENT_SERVICE_URL } from '../config/apiConfig';
 const BACKEND_BASE_URL = PAYMENT_SERVICE_URL;
@@ -32,15 +34,14 @@ const getEffectivePlanLabel = (planInfo) => {
   return getPlanDisplayName(planInfo.subscription || planInfo) || planInfo.plan || planInfo.planName || '';
 };
 
-const isSamePlanFamily = (userPlanName, uiPlan) => {
+const isSamePlanFamily = (userPlanName, plan) => {
   const normalizedUserPlan = normalizePlanLabel(userPlanName);
   if (!normalizedUserPlan) return false;
-
-  if (normalizePlanLabel(uiPlan.name) === normalizedUserPlan) {
-    return true;
-  }
-
-  const hints = PLAN_NAME_HINTS[uiPlan.id] || [];
+  const planName = normalizePlanLabel(plan.name);
+  if (!planName) return false;
+  if (planName === normalizedUserPlan) return true;
+  if (normalizedUserPlan.includes(planName) || planName.includes(normalizedUserPlan)) return true;
+  const hints = PLAN_NAME_HINTS[plan.id] || [];
   return hints.some((hint) => normalizedUserPlan.includes(hint));
 };
 
@@ -50,6 +51,13 @@ const priceStringToPaise = (price) => {
   const amount = Number(raw);
   if (!Number.isFinite(amount) || amount <= 0) return 0;
   return Math.round(amount * 100);
+};
+
+const formatPriceDisplay = (price, currency = 'INR') => {
+  const n = Number(price);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const symbol = currency === 'INR' ? '₹' : `${currency} `;
+  return symbol + n.toLocaleString('en-IN');
 };
 
 const resolveBackendPlanForUi = (backendPlans, uiPlanId, cycle, uiPlanType) => {
@@ -89,6 +97,7 @@ const SubscriptionPlanPage = () => {
  const { user, token, loading: authLoading, planInfo, fetchAndStorePlan } = useAuth();
  
  const [billingCycle, setBillingCycle] = useState('yearly');
+ const [planTypeTab, setPlanTypeTab] = useState('individual');
  const [plans, setPlans] = useState([]);
  const [backendPlans, setBackendPlans] = useState([]);
  const [loading, setLoading] = useState(true);
@@ -98,6 +107,12 @@ const SubscriptionPlanPage = () => {
  const [pendingCheckout, setPendingCheckout] = useState(null);
 
  const currentPlanName = useMemo(() => getEffectivePlanLabel(planInfo), [planInfo]);
+
+ const displayedPlans = useMemo(() => plans.filter((plan) => {
+   const t = String(plan.type || '').toLowerCase();
+   if (planTypeTab === 'individual') return t === 'individual' || t === 'solo';
+   return t === 'business' || t === 'enterprise' || t === 'team';
+ }), [plans, planTypeTab]);
 
  useEffect(() => {
  if (!token || currentPlanName || typeof fetchAndStorePlan !== 'function') return;
@@ -160,14 +175,35 @@ const SubscriptionPlanPage = () => {
 
  if (Array.isArray(plansData) && plansData.length > 0) {
  setBackendPlans(plansData);
- const visiblePlans = LANDING_PLAN_CONFIG
- .map((uiPlan) => ({
- ...uiPlan,
- backendPlan: resolveBackendPlanForUi(plansData, uiPlan.id, billingCycle, uiPlan.type),
- }));
- 
- console.log('Visible landing-aligned plans:', visiblePlans);
- setPlans(visiblePlans);
+ const intervals = billingCycle === 'yearly'
+   ? ['year', 'yearly', 'annual']
+   : ['month', 'monthly'];
+ const activePlans = plansData.filter(p => p?.is_active !== false);
+ const cycleFiltered = activePlans.filter(p =>
+   intervals.includes(String(p?.interval || '').toLowerCase())
+ );
+ const source = cycleFiltered.length > 0 ? cycleFiltered : activePlans;
+ const displayPlans = source.map(p => {
+   const isEnterprise = String(p.name || '').toLowerCase().includes('enterprise');
+   return {
+     id: String(p.id),
+     name: p.name,
+     description: toDisplayString(p.description || p.tagline, ''),
+     features: p.features || null,
+     planLimitSections: buildPlanLimitSections(p),
+     type: p.type || 'individual',
+     backendPlan: p,
+     displayPrice: !isEnterprise && Number(p.price) > 0
+       ? formatPriceDisplay(p.price, p.currency)
+       : null,
+     displayPeriod: !isEnterprise
+       ? (billingCycle === 'yearly' ? '/year' : '/month')
+       : null,
+     ctaLabel: isEnterprise ? 'Contact Us' : 'Select Plan',
+   };
+ });
+ console.log('Backend-driven plans:', displayPlans);
+ setPlans(displayPlans);
  } else {
  throw new Error('No plans available from payment service');
  }
@@ -211,18 +247,28 @@ const SubscriptionPlanPage = () => {
  });
  };
 
- const handlePaymentSuccess = async (planName, paymentData) => {
+ const handlePaymentSuccess = async (planName, paymentData, verifyResult = null) => {
  try {
  console.log('Payment successful:', paymentData);
  
+ const activePlan = verifyResult?.activePlan;
+ const resolvedPlanName =
+   getPlanDisplayName(activePlan) ||
+   activePlan?.plan_name ||
+   activePlan?.planName ||
+   planName;
+
  const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}');
- userInfo.plan = planName;
+ userInfo.plan = resolvedPlanName;
+ userInfo.planId = activePlan?.plan_id ?? activePlan?.id ?? userInfo.planId ?? null;
  userInfo.lastPayment = {
  id: paymentData.razorpay_payment_id,
  subscription_id: paymentData.razorpay_subscription_id,
  date: new Date().toISOString()
  };
  localStorage.setItem('userInfo', JSON.stringify(userInfo));
+
+ invalidateSecretsListCache();
  
  if (token && typeof fetchAndStorePlan === 'function') {
  await fetchAndStorePlan(token).catch((planError) => {
@@ -326,15 +372,19 @@ const SubscriptionPlanPage = () => {
 
  console.log('Final currentUser object:', currentUser);
 
- if (plan.id === 'enterprise' && billingCycle === 'monthly') {
+ if (plan.ctaLabel === 'Contact Us') {
  navigate('/contact');
  return;
  }
 
- const shownPrice = billingCycle === 'yearly' ? plan.annualPrice : plan.monthlyPrice;
- const amountInPaise = priceStringToPaise(shownPrice);
+ const amountInPaise = plan.backendPlan?.price
+   ? Math.round(Number(plan.backendPlan.price) * 100)
+   : priceStringToPaise(plan.displayPrice);
  if (!amountInPaise) {
+ localStorage.removeItem('pendingUpgradeCheckout');
  setError('Invalid plan amount. Please try another plan.');
+ setProcessingPayment(false);
+ setSelectedPlanId(null);
  return;
  }
 
@@ -396,9 +446,7 @@ const SubscriptionPlanPage = () => {
   window.location.hostname === 'localhost' ||
   window.location.hostname === '127.0.0.1';
  if (isLocalhost && String(razorpayKeyId).startsWith('rzp_live_')) {
-  throw new Error(
-   'Live Razorpay key detected on localhost. Use test keys for local development or run via a public HTTPS URL.'
-  );
+  console.warn('[Razorpay] Live key on localhost — real payments will be charged.');
  }
 
  console.log(`[Razorpay Debug] Received orderId: ${orderId}`);
@@ -417,8 +465,31 @@ const SubscriptionPlanPage = () => {
  email: currentUser?.email || '',
  contact: currentUser?.phone || currentUser?.contact || ''
  },
+ config: {
+   display: {
+     blocks: {
+       upi: {
+         name: "Pay using UPI",
+         instruments: [
+           // test UPI ID: success@razorpay (success) | failure@razorpay (fail)
+           { method: "upi", flows: ["collect"] },
+         ],
+       },
+       other: {
+         name: "Other Payment Methods",
+         instruments: [
+           { method: "card" },
+           { method: "netbanking" },
+           { method: "wallet" },
+         ],
+       },
+     },
+     sequence: ["block.upi", "block.other"],
+     preferences: { show_default_blocks: false },
+   },
+ },
  theme: {
- color: "#1a202c"
+ color: "#0D9488"
  },
  handler: async function (response) {
  console.log('Razorpay payment handler response:', response);
@@ -451,7 +522,7 @@ const SubscriptionPlanPage = () => {
  console.log('Verification response:', verifyResult);
 
  if (verifyResult.success) {
- await handlePaymentSuccess(plan.name, response);
+ await handlePaymentSuccess(plan.name, response, verifyResult);
  } else {
  throw new Error(verifyResult.message || 'Payment verification failed.');
  }
@@ -558,7 +629,37 @@ const SubscriptionPlanPage = () => {
  </p>
  </div>
 
- <div className="mt-8 mb-12 flex justify-center">
+ {/* Plan type tab */}
+ <div className="mt-8 flex justify-center">
+   <div className="inline-flex rounded-xl border border-teal-200 bg-[#F0FDFA] p-1 gap-1">
+     <button
+       type="button"
+       onClick={() => setPlanTypeTab('individual')}
+       disabled={loading || processingPayment}
+       className={`px-6 py-2 rounded-lg font-dmSans text-sm font-semibold transition-all duration-200 ${
+         planTypeTab === 'individual'
+           ? 'bg-teal-600 text-white shadow-sm'
+           : 'text-teal-700 hover:bg-teal-50'
+       }`}
+     >
+       Individual
+     </button>
+     <button
+       type="button"
+       onClick={() => setPlanTypeTab('enterprise')}
+       disabled={loading || processingPayment}
+       className={`px-6 py-2 rounded-lg font-dmSans text-sm font-semibold transition-all duration-200 ${
+         planTypeTab === 'enterprise'
+           ? 'bg-teal-600 text-white shadow-sm'
+           : 'text-teal-700 hover:bg-teal-50'
+       }`}
+     >
+       Enterprise
+     </button>
+   </div>
+ </div>
+
+ <div className="mt-4 mb-8 flex justify-center">
  <div className="relative inline-flex rounded-full border border-teal-300/60 bg-white p-1 shadow-sm">
  <button
  type="button"
@@ -619,7 +720,7 @@ const SubscriptionPlanPage = () => {
  {error && (
  <div className="mb-8 rounded-xl border border-red-200 bg-red-50 p-4">
  <div className="flex items-center justify-between">
- <div className="font-dmSans text-red-800">{error}</div>
+ <div className="font-dmSans text-red-800">{toDisplayString(error, 'Something went wrong')}</div>
  <button
  onClick={handleRetry}
  className="text-red-600 hover:text-red-500 text-sm font-medium"
@@ -631,7 +732,7 @@ const SubscriptionPlanPage = () => {
  </div>
  )}
 
- {!loading && !error && plans.length === 0 && (
+ {!loading && !error && plans.length === 0 && !processingPayment && (
  <div className="py-12 text-center">
  <p className="mb-4 font-dmSans text-lg text-juri-muted">
  No plans available for {billingCycle} billing
@@ -645,15 +746,21 @@ const SubscriptionPlanPage = () => {
  </div>
  )}
 
-{!loading && !error && plans.length > 0 && (
- <div className="mt-12 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
- {plans.map((plan) => {
-const displayPrice = billingCycle === 'yearly' ? plan.annualPrice : plan.monthlyPrice;
-const displayPeriod = billingCycle === 'yearly' ? plan.annualPeriod : plan.monthlyPeriod;
+{!loading && displayedPlans.length === 0 && plans.length > 0 && !error && (
+ <div className="py-12 text-center">
+   <p className="font-dmSans text-juri-muted">No {planTypeTab} plans available for {billingCycle} billing.</p>
+ </div>
+)}
+
+{!loading && displayedPlans.length > 0 && (
+ <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+ {displayedPlans.map((plan) => {
+const displayPrice = plan.displayPrice;
+const displayPeriod = plan.displayPeriod;
  const isCurrentlyProcessing = processingPayment && selectedPlanId === plan.id;
  const isCurrentPlan = isSamePlanFamily(currentPlanName, plan);
 const isDisabled = processingPayment || isCurrentPlan;
-const ctaLabel = isCurrentPlan ? 'Current Plan' : (billingCycle === 'monthly' ? plan.ctaMonthly : plan.ctaAnnual);
+const ctaLabel = isCurrentPlan ? 'Current Plan' : plan.ctaLabel;
 
  return (
  <div
@@ -673,7 +780,7 @@ const ctaLabel = isCurrentPlan ? 'Current Plan' : (billingCycle === 'monthly' ? 
  {plan.name}
  </h2>
  <p className="mt-2 text-center font-dmSans text-xs leading-snug text-juri-muted">
- {plan.description || plan.tagline || 'Subscription plan'}
+ {toDisplayString(plan.description || plan.tagline, 'Subscription plan')}
  </p>
  
  <div className="mt-5 flex items-end justify-center gap-1">
@@ -728,21 +835,7 @@ ctaLabel
  <hr className="my-5 border-teal-300/60" />
 
  <div className="flex-1">
- <ul className="space-y-3">
- {plan.features ? (
- (typeof plan.features === 'string' ?
- plan.features.split(',').map(f => f.trim()).filter(f => f) :
- Array.isArray(plan.features) ? plan.features : []
- ).map((feature, index) => (
- <li key={index} className="flex items-start">
- <CheckIcon className="mt-0.5 mr-3 h-5 w-5 flex-shrink-0 text-teal-600" />
- <span className="font-dmSans text-xs leading-snug text-teal-700">{feature}</span>
- </li>
- ))
- ) : (
- <li className="font-dmSans text-sm italic text-juri-muted">No features listed</li>
- )}
- </ul>
+ <PlanLimitsDisplay plan={plan} planLimitSections={plan.planLimitSections} />
  </div>
  </div>
  );
