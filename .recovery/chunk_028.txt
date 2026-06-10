@@ -1,8 +1,0 @@
-          secretAttachmentIds.length > 1 ? secretAttachmentIds : null,
-          (thoughtText) => {
-            if (typeof thoughtText === 'string' && thoughtText) {
-              setReasoningText((prev) => `${prev}${thoughtText}`);
-            }
-          },
-          loopAbortControllerRef.current?.signal ?? null
-        );

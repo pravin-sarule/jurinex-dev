@@ -1,8 +1,0 @@
-      streamBufferRef.current = '';
-      streamingGeneratingFiredRef.current = false;
-      loopAbortedRef.current = false;
-      loopCharsRef.current   = 0;
-      loopAbortControllerRef.current = new AbortController();
-      setStreamingStatus('initializing');
-      setStreamingMessage('Starting legal chat...');
-      startProcessingTimeline(question.trim(), 'initializing', 'Starting legal chat...');

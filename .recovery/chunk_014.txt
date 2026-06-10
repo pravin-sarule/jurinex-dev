@@ -1,9 +1,0 @@
-// ─── Streaming renderer (with block-level DOM diffing) ────────────────────────
-// Guarantees O(LIVE_CAP) parse cost per tick regardless of total buffer size.
-//
-//   stableDiv — append-only; receives completed paragraphs, never re-parsed.
-//   liveDiv   — re-rendered every tick with the last ≤ LIVE_CAP chars only.
-//
-// findStableSplit ensures liveDiv is always small: it falls back to a
-// single-newline split (or even a mid-line split) if no \n\n is present,
-// so a 100 KB legal wall-of-text parses identically to a 1 KB response.

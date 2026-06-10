@@ -1,6 +1,0 @@
-        Object.keys(generalStreamOpts).length ? generalStreamOpts : null,
-        (thoughtText) => {
-          appendReasoningChunk(thoughtText);
-        },
-        loopAbortControllerRef.current?.signal ?? null
-      );

@@ -1,8 +1,0 @@
-  // Guards against calling setStreamingStatus('generating') on every chunk due
-  // to the stale closure problem.  Reset to false at the start of each request.
-  const streamingGeneratingFiredRef = useRef(false);
-
-  // Incremented whenever streamBufferRef is reset mid-stream (e.g. cache→fallback).
-  // Used as a key on <StreamingMarkdown> so the component remounts with empty DOM
-  // instead of inheriting stale stable-div content from the previous stream.
-  const [streamResetKey, setStreamResetKey] = React.useState(0);

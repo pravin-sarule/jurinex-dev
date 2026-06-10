@@ -1,8 +1,0 @@
-  // Stable callback — prevents TokenCostPopover from re-rendering on every
-  // ChatModelPage render just because an inline arrow function changed identity.
-  const handleCacheExpired = React.useCallback(() => {
-    setCacheSessionData(prev => prev ? { ...prev, status: 'deleted' } : null);
-  }, []);
-
-  const hasSessions = chatSessions.length > 0;
-  const sidebarSessions = useMemo(
