@@ -298,6 +298,34 @@ function formatJsonAsPlainText(jsonData) {
   return formattedText;
 }
 
+function escapeMarkdownTableCell(value) {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+}
+
+function objectArrayToMarkdownTable(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  if (!items.every(item => item && typeof item === 'object' && !Array.isArray(item))) return '';
+
+  const columns = [];
+  const seen = new Set();
+  items.forEach(item => {
+    Object.keys(item).forEach(key => {
+      if (!seen.has(key)) {
+        seen.add(key);
+        columns.push(key);
+      }
+    });
+  });
+  if (columns.length < 2 || columns.length > 12) return '';
+
+  const header = `| ${columns.map(key => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())).join(' | ')} |`;
+  const separator = `| ${columns.map(() => '---').join(' | ')} |`;
+  const rows = items.map(item => `| ${columns.map(key => escapeMarkdownTableCell(item[key])).join(' | ')} |`);
+  return [header, separator, ...rows].join('\n');
+}
+
 function extractTextFromJson(obj, depth = 0) {
   if (depth > 10) return '';
   
@@ -315,6 +343,8 @@ function extractTextFromJson(obj, depth = 0) {
   }
   
   if (Array.isArray(obj)) {
+    const table = objectArrayToMarkdownTable(obj);
+    if (table) return table;
     obj.forEach((item, index) => {
       const extracted = extractTextFromJson(item, depth + 1);
       if (extracted && extracted.trim()) {
@@ -396,4 +426,3 @@ function extractTextFromJson(obj, depth = 0) {
   
   return text.trim();
 }
-

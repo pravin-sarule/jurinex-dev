@@ -397,4 +397,40 @@ router.get('/roles/by-name/:roleName', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/internal/user/:userId/role
+ * Returns the user's role_id and domain_role from the users table.
+ * Used by downstream services to resolve role for secret_manager filtering.
+ */
+router.get('/user/:userId/role', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    const pool = require('../config/db');
+
+    const userResult = await pool.query(
+      `SELECT u.role_id, u.domain_role,
+              r.id AS resolved_role_id, r.name AS role_name
+       FROM users u
+       LEFT JOIN roles r
+         ON UPPER(REPLACE(r.name, ' ', '_')) = UPPER(REPLACE(COALESCE(u.domain_role, ''), ' ', '_'))
+       WHERE u.id = $1
+       LIMIT 1`,
+      [userId]
+    );
+    if (!userResult.rows.length) return res.status(404).json({ error: 'User not found' });
+
+    const row = userResult.rows[0];
+    const roleId = row.role_id ?? row.resolved_role_id ?? null;
+    res.json({
+      role_id: roleId ? String(roleId) : null,
+      domain_role: row.domain_role || null,
+      role_name: row.role_name || null,
+    });
+  } catch (error) {
+    console.error('[Internal] Error fetching user role:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

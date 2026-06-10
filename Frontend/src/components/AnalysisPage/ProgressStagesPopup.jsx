@@ -68,7 +68,7 @@ const ProgressStagesPopup = ({
           <div className="p-2 bg-red-50 rounded border border-red-200">
             <p className="text-red-800 text-xs font-medium">Processing Failed</p>
             <p className="text-red-700 text-xs mt-0.5">
-              {processingStatus?.job_error || 'An error occurred during processing'}
+              {(typeof processingStatus?.job_error === 'string' ? processingStatus.job_error : null) || 'An error occurred during processing'}
             </p>
           </div>
         </div>

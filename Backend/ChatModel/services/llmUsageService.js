@@ -3,7 +3,8 @@
  * Saves LLM usage logs to the database
  */
 
-const pool = require('../config/db');
+const paymentPool = require('../config/paymentDb');
+const { maybeDeductTopupAfterUsage } = require('./topupDeductionService');
 
 // Model pricing per 1 Million tokens (Input, Output) in INR
 const MODEL_PRICING = {
@@ -155,9 +156,11 @@ async function logLLMUsage(usageData) {
       sessionId
     ];
 
-    const result = await pool.query(query, values);
+    const result = await paymentPool.query(query, values);
     
     console.log(`✅ [LLM Usage] Logged usage for user ${normalizedUserId}, model ${modelName}, tokens: ${totalTokens}, cost: ₹${costData.totalCost.toFixed(4)}`);
+
+    await maybeDeductTopupAfterUsage(normalizedUserId, totalTokens);
     
     return result.rows[0];
   } catch (error) {

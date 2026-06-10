@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const LLMUsageLogService = require('../services/llmUsageLogService');
+const { maybeDeductTopupAfterUsage } = require('../services/topupDeductionService');
 
 /**
  * Create LLM usage log entry
@@ -61,6 +62,8 @@ exports.createLLMUsageLog = async (req, res) => {
       totalTokens: usageLog.total_tokens,
       totalCost: usageLog.total_cost
     });
+
+    await maybeDeductTopupAfterUsage(userId, inputTokens + outputTokens);
 
     res.status(201).json({
       success: true,

@@ -149,6 +149,19 @@ export function normalizeBrandingProfile(profile) {
   return merged;
 }
 
+/** e.g. "09 Jun 2026" — used for {date} / {today} in header & footer text. */
+export function formatBrandingDate(date = new Date()) {
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+/** Replace {date} and {today} in branding header/footer strings at export time. */
+export function resolveBrandingTokens(text, { date = new Date() } = {}) {
+  const formatted = formatBrandingDate(date);
+  return String(text ?? '')
+    .replace(/\{date\}/gi, formatted)
+    .replace(/\{today\}/gi, formatted);
+}
+
 export function logBrandingExport(meta) {
   const {
     module: mod,

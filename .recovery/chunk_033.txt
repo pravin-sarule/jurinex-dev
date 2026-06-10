@@ -1,0 +1,12 @@
+                                    <div className="chat-thread-card__body analysis-page-ai-response">
+                                      {msg.isStreaming && msg.id === selectedMessageId ? (
+                                        <>
+                                          <StreamingMarkdown key={`stream-${selectedMessageId}-${streamResetKey}`} bufferRef={streamBufferRef} scrollTargetRef={chatThreadRef} />
+                                          {/* Dots shown in the gap between status='generating' and first visible text */}
+                                          {streamingStatus === 'generating' && !streamBufferRef.current && (
+                                            <TypingDots />
+                                          )}
+                                        </>
+                                      ) : (
+                                        <FinalMarkdown text={assistantContent} />
+                                      )}

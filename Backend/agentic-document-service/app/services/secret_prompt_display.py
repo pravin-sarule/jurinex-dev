@@ -92,6 +92,31 @@ def _fetch_template_text_local(template_id: str | None) -> str | None:
     return None
 
 
+def resolve_secret_prompt_llm_name(secret_id: str | None) -> str | None:
+    """Return the model assigned to a selected secret prompt in the database."""
+    sid = str(secret_id or "").strip()
+    if not sid or not is_db_available():
+        return None
+    try:
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT TRIM(l.name::text) AS llm_name
+                FROM secret_manager s
+                LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
+                WHERE s.id::text = %s::text
+                LIMIT 1
+                """,
+                (sid,),
+            )
+            row = cur.fetchone()
+            model_name = str((row or {}).get("llm_name") or "").strip()
+            return model_name or None
+    except Exception as exc:
+        logger.warning("[SecretLocal] secret model lookup failed id=%s: %s", sid, exc)
+        return None
+
+
 def resolve_secret_display_label(
     secret_id: str,
     prompt_label: str | None,

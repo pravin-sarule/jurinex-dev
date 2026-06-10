@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { deleteFirmUser, fetchFirmUsers, resendFirmUserPasswordSetupEmail } from './rbacApi';
 import AddUserModal from './AddUserModal';
 import PermissionsModal from './PermissionsModal';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context';
 import { canUsePermission, PERMISSION_KEYS } from '../../utils/permissions';
 import { toast } from 'react-toastify';
 

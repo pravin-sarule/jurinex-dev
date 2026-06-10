@@ -78,7 +78,7 @@ const deriveAccountLabel = (planInfo, userInfo) => {
   return 'Professional Account';
 };
 
-const UserProfileMenu = ({ userData, navigate, onLogout }) => {
+const UserProfileMenu = ({ userData, navigate, onLogout, onClose }) => {
   const [userPlan, setUserPlan] = useState('');
   const [accountLabel, setAccountLabel] = useState('Professional Account');
   const [userEmail, setUserEmail] = useState('');
@@ -483,6 +483,7 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
   }, [contextPlanInfo, contextUser, userData, syncUserProfile]);
 
   const handleLogout = useCallback(() => {
+    onClose?.();
     try {
       console.log('🚀 UserProfileMenu: Starting enhanced logout process...');
 
@@ -537,92 +538,171 @@ const UserProfileMenu = ({ userData, navigate, onLogout }) => {
 
   if (isLoading && !userName && !userEmail) {
     return (
-      <div className="p-4 border-b border-gray-200 bg-white relative z-[9999]">
-        <div className="flex items-center space-x-3 mb-4">
-          <div className="flex-shrink-0">
-            <div className="inline-flex items-center justify-center h-10 w-10 rounded-full bg-gray-200 animate-pulse"></div>
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="h-4 bg-gray-200 rounded animate-pulse mb-2"></div>
-            <div className="h-3 bg-gray-200 rounded animate-pulse w-2/3"></div>
+      <div className="p-3 bg-white">
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-gray-50 mb-2">
+          <div className="w-9 h-9 rounded-full bg-gray-200 animate-pulse shrink-0" />
+          <div className="flex-1 space-y-1.5">
+            <div className="h-3.5 bg-gray-200 rounded animate-pulse w-24" />
+            <div className="h-3 bg-gray-200 rounded animate-pulse w-32" />
           </div>
         </div>
       </div>
     );
   }
 
+  const go = (path) => {
+    onClose?.();
+    navigate(path);
+  };
+
+  const MenuItem = ({ onClick, icon, label, danger = false }) => (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm font-medium transition-colors text-left ${
+        danger
+          ? 'text-red-500 hover:bg-red-50 hover:text-red-600'
+          : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+      }`}
+    >
+      <span className={`shrink-0 ${danger ? 'text-red-400' : 'text-gray-400'}`}>{icon}</span>
+      {label}
+    </button>
+  );
+
   return (
-    <div className="p-4 border-b border-gray-200 bg-white relative z-[9999]">
-      <div className="mb-4 rounded-2xl border border-[#d8efe9] bg-[linear-gradient(135deg,#f8fffe_0%,#eefaf7_100%)] p-4 shadow-sm">
-      <div className="flex items-start space-x-3">
-        <div
-          className="flex-shrink-0 inline-flex items-center justify-center h-10 w-10 rounded-full text-white font-semibold text-sm shadow-lg transition-colors duration-200 transform hover:-translate-y-0.5 hover:shadow-xl"
-          style={{ backgroundColor: '#21C1B6' }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1AA49B')}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
-        >
-          {userInitials || (userName || userEmail || 'U').charAt(0).toUpperCase()}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold text-gray-900 truncate">{userName || 'User'}</div>
-          {userEmail ? <div className="text-sm text-gray-600 truncate">{userEmail}</div> : null}
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center rounded-full bg-[#dff7f3] px-2.5 py-1 text-xs font-semibold text-[#0f766e]">
-              {userPlan || (isLoading ? 'Loading plan…' : 'No active plan')}
-            </span>
-            <span className="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-xs font-medium text-gray-600 border border-[#d8efe9]">
-              {accountLabel}
-            </span>
+    <div className="bg-white rounded-2xl overflow-hidden shadow-2xl ring-1 ring-black/8" style={{ minWidth: 260 }}>
+
+      {/* ── User card ───────────────────────────────────────── */}
+      <div className="px-3 pt-3 pb-2">
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-gray-50 border border-gray-100">
+          {/* Avatar */}
+          <div
+            className="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold shadow-sm"
+            style={{ background: 'linear-gradient(135deg,#21C1B6,#0d9488)' }}
+          >
+            {userInitials || (userName || userEmail || 'U').charAt(0).toUpperCase()}
           </div>
+
+          {/* Info */}
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-gray-900 truncate leading-tight">
+              {userName || 'User'}
+            </p>
+            {userEmail && (
+              <p className="text-xs text-gray-400 truncate leading-tight mt-0.5">{userEmail}</p>
+            )}
+            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+              {userPlan && (
+                <span
+                  className="inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold"
+                  style={{ background: '#dff7f3', color: '#0f766e' }}
+                >
+                  {userPlan}
+                </span>
+              )}
+              <span className="inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-medium bg-white border border-gray-200 text-gray-500">
+                {accountLabel}
+              </span>
+            </div>
+          </div>
+
+          {/* Online dot */}
+          <span className="shrink-0 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-emerald-100" />
         </div>
-        <div className="flex-shrink-0 pt-1">
-          <span className="inline-flex h-3 w-3 rounded-full bg-[#22c55e] ring-4 ring-[#dcfce7]"></span>
-        </div>
-      </div>
       </div>
 
-      <nav>
-        <ul className="space-y-1">
-          {canViewSettings && (
-            <li>
-              <button onClick={() => navigate('/settings')} className="flex items-center w-full px-3 py-2.5 text-sm font-medium text-gray-700 rounded-lg hover:bg-gray-50 transition-colors">
-                <svg className="h-4 w-4 mr-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                Settings
-              </button>
-            </li>
-          )}
-          <li>
-            <button onClick={() => navigate('/get-help')} className="flex items-center w-full px-3 py-2.5 text-sm font-medium text-gray-700 rounded-lg hover:bg-gray-50 transition-colors">
-              <svg className="h-4 w-4 mr-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      {/* ── Nav items ───────────────────────────────────────── */}
+      <div className="px-2 py-1">
+        {canViewSettings && (
+          <MenuItem
+            onClick={() => go('/settings')}
+            label="Settings"
+            icon={
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
-              Get help
-            </button>
-          </li>
-          <li>
-            <button
-              onClick={() => navigate('/subscription-plans')}
-              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1AA49B')}
-              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
-              className="flex items-center w-full px-3 py-2.5 text-sm font-medium text-white rounded-lg transition-colors duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
-              style={{ backgroundColor: '#21C1B6' }}
-            >
-              Upgrade plan
-            </button>
-          </li>
-          <li>
-            <button onClick={handleLogout} className="flex items-center w-full px-3 py-2.5 text-sm font-medium text-red-600 rounded-lg hover:bg-red-50 transition-colors">
-              <svg className="h-4 w-4 mr-3 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            }
+          />
+        )}
+        <MenuItem
+          onClick={() => go('/get-help')}
+          label="Get help"
+          icon={
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
+        />
+        <MenuItem
+          onClick={() => go('/billing-usage')}
+          label="Billing & Usage"
+          icon={
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+            </svg>
+          }
+        />
+        <MenuItem
+          onClick={() => go('/batch-request')}
+          label="Batch Requests"
+          icon={
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+          }
+        />
+      </div>
+
+      {/* ── Divider ─────────────────────────────────────────── */}
+      <div className="mx-3 my-1 border-t border-gray-100" />
+
+      {/* ── Upgrade plan ────────────────────────────────────── */}
+      <div className="px-2 py-1">
+        <button
+          onClick={() => go('/subscription-plans')}
+          className="flex items-center justify-between w-full px-3 py-2 rounded-lg text-sm font-semibold transition-all group"
+          style={{ color: '#0d9488' }}
+          onMouseEnter={e => e.currentTarget.style.background = '#f0fdfa'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          <div className="flex items-center gap-3">
+            <span style={{ color: '#21C1B6' }}>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                  d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
-              Log out
-            </button>
-          </li>
-        </ul>
-      </nav>
+            </span>
+            Upgrade plan
+          </div>
+          <svg className="w-3.5 h-3.5 opacity-50 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+      </div>
+
+      {/* ── Divider ─────────────────────────────────────────── */}
+      <div className="mx-3 my-1 border-t border-gray-100" />
+
+      {/* ── Log out ─────────────────────────────────────────── */}
+      <div className="px-2 pt-1 pb-2">
+        <MenuItem
+          onClick={handleLogout}
+          danger
+          label="Log out"
+          icon={
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+          }
+        />
+      </div>
+
     </div>
   );
 };

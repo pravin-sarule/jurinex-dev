@@ -1398,7 +1398,7 @@
 //       });
       
 //       await deletePromise;
-//       console.log(`✅ Successfully deleted chat ${chatId}`);
+//       console.log(`? Successfully deleted chat ${chatId}`);
       
 //       setCurrentChatHistory(prev => prev.filter(chat => chat.id !== chatId));
       
@@ -1414,7 +1414,7 @@
 //         await fetchChatHistory(null, folderName);
 //       }
 //     } catch (err) {
-//       console.error("❌ Error deleting chat:", err);
+//       console.error("? Error deleting chat:", err);
 //       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete chat';
 //       setChatError(errorMessage);
 //     } finally {
@@ -1481,7 +1481,7 @@
 //       });
       
 //       await deletePromise;
-//       console.log(`✅ Successfully deleted all chats from folder ${selectedFolder}`);
+//       console.log(`? Successfully deleted all chats from folder ${selectedFolder}`);
       
 //       setCurrentChatHistory([]);
 //       setSelectedChatSessionId(null);
@@ -1498,7 +1498,7 @@
 //         await fetchChatHistory(null, folderName);
 //       }
 //     } catch (err) {
-//       console.error("❌ Error deleting all chats:", err);
+//       console.error("? Error deleting all chats:", err);
 //       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete all chats';
 //       setChatError(errorMessage);
 //     } finally {
@@ -1930,7 +1930,7 @@
 //                       fontSize: '14px',
 //                       fontWeight: '500'
 //                     }}>
-//                       <span style={{ fontSize: '18px' }}>🧠</span>
+//                       <span style={{ fontSize: '18px' }}>??</span>
 //                       <span>Thinking...</span>
 //                     </div>
 //                     <div className="thinking-content" style={{
@@ -1946,7 +1946,7 @@
 //                       wordWrap: 'break-word'
 //                     }}>
 //                       {thinkingContent}
-//                       {loadingChat && <span style={{ animation: 'blink 1s infinite' }}>▋</span>}
+//                       {loadingChat && <span style={{ animation: 'blink 1s infinite' }}>?</span>}
 //                     </div>
 //                   </div>
 //                 )}
@@ -2558,6 +2558,8 @@ import {
   stringToChatErrorDisplay,
   getUserFriendlyApiErrorMessage,
 } from "../../utils/llmQuotaMessages";
+import { parseQuotaHttpError, createQuotaError } from "../../utils/quotaError";
+import { useTokenQuota } from "../../context/TokenQuotaContext";
 import ChatQuotaErrorModal from "../ChatQuotaErrorModal";
 import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
 import LearningChatBubble from "./LearningChatBubble";
@@ -2586,7 +2588,7 @@ function plainTextPreviewFromResponse(raw) {
         if (parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed)) {
           const parts = [];
           if (parsed.feedback) parts.push(String(parsed.feedback).trim());
-          if (parsed.content_hint) parts.push(`💡 ${String(parsed.content_hint).trim()}`);
+          if (parsed.content_hint) parts.push(`?? ${String(parsed.content_hint).trim()}`);
           if (parsed.question) parts.push(String(parsed.question).trim());
           return parts.join('\n\n');
         }
@@ -2666,7 +2668,7 @@ function loadSourcePassagesFromStorage(folderName, messageId) {
 }
 
 /**
- * When the model omits [1], [2], … markers, append them to successive paragraph blocks
+ * When the model omits [1], [2], ? markers, append them to successive paragraph blocks
  * so each paragraph can show an inline link to the matching source (best-effort: order matches citation order).
  */
 function injectCitationMarkersIntoParagraphs(text, maxCitations) {
@@ -3431,6 +3433,7 @@ const ChatInterface = () => {
     setHasAiResponse,
   } = useContext(FileManagerContext);
   const { setForceSidebarCollapsed } = useContext(SidebarContext);
+  const { showQuotaError } = useTokenQuota();
   const [currentChatHistory, setCurrentChatHistory] = useState([]);
   const [loadingChat, setLoadingChat] = useState(false);
   const [chatError, setChatError] = useState(null);
@@ -3448,7 +3451,7 @@ const ChatInterface = () => {
   const [activeDropdown, setActiveDropdown] = useState("Custom Query");
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
-  // Panel state — mirrors Claude's artifact panel
+  // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelType, setPanelType] = useState(null); // 'learning' | 'response' | 'agentic'
   const [panelData, setPanelData] = useState(null);
@@ -3538,7 +3541,7 @@ const ChatInterface = () => {
       text = clean(formatChatResponseForDisplay(rawResponse));
     }
 
-    // Inline [n] → clickable link (opens document viewer). Inject [n] per paragraph when missing.
+    // Inline [n] ? clickable link (opens document viewer). Inject [n] per paragraph when missing.
     if (citations && citations.length > 0) {
       text = injectCitationMarkersIntoParagraphs(text, citations.length);
       text = text.replace(/\[(\d+)\]/g, (match, numStr) => {
@@ -3549,7 +3552,7 @@ const ChatInterface = () => {
           const pageBit =
             cite.pageLabel ||
             (cite.page || cite.pageStart ? `p. ${cite.page || cite.pageStart}` : "source");
-          const safeTitle = `${filenameShort} · ${pageBit}`.replace(/"/g, "&quot;");
+          const safeTitle = `${filenameShort} ? ${pageBit}`.replace(/"/g, "&quot;");
           return (
             `<span class="inline-cite" data-n="${n}" role="link" tabindex="0" title="${safeTitle}" ` +
             `style="font-size:0.92em;color:#1d4ed8;font-weight:600;text-decoration:underline;` +
@@ -4008,7 +4011,7 @@ const ChatInterface = () => {
       console.log('[ChatInterface] fetchChatHistory: Setting currentChatHistory with', chatsWithChunks.length, 'chats');
       setCurrentChatHistory(chatsWithChunks);
       setSelectedChatSessionId(sessionId);
-      // Show all messages inline in main panel — no auto-open of split panel
+      // Show all messages inline in main panel ? no auto-open of split panel
       setIsAnimatingResponse(false);
       setIsGenerating(false);
       setCitations([]);
@@ -4410,7 +4413,7 @@ const ChatInterface = () => {
       const promptLabel = selectedSecret.name;
       setPendingQuestion(`Analysis: ${promptLabel}`);
       // Server loads the secret body from document-service (same as SecretManager flow).
-      // Do not send the full preset text in `question` — DB and UI store the prompt name only.
+      // Do not send the full preset text in `question` ? DB and UI store the prompt name only.
 
       const token = getAuthToken();
       const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folder)}/intelligent-chat/stream`, {
@@ -4436,6 +4439,13 @@ const ChatInterface = () => {
           errBody = await response.json();
         } catch {
           errBody = {};
+        }
+        const quota = parseQuotaHttpError(response.status, errBody);
+        if (quota && showQuotaError(createQuotaError(quota, response.status))) {
+          setHasResponse(false);
+          setHasAiResponse(false);
+          setForceSidebarCollapsed(false);
+          return;
         }
         setChatError(parseLlmPolicyErrorForUi(response.status, errBody));
         setHasResponse(false);
@@ -4731,11 +4741,13 @@ const ChatInterface = () => {
       }
     } catch (error) {
       console.error("Chat error:", error);
-      setChatError(
-        stringToChatErrorDisplay(
-          getUserFriendlyApiErrorMessage(error, 'Analysis could not complete. Please try again.')
-        )
-      );
+      if (!showQuotaError(error)) {
+        setChatError(
+          stringToChatErrorDisplay(
+            getUserFriendlyApiErrorMessage(error, 'Analysis could not complete. Please try again.')
+          )
+        );
+      }
       setHasResponse(false);
       setHasAiResponse(false);
       setForceSidebarCollapsed(false);
@@ -4829,6 +4841,15 @@ const ChatInterface = () => {
             errBody = await response.json();
           } catch {
             errBody = {};
+          }
+          const quota2 = parseQuotaHttpError(response.status, errBody);
+          if (quota2 && showQuotaError(createQuotaError(quota2, response.status))) {
+            setHasResponse(false);
+            setHasAiResponse(false);
+            setForceSidebarCollapsed(false);
+            setPendingQuestion('');
+            setIsGenerating(false);
+            return;
           }
           setChatError(parseLlmPolicyErrorForUi(response.status, errBody));
           setHasResponse(false);
@@ -5227,7 +5248,7 @@ const ChatInterface = () => {
       });
      
       await deletePromise;
-      console.log(`✅ Successfully deleted chat ${chatId}`);
+      console.log(`? Successfully deleted chat ${chatId}`);
      
       setCurrentChatHistory(prev => prev.filter(chat => chat.id !== chatId));
      
@@ -5243,7 +5264,7 @@ const ChatInterface = () => {
         await fetchChatHistory(null, folderName);
       }
     } catch (err) {
-      console.error("❌ Error deleting chat:", err);
+      console.error("? Error deleting chat:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete chat';
       setChatError(stringToChatErrorDisplay(errorMessage));
     } finally {
@@ -5396,7 +5417,7 @@ const ChatInterface = () => {
       });
      
       await deletePromise;
-      console.log(`✅ Successfully deleted all chats from folder ${selectedFolder}`);
+      console.log(`? Successfully deleted all chats from folder ${selectedFolder}`);
      
       setCurrentChatHistory([]);
       setSelectedChatSessionId(null);
@@ -5415,7 +5436,7 @@ const ChatInterface = () => {
         await fetchChatSessions(folderName);
       }
     } catch (err) {
-      console.error("❌ Error deleting all chats:", err);
+      console.error("? Error deleting all chats:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete all chats';
       setChatError(stringToChatErrorDisplay(errorMessage));
     } finally {
@@ -5490,15 +5511,15 @@ const ChatInterface = () => {
     }).join('');
   };
 
-  // Shared ReactMarkdown component overrides — clean serif style matching the site theme.
-  // • Option paragraphs (A) … D)) → interactive clickable choice cards
-  // • Bold text → site teal, no chip
-  // • Questions (ending with ?) → bold body text (no callout box)
+  // Shared ReactMarkdown component overrides ? clean serif style matching the site theme.
+  // ? Option paragraphs (A) ? D)) ? interactive clickable choice cards
+  // ? Bold text ? site teal, no chip
+  // ? Questions (ending with ?) ? bold body text (no callout box)
   const aiMarkdownComponents = {
     p: ({ node, children, ...props }) => {
       const rawText = extractNodeText(node?.children || []);
 
-      // ── Option card detection: "A) …", "B) …", "C) …", "D) …" (or A. B. C. D.)
+      // ?? Option card detection: "A) ?", "B) ?", "C) ?", "D) ?" (or A. B. C. D.)
       const optionMatch = rawText.match(/^([A-Da-d])[).]\s+/);
       if (optionMatch) {
         const letter = optionMatch[1].toUpperCase();
@@ -5541,7 +5562,7 @@ const ChatInterface = () => {
               fontWeight: 700, fontSize: '14px', flexShrink: 0,
               transition: 'all 0.18s ease',
             }}>
-              {isPicked ? '✓' : letter}
+              {isPicked ? '?' : letter}
             </span>
             {/* Option content */}
             <span style={{
@@ -5556,7 +5577,7 @@ const ChatInterface = () => {
         );
       }
 
-      // ── Question paragraph (ends with ?)
+      // ?? Question paragraph (ends with ?)
       const isQuestion = (() => {
         const last = node?.children?.[node.children.length - 1];
         const text = last?.value || extractNodeText(last?.children || []);
@@ -5577,7 +5598,7 @@ const ChatInterface = () => {
         );
       }
 
-      // � Normal paragraph
+      // ? Normal paragraph
       return (
         <p style={{
           margin: '0 0 14px',
@@ -5846,7 +5867,7 @@ const ChatInterface = () => {
     if (selectedChatSessionId) setNewChatMode(false);
   }, [selectedChatSessionId]);
 
-  // Must run before any conditional return — same hook order when folder is null vs set.
+  // Must run before any conditional return ? same hook order when folder is null vs set.
   const threadUsesLearningLayout = useMemo(
     () =>
       learningModeActive ||
@@ -5870,7 +5891,7 @@ const ChatInterface = () => {
     ? "p-2.5 bg-gray-500 hover:bg-gray-600 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-full transition-colors"
     : "p-2.5 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 disabled:cursor-not-allowed rounded-full transition-colors";
 
-  // ── Pagination helpers ──────────────────────────────────────────────────────
+  // ?? Pagination helpers ??????????????????????????????????????????????????????
   const paginateContent = (text) => {
     const raw = text || '';
     const hasInlineCiteHtml = /class\s*=\s*["'][^"']*inline-cite/.test(raw);
@@ -5902,7 +5923,7 @@ const ChatInterface = () => {
     return pages.length ? pages : [''];
   };
 
-  // ────────────────────────────────────────────────────────────────────────────
+  // ????????????????????????????????????????????????????????????????????????????
   // showMainArea: show the messages+input panel only when actively chatting
   const hasSessions = chatSessions && chatSessions.length > 0;
   const showMainArea = !!(selectedChatSessionId || pendingQuestion || hasResponse || loadingChat || !hasSessions || newChatMode);
@@ -5912,9 +5933,13 @@ const ChatInterface = () => {
 
   return (
     <div className="flex h-full min-h-0 w-full overflow-hidden relative" style={{ background: '#fff' }}>
-      <ChatQuotaErrorModal error={chatError} onDismiss={() => setChatError(null)} />
+      <ChatQuotaErrorModal
+        error={chatError}
+        onDismiss={() => setChatError(null)}
+        onTopupSuccess={() => setChatError(null)}
+      />
 
-      {/* ── Chat Session Sidebar (Left) — full list or collapsed rail ── */}
+      {/* ?? Chat Session Sidebar (Left) ? full list or collapsed rail ?? */}
       {hasSessions && chatHistorySidebarOpen && (
         <div
           className={`flex-shrink-0 flex flex-col border-r border-gray-100 ${!showMainArea ? 'flex-1' : ''}`}
@@ -5981,7 +6006,7 @@ const ChatInterface = () => {
         </div>
       )}
 
-      {/* ── MAIN CONTENT AREA (messages + input) — only when actively chatting ── */}
+      {/* ?? MAIN CONTENT AREA (messages + input) ? only when actively chatting ?? */}
       {showMainArea && <div className="flex flex-1 min-w-0 h-full overflow-hidden relative bg-white">
         {/* Chat message panel (60% or 100% of available space) */}
         <div style={{
@@ -6068,7 +6093,7 @@ const ChatInterface = () => {
 
                     return (
                       <div key={chat.id != null ? `${String(chat.id)}-${idx}` : `chat-${idx}`} className="flex flex-col gap-3">
-                        {/* User question � same card layout as AI response */}
+                        {/* User question ? same card layout as AI response */}
                         <div className="chat-thread-card chat-thread-card--user">
                           <div className="chat-thread-card__label">You</div>
                           <div className="chat-thread-card__body">
@@ -6339,7 +6364,7 @@ const ChatInterface = () => {
                     : 'text-[#21C1B6] hover:bg-teal-50 disabled:opacity-40 disabled:cursor-not-allowed'
                   }`}
                 style={isRecording ? { background: '#ef4444' } : {}}
-                title={isRecording ? 'Stop recording � your words will be sent to chat' : isTranscribing ? 'Transcribing and sending...' : 'Voice input (Google Speech-to-Text)'}
+                title={isRecording ? 'Stop recording ? your words will be sent to chat' : isTranscribing ? 'Transcribing and sending...' : 'Voice input (Google Speech-to-Text)'}
               >
                 {isTranscribing
                   ? <Loader2 className="h-4 w-4 animate-spin" />
@@ -6365,7 +6390,7 @@ const ChatInterface = () => {
                 disabled={!isGenerating && (loadingChat || isRecording || isTranscribing || (!chatInput.trim() && !isSecretPromptSelected))}
                 className="flex-shrink-0 p-2 text-white rounded-xl transition-all disabled:cursor-not-allowed disabled:opacity-40"
                 style={{ background: (!isGenerating && (loadingChat || (!chatInput.trim() && !isSecretPromptSelected))) ? '#d1d5db' : '#21C1B6' }}
-                title={isGenerating ? "Stop" : loadingChat ? "Sending…" : "Send"}
+                title={isGenerating ? "Stop" : loadingChat ? "Sending?" : "Send"}
               >
                 {isGenerating ? (
                   <X className="h-4 w-4" />

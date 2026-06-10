@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter
 
+from app.core.config import get_settings
 from app.schemas.contracts import HealthResponse
-from app.services.container import get_pipeline_service
 
 
 router = APIRouter(tags=["health"])
@@ -11,5 +13,11 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health", response_model=HealthResponse)
 def health_check() -> HealthResponse:
-    return get_pipeline_service().health()
-
+    settings = get_settings()
+    return HealthResponse(
+        status="ok",
+        service=settings.service_name,
+        version=settings.version,
+        adk_runtime_enabled=settings.enable_adk_runtime,
+        timestamp=datetime.now(timezone.utc),
+    )

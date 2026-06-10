@@ -1,0 +1,8 @@
+        ids.length > 1 ? ids : null,
+        (thoughtText) => {
+          appendReasoningChunk(thoughtText);
+        },
+        loopAbortControllerRef.current?.signal ?? null
+      );
+     
+      return finalMetadata;

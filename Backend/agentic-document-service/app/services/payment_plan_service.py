@@ -11,12 +11,17 @@ from app.core.config import get_settings
 logger = logging.getLogger("agentic_document_service.payment_plan")
 
 _ACTIVE_SUBSCRIPTION_SQL = """
-    SELECT sp.*
+    SELECT
+        COALESCE(mp.id, sp.id) AS id,
+        COALESCE(mp.name, sp.name) AS name,
+        COALESCE(mp.monthly_tokens, sp.token_limit, 0) AS token_limit
     FROM user_subscriptions us
-    JOIN subscription_plans sp ON us.plan_id = sp.id
+    LEFT JOIN monthly_plans mp ON mp.id = us.monthly_plan_id AND mp.is_active = true
+    LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
     WHERE us.user_id = %s
       AND LOWER(COALESCE(us.status, 'active')) = 'active'
       AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+      AND (mp.id IS NOT NULL OR sp.id IS NOT NULL)
     ORDER BY us.activated_at DESC NULLS LAST, us.start_date DESC NULLS LAST, us.updated_at DESC
     LIMIT 1
 """

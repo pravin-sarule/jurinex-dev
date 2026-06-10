@@ -30,6 +30,8 @@
 // import CitationsPanel from "../AnalysisPage/CitationsPanel";
 // import apiService from "../../services/api";
 // import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
+// import FormattedAssistantContent from "./FormattedAssistantContent";
+// import { formatChatResponseForDisplay } from "../../utils/formatChatResponse";
 // import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../utils/renderSecretPromptResponse";
 
 
@@ -1396,7 +1398,7 @@
 //       });
       
 //       await deletePromise;
-//       console.log(`✅ Successfully deleted chat ${chatId}`);
+//       console.log(`? Successfully deleted chat ${chatId}`);
       
 //       setCurrentChatHistory(prev => prev.filter(chat => chat.id !== chatId));
       
@@ -1412,7 +1414,7 @@
 //         await fetchChatHistory(null, folderName);
 //       }
 //     } catch (err) {
-//       console.error("❌ Error deleting chat:", err);
+//       console.error("? Error deleting chat:", err);
 //       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete chat';
 //       setChatError(errorMessage);
 //     } finally {
@@ -1479,7 +1481,7 @@
 //       });
       
 //       await deletePromise;
-//       console.log(`✅ Successfully deleted all chats from folder ${selectedFolder}`);
+//       console.log(`? Successfully deleted all chats from folder ${selectedFolder}`);
       
 //       setCurrentChatHistory([]);
 //       setSelectedChatSessionId(null);
@@ -1496,7 +1498,7 @@
 //         await fetchChatHistory(null, folderName);
 //       }
 //     } catch (err) {
-//       console.error("❌ Error deleting all chats:", err);
+//       console.error("? Error deleting all chats:", err);
 //       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete all chats';
 //       setChatError(errorMessage);
 //     } finally {
@@ -1928,7 +1930,7 @@
 //                       fontSize: '14px',
 //                       fontWeight: '500'
 //                     }}>
-//                       <span style={{ fontSize: '18px' }}>🧠</span>
+//                       <span style={{ fontSize: '18px' }}>??</span>
 //                       <span>Thinking...</span>
 //                     </div>
 //                     <div className="thinking-content" style={{
@@ -1944,7 +1946,7 @@
 //                       wordWrap: 'break-word'
 //                     }}>
 //                       {thinkingContent}
-//                       {loadingChat && <span style={{ animation: 'blink 1s infinite' }}>▋</span>}
+//                       {loadingChat && <span style={{ animation: 'blink 1s infinite' }}>?</span>}
 //                     </div>
 //                   </div>
 //                 )}
@@ -2508,7 +2510,7 @@
 
 
 
-import React, { useState, useEffect, useContext, useRef, useMemo, useCallback, startTransition } from "react";
+import React, { useState, useEffect, useLayoutEffect, useContext, useRef, useMemo, useCallback, startTransition } from "react";
 import { FileManagerContext } from "../../context/FileManagerContext";
 import documentApi from "../../services/documentApi";
 import { API_BASE_URL, DOCS_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCUMENT_SERVICE_URL, getUserIdForDrafting } from "../../config/apiConfig";
@@ -2526,6 +2528,7 @@ import {
   Square,
   Trash2,
   FileText,
+  Download,
   X,
   Mic,
   MicOff,
@@ -2533,14 +2536,17 @@ import {
   Settings2,
   PanelRight,
   ChevronLeft,
-  Volume2,
+  Printer,
+  Code,
 } from "lucide-react";
+import { getCleanText, stripMarkdown, downloadAsPdf, downloadAsHtml, printResponse } from "../../utils/responseExportUtils";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import { SidebarContext } from "../../context/SidebarContext";
 import DownloadPdf from "../DownloadPdf/DownloadPdf";
+import BrandingDownloadModal from "../BrandingDownload/BrandingDownloadModal";
 import { toast } from "react-toastify";
 import "../../styles/ChatInterface.css";
 import CitationsPanel from "../AnalysisPage/CitationsPanel";
@@ -2552,12 +2558,22 @@ import {
   stringToChatErrorDisplay,
   getUserFriendlyApiErrorMessage,
 } from "../../utils/llmQuotaMessages";
+import { parseQuotaHttpError, createQuotaError } from "../../utils/quotaError";
+import { useTokenQuota } from "../../context/TokenQuotaContext";
 import ChatQuotaErrorModal from "../ChatQuotaErrorModal";
 import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
 import LearningChatBubble from "./LearningChatBubble";
 import LearningDetailPanel from "./LearningDetailPanel";
 import AgentStepsPanel from "./AgentStepsPanel";
 import ChatSessionList from "./ChatSessionList";
+import FormattedAssistantContent from "./FormattedAssistantContent";
+import {
+  formatChatResponseForDisplay,
+  convertMarkdownBoldMarkers,
+} from "../../utils/formatChatResponse";
+import { useDocumentMicTranscribe } from "../../hooks/useDocumentMicTranscribe";
+import PromptChipsBar from "../PromptChipsBar";
+import { fetchSecretsList, peekSecretsList, fetchSecretById } from "../../services/secretsService";
 
 /** Full plain text for chat list preview (not a single 120-char line). */
 function plainTextPreviewFromResponse(raw) {
@@ -2572,7 +2588,7 @@ function plainTextPreviewFromResponse(raw) {
         if (parsed && typeof parsed === 'object' && ('feedback' in parsed || 'question' in parsed)) {
           const parts = [];
           if (parsed.feedback) parts.push(String(parsed.feedback).trim());
-          if (parsed.content_hint) parts.push(`💡 ${String(parsed.content_hint).trim()}`);
+          if (parsed.content_hint) parts.push(`?? ${String(parsed.content_hint).trim()}`);
           if (parsed.question) parts.push(String(parsed.question).trim());
           return parts.join('\n\n');
         }
@@ -2652,7 +2668,7 @@ function loadSourcePassagesFromStorage(folderName, messageId) {
 }
 
 /**
- * When the model omits [1], [2], … markers, append them to successive paragraph blocks
+ * When the model omits [1], [2], ? markers, append them to successive paragraph blocks
  * so each paragraph can show an inline link to the matching source (best-effort: order matches citation order).
  */
 function injectCitationMarkersIntoParagraphs(text, maxCitations) {
@@ -3417,6 +3433,7 @@ const ChatInterface = () => {
     setHasAiResponse,
   } = useContext(FileManagerContext);
   const { setForceSidebarCollapsed } = useContext(SidebarContext);
+  const { showQuotaError } = useTokenQuota();
   const [currentChatHistory, setCurrentChatHistory] = useState([]);
   const [loadingChat, setLoadingChat] = useState(false);
   const [chatError, setChatError] = useState(null);
@@ -3432,10 +3449,9 @@ const ChatInterface = () => {
   const [selectedSecretId, setSelectedSecretId] = useState(null);
   const [selectedLlmName, setSelectedLlmName] = useState(null);
   const [activeDropdown, setActiveDropdown] = useState("Custom Query");
-  const [showDropdown, setShowDropdown] = useState(false);
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
-  // Panel state — mirrors Claude's artifact panel
+  // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelType, setPanelType] = useState(null); // 'learning' | 'response' | 'agentic'
   const [panelData, setPanelData] = useState(null);
@@ -3461,298 +3477,47 @@ const ChatInterface = () => {
   // Tracks the option key the user last picked (resets when a new pending question starts)
   const [pickedOption, setPickedOption] = useState(null);
 
-  const [isListening, setIsListening] = useState(false);
-  const [recognition, setRecognition] = useState(null);
+  const handleNewMessageRef = useRef(null);
+  const chatBodyRefs = useRef({});
+  const [chatCopySuccess, setChatCopySuccess] = useState(null);
+  const [downloadModalChatId, setDownloadModalChatId] = useState(null);
+  const [wordModalChatId, setWordModalChatId] = useState(null);
+  const pdfExportContentRef = useRef({ current: null });
+  const wordExportContentRef = useRef({ current: null });
 
-  // ── Voice Document Agent (inline) ─────────────────────────────────────────
-  const [audioMicStatus, setAudioMicStatus] = useState('idle'); // idle|connecting|live|stopping
-  const [audioMessages, setAudioMessages] = useState([]);
-  const [audioInputTranscript, setAudioInputTranscript] = useState('');
+  useLayoutEffect(() => {
+    pdfExportContentRef.current.current = downloadModalChatId != null
+      ? chatBodyRefs.current[downloadModalChatId] ?? null
+      : null;
+  }, [downloadModalChatId]);
 
-  // Speech recognition setup
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const recognitionInstance = new SpeechRecognition();
-      recognitionInstance.continuous = false;
-      recognitionInstance.interimResults = false;
-      recognitionInstance.lang = 'en-US';
+  useLayoutEffect(() => {
+    wordExportContentRef.current.current = wordModalChatId != null
+      ? chatBodyRefs.current[wordModalChatId] ?? null
+      : null;
+  }, [wordModalChatId]);
 
-      recognitionInstance.onstart = () => setIsListening(true);
-      recognitionInstance.onend = () => setIsListening(false);
-      recognitionInstance.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setChatInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
-        
-        // Reset secret prompt if voice input is given
-        if (isSecretPromptSelected) {
-          setIsSecretPromptSelected(false);
-          setActiveDropdown("Custom Query");
-          setSelectedSecretId(null);
-          setSelectedLlmName(null);
-        }
-      };
-      recognitionInstance.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-        setIsListening(false);
-      };
-
-      setRecognition(recognitionInstance);
+  const onMicTranscript = useCallback((transcript) => {
+    const question = String(transcript || '').trim();
+    if (!question || loadingChat || isGenerating) return;
+    if (isSecretPromptSelected) {
+      setIsSecretPromptSelected(false);
+      setActiveDropdown('Custom Query');
+      setSelectedSecretId(null);
+      setSelectedLlmName(null);
     }
-  }, [isSecretPromptSelected]);
+    setChatInput('');
+    handleNewMessageRef.current?.(question);
+  }, [isSecretPromptSelected, loadingChat, isGenerating]);
 
-  const toggleListening = () => {
-    if (!recognition) {
-      alert("Speech recognition is not supported in this browser.");
-      return;
-    }
+  const onMicError = useCallback((err) => {
+    toast.error(err?.message || 'Could not transcribe audio. Please try again.');
+  }, []);
 
-    if (isListening) {
-      recognition.stop();
-    } else {
-      try {
-        recognition.start();
-      } catch (err) {
-        console.error('Failed to start recognition:', err);
-      }
-    }
-  };
-
-  // ── Voice Document Agent helpers ───────────────────────────────────────────
-
-  const _docAudioGetPlayCtx = () => {
-    if (!audioPlayCtxRef.current || audioPlayCtxRef.current.state === 'closed') {
-      audioPlayCtxRef.current = new AudioContext({ sampleRate: 24000 });
-      audioNextPlayRef.current = 0;
-    }
-    return audioPlayCtxRef.current;
-  };
-
-  const _docAudioDownsample = (input, inputRate) => {
-    if (inputRate === 16000) return input;
-    const ratio = inputRate / 16000;
-    const out = new Float32Array(Math.max(1, Math.round(input.length / ratio)));
-    for (let i = 0; i < out.length; i++) {
-      const s = Math.floor(i * ratio), e = Math.min(Math.floor((i + 1) * ratio), input.length);
-      let sum = 0; for (let j = s; j < e; j++) sum += input[j];
-      out[i] = sum / Math.max(e - s, 1);
-    }
-    return out;
-  };
-
-  const _docAudioResample = (input, fromRate, toRate) => {
-    if (!input?.length || fromRate === toRate) return input;
-    const ratio = fromRate / toRate;
-    const out = new Float32Array(Math.max(1, Math.round(input.length / ratio)));
-    for (let i = 0; i < out.length; i++) {
-      const si = i * ratio, idx = Math.floor(si), frac = si - idx;
-      const a = input[idx] ?? 0, b = input[Math.min(idx + 1, input.length - 1)] ?? a;
-      out[i] = a + (b - a) * frac;
-    }
-    return out;
-  };
-
-  const _docPcm16ToBase64 = (samples) => {
-    const bytes = new Uint8Array(samples.buffer);
-    let bin = ''; const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk)
-      bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    return btoa(bin);
-  };
-
-  const _docScheduleAudio = (base64Data, mimeType) => {
-    try {
-      const srcRate = mimeType?.includes('24000') ? 24000 : 16000;
-      const raw = atob(base64Data);
-      const int16 = new Int16Array(raw.length / 2);
-      for (let i = 0; i < int16.length; i++)
-        int16[i] = (raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8));
-      let f32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-      const ctx = _docAudioGetPlayCtx();
-      if (ctx.sampleRate !== srcRate) f32 = _docAudioResample(f32, srcRate, ctx.sampleRate);
-      const fade = Math.min(128, Math.floor(f32.length / 2));
-      if (fade > 0) {
-        for (let i = 0; i < fade; i++) {
-          f32[i] *= i / fade;
-          f32[f32.length - 1 - i] *= (fade - i) / fade;
-        }
-      }
-      const buf = ctx.createBuffer(1, f32.length, ctx.sampleRate);
-      buf.copyToChannel(f32, 0);
-      const src = ctx.createBufferSource();
-      src.buffer = buf; src.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (!audioNextPlayRef.current) audioNextPlayRef.current = now + 0.06;
-      else if (audioNextPlayRef.current < now + 0.02) audioNextPlayRef.current = now + 0.02;
-      src.start(audioNextPlayRef.current);
-      audioNextPlayRef.current += buf.duration;
-    } catch (_) {}
-  };
-
-  const _docCleanupAudio = () => {
-    audioSourceRef.current?.disconnect();
-    audioProcessorRef.current?.disconnect();
-    audioCtxRef.current?.close();
-    audioStreamRef.current?.getTracks().forEach(t => t.stop());
-    audioCtxRef.current = null;
-    audioSourceRef.current = null;
-    audioProcessorRef.current = null;
-    audioStreamRef.current = null;
-    audioNextPlayRef.current = 0;
-  };
-
-  const stopDocumentAudio = () => {
-    audioVoiceDoneRef.current = true;
-    audioAwaitingFinalRef.current = true;
-    try { audioWsRef.current?.send(JSON.stringify({ type: 'end' })); } catch (_) {}
-    _docCleanupAudio();
-    setAudioMicStatus('stopping');
-    clearTimeout(audioStopTimeoutRef.current);
-    audioStopTimeoutRef.current = setTimeout(() => {
-      try { audioWsRef.current?.close(); } catch (_) {}
-      audioWsRef.current = null;
-      audioAwaitingFinalRef.current = false;
-      setAudioMicStatus('idle');
-    }, 12000);
-  };
-
-  const startDocumentAudio = async () => {
-    const folderName = _normalizeFolderName(selectedFolder);
-    if (!folderName) return;
-    const userId = getUserIdForDrafting() || 'anonymous';
-    setAudioMicStatus('connecting');
-    audioVoiceDoneRef.current = false;
-    audioVoiceBufferRef.current = '';
-    setAudioInputTranscript('');
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStreamRef.current = stream;
-      const ctx = new AudioContext();
-      if (ctx.state === 'suspended') await ctx.resume();
-      audioCtxRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      audioSourceRef.current = source;
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      audioProcessorRef.current = processor;
-      const silent = ctx.createGain(); silent.gain.value = 0;
-
-      const base = DOCUMENT_SERVICE_URL
-        .replace(/^https:\/\//, 'wss://')
-        .replace(/^http:\/\//, 'ws://')
-        .replace(/\/$/, '');
-      const wsUrl = `${base}/api/v1/audio/chat?folder_name=${encodeURIComponent(folderName)}&user_id=${encodeURIComponent(userId)}`;
-      const ws = new WebSocket(wsUrl);
-      audioWsRef.current = ws;
-
-      ws.onopen = () => {
-        setAudioMicStatus('live');
-        processor.onaudioprocess = (e) => {
-          if (audioVoiceDoneRef.current || ws.readyState !== WebSocket.OPEN) return;
-          const pcm = _docAudioDownsample(e.inputBuffer.getChannelData(0), ctx.sampleRate);
-          const int16 = new Int16Array(pcm.length);
-          for (let i = 0; i < pcm.length; i++)
-            int16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32768));
-          ws.send(JSON.stringify({ type: 'audio', data: _docPcm16ToBase64(int16) }));
-        };
-        source.connect(processor);
-        processor.connect(silent);
-        silent.connect(ctx.destination);
-      };
-
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'audio' && msg.data) _docScheduleAudio(msg.data, msg.mime_type);
-
-          if (msg.type === 'input_transcript' && msg.content) {
-            setAudioInputTranscript(String(msg.content).trim());
-          }
-
-          if (msg.type === 'text' && msg.content) {
-            const chunk = String(msg.content || '').trim();
-            if (chunk) {
-              const cur = audioVoiceBufferRef.current;
-              if (chunk.startsWith(cur)) audioVoiceBufferRef.current = chunk;
-              else if (!cur.endsWith(chunk))
-                audioVoiceBufferRef.current = `${cur} ${chunk}`.trim().replace(/\s+/g, ' ');
-              const full = audioVoiceBufferRef.current;
-              setAudioMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (last?.role === 'assistant' && last.streaming)
-                  return [...prev.slice(0, -1), { ...last, text: full }];
-                return [...prev, { role: 'assistant', text: full, streaming: true }];
-              });
-            }
-          }
-
-          if (msg.type === 'tool_call') {
-            setAudioInputTranscript(`Searching: ${msg.query || ''}`);
-          }
-
-          if (msg.type === 'turn_complete') {
-            audioNextPlayRef.current = 0;
-            const userSpeech = audioInputTranscript || audioVoiceBufferRef.current;
-            if (audioAwaitingFinalRef.current) {
-              clearTimeout(audioStopTimeoutRef.current);
-              audioAwaitingFinalRef.current = false;
-              try { audioWsRef.current?.close(); } catch (_) {}
-              audioWsRef.current = null;
-              setAudioMicStatus('idle');
-              setAudioInputTranscript('');
-              setAudioMessages(prev =>
-                prev.map(m => m.streaming ? { role: m.role, text: m.text } : m)
-              );
-            } else if (!audioVoiceDoneRef.current) {
-              setAudioMicStatus('live');
-              setAudioInputTranscript('');
-              audioVoiceBufferRef.current = '';
-            }
-          }
-
-          if (msg.type === 'error') {
-            setAudioMessages(prev => [...prev, {
-              role: 'error',
-              text: msg.message || 'Voice service error.',
-            }]);
-            stopDocumentAudio();
-          }
-        } catch (_) {}
-      };
-
-      ws.onerror = () => {
-        setAudioMessages(prev => [...prev, {
-          role: 'error',
-          text: 'Could not connect to voice service. Please try again.',
-        }]);
-        stopDocumentAudio();
-      };
-
-      ws.onclose = () => {
-        clearTimeout(audioStopTimeoutRef.current);
-        audioAwaitingFinalRef.current = false;
-        setAudioMicStatus('idle');
-      };
-
-    } catch (err) {
-      audioVoiceDoneRef.current = true;
-      setAudioMessages(prev => [...prev, {
-        role: 'error',
-        text: err?.message || 'Microphone access denied. Please allow permissions and try again.',
-      }]);
-      setAudioMicStatus('idle');
-    }
-  };
-
-  // Cleanup audio on unmount
-  useEffect(() => {
-    return () => {
-      clearTimeout(audioStopTimeoutRef.current);
-      _docCleanupAudio();
-      audioPlayCtxRef.current?.close();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const { micStatus, toggleMic, isRecording, isTranscribing } = useDocumentMicTranscribe(
+    DOCUMENT_SERVICE_URL,
+    { onTranscript: onMicTranscript, onError: onMicError },
+  );
 
   const responseHasTable = useMemo(() => {
     if (!animatedResponseContent) return false;
@@ -3771,13 +3536,12 @@ const ChatInterface = () => {
 
     let text;
     if (isGenerating) {
-      text = clean(rawResponse);
+      text = clean(convertMarkdownBoldMarkers(rawResponse));
     } else {
-      const isStructured = isStructuredJsonResponse(rawResponse);
-      text = clean(isStructured ? renderSecretPromptResponse(rawResponse) : convertJsonToPlainText(rawResponse));
+      text = clean(formatChatResponseForDisplay(rawResponse));
     }
 
-    // Inline [n] → clickable link (opens document viewer). Inject [n] per paragraph when missing.
+    // Inline [n] ? clickable link (opens document viewer). Inject [n] per paragraph when missing.
     if (citations && citations.length > 0) {
       text = injectCitationMarkersIntoParagraphs(text, citations.length);
       text = text.replace(/\[(\d+)\]/g, (match, numStr) => {
@@ -3788,7 +3552,7 @@ const ChatInterface = () => {
           const pageBit =
             cite.pageLabel ||
             (cite.page || cite.pageStart ? `p. ${cite.page || cite.pageStart}` : "source");
-          const safeTitle = `${filenameShort} · ${pageBit}`.replace(/"/g, "&quot;");
+          const safeTitle = `${filenameShort} ? ${pageBit}`.replace(/"/g, "&quot;");
           return (
             `<span class="inline-cite" data-n="${n}" role="link" tabindex="0" title="${safeTitle}" ` +
             `style="font-size:0.92em;color:#1d4ed8;font-weight:600;text-decoration:underline;` +
@@ -3812,9 +3576,7 @@ const ChatInterface = () => {
     const responseText =
       selectedMessage.response || selectedMessage.answer || selectedMessage.message || '';
     if (!responseText) return '';
-    return isStructuredJsonResponse(responseText)
-      ? renderSecretPromptResponse(responseText)
-      : convertJsonToPlainText(responseText);
+    return formatChatResponseForDisplay(responseText);
   }, [selectedMessage]);
 
   const activeResponseContent = useMemo(
@@ -3855,7 +3617,6 @@ const ChatInterface = () => {
     return isSmallScreen && responseHasTable && needsHorizontalScroll;
   }, [isSmallScreen, responseHasTable, needsHorizontalScroll]);
   const responseRef = useRef(null);
-  const dropdownRef = useRef(null);
   const styleDropdownRef = useRef(null);
   const completeResponseRef = useRef(null);
   const animationFrameRef = useRef(null);
@@ -3870,19 +3631,6 @@ const ChatInterface = () => {
   const panelStatesSetRef = useRef(false);
   const fetchedFoldersRef = useRef(new Set());
   const folderFilesCacheRef = useRef(new Map());
-
-  // Voice Document Agent refs
-  const audioWsRef          = useRef(null);
-  const audioCtxRef         = useRef(null);
-  const audioPlayCtxRef     = useRef(null);
-  const audioSourceRef      = useRef(null);
-  const audioProcessorRef   = useRef(null);
-  const audioStreamRef      = useRef(null);
-  const audioNextPlayRef    = useRef(0);
-  const audioStopTimeoutRef = useRef(null);
-  const audioVoiceDoneRef   = useRef(false);
-  const audioAwaitingFinalRef = useRef(false);
-  const audioVoiceBufferRef = useRef('');
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -4149,19 +3897,13 @@ const ChatInterface = () => {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setChatError(null);
-      const token = getAuthToken();
-      const headers = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=true`, {
-        method: "GET",
-        headers,
-      });
-      if (!response.ok) throw new Error(`Failed to fetch secrets: ${response.status}`);
-      const secretsData = await response.json();
+      const secretsData = await fetchSecretsList();
       setSecrets(secretsData || []);
       setActiveDropdown("Custom Query");
       setSelectedSecretId(null);
@@ -4179,15 +3921,7 @@ const ChatInterface = () => {
     try {
       const existingSecret = secrets.find((secret) => secret.id === secretId);
       if (existingSecret?.value) return existingSecret.value;
-      const token = getAuthToken();
-      const headers = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets/${secretId}`, {
-        method: "GET",
-        headers,
-      });
-      if (!response.ok) throw new Error(`Failed to fetch secret value: ${response.status}`);
-      const secretData = await response.json();
+      const secretData = await fetchSecretById(secretId);
       const promptValue = secretData.value || secretData.prompt || secretData.content || secretData;
       setSecrets((prevSecrets) =>
         prevSecrets.map((secret) =>
@@ -4277,7 +4011,7 @@ const ChatInterface = () => {
       console.log('[ChatInterface] fetchChatHistory: Setting currentChatHistory with', chatsWithChunks.length, 'chats');
       setCurrentChatHistory(chatsWithChunks);
       setSelectedChatSessionId(sessionId);
-      // Show all messages inline in main panel — no auto-open of split panel
+      // Show all messages inline in main panel ? no auto-open of split panel
       setIsAnimatingResponse(false);
       setIsGenerating(false);
       setCitations([]);
@@ -4679,7 +4413,7 @@ const ChatInterface = () => {
       const promptLabel = selectedSecret.name;
       setPendingQuestion(`Analysis: ${promptLabel}`);
       // Server loads the secret body from document-service (same as SecretManager flow).
-      // Do not send the full preset text in `question` — DB and UI store the prompt name only.
+      // Do not send the full preset text in `question` ? DB and UI store the prompt name only.
 
       const token = getAuthToken();
       const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folder)}/intelligent-chat/stream`, {
@@ -4705,6 +4439,13 @@ const ChatInterface = () => {
           errBody = await response.json();
         } catch {
           errBody = {};
+        }
+        const quota = parseQuotaHttpError(response.status, errBody);
+        if (quota && showQuotaError(createQuotaError(quota, response.status))) {
+          setHasResponse(false);
+          setHasAiResponse(false);
+          setForceSidebarCollapsed(false);
+          return;
         }
         setChatError(parseLlmPolicyErrorForUi(response.status, errBody));
         setHasResponse(false);
@@ -5000,11 +4741,13 @@ const ChatInterface = () => {
       }
     } catch (error) {
       console.error("Chat error:", error);
-      setChatError(
-        stringToChatErrorDisplay(
-          getUserFriendlyApiErrorMessage(error, 'Analysis could not complete. Please try again.')
-        )
-      );
+      if (!showQuotaError(error)) {
+        setChatError(
+          stringToChatErrorDisplay(
+            getUserFriendlyApiErrorMessage(error, 'Analysis could not complete. Please try again.')
+          )
+        );
+      }
       setHasResponse(false);
       setHasAiResponse(false);
       setForceSidebarCollapsed(false);
@@ -5098,6 +4841,15 @@ const ChatInterface = () => {
             errBody = await response.json();
           } catch {
             errBody = {};
+          }
+          const quota2 = parseQuotaHttpError(response.status, errBody);
+          if (quota2 && showQuotaError(createQuotaError(quota2, response.status))) {
+            setHasResponse(false);
+            setHasAiResponse(false);
+            setForceSidebarCollapsed(false);
+            setPendingQuestion('');
+            setIsGenerating(false);
+            return;
           }
           setChatError(parseLlmPolicyErrorForUi(response.status, errBody));
           setHasResponse(false);
@@ -5403,6 +5155,10 @@ const ChatInterface = () => {
     }
   };
 
+  useEffect(() => {
+    handleNewMessageRef.current = handleNewMessage;
+  }, [handleNewMessage]);
+
   const handleLearningOptionSelect = useCallback(async (optionText) => {
     if (!optionText || loadingChat || isGenerating) return;
     setIsSecretPromptSelected(false);
@@ -5492,7 +5248,7 @@ const ChatInterface = () => {
       });
      
       await deletePromise;
-      console.log(`✅ Successfully deleted chat ${chatId}`);
+      console.log(`? Successfully deleted chat ${chatId}`);
      
       setCurrentChatHistory(prev => prev.filter(chat => chat.id !== chatId));
      
@@ -5508,7 +5264,7 @@ const ChatInterface = () => {
         await fetchChatHistory(null, folderName);
       }
     } catch (err) {
-      console.error("❌ Error deleting chat:", err);
+      console.error("? Error deleting chat:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete chat';
       setChatError(stringToChatErrorDisplay(errorMessage));
     } finally {
@@ -5521,6 +5277,26 @@ const ChatInterface = () => {
       e.stopPropagation();
     }
     setOpenChatMenuId(openChatMenuId === chatId ? null : chatId);
+  };
+
+  const handleCopyChatResponse = async (chatId, rawResponse) => {
+    try {
+      const text = getCleanText(chatBodyRefs.current[chatId], rawResponse);
+      await navigator.clipboard.writeText(text.trim());
+      setChatCopySuccess(chatId);
+      setTimeout(() => setChatCopySuccess(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const handleDownloadChatPdf = (chatId) => {
+    if (!chatBodyRefs.current[chatId]) return;
+    setDownloadModalChatId(chatId);
+  };
+
+  const handleDownloadChatWord = (chatId) => {
+    setWordModalChatId(chatId);
   };
 
   const handleNewChat = () => {
@@ -5641,7 +5417,7 @@ const ChatInterface = () => {
       });
      
       await deletePromise;
-      console.log(`✅ Successfully deleted all chats from folder ${selectedFolder}`);
+      console.log(`? Successfully deleted all chats from folder ${selectedFolder}`);
      
       setCurrentChatHistory([]);
       setSelectedChatSessionId(null);
@@ -5660,7 +5436,7 @@ const ChatInterface = () => {
         await fetchChatSessions(folderName);
       }
     } catch (err) {
-      console.error("❌ Error deleting all chats:", err);
+      console.error("? Error deleting all chats:", err);
       const errorMessage = err?.response?.data?.error || err?.message || 'Failed to delete all chats';
       setChatError(stringToChatErrorDisplay(errorMessage));
     } finally {
@@ -5668,13 +5444,24 @@ const ChatInterface = () => {
     }
   };
 
-  const handleDropdownSelect = (secretName, secretId, llmName) => {
+  const handleDropdownSelect = async (secretName, secretId, llmName) => {
+    if (loadingChat || isGenerating || isRecording || isTranscribing || !selectedFolder || !secretId) {
+      return;
+    }
     setActiveDropdown(secretName);
     setSelectedSecretId(secretId);
     setSelectedLlmName(llmName);
-    setIsSecretPromptSelected(true);
     setChatInput("");
-    setShowDropdown(false);
+    try {
+      await chatWithAI(selectedFolder, secretId, selectedChatSessionId);
+    } catch (err) {
+      console.error("[ChatInterface] Prompt analysis failed:", err);
+    } finally {
+      setIsSecretPromptSelected(false);
+      setActiveDropdown("Custom Query");
+      setSelectedSecretId(null);
+      setSelectedLlmName(null);
+    }
   };
 
   const handleChatInputChange = (e) => {
@@ -5724,15 +5511,15 @@ const ChatInterface = () => {
     }).join('');
   };
 
-  // Shared ReactMarkdown component overrides — clean serif style matching the site theme.
-  // • Option paragraphs (A) … D)) → interactive clickable choice cards
-  // • Bold text → site teal, no chip
-  // • Questions (ending with ?) → bold body text (no callout box)
+  // Shared ReactMarkdown component overrides ? clean serif style matching the site theme.
+  // ? Option paragraphs (A) ? D)) ? interactive clickable choice cards
+  // ? Bold text ? site teal, no chip
+  // ? Questions (ending with ?) ? bold body text (no callout box)
   const aiMarkdownComponents = {
     p: ({ node, children, ...props }) => {
       const rawText = extractNodeText(node?.children || []);
 
-      // ── Option card detection: "A) …", "B) …", "C) …", "D) …" (or A. B. C. D.)
+      // ?? Option card detection: "A) ?", "B) ?", "C) ?", "D) ?" (or A. B. C. D.)
       const optionMatch = rawText.match(/^([A-Da-d])[).]\s+/);
       if (optionMatch) {
         const letter = optionMatch[1].toUpperCase();
@@ -5775,12 +5562,12 @@ const ChatInterface = () => {
               fontWeight: 700, fontSize: '14px', flexShrink: 0,
               transition: 'all 0.18s ease',
             }}>
-              {isPicked ? '✓' : letter}
+              {isPicked ? '?' : letter}
             </span>
             {/* Option content */}
             <span style={{
-              flex: 1, fontSize: '18px', lineHeight: '1.65',
-              fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+              flex: 1, fontSize: '15px', lineHeight: '1.65',
+              fontFamily: 'Inter, system-ui, sans-serif',
               color: isPicked ? '#0f766e' : '#1a1a1a',
               fontWeight: isPicked ? 600 : 400,
             }}>
@@ -5790,7 +5577,7 @@ const ChatInterface = () => {
         );
       }
 
-      // ── Question paragraph (ends with ?)
+      // ?? Question paragraph (ends with ?)
       const isQuestion = (() => {
         const last = node?.children?.[node.children.length - 1];
         const text = last?.value || extractNodeText(last?.children || []);
@@ -5799,26 +5586,26 @@ const ChatInterface = () => {
       if (isQuestion) {
         return (
           <p style={{
-            margin: '0 0 16px',
-            fontWeight: 700,
+            margin: '0 0 14px',
+            fontWeight: 600,
             color: '#1a1a1a',
-            fontSize: '19px',
-            lineHeight: '1.82',
-            fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+            fontSize: '15px',
+            lineHeight: '1.75',
+            fontFamily: 'Inter, system-ui, sans-serif',
           }} {...props}>
             {children}
           </p>
         );
       }
 
-      // ── Normal paragraph
+      // ? Normal paragraph
       return (
         <p style={{
-          margin: '0 0 16px',
-          fontSize: '19px',
-          lineHeight: '1.82',
+          margin: '0 0 14px',
+          fontSize: '15px',
+          lineHeight: '1.75',
           color: '#232323',
-          fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+          fontFamily: 'Inter, system-ui, sans-serif',
         }} {...props}>
           {children}
         </p>
@@ -5828,20 +5615,21 @@ const ChatInterface = () => {
     strong: ({ children, ...props }) => (
       <strong style={{ fontWeight: 700, color: '#0f766e' }} {...props}>{children}</strong>
     ),
-    h1: (p) => <h1 style={{ fontSize: '24px', fontWeight: 700, margin: '24px 0 10px', color: '#111', fontFamily: '"Crimson Text", serif' }} {...p} />,
-    h2: (p) => <h2 style={{ fontSize: '21px', fontWeight: 700, margin: '20px 0 8px', color: '#111', fontFamily: '"Crimson Text", serif' }} {...p} />,
+    h1: (p) => <h1 style={{ fontSize: '20px', fontWeight: 700, margin: '20px 0 8px', color: '#111', fontFamily: 'Inter, system-ui, sans-serif' }} {...p} />,
+    h2: (p) => <h2 style={{ fontSize: '17px', fontWeight: 700, margin: '16px 0 6px', color: '#111', fontFamily: 'Inter, system-ui, sans-serif' }} {...p} />,
+    h3: (p) => <h3 style={{ fontSize: '15px', fontWeight: 700, margin: '14px 0 4px', color: '#222', fontFamily: 'Inter, system-ui, sans-serif' }} {...p} />,
     blockquote: (p) => (
       <blockquote style={{
-        margin: '18px 0 22px', padding: '6px 0 6px 18px',
-        borderLeft: '4px solid #21C1B6', background: '#f0fdfa',
+        margin: '14px 0 16px', padding: '6px 0 6px 14px',
+        borderLeft: '3px solid #21C1B6', background: '#f0fdfa',
         color: '#134e4a', fontStyle: 'italic', borderRadius: '0 6px 6px 0',
-        fontSize: '19px', lineHeight: '1.72', fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
+        fontSize: '14px', lineHeight: '1.65', fontFamily: 'Inter, system-ui, sans-serif',
       }} {...p} />
     ),
-    ul: (p) => <ul style={{ margin: '0 0 18px', paddingLeft: '28px' }} {...p} />,
-    ol: (p) => <ol style={{ margin: '0 0 18px', paddingLeft: '28px' }} {...p} />,
-    li: (p) => <li style={{ marginBottom: '8px', fontSize: '19px', lineHeight: '1.72', fontFamily: '"Crimson Text", "Times New Roman", Times, serif' }} {...p} />,
-    hr: (p) => <hr style={{ border: 0, borderTop: '1px solid #d9d1c5', margin: '24px 0' }} {...p} />,
+    ul: (p) => <ul style={{ margin: '0 0 14px', paddingLeft: '22px' }} {...p} />,
+    ol: (p) => <ol style={{ margin: '0 0 14px', paddingLeft: '22px' }} {...p} />,
+    li: (p) => <li style={{ marginBottom: '6px', fontSize: '15px', lineHeight: '1.65', fontFamily: 'Inter, system-ui, sans-serif' }} {...p} />,
+    hr: (p) => <hr style={{ border: 'none', borderTop: '1px solid #e5e7eb', margin: '16px 0' }} {...p} />,
     table: ({ children, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '18px 0', WebkitOverflowScrolling: 'touch' }}>
         <table
@@ -5966,9 +5754,6 @@ const ChatInterface = () => {
 
   useEffect(() => {
     const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
-        setShowDropdown(false);
-      }
       if (styleDropdownRef.current && !styleDropdownRef.current.contains(event.target)) {
         setShowStyleDropdown(false);
       }
@@ -5995,7 +5780,7 @@ const ChatInterface = () => {
   }, [openChatMenuId]);
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
   }, []);
 
   // Auto-scroll when a new prompt starts or when chat history updates with a response.
@@ -6082,7 +5867,7 @@ const ChatInterface = () => {
     if (selectedChatSessionId) setNewChatMode(false);
   }, [selectedChatSessionId]);
 
-  // Must run before any conditional return — same hook order when folder is null vs set.
+  // Must run before any conditional return ? same hook order when folder is null vs set.
   const threadUsesLearningLayout = useMemo(
     () =>
       learningModeActive ||
@@ -6106,7 +5891,7 @@ const ChatInterface = () => {
     ? "p-2.5 bg-gray-500 hover:bg-gray-600 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-full transition-colors"
     : "p-2.5 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 disabled:cursor-not-allowed rounded-full transition-colors";
 
-  // ── Pagination helpers ──────────────────────────────────────────────────────
+  // ?? Pagination helpers ??????????????????????????????????????????????????????
   const paginateContent = (text) => {
     const raw = text || '';
     const hasInlineCiteHtml = /class\s*=\s*["'][^"']*inline-cite/.test(raw);
@@ -6138,19 +5923,23 @@ const ChatInterface = () => {
     return pages.length ? pages : [''];
   };
 
-  // ────────────────────────────────────────────────────────────────────────────
+  // ????????????????????????????????????????????????????????????????????????????
   // showMainArea: show the messages+input panel only when actively chatting
   const hasSessions = chatSessions && chatSessions.length > 0;
   const showMainArea = !!(selectedChatSessionId || pendingQuestion || hasResponse || loadingChat || !hasSessions || newChatMode);
 
   /** Normal mode: wider reading column; learning mode stays compact. */
-  const messagesColumnMaxWidth = panelOpen ? '100%' : threadUsesLearningLayout ? '620px' : 'min(100%, 1180px)';
+  const messagesColumnMaxWidth = threadUsesLearningLayout ? '620px' : 'min(880px, 100%)';
 
   return (
     <div className="flex h-full min-h-0 w-full overflow-hidden relative" style={{ background: '#fff' }}>
-      <ChatQuotaErrorModal error={chatError} onDismiss={() => setChatError(null)} />
+      <ChatQuotaErrorModal
+        error={chatError}
+        onDismiss={() => setChatError(null)}
+        onTopupSuccess={() => setChatError(null)}
+      />
 
-      {/* ── Chat Session Sidebar (Left) — full list or collapsed rail ── */}
+      {/* ?? Chat Session Sidebar (Left) ? full list or collapsed rail ?? */}
       {hasSessions && chatHistorySidebarOpen && (
         <div
           className={`flex-shrink-0 flex flex-col border-r border-gray-100 ${!showMainArea ? 'flex-1' : ''}`}
@@ -6217,18 +6006,16 @@ const ChatInterface = () => {
         </div>
       )}
 
-      {/* ── MAIN CONTENT AREA (messages + input) — only when actively chatting ── */}
+      {/* ?? MAIN CONTENT AREA (messages + input) ? only when actively chatting ?? */}
       {showMainArea && <div className="flex flex-1 min-w-0 h-full overflow-hidden relative bg-white">
         {/* Chat message panel (60% or 100% of available space) */}
-        <div style={{ 
-          width: panelOpen ? '40%' : '100%', 
-          transition: 'width 0.3s ease', 
-          display: 'flex', 
-          flexDirection: 'column', 
-          height: '100%', 
-          borderRight: panelOpen ? '1px solid #e5e7eb' : 'none', 
-          overflow: 'hidden', 
-          background: '#ffffff' 
+        <div style={{
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
+          overflow: 'hidden',
+          background: '#ffffff'
         }}>
 
           {/* top bar */}
@@ -6244,22 +6031,6 @@ const ChatInterface = () => {
                 <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all"
                   className="p-1.5 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 transition-colors">
                   <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-              {hasResponse && !selectedMessageIsLearning && (
-                <button
-                  type="button"
-                  onClick={() => panelOpen ? closePanel() : openPanel('response', { response: activeResponseContent, messageId: selectedMessageId })}
-                  title={panelOpen ? 'Close split view' : 'Open split view'}
-                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1.5 ${
-                    panelOpen
-                      ? 'text-white border border-transparent'
-                      : 'text-[#21C1B6] bg-[#f0fdfb] border border-[#21C1B6] hover:bg-[#e6faf9]'
-                  }`}
-                  style={panelOpen ? { background: '#21C1B6' } : {}}
-                >
-                  <PanelRight className="w-3.5 h-3.5" />
-                  <span>{panelOpen ? 'Close Split' : 'Split View'}</span>
                 </button>
               )}
             </div>
@@ -6322,79 +6093,18 @@ const ChatInterface = () => {
 
                     return (
                       <div key={chat.id != null ? `${String(chat.id)}-${idx}` : `chat-${idx}`} className="flex flex-col gap-3">
-                        {/* User question item */}
-                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                          {panelOpen && !isLearning ? (
-                            <div style={{ width: '100%', position: 'relative' }}>
-                              <button
-                                type="button"
-                                onClick={() => handleSelectChat(chat)}
-                                style={{
-                                  background: selectedMessageId === chat.id ? '#E0F7F6' : '#f9fafb',
-                                  color: '#1a1a1a',
-                                  borderRadius: '12px',
-                                  border: selectedMessageId === chat.id ? '1px solid #21C1B6' : '1px solid #e5e7eb',
-                                  padding: '14px 38px 14px 14px',
-                                  minHeight: '64px',
-                                  width: '84%',
-                                  textAlign: 'left',
-                                  fontSize: '14px',
-                                  fontWeight: selectedMessageId === chat.id ? '600' : '500',
-                                  lineHeight: '1.45',
-                                  fontFamily: 'Inter, sans-serif',
-                                  wordBreak: 'break-word',
-                                  boxShadow: selectedMessageId === chat.id ? '0 1px 3px rgba(33, 193, 182, 0.12)' : 'none',
-                                  cursor: 'pointer',
-                                  marginLeft: 'auto'
-                                }}
-                              >
-                                {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
-                                  ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
-                                  : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
-                              </button>
-                              <div
-                                className="absolute top-2 right-2"
-                                ref={(el) => (chatMenuRefs.current[chat.id] = el)}
-                              >
-                                <button
-                                  onClick={(e) => handleChatMenuToggle(chat.id, e)}
-                                  className="p-1 text-gray-400 hover:text-gray-600 transition-colors rounded"
-                                >
-                                  <MoreVertical className="h-3.5 w-3.5" />
-                                </button>
-                                {openChatMenuId === chat.id && (
-                                  <div className="absolute right-0 top-7 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-                                    <button onClick={(e) => handleDeleteChat(chat.id, e)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 rounded-lg">
-                                      <Trash2 className="w-4 h-4" /> Delete
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <div style={{
-                              background: '#f0fdfa',
-                              color: '#1a1a1a',
-                              borderRadius: '18px 18px 4px 18px',
-                              border: '1px solid #21C1B6',
-                              padding: '10px 16px',
-                              maxWidth: '72%',
-                              fontSize: '17px',
-                              fontWeight: '500',
-                              lineHeight: '1.55',
-                              fontFamily: 'Inter, sans-serif',
-                              wordBreak: 'break-word',
-                              boxShadow: '0 2px 4px rgba(33, 193, 182, 0.05)'
-                            }}>
+                        {/* User question ? same card layout as AI response */}
+                        <div className="chat-thread-card chat-thread-card--user">
+                          <div className="chat-thread-card__label">You</div>
+                          <div className="chat-thread-card__body">
                               {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
                                 ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
                                 : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
-                            </div>
-                          )}
+                          </div>
                         </div>
 
-                        {/* AI response (Normal mode: hidden in left column when split panel is open) */}
-                        {(!panelOpen || isLearning) && (chat.response || ((loadingChat || isGenerating) && !pendingQuestion && idx === currentChatHistory.length - 1)) && (
+                        {/* AI response */}
+                        {(chat.response || ((loadingChat || isGenerating) && !pendingQuestion && idx === currentChatHistory.length - 1)) && (
                           isLearning ? (
                             <div style={{ display: 'flex', justifyContent: 'flex-start', width: '100%' }}>
                               <div style={{ width: '100%', padding: '4px 0' }}>
@@ -6412,29 +6122,67 @@ const ChatInterface = () => {
                                     onViewFull={null}
                                   />
                                 ) : (
-                                  <div style={{ maxWidth: '560px', width: '100%', margin: '0 auto', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>
-                                      {chat.response}
-                                    </ReactMarkdown>
-                                  </div>
+                                  <FormattedAssistantContent raw={chat.response} markdownComponents={aiMarkdownComponents} />
                                 )}
                               </div>
                             </div>
                           ) : (
-                            <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                            <div className="chat-thread-card">
+                              <div className="chat-thread-card__label">Assistant</div>
                               {!chat.response ? (
-                                <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                <div className="flex items-center gap-2 text-gray-500 text-sm py-4 px-5">
                                   <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
                                   <span>Thinking...</span>
                                 </div>
                               ) : (
                                 <>
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>
-                                    {chat.response}
-                                  </ReactMarkdown>
-                                  <div className="flex items-center gap-2 mt-2">
-                                    <button onClick={() => navigator.clipboard.writeText(chat.response)} className="p-1 px-2 text-[10px] text-gray-400 border border-gray-200 rounded hover:bg-gray-50">Copy</button>
-                                    <button onClick={() => { handleSelectChat(chat); openPanel('response', { response: chat.response, messageId: chat.id }); }} className="p-1 px-2 text-[10px] text-gray-400 border border-gray-200 rounded hover:bg-gray-50">Open in Panel</button>
+                                  <div
+                                    className="chat-thread-card__body"
+                                    ref={el => { if (el) chatBodyRefs.current[chat.id] = el; else delete chatBodyRefs.current[chat.id]; }}
+                                  >
+                                    <FormattedAssistantContent raw={chat.response} markdownComponents={aiMarkdownComponents} />
+                                  </div>
+                                  <div className="chat-thread-card__footer">
+                                    <button
+                                      onClick={() => handleCopyChatResponse(chat.id, chat.response)}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer"
+                                      title="Copy response"
+                                    >
+                                      <Copy className="h-3 w-3" />
+                                      {chatCopySuccess === chat.id ? 'Copied!' : 'Copy'}
+                                    </button>
+                                    <button
+                                      onClick={() => handleDownloadChatPdf(chat.id)}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer"
+                                      title="Download as PDF"
+                                    >
+                                      <Download className="h-3 w-3" />
+                                      PDF
+                                    </button>
+                                    <button
+                                      onClick={() => handleDownloadChatWord(chat.id)}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer"
+                                      title="Download as Word"
+                                    >
+                                      <FileText className="h-3 w-3" />
+                                      Word
+                                    </button>
+                                    <button
+                                      onClick={() => downloadAsHtml(chatBodyRefs.current[chat.id], `AI_Response_${new Date().toISOString().slice(0, 10)}.html`)}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer"
+                                      title="Download as HTML"
+                                    >
+                                      <Code className="h-3 w-3" />
+                                      HTML
+                                    </button>
+                                    <button
+                                      onClick={() => printResponse(chatBodyRefs.current[chat.id])}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer"
+                                      title="Print response"
+                                    >
+                                      <Printer className="h-3 w-3" />
+                                      Print
+                                    </button>
                                   </div>
                                 </>
                               )}
@@ -6443,7 +6191,7 @@ const ChatInterface = () => {
                         )}
 
                         {/* Menu */}
-                        {!(panelOpen && !isLearning) && (
+                        {(
                           <div className="mt-1 flex justify-end">
                             <div className="relative" ref={(el) => (chatMenuRefs.current[chat.id] = el)}>
                               <button onClick={(e) => handleChatMenuToggle(chat.id, e)} className="p-1 text-gray-300 hover:text-gray-500 transition-colors">
@@ -6466,10 +6214,9 @@ const ChatInterface = () => {
                   {/* Pending Question */}
                   {pendingQuestion && (
                     <div className="flex flex-col gap-3">
-                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                        <div style={{ background: '#f0fdfa', border: '1px solid #21C1B6', borderRadius: '18px 18px 4px 18px', padding: '10px 16px', maxWidth: '72%', fontSize: '17px', color: '#1a1a1a', fontFamily: 'Inter, sans-serif' }}>
-                          {pendingQuestion}
-                        </div>
+                      <div className="chat-thread-card chat-thread-card--user">
+                        <div className="chat-thread-card__label">You</div>
+                        <div className="chat-thread-card__body">{pendingQuestion}</div>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
                         {learningModeActive ? (
@@ -6499,9 +6246,7 @@ const ChatInterface = () => {
                               }
                               if (animatedResponseContent) {
                                 return (
-                                  <div style={{ fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>{animatedResponseContent}</ReactMarkdown>
-                                  </div>
+                                  <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} />
                                 );
                               }
                               return (
@@ -6515,7 +6260,7 @@ const ChatInterface = () => {
                         ) : (
                           <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             {animatedResponseContent ? (
-                              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>{animatedResponseContent}</ReactMarkdown>
+                              <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} />
                             ) : (
                               <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                 <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
@@ -6531,111 +6276,29 @@ const ChatInterface = () => {
                 </>
               )}
 
-              {/* ── Voice Document Agent inline messages ── */}
-              {audioMessages.length > 0 && (
-                <div className="flex flex-col gap-3 pt-2">
-                  {audioMessages.map((msg, i) => {
-                    if (msg.role === 'user') {
-                      return (
-                        <div key={i} style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                          <div style={{
-                            background: '#f0fdfa',
-                            color: '#1a1a1a',
-                            borderRadius: '18px 18px 4px 18px',
-                            border: '1px solid #21C1B6',
-                            padding: '10px 16px',
-                            maxWidth: '72%',
-                            fontSize: '17px',
-                            fontWeight: '500',
-                            lineHeight: '1.55',
-                            fontFamily: 'Inter, sans-serif',
-                            wordBreak: 'break-word',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                          }}>
-                            <Mic className="h-4 w-4 flex-shrink-0 text-teal-500" />
-                            {msg.text}
-                          </div>
-                        </div>
-                      );
-                    }
-                    if (msg.role === 'assistant') {
-                      return (
-                        <div key={i} style={{ display: 'flex', justifyContent: 'flex-start' }}>
-                          <div style={{ maxWidth: '100%', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
-                            <div className="flex items-start gap-2">
-                              <div className="flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center mt-0.5"
-                                style={{ background: 'linear-gradient(135deg,#21C1B6,#1AA49B)' }}>
-                                <Volume2 className="h-3.5 w-3.5 text-white" />
-                              </div>
-                              <div>
-                                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSanitize]} components={aiMarkdownComponents}>
-                                  {msg.text}
-                                </ReactMarkdown>
-                                {msg.streaming && <span className="inline-block w-0.5 h-4 bg-teal-400 ml-1 animate-pulse align-middle" />}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
-                    if (msg.role === 'error') {
-                      return (
-                        <div key={i} className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                          {msg.text}
-                        </div>
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
-              )}
-
-              {/* In-progress voice transcript */}
-              {audioInputTranscript && audioMicStatus !== 'idle' && (
-                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                  <div style={{
-                    background: '#f0fdfa',
-                    color: '#6b7280',
-                    borderRadius: '18px 18px 4px 18px',
-                    border: '1px dashed #21C1B6',
-                    padding: '8px 14px',
-                    maxWidth: '72%',
-                    fontSize: '14px',
-                    fontStyle: 'italic',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                  }}>
-                    <Mic className="h-3.5 w-3.5 text-teal-400" />
-                    {audioInputTranscript}
-                  </div>
-                </div>
-              )}
             </div>
           </div>
 
           {/* Input Area */}
           <div className="flex-shrink-0 border-t border-gray-100 px-3 py-3" style={{ background: '#f8fafc' }}>
             {/* Voice session status bar */}
-            {audioMicStatus !== 'idle' && (
-              <div className={`flex items-center justify-between px-3 py-1.5 mb-2 rounded-xl text-xs font-medium
-                ${audioMicStatus === 'live' ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-teal-50 text-teal-700 border border-teal-100'}`}>
-                <div className="flex items-center gap-2">
-                  {audioMicStatus === 'live' && (
-                    <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-                  )}
-                  {audioMicStatus === 'live' ? 'Voice session active — listening' :
-                   audioMicStatus === 'connecting' ? 'Connecting to Voice Agent…' : 'Processing…'}
-                </div>
-                {audioMicStatus === 'live' && (
-                  <button type="button" onClick={stopDocumentAudio}
-                    className="text-red-500 hover:text-red-700 font-bold text-xs">
-                    Stop
-                  </button>
-                )}
+            {(isRecording || isTranscribing) && (
+              <div className={`flex items-center gap-2 px-3 py-1.5 mb-2 rounded-xl text-xs font-medium
+                ${isRecording ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-teal-50 text-teal-700 border border-teal-100'}`}>
+                {isRecording && <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />}
+                {isRecording ? 'Recording - tap mic when done speaking' : 'Transcribing and sending your message...'}
               </div>
+            )}
+            {(isLoadingSecrets || secrets.length > 0) && (
+              <PromptChipsBar
+                secrets={secrets}
+                isLoading={isLoadingSecrets}
+                selectedSecretId={selectedSecretId}
+                activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                disabled={loadingChat || isRecording || isTranscribing}
+                className="mb-1"
+              />
             )}
             <form
               onSubmit={(e) => {
@@ -6646,22 +6309,6 @@ const ChatInterface = () => {
               className="flex items-center gap-2 bg-white rounded-2xl border border-gray-200 px-3 py-2.5 shadow-sm"
               style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}
             >
-              <div className="relative flex-shrink-0" ref={dropdownRef}>
-                <button type="button" onClick={() => setShowDropdown(!showDropdown)}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl hover:border-[#21C1B6] hover:text-[#21C1B6] transition-colors">
-                  <BookOpen className="h-3.5 w-3.5" />
-                  <span>{isLoadingSecrets ? "Loading..." : activeDropdown}</span>
-                  <ChevronDown className="h-3 w-3 text-gray-400" />
-                </button>
-                {showDropdown && !isLoadingSecrets && (
-                  <div className="absolute bottom-full left-0 mb-2 w-52 bg-white border border-gray-100 rounded-2xl shadow-xl z-20 max-h-60 overflow-y-auto py-1">
-                    {secrets.map((s) => (
-                      <button key={s.id} type="button" onClick={() => handleDropdownSelect(s.name, s.id, s.llm_name)}
-                        className="w-full text-left px-4 py-2.5 text-xs text-gray-700 hover:bg-gray-50 hover:text-[#21C1B6] transition-colors">{s.name}</button>
-                    ))}
-                  </div>
-                )}
-              </div>
               <div className="relative flex-shrink-0" ref={styleDropdownRef}>
                 <button
                   type="button"
@@ -6707,26 +6354,25 @@ const ChatInterface = () => {
               {/* Divider */}
               <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
 
-              {/* Voice Document Agent mic button */}
               <button
                 type="button"
-                onClick={audioMicStatus === 'live' ? stopDocumentAudio : startDocumentAudio}
-                disabled={loadingChat || audioMicStatus === 'connecting' || audioMicStatus === 'stopping' || !_normalizeFolderName(selectedFolder)}
+                onClick={toggleMic}
+                disabled={loadingChat || isTranscribing || !_normalizeFolderName(selectedFolder)}
                 className={`relative flex-shrink-0 p-2 rounded-xl transition-all duration-200
-                  ${audioMicStatus === 'live'
+                  ${isRecording
                     ? 'text-white shadow-md scale-110'
                     : 'text-[#21C1B6] hover:bg-teal-50 disabled:opacity-40 disabled:cursor-not-allowed'
                   }`}
-                style={audioMicStatus === 'live' ? { background: '#ef4444' } : {}}
-                title={audioMicStatus === 'live' ? 'Stop voice session' : 'Start Voice Document Agent'}
+                style={isRecording ? { background: '#ef4444' } : {}}
+                title={isRecording ? 'Stop recording ? your words will be sent to chat' : isTranscribing ? 'Transcribing and sending...' : 'Voice input (Google Speech-to-Text)'}
               >
-                {audioMicStatus === 'connecting' || audioMicStatus === 'stopping'
+                {isTranscribing
                   ? <Loader2 className="h-4 w-4 animate-spin" />
-                  : audioMicStatus === 'live'
+                  : isRecording
                     ? <MicOff className="h-4 w-4" />
                     : <Mic className="h-4 w-4" />
                 }
-                {audioMicStatus === 'live' && (
+                {isRecording && (
                   <span className="absolute inset-0 rounded-xl animate-ping bg-red-400 opacity-40 pointer-events-none" />
                 )}
               </button>
@@ -6737,14 +6383,14 @@ const ChatInterface = () => {
                 onChange={handleChatInputChange}
                 placeholder={isSecretPromptSelected ? `Analysis: ${activeDropdown}` : "How can I help you today?"}
                 className="flex-grow bg-transparent border-none outline-none text-gray-800 text-sm py-1 min-w-0 placeholder-gray-400"
-                disabled={loadingChat}
+                disabled={loadingChat || isRecording || isTranscribing}
               />
               <button
                 type="submit"
-                disabled={!isGenerating && (loadingChat || (!chatInput.trim() && !isSecretPromptSelected))}
+                disabled={!isGenerating && (loadingChat || isRecording || isTranscribing || (!chatInput.trim() && !isSecretPromptSelected))}
                 className="flex-shrink-0 p-2 text-white rounded-xl transition-all disabled:cursor-not-allowed disabled:opacity-40"
                 style={{ background: (!isGenerating && (loadingChat || (!chatInput.trim() && !isSecretPromptSelected))) ? '#d1d5db' : '#21C1B6' }}
-                title={isGenerating ? "Stop" : loadingChat ? "Sending…" : "Send"}
+                title={isGenerating ? "Stop" : loadingChat ? "Sending?" : "Send"}
               >
                 {isGenerating ? (
                   <X className="h-4 w-4" />
@@ -6757,496 +6403,6 @@ const ChatInterface = () => {
             </form>
           </div>
         </div>
-        {/* PANEL CLOSED ABOVE, MAIN REMAINS OPEN FOR ARTIFACT PANEL */}
-        {panelOpen && (
-        <div className="chat-artifact-panel flex flex-col h-full min-w-0 relative" style={{ width: '60%', background: '#ffffff', overflow: 'hidden' }}>
-          {/* ── Learning panel ── */}
-          {panelType === 'learning' && panelData && (
-            <LearningDetailPanel
-              data={panelData}
-              onOptionClick={handleLearningOptionSelect}
-              onClose={closePanel}
-              isStreaming={isGenerating || loadingChat}
-            />
-          )}
-
-          {/* ── Agentic steps panel ── */}
-          {panelType === 'agentic' && (
-            <AgentStepsPanel
-              steps={panelData?.steps || []}
-              onClose={closePanel}
-            />
-          )}
-
-          {/* ── Response / A4 viewer panel ── */}
-          {(panelType === 'response' || (!panelType && hasResponse)) && (
-          <>{/* Toolbar */}
-          {selectedMessageId && activeResponseContent && (
-            <div className="flex-shrink-0 px-4 py-2 flex items-center justify-between" style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb' }}>
-              <div className="flex items-center gap-2">
-                <DownloadPdf markdownOutputRef={markdownOutputRef} />
-                <button
-                  onClick={handleCopyResponse}
-                  className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded transition-colors"
-                  title="Copy to clipboard"
-                >
-                  {copySuccess ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
-                </button>
-              </div>
-              <div className="text-xs text-gray-500">
-                {currentChatHistory.find((msg) => msg.id === selectedMessageId)?.timestamp && (
-                  <span>{formatDate(currentChatHistory.find((msg) => msg.id === selectedMessageId).timestamp)}</span>
-                )}
-              </div>
-            </div>
-          )}
-          {/* A4 scroll area */}
-          <div className="flex-1 overflow-y-auto scrollbar-custom" ref={responseRef} style={{ background: '#ffffff', padding: '24px 0' }}>
-            {currentStatus && (
-              <div className="px-6 pt-6">
-                <div className="status-display" style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px',
-                  padding: '12px 16px',
-                  background: '#f8f9fa',
-                  borderLeft: '4px solid #4285f4',
-                  borderRadius: '8px',
-                  marginBottom: '16px',
-                  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif'
-                }}>
-                  <div className="status-spinner" style={{
-                    width: '20px',
-                    height: '20px',
-                    border: '2px solid #e0e0e0',
-                    borderTop: '2px solid #4285f4',
-                    borderRadius: '50%',
-                    animation: 'spin 1s linear infinite'
-                  }}></div>
-                  <div className="status-content">
-                    <div className="status-label" style={{
-                      fontSize: '13px',
-                      fontWeight: '500',
-                      color: '#5f6368',
-                      textTransform: 'capitalize',
-                      marginBottom: '2px'
-                    }}>
-                      {currentStatus.status}
-                    </div>
-                    <div className="status-message" style={{
-                      fontSize: '14px',
-                      color: '#3c4043'
-                    }}>
-                      {currentStatus.message}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-           
-            {loadingChat && !activeResponseContent && !thinkingContent && !currentStatus ? (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center">
-                  <Loader2 className="h-12 w-12 mx-auto mb-4 animate-spin text-[#21C1B6]" />
-                  <p className="text-gray-600">Generating response...</p>
-                </div>
-              </div>
-            ) : selectedMessageId && (activeResponseContent || thinkingContent || currentStatus) ? (
-              /* Paginated A4 pages — one card per page, Claude-style */
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '0 0 32px 0' }}>
-                {/* Thinking section above page 1 */}
-                {thinkingContent && (
-                  <div style={{
-                    margin: '0 auto', width: '210mm', background: '#f5f5f5',
-                    borderLeft: '4px solid #4285f4', borderRadius: '8px', padding: '16px',
-                    boxSizing: 'border-box', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', color: '#5f6368', fontSize: '14px', fontWeight: '500' }}>
-                      <span style={{ fontSize: '18px' }}>🧠</span>
-                      <span>Thinking...</span>
-                    </div>
-                    <div style={{ color: '#3c4043', fontSize: '14px', lineHeight: '1.6', whiteSpace: 'pre-wrap', fontFamily: '"Roboto Mono", "Courier New", monospace', background: 'white', padding: '12px', borderRadius: '4px', border: '1px solid #e0e0e0', wordWrap: 'break-word' }}>
-                      {thinkingContent}
-                      {loadingChat && <span style={{ animation: 'blink 1s infinite' }}>▋</span>}
-                    </div>
-                  </div>
-                )}
-                {/* Paginated content */}
-                {(() => {
-                  const pages = selectedMessageIsLearning
-                    ? [activeResponseContent || '']
-                    : paginateContent(activeResponseContent || '');
-                  const totalPages = pages.length || 1;
-                  const useContinuousPanelLayout = selectedMessageIsLearning;
-
-                  const openCitationByIndex = async (n) => {
-                    if (!Number.isFinite(n) || n < 1) return;
-                    const cite = citations?.[n - 1];
-                    if (!cite) return;
-                    const fid = await resolveCitationFileId(cite);
-                    const pageNum = cite.page ?? cite.pageStart ?? 1;
-                    const token = getAuthToken();
-                    if (!token) {
-                      toast.error('Please sign in to open the document.');
-                      return;
-                    }
-                    if (!fid) {
-                      toast.error('Document link is not available for this citation.');
-                      return;
-                    }
-                    openDocumentAtPage(fid, pageNum, cite.filename, token);
-                  };
-
-                  const classListIncludesInlineCite = (cls) => {
-                    if (!cls) return false;
-                    const parts = Array.isArray(cls) ? cls : String(cls).split(/\s+/);
-                    return parts.some((c) => String(c).includes('inline-cite'));
-                  };
-
-                  const mdComponents = {
-                    h1: ({node, ...props}) => <h1 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '24px', fontWeight: 700, margin: '24px 0 12px', color: '#111', lineHeight: 1.3 }} {...props} />,
-                    h2: ({node, ...props}) => <h2 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '21px', fontWeight: 700, margin: '20px 0 10px', color: '#111', lineHeight: 1.3 }} {...props} />,
-                    h3: ({node, ...props}) => <h3 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '19px', fontWeight: 700, margin: '16px 0 8px', color: '#111' }} {...props} />,
-                    h4: ({node, ...props}) => <h4 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '19px', fontWeight: 700, margin: '14px 0 6px', color: '#222' }} {...props} />,
-                    h5: ({node, ...props}) => <h5 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '17px', fontWeight: 700, margin: '12px 0 4px', color: '#333' }} {...props} />,
-                    h6: ({node, ...props}) => <h6 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '17px', fontWeight: 700, margin: '10px 0 4px', color: '#444' }} {...props} />,
-                    p: ({node, ...props}) => <p style={{ fontFamily: '"Times New Roman", Times, serif', marginBottom: '14px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '19px' }} {...props} />,
-                    strong: ({node, ...props}) => <strong style={{ fontWeight: 700, color: '#111' }} {...props} />,
-                    em: ({node, ...props}) => <em style={{ fontStyle: 'italic' }} {...props} />,
-                    ul: ({node, ...props}) => <ul style={{ listStyleType: 'disc', paddingLeft: '28px', marginBottom: '14px', marginTop: '6px' }} {...props} />,
-                    ol: ({node, ...props}) => <ol style={{ listStyleType: 'decimal', paddingLeft: '28px', marginBottom: '14px', marginTop: '6px' }} {...props} />,
-                    li: ({node, ...props}) => <li style={{ fontFamily: '"Times New Roman", Times, serif', marginBottom: '6px', lineHeight: '1.75', color: '#1a1a1a', fontSize: '19px' }} {...props} />,
-                    a: ({node, ...props}) => <a {...props} style={{ color: '#1a6db5', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" />,
-                    blockquote: ({node, ...props}) => <blockquote style={{ borderLeft: '3px solid #ccc', paddingLeft: '16px', margin: '16px 0', color: '#555', fontStyle: 'italic', fontSize: '19px', lineHeight: 1.75 }} {...props} />,
-                    code: ({node, inline, className, children, ...props}) => {
-                      const match = /language-(\w+)/.exec(className || '');
-                      const language = match ? match[1] : '';
-                      if (inline) return <code className="bg-gray-100 text-red-600 px-1.5 py-0.5 rounded text-sm font-mono border border-gray-200" {...props}>{children}</code>;
-                      return (
-                        <div className="relative my-4">
-                          {language && <div className="bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-t font-mono">{language}</div>}
-                          <pre className={`bg-gray-900 text-gray-100 p-4 ${language ? 'rounded-b' : 'rounded'} overflow-x-auto`}>
-                            <code className="font-mono text-sm" {...props}>{children}</code>
-                          </pre>
-                        </div>
-                      );
-                    },
-                    pre: ({node, ...props}) => <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />,
-                    table: ({node, ...props}) => <div className="my-6 rounded-lg border border-gray-300 shadow-sm overflow-x-auto"><table className="min-w-full divide-y divide-gray-300" {...props} /></div>,
-                    thead: ({node, ...props}) => <thead className="bg-gradient-to-r from-gray-50 to-gray-100" {...props} />,
-                    th: ({node, ...props}) => <th className="px-6 py-4 text-left text-xs font-bold text-gray-800 uppercase tracking-wider border-b-2 border-gray-300" {...props} />,
-                    tbody: ({node, ...props}) => <tbody className="bg-white divide-y divide-gray-200" {...props} />,
-                    tr: ({node, ...props}) => <tr className="hover:bg-gray-50 transition-colors" {...props} />,
-                    td: ({node, ...props}) => <td className="px-6 py-4 text-sm text-gray-800 border-b border-gray-100 leading-relaxed" {...props} />,
-                    hr: ({node, ...props}) => <hr className="my-6 border-t-2 border-gray-300" {...props} />,
-                    img: ({node, ...props}) => <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />,
-                    span: ({ node, className, children, ...props }) => {
-                      const hastClass = node?.properties?.className;
-                      const isCite =
-                        classListIncludesInlineCite(className) || classListIncludesInlineCite(hastClass);
-                      const rawN =
-                        props['data-n'] ??
-                        node?.properties?.['data-n'] ??
-                        node?.properties?.dataN;
-                      const n = rawN != null ? parseInt(String(rawN), 10) : NaN;
-                      if (
-                        isCite &&
-                        Number.isFinite(n) &&
-                        citations?.length &&
-                        n >= 1 &&
-                        n <= citations.length
-                      ) {
-                        const cite = citations[n - 1];
-                        const pageNum = cite.page ?? cite.pageStart ?? 1;
-                        const pageLabel =
-                          cite.pageLabel ||
-                          (cite.page || cite.pageStart ? `p. ${cite.page || cite.pageStart}` : null);
-                        const titleBits = [cite.filename, pageLabel].filter(Boolean).join(' · ');
-                        return (
-                          <span
-                            role="link"
-                            tabIndex={0}
-                            data-n={n}
-                            className={`inline-cite ${className || ''}`.trim()}
-                            title={titleBits || 'Citation'}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              openCitationByIndex(n);
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key !== 'Enter' && e.key !== ' ') return;
-                              e.preventDefault();
-                              e.stopPropagation();
-                              openCitationByIndex(n);
-                            }}
-                          >
-                            <span className="inline-cite-num">[{n}]</span>
-                            {pageLabel ? (
-                              <span className="inline-cite-page"> {pageLabel}</span>
-                            ) : null}
-                          </span>
-                        );
-                      }
-                      return (
-                        <span className={className} {...props}>
-                          {children}
-                        </span>
-                      );
-                    },
-                  };
-                  return pages.map((pageContent, idx) => (
-                    <article
-                      key={`ci-page-${idx}`}
-                      style={{
-                        margin: '0 auto',
-                        width: useContinuousPanelLayout ? 'min(920px, calc(100% - 48px))' : '210mm',
-                        minHeight: useContinuousPanelLayout ? 'auto' : '297mm',
-                        background: '#ffffff',
-                        boxShadow: useContinuousPanelLayout ? 'none' : '0 16px 34px rgba(15,23,42,0.12)',
-                        padding: useContinuousPanelLayout ? '8px 6px 20px' : '20mm 18mm',
-                        boxSizing: 'border-box',
-                        borderRadius: useContinuousPanelLayout ? '0' : '8px',
-                        border: useContinuousPanelLayout ? 'none' : '1px solid #d9d2c6',
-                        fontFamily: '"Times New Roman", Times, serif',
-                      }}
-                    >
-                      {!useContinuousPanelLayout && (
-                        <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e4ddd2', paddingBottom: '10px', marginBottom: '24px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.12em', color: '#807868' }}>
-                          <span>JuriNex Analysis</span>
-                          <span>Page {idx + 1}</span>
-                        </div>
-                      )}
-                      {/* Content */}
-                      <div
-                        ref={idx === 0 ? markdownOutputRef : undefined}
-                        onClick={(e) => {
-                          const t = e.target;
-                          const el =
-                            (t && t.nodeType === 3 ? t.parentElement : t)?.closest?.('.inline-cite');
-                          if (!el) return;
-                          e.preventDefault();
-                          const n = parseInt(el.getAttribute('data-n'), 10);
-                          openCitationByIndex(n);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key !== 'Enter' && e.key !== ' ') return;
-                          const t = e.target;
-                          const el =
-                            (t && t.nodeType === 3 ? t.parentElement : t)?.closest?.('.inline-cite');
-                          if (!el) return;
-                          e.preventDefault();
-                          const n = parseInt(el.getAttribute('data-n'), 10);
-                          openCitationByIndex(n);
-                        }}
-                      >
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={mdComponents}>
-                          {pageContent}
-                        </ReactMarkdown>
-                        {idx === pages.length - 1 && isGenerating && (
-                          <span style={{ display: 'inline-block', width: '2px', height: '18px', background: '#555', marginLeft: '2px', verticalAlign: 'middle', animation: 'blink 1s step-end infinite' }} />
-                        )}
-                      </div>
-                      {!useContinuousPanelLayout && (
-                        <div style={{ marginTop: '32px', paddingTop: '12px', borderTop: '1px solid #e7e1d7', textAlign: 'right', fontSize: '11px', color: '#807868' }}>
-                          Page {idx + 1} / {totalPages}
-                        </div>
-                      )}
-                    </article>
-                  ));
-                })()}
-                {Array.isArray(citations) && citations.length > 0 && (
-                  <section
-                    style={{
-                      margin: '0 auto',
-                      width: '210mm',
-                      background: '#f7fbff',
-                      border: '1px solid #d6e8ff',
-                      borderRadius: '12px',
-                      padding: '12px 14px',
-                      boxSizing: 'border-box',
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: '11px',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.12em',
-                        color: '#335b8a',
-                        marginBottom: '8px',
-                        fontWeight: 700,
-                      }}
-                    >
-                      Paragraph Sources
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      {citations.map((cite, idx) => {
-                        const n = idx + 1;
-                        const pageLabel = cite.pageLabel || (cite.page || cite.pageStart ? `Page ${cite.page || cite.pageStart}` : '');
-                        const label = `${n}. ${cite.filename || 'Document'}${pageLabel ? ` - ${pageLabel}` : ''}`;
-                        return (
-                          <button
-                            key={`visible-source-${n}-${cite.fileId || cite.document_id || cite.filename || 'doc'}`}
-                            type="button"
-                            onClick={async () => {
-                              const token = getAuthToken();
-                              if (!token) {
-                                toast.error('Please sign in to open the document.');
-                                return;
-                              }
-                              const fid = await resolveCitationFileId(cite);
-                              if (!fid) {
-                                toast.error('Document link is not available for this citation.');
-                                return;
-                              }
-                              const pageNum = cite.page ?? cite.pageStart ?? 1;
-                              openDocumentAtPage(fid, pageNum, cite.filename, token);
-                            }}
-                            style={{
-                              textAlign: 'left',
-                              padding: '6px 8px',
-                              borderRadius: '8px',
-                              border: '1px solid #d6e8ff',
-                              background: '#ffffff',
-                              color: '#1d4ed8',
-                              fontSize: '13px',
-                              textDecoration: 'underline',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-                )}
-                {!loadingChat && !isGenerating && suggestedQuestions.length > 0 && (
-                  <div
-                    style={{
-                      margin: '0 auto',
-                      width: '210mm',
-                      background: '#f8fbfa',
-                      border: '1px solid #d7e8e1',
-                      borderRadius: '16px',
-                      padding: '18px 20px',
-                      boxSizing: 'border-box',
-                    }}
-                  >
-                    <div style={{ marginBottom: '12px' }}>
-                      <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.18em', color: '#6f7f79', marginBottom: '6px' }}>
-                        Suggested Questions
-                      </div>
-                      <div style={{ fontSize: '14px', color: '#3e4b46' }}>
-                        Use these follow-up questions to study the case in more detail.
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
-                      {suggestedQuestions.map((suggestion) => (
-                        <button
-                          key={suggestion}
-                          type="button"
-                          onClick={() => handleSuggestedQuestionClick(suggestion)}
-                          style={{
-                            textAlign: 'left',
-                            padding: '10px 14px',
-                            borderRadius: '999px',
-                            background: '#ffffff',
-                            border: '1px solid #c9ddd5',
-                            color: '#20463f',
-                            fontSize: '14px',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          {suggestion}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center max-w-md px-6">
-                  <MessageSquare className="h-16 w-16 mx-auto mb-6 text-gray-300" />
-                  <h3 className="text-2xl font-semibold mb-4 text-gray-900">Select a Question</h3>
-                  <p className="text-gray-600 text-lg leading-relaxed">
-                    Click on any question from the left panel to view the JuriNex response here.
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-          {false && selectedMessageId && (() => {
-            const message = currentChatHistory.find((msg) => msg.id === selectedMessageId);
-            const hasCitations = message && (
-              (message.used_chunk_ids && message.used_chunk_ids.length > 0) ||
-              (message.citations && Array.isArray(message.citations) && message.citations.length > 0) ||
-              (citations && citations.length > 0)
-            );
-
-            return hasCitations ? (
-              <div className="px-6 py-4 border-t border-gray-200 bg-white flex justify-center flex-shrink-0" style={{ position: 'relative', zIndex: 10 }}>
-                <button
-                  onClick={async (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log('[ChatInterface] SOURCES button clicked');
-                    console.log('[ChatInterface] Current citations:', citations);
-                    console.log('[ChatInterface] Current showCitations:', showCitations);
-                    console.log('[ChatInterface] Current selectedMessageId:', selectedMessageId);
-                   
-                    const newShowState = !showCitations;
-                    setShowCitations(newShowState);
-                   
-                    if (newShowState && (!citations || citations.length === 0)) {
-                      const message = currentChatHistory.find((msg) => msg.id === selectedMessageId);
-                      console.log('[ChatInterface] Message for citations:', message);
-                      if (message && (message.used_chunk_ids?.length > 0 || message.citations?.length > 0)) {
-                        console.log('[ChatInterface] Citations should be fetched by useEffect');
-                      }
-                    }
-                  }}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ pointerEvents: 'auto', zIndex: 20 }}
-                  type="button"
-                  disabled={loadingCitations}
-                >
-                  <BookOpen className="h-4 w-4" />
-                  <span>SOURCES</span>
-                  {loadingCitations && (
-                    <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                  )}
-                  {citations && citations.length > 0 && (
-                    <span className="ml-1 text-xs bg-purple-500 px-2 py-0.5 rounded-full">
-                      {citations.length}
-                    </span>
-                  )}
-                </button>
-              </div>
-            ) : null;
-          })()}
-         
-          {shouldShowHorizontalScrollbar && (
-            <div className="px-6 pb-4 pt-2 bg-white border-t border-gray-100">
-              <div
-                ref={stickyScrollbarRef}
-                className="overflow-x-auto overflow-y-hidden bg-gray-100 border border-gray-200 rounded-lg shadow-sm"
-                style={{
-                  height: "16px",
-                  scrollbarWidth: "thin",
-                  scrollbarColor: "#9CA3AF #E5E7EB",
-                  WebkitOverflowScrolling: "touch",
-                }}
-              >
-                <div style={{ width: `${scrollbarWidth}px`, height: "1px" }} />
-              </div>
-            </div>
-          )}
-          </>
-        )}
-      </div>
-    )}
       {hasResponse && showCitations && (
           <div className="absolute" style={{ right: '16px', top: '16px', bottom: '16px', width: '380px', zIndex: 50 }}>
           <CitationsPanel
@@ -7617,6 +6773,23 @@ const ChatInterface = () => {
         }
       `}</style>
       </div>}
+
+    <BrandingDownloadModal
+      isOpen={downloadModalChatId != null}
+      onClose={() => setDownloadModalChatId(null)}
+      contentRef={pdfExportContentRef.current}
+      filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.pdf`}
+      format="pdf"
+      module="chat"
+    />
+    <BrandingDownloadModal
+      isOpen={wordModalChatId != null}
+      onClose={() => setWordModalChatId(null)}
+      contentRef={wordExportContentRef.current}
+      filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.docx`}
+      format="word"
+      module="chat"
+    />
     </div>
   );
 };

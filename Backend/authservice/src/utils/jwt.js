@@ -96,4 +96,14 @@ const verifyToken = (token) => {
   }
 };
 
-module.exports = { generateToken, verifyToken, generateUserUUID };
+// Like verifyToken but accepts expired tokens — only rejects a bad signature or malformed token.
+// Use for fire-and-forget endpoints (e.g. activity ping) so an expired session doesn't hard-fail.
+const verifyTokenLenient = (token) => {
+  try {
+    return jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+  } catch (error) {
+    return null;
+  }
+};
+
+module.exports = { generateToken, verifyToken, verifyTokenLenient, generateUserUUID };

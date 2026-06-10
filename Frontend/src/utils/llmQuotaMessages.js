@@ -2,7 +2,16 @@
  * LLM quota copy. Per-user chat limits use a rolling 24-hour window (all sessions combined).
  */
 
+import { UPGRADE_LIMIT_SHORT } from './planUpgrade';
+
 const IST_TZ = 'Asia/Kolkata';
+
+function withUpgradeHint(body) {
+  const b = String(body || '').trim();
+  if (!b) return UPGRADE_LIMIT_SHORT;
+  if (b.toLowerCase().includes('upgrade')) return b;
+  return `${b} ${UPGRADE_LIMIT_SHORT}`;
+}
 
 export function formatUtcIsoInIST(isoUtc) {
   if (!isoUtc) return '';
@@ -32,13 +41,20 @@ export function buildDailyTokenPoolExceededMessage(details) {
     details?.reset_basis === 'rolling_24h_global_tokens' ||
     details?.reset_basis === 'rolling_24h_per_user_tokens'
   ) {
-    body += ' This is a rolling window — your quota frees up as older usage ages out.';
+    body += ' This is a rolling 24-hour window.';
+    if (ist) body += ` Quota frees up by ${ist} IST.`;
   } else if (ist) {
-    body += ` Resets at ${ist} (IST).`;
+    body += ` Resets at ${ist} IST.`;
   } else {
-    body += ' Resets at the next UTC midnight.';
+    body += ' Resets at midnight IST.';
   }
-  return { title: 'Token Limit Reached', body, isLimit: true, limitType: 'tokens' };
+  return {
+    title: 'Token Limit Reached',
+    body: withUpgradeHint(body),
+    isLimit: true,
+    limitType: 'tokens',
+    showUpgrade: true,
+  };
 }
 
 export function buildDailyChatQuotaMessage(details) {
@@ -52,15 +68,23 @@ export function buildDailyChatQuotaMessage(details) {
   }
   if (details?.reset_basis === 'rolling_24h_per_user') {
     body += ' This is a rolling 24-hour window.';
+    if (ist) body += ` Quota frees up by ${ist} IST.`;
   } else if (ist) {
-    body += ` Resets at ${ist} (IST).`;
+    body += ` Resets at ${ist} IST.`;
   } else {
-    body += ' Resets at the next UTC midnight.';
+    body += ' Resets at midnight IST.';
   }
-  return { title: 'Daily Chat Limit Reached', body, isLimit: true, limitType: 'daily' };
+  return {
+    title: 'Daily Chat Limit Reached',
+    body: withUpgradeHint(body),
+    isLimit: true,
+    limitType: 'daily',
+    showUpgrade: true,
+  };
 }
 
 export function buildPerMinuteQuotaMessage(details) {
+  const ist = formatUtcIsoInIST(details?.next_reset_utc);
   const limit = details?.limit_per_minute;
   const used = details?.used_last_minute;
 
@@ -68,11 +92,22 @@ export function buildPerMinuteQuotaMessage(details) {
   if (Number.isFinite(Number(limit)) && Number.isFinite(Number(used))) {
     body += ` (${used} / ${limit} per minute.)`;
   }
-  body += ' Please wait a moment and try again.';
-  return { title: 'Slow Down a Bit', body, isLimit: true, limitType: 'minute' };
+  if (ist) {
+    body += ` Try again after ${ist} IST.`;
+  } else {
+    body += ' Please wait a moment and try again.';
+  }
+  return {
+    title: 'Slow Down a Bit',
+    body: withUpgradeHint(body),
+    isLimit: true,
+    limitType: 'minute',
+    showUpgrade: true,
+  };
 }
 
 export function buildPerHourQuotaMessage(details) {
+  const ist = formatUtcIsoInIST(details?.next_reset_utc);
   const limit = details?.limit_per_hour;
   const used = details?.used_last_hour;
 
@@ -80,8 +115,18 @@ export function buildPerHourQuotaMessage(details) {
   if (Number.isFinite(Number(limit)) && Number.isFinite(Number(used))) {
     body += ` (${used} / ${limit} messages this hour.)`;
   }
-  body += ' Please try again later.';
-  return { title: 'Hourly Limit Reached', body, isLimit: true, limitType: 'hour' };
+  if (ist) {
+    body += ` Try again after ${ist} IST.`;
+  } else {
+    body += ' Please try again in an hour.';
+  }
+  return {
+    title: 'Hourly Limit Reached',
+    body: withUpgradeHint(body),
+    isLimit: true,
+    limitType: 'hour',
+    showUpgrade: true,
+  };
 }
 
 /**
@@ -97,6 +142,22 @@ export function getChatModelQuotaUserMessage(error) {
   const code = error?.code || data.code;
   const details = error?.details ?? data.details;
 
+  if (code === 'MONTHLY_TOKEN_LIMIT_EXHAUSTED') {
+    const used = details?.tokens_used_this_month;
+    const limit = details?.monthly_token_limit;
+    let body = "You've used all your monthly token allowance across Chat, Documents, Citations, and Drafting.";
+    if (Number.isFinite(Number(used)) && Number.isFinite(Number(limit))) {
+      body += ` (${Number(used).toLocaleString()} / ${Number(limit).toLocaleString()} tokens used this billing period.)`;
+    }
+    body += ' Purchase a token top-up to continue now, upgrade your plan, or wait until your next billing date.';
+    return {
+      title: 'Monthly Token Limit Reached',
+      body,
+      isLimit: true,
+      limitType: 'tokens',
+      showUpgrade: true,
+    };
+  }
   if (code === 'DAILY_GLOBAL_TOKEN_POOL_EXHAUSTED' || code === 'RATE_LIMIT_TOTAL_TOKENS_PER_DAY') {
     return buildDailyTokenPoolExceededMessage(details);
   }
@@ -140,6 +201,11 @@ export function getLlmPolicyErrorUserText(status, body) {
       details: data.details,
     });
     if (quota?.body) return quota.body;
+    // Check for upload-policy error codes and return a plan-context message
+    if (data.code) {
+      const uploadMsg = formatUploadPolicyError(data.code, data.details || {});
+      if (uploadMsg) return uploadMsg;
+    }
     if (typeof data.message === 'string' && data.message.trim()) return data.message.trim();
     if (typeof data.error === 'string' && data.error.trim()) return data.error.trim();
   }
@@ -192,7 +258,13 @@ export function parseLlmPolicyErrorForUi(status, body) {
   if (!text) text = `Something went wrong (${status}).`;
 
   if (status === 429) {
-    return { title: 'Usage limit', body: text, isLimit: true, limitType: 'minute' };
+    return {
+      title: 'Usage limit',
+      body: withUpgradeHint(text),
+      isLimit: true,
+      limitType: 'minute',
+      showUpgrade: true,
+    };
   }
   return stringToChatErrorDisplay(text);
 }
@@ -204,15 +276,22 @@ export function parseLlmPolicyErrorForUi(status, body) {
 export function coerceChatErrorDisplay(input) {
   if (input == null) return null;
   if (typeof input === 'object' && input.body != null && input.title != null) {
+    const isLimit = !!input.isLimit;
     return {
       title: String(input.title),
       body: String(input.body),
-      isLimit: !!input.isLimit,
+      isLimit,
       limitType: input.limitType || 'unknown',
+      showUpgrade: input.showUpgrade ?? isLimit,
     };
   }
   if (typeof input === 'string') {
     return stringToChatErrorDisplay(input);
+  }
+  const quota = getChatModelQuotaUserMessage(input);
+  if (quota) return quota;
+  if (typeof input === 'object' && typeof input.message === 'string' && input.message.trim()) {
+    return stringToChatErrorDisplay(input.message.trim());
   }
   return stringToChatErrorDisplay(String(input));
 }
@@ -222,6 +301,103 @@ function _unwrapErrorBody(body) {
     return body.detail;
   }
   return body || {};
+}
+
+/**
+ * Translate upload-policy error codes into a user-friendly message that explains
+ * the plan limit.
+ *
+ * @param {string} code   - e.g. "DOCUMENT_TOO_MANY_PAGES"
+ * @param {object} details - the `details` object from the policy error payload
+ * @param {string} [planName] - optional plan display name (e.g. "Free", "Pro")
+ * @returns {string|null} formatted string, or null if code is unknown
+ */
+export function formatUploadPolicyError(code, details = {}, planName) {
+  const name = planName || details?.plan_name || null;
+  const plan = name ? `Your ${name} plan allows` : 'Your plan allows';
+
+  switch (code) {
+    case 'DOCUMENT_TOO_MANY_PAGES': {
+      const pages = details?.pages;
+      const max = details?.max_pages;
+      if (max != null && pages != null) {
+        return `${plan} a maximum of ${max} pages per document. This document has ${pages} pages — please upload a shorter file or upgrade your plan.`;
+      }
+      if (max != null) {
+        return `${plan} a maximum of ${max} pages per document. Please upload a shorter file.`;
+      }
+      return 'This document exceeds the page limit for your plan. Please upload a shorter file.';
+    }
+    case 'FILE_TOO_LARGE': {
+      const maxMb = details?.max_mb;
+      const sizeBytes = details?.size_bytes;
+      const sizeMb = sizeBytes ? (sizeBytes / (1024 * 1024)).toFixed(1) : null;
+      if (maxMb != null && sizeMb != null) {
+        return `${plan} a maximum file size of ${maxMb} MB. This file is ${sizeMb} MB — please upload a smaller file.`;
+      }
+      if (maxMb != null) {
+        return `${plan} a maximum file size of ${maxMb} MB. Please upload a smaller file.`;
+      }
+      return 'This file exceeds the size limit for your plan. Please upload a smaller file.';
+    }
+    case 'DAILY_UPLOAD_LIMIT': {
+      const limit = details?.limit_per_24h;
+      const used = details?.used_last_24h;
+      if (limit != null && used != null) {
+        return `${plan} ${limit} file uploads per day. You have used ${used} of ${limit} today — please try again tomorrow or upgrade your plan.`;
+      }
+      if (limit != null) {
+        return `${plan} ${limit} file uploads per day. Daily limit reached — please try again tomorrow.`;
+      }
+      return 'You have reached your daily upload limit. Please try again tomorrow or upgrade your plan.';
+    }
+    case 'MAX_UPLOAD_FILES_EXCEEDED': {
+      const max = details?.max_upload_files;
+      if (max != null) {
+        return `${plan} a maximum of ${max} file(s) per upload request. Please upload fewer files at a time.`;
+      }
+      return 'Too many files in one upload. Please upload fewer files at a time.';
+    }
+    case 'PDF_INVALID':
+      return 'This PDF could not be read. Please check the file and try again.';
+    case 'AUDIO_FILE_TOO_LARGE': {
+      const maxMb = details?.max_mb;
+      if (maxMb != null) {
+        return `${plan} a maximum audio file size of ${maxMb} MB. Please upload a smaller audio file.`;
+      }
+      return 'This audio file exceeds the size limit for your plan.';
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Extract and format an upload policy error from an axios error response.
+ * Returns a user-friendly string, or null if the error is not an upload policy error.
+ *
+ * @param {object} err - axios error (err.response.data contains the payload)
+ * @param {string} [planName] - optional plan display name
+ * @returns {string|null}
+ */
+export function extractUploadPolicyErrorMessage(err, planName) {
+  const data = err?.response?.data;
+  const detail = (data?.detail && typeof data.detail === 'object') ? data.detail : data;
+  if (!detail || typeof detail !== 'object') return null;
+
+  const code = detail?.code;
+  const details = detail?.details;
+
+  if (!code) return null;
+
+  const formatted = formatUploadPolicyError(code, details || {}, planName);
+  if (formatted) return formatted;
+
+  // Fallback: return the raw server message if code is unrecognised but present
+  if (typeof detail?.message === 'string' && detail.message.trim()) {
+    return detail.message.trim();
+  }
+  return null;
 }
 
 /**

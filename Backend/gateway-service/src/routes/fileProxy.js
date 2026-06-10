@@ -58,7 +58,10 @@ router.use(
       if (req.headers.authorization) {
         proxyReq.setHeader("Authorization", req.headers.authorization);
       }
-      console.log(`[Gateway] Proxying secrets to ChatModel: ${proxyReq.path}`);
+      if (req.headers["x-user-plan-id"]) {
+        proxyReq.setHeader("x-user-plan-id", req.headers["x-user-plan-id"]);
+      }
+      console.log(`[Gateway] Proxying secrets to ChatModel: ${proxyReq.path} (plan=${req.headers["x-user-plan-id"] ?? "none"})`);
     },
     proxyTimeout: 30000,
     timeout: 30000,

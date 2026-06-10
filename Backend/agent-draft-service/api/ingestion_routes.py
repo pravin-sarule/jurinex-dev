@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from api.deps import require_user_id
 from api.orchestrator_helpers import get_orchestrator
+from services.storage_policy import assert_storage_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,18 @@ async def orchestrate_upload(
     if not content:
         raise HTTPException(status_code=400, detail="File is empty")
 
+    # Storage quota check — must pass before ingesting into the system
+    storage_check = assert_storage_allowed(user_id, len(content))
+    if not storage_check.get("ok"):
+        raise HTTPException(
+            status_code=507,
+            detail={
+                "code":    storage_check.get("code", "STORAGE_LIMIT_EXCEEDED"),
+                "message": storage_check.get("message", "Your storage is full. Please delete files or upgrade your plan."),
+                "details": storage_check.get("details", {}),
+            },
+        )
+
     upload_payload: Dict[str, Any] = {
         "user_id": str(user_id),
         "file_content": base64.b64encode(content).decode("utf-8"),
@@ -280,14 +293,34 @@ async def orchestrate_upload_multiple(
     if not draft_id_val:
         raise HTTPException(status_code=400, detail="draft_id is required for multi-document upload")
 
-    payloads: List[Dict[str, Any]] = []
+    # Read all files first so we can calculate total size for quota check
+    file_contents: List[tuple] = []
     for file in files:
         try:
             content = await file.read()
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to read file {file.filename or '?'}: {e}") from e
-        if not content:
-            continue
+        if content:
+            file_contents.append((file, content))
+
+    if not file_contents:
+        raise HTTPException(status_code=400, detail="No valid file content to upload")
+
+    # Storage quota check — total size of all files combined
+    total_size = sum(len(c) for _, c in file_contents)
+    storage_check = assert_storage_allowed(user_id, total_size)
+    if not storage_check.get("ok"):
+        raise HTTPException(
+            status_code=507,
+            detail={
+                "code":    storage_check.get("code", "STORAGE_LIMIT_EXCEEDED"),
+                "message": storage_check.get("message", "Your storage is full. Please delete files or upgrade your plan."),
+                "details": storage_check.get("details", {}),
+            },
+        )
+
+    payloads: List[Dict[str, Any]] = []
+    for file, content in file_contents:
         upload_payload: Dict[str, Any] = {
             "user_id": str(user_id),
             "file_content": base64.b64encode(content).decode("utf-8"),
@@ -302,9 +335,6 @@ async def orchestrate_upload_multiple(
         if template_id and template_id.strip():
             upload_payload["template_id"] = template_id.strip()
         payloads.append(upload_payload)
-
-    if not payloads:
-        raise HTTPException(status_code=400, detail="No valid file content to upload")
 
     try:
         result = enqueue_draft_job(

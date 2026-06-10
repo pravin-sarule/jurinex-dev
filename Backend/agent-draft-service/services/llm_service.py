@@ -25,6 +25,32 @@ _gemini_max_retry_attempts = max(0, int(os.environ.get("GEMINI_MAX_RETRY_ATTEMPT
 _gemini_retry_backoff_seconds = max(1, int(os.environ.get("GEMINI_RETRY_INITIAL_BACKOFF_SECONDS", "2")))
 _gemini_fallback_models_csv = os.environ.get("GEMINI_FALLBACK_MODELS", "").strip()
 
+
+def _record_shared_pool_usage(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    endpoint: str,
+) -> None:
+    try:
+        from services.request_context import current_user_id
+        from services.daily_limit_guard import log_llm_usage
+
+        uid = current_user_id.get()
+        if not uid:
+            return
+        if input_tokens <= 0 and output_tokens <= 0:
+            return
+        log_llm_usage(
+            user_id=uid,
+            model_name=(model or "unknown").strip() or "unknown",
+            input_tokens=max(0, int(input_tokens)),
+            output_tokens=max(0, int(output_tokens)),
+            endpoint=endpoint,
+        )
+    except Exception as exc:
+        logger.debug("[LLM] shared pool usage log skipped: %s", exc)
+
 def call_llm(
     prompt: str,
     system_prompt: str = "",
@@ -63,12 +89,13 @@ def _call_claude(prompt: str, system_prompt: str, model: str, temperature: float
         f"{len(system_prompt)} chars" if system_prompt else "none",
     )
     from services.claude_client import complete as claude_complete
-    return claude_complete(
+    text = claude_complete(
         system_prompt=system_prompt,
         user_message=prompt,
         model=api_model,
         temperature=temperature,
     )
+    return text
 
 def _call_gemini(
     prompt: str,
@@ -140,6 +167,10 @@ def _call_gemini(
                         return ""
                     if active_model != model:
                         logger.info("[LLM] Gemini fallback model succeeded: %r -> %r", model, active_model)
+                    usage_meta = getattr(response, "usage_metadata", None)
+                    ti = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
+                    to = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
+                    _record_shared_pool_usage(active_model, ti, to, "agent-draft:generate")
                     return response.text
                 except Exception as e:
                     last_error = e

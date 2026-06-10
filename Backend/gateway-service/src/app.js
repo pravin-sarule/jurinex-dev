@@ -147,6 +147,12 @@ app.use(["/api/auth", "/api/rbac"], express.json({ limit: '10mb' }), async (req,
     const response = await axios(axiosConfig);
     res.status(response.status).json(response.data);
   } catch (error) {
+    const isPing = authPath.includes('/activity/ping');
+    if (isPing && error.response?.status && error.response.status < 500) {
+      // Ping is fire-and-forget — a 4xx (expired token, not found) is not worth an error log
+      console.log(`[Gateway] Ping silenced (${error.response.status}): ${authPath}`);
+      return res.status(200).json({ success: true, silenced: true });
+    }
     console.error(`[Gateway] Auth forwarder error (${req.method} ${authPath}):`, error.message);
     if (error.response) {
       return res.status(error.response.status).json(error.response.data);

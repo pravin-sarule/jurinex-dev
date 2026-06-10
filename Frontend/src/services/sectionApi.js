@@ -4,6 +4,7 @@
  */
 
 import { AGENT_DRAFT_TEMPLATE_API } from '../config/apiConfig';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 
 const API_URL = AGENT_DRAFT_TEMPLATE_API;
 
@@ -48,8 +49,7 @@ export const generateSection = async (
   );
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || 'Failed to generate section');
+    await throwIfQuotaResponse(response, 'Failed to generate section');
   }
 
   return response.json();
@@ -102,8 +102,7 @@ export const refineSection = async (
   );
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || 'Failed to refine section');
+    await throwIfQuotaResponse(response, 'Failed to refine section');
   }
 
   return response.json();

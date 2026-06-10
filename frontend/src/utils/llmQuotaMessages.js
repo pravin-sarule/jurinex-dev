@@ -142,6 +142,22 @@ export function getChatModelQuotaUserMessage(error) {
   const code = error?.code || data.code;
   const details = error?.details ?? data.details;
 
+  if (code === 'MONTHLY_TOKEN_LIMIT_EXHAUSTED') {
+    const used = details?.tokens_used_this_month;
+    const limit = details?.monthly_token_limit;
+    let body = "You've used all your monthly token allowance across Chat, Documents, Citations, and Drafting.";
+    if (Number.isFinite(Number(used)) && Number.isFinite(Number(limit))) {
+      body += ` (${Number(used).toLocaleString()} / ${Number(limit).toLocaleString()} tokens used this billing period.)`;
+    }
+    body += ' Purchase a token top-up to continue now, upgrade your plan, or wait until your next billing date.';
+    return {
+      title: 'Monthly Token Limit Reached',
+      body,
+      isLimit: true,
+      limitType: 'tokens',
+      showUpgrade: true,
+    };
+  }
   if (code === 'DAILY_GLOBAL_TOKEN_POOL_EXHAUSTED' || code === 'RATE_LIMIT_TOTAL_TOKENS_PER_DAY') {
     return buildDailyTokenPoolExceededMessage(details);
   }
@@ -271,6 +287,11 @@ export function coerceChatErrorDisplay(input) {
   }
   if (typeof input === 'string') {
     return stringToChatErrorDisplay(input);
+  }
+  const quota = getChatModelQuotaUserMessage(input);
+  if (quota) return quota;
+  if (typeof input === 'object' && typeof input.message === 'string' && input.message.trim()) {
+    return stringToChatErrorDisplay(input.message.trim());
   }
   return stringToChatErrorDisplay(String(input));
 }

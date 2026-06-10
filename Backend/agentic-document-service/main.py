@@ -16,9 +16,11 @@ from app.api.routes.health import router as health_router
 from app.api.routes.rbac import router as rbac_router
 from app.api.routes.branding import router as branding_router
 from app.api.routes.summarization_config_admin import router as summarization_config_admin_router
+from app.api.routes.batch import router as batch_router
 from app.core.config import BASE_DIR, get_settings
 from app.core.logging import configure_logging
 from app.middleware.llm_chat_policy import LLMChatPolicyMiddleware
+from app.middleware.payment_token_guard import PaymentTokenGuardMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ def create_app() -> FastAPI:
         logger.exception("[GlobalHandler] Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
         return _cors_error_response(request, 500, "Internal server error")
 
+    app.add_middleware(PaymentTokenGuardMiddleware)
     app.add_middleware(LLMChatPolicyMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -87,6 +90,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router)
+    app.include_router(batch_router)
     app.include_router(branding_router)
     app.include_router(summarization_config_admin_router)
     app.include_router(speech_router)
@@ -153,4 +157,5 @@ if __name__ == "__main__":
         host=settings.host,
         port=settings.port,
         reload=settings.environment.lower() == "development",
+        log_config=None,   # prevent uvicorn from overwriting our TabularFormatter
     )

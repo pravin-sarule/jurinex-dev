@@ -5,7 +5,7 @@
  * Environment variables are supported with sensible defaults.
  */
 
-const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
+const DEFAULT_GATEWAY_URL = 'http://localhost:5000';
 
 // Get base gateway URL from environment or use deployed default
 const GATEWAY_URL =
@@ -35,10 +35,33 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'https://authservice-120280829617.asia-south1.run.app';
+  'http://localhost:5001';
+
+const IS_LOCAL_DEV_HOST =
+  typeof window !== 'undefined' &&
+  ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
+/** Python ADK agentic chat service (replaces legacy Node ChatModel when set). */
+const DEFAULT_AGENTIC_CHAT_HOST =
+  'http://localhost:8096';
+
+const rawAgenticChat =
+  import.meta.env.VITE_APP_AGENTIC_CHAT_SERVICE_URL ||
+  import.meta.env.VITE_AGENTIC_CHAT_SERVICE_URL ||
+  '';
+
+function agenticChatHost() {
+  const s = String(rawAgenticChat || '').trim().replace(/\/$/, '');
+  if (s) return s;
+  if (IS_LOCAL_DEV_HOST) return '';
+  return DEFAULT_AGENTIC_CHAT_HOST;
+}
+
+export const AGENTIC_CHAT_SERVICE_URL = agenticChatHost();
+
 export const CHAT_MODEL_BASE_URL =
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
-  'https://chat-model-120280829617.asia-south1.run.app';
+  AGENTIC_CHAT_SERVICE_URL;
 
 /** Secret prompts list/detail via gateway file proxy (`/files/secrets`). */
 export const SECRET_PROMPTS_API_BASE =
@@ -54,8 +77,9 @@ export const VISUAL_SERVICE_URL =
 
 /**
  * Agentic document service (Python, port 8092).
- * If unset, cases/docs default directly to the standalone agentic service.
- * Set e.g. VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL=https://.../api/files for a custom host.
+ * Local dev: run Backend/agentic-document-service/start.ps1 (port 8092).
+ * Port 8095 is AI Chatbot — do not start this service on 8095.
+ * Set VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL for a custom host.
  */
 const DEFAULT_AGENTIC_DOCUMENT_HOST =
   'https://agentic-document-service-120280829617.asia-south1.run.app';
@@ -79,24 +103,20 @@ export const FILES_SERVICE_URL = `${GATEWAY_URL}/api/files`;
 export const CONTENT_SERVICE_URL = `${GATEWAY_URL}/api/content`;
 export const MINDMAP_SERVICE_URL = `${GATEWAY_URL}/api/mindmap`;
 export const USER_RESOURCES_SERVICE_URL = `${GATEWAY_URL}/user-resources`;
-export const CHAT_SERVICE_URL = CHAT_MODEL_BASE_URL;
-
-const IS_LOCAL_DEV_HOST =
-  typeof window !== 'undefined' &&
-  ['localhost', '127.0.0.1'].includes(window.location.hostname);
+export const CHAT_SERVICE_URL = AGENTIC_CHAT_SERVICE_URL;
 
 // Citation service (direct FastAPI service)
 export const CITATION_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_SERVICE_URL ||
   (IS_LOCAL_DEV_HOST
-    ? 'http://localhost:8001'
+    ? 'http://localhost:8002'
     : 'https://citation-service-120280829617.asia-south1.run.app');
 
 // Citation service v1 — Google ADK + Claude + Serper pipeline (port 8002 local)
 export const CITATION_V1_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_V1_SERVICE_URL ||
   (IS_LOCAL_DEV_HOST
-    ? 'http://localhost:8002'
+    ? 'http://localhost:8003'
     : 'https://citation-service-v1-120280829617.asia-south1.run.app');
 
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
@@ -161,6 +181,8 @@ export const FILES_BASE_URL = `${GATEWAY_URL}/files`;
 
 export const DOCUMENT_SERVICE_DIRECT = DOCUMENT_SERVICE_URL;
 export const AGENTIC_DOCUMENT_SERVICE_URL = DOCUMENT_SERVICE_DIRECT;
+/** Google Cloud STT for mic input (not LLM). POST multipart audio to transcribe. */
+export const SPEECH_TRANSCRIBE_URL = `${DOCUMENT_SERVICE_DIRECT}/api/v1/speech/transcribe`;
 export const CONTENT_SERVICE_DIRECT = `${DOCUMENT_SERVICE_DIRECT}/api/content`;
 
 // Export default object for convenience
@@ -169,6 +191,8 @@ const apiConfig = {
   API_BASE_URL,
   GATEWAY_BASE_URL,
   CHAT_MODEL_BASE_URL,
+  AGENTIC_CHAT_SERVICE_URL,
+  CHAT_SERVICE_URL,
   SECRET_PROMPTS_API_BASE,
   AGENT_DRAFT_TEMPLATE_API,
   CHAT_DRAFT_BACKEND_URL,

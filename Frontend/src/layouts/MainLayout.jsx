@@ -2,35 +2,40 @@ import React, { useEffect } from 'react';
 import Sidebar from '../components/Sidebar';
 import MainContent from '../components/MainContent';
 import AppAssistant from '../components/AppAssistant/AppAssistant';
+import TokenExhaustionBanner from '../components/TokenExhaustionBanner';
 import { useSidebar } from '../context/SidebarContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
+import { useTokenQuota } from '../context/TokenQuotaContext';
 
 const MainLayout = ({ children, useNoPadding = false }) => {
   const { isSidebarHidden, setIsSidebarHidden } = useSidebar();
   const { isAuthenticated, loading } = useAuth();
+  const { quotaStatus, onTopupSuccess } = useTokenQuota();
+
   const pageTitle = children.type?.name?.replace('Page', '') || 'Drafting';
   const pageSubtitle = `This is the ${pageTitle} page.`;
 
-  // Force sidebar to be visible when user is authenticated
   useEffect(() => {
     if (isAuthenticated && !loading) {
-      console.log('MainLayout: User authenticated, forcing sidebar to be visible');
       setIsSidebarHidden(false);
     }
   }, [isAuthenticated, loading, setIsSidebarHidden]);
 
-  // Always show sidebar when authenticated
   const shouldShowSidebar = isAuthenticated && !loading;
 
-  console.log('MainLayout render:', { isAuthenticated, loading, shouldShowSidebar, isSidebarHidden });
-
   return (
-    <div className="flex h-screen overflow-hidden">
-      {shouldShowSidebar && <Sidebar />}
-      <MainContent pageTitle={pageTitle} pageSubtitle={pageSubtitle} noPadding={useNoPadding}>
-        {children}
-      </MainContent>
-      {shouldShowSidebar && <AppAssistant />}
+    <div className="flex flex-col h-screen overflow-hidden">
+      {/* Banner sits at the top of the column — pushes sidebar+content down naturally */}
+      <TokenExhaustionBanner quotaStatus={quotaStatus} onTopupSuccess={onTopupSuccess} />
+
+      {/* Sidebar + main content row fills the remaining height */}
+      <div className="flex flex-row flex-1 min-h-0 overflow-hidden">
+        {shouldShowSidebar && <Sidebar />}
+        <MainContent pageTitle={pageTitle} pageSubtitle={pageSubtitle} noPadding={useNoPadding}>
+          {children}
+        </MainContent>
+        {shouldShowSidebar && <AppAssistant />}
+      </div>
     </div>
   );
 };

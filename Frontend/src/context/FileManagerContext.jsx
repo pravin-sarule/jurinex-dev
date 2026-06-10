@@ -36,7 +36,15 @@ export const FileManagerProvider = ({ children }) => {
       setFolders(data.folders || []);
     } catch (err) {
       console.error('Error loading folders and files:', err);
-      setError(`Error loading folders and files: ${err.message}`);
+      const isNetwork =
+        err.message === 'Network Error' ||
+        err.code === 'ERR_NETWORK' ||
+        err.code === 'ECONNREFUSED';
+      setError(
+        isNetwork
+          ? 'Cannot reach the document service. Start it on port 8092: Backend/agentic-document-service/start.ps1'
+          : `Error loading folders and files: ${err.message}`
+      );
       setFolders([]);
       setDocuments([]);
     } finally {

@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
+    deepseek_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("DEEPSEEK_API_KEY", "Deepseek_API_KEY"),
+    )
     cloud_speech_to_text_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("CLOUD_SPEECH_TO_TEXT_API_KEY"),
@@ -194,6 +198,10 @@ class Settings(BaseSettings):
     default_max_file_upload_per_day: int = Field(default=15, validation_alias=AliasChoices("DEFAULT_MAX_FILE_UPLOAD_PER_DAY"))
     default_max_context_documents: int = Field(default=8, validation_alias=AliasChoices("DEFAULT_MAX_CONTEXT_DOCUMENTS"))
     default_max_conversation_history: int = Field(default=25, validation_alias=AliasChoices("DEFAULT_MAX_CONVERSATION_HISTORY"))
+    default_max_output_tokens: int = Field(
+        default=65536,
+        validation_alias=AliasChoices("DEFAULT_MAX_OUTPUT_TOKENS"),
+    )
 
     # 0 = always read latest summarization_chat_config from DB (recommended when admins edit often).
     summarization_chat_config_cache_seconds: float = Field(

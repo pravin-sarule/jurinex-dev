@@ -353,6 +353,83 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Token limit guard (payment-service) ───────────────────────────────────────
+_CITATION_LLM_POST_PREFIXES = (
+    "/citation/report",
+    "/citation/build-report",
+    "/citation/report/start",
+    "/citation/suggest-keywords",
+    "/api/claude",
+)
+
+def _quota_cors_headers(request: Request) -> dict:
+    """Return CORS headers for short-circuit quota responses.
+
+    The CORSMiddleware is inner to this middleware, so it never sees responses
+    returned directly here. We must add the headers manually so the browser can
+    read the 429/503 body instead of throwing 'Failed to fetch'.
+    """
+    origin = request.headers.get("origin", "")
+    allowed = [o.strip() for o in CORS_ORIGINS if o.strip()]
+    if origin and (origin in allowed or "*" in allowed):
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    return {}
+
+
+@app.middleware("http")
+async def payment_token_limit_middleware(request: Request, call_next):
+    path = request.url.path
+    if request.method == "POST" and any(path.startswith(p) for p in _CITATION_LLM_POST_PREFIXES):
+        try:
+            from services.payment_token_guard import (
+                check_token_availability,
+                extract_user_id_from_request,
+                quota_block_body,
+                quota_block_status,
+            )
+            uid = extract_user_id_from_request(request)
+            if not uid:
+                payload = _decode_jwt(request)
+                uid = payload.get("id") or payload.get("userId") or payload.get("sub")
+            if uid:
+                result = check_token_availability(
+                    uid,
+                    endpoint=path,
+                    service="citation-service",
+                )
+                if not result.get("ok"):
+                    import json
+                    from starlette.responses import Response
+                    body = json.dumps(quota_block_body(result))
+                    return Response(
+                        content=body,
+                        status_code=quota_block_status(result),
+                        media_type="application/json",
+                        headers=_quota_cors_headers(request),
+                    )
+        except Exception as exc:
+            logger.warning("[PaymentTokenLimit] middleware error: %s", exc)
+            if os.environ.get("TOKEN_CHECK_FAIL_OPEN", "false").lower() != "true":
+                import json
+                from starlette.responses import Response
+                body = json.dumps({
+                    "success": False,
+                    "code": "TOKEN_CHECK_UNAVAILABLE",
+                    "message": "Unable to verify token availability.",
+                })
+                return Response(
+                    content=body,
+                    status_code=503,
+                    media_type="application/json",
+                    headers=_quota_cors_headers(request),
+                )
+    return await call_next(request)
+
 
 async def _fetch_case_context(case_id: str, auth_header: Optional[str]):
     """

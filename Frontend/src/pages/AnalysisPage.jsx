@@ -1,5 +1,8 @@
 import '../styles/AnalysisPage.css';
+import PromptChipsBar from '../components/PromptChipsBar';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import { FileManagerContext } from '../context/FileManagerContext';
@@ -18,7 +21,14 @@ import UploadOptionsMenu from '../components/UploadOptionsMenu';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { formatFileSize } from '../utils/planUtils';
-import { getLlmPolicyErrorUserText } from '../utils/llmQuotaMessages';
+import {
+  getChatModelQuotaUserMessage,
+  getLlmPolicyErrorUserText,
+  parseLlmPolicyErrorForUi,
+} from '../utils/llmQuotaMessages';
+import ChatQuotaErrorModal from '../components/ChatQuotaErrorModal';
+import { useTokenQuota } from '../context/TokenQuotaContext';
+import UpgradePlanBanner from '../components/UpgradePlanBanner';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
 import {
@@ -201,7 +211,7 @@ const RealTimeProgressPanel = ({ processingStatus }) => {
           <div className="text-center">
             <AlertTriangle className="h-10 w-10 text-red-500 mx-auto mb-3 animate-pulse" />
             <p className="text-red-700 text-xs mb-3 font-medium">
-              {processingStatus.job_error || 'An error occurred during processing'}
+              {(typeof processingStatus.job_error === 'string' ? processingStatus.job_error : null) || 'An error occurred during processing'}
             </p>
             <p className="text-xs text-gray-500">Last updated: {formatDate(processingStatus.last_updated)}</p>
           </div>
@@ -297,6 +307,7 @@ const AnalysisPage = () => {
   const navigate = useNavigate();
 
   const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError } = useLlmChatLimits();
+  const { showQuotaError } = useTokenQuota();
 
   // Get the currently selected case folder so uploads land in the right place
   const { selectedFolder, setDocuments, loadFoldersAndFiles } = React.useContext(FileManagerContext) || {};
@@ -543,21 +554,32 @@ const AnalysisPage = () => {
         } catch {
           errorData = { error: `HTTP error! status: ${response.status}` };
         }
+        const serverMsg = (errorData.detail && typeof errorData.detail === 'object'
+          ? errorData.detail.message
+          : typeof errorData.detail === 'string' ? errorData.detail : null)
+          || errorData.message || errorData.error || null;
         switch (response.status) {
           case 401:
             throw new Error('Authentication required. Please log in again.');
           case 403:
-            throw new Error(errorData.error || 'Access denied.');
+            throw new Error(serverMsg || 'Access denied.');
           case 404:
             throw new Error('Resource not found.');
           case 413:
-            throw new Error('File too large.');
+            throw new Error(serverMsg || 'File too large or exceeds page limit.');
           case 415:
             throw new Error('Unsupported file type.');
-          case 429:
-            throw new Error(getLlmPolicyErrorUserText(429, errorData));
+          case 429: {
+            const quotaDisplay = parseLlmPolicyErrorForUi(429, errorData);
+            const err = new Error(quotaDisplay.body);
+            err.quotaDisplay = quotaDisplay;
+            err.code = errorData?.detail?.code || errorData?.code;
+            err.isQuotaError = true;
+            err.details = errorData?.detail?.details || errorData?.details || {};
+            throw err;
+          }
           default:
-            throw new Error(errorData.error || errorData.message || `Request failed with status ${response.status}`);
+            throw new Error(serverMsg || `Request failed with status ${response.status}`);
         }
       }
       const contentType = response.headers.get('content-type');
@@ -570,22 +592,13 @@ const AnalysisPage = () => {
     }
   };
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, {
-        method: 'GET',
-        headers,
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secrets: ${response.status}`);
-      }
-      const secretsData = await response.json();
-      console.log('[fetchSecrets] Raw secrets data:', secretsData);
+      const secretsData = await fetchSecretsList();
       setSecrets(secretsData || []);
       setActiveDropdown('Custom Query');
       setSelectedSecretId(null);
@@ -713,7 +726,7 @@ const AnalysisPage = () => {
         setSuccess('Document processing completed!');
       } else if (data.status === 'error') {
         console.error(`[getProcessingStatus] File ${file_id} processing failed:`, data.job_error);
-        setError(data.job_error || `Document processing failed for ${data.filename}`);
+        setError((typeof data.job_error === 'string' ? data.job_error : null) || `Document processing failed for ${data.filename}`);
         if (batchPollingIntervalsRef.current[file_id]) {
           clearInterval(batchPollingIntervalsRef.current[file_id]);
           delete batchPollingIntervalsRef.current[file_id];
@@ -1480,6 +1493,14 @@ const AnalysisPage = () => {
       });
 
       if (!response.ok) {
+        let errorData = {};
+        try { errorData = await response.json(); } catch {}
+        if (response.status === 429 || response.status === 503) {
+          const quotaDisplay = parseLlmPolicyErrorForUi(response.status, errorData);
+          const err = new Error(quotaDisplay.body);
+          err.quotaDisplay = quotaDisplay;
+          throw err;
+        }
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
@@ -1492,7 +1513,7 @@ const AnalysisPage = () => {
 
       while (true) {
         const { done, value } = await reader.read();
-        
+
         if (done) {
           if (isStopped) {
             setIsLoading(false);
@@ -1678,7 +1699,21 @@ const AnalysisPage = () => {
               }
               setIsLoading(false);
             } else if (parsed.type === 'error') {
-              setError(parsed.error);
+              const errMsg = parsed.error;
+              const quota =
+                errMsg && typeof errMsg === 'object'
+                  ? getChatModelQuotaUserMessage({
+                      code: errMsg.code,
+                      details: errMsg.details,
+                      response: { data: errMsg },
+                    })
+                  : null;
+              setError(
+                quota ||
+                  (typeof errMsg === 'string'
+                    ? errMsg
+                    : errMsg?.message || errMsg?.detail || JSON.stringify(errMsg) || 'An error occurred')
+              );
               setIsLoading(false);
             }
           } catch (e) {
@@ -1699,6 +1734,8 @@ const AnalysisPage = () => {
             }
           }
         }
+      } else if (error?.isQuotaError || error?.quotaDisplay) {
+        if (!showQuotaError(error)) setError(error.quotaDisplay || error);
       } else {
         setError(`Chat failed: ${error.message}`);
       }
@@ -1887,44 +1924,19 @@ const AnalysisPage = () => {
   };
 
   const handleDropdownSelect = (secretName, secretId, llmName) => {
-    console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
-    setActiveDropdown(secretName);
-    setSelectedSecretId(secretId);
-    setSelectedLlmName(llmName);
-    setIsSecretPromptSelected(true);
-    setChatInput('');
-    setShowDropdown(false);
-    
-    const messagesForThisPrompt = messages.filter(
-      (msg) => msg.used_secret_prompt && msg.secret_id === secretId && msg.file_id === fileId
+    if (isLoading || isGeneratingInsights) return;
+    flushSync(() => {
+      setActiveDropdown(secretName);
+      setSelectedSecretId(secretId);
+      setSelectedLlmName(llmName);
+      setIsSecretPromptSelected(true);
+      setChatInput('');
+      setShowDropdown(false);
+    });
+    void handleSend(
+      { preventDefault: () => {} },
+      { secretId, llmName, secretName }
     );
-    
-    const messageForThisPrompt = messagesForThisPrompt.length > 0
-      ? messagesForThisPrompt.sort((a, b) => {
-          const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
-          const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
-          return timeB - timeA;
-        })[0]
-      : null;
-    
-    if (messageForThisPrompt) {
-      setSelectedMessageId(messageForThisPrompt.id);
-      const rawAnswer = messageForThisPrompt.answer || messageForThisPrompt.response || '';
-      const isStructured = messageForThisPrompt.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-      const responseToDisplay = isStructured
-        ? renderSecretPromptResponse(rawAnswer)
-        : convertJsonToPlainText(rawAnswer);
-      setCurrentResponse(responseToDisplay);
-      setAnimatedResponseContent(responseToDisplay);
-      setHasResponse(true);
-    } else {
-      setCurrentResponse('');
-      setAnimatedResponseContent('');
-      setSelectedMessageId(null);
-      streamBufferRef.current = '';
-      setIsAnimatingResponse(false);
-      setHasResponse(false);
-    }
   };
 
   const handleStyleSelect = (style) => {
@@ -1945,8 +1957,12 @@ const AnalysisPage = () => {
     }
   };
 
-  const handleSend = async (e) => {
-    e.preventDefault();
+  const handleSend = async (e, secretOverride = null) => {
+    if (e?.preventDefault) e.preventDefault();
+
+    const secretPromptMode = Boolean(secretOverride?.secretId) || isSecretPromptSelected;
+    const effectiveSecretId = secretOverride?.secretId ?? selectedSecretId;
+    const effectiveLlmName = secretOverride?.llmName ?? selectedLlmName;
 
     const hasFile = Boolean(fileId);
     const currentStatus = processingStatus?.status;
@@ -1960,7 +1976,7 @@ const AnalysisPage = () => {
     const isProcessingComplete =
       !currentStatus || currentStatus === 'processed' || currentProgress >= 100;
 
-    if (isSecretPromptSelected) {
+    if (secretPromptMode) {
       if (!hasFile && !activeFolderName) {
         setError('Please upload a document or select a case folder before running an analysis prompt.');
         return;
@@ -1975,16 +1991,16 @@ const AnalysisPage = () => {
           return;
         }
       }
-      if (!selectedSecretId) {
+      if (!effectiveSecretId) {
         setError('Please select an analysis type.');
         return;
       }
-      const selectedSecret = secrets.find((s) => s.id === selectedSecretId);
-      const promptLabel = selectedSecret?.name || 'Secret Prompt';
+      const selectedSecret = secrets.find((s) => s.id === effectiveSecretId);
+      const promptLabel = secretOverride?.secretName || selectedSecret?.name || 'Secret Prompt';
       
-      const currentSecretId = selectedSecretId;
+      const currentSecretId = effectiveSecretId;
       const currentPromptLabel = promptLabel;
-      const currentLlmName = selectedLlmName;
+      const currentLlmName = effectiveLlmName;
       
       const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       currentRequestIdRef.current = requestId;
@@ -2085,6 +2101,14 @@ const AnalysisPage = () => {
         });
 
         if (!response.ok) {
+          let errorData = {};
+          try { errorData = await response.json(); } catch {}
+          if (response.status === 429 || response.status === 503) {
+            const quotaDisplay = parseLlmPolicyErrorForUi(response.status, errorData);
+            const err = new Error(quotaDisplay.body);
+            err.quotaDisplay = quotaDisplay;
+            throw err;
+          }
           throw new Error(`HTTP error! status: ${response.status}`);
         }
 
@@ -2309,7 +2333,21 @@ const AnalysisPage = () => {
                 animateResponse(responseToDisplay, true);
                 setIsGeneratingInsights(false);
               } else if (parsed.type === 'error') {
-                setError(parsed.error);
+                const errMsg = parsed.error;
+                const quota =
+                  errMsg && typeof errMsg === 'object'
+                    ? getChatModelQuotaUserMessage({
+                        code: errMsg.code,
+                        details: errMsg.details,
+                        response: { data: errMsg },
+                      })
+                    : null;
+                setError(
+                  quota ||
+                    (typeof errMsg === 'string'
+                      ? errMsg
+                      : errMsg?.message || errMsg?.detail || JSON.stringify(errMsg) || 'An error occurred')
+                );
                 setIsGeneratingInsights(false);
               }
             } catch (e) {
@@ -2327,6 +2365,8 @@ const AnalysisPage = () => {
               setProgressPercentage(status.processing_progress || 0);
             }
           }
+        } else if (error?.isQuotaError || error?.quotaDisplay) {
+          if (!showQuotaError(error)) setError(error.quotaDisplay || error);
         } else {
           setError(`Analysis failed: ${error.message}`);
         }
@@ -2586,7 +2626,7 @@ const AnalysisPage = () => {
   }, []);
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
   }, []);
 
 
@@ -3170,19 +3210,11 @@ const AnalysisPage = () => {
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
-      {error && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
-          <div className="bg-red-50 border border-red-200 text-red-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-start space-x-2">
-            <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm">{error}</p>
-            </div>
-            <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-      )}
+      <ChatQuotaErrorModal
+        error={error}
+        onDismiss={() => setError(null)}
+        onTopupSuccess={() => setError(null)}
+      />
       {success && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
           <div className="bg-green-50 border border-green-200 text-green-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-center space-x-2">
@@ -3302,7 +3334,20 @@ const AnalysisPage = () => {
                 </div>
               </div>
             )}
-            <form onSubmit={handleSend} className="mx-auto mt-4">
+            <UpgradePlanBanner className="mx-auto mt-4 mb-2 max-w-3xl w-full" />
+            <form onSubmit={handleSend} className="mx-auto mt-2">
+              {(isLoadingSecrets || secrets.length > 0) && (
+                <PromptChipsBar
+                  secrets={secrets}
+                  isLoading={isLoadingSecrets}
+                  selectedSecretId={selectedSecretId}
+                  activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                  onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                  disabled={isLoading || isGeneratingInsights}
+                  className="mb-1"
+                />
+              )}
+
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                 <UploadOptionsMenu
                   fileInputRef={fileInputRef}
@@ -3320,38 +3365,7 @@ const AnalysisPage = () => {
                   disabled={isUploading}
                   multiple
                 />
-                <div className="relative flex-shrink-0" ref={dropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => setShowDropdown(!showDropdown)}
-                    disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <BookOpen className="h-3 w-3 sm:h-4 sm:w-4" />
-                    <span className="hidden sm:inline">{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                    <span className="inline sm:hidden">{isLoadingSecrets ? '...' : 'Prompts'}</span>
-                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
-                  </button>
-                  {showDropdown && !isLoadingSecrets && (
-                    <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                      {secrets.length > 0 ? (
-                        secrets.map((secret) => (
-                          <button
-                            key={secret.id}
-                            type="button"
-                            onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                            className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                          >
-                            {secret.name}
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+<div className="relative flex-shrink-0" ref={styleDropdownRef}>
                   <button
                     type="button"
                     onClick={() => setShowStyleDropdown((prev) => !prev)}
@@ -3628,7 +3642,20 @@ const AnalysisPage = () => {
                   </div>
                 </div>
               )}
+              <UpgradePlanBanner className="mb-2" />
               <form onSubmit={handleSend}>
+                  {(isLoadingSecrets || secrets.length > 0) && (
+                    <PromptChipsBar
+                      secrets={secrets}
+                      isLoading={isLoadingSecrets}
+                      selectedSecretId={selectedSecretId}
+                      activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                      onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                      disabled={isLoading || isGeneratingInsights}
+                      size="compact"
+                      className="mb-1"
+                    />
+                  )}
                 <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                   <UploadOptionsMenu
                     fileInputRef={fileInputRef}
@@ -3646,37 +3673,7 @@ const AnalysisPage = () => {
                     disabled={isUploading}
                     multiple
                   />
-                  <div className="relative flex-shrink-0" ref={dropdownRef}>
-                    <button
-                      type="button"
-                      onClick={() => setShowDropdown(!showDropdown)}
-                      disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <BookOpen className="h-3 w-3" />
-                      <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                      <ChevronDown className="h-3 w-3" />
-                    </button>
-                    {showDropdown && !isLoadingSecrets && (
-                      <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                        {secrets.length > 0 ? (
-                          secrets.map((secret) => (
-                            <button
-                              key={secret.id}
-                              type="button"
-                              onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                              className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                            >
-                              {secret.name}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+<div className="relative flex-shrink-0" ref={styleDropdownRef}>
                     <button
                       type="button"
                       onClick={() => setShowStyleDropdown((prev) => !prev)}

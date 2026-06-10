@@ -1,0 +1,6 @@
+        setCurrentResponse('');
+        streamBufferRef.current = '';
+        streamingGeneratingFiredRef.current = false;
+        setStreamingStatus('initializing');
+        setStreamingMessage('Starting chat request...');
+        startProcessingTimeline(`Analysis: ${promptLabel}`, 'initializing', 'Starting chat request...');

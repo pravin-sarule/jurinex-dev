@@ -189,9 +189,10 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
     d_uploads_day  = max(0, int(settings.default_max_file_upload_per_day))
     d_ctx_docs     = max(0, int(settings.default_max_context_documents))
     d_conv_hist    = max(0, int(settings.default_max_conversation_history))
+    d_max_out      = max(1, min(_MAX_OUTPUT_TOKENS_CEILING, int(settings.default_max_output_tokens)))
 
     if not row:
-        max_out = 25000
+        max_out = d_max_out
         max_file_mb = 100
         return {
             "config_id": None,
@@ -228,7 +229,7 @@ def _core_from_row(row: dict[str, Any] | None, *, settings: Any) -> dict[str, An
     llm_from_row = resolve_chat_llm_model(row.get("llm_model"), default_model)
     max_out = max(
         1,
-        min(_MAX_OUTPUT_TOKENS_CEILING, _finite_int(row.get("max_output_tokens"), 25000)),
+        min(_MAX_OUTPUT_TOKENS_CEILING, _finite_int(row.get("max_output_tokens"), d_max_out)),
     )
     max_file_mb = max(0, min(_MAX_DOC_MB_CEILING, _finite_int(row.get("max_file_size_mb"), 100)))
 
@@ -302,10 +303,14 @@ def get_streaming_delay_ms(config: dict[str, Any] | None) -> int:
 
 
 def merge_folder_chat_request_llm_overrides(base: dict[str, Any], request: Any) -> dict[str, Any]:
-    """Apply optional per-request max_output_tokens / model_temperature (clamped to dashboard limits)."""
+    """Apply optional per-request generation overrides."""
     out = dict(base)
     if request is None:
         return out
+    requested_model = str(getattr(request, "llm_name", None) or "").strip()
+    if requested_model and requested_model.lower() not in {"gemini", "claude", "deepseek", "default"}:
+        out["llm_model"] = requested_model
+        out["summarization_model"] = requested_model
     mot = getattr(request, "max_output_tokens", None)
     if mot is not None:
         try:
@@ -429,8 +434,6 @@ def _merge_plan_limits(
                 out["max_upload_files"] = legacy_doc_limit
             if not plan_col_set("chat_max_file_upload_per_day"):
                 out["max_file_upload_per_day"] = legacy_doc_limit
-            if not plan_col_set("chat_max_document_pages"):
-                out["max_document_pages"] = legacy_doc_limit
 
     out["_plan_id"] = plan.get("id")
     out["_plan_name"] = plan.get("name")

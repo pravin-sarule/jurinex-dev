@@ -1,0 +1,6 @@
+      setCurrentResponse('');
+      streamBufferRef.current = '';
+      streamingGeneratingFiredRef.current = false;
+      setStreamingStatus('initializing');
+      setStreamingMessage('Starting chat request...');
+      startProcessingTimeline(question.trim(), 'initializing', 'Starting chat request...');

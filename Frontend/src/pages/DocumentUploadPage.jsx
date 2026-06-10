@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette } from 'lucide-react';
 import { FileManagerContext } from '../context/FileManagerContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import CreateFolderModal from '../components/FolderBrowser/CreateFolderModal';
 import CaseCreationFlow from './CreateCase/CaseCreationFlow';
 import { CONTENT_SERVICE_DIRECT } from '../config/apiConfig';
@@ -283,18 +283,39 @@ const DocumentUploadPage = () => {
             </div>
             <p className="text-sm text-gray-400 ml-10">Manage and organize your legal case files</p>
           </div>
-          <button
-            onClick={handleStartCaseFlow}
-            disabled={!canCreateCases}
-            className={`flex items-center gap-2 text-white text-sm font-semibold px-4 py-2.5 rounded-xl shadow-sm transition-all duration-200 flex-shrink-0 ${canCreateCases ? 'hover:shadow-md hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'}`}
-            style={{ background: '#21C1B6' }}
-            onMouseEnter={(e) => { if (canCreateCases) e.currentTarget.style.background = '#1AA49B'; }}
-            onMouseLeave={(e) => (e.currentTarget.style.background = '#21C1B6')}
-            title={!canCreateCases ? 'You do not have permission to create new cases' : undefined}
-          >
-            <Plus className="w-4 h-4" />
-            Create New Case
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => navigate('/batch-request')}
+              className="flex items-center gap-2 text-sm font-semibold px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:border-gray-300 shadow-sm transition-all duration-200 cursor-pointer"
+              title="Send bulk AI queries via Gemini Batch API"
+            >
+              <svg className="w-4 h-4 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+              Batch Requests
+            </button>
+            <button
+              onClick={() => navigate('/branding')}
+              className="flex items-center gap-2 text-sm font-semibold px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:border-gray-300 shadow-sm transition-all duration-200 cursor-pointer"
+              title="Manage Custom Branding"
+            >
+              <Palette className="w-4 h-4 text-teal-600" />
+              Custom Branding
+            </button>
+            <button
+              onClick={handleStartCaseFlow}
+              disabled={!canCreateCases}
+              className={`flex items-center gap-2 text-white text-sm font-semibold px-4 py-2.5 rounded-xl shadow-sm transition-all duration-200 ${canCreateCases ? 'hover:shadow-md hover:-translate-y-0.5' : 'cursor-not-allowed opacity-50'}`}
+              style={{ background: '#21C1B6' }}
+              onMouseEnter={(e) => { if (canCreateCases) e.currentTarget.style.background = '#1AA49B'; }}
+              onMouseLeave={(e) => (e.currentTarget.style.background = '#21C1B6')}
+              title={!canCreateCases ? 'You do not have permission to create new cases' : undefined}
+            >
+              <Plus className="w-4 h-4" />
+              Create New Case
+            </button>
+          </div>
         </div>
 
         {/* ── Search & Filters ── */}

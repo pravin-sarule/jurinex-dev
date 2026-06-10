@@ -12,7 +12,9 @@ import './TemplateWizardGallery.css';
 
 // Module-level caches — persist across navigation until page refresh
 let _templatesCache = null;
+let _templatesFetchPromise = null; // deduplicates StrictMode double-invoke
 let _customTemplatesCache = null;
+let _customFetchPromise = null;
 
 /**
  * Template Gallery: horizontal cards (uniform size, name below, no category).
@@ -39,53 +41,58 @@ const TemplateWizardGallery = ({ onTemplateClick }) => {
       setCustomLoading(false);
       return;
     }
+    // Reuse in-flight fetch (StrictMode double-invoke guard)
+    if (!force && _customFetchPromise) {
+      try { setCustomTemplates((await _customFetchPromise) ?? []); } catch { /* service may be offline */ }
+      setCustomLoading(false);
+      return;
+    }
     setCustomLoading(true);
+    // Assign before first await so the second StrictMode invocation sees it
+    _customFetchPromise = customTemplateApi.getUserTemplates(true);
     try {
-      const list = await customTemplateApi.getUserTemplates(true);
+      const list = await _customFetchPromise;
       const result = Array.isArray(list) ? list : [];
       _customTemplatesCache = result;
       setCustomTemplates(result);
     } catch (err) {
-      console.warn('Failed to load custom templates:', err);
+      // Template analyzer service may not be running locally — fail silently
       setCustomTemplates(_customTemplatesCache ?? []);
     } finally {
+      _customFetchPromise = null;
       setCustomLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    // Skip fetch if cache is already populated
-    if (_templatesCache !== null) return;
+    if (_templatesCache !== null) {
+      setTemplates(_templatesCache);
+      setIsLoading(false);
+      return;
+    }
     let cancelled = false;
-    const load = async () => {
-      setIsLoading(true);
-      setError(null);
-      try {
-        const res = await fetchTemplates({
-          category: '',
-          is_active: true,
-          limit: 50,
-          offset: 0,
-          include_preview_url: true,
-          finalized_only: true,
-        });
-        if (!cancelled && res?.success && Array.isArray(res.templates)) {
-          _templatesCache = res.templates;
-          setTemplates(res.templates);
-        } else if (!cancelled) {
-          _templatesCache = [];
-          setTemplates([]);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err.message || 'Failed to load templates');
-          setTemplates(_templatesCache ?? []);
-        }
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    };
-    load();
+    setIsLoading(true);
+    setError(null);
+
+    // Start the fetch only if none is in-flight; otherwise share the promise.
+    // This prevents React StrictMode from firing two identical network requests.
+    if (!_templatesFetchPromise) {
+      _templatesFetchPromise = fetchTemplates({
+        category: '', is_active: true, limit: 50, offset: 0,
+        include_preview_url: true, finalized_only: true,
+      }).then(res => {
+        const tpls = res?.success && Array.isArray(res.templates) ? res.templates : [];
+        _templatesCache = tpls;
+        return tpls;
+      }).catch(err => {
+        throw err;
+      }).finally(() => { _templatesFetchPromise = null; });
+    }
+
+    _templatesFetchPromise
+      .then(tpls => { if (!cancelled) { setTemplates(tpls); setIsLoading(false); } })
+      .catch(err => { if (!cancelled) { setError(err.message || 'Failed to load templates'); setTemplates(_templatesCache ?? []); setIsLoading(false); } });
+
     return () => { cancelled = true; };
   }, []);
 

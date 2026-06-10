@@ -27,6 +27,7 @@ import {
   parseLlmPolicyErrorForUi,
 } from '../utils/llmQuotaMessages';
 import ChatQuotaErrorModal from '../components/ChatQuotaErrorModal';
+import { useTokenQuota } from '../context/TokenQuotaContext';
 import UpgradePlanBanner from '../components/UpgradePlanBanner';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
@@ -306,6 +307,7 @@ const AnalysisPage = () => {
   const navigate = useNavigate();
 
   const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError } = useLlmChatLimits();
+  const { showQuotaError } = useTokenQuota();
 
   // Get the currently selected case folder so uploads land in the right place
   const { selectedFolder, setDocuments, loadFoldersAndFiles } = React.useContext(FileManagerContext) || {};
@@ -571,6 +573,9 @@ const AnalysisPage = () => {
             const quotaDisplay = parseLlmPolicyErrorForUi(429, errorData);
             const err = new Error(quotaDisplay.body);
             err.quotaDisplay = quotaDisplay;
+            err.code = errorData?.detail?.code || errorData?.code;
+            err.isQuotaError = true;
+            err.details = errorData?.detail?.details || errorData?.details || {};
             throw err;
           }
           default:
@@ -1488,6 +1493,14 @@ const AnalysisPage = () => {
       });
 
       if (!response.ok) {
+        let errorData = {};
+        try { errorData = await response.json(); } catch {}
+        if (response.status === 429 || response.status === 503) {
+          const quotaDisplay = parseLlmPolicyErrorForUi(response.status, errorData);
+          const err = new Error(quotaDisplay.body);
+          err.quotaDisplay = quotaDisplay;
+          throw err;
+        }
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
@@ -1500,7 +1513,7 @@ const AnalysisPage = () => {
 
       while (true) {
         const { done, value } = await reader.read();
-        
+
         if (done) {
           if (isStopped) {
             setIsLoading(false);
@@ -1721,8 +1734,8 @@ const AnalysisPage = () => {
             }
           }
         }
-      } else if (error?.quotaDisplay) {
-        setError(error.quotaDisplay);
+      } else if (error?.isQuotaError || error?.quotaDisplay) {
+        if (!showQuotaError(error)) setError(error.quotaDisplay || error);
       } else {
         setError(`Chat failed: ${error.message}`);
       }
@@ -2088,6 +2101,14 @@ const AnalysisPage = () => {
         });
 
         if (!response.ok) {
+          let errorData = {};
+          try { errorData = await response.json(); } catch {}
+          if (response.status === 429 || response.status === 503) {
+            const quotaDisplay = parseLlmPolicyErrorForUi(response.status, errorData);
+            const err = new Error(quotaDisplay.body);
+            err.quotaDisplay = quotaDisplay;
+            throw err;
+          }
           throw new Error(`HTTP error! status: ${response.status}`);
         }
 
@@ -2344,8 +2365,8 @@ const AnalysisPage = () => {
               setProgressPercentage(status.processing_progress || 0);
             }
           }
-        } else if (error?.quotaDisplay) {
-          setError(error.quotaDisplay);
+        } else if (error?.isQuotaError || error?.quotaDisplay) {
+          if (!showQuotaError(error)) setError(error.quotaDisplay || error);
         } else {
           setError(`Analysis failed: ${error.message}`);
         }
@@ -3189,7 +3210,11 @@ const AnalysisPage = () => {
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
-      <ChatQuotaErrorModal error={error} onDismiss={() => setError(null)} />
+      <ChatQuotaErrorModal
+        error={error}
+        onDismiss={() => setError(null)}
+        onTopupSuccess={() => setError(null)}
+      />
       {success && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:right-4 sm:translate-x-0 z-50 max-w-[90vw] sm:max-w-sm">
           <div className="bg-green-50 border border-green-200 text-green-700 px-3 sm:px-4 py-2 sm:py-3 rounded-lg shadow-lg flex items-center space-x-2">

@@ -31,10 +31,14 @@ from app.schemas.contracts import (
 )
 from app.core.config import get_settings
 from app.services.db import get_db_connection, is_db_available
-from app.services.llm_chat_config import get_summarization_chat_config
+from app.services.llm_chat_config import get_summarization_chat_config, merge_folder_chat_request_llm_overrides
 from app.services.legal_system_prompt import build_document_qa_system_prompt, build_legal_system_prompt, fetch_full_profile
 from app.services.pipeline_service import LegalCasePipelineService, StoredCase
-from app.services.secret_prompt_display import post_process_secret_prompt_response, resolve_query_and_display
+from app.services.secret_prompt_display import (
+    post_process_secret_prompt_response,
+    resolve_query_and_display,
+    resolve_secret_prompt_llm_name,
+)
 from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime
 
 
@@ -1291,6 +1295,11 @@ class FolderWorkflowService:
         if not query_text:
             raise ValueError("question is required")
         llm_config = get_summarization_chat_config(user_id=user_id, force_refresh=False)
+        llm_config = merge_folder_chat_request_llm_overrides(llm_config, request)
+        requested_model = str(request.llm_name or "").strip()
+        if requested_model.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+            requested_model = ""
+        selected_model = resolve_secret_prompt_llm_name(secret_id) or requested_model or None
         user_profile = fetch_full_profile(user_id, authorization)
         system_instruction = build_document_qa_system_prompt(user_profile)
         logger.info(
@@ -1339,6 +1348,9 @@ class FolderWorkflowService:
             QueryRequest(user_id=user_id, case_id=case_id, query=effective_query_text),
             file_ids,
             system_instruction=system_instruction,
+            summarization_llm_config=llm_config,
+            agent_name="grounded_retrieval_agent",
+            model_name_override=selected_model,
         )
         if secret_id:
             # Secret/preset prompts are expected to produce machine-readable JSON.

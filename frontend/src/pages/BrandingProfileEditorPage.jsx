@@ -426,8 +426,9 @@ export default function BrandingProfileEditorPage() {
               {profile.headerEnabled && (
                 <>
                   <Field label="Header Text">
-                    <Input value={profile.headerText} onChange={v => set('headerText', v)} placeholder="e.g. IN THE SUPREME COURT OF INDIA" />
+                    <Input value={profile.headerText} onChange={v => set('headerText', v)} placeholder="e.g. {date} or IN THE SUPREME COURT OF INDIA" />
                   </Field>
+                  <p className="text-xs text-gray-400 -mt-2">Use <code className="bg-gray-100 px-1 rounded">{'{date}'}</code> for today&apos;s date (e.g. 09 Jun 2026)</p>
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Alignment">
                       <div className="flex gap-2">

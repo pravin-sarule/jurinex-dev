@@ -1,0 +1,29 @@
+    useEffect(() => {
+      // 100ms (~10 writes/sec) — smooth streaming feel.
+      // The append-only stable-div strategy keeps per-tick cost O(tail),
+      // so a fixed fast throttle is fine regardless of total buffer size.
+      const THROTTLE = 100;
+      let lastFlush = 0;
+      let rafId;
+
+      const scheduleScroll = () => {
+        // Defer scroll until after the browser has finished layout from innerHTML.
+        requestAnimationFrame(() => {
+          const sc = scrollTargetRef?.current;
+          if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 280) {
+            sc.scrollTop = sc.scrollHeight;
+          }
+        });
+      };
+
+      function tick(now) {
+        rafId = requestAnimationFrame(tick);
+        const stableEl = stableRef.current;
+        const liveEl   = liveRef.current;
+        if (!stableEl || !liveEl) return;
+
+        const cur = bufferRef.current || '';
+        if (cur.length === prevLenRef.current) return; // nothing new
+        if (now - lastFlush < THROTTLE) return;
+        lastFlush = now;
+        prevLenRef.current = cur.length;

@@ -184,15 +184,13 @@ def _resolve_model_ids(model_ids: Any) -> str | None:
     Resolve first model_id in the array to a model name string by querying llm_models.
     Returns None when the DB is unavailable or the row doesn't exist.
     """
-    from app.services.db import get_db_connection, is_db_available
-
     ids = _coerce_model_id_list(model_ids)
 
-    if not ids or not is_db_available():
+    if not ids:
         return None
 
-    try:
-        with get_db_connection() as conn, conn.cursor() as cur:
+    def _query(connection_factory) -> str | None:
+        with connection_factory() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT TRIM(name::text) AS name
@@ -207,6 +205,18 @@ def _resolve_model_ids(model_ids: Any) -> str | None:
             if row:
                 name = str(row.get("name") or "").strip()
                 return name if name else None
+        return None
+
+    try:
+        resolved = _query(_get_agent_prompts_connection)
+        if resolved:
+            return resolved
+    except Exception as exc:
+        logger.debug("[AgentConfig] model_ids=%s not in agent-prompts DB: %s", ids, exc)
+    try:
+        from app.services.db import get_db_connection
+
+        return _query(get_db_connection)
     except Exception as exc:
         logger.warning("[AgentConfig] model_ids=%s resolve error: %s", ids, exc)
     return None
@@ -227,15 +237,13 @@ def _model_name_from_llm_parameters(llm_params: dict[str, Any]) -> str | None:
         if not s:
             continue
         low = s.lower()
-        if low.startswith("claude") or low.startswith("gemini") or "/" in s:
+        if low.startswith(("claude", "gemini", "deepseek")) or "/" in s:
             return s
     return None
 
 
 def _resolve_model_from_llm_parameters_model_id(llm_params: dict[str, Any]) -> str | None:
     """Resolve llm_parameters.model_id (single int FK) via llm_models."""
-    from app.services.db import get_db_connection, is_db_available
-
     raw = llm_params.get("model_id") or llm_params.get("llm_model_id")
     if raw is None:
         return None
@@ -243,10 +251,10 @@ def _resolve_model_from_llm_parameters_model_id(llm_params: dict[str, Any]) -> s
         mid = int(raw)
     except (TypeError, ValueError):
         return None
-    if mid <= 0 or not is_db_available():
+    if mid <= 0:
         return None
-    try:
-        with get_db_connection() as conn, conn.cursor() as cur:
+    def _query(connection_factory) -> str | None:
+        with connection_factory() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT TRIM(name::text) AS name
@@ -260,6 +268,18 @@ def _resolve_model_from_llm_parameters_model_id(llm_params: dict[str, Any]) -> s
             if row:
                 name = str(row.get("name") or "").strip()
                 return name if name else None
+        return None
+
+    try:
+        resolved = _query(_get_agent_prompts_connection)
+        if resolved:
+            return resolved
+    except Exception as exc:
+        logger.debug("[AgentConfig] model_id=%s not in agent-prompts DB: %s", raw, exc)
+    try:
+        from app.services.db import get_db_connection
+
+        return _query(get_db_connection)
     except Exception as exc:
         logger.warning("[AgentConfig] llm_parameters model_id=%s resolve error: %s", raw, exc)
     return None

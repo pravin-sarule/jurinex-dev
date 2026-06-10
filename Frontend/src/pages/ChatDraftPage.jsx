@@ -6,6 +6,8 @@ import {
   saveChatDraftToGoogleDocs,
 } from '../services/chatDraftApi';
 import { AGENT_DRAFT_TEMPLATE_API, CHAT_DRAFT_BACKEND_URL, getUserIdForDrafting } from '../config/apiConfig';
+import { useTokenQuota } from '../context/TokenQuotaContext';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 
 /* ─── Palette ───────────────────────────────────────────────────────────── */
 const T = {
@@ -123,8 +125,7 @@ async function streamMessage(sessionId, message, onChunk, signal) {
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.detail || `HTTP ${res.status}`);
+    await throwIfQuotaResponse(res, `HTTP ${res.status}`);
   }
 
   const reader = res.body.getReader();
@@ -174,6 +175,8 @@ export default function ChatDraftPage() {
   const [searchParams] = useSearchParams();
   const urlTemplateId   = searchParams.get('templateId');
   const urlTemplateName = searchParams.get('templateName') || 'Template';
+
+  const { showQuotaError } = useTokenQuota();
 
   const [phase,           setPhase]          = useState('home');
   const [templateText,    setTemplateText]    = useState('');
@@ -324,6 +327,10 @@ export default function ChatDraftPage() {
 
     } catch (err) {
       if (err.name === 'AbortError') return;
+      if (showQuotaError(err)) {
+        setMessages(prev => prev.slice(0, -1));
+        return;
+      }
 
       // Streaming not available — fall back to regular POST
       try {
@@ -335,8 +342,10 @@ export default function ChatDraftPage() {
         setMessages(prev => [...prev, { role:'assistant', content: res.html }]);
         setCitations(res.citations || []);
       } catch (fallbackErr) {
-        setError(fallbackErr.message || 'Something went wrong.');
-        setMessages(prev => prev.slice(0, -1));
+        if (!showQuotaError(fallbackErr)) {
+          setError(fallbackErr.message || 'Something went wrong.');
+          setMessages(prev => prev.slice(0, -1));
+        }
       }
     } finally {
       setIsSending(false);

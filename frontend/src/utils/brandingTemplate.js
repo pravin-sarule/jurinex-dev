@@ -1,5 +1,5 @@
 import DOMPurify from 'dompurify';
-import { normalizeBrandingProfile } from './brandingProfileDefaults';
+import { normalizeBrandingProfile, resolveBrandingTokens } from './brandingProfileDefaults';
 import { brandingHeadingPt } from './brandingTypography';
 
 function esc(s) {
@@ -78,15 +78,9 @@ function _pageAtRule(profile, forPdf = false) {
   const p = normalizeBrandingProfile(profile);
   const size = (p.pageSize || 'a4').toUpperCase();
   const land = p.orientation === 'landscape' ? ' landscape' : '';
-  if (!forPdf) return `@page{size:${size}${land};margin:0;}`;
-  const mt = p.marginTop ?? 20;
-  const mr = p.marginRight ?? 20;
-  let mb = p.marginBottom ?? 20;
-  const ml = p.marginLeft ?? 20;
-  if (p.footerEnabled || String(p.footerText || '').trim()) {
-    mb += PDF_FOOTER_BAND_MM;
-  }
-  return `@page{size:${size}${land};margin:${mt}mm ${mr}mm ${mb}mm ${ml}mm;}`;
+  /* Playwright / html2pdf apply page margins externally — @page margins here would double them and clip content. */
+  if (forPdf) return `@page{size:${size}${land};margin:0;}`;
+  return `@page{size:${size}${land};margin:0;}`;
 }
 
 /**
@@ -221,7 +215,8 @@ export function renderDocumentHeader(profile) {
   const headerAlign = p.headerAlignment || 'center';
   const fs = p.headerFontSize || 12;
   const color = p.headerColor || '#000000';
-  return `<div class="brd-doc-header" style="text-align:${headerAlign};font-size:${fs}pt;color:${color} !important;">${esc(p.headerText)}</div>`;
+  const headerLine = resolveBrandingTokens(p.headerText);
+  return `<div class="brd-doc-header" style="text-align:${headerAlign};font-size:${fs}pt;color:${color} !important;">${esc(headerLine)}</div>`;
 }
 
 /**
@@ -243,7 +238,7 @@ export function renderFooter(profile, { previewShell = false, forPrint = false, 
     .replace(/\{total\}/g, previewShell ? '12' : totalPagesHint);
 
   const staticLine = p.footerText
-    ? `<div class="brd-footer-static" style="text-align:${align};">${esc(p.footerText)}</div>`
+    ? `<div class="brd-footer-static" style="text-align:${align};">${esc(resolveBrandingTokens(p.footerText))}</div>`
     : '';
   const numsLine = p.footerEnabled
     ? `<div class="brd-footer-numbers" style="text-align:${align};">${esc(footerNums)}</div>`
@@ -354,6 +349,9 @@ export function getBrandingCss(profile, { forPdf = false, pageWidthPx, pageHeigh
   .brd-outer strong,.brd-outer b{font-weight:700;}.brd-outer em,.brd-outer i{font-style:italic;}
   .brd-outer hr{border:none;border-top:1pt solid #e5e7eb;margin:12pt 0;}
   .brd-outer .brd-content img{max-width:100%;height:auto;}
+  .brd-outer .brd-content .batch-results-export,.brd-outer .brd-content .batch-export-item{max-width:100%;overflow-wrap:break-word;word-break:break-word;}
+  .brd-outer .brd-content .batch-export-item{page-break-inside:auto;margin-bottom:24pt;}
+  .brd-outer .brd-content .batch-export-item h2{page-break-after:avoid;}
   .brd-outer .html2pdf__page-break{page-break-before:always;}
   .brd-outer .brd-watermark{position:absolute;top:50%;left:50%;pointer-events:none;z-index:0;color:#000;font-weight:900;white-space:nowrap;}
   .brd-outer .brd-watermark-img img{max-width:280px;max-height:200px;object-fit:contain;display:block;}
@@ -593,7 +591,7 @@ export function buildBrandedWordHtml(contentHtml, profile, {
     : '';
 
   const docHdr = p.headerEnabled && String(p.headerText || '').trim()
-    ? `<p class="MsoNormal" align="${p.headerAlignment || 'center'}" style="${pBase}font-size:${p.headerFontSize || 12}pt;font-weight:bold;color:${hdrC};padding-top:6pt;text-align:${p.headerAlignment || 'center'};"><b>${esc(p.headerText)}</b></p>`
+    ? `<p class="MsoNormal" align="${p.headerAlignment || 'center'}" style="${pBase}font-size:${p.headerFontSize || 12}pt;font-weight:bold;color:${hdrC};padding-top:6pt;text-align:${p.headerAlignment || 'center'};"><b>${esc(resolveBrandingTokens(p.headerText))}</b></p>`
     : '';
 
   const wmNote = '';
@@ -615,7 +613,7 @@ export function buildBrandedWordHtml(contentHtml, profile, {
     if (p.footerText) {
       lines.push(
         `<p class="MsoFooter" align="${footerAlign}" style="${fp}margin-bottom:2pt;color:${footC};text-align:${footerAlign};">` +
-        `<b>${esc(p.footerText)}</b></p>`,
+        `<b>${esc(resolveBrandingTokens(p.footerText))}</b></p>`,
       );
     }
     if (p.footerEnabled) {

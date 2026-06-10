@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useAuth } from '../context';
 import {
   fetchLlmChatLimits,
   getMaxUploadBytesFromLimits,
@@ -10,6 +11,8 @@ import {
  * Upload and generation caps from ChatModel `llm_chat_config` (DB).
  */
 export function useLlmChatLimits() {
+  const { planInfo } = useAuth();
+  const planKey = planInfo?.planId ?? planInfo?.plan ?? null;
   const [limits, setLimits] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -32,8 +35,10 @@ export function useLlmChatLimits() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setLoading(true);
       try {
-        const data = await fetchLlmChatLimits();
+        invalidateLlmChatLimitsCache();
+        const data = await fetchLlmChatLimits({ forceRefresh: true });
         if (!cancelled) {
           setLimits(data);
           setError(null);
@@ -50,7 +55,7 @@ export function useLlmChatLimits() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [planKey]);
 
   const maxUploadBytes = limits ? getMaxUploadBytesFromLimits(limits) : null;
   const maxUploadMbLabel = limits ? getMaxUploadMbLabel(limits) : null;

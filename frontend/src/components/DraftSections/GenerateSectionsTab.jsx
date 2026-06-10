@@ -8,6 +8,7 @@ import {
   getSectionGenerationJob,
 } from '../../services/sectionApi';
 import { getTemplateUrl } from '../../services/draftFormApi';
+import { useQuotaErrorHandler } from '../../context/TokenQuotaContext';
 import { SparklesIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
 
 /**
@@ -23,6 +24,7 @@ import { SparklesIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/
  * - Allows refinement
  */
 const GenerateSectionsTab = ({ draftId, draft, onNext, onBack }) => {
+  const handleQuotaError = useQuotaErrorHandler();
   const [prompts, setPrompts] = useState({});
   const [generatedSections, setGeneratedSections] = useState({});
   const [criticReviews, setCriticReviews] = useState({});
@@ -148,7 +150,8 @@ const GenerateSectionsTab = ({ draftId, draft, onNext, onBack }) => {
       }
     } catch (error) {
       console.error(`Failed to generate section ${sectionKey}:`, error);
-      alert(`Failed to generate section: ${error.message}`);
+      const msg = handleQuotaError(error, `Failed to generate section: ${error.message}`);
+      if (msg) alert(msg);
     } finally {
       setGeneratingSection(null);
     }
@@ -184,7 +187,8 @@ const GenerateSectionsTab = ({ draftId, draft, onNext, onBack }) => {
       }
     } catch (error) {
       console.error(`Failed to refine section ${sectionKey}:`, error);
-      alert(`Failed to refine section: ${error.message}`);
+      const msg = handleQuotaError(error, `Failed to refine section: ${error.message}`);
+      if (msg) alert(msg);
     }
   };
 

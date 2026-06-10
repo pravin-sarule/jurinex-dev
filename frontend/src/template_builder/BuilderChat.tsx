@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { useNavigate } from 'react-router-dom';
 import { useTemplateBuilderStore } from './templateBuilderStore';
 import { templateBuilderApi } from './api';
+import { useTokenQuota } from '../context/TokenQuotaContext';
 
 const BRAND = '#21C1B6';
 const BRAND_DARK = '#1AA49B';
@@ -1141,6 +1142,7 @@ const Step5Clauses: React.FC = () => {
 };
 
 const Step6Review: React.FC = () => {
+  const { showQuotaError, isExhausted, quotaStatus } = useTokenQuota();
   const {
     requirements,
     dynamicMode,
@@ -1196,9 +1198,21 @@ const Step6Review: React.FC = () => {
       ] as [string, string][]).filter(([, v]) => Boolean(v));
 
   const handleGenerate = async () => {
-    if (!requirements.detailLevel) {
+    if (!requirements.detailLevel) return;
+
+    // Block only when there are genuinely NO tokens available — plan exhausted AND
+    // no top-up balance remaining. If top-up is available, let the request through
+    // so the backend can draw from the top-up pool.
+    const topupBalance = (quotaStatus as any)?.topup_token_balance ?? 0;
+    if (isExhausted && topupBalance === 0) {
+      const syntheticErr: any = new Error('All tokens used. Buy extra tokens or upgrade your plan to continue generating templates.');
+      syntheticErr.isQuotaError = true;
+      syntheticErr.code = 'MONTHLY_TOKEN_LIMIT_EXHAUSTED';
+      syntheticErr.details = {};
+      showQuotaError(syntheticErr);
       return;
     }
+
     clearGenerationStreamText();
     setGenerationStreamText(`Preparing ${requirements.subjectLabel || 'template'}...\n\n`);
     setLoading(true);
@@ -1221,6 +1235,11 @@ const Step6Review: React.FC = () => {
       );
       setGenerationResult(response.templateText, response.fields, response.sections, response.metadata);
     } catch (error) {
+      // If the generation service returned a 429 quota error, show the upgrade popup
+      if (showQuotaError(error as Error)) {
+        setPhase('review');
+        return;
+      }
       setError(error instanceof Error ? error.message : 'Template generation failed');
     } finally {
       setLoading(false);

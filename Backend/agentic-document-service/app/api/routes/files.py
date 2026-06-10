@@ -49,14 +49,25 @@ from app.services.learning_agent_controller import LearningAgentController
 from app.services.learning_folder_document_context import build_learning_folder_document_context
 from app.services.learning_question_validator import sanitize_public_popup
 from app.services.learning_response_parser import parse_learning_model_output
-from app.services.llm_policy_service import assert_upload_allowed
+from app.services.llm_policy_service import assert_upload_allowed, assert_storage_allowed
 from app.services.secret_manager_api import get_secret_prompt_detail, list_secret_prompts
-from app.services.secret_prompt_display import resolve_query_and_display
+from app.services.secret_prompt_display import (
+    post_process_secret_prompt_response,
+    resolve_query_and_display,
+    resolve_secret_prompt_llm_name,
+)
 from app.services.token_usage import (
     enforce_limits,
     estimate_streaming_token_request,
     estimate_tokens_from_text,
     log_llm_usage,
+)
+from app.services.token_usage_log import (
+    begin_token_usage_session,
+    bind_token_usage_session,
+    flush_aggregated_token_usage_table,
+    record_token_usage,
+    unbind_token_usage_session,
 )
 
 
@@ -882,40 +893,181 @@ def get_user_usage_and_plan_for_payment(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """
-    Backward-compatible contract for payment-service:
-    GET /api/files/user-usage-and-plan/:userId
+    Backward-compatible contract for payment-service.
+    Returns real storage usage (GCS + DB) from user_files and the plan's
+    storage_limit_gb from monthly_plans / subscription_plans.
     """
+    from app.services.db import get_db_connection, get_payment_db_connection, is_db_available, is_payment_db_available
+
     actor_user_id = _resolve_user_id(x_user_id, authorization)
     logger.info(
-        "[Route:user_usage_and_plan] request received actor_user_id=%s target_user_id=%s has_auth=%s",
-        actor_user_id,
-        user_id,
-        bool(authorization),
+        "[Route:user_usage_and_plan] actor=%s target=%s",
+        actor_user_id, user_id,
     )
 
+    from app.services.db import (
+        get_db_connection, get_payment_db_connection, get_draft_db_connection,
+        is_db_available, is_payment_db_available, is_draft_db_available,
+    )
+
+    # user_id column is character varying in all DBs — cast once to avoid type mismatch
+    user_id_str = str(user_id)
+
+    # ── 1a. Document DB: user_files (all services share this table) ──────────
+    documents_used: int = 0
+    doc_storage_bytes: int = 0
+    zero_size_files: list = []
+    if is_db_available():
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*)                                        AS documents_used,
+                        COALESCE(SUM(size), 0)::bigint                  AS storage_used_bytes,
+                        JSON_AGG(
+                            JSON_BUILD_OBJECT('id', id::text, 'gcs_path', gcs_path)
+                        ) FILTER (
+                            WHERE (size IS NULL OR size = 0) AND gcs_path IS NOT NULL
+                        )                                               AS zero_size_files
+                    FROM user_files
+                    WHERE user_id = %s
+                      AND (is_folder IS NULL OR is_folder = FALSE)
+                    """,
+                    (user_id_str,),
+                )
+                row = cur.fetchone() or {}
+            documents_used    = int(row.get("documents_used", 0) or 0)
+            doc_storage_bytes = int(row.get("storage_used_bytes", 0) or 0)
+            zero_size_files   = row.get("zero_size_files") or []
+        except Exception as exc:
+            logger.warning("[Route:user_usage_and_plan] doc-db query failed: %s", exc)
+
+    # ── 1a-fallback: fetch real sizes from GCS for rows stored as size=0 ──
+    if is_db_available() and zero_size_files:
+        try:
+            from app.services.adapters.gcs import _get_gcs_client
+            from app.core.config import get_settings as _gs
+            _settings = _gs()
+            _bucket_name = _settings.gcs_input_bucket_name or _settings.gcs_bucket_name or "fileinputbucket"
+            _client = _get_gcs_client()
+            _bucket = _client.bucket(_bucket_name)
+            repaired_bytes = 0
+            with get_db_connection() as conn, conn.cursor() as cur:
+                for zf in zero_size_files[:30]:  # cap to avoid long response times
+                    gcs_path = (zf.get("gcs_path") or "").strip()
+                    file_id  = zf.get("id")
+                    if not gcs_path or not file_id:
+                        continue
+                    # Strip gs://bucket/ prefix if present
+                    if gcs_path.startswith("gs://"):
+                        gcs_path = "/".join(gcs_path.split("/")[3:])
+                    try:
+                        blob = _bucket.blob(gcs_path)
+                        blob.reload()
+                        real_size = int(blob.size or 0)
+                        if real_size > 0:
+                            repaired_bytes += real_size
+                            cur.execute(
+                                "UPDATE user_files SET size = %s WHERE id = %s::uuid AND size = 0",
+                                (real_size, file_id),
+                            )
+                    except Exception:
+                        pass  # object may not exist in this bucket
+                conn.commit()
+            if repaired_bytes > 0:
+                doc_storage_bytes += repaired_bytes
+                logger.info(
+                    "[Route:user_usage_and_plan] repaired %d zero-size rows → +%d bytes for user %s",
+                    len(zero_size_files), repaired_bytes, user_id,
+                )
+        except Exception as exc:
+            logger.warning("[Route:user_usage_and_plan] GCS size repair failed: %s", exc)
+
+    # ── 1b. Draft DB: generated_documents (agent-draft-service output files) ──
+    draft_storage_bytes: int = 0
+    if is_draft_db_available():
+        try:
+            with get_draft_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(gd.file_size), 0)::bigint AS draft_bytes
+                    FROM generated_documents gd
+                    JOIN user_drafts ud ON ud.draft_id = gd.draft_id
+                    WHERE ud.user_id = %s
+                      AND gd.file_size IS NOT NULL
+                    """,
+                    (user_id_str,),
+                )
+                row = cur.fetchone() or {}
+            draft_storage_bytes = int(row.get("draft_bytes", 0) or 0)
+        except Exception as exc:
+            logger.warning("[Route:user_usage_and_plan] draft-db query failed: %s", exc)
+
+    storage_used_bytes = doc_storage_bytes + draft_storage_bytes
+    storage_used_gb = storage_used_bytes / (1024 ** 3)
+
+    # ── 2. Payment DB: resolve active plan + storage_limit_gb ─────────────────
+    storage_limit_gb: float = 0.0
+    plan_name = "Unlimited"
+    if is_payment_db_available():
+        try:
+            with get_payment_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(mp.name, sp.name, 'Unknown')      AS plan_name,
+                        COALESCE(
+                            mp.storage_limit_gb,
+                            sp.storage_limit_gb,
+                            0
+                        )::numeric                                  AS storage_limit_gb
+                    FROM user_subscriptions us
+                    LEFT JOIN monthly_plans      mp ON mp.id = us.monthly_plan_id AND mp.is_active = TRUE
+                    LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
+                    WHERE us.user_id = %s
+                      AND LOWER(COALESCE(us.status, 'active')) = 'active'
+                      AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+                      AND (mp.id IS NOT NULL OR sp.id IS NOT NULL)
+                    ORDER BY us.updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (user_id_str,),
+                )
+                row = cur.fetchone() or {}
+            storage_limit_gb = float(row.get("storage_limit_gb", 0) or 0)
+            plan_name         = row.get("plan_name", "Unlimited") or "Unlimited"
+        except Exception as exc:
+            logger.warning("[Route:user_usage_and_plan] payment-db query failed: %s", exc)
+
     usage = {
-        "user_id": user_id,
-        "tokens_used": 0,
-        "documents_used": 0,
-        "ai_analysis_used": 0,
-        "storage_used_gb": 0,
-        "carry_over_tokens": 0,
+        "user_id":                   user_id,
+        "tokens_used":               0,
+        "documents_used":            documents_used,
+        "ai_analysis_used":          0,
+        "storage_used_gb":           round(storage_used_gb, 6),
+        "storage_used_bytes":        storage_used_bytes,
+        "storage_breakdown": {
+            "documents_bytes":       doc_storage_bytes,
+            "documents_gb":          round(doc_storage_bytes / (1024 ** 3), 6),
+            "draft_documents_bytes": draft_storage_bytes,
+            "draft_documents_gb":    round(draft_storage_bytes / (1024 ** 3), 6),
+        },
+        "carry_over_tokens":         0,
     }
     plan = {
-        "name": "Unlimited",
-        "type": "firm",
-        "token_limit": 999999999,
-        "document_limit": 999999,
-        "ai_analysis_limit": 999999,
-        "storage_limit_gb": 100,
+        "name":                    plan_name,
+        "type":                    "firm",
+        "token_limit":             999999999,
+        "document_limit":          999999,
+        "ai_analysis_limit":       999999,
+        "storage_limit_gb":        storage_limit_gb,
         "token_renew_interval_hours": 24,
     }
+
     logger.info(
-        "[Route:user_usage_and_plan] response sent actor_user_id=%s target_user_id=%s tokens_used=%s documents_used=%s",
-        actor_user_id,
-        user_id,
-        usage["tokens_used"],
-        usage["documents_used"],
+        "[Route:user_usage_and_plan] user=%s docs=%d storage_used_gb=%.4f storage_limit_gb=%.3f",
+        user_id, documents_used, storage_used_gb, storage_limit_gb,
     )
     return {"success": True, "data": {"usage": usage, "plan": plan, "timeLeft": 0}}
 
@@ -979,10 +1131,21 @@ async def upload_for_processing(
         folder_name,
         len(files),
     )
-    documents: list[DocumentReference] = []
+    # Storage quota check: sum total bytes of all files first
+    total_new_bytes = 0
+    files_data = []
     for upload in files:
         file_bytes = await upload.read()
         upload.file.seek(0)
+        total_new_bytes += len(file_bytes)
+        files_data.append((upload, file_bytes))
+
+    storage_check = assert_storage_allowed(user_id, total_new_bytes)
+    if not storage_check.get("ok"):
+        raise HTTPException(status_code=507, detail=storage_check)
+
+    documents: list[DocumentReference] = []
+    for upload, file_bytes in files_data:
         check = assert_upload_allowed(
             user_id,
             llm_config,
@@ -1017,10 +1180,21 @@ async def upload_documents_to_folder(
         folder_name,
         len(files),
     )
-    documents: list[DocumentReference] = []
+    # Storage quota check
+    total_new_bytes = 0
+    files_data = []
     for upload in files:
         file_bytes = await upload.read()
         upload.file.seek(0)
+        total_new_bytes += len(file_bytes)
+        files_data.append((upload, file_bytes))
+
+    storage_check = assert_storage_allowed(user_id, total_new_bytes)
+    if not storage_check.get("ok"):
+        raise HTTPException(status_code=507, detail=storage_check)
+
+    documents: list[DocumentReference] = []
+    for upload, file_bytes in files_data:
         check = assert_upload_allowed(
             user_id,
             llm_config,
@@ -1070,6 +1244,13 @@ def import_google_drive_documents(
             data, filename, mime_type = google_drive_tool.download_file_bytes(
                 x_google_access_token, file_id
             )
+            # Storage quota check (per file, after download so we know the real size)
+            storage_check = assert_storage_allowed(user_id, len(data))
+            if not storage_check.get("ok"):
+                raise HTTPException(
+                    status_code=507,
+                    detail=storage_check.get("message", "Storage limit exceeded. Delete files or upgrade your plan."),
+                )
             check = assert_upload_allowed(
                 user_id,
                 llm_config,
@@ -1159,6 +1340,7 @@ def generate_upload_url_for_folder(
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     try:
         llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
+        # File-level checks (size, pages, daily limit)
         check = assert_upload_allowed(
             user_id,
             llm_config,
@@ -1169,6 +1351,10 @@ def generate_upload_url_for_folder(
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
+        # Plan-level storage quota check
+        storage_check = assert_storage_allowed(user_id, size_bytes=int(request.size or 0))
+        if not storage_check.get("ok"):
+            raise HTTPException(status_code=429, detail=storage_check)
         return _build_signed_upload(user_id, folder_name, request, llm_config)
     except HTTPException:
         raise
@@ -1208,6 +1394,32 @@ def complete_upload_for_folder(
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
+        # Plan-level storage quota check (at completion, file is already in GCS)
+        storage_check = assert_storage_allowed(user_id, size_bytes=int(request.size or 0))
+        if not storage_check.get("ok"):
+            raise HTTPException(status_code=429, detail=storage_check)
+        # ── Resolve real file size from GCS when request.size is missing/zero ──
+        declared_size = int(request.size or 0)
+        real_size = declared_size
+        if declared_size == 0 and request.gcsPath:
+            try:
+                from app.services.adapters.gcs import _get_gcs_client
+                from app.core.config import get_settings as _gs
+                _s = _gs()
+                _bn = _s.gcs_input_bucket_name or _s.gcs_bucket_name or "fileinputbucket"
+                _gcs_path = request.gcsPath
+                if _gcs_path.startswith("gs://"):
+                    _gcs_path = "/".join(_gcs_path.split("/")[3:])
+                _blob = _get_gcs_client().bucket(_bn).blob(_gcs_path)
+                _blob.reload()
+                real_size = int(_blob.size or 0)
+                logger.info(
+                    "[Route:complete_upload] resolved real_size=%d bytes from GCS for %s",
+                    real_size, request.filename,
+                )
+            except Exception as _size_exc:
+                logger.debug("[Route:complete_upload] GCS size lookup failed: %s", _size_exc)
+
         payload = enqueue_case_documents(
             user_id=user_id,
             folder_name=folder_name,
@@ -1217,7 +1429,7 @@ def complete_upload_for_folder(
                     mime_type=request.mimetype or "application/octet-stream",
                     document_uri=request.gcsPath,
                     metadata={
-                        "size": int(request.size or 0),
+                        "size": real_size,
                         "original_name": request.filename or "",
                         "gcs_path": request.gcsPath,
                     },
@@ -1783,7 +1995,15 @@ def intelligent_chat(
             request=request,
             authorization=authorization,
         )
-        model_name = str((get_llm_chat_config(user_id=user_id, force_refresh=False) or {}).get("llm_model") or "unknown")
+        requested_model = str(request.llm_name or "").strip()
+        if requested_model.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+            requested_model = ""
+        model_name = str(
+            resolve_secret_prompt_llm_name(request.secret_id)
+            or requested_model
+            or (get_llm_chat_config(user_id=user_id, force_refresh=False) or {}).get("llm_model")
+            or "unknown"
+        )
         answer_text = str(result.get("answer") or "")
         request_id = uuid.uuid4().hex[:12]
         log_llm_usage(
@@ -1834,6 +2054,8 @@ async def intelligent_chat_stream(
             gemini_stream_config_for_folder_chat,
             stream_config_for_folder_chat,
             claude_stream_generator,
+            deepseek_stream_generator,
+            normalize_markdown_render_output,
         )
 
         async def _run_blocking(func, *, timeout_s: float, timeout_message: str):
@@ -1868,6 +2090,7 @@ async def intelligent_chat_stream(
         yield _sse({"type": "thinking", "text": "Loading legal prompt and profile context...\n"})
 
         loop = asyncio.get_running_loop()
+        usage_session_key = begin_token_usage_session()
         chat_request = request
         llm_config = getattr(fastapi_request.state, "llm_chat_config", None) or get_llm_chat_config(
             user_id=user_id,
@@ -1908,6 +2131,16 @@ async def intelligent_chat_stream(
         if not query_text:
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
+        requested_model_name = str(chat_request.llm_name or "").strip()
+        if requested_model_name.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+            requested_model_name = ""
+        selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
+        logger.info(
+            "[Route:intelligent_chat_stream] model_resolution folder=%s secret_id=%s model=%s",
+            folder_name,
+            (chat_request.secret_id or "").strip() or None,
+            selected_model_name,
+        )
 
         folder_service = get_folder_service()
         learning_pedagogy_directive = ""
@@ -2072,17 +2305,21 @@ async def intelligent_chat_stream(
                 }
             )
         else:
+            def _run_vector_chat():
+                bind_token_usage_session(usage_session_key)
+                try:
+                    return answer_case_folder_chat(
+                        user_id=user_id,
+                        folder_name=folder_name,
+                        request=resolved_chat_request,
+                        authorization=authorization,
+                    )
+                finally:
+                    unbind_token_usage_session()
+
             try:
                 vector_result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        lambda: answer_case_folder_chat(
-                            user_id=user_id,
-                            folder_name=folder_name,
-                            request=resolved_chat_request,
-                            authorization=authorization,
-                        ),
-                    ),
+                    loop.run_in_executor(None, _run_vector_chat),
                     timeout=vector_timeout_s,
                 )
             except asyncio.TimeoutError:
@@ -2130,12 +2367,26 @@ async def intelligent_chat_stream(
                     vector_answer_text = (full_answer or "").strip()
 
                 request_id = uuid.uuid4().hex[:12]
-                model_name = str((llm_config or {}).get("llm_model") or "unknown")
+                model_name = str(selected_model_name or (llm_config or {}).get("llm_model") or "unknown")
+                usage_totals = flush_aggregated_token_usage_table(
+                    usage_session_key,
+                    endpoint="/api/files/{folder}/intelligent-chat/stream",
+                    user_id=uid_int,
+                    session_id=str(session_id or ""),
+                    request_id=request_id,
+                    model_name=model_name,
+                    answer_length=len(vector_answer_text),
+                    routing="grounded_retrieval",
+                ) or {
+                    "inputTokens": estimate_tokens_from_text(query_text),
+                    "outputTokens": estimate_tokens_from_text(vector_answer_text),
+                    "totalTokens": estimate_tokens_from_text(query_text) + estimate_tokens_from_text(vector_answer_text),
+                }
                 log_llm_usage(
                     user_id=uid_int,
                     model_name=model_name,
-                    input_tokens=estimate_tokens_from_text(query_text),
-                    output_tokens=estimate_tokens_from_text(vector_answer_text),
+                    input_tokens=int(usage_totals.get("inputTokens") or 0),
+                    output_tokens=int(usage_totals.get("outputTokens") or 0),
                     endpoint="/api/files/{folder}/intelligent-chat/stream",
                     request_id=request_id,
                     session_id=str(session_id or ""),
@@ -2312,12 +2563,12 @@ async def intelligent_chat_stream(
             yield _sse({"type": "thinking", "text": f"Loaded {len(doc_texts)} document(s). Generating answer now...\n"})
 
             non_stream_timeout_s = min(
-                180.0,
+                600.0,
                 max(
                     60.0,
                     30.0
                     + (len(doc_texts) * 8.0)
-                    + (float(llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 15000) / 400.0),
+                    + (float(llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 65536) / 200.0),
                 ),
             )
 
@@ -2329,6 +2580,7 @@ async def intelligent_chat_stream(
             stream_delay_ms = get_streaming_delay_ms(llm_config)
             # Will be set to the resolved model from agent_prompts (used for token usage logging)
             actual_model_name: str = str((llm_config or {}).get("llm_model") or "unknown")
+            stream_usage: dict[str, Any] | None = None
             try:
                 from google import genai  # type: ignore
 
@@ -2398,6 +2650,7 @@ async def intelligent_chat_stream(
                         for_summary=True,
                         summarization_llm_config=llm_config,
                         agent_name=learning_agent_name,
+                        model_name_override=selected_model_name,
                     )
                     # Store for token-usage logging below
                     actual_model_name = resolved_model_name
@@ -2442,6 +2695,46 @@ async def intelligent_chat_stream(
                             claude_stream_error.append(str(exc))
                         if claude_stream_error:
                             raise RuntimeError(f"claude_stream_failed: {claude_stream_error[0]}")
+                    elif stream_provider == "deepseek":
+                        # ── DeepSeek streaming path (thread + queue, same as Claude) ──
+                        deepseek_gen_kwargs, deepseek_llm_params = stream_cfg
+                        _SENTINEL_DS = object()
+                        ds_chunk_queue: asyncio.Queue = asyncio.Queue()
+                        deepseek_stream_error: list[str] = []
+
+                        def _run_deepseek_stream():
+                            try:
+                                for chunk_text in deepseek_stream_generator(
+                                    prompt,
+                                    model_name=resolved_model_name,
+                                    gen_kwargs=deepseek_gen_kwargs,
+                                    llm_params=deepseek_llm_params,
+                                ):
+                                    loop.call_soon_threadsafe(ds_chunk_queue.put_nowait, chunk_text)
+                            except Exception as exc:
+                                deepseek_stream_error.append(str(exc))
+                            finally:
+                                loop.call_soon_threadsafe(ds_chunk_queue.put_nowait, _SENTINEL_DS)
+
+                        ds_stream_future = loop.run_in_executor(None, _run_deepseek_stream)
+                        while True:
+                            chunk_text = await ds_chunk_queue.get()
+                            if chunk_text is _SENTINEL_DS:
+                                break
+                            if not chunk_text:
+                                continue
+                            streamed = True
+                            answer_parts.append(chunk_text)
+                            async for sse_line in _yield_text_as_streaming_chunks(
+                                _sse, chunk_text, delay_ms=stream_delay_ms
+                            ):
+                                yield sse_line
+                        try:
+                            await ds_stream_future
+                        except Exception as exc:
+                            deepseek_stream_error.append(str(exc))
+                        if deepseek_stream_error:
+                            raise RuntimeError(f"deepseek_stream_failed: {deepseek_stream_error[0]}")
                     else:
                         # ── Gemini streaming path ─────────────────────────────────────
                         gemini_config = stream_cfg
@@ -2473,6 +2766,20 @@ async def intelligent_chat_stream(
                                 raise TimeoutError("gemini_stream_first_chunk_timeout")
                             if chunk is None:
                                 break
+                            _um = getattr(chunk, "usage_metadata", None)
+                            if _um is not None:
+                                prompt_tokens = int(getattr(_um, "prompt_token_count", 0) or 0)
+                                completion_tokens = int(getattr(_um, "candidates_token_count", 0) or 0)
+                                total_tokens = int(getattr(_um, "total_token_count", 0) or 0)
+                                if not total_tokens and (prompt_tokens or completion_tokens):
+                                    total_tokens = prompt_tokens + completion_tokens
+                                stream_usage = {
+                                    "provider": "gemini",
+                                    "model": resolved_model_name,
+                                    "inputTokens": prompt_tokens,
+                                    "outputTokens": completion_tokens,
+                                    "totalTokens": total_tokens,
+                                }
                             piece = _gemini_chunk_text(chunk)
                             if not piece:
                                 continue
@@ -2509,7 +2816,7 @@ async def intelligent_chat_stream(
                     folder_name,
                     non_stream_timeout_s,
                     len(doc_texts),
-                    llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 15000,
+                    llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 65536,
                 )
                 non_stream_system_instruction = system_instruction
                 if learning_mode and learning_state is not None:
@@ -2534,6 +2841,7 @@ async def intelligent_chat_stream(
                         for_summary=True,
                         summarization_llm_config=llm_config,
                         agent_name=learning_agent_name,
+                        model_name_override=selected_model_name,
                     )
                     actual_model_name = _fb_model
                 except Exception:
@@ -2552,6 +2860,7 @@ async def intelligent_chat_stream(
                         ),
                         summarization_llm_config=llm_config,
                         agent_name=learning_agent_name,
+                        model_name_override=selected_model_name,
                     ),
                     timeout_s=non_stream_timeout_s,
                     timeout_message="gemini_non_stream_generation",
@@ -2570,7 +2879,7 @@ async def intelligent_chat_stream(
                     yield sse_line
                 yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
 
-            raw_answer = "".join(answer_parts).strip()
+            raw_answer = normalize_markdown_render_output("".join(answer_parts))
             if not raw_answer:
                 yield _sse({"type": "error", "message": "Could not generate an answer. Please try rephrasing your question."})
                 return
@@ -2617,6 +2926,7 @@ async def intelligent_chat_stream(
                                 system_instruction=repair_runtime,
                                 summarization_llm_config=llm_config,
                                 agent_name=learning_agent_name,
+                                model_name_override=selected_model_name,
                             ),
                             timeout_s=45.0,
                             timeout_message="learning_json_repair",
@@ -2692,6 +3002,8 @@ async def intelligent_chat_stream(
                 answer = LearningAgentController.to_display_text(learning_payload)
             else:
                 answer = raw_answer
+                if (chat_request.secret_id or "").strip():
+                    answer = post_process_secret_prompt_response(answer)
 
             # Try to create a session entry in the folder service
             session_id = chat_request.session_id or ""
@@ -2762,11 +3074,59 @@ async def intelligent_chat_stream(
                 "turn_threshold": LearningAgentController.TURN_THRESHOLD if learning_mode else None,
             })
             request_id = uuid.uuid4().hex[:12]
+            input_tokens = (
+                int(stream_usage.get("inputTokens") or 0)
+                if stream_usage
+                else estimate_tokens_from_text(query_text)
+            )
+            output_tokens = (
+                int(stream_usage.get("outputTokens") or 0)
+                if stream_usage
+                else estimate_tokens_from_text(answer)
+            )
+            if stream_usage and input_tokens <= 0:
+                input_tokens = estimate_tokens_from_text(query_text)
+            if stream_usage and output_tokens <= 0:
+                output_tokens = estimate_tokens_from_text(answer)
+            if stream_usage:
+                record_token_usage(
+                    context="gemini_direct_stream",
+                    usage=stream_usage,
+                    provider=stream_usage.get("provider"),
+                    model_name=actual_model_name,
+                )
+            elif not streamed:
+                record_token_usage(
+                    context="gemini_direct_estimated",
+                    usage={
+                        "provider": "estimated",
+                        "model": actual_model_name,
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
+                        "totalTokens": input_tokens + output_tokens,
+                    },
+                    provider="estimated",
+                    model_name=actual_model_name,
+                )
+            usage_totals = flush_aggregated_token_usage_table(
+                usage_session_key,
+                endpoint="/api/files/{folder}/intelligent-chat/stream",
+                user_id=uid_int,
+                session_id=str(session_id or ""),
+                request_id=request_id,
+                model_name=actual_model_name,
+                answer_length=len(answer or ""),
+                routing="gemini_direct",
+            ) or {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": input_tokens + output_tokens,
+            }
             log_llm_usage(
                 user_id=uid_int,
                 model_name=actual_model_name,
-                input_tokens=estimate_tokens_from_text(query_text),
-                output_tokens=estimate_tokens_from_text(answer),
+                input_tokens=int(usage_totals.get("inputTokens") or 0),
+                output_tokens=int(usage_totals.get("outputTokens") or 0),
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
                 request_id=request_id,
                 session_id=str(session_id or ""),

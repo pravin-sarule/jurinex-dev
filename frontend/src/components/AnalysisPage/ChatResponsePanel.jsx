@@ -4,8 +4,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
-import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
-import { renderSecretPromptResponse, isStructuredJsonResponse } from '../../utils/renderSecretPromptResponse';
+import {
+  formatChatResponseForDisplay,
+  chatResponseLooksLikeHtml,
+} from '../../utils/formatChatResponse';
 import { getCleanText, downloadAsHtml, printResponse } from '../../utils/responseExportUtils';
 import {
   ensureTableSeparators,
@@ -183,13 +185,14 @@ const ChatResponsePanel = ({
  li: ({node, ...props}) => (
  <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
  ),
- a: ({node, ...props}) => (
+ a: ({node, children, ...props}) => (
  <a
  {...props}
  className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
  target="_blank"
  rel="noopener noreferrer"
  >
+   {children}
  </a>
  ),
  blockquote: ({node, ...props}) => (
@@ -229,24 +232,24 @@ const ChatResponsePanel = ({
  <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />
  ),
  table: ({node, ...props}) => (
- <div className="my-6 rounded-lg border border-gray-300 shadow-sm overflow-hidden">
- <table className="min-w-full divide-y divide-gray-300" {...props} />
+ <div className="md-table-scroll">
+   <table {...props} />
  </div>
  ),
  thead: ({node, ...props}) => (
- <thead className="bg-gradient-to-r from-gray-50 to-gray-100" {...props} />
+ <thead {...props} />
  ),
  th: ({node, ...props}) => (
- <th className="px-6 py-4 text-left text-xs font-bold text-gray-800 uppercase tracking-wider border-b-2 border-gray-300" {...props} />
+ <th {...props} />
  ),
  tbody: ({node, ...props}) => (
- <tbody className="bg-white divide-y divide-gray-200" {...props} />
+ <tbody {...props} />
  ),
  tr: ({node, ...props}) => (
- <tr className="hover:bg-gray-50 transition-colors" {...props} />
+ <tr {...props} />
  ),
  td: ({node, ...props}) => (
- <td className="px-6 py-4 text-sm text-gray-800 border-b border-gray-100 leading-relaxed" {...props} />
+ <td {...props} />
  ),
  hr: ({node, ...props}) => (
  <hr className="my-6 border-t-2 border-gray-300" {...props} />
@@ -392,31 +395,19 @@ ref={horizontalScrollRef}
   
   if (!rawResponse) return null;
   
-  const isSecretPrompt = selectedMessage?.used_secret_prompt || false;
+  const responseContent = formatChatResponseForDisplay(rawResponse);
   
-  const isStructured = isStructuredJsonResponse(rawResponse);
-  
-  let responseContent = '';
-  if (isStructured) {
-    responseContent = renderSecretPromptResponse(rawResponse);
-  } else {
-    responseContent = convertJsonToPlainText(rawResponse);
-  }
-  
-  // Check if content contains HTML (Word document style)
-  const containsHTML = responseContent.includes('<div style=') || 
-                       responseContent.includes('<h1 style=') || 
-                       responseContent.includes('<h2 style=') ||
-                       responseContent.includes('<table style=') ||
-                       responseContent.includes('<p style=');
+  if (!responseContent) return null;
+
+  const isHTML = chatResponseLooksLikeHtml(responseContent);
   
   return (
     <div 
-      className={containsHTML ? 'word-document-style' : 'prose prose-gray prose-lg max-w-none'} 
+      className={isHTML ? 'word-document-style' : 'formatted-assistant-markdown analysis-page-response'} 
       ref={markdownOutputRef} 
       style={{ minWidth: 'fit-content' }}
     >
-      {containsHTML ? (
+      {isHTML ? (
         <div 
           dangerouslySetInnerHTML={{ __html: responseContent }}
           style={{
@@ -427,7 +418,7 @@ ref={horizontalScrollRef}
           }}
         />
       ) : (
-        {splitMarkdownIntoRenderChunks(ensureTableSeparators(responseContent)).map((chunk, index) => (
+        splitMarkdownIntoRenderChunks(ensureTableSeparators(responseContent)).map((chunk, index) => (
           <ReactMarkdown
             key={`${index}-${chunk.length}`}
             remarkPlugins={[remarkGfm]}
@@ -436,7 +427,7 @@ ref={horizontalScrollRef}
           >
             {chunk}
           </ReactMarkdown>
-        ))}
+        ))
       )}
       
       {isAnimatingResponse && (

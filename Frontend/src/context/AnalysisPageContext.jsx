@@ -6,6 +6,7 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import {
   Search, Send, FileText, Layers, Trash2, RotateCcw,
   ArrowRight, ChevronRight, AlertTriangle, Clock, Loader2,
@@ -100,14 +101,19 @@ export const AnalysisPageProvider = ({
         try { errorData = await response.json(); } catch { 
           errorData = { error: `HTTP error! status: ${response.status}` }; 
         }
+        // Extract the real server message from FastAPI detail objects or plain message fields.
+        const serverMsg = (errorData.detail && typeof errorData.detail === 'object'
+          ? errorData.detail.message
+          : typeof errorData.detail === 'string' ? errorData.detail : null)
+          || errorData.message || errorData.error || null;
         switch (response.status) {
           case 401: throw new Error('Authentication required. Please log in again.');
-          case 403: throw new Error(errorData.error || 'Access denied.');
+          case 403: throw new Error(serverMsg || 'Access denied.');
           case 404: throw new Error('Resource not found.');
-          case 413: throw new Error('File too large.');
+          case 413: throw new Error(serverMsg || 'File too large or exceeds page limit.');
           case 415: throw new Error('Unsupported file type.');
-          case 429: throw new Error('Too many requests.');
-          default: throw new Error(errorData.error || errorData.message || `Request failed with status ${response.status}`);
+          case 429: throw new Error(serverMsg || 'Usage limit reached. Please wait and try again.');
+          default: throw new Error(serverMsg || `Request failed with status ${response.status}`);
         }
       }
 
@@ -121,21 +127,14 @@ export const AnalysisPageProvider = ({
     }
   };
 
-  const fetchSecrets = async () => {
+  const fetchSecrets = async ({ forceRefresh = false } = {}) => {
+    const cached = !forceRefresh ? peekSecretsList() : null;
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, { method: 'GET', headers });
-      if (!response.ok) throw new Error(`Failed to fetch secrets: ${response.status}`);
-
-      const secretsData = await response.json();
-      console.log('[fetchSecrets] Raw secrets data:', secretsData);
+      const secretsData = await fetchSecretsList({ forceRefresh });
       setSecrets(secretsData || []);
-      
       if (secretsData && secretsData.length > 0) {
         setActiveDropdown(secretsData[0].name);
         setSelectedSecretId(secretsData[0].id);
@@ -579,6 +578,14 @@ export const AnalysisPageProvider = ({
   }, []);
 
   useEffect(() => { fetchSecrets(); }, []);
+
+  useEffect(() => {
+    const onPlanUpdated = () => {
+      fetchSecrets({ forceRefresh: true });
+    };
+    window.addEventListener('userInfoUpdated', onPlanUpdated);
+    return () => window.removeEventListener('userInfoUpdated', onPlanUpdated);
+  }, []);
 
   useEffect(() => {
     if (showSplitView) {

@@ -28,6 +28,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { GoogleAICacheManager, GoogleAIFileManager } = require('@google/generative-ai/server');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
+const { logLLMUsage } = require('./llmUsageService');
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
@@ -41,7 +42,36 @@ const INACTIVITY_MS = (() => {
   return Number.isFinite(raw) && raw >= 60_000 ? Math.floor(raw) : 15 * 60 * 1000;
 })();
 
-/** Google Generative AI minimum for explicit context cache (document + system instruction). */
+/** Record Gemini cache token usage in the shared Payment DB pool (llm_usage_logs). */
+async function logSharedPoolUsage({
+  userId,
+  modelName,
+  inputTokens = 0,
+  outputTokens = 0,
+  totalTokens = null,
+  endpoint,
+  fileId = null,
+  sessionId = null,
+}) {
+  if (!userId) return;
+  const input = Math.max(0, Math.floor(Number(inputTokens) || 0));
+  const output = Math.max(0, Math.floor(Number(outputTokens) || 0));
+  const total = totalTokens != null
+    ? Math.max(0, Math.floor(Number(totalTokens) || 0))
+    : input + output;
+  if (total <= 0) return;
+  await logLLMUsage({
+    userId,
+    modelName: modelName || 'gemini-2.5-flash',
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: total,
+    endpoint,
+    fileId,
+    sessionId,
+  });
+}
+
 const GEMINI_CACHE_MIN_TOKENS = 1024;
 
 function toGenAISystemInstruction(text) {
@@ -56,6 +86,16 @@ function isCacheTooSmallError(err) {
     err?.code === 'CACHE_TOO_SMALL' ||
     /cached content is too small/i.test(msg) ||
     /min_total_token_count/i.test(msg)
+  );
+}
+
+function isGeminiApiKeyRevokedError(err) {
+  const msg = String(err?.message || '');
+  const status = Number(err?.status || err?.statusCode || err?.code);
+  // Google marks the key and blocks all API calls once detected as leaked.
+  return (
+    status === 403 &&
+    /api key was reported as leaked|reported as leaked|api key.*leaked/i.test(msg)
   );
 }
 
@@ -152,12 +192,12 @@ async function startInactivityTimer(sessionId) {
     try { await deleteCache(sessionId, 'inactivity_timeout'); } catch (e) {
       console.error('[CacheService] Auto-delete failed:', e.message);
     }
-  }, 2 * 60 * 1000);
+  }, INACTIVITY_MS);
 
   cacheTimers.set(sessionId, { timer, expiresAt });
 
   // Await the DB update so that any status fetch immediately after this call
-  // sees the correct expires_at (2 min from now, not from cache creation time).
+  // sees the correct expires_at (INACTIVITY_MS from now, not from cache creation time).
   await pool.query(
     'UPDATE gemini_cache_sessions SET expires_at = $1, last_accessed_at = NOW() WHERE session_id = $2',
     [new Date(expiresAt), sessionId]
@@ -338,7 +378,8 @@ async function createCache(
   modelName = 'gemini-2.5-flash',
   customSessionId = null,
   fileId = null,
-  systemInstruction = null
+  systemInstruction = null,
+  userId = null
 ) {
   const apiKey = getApiKey();
   const genAI  = new GoogleGenerativeAI(apiKey);
@@ -371,6 +412,17 @@ async function createCache(
   // 3. Persist to DB
   await dbInsertSession({ sessionId, cacheName: cache.name, documentTokens, setupCost, displayName, expiresAt, fileId });
 
+  await logSharedPoolUsage({
+    userId,
+    modelName: pricing.model,
+    inputTokens: documentTokens,
+    outputTokens: 0,
+    totalTokens: documentTokens,
+    endpoint: '/api/chat/cache/create',
+    fileId,
+    sessionId,
+  });
+
   // 4. Start sliding inactivity timer
   await startInactivityTimer(sessionId);
 
@@ -401,7 +453,8 @@ async function createCacheFromFile(
   customSessionId = null,
   fileId = null,
   skipInitialTimer = false,
-  systemInstruction = null
+  systemInstruction = null,
+  userId = null
 ) {
   const apiKey       = getApiKey();
   const genAI        = new GoogleGenerativeAI(apiKey);
@@ -461,6 +514,17 @@ async function createCacheFromFile(
     ? Date.now() + 900 * 1000
     : Date.now() + INACTIVITY_MS;
   await dbInsertSession({ sessionId, cacheName: cache.name, documentTokens, setupCost, displayName, expiresAt, fileId });
+
+  await logSharedPoolUsage({
+    userId,
+    modelName: pricing.model,
+    inputTokens: documentTokens,
+    outputTokens: 0,
+    totalTokens: documentTokens,
+    endpoint: '/api/chat/cache/create',
+    fileId,
+    sessionId,
+  });
 
   if (!skipInitialTimer) {
     await startInactivityTimer(sessionId);
@@ -565,6 +629,17 @@ async function askQuestion(sessionId, question, userId = null) {
   await dbAccumulateUsage(sessionId, {
     cachedTokens, newPromptTokens, outputTokens,
     inputCost: cachedCost + promptCost, outputCost,
+  });
+
+  await logSharedPoolUsage({
+    userId,
+    modelName: session.model_name,
+    inputTokens: totalInputTokens,
+    outputTokens,
+    totalTokens: totalInputTokens + outputTokens,
+    endpoint: '/api/chat/cache/ask',
+    fileId: session.file_id,
+    sessionId,
   });
 
   // ── Reset 2-minute sliding window (await so DB has correct expires_at) ─────
@@ -782,7 +857,8 @@ async function askWithAutoCache(
       null,
       fileId,
       true,
-      systemInstruction
+      systemInstruction,
+      userId
     );
     sessionId = cacheStatus.sessionId;
     console.log(`[CacheService] New cache session ${sessionId} created for file ${fileId}`);
@@ -873,7 +949,8 @@ async function askWithAutoCacheStream(
       null,
       fileId,
       true,
-      systemInstruction
+      systemInstruction,
+      userId
     );
     sessionId = cacheStatus.sessionId;
     console.log(`[CacheService] Stream: new session ${sessionId} created for file ${fileId}`);
@@ -970,6 +1047,17 @@ async function askWithAutoCacheStream(
     inputCost: cachedCost + promptCost, outputCost,
   });
 
+  await logSharedPoolUsage({
+    userId,
+    modelName: session.model_name,
+    inputTokens: totalInputTokens,
+    outputTokens,
+    totalTokens: totalInputTokens + outputTokens,
+    endpoint: '/api/chat/cache/ask/stream',
+    fileId,
+    sessionId,
+  });
+
   // 8. Start 2-minute inactivity timer AFTER the full response has been streamed
   await startInactivityTimer(sessionId);
 
@@ -1024,5 +1112,6 @@ module.exports = {
   getStatusForFile,
   deleteCache,
   isCacheTooSmallError,
+  isGeminiApiKeyRevokedError,
   GEMINI_CACHE_MIN_TOKENS,
 };

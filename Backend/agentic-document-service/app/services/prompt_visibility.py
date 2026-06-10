@@ -49,7 +49,8 @@ def secret_sql_filters() -> tuple[str, str]:
     """
     Returns (plan_clause, role_clause) for secret_manager queries.
     Caller supplies params: [user_plan_id, user_role_id].
+    NULL role_id means no role restriction — visible to any user with matching plan.
     """
     plan_clause = "s.plan_id IS NOT NULL AND s.plan_id = %s"
-    role_clause = "s.role_id IS NOT NULL AND s.role_id::text = %s"
+    role_clause = "(s.role_id IS NULL OR s.role_id::text = %s)"
     return plan_clause, role_clause

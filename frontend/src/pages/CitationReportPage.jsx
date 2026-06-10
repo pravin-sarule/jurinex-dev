@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import citationApi, { resolveCitationUserId } from '../services/citationApi';
 import citationV1Api from '../services/citationV1Api';
 import documentApi from '../services/documentApi';
+import { useTokenQuota } from '../context/TokenQuotaContext';
+import { QUOTA_ERROR_CODES } from '../utils/quotaError';
 import { CITATION_SERVICE_URL } from '../config/apiConfig';
 import html2pdf from 'html2pdf.js';
 import RedesignedCitationReportDoc from '../components/CitationReport/RedesignedCitationReportDoc';
@@ -2696,6 +2698,7 @@ function CaseSearchTab() {
 export default function CitationReportPage({ embedded = false }) {
   const { reportId } = useParams();
   const navigate = useNavigate();
+  const { showQuotaError } = useTokenQuota();
 
   // Firm visibility: analytics only for FIRM_ADMIN; team for both FIRM_ADMIN and FIRM_USER
   const _storedUser = (() => { try { return JSON.parse(localStorage.getItem('user') || '{}'); } catch { return {}; } })();
@@ -3211,7 +3214,15 @@ export default function CitationReportPage({ embedded = false }) {
               const suppressWatchdogMissingQuery =
                 normalized.includes('watchdog failed') &&
                 normalized.includes('query or keyword_sets or dimensions required');
-              if (!suppressWatchdogMissingQuery) {
+              // Check if the pipeline error string contains a known quota error code
+              const embeddedQuotaCode = [...QUOTA_ERROR_CODES].find(c => pipelineError.includes(c));
+              if (embeddedQuotaCode) {
+                const syntheticErr = new Error(pipelineError);
+                syntheticErr.code = embeddedQuotaCode;
+                syntheticErr.isQuotaError = true;
+                syntheticErr.details = {};
+                showQuotaError(syntheticErr);
+              } else if (!suppressWatchdogMissingQuery) {
                 addMsg('error', `❌ Pipeline failed: ${pipelineError}`);
               }
               setReportError(pipelineError);
@@ -3232,8 +3243,10 @@ export default function CitationReportPage({ embedded = false }) {
 
     } catch (e) {
       stopPolling();
-      addMsg('error', `❌ ${e.message}`);
-      setReportError(e.message);
+      if (!showQuotaError(e)) {
+        addMsg('error', `❌ ${e.message}`);
+        setReportError(e.message);
+      }
       setSending(false); setGenerating(false);
     }
   };

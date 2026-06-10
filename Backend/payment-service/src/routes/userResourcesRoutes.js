@@ -18,9 +18,23 @@ router.put('/firm-analytics/users/:userId/token-limit', protect, firmAnalyticsCo
 
 const tokenUsageController = require('../controllers/tokenUsageController');
 router.get('/token-usage', protect, tokenUsageController.getTokenUsage);
+const tokenCheckController = require('../controllers/tokenCheckController');
 router.post('/internal/firm-token-caps/check', firmAnalyticsController.checkFirmUserTokenLimit);
+router.post('/internal/token-check', tokenCheckController.internalTokenCheck);
 
 const llmUsageLogController = require('../controllers/llmUsageLogController');
 router.post('/llm-usage-log', llmUsageLogController.createLLMUsageLog); // No auth - will be called internally by document service
+
+// On-demand billing period renewal — renews the caller's subscription if the end_date
+// has already passed in IST but the midnight cron hasn't run yet (server restart, etc.)
+router.post('/renew-billing-period', protect, async (req, res) => {
+  const { runDailyMidnightIST } = require('../services/cronService');
+  try {
+    await runDailyMidnightIST();
+    res.json({ success: true, message: 'Billing period renewal check completed.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 module.exports = router;

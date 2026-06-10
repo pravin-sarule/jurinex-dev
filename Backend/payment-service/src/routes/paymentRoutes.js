@@ -13,15 +13,19 @@ const {
   rollbackTokensApi
 } = require('../controllers/paymentController');
 const { protect } = require('../middleware/auth');
-const { checkTokenUsage } = require('../middleware/tokenAuth'); // Import checkTokenUsage
-const {getAllPlans} = require('../controllers/userplanController');
+const { checkTokenUsage } = require('../middleware/tokenAuth');
+const { getAllPlans } = require('../controllers/userplanController');
+const { getMonthlyPlans, startMonthlySubscription, verifyMonthlySubscription } = require('../controllers/monthlyPlansController');
+const { getTopupPlans, createTopupOrder, verifyTopupPayment, deductTopupTokens, getTopupHistory } = require('../controllers/topupController');
+const { getTokenQuotaStatus } = require('../controllers/tokenCheckController');
+const { getStorageAddonPlans, createStorageAddonOrder, verifyStorageAddonPayment, getStorageAddonHistory } = require('../controllers/storageAddonController');
 const router = express.Router();
 
 router.use((req, res, next) => {
-  console.log(`🔔 Payment route accessed: ${req.method} ${req.originalUrl}`);
-  console.log('Headers:', req.headers);
-  console.log('Body:', req.body);
-  console.log('User from auth (if any):', req.user);
+  console.log(`🔔 Payment route: ${req.method} ${req.originalUrl}`);
+  if (req.originalUrl.includes('/topup/order/verify')) {
+    console.log('[topup/verify] user:', req.user?.id, 'order:', req.body?.razorpay_order_id);
+  }
   next();
 });
 
@@ -65,5 +69,25 @@ router.post('/token-usage', protect, checkTokenUsage, checkAndDeductTokens);
 router.post('/token/check-reserve', protect, checkAndReserveTokensApi);
 router.post('/token/commit', protect, commitTokensApi);
 router.post('/token/rollback', protect, rollbackTokensApi);
+
+// ── Monthly Plans (new subscription flow with daily_token_limit) ──────────────
+router.get('/monthly-plans', getMonthlyPlans);
+router.post('/monthly-plans/subscribe/start', protect, startMonthlySubscription);
+router.post('/monthly-plans/subscribe/verify', protect, verifyMonthlySubscription);
+
+// ── Token Top-Up (one-time purchase when daily limit is exhausted) ─────────────
+router.get('/topup-plans', getTopupPlans);
+router.get('/daily-token-status', protect, getTokenQuotaStatus);
+router.get('/token-quota-status', protect, getTokenQuotaStatus);
+router.get('/topup/history', protect, getTopupHistory);
+router.post('/topup/order/create', protect, createTopupOrder);
+router.post('/topup/order/verify', protect, verifyTopupPayment);
+router.post('/topup/deduct', protect, deductTopupTokens);
+
+// ── Storage Add-On (purchase extra storage beyond plan limit) ─────────────────
+router.get('/storage-addon/plans',         getStorageAddonPlans);
+router.get('/storage-addon/history',       protect, getStorageAddonHistory);
+router.post('/storage-addon/order/create', protect, createStorageAddonOrder);
+router.post('/storage-addon/order/verify', protect, verifyStorageAddonPayment);
 
 module.exports = router;

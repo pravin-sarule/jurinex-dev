@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff, CreditCard } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
 import { useTheme } from '../context/ThemeContext.jsx';
 import api from '../services/api';
 import { ToastContainer, toast } from 'react-toastify';
@@ -141,6 +141,8 @@ const SettingsPage = () => {
  });
 
  const [loading, setLoading] = useState(true);
+ const profileFetchedForUserRef = useRef(null);
+ const planRefreshAttemptedRef = useRef(false);
  const [error, setError] = useState(null);
  const [isEditingProfile, setIsEditingProfile] = useState(false);
  const [isEditingPassword, setIsEditingPassword] = useState(false);
@@ -349,13 +351,21 @@ const SettingsPage = () => {
  useEffect(() => {
  const isBlockedFirmUser = shouldEnforceRbac(authUser) && !canViewAccountSettings;
 
- if (authLoading || !authUser || isBlockedFirmUser) {
+ if (authLoading || !authUser?.id || isBlockedFirmUser) {
  return;
  }
 
+ if (profileFetchedForUserRef.current === authUser.id) {
+ return;
+ }
+ const isFirstLoad = profileFetchedForUserRef.current === null;
+ profileFetchedForUserRef.current = authUser.id;
+
  const fetchUserProfile = async () => {
  try {
+ if (isFirstLoad) {
  setLoading(true);
+ }
  const response = await api.fetchProfile();
  const user = response.user;
  
@@ -370,6 +380,7 @@ const SettingsPage = () => {
  day: 'numeric'
  }) : 'N/A'
  });
+ setError(null);
  } catch (err) {
  setError('Failed to fetch user profile.');
  console.error('Error fetching profile:', err);
@@ -380,17 +391,21 @@ const SettingsPage = () => {
  };
 
  fetchUserProfile();
- }, [authLoading, authUser, canViewAccountSettings]);
+ }, [authLoading, authUser?.id, canViewAccountSettings]);
 
  useEffect(() => {
  if (!token || planInfo?.plan || typeof fetchAndStorePlan !== 'function') {
  return;
  }
+ if (planRefreshAttemptedRef.current) {
+ return;
+ }
+ planRefreshAttemptedRef.current = true;
 
  fetchAndStorePlan(token).catch((err) => {
  console.error('Error refreshing current plan on settings page:', err);
  });
- }, [token, planInfo, fetchAndStorePlan]);
+ }, [token, planInfo?.plan, fetchAndStorePlan]);
 
  useEffect(() => {
  const isBlockedFirmUser = shouldEnforceRbac(authUser) && !canViewAccountSettings;

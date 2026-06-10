@@ -1,0 +1,67 @@
+    useEffect(() => {
+      // Base throttle 120ms (~8 writes/sec).  Scales up for large buffers so
+      // the O(n) parse never blocks the main thread long enough to drop frames.
+      const BASE_THROTTLE = 120;
+      let lastFlush = 0;
+      let rafId;
+
+      const scheduleScroll = () => {
+        // Defer the scroll check until after the browser has finished layout
+        // from the innerHTML update — avoids reading stale scrollHeight.
+        requestAnimationFrame(() => {
+          const sc = scrollTargetRef?.current;
+          if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 280) {
+            sc.scrollTop = sc.scrollHeight;
+          }
+        });
+      };
+
+      function tick(now) {
+        rafId = requestAnimationFrame(tick);
+        const stableEl = stableRef.current;
+        const liveEl   = liveRef.current;
+        if (!stableEl || !liveEl) return;
+
+        const cur = bufferRef.current || '';
+        if (cur.length === prevLenRef.current) return; // nothing new
+
+        // Scale throttle with buffer size so large responses parse less often
+        const throttle = Math.min(
+          400,
+          BASE_THROTTLE + Math.floor(cur.length / 300) * 8,
+        );
+        if (now - lastFlush < throttle) return;
+        lastFlush = now;
+        prevLenRef.current = cur.length;
+
+        const split = findStableSplit(cur);
+
+        if (split <= 0) {
+          // No stable boundary yet — put everything in the live div
+          liveEl.innerHTML = parseMarkdown(cur);
+        } else {
+          const stablePart = cur.substring(0, split);
+          const livePart   = cur.substring(split);
+
+          // Stable div: only re-render when the stable boundary advances.
+          // Append-only: parse only the new stable slice and append as HTML so
+          // the work is O(new_content) not O(all_stable_content).
+          if (stablePart.length > stableEndRef.current) {
+            const newSlice = stablePart.substring(stableEndRef.current);
+            if (newSlice.trim()) {
+              const frag = document.createElement('div');
+              frag.innerHTML = parseMarkdown(newSlice);
+              while (frag.firstChild) stableEl.appendChild(frag.firstChild);
+            }
+            stableEndRef.current = stablePart.length;
+          }
+          // Live div: always re-render — only the tail (tiny)
+          liveEl.innerHTML = parseMarkdown(livePart);
+        }
+
+        scheduleScroll();
+      }
+
+      rafId = requestAnimationFrame(tick);
+      return () => cancelAnimationFrame(rafId);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps

@@ -1,28 +1,40 @@
 import '../styles/AnalysisPage.css';
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import PromptChipsBar from '../components/PromptChipsBar';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
+import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react';
+import { flushSync } from 'react-dom';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
 import UploadProgressPanel from '../components/AnalysisPage/UploadProgressPanel';
 import ChatInputArea from '../components/AnalysisPage/ChatInputArea';
-import MessagesList from '../components/AnalysisPage/MessageList';
+import ChatSessionList from '../components/ChatInterface/ChatSessionList';
 import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
+import '../styles/ChatInterface.css';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
 import UploadOptionsMenu from '../components/UploadOptionsMenu';
 import googleDriveApi from '../services/googleDriveApi';
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import {
+  formatChatResponseForDisplay,
+  isEmptyFormattedChatContent,
+  looksLikeRawJsonString,
+  chatResponseLooksLikeHtml,
+} from '../utils/formatChatResponse';
 import { buildSuggestedQuestions } from '../utils/suggestedQuestions';
+
 import { formatFileSize } from '../utils/planUtils';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
-import { getChatModelQuotaUserMessage } from '../utils/llmQuotaMessages';
+import { getChatModelQuotaUserMessage, parseLlmPolicyErrorForUi } from '../utils/llmQuotaMessages';
+import { createQuotaError, parseQuotaHttpError } from '../utils/quotaError';
+import { useTokenQuota } from '../context/TokenQuotaContext';
+import { invalidateTokenQuotaCache } from '../services/tokenQuotaService';
+import ChatQuotaErrorModal from '../components/ChatQuotaErrorModal';
+import UpgradePlanBanner from '../components/UpgradePlanBanner';
 import {
   Search,
   Send,
@@ -30,6 +42,8 @@ import {
   Trash2,
   RotateCcw,
   ChevronRight,
+  ChevronLeft,
+  Plus,
   AlertTriangle,
   Clock,
   Loader2,
@@ -54,8 +68,308 @@ import {
   Mic,
   MicOff,
   Sparkles,
+  Settings2,
 } from 'lucide-react';
 import LearningBubble from '../components/LearningBubble';
+import TokenCostPopover from '../components/TokenCostPopover';
+import SessionTokenBadge from '../components/SessionTokenBadge';
+import FileTokenBadge from '../components/FileTokenBadge';
+// ─── Unified O(n) Markdown Parser ────────────────────────────────────────────
+// Rules guaranteed by this implementation:
+//   Rule 1: Never re-parse the whole string on every chunk — rAF throttle controls parse cadence
+//   Rule 2: Chunks append to a plain ref, no setState on each token
+//   Rule 3: ONE parser for both streaming and final — byte-identical HTML, no visual jump
+//   Rule 4: DOM writes capped to ~12/sec via rAF + 80ms throttle
+//
+// Handles: headings, bold/italic/bold-italic, inline code, fenced code blocks,
+// links, blockquotes, HR, ordered/unordered lists, GFM tables (with escaped pipes).
+// Mid-stream incomplete table rows fall through to <p> and snap into the table
+// on the next parse — no broken markup ever emitted.
+function parseMarkdown(md) {
+  if (!md || typeof md !== 'string') return '';
+
+  const esc = (s) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // inline() escapes first, then applies formatting so injected < > & are safe
+  const inline = (s) =>
+    esc(s)
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/\*\*\*([^*\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>')
+      .replace(/`([^`\n]+?)`/g, '<code>$1</code>');
+
+  const splitRow = (row) => {
+    const cells = []; let cur = '';
+    const inner = row.replace(/^\||\|$/g, '');
+    for (let i = 0; i < inner.length; i++) {
+      if (inner[i] === '\\' && inner[i + 1] === '|') { cur += '|'; i++; }
+      else if (inner[i] === '|') { cells.push(cur); cur = ''; }
+      else cur += inner[i];
+    }
+    cells.push(cur);
+    return cells.map((c) => c.trim());
+  };
+
+  const lines = md.split('\n');
+  const out = [];
+  let inTable = false, hasHead = false;
+  let inList = false, listTag = null;
+  let inCode = false, codeBuf = [], codeLang = '';
+
+  const endList  = () => { if (inList)  { out.push(`</${listTag}>`); inList = false; listTag = null; } };
+  const endTable = () => { if (inTable) { out.push('</tbody></table></div>'); inTable = false; hasHead = false; } };
+  const flushCode = () => {
+    out.push(
+      `<pre class="md-pre"${codeLang ? ` data-lang="${esc(codeLang)}"` : ''}><code>${esc(codeBuf.join('\n'))}</code></pre>`
+    );
+    inCode = false; codeBuf = []; codeLang = '';
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t   = raw.trim();
+
+    // Fenced code — highest priority, captures everything verbatim inside
+    const fence = t.match(/^```(.*)$/);
+    if (fence) {
+      if (inCode) { flushCode(); }
+      else { endList(); endTable(); inCode = true; codeLang = fence[1].trim(); }
+      continue;
+    }
+    if (inCode) { codeBuf.push(raw); continue; }
+
+    if (!t) { endList(); endTable(); continue; }
+
+    // Horizontal rule
+    if (/^([-*_]\s*){3,}$/.test(t)) { endList(); endTable(); out.push('<hr/>'); continue; }
+
+    // Heading
+    const h = t.match(/^(#{1,6})\s+(.+)/);
+    if (h) { endList(); endTable(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); continue; }
+
+    // Blockquote
+    if (/^>\s?/.test(t)) {
+      endList(); endTable();
+      out.push(`<blockquote>${inline(t.replace(/^>\s?/, ''))}</blockquote>`);
+      continue;
+    }
+
+    // Table separator — triggers thead→tbody transition, then skipped
+    if (/^\|?[\s:|-]+\|?$/.test(t) && t.includes('-') && t.includes('|')) {
+      if (inTable && !hasHead) { out.push('</thead><tbody>'); hasHead = true; }
+      continue;
+    }
+
+    // Table row — accepts rows with or without trailing | (LLMs often omit it)
+    // Requires at least two | characters: one at start + one elsewhere.
+    if (t.startsWith('|') && t.indexOf('|', 1) >= 0) {
+      endList();
+      if (!inTable) { out.push('<div class="md-table-scroll"><table><thead>'); inTable = true; hasHead = false; }
+      const tag = hasHead ? 'td' : 'th';
+      out.push(`<tr>${splitRow(t).map((c) => `<${tag}>${inline(c)}</${tag}>`).join('')}</tr>`);
+      continue;
+    }
+    if (inTable) endTable();
+
+    // Unordered list
+    if (/^[-*+]\s+/.test(t)) {
+      if (listTag !== 'ul') { endList(); out.push('<ul>'); inList = true; listTag = 'ul'; }
+      out.push(`<li>${inline(t.replace(/^[-*+]\s+/, ''))}</li>`);
+      continue;
+    }
+
+    // Ordered list
+    const ol = t.match(/^(\d+)[.)]\s+(.+)/);
+    if (ol) {
+      if (listTag !== 'ol') { endList(); out.push('<ol>'); inList = true; listTag = 'ol'; }
+      out.push(`<li>${inline(ol[2])}</li>`);
+      continue;
+    }
+
+    endList();
+    out.push(`<p>${inline(t)}</p>`);
+  }
+
+  if (inCode) flushCode();
+  endList();
+  endTable();
+  return out.join('\n');
+}
+
+// ─── Stable-split finder ─────────────────────────────────────────────────────
+// Returns the char index at which the buffer can be split into a stable
+// (already-complete) prefix and a live (still-growing) suffix.
+//
+// IMPORTANT: Only split on \n\n (double newline) to guarantee table integrity.
+// Splitting on a single \n mid-table causes parseMarkdown to emit the separator
+// row ":---" as a real <td> cell. The live tail is bounded separately in tick().
+const LIVE_CAP = 1200; // chars — max live tail chars parsed per tick
+
+function findStableSplit(text) {
+  const idx = text.lastIndexOf('\n\n');
+  if (idx >= 0) {
+    const before = text.substring(0, idx);
+    const fences = (before.match(/^```/gm) || []).length;
+    if (fences % 2 === 0) return idx;
+    const openFence = before.lastIndexOf('\n```');
+    const fallbackIdx = openFence > 0 ? before.lastIndexOf('\n\n', openFence) : -1;
+    if (fallbackIdx >= 0) return fallbackIdx;
+  }
+  return -1;
+}
+
+const StreamingMarkdown = React.memo(
+  function StreamingMarkdown({ bufferRef, scrollTargetRef }) {
+    const containerRef  = useRef(null);
+    const prevLenRef    = useRef(0);
+    const prevHtmlRef   = useRef('');
+    const stableEndRef  = useRef(0);
+    const stableHtmlRef = useRef('');
+
+    useEffect(() => {
+      let lastFlush = 0;
+      let rafId;
+
+      const scheduleScroll = () => {
+        requestAnimationFrame(() => {
+          const sc = scrollTargetRef?.current;
+          if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 400) {
+            sc.scrollTop = sc.scrollHeight;
+          }
+        });
+      };
+
+      function tick(now) {
+        rafId = requestAnimationFrame(tick);
+        const el = containerRef.current;
+        if (!el) return;
+
+        const cur = bufferRef.current || '';
+        if (cur.length === prevLenRef.current) return;
+
+        // Fixed 50ms throttle (~20 FPS) — fast enough to feel live, gentle on CPU
+        if (now - lastFlush < 50) return;
+        lastFlush = now;
+        prevLenRef.current = cur.length;
+
+        // Find stable split strictly at \n\n so we never split mid-table.
+        const split = findStableSplit(cur);
+
+        let html;
+        if (split <= 0) {
+          // Small buffer: parse whole thing but cap at LIVE_CAP to avoid lockup
+          const liveTail = cur.length > LIVE_CAP ? cur.substring(cur.length - LIVE_CAP) : cur;
+          html = stableHtmlRef.current + parseMarkdown(liveTail);
+        } else {
+          // Grow the stable cache incrementally (never re-parse old text)
+          if (split > stableEndRef.current) {
+            const newChunk = cur.substring(stableEndRef.current, split);
+            stableHtmlRef.current += parseMarkdown(newChunk);
+            stableEndRef.current = split;
+          }
+          // Parse only the live tail (always ≤ LIVE_CAP chars at a \n\n boundary)
+          const liveTail = cur.substring(split);
+          html = stableHtmlRef.current + parseMarkdown(liveTail);
+        }
+
+        if (html === prevHtmlRef.current) return;
+        prevHtmlRef.current = html;
+        el.innerHTML = html;
+
+        scheduleScroll();
+      }
+
+      rafId = requestAnimationFrame(tick);
+      return () => {
+        cancelAnimationFrame(rafId);
+        // Flush the full buffer on unmount so the last segment is never dropped
+        // when switching from StreamingMarkdown → FinalMarkdown.
+        const el = containerRef.current;
+        const full = bufferRef.current || '';
+        if (el && full) {
+          el.innerHTML = parseMarkdown(full);
+          prevLenRef.current = full.length;
+        }
+      };
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    return (
+      <div
+        ref={containerRef}
+        className="formatted-assistant-markdown stream-active"
+      />
+    );
+  },
+  () => true, // never re-render from props — rAF loop owns the DOM
+);
+
+// ─── Final renderer (same parser, memoized once) ──────────────────────────────
+// Uses parseMarkdown — byte-identical output to StreamingMarkdown, so the
+// transition at stream end is invisible (no heavy ReactMarkdown parse, no jump).
+const FinalMarkdown = React.memo(
+  function FinalMarkdown({ text }) {
+    const [html, setHtml] = React.useState(() => parseMarkdown(text || ''));
+    // When text changes (e.g. stream just finished), defer the expensive full
+    // re-parse to a microtask so the browser can paint "done" state first.
+    React.useEffect(() => {
+      if (!text) { setHtml(''); return; }
+      // Small responses: parse synchronously. Large: yield to browser first.
+      if (text.length < 4000) {
+        setHtml(parseMarkdown(text));
+      } else {
+        const id = setTimeout(() => setHtml(parseMarkdown(text)), 0);
+        return () => clearTimeout(id);
+      }
+    }, [text]);
+    return (
+      <div
+        className="formatted-assistant-markdown"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  },
+  (a, b) => a.text === b.text,
+);
+
+/** Wrap legacy HTML tables so wide matrices scroll instead of clipping. */
+function wrapBareHtmlTables(html) {
+  if (!html || typeof html !== 'string' || !/<table[\s>]/i.test(html)) return html;
+  if (/md-table-scroll/i.test(html)) return html;
+  return html.replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (block) =>
+    `<div class="md-table-scroll">${block}</div>`
+  );
+}
+
+/** Renders full secret-prompt HTML or markdown via FinalMarkdown (never hybrid HTML+md). */
+const AssistantMessageBody = React.memo(
+  function AssistantMessageBody({ content }) {
+    if (!content) return null;
+    if (chatResponseLooksLikeHtml(content)) {
+      return (
+        <div
+          className="formatted-assistant-markdown formatted-assistant-html"
+          dangerouslySetInnerHTML={{ __html: wrapBareHtmlTables(content) }}
+        />
+      );
+    }
+    return <FinalMarkdown text={content} />;
+  },
+  (a, b) => a.content === b.content,
+);
+
+// ── Gemini-style typing dots — shown while waiting for first token ───────────
+const TypingDots = React.memo(function TypingDots() {
+  return (
+    <div className="typing-dots" aria-label="Generating response…">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+});
 
 const PROGRESS_STAGES = {
   INIT: { range: [0, 15], label: 'Initialization' },
@@ -96,35 +410,6 @@ const getStageStatus = (stageKey, progress) => {
   if (progress >= stage.range[1]) return 'completed';
   if (progress >= stage.range[0] && progress < stage.range[1]) return 'active';
   return 'pending';
-};
-
-const formatRateQuotaValue = (value) => {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return 'Unlimited';
-  return String(Math.floor(n));
-};
-
-const RateQuotaPills = ({ limits, className = '' }) => {
-  if (!limits) return null;
-  const items = [
-    { key: 'messages_per_hour', label: 'Messages / hour' },
-    { key: 'quota_chats_per_minute', label: 'Chats / minute' },
-    { key: 'chats_per_day', label: 'Chats / day' },
-    { key: 'total_tokens_per_day', label: 'Tokens / 24h' },
-  ];
-  return (
-    <div className={`rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 ${className}`.trim()}>
-      <p className="text-[11px] uppercase tracking-[0.16em] text-[#807868] mb-1.5">Rate & Quota Limits</p>
-      <div className="flex flex-wrap gap-2">
-        {items.map((item) => (
-          <div key={item.key} className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1">
-            <span className="text-[11px] text-gray-500">{item.label}</span>
-            <span className="text-xs font-semibold text-gray-800">{formatRateQuotaValue(limits[item.key])}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
 };
 
 const RealTimeProgressPanel = ({ processingStatus }) => {
@@ -184,7 +469,7 @@ const RealTimeProgressPanel = ({ processingStatus }) => {
           <div className="text-center">
             <AlertTriangle className="h-10 w-10 text-red-500 mx-auto mb-3 animate-pulse" />
             <p className="text-red-700 text-xs mb-3 font-medium">
-              {processingStatus.job_error || 'An error occurred during processing'}
+              {(typeof processingStatus.job_error === 'string' ? processingStatus.job_error : null) || 'An error occurred during processing'}
             </p>
             <p className="text-xs text-gray-500">Last updated: {formatDate(processingStatus.last_updated)}</p>
           </div>
@@ -273,6 +558,9 @@ const RealTimeProgressPanel = ({ processingStatus }) => {
   );
 };
 
+const CHAT_INPUT_MIN_HEIGHT = 24;
+const CHAT_INPUT_MAX_HEIGHT = 200;
+
 const ChatModelPage = () => {
   const location = useLocation();
   const { fileId: paramFileId, sessionId: paramSessionId } = useParams();
@@ -280,6 +568,7 @@ const ChatModelPage = () => {
   const navigate = useNavigate();
 
   const { maxUploadBytes, maxUploadMbLabel, loading: limitsLoading, error: limitsError, limits, refresh: refreshLimits } = useLlmChatLimits();
+  const { showQuotaError } = useTokenQuota();
 
   /** All file UUIDs attached in this session (multi-doc chat). Primary id is fileId / first entry. */
   const chatAttachmentFileIdsRef = useRef([]);
@@ -304,12 +593,6 @@ const ChatModelPage = () => {
   const [animatedResponseContent, setAnimatedResponseContent] = useState('');
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [showSplitView, setShowSplitView] = useState(false);
-  const [splitLeftWidth, setSplitLeftWidth] = useState(48);
-  const [isResizingSplit, setIsResizingSplit] = useState(false);
-  const [isDesktopSplit, setIsDesktopSplit] = useState(() =>
-    typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
-  );
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMessageId, setSelectedMessageId] = useState(null);
   const [displayLimit, setDisplayLimit] = useState(10);
@@ -348,10 +631,111 @@ const ChatModelPage = () => {
   const [chatModelFiles, setChatModelFiles] = useState([]);
   const [chatModelHistory, setChatModelHistory] = useState([]);
 
+  // Gemini Context Caching States
+  const [useCache, setUseCache] = useState(false);
+  const [cacheSessionData, setCacheSessionData] = useState(null);
+  const [isInitializingCache, setIsInitializingCache] = useState(false);
+
+  // Cumulative token usage for the current session (non-cached path)
+  const [sessionTokenUsage, setSessionTokenUsage] = useState({ inputTokens: 0, outputTokens: 0, totalTokens: 0, modelName: '' });
+
+  // Document token count — populated immediately after upload via free countTokens API
+  const [fileTokenCount, setFileTokenCount] = useState({ totalTokens: 0, modelName: '', mimeType: null, filename: null, isLoading: false, error: null });
+
+  const handleInitializeCache = async () => {
+    if (!fileId) return null;
+    setIsInitializingCache(true);
+    setError(null);
+    try {
+      const res = await apiService.createGeminiCache({
+        file_id: fileId,
+        displayName: documentData?.originalName || documentData?.name || 'Legal Chat Cache',
+        modelName: 'gemini-2.5-flash',
+        customSessionId: sessionId
+      });
+      if (res && res.success && res.data) {
+        setCacheSessionData(res.data);
+        setUseCache(true);
+        setSuccess('Gemini Context Cache initialized successfully!');
+        return res.data; // return so callers can use it immediately without waiting for state
+      }
+      return null;
+    } catch (err) {
+      console.error('[handleInitializeCache] Error:', err);
+      setError('Failed to initialize context cache: ' + err.message);
+      return null;
+    } finally {
+      setIsInitializingCache(false);
+    }
+  };
+
+  // When active document changes: reset cache state (cache is created lazily on first prompt)
+  useEffect(() => {
+    if (fileId) {
+      setUseCache(true);
+      setCacheSessionData(null);
+      // Count document tokens immediately (free, non-generating call)
+      countDocumentTokens(fileId);
+    } else {
+      setUseCache(false);
+      setCacheSessionData(null);
+      setFileTokenCount({ totalTokens: 0, modelName: '', mimeType: null, filename: null, isLoading: false, error: null });
+    }
+  }, [fileId]);
+
+  // Keep cache cost/token UI in sync (poll only while a session exists and is active)
+  useEffect(() => {
+    if (!fileId || !useCache) return undefined;
+
+    let cancelled = false;
+    const refreshCacheStatus = async () => {
+      try {
+        const res = await apiService.getGeminiCacheFileStatus(fileId);
+        if (cancelled || !res?.success || !res.data) return;
+        const data = res.data;
+        if (data.status === 'NO_SESSION') return;
+        setCacheSessionData(data);
+      } catch (err) {
+        console.warn('[ChatModelPage] cache status poll failed:', err.message);
+      }
+    };
+
+    refreshCacheStatus();
+    // Poll every 5s while active; once deleted/expired the popover handles live time locally
+    const intervalId = setInterval(refreshCacheStatus, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [fileId, useCache]);
+
+  // Call countTokens API immediately after a file is attached — mirrors Google AI Studio
+  const countDocumentTokens = async (fid) => {
+    if (!fid) return;
+    setFileTokenCount((prev) => ({ ...prev, isLoading: true, error: null }));
+    try {
+      const res = await apiService.countFileTokens(fid, 'gemini-2.5-pro');
+      if (res && res.success && res.data) {
+        setFileTokenCount({
+          totalTokens: res.data.totalTokens || 0,
+          modelName: res.data.modelName || 'gemini-2.5-pro',
+          mimeType: res.data.mimeType || null,
+          filename: res.data.filename || null,
+          isLoading: false,
+          error: null,
+        });
+      }
+    } catch (err) {
+      console.warn('[countDocumentTokens] Token count failed (non-critical):', err.message);
+      setFileTokenCount((prev) => ({ ...prev, isLoading: false, error: err.message }));
+    }
+  };
+
   // Sessions list for the sidebar panel (ChatGPT-style)
   const [chatSessions, setChatSessions] = useState([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
-  const [showSessionsPanel, setShowSessionsPanel] = useState(true);
+  const [chatHistorySidebarOpen, setChatHistorySidebarOpen] = useState(true);
+  const [showWelcomeHistory, setShowWelcomeHistory] = useState(false);
 
   /** Messages for the active session only (UI + viewer; `messages` may hold mixed sessions from restore). */
   const sessionMessages = useMemo(() => {
@@ -371,7 +755,15 @@ const ChatModelPage = () => {
     return [];
   }, [messages, sessionId]);
 
+  const isChatActive =
+    sessionMessages.length > 0 ||
+    hasResponse ||
+    !!pendingQuestion ||
+    isLoading ||
+    isGeneratingInsights;
+
   const fileInputRef = useRef(null);
+  const chatInputRef = useRef(null);
   const dropdownRef = useRef(null);
   const styleDropdownRef = useRef(null);
   const responseRef = useRef(null);
@@ -380,17 +772,134 @@ const ChatModelPage = () => {
   const animationFrameRef = useRef(null);
   const streamBufferRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
+  const streamUiRafRef = useRef(null);
+  const reasoningBufferRef = useRef('');
+  const reasoningUiRafRef = useRef(null);
   const streamReaderRef = useRef(null);
-  const splitContainerRef = useRef(null);
+  const assistantDisplayCacheRef = useRef(new Map());
+  // Guards against calling setStreamingStatus('generating') on every chunk due
+  // to the stale closure problem.  Reset to false at the start of each request.
+  const streamingGeneratingFiredRef = useRef(false);
+
+  // Incremented whenever streamBufferRef is reset mid-stream (e.g. cache→fallback).
+  // Used as a key on <StreamingMarkdown> so the component remounts with empty DOM
+  // instead of inheriting stale stable-div content from the previous stream.
+  const [streamResetKey, setStreamResetKey] = React.useState(0);
+
+  // ── Repetition Circuit Breaker ───────────────────────────────────────────────
+  // loopAbortControllerRef: holds the AbortController for the active fetch; calling
+  //   .abort() immediately closes the HTTP connection and stops token spending.
+  // loopAbortedRef: set to true once we've fired the abort so we don't double-fire.
+  // loopCharsRef: counts chars since the last loop-detection check; we check every
+  //   LOOP_CHECK_CHARS to avoid running String.includes on every tiny chunk.
+  const loopAbortControllerRef = useRef(null);
+  const loopAbortedRef         = useRef(false);
+  const loopCharsRef           = useRef(0);
+
+  const cancelStreamUiSchedule = () => {
+    if (streamUiRafRef.current != null) {
+      clearInterval(streamUiRafRef.current);
+      streamUiRafRef.current = null;
+    }
+    if (streamUpdateTimeoutRef.current) {
+      clearTimeout(streamUpdateTimeoutRef.current);
+      streamUpdateTimeoutRef.current = null;
+    }
+  };
+
+  const scrollChatToBottom = () => {
+    requestAnimationFrame(() => {
+      const threadEl = learningModeActive ? learningThreadRef.current : chatThreadRef.current;
+      if (threadEl) threadEl.scrollTop = threadEl.scrollHeight;
+      if (responseRef.current) responseRef.current.scrollTop = responseRef.current.scrollHeight;
+    });
+  };
+
+  const flushStreamUiUpdate = () => {
+    cancelStreamUiSchedule();
+    const text = streamBufferRef.current || '';
+    setCurrentResponse(text);
+    setAnimatedResponseContent(text);
+    scrollChatToBottom();
+  };
+
+  // ── Repetition detection constants ──────────────────────────────────────────
+  // LOOP_MIN_BUFFER: ignore short responses — no false positives on brief answers.
+  // LOOP_WINDOW: size of the "tail fingerprint" we look for earlier in the buffer.
+  // LOOP_GAP: minimum chars between the fingerprint occurrence and the tail, so we
+  //   don't fire on perfectly normal adjacent duplicate phrases.
+  // LOOP_CHECK_CHARS: only run the O(n) scan after this many new chars arrive, to
+  //   avoid burning CPU on every tiny chunk from a fast stream.
+  // Legal templates repeat similar section headers — keep thresholds high to avoid
+  // false positives that abort the stream and leave only the title visible.
+  const LOOP_MIN_BUFFER  = 8000;
+  const LOOP_WINDOW      = 400;
+  const LOOP_GAP         = 1500;
+  const LOOP_CHECK_CHARS = 1200;
+  const LOOP_MIN_REPEATS = 3;
+
+  const detectRepetitionLoop = (buffer) => {
+    if (buffer.length < LOOP_MIN_BUFFER + LOOP_WINDOW + LOOP_GAP) return false;
+    const tail = buffer.slice(-LOOP_WINDOW).trimStart();
+    if (tail.replace(/\s+/g, '').length < 100) return false;
+    const searchEnd = buffer.length - LOOP_WINDOW - LOOP_GAP;
+    if (searchEnd < LOOP_MIN_BUFFER) return false;
+    const haystack = buffer.slice(0, searchEnd);
+    let fromIndex = 0;
+    let hits = 0;
+    while (hits < LOOP_MIN_REPEATS) {
+      const found = haystack.indexOf(tail, fromIndex);
+      if (found < 0) break;
+      hits += 1;
+      fromIndex = found + Math.max(LOOP_GAP, 1);
+    }
+    return hits >= LOOP_MIN_REPEATS;
+  };
+
+  const appendStreamChunk = (text) => {
+    if (typeof text !== 'string' || !text) return;
+
+    // Only update the ref — StreamingMarkdown reads from it directly via rAF.
+    streamBufferRef.current += text;
+    loopCharsRef.current += text.length;
+
+    // Periodic loop check: log only — never stop accepting chunks (that left header-only UI).
+    if (loopCharsRef.current >= LOOP_CHECK_CHARS) {
+      loopCharsRef.current = 0;
+      if (!loopAbortedRef.current && detectRepetitionLoop(streamBufferRef.current)) {
+        loopAbortedRef.current = true;
+        console.warn(
+          '[CircuitBreaker] Repetition pattern in stream preview (chunks still accepted; full answer applied on done).'
+        );
+      }
+    }
+  };
+
+  const appendReasoningChunk = (text) => {
+    if (typeof text !== 'string' || !text) return;
+    reasoningBufferRef.current += text;
+    if (reasoningUiRafRef.current != null) return;
+    reasoningUiRafRef.current = requestAnimationFrame(() => {
+      reasoningUiRafRef.current = null;
+      setReasoningText(reasoningBufferRef.current);
+    });
+  };
+
+  const resetReasoningBuffer = () => {
+    reasoningBufferRef.current = '';
+    if (reasoningUiRafRef.current != null) {
+      cancelAnimationFrame(reasoningUiRafRef.current);
+      reasoningUiRafRef.current = null;
+    }
+  };
+  const chatThreadRef = useRef(null);
   const learningThreadRef = useRef(null);
-  /** Optional per-request LLM overrides (VITE_CHAT_MODEL_MAX_OUTPUT_TOKENS, VITE_CHAT_MODEL_TEMPERATURE). */
+  const splitContainerRef = useRef(null);
+  const [splitLeftWidth, setSplitLeftWidth] = useState(46);
+  const [isResizingSplit, setIsResizingSplit] = useState(false);
+  /** Optional per-request LLM overrides (VITE_CHAT_MODEL_TEMPERATURE only). */
   const chatModelStreamFetchParams = useMemo(() => {
     const o = {};
-    const mot = import.meta.env.VITE_CHAT_MODEL_MAX_OUTPUT_TOKENS;
-    if (mot != null && String(mot).trim() !== '') {
-      const n = Number(mot);
-      if (Number.isFinite(n)) o.max_output_tokens = n;
-    }
     const temp = import.meta.env.VITE_CHAT_MODEL_TEMPERATURE;
     if (temp != null && String(temp).trim() !== '') {
       const t = Number(temp);
@@ -455,14 +964,6 @@ const ChatModelPage = () => {
   const uploadIntervalRef = useRef(null);
 
   useEffect(() => {
-    const handleWindowResize = () => {
-      setIsDesktopSplit(window.innerWidth >= 1024);
-    };
-    window.addEventListener('resize', handleWindowResize);
-    return () => window.removeEventListener('resize', handleWindowResize);
-  }, []);
-
-  useEffect(() => {
     if (!isResizingSplit) return undefined;
 
     const handleMouseMove = (event) => {
@@ -471,13 +972,10 @@ const ChatModelPage = () => {
       const rect = container.getBoundingClientRect();
       if (!rect.width) return;
       const rawPercent = ((event.clientX - rect.left) / rect.width) * 100;
-      const clampedPercent = Math.min(72, Math.max(28, rawPercent));
-      setSplitLeftWidth(clampedPercent);
+      setSplitLeftWidth(Math.min(68, Math.max(32, rawPercent)));
     };
 
-    const handleMouseUp = () => {
-      setIsResizingSplit(false);
-    };
+    const handleMouseUp = () => setIsResizingSplit(false);
 
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
@@ -491,6 +989,25 @@ const ChatModelPage = () => {
       window.removeEventListener('mouseup', handleMouseUp);
     };
   }, [isResizingSplit]);
+
+  // 2-minute cache deletion timer after response completes
+  useEffect(() => {
+    let timeoutId;
+    if (!isGeneratingInsights && !isLoading && hasResponse) {
+      timeoutId = setTimeout(() => {
+        const sid = cacheSessionData?.sessionId || sessionId;
+        if (sid) {
+           apiService.deleteGeminiCache(sid)
+             .then(() => console.log('Cache deleted due to 2 minutes of inactivity'))
+             .catch(e => console.error('Failed to delete cache on inactivity', e));
+        }
+      }, 120000);
+    }
+    
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }, [isGeneratingInsights, isLoading, hasResponse, chatInput, selectedSecretId, cacheSessionData, sessionId]);
 
   const getAuthToken = () => {
     const tokenKeys = [
@@ -533,21 +1050,33 @@ const ChatModelPage = () => {
         } catch {
           errorData = { error: `HTTP error! status: ${response.status}` };
         }
+        const serverMsg = (errorData.detail && typeof errorData.detail === 'object'
+          ? errorData.detail.message
+          : typeof errorData.detail === 'string' ? errorData.detail : null)
+          || errorData.message || errorData.error || null;
         switch (response.status) {
           case 401:
             throw new Error('Authentication required. Please log in again.');
           case 403:
-            throw new Error(errorData.error || 'Access denied.');
+            throw new Error(serverMsg || 'Access denied.');
           case 404:
             throw new Error('Resource not found.');
           case 413:
-            throw new Error('File too large.');
+            throw new Error(serverMsg || 'File too large or exceeds page limit.');
           case 415:
             throw new Error('Unsupported file type.');
-          case 429:
-            throw new Error('Too many requests.');
+          case 429: {
+            const quota = parseQuotaHttpError(429, errorData);
+            if (quota) throw createQuotaError(quota, 429);
+            const quotaDisplay = parseLlmPolicyErrorForUi(429, errorData);
+            const err = new Error(quotaDisplay.body);
+            err.code = errorData?.code || errorData?.detail?.code;
+            err.details = errorData?.details || errorData?.detail?.details;
+            err.quotaDisplay = quotaDisplay;
+            throw err;
+          }
           default:
-            throw new Error(errorData.error || errorData.message || `Request failed with status ${response.status}`);
+            throw new Error(serverMsg || `Request failed with status ${response.status}`);
         }
       }
       const contentType = response.headers.get('content-type');
@@ -583,36 +1112,85 @@ const ChatModelPage = () => {
         },
       });
 
-      const fileId = response.data?.file_id || response.file_id;
-      if (!fileId) {
+      const newFileId = response.data?.file_id || response.file_id;
+      if (!newFileId) {
         throw new Error('No file_id returned from upload');
       }
 
-      chatAttachmentFileIdsRef.current = [...new Set([...chatAttachmentFileIdsRef.current, fileId])];
+      const priorIds =
+        chatAttachmentFileIdsRef.current.length > 0
+          ? [...chatAttachmentFileIdsRef.current]
+          : fileId
+            ? [fileId]
+            : [];
+      const nextAttachmentIds = [...new Set([...priorIds, newFileId])];
+      chatAttachmentFileIdsRef.current = nextAttachmentIds;
 
-      setUploadedFileId(fileId);
-      setFileId(fileId);
+      if (!fileId) {
+        setFileId(newFileId);
+      }
+
+      setUploadedFileId(newFileId);
+      setHasResponse(true);
       setUploadProgress(100);
+      setCacheSessionData(null);
+
+      const uploadedName = file?.name || response.data?.filename || 'document';
+      if (nextAttachmentIds.length > 1) {
+        setDocumentData((prev) => {
+          const prevNames = prev?.originalName && prev.originalName !== `${priorIds.length} documents`
+            ? prev.originalName
+            : '';
+          const combinedNames = prevNames
+            ? `${prevNames}, ${uploadedName}`
+            : uploadedName;
+          return {
+            name: `${nextAttachmentIds.length} documents`,
+            originalName: combinedNames,
+            size: (prev?.size || 0) + (file?.size || 0),
+            type: 'multi',
+            uploadedAt: new Date().toISOString(),
+          };
+        });
+      } else {
+        setDocumentData({
+          name: uploadedName,
+          originalName: uploadedName,
+          size: file?.size || response.data?.size || 0,
+          type: file?.type || response.data?.mimetype || 'application/pdf',
+          uploadedAt: new Date().toISOString(),
+        });
+      }
 
       if (!skipFinalize) {
         setTimeout(() => {
           setIsChatUploading(false);
-          setSuccess('Document uploaded successfully! You can now ask questions about it.');
-
-          setShowSplitView(true);
-          setHasResponse(true);
-
+          if (nextAttachmentIds.length > 1) {
+            setSuccess(
+              `Document added. ${nextAttachmentIds.length} documents are attached — a new combined cache will be created on your next question.`
+            );
+          } else {
+            setSuccess('Document uploaded successfully! You can now ask questions about it.');
+          }
           setStreamingStatus('ready');
-          setStreamingMessage('Document ready. You can now ask questions about it.');
+          setStreamingMessage(
+            nextAttachmentIds.length > 1
+              ? `${nextAttachmentIds.length} documents ready. Ask a question about any or all of them.`
+              : 'Document ready. You can now ask questions about it.'
+          );
         }, 500);
 
         fetchChatModelFiles();
+        countDocumentTokens(nextAttachmentIds[0]);
+        apiService.createGeminiCache({ file_id: nextAttachmentIds[0] }).catch(err => console.error("Cache prime error:", err));
       }
 
-      return { file_id: fileId, ...response };
+      return { file_id: newFileId, ...response };
     } catch (error) {
       console.error('[uploadDocumentToChat] Error:', error);
-      setError(getChatModelQuotaUserMessage(error) || `Upload failed: ${error.message}`);
+      if (!showQuotaError(error)) {
+        setError(getChatModelQuotaUserMessage(error) || `Upload failed: ${error.message}`);
+      }
       setIsChatUploading(false);
       throw error;
     }
@@ -667,9 +1245,10 @@ const ChatModelPage = () => {
   };
 
   const startProcessingTimeline = (questionLabel, initialStatus, initialMessage) => {
-    setPendingQuestion(questionLabel || null);
+    setPendingQuestion(sanitizeVisibleChatText(questionLabel) || null);
     setShowProcessingTimeline(true);
     setShowReasoning(true);
+    resetReasoningBuffer();
     setReasoningText('');
     setProcessingTimeline([]);
     if (initialStatus) {
@@ -680,9 +1259,25 @@ const ChatModelPage = () => {
   const clearProcessingTimeline = () => {
     setProcessingTimeline([]);
     setPendingQuestion(null);
-    setShowProcessingTimeline(true);
+    setShowProcessingTimeline(false);
+    resetReasoningBuffer();
     setReasoningText('');
-    setShowReasoning(true);
+    setShowReasoning(false);
+  };
+
+  const sanitizeVisibleChatText = (value, fallback = '') => {
+    const text = String(value || '').trim();
+    if (!text) return fallback;
+    if (
+      /ChatModel:\s*User authenticated/i.test(text) ||
+      /\[CacheService\]/i.test(text) ||
+      /\[GeminiCacheController\]/i.test(text) ||
+      /TypeError:\s*fetch failed/i.test(text) ||
+      /node:internal|node_modules|\\Backend\\|\/Backend\//i.test(text)
+    ) {
+      return fallback;
+    }
+    return text;
   };
 
   const normalizedReasoningText = useMemo(() => {
@@ -719,7 +1314,7 @@ const ChatModelPage = () => {
       setIsLoadingSessions(true);
       let sessions = [];
 
-      // Try fetching general chat sessions
+      // Fetch general chat sessions (no document)
       try {
         const response = await apiService.getGeneralChatSessions();
         if (response.success && Array.isArray(response.data?.sessions)) {
@@ -727,18 +1322,38 @@ const ChatModelPage = () => {
             session_id: session.session_id,
             name: session.title || generateSessionName(session.first_question || session.first_message),
             first_question: session.first_question || session.first_message || '',
-            created_at: session.created_at,
+            created_at: session.last_message_at || session.created_at,
             message_count: session.message_count || 0,
-            is_general_chat: !session.file_id,
-            file_id: session.file_id || null,
+            is_general_chat: true,
+            file_id: null,
           }));
           sessions = [...sessions, ...generalSessions];
         }
       } catch (err) {
-        console.warn('[fetchChatSessions] General sessions API error (may not be supported):', err.message);
+        console.warn('[fetchChatSessions] General sessions API error:', err.message);
       }
 
-      // Sort by created_at descending
+      // Fetch document-based sessions
+      try {
+        const docResponse = await apiService.getAllDocumentSessions();
+        if (docResponse.success && Array.isArray(docResponse.data?.sessions)) {
+          const docSessions = docResponse.data.sessions.map((session) => ({
+            session_id: session.session_id,
+            name: generateSessionName(session.first_question),
+            first_question: session.first_question || '',
+            created_at: session.last_message_at || session.first_message_at,
+            message_count: session.message_count || 0,
+            is_general_chat: false,
+            file_id: session.file_id,
+            filename: session.filename,
+          }));
+          sessions = [...sessions, ...docSessions];
+        }
+      } catch (err) {
+        console.warn('[fetchChatSessions] Document sessions API error:', err.message);
+      }
+
+      // Sort by most recent first
       sessions.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
       setChatSessions(sessions);
     } catch (error) {
@@ -769,13 +1384,11 @@ const ChatModelPage = () => {
       // Document chat session
       setFileId(session.file_id);
       chatAttachmentFileIdsRef.current = [session.file_id];
-      setShowSplitView(true);
       setHasResponse(true);
       await fetchChatModelHistory(session.file_id, session.session_id);
       navigate(`/chatmodel/${session.file_id}/${session.session_id}`, { replace: true });
     } else {
       // General chat session
-      setShowSplitView(true);
       setHasResponse(true);
       await fetchGeneralChatHistory(session.session_id);
       navigate(`/chatmodel/session/${encodeURIComponent(session.session_id)}`, { replace: true });
@@ -880,7 +1493,6 @@ const ChatModelPage = () => {
           setCurrentResponse(responseToDisplay);
           showResponseImmediately(responseToDisplay);
           setHasResponse(true);
-          setShowSplitView(true);
         }
       }
     } catch (error) {
@@ -929,7 +1541,6 @@ const ChatModelPage = () => {
         setMessages(history);
         setSessionId(currentSessionId);
         setHasResponse(true);
-        setShowSplitView(true);
 
         if (history.length > 0) {
           const lastMessage = history[history.length - 1];
@@ -951,13 +1562,16 @@ const ChatModelPage = () => {
       setError(null);
       setCurrentResponse('');
       streamBufferRef.current = '';
+      streamingGeneratingFiredRef.current = false;
+      loopAbortedRef.current = false;
+      loopCharsRef.current   = 0;
+      loopAbortControllerRef.current = new AbortController();
       setStreamingStatus('initializing');
       setStreamingMessage('Starting legal chat...');
       startProcessingTimeline(question.trim(), 'initializing', 'Starting legal chat...');
 
       const messageId = Date.now();
       setHasResponse(true);
-      setShowSplitView(true);
       setChatInput('');
 
       console.log('[General Chat] Sending question with DB params:', {
@@ -968,23 +1582,26 @@ const ChatModelPage = () => {
 
       let newSessionId = sessionId;
 
+      // Prefer: secret-prompt override > admin DB model from limits > backend default
+      const adminModel = limits?.llm_model;
       const generalStreamOpts = {
         ...(chatModelStreamFetchParams || {}),
-        ...(selectedLlmName ? { llm_name: selectedLlmName } : {}),
+        ...(selectedLlmName
+          ? { llm_name: selectedLlmName }
+          : adminModel
+            ? { llm_name: adminModel }
+            : {}),
       };
 
       await apiService.askGeneralChatStream(
         question.trim(),
         sessionId,
         (text) => {
-          if (typeof text === 'string') {
-            streamBufferRef.current += text;
-            setCurrentResponse(streamBufferRef.current);
-            setAnimatedResponseContent(streamBufferRef.current);
-            if (!streamingStatus || streamingStatus !== 'generating') {
-              setStreamingStatus('generating');
-              setStreamingMessage('Model thinking');
-            }
+          appendStreamChunk(text);
+          if (typeof text === 'string' && text && !streamingGeneratingFiredRef.current) {
+            streamingGeneratingFiredRef.current = true;
+            setStreamingStatus('generating');
+            setStreamingMessage('Model thinking');
           }
         },
         (status, message) => {
@@ -1012,6 +1629,18 @@ const ChatModelPage = () => {
           const fromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
           const fromBuf = streamBufferRef.current || '';
           const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
+          streamBufferRef.current = finalResponse;
+          flushStreamUiUpdate();
+
+          if (doneData.token_usage) {
+            setSessionTokenUsage((prev) => ({
+              inputTokens:  prev.inputTokens  + (doneData.token_usage.inputTokens  || 0),
+              outputTokens: prev.outputTokens + (doneData.token_usage.outputTokens || 0),
+              totalTokens:  prev.totalTokens  + (doneData.token_usage.totalTokens  || 0),
+              modelName: doneData.token_usage.modelName || prev.modelName,
+            }));
+          }
+
           if (doneData.session_id) newSessionId = doneData.session_id;
           const resolvedSessionId = newSessionId || sessionId || null;
 
@@ -1046,11 +1675,10 @@ const ChatModelPage = () => {
           const synthetic = new Error(errorMessage);
           synthetic.code = code;
           synthetic.details = details;
-          const friendly = getChatModelQuotaUserMessage(synthetic);
-          if (code) {
-            refreshLimits().catch(() => {});
+          if (code) refreshLimits().catch(() => {});
+          if (!showQuotaError(synthetic)) {
+            setError(getChatModelQuotaUserMessage(synthetic) || errorMessage || 'Failed to get answer.');
           }
-          setError(friendly || errorMessage || 'Failed to get answer.');
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setStreamingStatus(null);
@@ -1059,30 +1687,38 @@ const ChatModelPage = () => {
         },
         Object.keys(generalStreamOpts).length ? generalStreamOpts : null,
         (thoughtText) => {
-          if (typeof thoughtText === 'string' && thoughtText) {
-            setReasoningText((prev) => `${prev}${thoughtText}`);
-          }
-        }
+          appendReasoningChunk(thoughtText);
+        },
+        loopAbortControllerRef.current?.signal ?? null
       );
     } catch (error) {
       console.error('[General Chat] Error:', error);
-      setError(getChatModelQuotaUserMessage(error) || error.message || 'Failed to get answer.');
+      if (!showQuotaError(error)) {
+        setError(getChatModelQuotaUserMessage(error) || error.message || 'Failed to get answer.');
+      }
+      clearProcessingTimeline();
+      throw error;
+    } finally {
+      cancelStreamUiSchedule();
       setIsLoading(false);
       setIsGeneratingInsights(false);
       setStreamingStatus(null);
       setStreamingMessage('');
-      clearProcessingTimeline();
-      throw error;
     }
   };
 
   const askQuestionToChat = async (question, fileId, fileIdsOverride = null) => {
+    let messageId = null;
     try {
       setIsLoading(true);
       setIsGeneratingInsights(true);
       setError(null);
       setCurrentResponse('');
       streamBufferRef.current = '';
+      streamingGeneratingFiredRef.current = false;
+      loopAbortedRef.current = false;
+      loopCharsRef.current   = 0;
+      loopAbortControllerRef.current = new AbortController();
       setStreamingStatus('initializing');
       setStreamingMessage('Starting chat request...');
       startProcessingTimeline(question.trim(), 'initializing', 'Starting chat request...');
@@ -1095,10 +1731,7 @@ const ChatModelPage = () => {
         streamReaderRef.current = null;
       }
 
-      if (streamUpdateTimeoutRef.current) {
-        clearTimeout(streamUpdateTimeoutRef.current);
-        streamUpdateTimeoutRef.current = null;
-      }
+      cancelStreamUiSchedule();
 
       const sanitizeId = (id) =>
         id && typeof id === 'string' ? id.replace(/\{\{|\}\}/g, '').replace(/\{|\}/g, '').trim() : id;
@@ -1119,8 +1752,8 @@ const ChatModelPage = () => {
 
       let newSessionId = sessionId;
       let finalMetadata = null;
-     
-      const messageId = Date.now();
+
+      messageId = Date.now();
       const newChat = {
         id: messageId,
         file_id: cleanFileId,
@@ -1134,11 +1767,21 @@ const ChatModelPage = () => {
         isStreaming: true,
       };
      
-      setMessages((prev) => [...prev, newChat]);
+      // Clear isStreaming on any stuck previous messages before adding the new one
+      setMessages((prev) => [
+        ...prev.map((m) => m.isStreaming ? { ...m, isStreaming: false } : m),
+        newChat,
+      ]);
       setSelectedMessageId(messageId);
       setHasResponse(true);
-      setShowSplitView(true);
       setChatInput('');
+
+      // NOTE: The separate /cache/ask/stream path was removed.
+      // /ask/stream (stream_document_chat) already calls ask_with_context_cache
+      // internally, so routing both paths caused TWO query_logs entries per user
+      // message. All document chat — single or multi-file — now flows through
+      // /ask/stream which handles ADK caching, session persistence, and query
+      // logging in one place.
 
       console.log('[DB] Sending chat request with DB params:', {
         file_id: cleanFileId,
@@ -1154,12 +1797,11 @@ const ChatModelPage = () => {
         cleanFileId,
         sessionId,
         (text) => {
-          if (typeof text === 'string') {
-            streamBufferRef.current += text;
-            if (!streamingStatus || streamingStatus !== 'generating') {
-              setStreamingStatus('generating');
-              setStreamingMessage('Model thinking');
-            }
+          appendStreamChunk(text);
+          if (typeof text === 'string' && text && !streamingGeneratingFiredRef.current) {
+            streamingGeneratingFiredRef.current = true;
+            setStreamingStatus('generating');
+            setStreamingMessage('Model thinking');
           }
         },
         (status, message) => {
@@ -1172,6 +1814,10 @@ const ChatModelPage = () => {
         },
         (metadata) => {
           console.log('[askQuestionToChat] Metadata:', metadata);
+          if (metadata.cache_session_metrics) {
+            setCacheSessionData(metadata.cache_session_metrics);
+            setUseCache(true);
+          }
           if (metadata.session_id) {
             newSessionId = metadata.session_id;
             setMessages((prev) => {
@@ -1191,12 +1837,45 @@ const ChatModelPage = () => {
           const fromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
           const fromBuf = streamBufferRef.current || '';
           const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
-         
+          streamBufferRef.current = finalResponse;
+
+          if (!finalResponse || !String(finalResponse).trim()) {
+            setError('The model returned an empty response. Please try again.');
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === messageId ? { ...msg, isStreaming: false, answer: '' } : msg
+              )
+            );
+            clearProcessingTimeline();
+            setIsLoading(false);
+            setIsGeneratingInsights(false);
+            setStreamingStatus(null);
+            setStreamingMessage('');
+            return;
+          }
+
+          flushStreamUiUpdate();
+
+          if (doneData.token_usage) {
+            setSessionTokenUsage((prev) => ({
+              inputTokens:  prev.inputTokens  + (doneData.token_usage.inputTokens  || 0),
+              outputTokens: prev.outputTokens + (doneData.token_usage.outputTokens || 0),
+              totalTokens:  prev.totalTokens  + (doneData.token_usage.totalTokens  || 0),
+              modelName: doneData.token_usage.modelName || prev.modelName,
+            }));
+          }
+          if (doneData.used_gemini_cache) {
+            setUseCache(true);
+            if (doneData.cache_session_metrics) {
+              setCacheSessionData(doneData.cache_session_metrics);
+            }
+          }
+
           if (doneData.session_id) {
             newSessionId = doneData.session_id;
           }
           const resolvedSessionId = newSessionId || sessionId || null;
-         
+
           setStreamingStatus(null);
           setStreamingMessage('');
          
@@ -1220,6 +1899,8 @@ const ChatModelPage = () => {
          
           setSelectedMessageId(messageId);
           if (resolvedSessionId) setSessionId(resolvedSessionId);
+          assistantDisplayCacheRef.current.delete(messageId);
+          setStreamResetKey((k) => k + 1);
           const displayResponse = formatResponseForDisplay(finalResponse, {
             used_secret_prompt: false,
             learning_mode: !!doneData?.learning_mode,
@@ -1246,19 +1927,22 @@ const ChatModelPage = () => {
           const synthetic = new Error(errorMessage);
           synthetic.code = code;
           synthetic.details = details;
-          if (code) {
-            refreshLimits().catch(() => {});
+          if (code) refreshLimits().catch(() => {});
+          if (!showQuotaError(synthetic)) {
+            setError(getChatModelQuotaUserMessage(synthetic) || errorMessage || 'Failed to get answer.');
           }
-          setError(getChatModelQuotaUserMessage(synthetic) || errorMessage || 'Failed to get answer.');
+          flushStreamUiUpdate();
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setStreamingStatus(null);
           setStreamingMessage('');
           clearProcessingTimeline();
          
-          setMessages((prev) => {
-            return prev.filter((msg) => msg.id !== messageId);
-          });
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === messageId ? { ...msg, isStreaming: false, answer: msg.answer || streamBufferRef.current || '' } : msg
+            )
+          );
         },
         null,
         false,
@@ -1272,49 +1956,59 @@ const ChatModelPage = () => {
         },
         ids.length > 1 ? ids : null,
         (thoughtText) => {
-          if (typeof thoughtText === 'string' && thoughtText) {
-            setReasoningText((prev) => `${prev}${thoughtText}`);
+          appendReasoningChunk(thoughtText);
+        },
+        (usagePayload) => {
+          if (usagePayload?.sessionMetrics) {
+            setCacheSessionData(usagePayload.sessionMetrics);
           }
-        }
+        },
+        loopAbortControllerRef.current?.signal ?? null
       );
      
       return finalMetadata;
     } catch (error) {
       console.error('[askQuestionToChat] Error:', error);
-      setError(getChatModelQuotaUserMessage(error) || `Failed to get answer: ${error.message}`);
+      if (!showQuotaError(error)) {
+        setError(getChatModelQuotaUserMessage(error) || `Failed to get answer: ${error.message}`);
+      }
+      clearProcessingTimeline();
+      throw error;
+    } finally {
+      // Cancel any pending UI schedule timers (rAF / timeout) created during
+      // the stream. Do NOT call setMessages here — onDone / onError already
+      // cleared isStreaming. A duplicate setMessages call here creates a React
+      // state race that can blank out the final rendered answer.
+      cancelStreamUiSchedule();
+      loopAbortedRef.current = false;
+      loopCharsRef.current = 0;
       setIsLoading(false);
       setIsGeneratingInsights(false);
       setStreamingStatus(null);
       setStreamingMessage('');
-      clearProcessingTimeline();
-      throw error;
+      // Safety: if onDone/onError never ran (e.g. network drop), stop the spinner.
+      if (messageId != null) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId && m.isStreaming ? { ...m, isStreaming: false } : m
+          )
+        );
+      }
     }
   };
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
       setError(null);
-      const token = getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=false`, {
-        method: 'GET',
-        headers,
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secrets: ${response.status}`);
-      }
-      const secretsData = await response.json();
-      console.log('[fetchSecrets] Raw secrets data:', secretsData);
-      const secretsList = secretsData || [];
+      const secretsList = await fetchSecretsList();
       setSecrets(secretsList);
-     
+
       if (selectedSecretId) {
         const secretExists = secretsList.find((s) => s.id === selectedSecretId);
         if (!secretExists) {
-          console.warn('[fetchSecrets] Previously selected secret ID no longer exists:', selectedSecretId);
-          console.warn('[fetchSecrets] Available secrets:', secretsList.map(s => ({ id: s.id, name: s.name })));
           setSelectedSecretId(null);
           setIsSecretPromptSelected(false);
           setActiveDropdown('Custom Query');
@@ -1363,7 +2057,6 @@ const ChatModelPage = () => {
       };
     });
     setBatchUploads(initialBatchUploads);
-    setShowSplitView(true);
    
     try {
       const token = getAuthToken();
@@ -1719,7 +2412,11 @@ const ChatModelPage = () => {
       animationFrameRef.current = null;
     }
 
-    const plainText = isAlreadyFormatted ? text : convertJsonToPlainText(text);
+    const plainText = isAlreadyFormatted
+      ? text
+      : looksLikeRawJsonString(text)
+        ? formatChatResponseForDisplay(text)
+        : text;
 
     if (!plainText || typeof plainText !== 'string') {
       setIsAnimatingResponse(false);
@@ -1729,7 +2426,6 @@ const ChatModelPage = () => {
 
     setAnimatedResponseContent('');
     setIsAnimatingResponse(true);
-    setShowSplitView(true);
 
     const words = plainText.split(/(\s+)/);
     let currentIndex = 0;
@@ -1780,7 +2476,10 @@ const ChatModelPage = () => {
   };
 
   const showResponseImmediately = (text = '') => {
-    const plainText = convertJsonToPlainText(text);
+    const plainText =
+      typeof text === 'string' && text.length > 0 && !looksLikeRawJsonString(text)
+        ? text
+        : formatChatResponseForDisplay(text);
    
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -1790,7 +2489,6 @@ const ChatModelPage = () => {
     console.log('[showResponseImmediately] Displaying text immediately. Length:', plainText.length);
     setAnimatedResponseContent(plainText);
     setIsAnimatingResponse(false);
-    setShowSplitView(true);
     requestAnimationFrame(() => {
       if (responseRef.current) {
         responseRef.current.scrollTop = responseRef.current.scrollHeight;
@@ -1872,11 +2570,12 @@ const ChatModelPage = () => {
       }
       streamReaderRef.current = null;
     }
+
+    loopAbortedRef.current = false;
+    loopCharsRef.current   = 0;
+    loopAbortControllerRef.current = new AbortController();
    
-    if (streamUpdateTimeoutRef.current) {
-      clearTimeout(streamUpdateTimeoutRef.current);
-      streamUpdateTimeoutRef.current = null;
-    }
+    cancelStreamUiSchedule();
 
     try {
       console.log('[chatWithDocument] Sending custom query with streaming. LLM:', llm_name || 'default (backend)');
@@ -1893,9 +2592,6 @@ const ChatModelPage = () => {
       if (llm_name) {
         body.llm_name = llm_name;
       }
-      if (chatModelStreamFetchParams?.max_output_tokens != null) {
-        body.max_output_tokens = chatModelStreamFetchParams.max_output_tokens;
-      }
       if (chatModelStreamFetchParams?.model_temperature != null) {
         body.model_temperature = chatModelStreamFetchParams.model_temperature;
       }
@@ -1908,10 +2604,18 @@ const ChatModelPage = () => {
           'Accept': 'text/event-stream',
         },
         body: JSON.stringify(body),
+        signal: loopAbortControllerRef.current?.signal ?? undefined,
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorData = await response.json().catch(() => ({}));
+        const quota = parseQuotaHttpError(response.status, errorData);
+        if (quota) throw createQuotaError(quota, response.status);
+        const msg =
+          errorData?.message
+          || (typeof errorData?.detail === 'object' ? errorData.detail?.message : errorData?.detail)
+          || `HTTP error! status: ${response.status}`;
+        throw new Error(msg);
       }
 
       const reader = response.body.getReader();
@@ -2020,16 +2724,15 @@ const ChatModelPage = () => {
               console.log('Stream metadata:', parsed);
               newSessionId = parsed.session_id || newSessionId;
             } else if (parsed.type === 'chunk') {
-              streamBufferRef.current += parsed.text || '';
-              const liveResponse = streamBufferRef.current;
-              setCurrentResponse(liveResponse);
-              setAnimatedResponseContent(liveResponse);
+              appendStreamChunk(parsed.text || '');
               setHasResponse(true);
             } else if (parsed.type === 'done') {
               finalMetadata = parsed;
               const fd = typeof parsed.answer === 'string' ? parsed.answer : '';
               const fb = streamBufferRef.current || '';
               const finalResponse = fd.length >= fb.length ? (fd || fb) : fb;
+              streamBufferRef.current = finalResponse;
+              flushStreamUiUpdate();
               const displayResponse = formatResponseForDisplay(finalResponse, {
                 used_secret_prompt: false,
                 learning_mode: !!finalMetadata?.learning_mode,
@@ -2039,7 +2742,15 @@ const ChatModelPage = () => {
               setIsLoading(false);
               showResponseImmediately(displayResponse);
             } else if (parsed.type === 'error') {
-              setError(parsed.error);
+              const errMsg = parsed.message ?? parsed.error;
+              const synthetic = new Error(
+                typeof errMsg === 'string' ? errMsg : (errMsg?.message || errMsg?.detail || 'An error occurred')
+              );
+              synthetic.code = parsed.code;
+              synthetic.details = parsed.details;
+              if (!showQuotaError(synthetic)) {
+                setError(getChatModelQuotaUserMessage(synthetic) || synthetic.message);
+              }
               setIsLoading(false);
             }
           } catch (e) {
@@ -2051,13 +2762,17 @@ const ChatModelPage = () => {
       console.error('[chatWithDocument] Streaming error:', error);
       if (error.message && error.message.includes('No content found')) {
         setError('Document is still processing. Please wait a few moments and try again.');
-      } else {
-        setError(`Chat failed: ${error.message}`);
+      } else if (!showQuotaError(error)) {
+        setError(getChatModelQuotaUserMessage(error) || `Chat failed: ${error.message}`);
       }
       setIsLoading(false);
       throw error;
     } finally {
+      cancelStreamUiSchedule();
       setIsLoading(false);
+      setIsGeneratingInsights(false);
+      setStreamingStatus(null);
+      setStreamingMessage('');
       streamReaderRef.current = null;
     }
   };
@@ -2145,13 +2860,17 @@ const ChatModelPage = () => {
       try {
         if (toUpload.length === 1) {
           const fileToUpload = toUpload[0];
-          setDocumentData({
-            name: fileToUpload.name,
-            originalName: fileToUpload.name,
-            size: fileToUpload.size,
-            type: fileToUpload.type,
-            uploadedAt: new Date().toISOString(),
-          });
+          const isAddingToChat =
+            Boolean(fileId) || chatAttachmentFileIdsRef.current.length > 0 || sessionMessages.length > 0;
+          if (!isAddingToChat) {
+            setDocumentData({
+              name: fileToUpload.name,
+              originalName: fileToUpload.name,
+              size: fileToUpload.size,
+              type: fileToUpload.type,
+              uploadedAt: new Date().toISOString(),
+            });
+          }
           const result = await uploadDocumentToChat(fileToUpload);
           console.log('[handleFileUpload] Document uploaded successfully:', result);
         } else {
@@ -2170,7 +2889,6 @@ const ChatModelPage = () => {
           setSuccess(
             `${toUpload.length} documents uploaded successfully. You can ask questions about all of them.`
           );
-          setShowSplitView(true);
           setHasResponse(true);
           setStreamingStatus('ready');
           setStreamingMessage('Documents ready. You can now ask questions.');
@@ -2219,15 +2937,15 @@ const ChatModelPage = () => {
       }
 
       const accessToken = tokenData.accessToken;
-      const fileId = file.id || file.fileId;
+      const driveFileId = file.id || file.fileId;
 
-      if (!fileId) {
+      if (!driveFileId) {
         setError('File ID is missing from selected file');
         setIsChatUploading(false);
         return;
       }
 
-      console.log('[handleGoogleDriveUpload] Uploading file to ChatModel:', fileId);
+      console.log('[handleGoogleDriveUpload] Uploading file to ChatModel:', driveFileId);
 
       setUploadProgress(20);
 
@@ -2246,7 +2964,7 @@ const ChatModelPage = () => {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          fileId,
+          fileId: driveFileId,
           accessToken,
         }),
       });
@@ -2281,32 +2999,67 @@ const ChatModelPage = () => {
 
       console.log('[handleGoogleDriveUpload] Extracted file_id:', uploadedFileId);
 
-      chatAttachmentFileIdsRef.current = [...new Set([...chatAttachmentFileIdsRef.current, uploadedFileId])];
+      const priorIds =
+        chatAttachmentFileIdsRef.current.length > 0
+          ? [...chatAttachmentFileIdsRef.current]
+          : fileId
+            ? [fileId]
+            : [];
+      const nextAttachmentIds = [...new Set([...priorIds, uploadedFileId])];
+      chatAttachmentFileIdsRef.current = nextAttachmentIds;
+
+      if (!fileId) {
+        setFileId(uploadedFileId);
+      }
 
       setUploadedFileId(uploadedFileId);
-      setFileId(uploadedFileId);
       setUploadProgress(100);
+      setCacheSessionData(null);
 
-      // Set document data
-      setDocumentData({
-        name: result.data?.filename || file.name,
-        originalName: result.data?.filename || file.name,
-        size: result.data?.size || file.sizeBytes || 0,
-        type: result.data?.mimetype || file.mimeType,
-        uploadedAt: new Date().toISOString(),
-      });
+      const uploadedName = result.data?.filename || file.name;
+      if (nextAttachmentIds.length > 1) {
+        setDocumentData((prev) => {
+          const prevNames = prev?.originalName && !String(prev.originalName).includes(',')
+            ? prev.originalName
+            : prev?.originalName?.split(', ').filter(Boolean).join(', ') || '';
+          const combinedNames = prevNames ? `${prevNames}, ${uploadedName}` : uploadedName;
+          return {
+            name: `${nextAttachmentIds.length} documents`,
+            originalName: combinedNames,
+            size: (prev?.size || 0) + (result.data?.size || file.sizeBytes || 0),
+            type: 'multi',
+            uploadedAt: new Date().toISOString(),
+          };
+        });
+      } else {
+        setDocumentData({
+          name: uploadedName,
+          originalName: uploadedName,
+          size: result.data?.size || file.sizeBytes || 0,
+          type: result.data?.mimetype || file.mimeType,
+          uploadedAt: new Date().toISOString(),
+        });
+      }
 
       setTimeout(() => {
         setIsChatUploading(false);
-        setSuccess('Document uploaded from Google Drive successfully! You can now ask questions about it.');
+        setSuccess(
+          nextAttachmentIds.length > 1
+            ? `Document added. ${nextAttachmentIds.length} documents are attached — a new combined cache will be created on your next question.`
+            : 'Document uploaded from Google Drive successfully! You can now ask questions about it.'
+        );
         
-        setShowSplitView(true);
         setHasResponse(true);
         
         setStreamingStatus('ready');
-        setStreamingMessage('Document ready. You can now ask questions about it.');
+        setStreamingMessage(
+          nextAttachmentIds.length > 1
+            ? `${nextAttachmentIds.length} documents ready. Ask a question about any or all of them.`
+            : 'Document ready. You can now ask questions about it.'
+        );
 
         fetchChatModelFiles();
+        countDocumentTokens(nextAttachmentIds[0]);
       }, 500);
 
     } catch (error) {
@@ -2317,12 +3070,10 @@ const ChatModelPage = () => {
   };
 
   const handleDropdownSelect = (secretName, secretId, llmName) => {
-    console.log('[handleDropdownSelect] Selected:', secretName, secretId, 'LLM:', llmName);
-   
+    if (isLoading || isGeneratingInsights) return;
+
     const secret = secrets.find((s) => s.id === secretId);
     if (!secret) {
-      console.error('[handleDropdownSelect] Secret ID not found in secrets list:', secretId);
-      console.error('[handleDropdownSelect] Available secrets:', secrets.map(s => ({ id: s.id, name: s.name })));
       setError(`Selected analysis prompt "${secretName}" is no longer available. Please refresh the page.`);
       setActiveDropdown('Custom Query');
       setSelectedSecretId(null);
@@ -2331,76 +3082,33 @@ const ChatModelPage = () => {
       setShowDropdown(false);
       return;
     }
-   
-    setActiveDropdown(secretName);
-    setSelectedSecretId(secretId);
-    setSelectedLlmName(llmName);
-    setIsSecretPromptSelected(true);
-    setChatInput('');
-    setShowDropdown(false);
-   
-    console.log('[handleDropdownSelect] Looking for messages with secret_id:', secretId, 'file_id:', fileId);
-    console.log('[handleDropdownSelect] Total messages (session):', sessionMessages.length);
-    console.log('[handleDropdownSelect] Messages with secret prompts:', sessionMessages.filter(m => m.used_secret_prompt).map(m => ({
-      id: m.id,
-      secret_id: m.secret_id,
-      prompt_label: m.prompt_label,
-      file_id: m.file_id
-    })));
-   
-    const messagesForThisPrompt = sessionMessages.filter(
-      (msg) => {
-        const matches = msg.used_secret_prompt &&
-                       msg.secret_id === secretId &&
-                       (msg.file_id === fileId || !fileId || !msg.file_id);
-        if (matches) {
-          console.log('[handleDropdownSelect] Found matching message:', {
-            id: msg.id,
-            secret_id: msg.secret_id,
-            prompt_label: msg.prompt_label,
-            file_id: msg.file_id
-          });
-        }
-        return matches;
-      }
+
+    flushSync(() => {
+      setActiveDropdown(secretName);
+      setSelectedSecretId(secretId);
+      setSelectedLlmName(llmName);
+      setIsSecretPromptSelected(true);
+      setChatInput('');
+      setShowDropdown(false);
+    });
+    void handleSend(
+      { preventDefault: () => {} },
+      { secretId, llmName, secretName }
     );
-   
-    console.log('[handleDropdownSelect] Found', messagesForThisPrompt.length, 'messages for this secret prompt');
-   
-    const messageForThisPrompt = messagesForThisPrompt.length > 0
-      ? messagesForThisPrompt.sort((a, b) => {
-          const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
-          const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
-          return timeB - timeA;
-        })[0]
-      : null;
-   
-    if (messageForThisPrompt) {
-      console.log('[handleDropdownSelect] Displaying message:', {
-        id: messageForThisPrompt.id,
-        secret_id: messageForThisPrompt.secret_id,
-        prompt_label: messageForThisPrompt.prompt_label,
-        answer_length: (messageForThisPrompt.answer || '').length
-      });
-      setSelectedMessageId(messageForThisPrompt.id);
-      const rawAnswer = messageForThisPrompt.answer || messageForThisPrompt.response || '';
-      const isStructured = messageForThisPrompt.used_secret_prompt && isStructuredJsonResponse(rawAnswer);
-      const responseToDisplay = isStructured
-        ? renderSecretPromptResponse(rawAnswer)
-        : convertJsonToPlainText(rawAnswer);
-      setCurrentResponse(responseToDisplay);
-      setAnimatedResponseContent(responseToDisplay);
-      setHasResponse(true);
-    } else {
-      console.log('[handleDropdownSelect] No message found for this secret prompt, clearing response');
-      setCurrentResponse('');
-      setAnimatedResponseContent('');
-      setSelectedMessageId(null);
-      streamBufferRef.current = '';
-      setIsAnimatingResponse(false);
-      setHasResponse(false);
-    }
   };
+
+  const resizeChatInput = useCallback(() => {
+    const ta = chatInputRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(ta.scrollHeight, CHAT_INPUT_MIN_HEIGHT), CHAT_INPUT_MAX_HEIGHT);
+    ta.style.height = `${nextHeight}px`;
+    ta.style.overflowY = ta.scrollHeight > CHAT_INPUT_MAX_HEIGHT ? 'auto' : 'hidden';
+  }, []);
+
+  useEffect(() => {
+    resizeChatInput();
+  }, [chatInput, resizeChatInput]);
 
   const handleChatInputChange = (e) => {
     setChatInput(e.target.value);
@@ -2413,27 +3121,42 @@ const ChatModelPage = () => {
     if (!e.target.value && !isSecretPromptSelected) {
       setActiveDropdown('Custom Query');
     }
+    requestAnimationFrame(resizeChatInput);
   };
 
-  const handleSend = async (e) => {
-    e.preventDefault();
+  const handleChatInputKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!isSendButtonDisabled) {
+        handleSend(e);
+      }
+    }
+  };
+
+  const handleSend = async (e, secretOverride = null) => {
+    if (e?.preventDefault) e.preventDefault();
+
+    // Prevent double-submission while a request is in flight
+    if (isLoading || isGeneratingInsights) return;
+
+    const secretPromptMode = Boolean(secretOverride?.secretId) || isSecretPromptSelected;
+    const effectiveSecretId = secretOverride?.secretId ?? selectedSecretId;
+    const effectiveLlmName = secretOverride?.llmName ?? selectedLlmName;
 
     const hasFile = Boolean(fileId);
 
-    if (isSecretPromptSelected) {
+    if (secretPromptMode) {
       if (!hasFile) {
         setError('Please upload a document before running an analysis prompt.');
         return;
       }
-      if (!selectedSecretId) {
+      if (!effectiveSecretId) {
         setError('Please select an analysis type.');
         return;
       }
      
-      const selectedSecret = secrets.find((s) => s.id === selectedSecretId);
+      const selectedSecret = secrets.find((s) => s.id === effectiveSecretId);
       if (!selectedSecret) {
-        console.error('[handleSend] Selected secret ID not found in secrets list:', selectedSecretId);
-        console.error('[handleSend] Available secrets:', secrets.map(s => ({ id: s.id, name: s.name })));
         setError(`Selected analysis prompt is no longer available. Please select a different one.`);
         setSelectedSecretId(null);
         setIsSecretPromptSelected(false);
@@ -2441,7 +3164,7 @@ const ChatModelPage = () => {
         return;
       }
      
-      const promptLabel = selectedSecret.name || 'Secret Prompt';
+      const promptLabel = secretOverride?.secretName || selectedSecret.name || 'Secret Prompt';
       const secretAttachmentIds =
         chatAttachmentFileIdsRef.current.length > 0
           ? chatAttachmentFileIdsRef.current
@@ -2452,16 +3175,20 @@ const ChatModelPage = () => {
         setIsGeneratingInsights(true);
         setError(null);
         console.log('[handleSend] Triggering secret analysis with streaming:', {
-          secretId: selectedSecretId,
+          secretId: effectiveSecretId,
           fileId: secretAttachmentIds[0],
           file_ids: secretAttachmentIds.length > 1 ? secretAttachmentIds : undefined,
           additionalInput: chatInput.trim(),
           promptLabel: promptLabel,
-          llmName: selectedLlmName,
+          llmName: effectiveLlmName,
         });
        
         setCurrentResponse('');
         streamBufferRef.current = '';
+        streamingGeneratingFiredRef.current = false;
+        loopAbortedRef.current = false;
+        loopCharsRef.current   = 0;
+        loopAbortControllerRef.current = new AbortController();
         setStreamingStatus('initializing');
         setStreamingMessage('Starting chat request...');
         startProcessingTimeline(`Analysis: ${promptLabel}`, 'initializing', 'Starting chat request...');
@@ -2474,10 +3201,7 @@ const ChatModelPage = () => {
           streamReaderRef.current = null;
         }
        
-        if (streamUpdateTimeoutRef.current) {
-          clearTimeout(streamUpdateTimeoutRef.current);
-          streamUpdateTimeoutRef.current = null;
-        }
+        cancelStreamUiSchedule();
 
         streamBufferRef.current = '';
         let newSessionId = sessionId;
@@ -2495,13 +3219,15 @@ const ChatModelPage = () => {
           type: 'chat',
           used_secret_prompt: true,
           prompt_label: promptLabel,
-          secret_id: selectedSecretId,
+          secret_id: effectiveSecretId,
           isStreaming: true,
         };
-        setMessages((prev) => [...prev, newChat]);
+        setMessages((prev) => [
+          ...prev.map((m) => m.isStreaming ? { ...m, isStreaming: false } : m),
+          newChat,
+        ]);
         setSelectedMessageId(messageId);
         setHasResponse(true);
-        setShowSplitView(true);
         setChatInput('');
        
         setCurrentResponse('');
@@ -2513,9 +3239,7 @@ const ChatModelPage = () => {
           sessionId,
           (text) => {
             if (typeof text === 'string') {
-              streamBufferRef.current += text;
-              setCurrentResponse(streamBufferRef.current);
-              setAnimatedResponseContent(streamBufferRef.current);
+              appendStreamChunk(text);
               setHasResponse(true);
             }
           },
@@ -2540,6 +3264,8 @@ const ChatModelPage = () => {
             const sFromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
             const sFromBuf = streamBufferRef.current || '';
             const finalResponse = sFromDone.length >= sFromBuf.length ? (sFromDone || sFromBuf) : sFromBuf;
+            streamBufferRef.current = finalResponse;
+            flushStreamUiUpdate();
             console.log('[Secret Prompt] Final response length:', finalResponse.length);
             console.log('[Secret Prompt] Response preview:', finalResponse.substring(0, 200));
            
@@ -2591,14 +3317,14 @@ const ChatModelPage = () => {
            
             console.log('[Secret Prompt] Updating message:', {
               messageId,
-              selectedSecretId,
+              secretId: effectiveSecretId,
               promptLabel,
               responseLength: responseToStore.length
             });
             setMessages((prev) => {
               const updated = prev.map((msg) => {
                 if (msg.id === messageId) {
-                  console.log('[Secret Prompt] Updating message with secret_id:', selectedSecretId, 'prompt_label:', promptLabel);
+                  console.log('[Secret Prompt] Updating message with secret_id:', effectiveSecretId, 'prompt_label:', promptLabel);
                   return {
                     ...msg,
                     answer: responseToStore,
@@ -2606,7 +3332,7 @@ const ChatModelPage = () => {
                     isStreaming: false,
                     used_secret_prompt: true,
                     prompt_label: promptLabel,
-                    secret_id: selectedSecretId,
+                    secret_id: effectiveSecretId,
                     learning_payload: doneData?.learning_payload || null,
                     learning_mode: !!doneData?.learning_mode,
                   };
@@ -2623,6 +3349,22 @@ const ChatModelPage = () => {
            
             setSelectedMessageId(messageId);
             setSessionId(newSessionId);
+            assistantDisplayCacheRef.current.delete(messageId);
+            setStreamResetKey((k) => k + 1);
+            if (doneData?.used_gemini_cache) {
+              setUseCache(true);
+              if (doneData.cache_session_metrics) {
+                setCacheSessionData(doneData.cache_session_metrics);
+              }
+            }
+            if (doneData?.token_usage) {
+              setSessionTokenUsage((prev) => ({
+                inputTokens:  prev.inputTokens  + (doneData.token_usage.inputTokens  || 0),
+                outputTokens: prev.outputTokens + (doneData.token_usage.outputTokens || 0),
+                totalTokens:  prev.totalTokens  + (doneData.token_usage.totalTokens  || 0),
+                modelName: doneData.token_usage.modelName || 'gemini-2.5-flash',
+              }));
+            }
             setCurrentResponse(responseToDisplay);
             setAnimatedResponseContent(responseToDisplay);
             showResponseImmediately(responseToDisplay);
@@ -2645,11 +3387,11 @@ const ChatModelPage = () => {
             setStreamingMessage('');
             clearProcessingTimeline();
           },
-          selectedSecretId,
+          effectiveSecretId,
           true,
           promptLabel,
           chatInput.trim() || '',
-          selectedLlmName,
+          effectiveLlmName,
           {
             ...chatModelStreamFetchParams,
             learning_mode: learningModeActive,
@@ -2660,13 +3402,14 @@ const ChatModelPage = () => {
             if (typeof thoughtText === 'string' && thoughtText) {
               setReasoningText((prev) => `${prev}${thoughtText}`);
             }
-          }
+          },
+          loopAbortControllerRef.current?.signal ?? null
         );
       } catch (error) {
         console.error('[handleSend] Analysis error:', error);
         if (error.message && error.message.includes('No content found')) {
           setError('Document is still processing. Please wait a few moments and try again.');
-        } else {
+        } else if (!showQuotaError(error)) {
           setError(getChatModelQuotaUserMessage(error) || `Analysis failed: ${error.message}`);
         }
         setStreamingStatus(null);
@@ -2720,7 +3463,9 @@ const ChatModelPage = () => {
         }
       } catch (error) {
         console.error('[handleSend] Chat error:', error);
-        setError(getChatModelQuotaUserMessage(error) || error.message || 'Failed to get answer. Please try again.');
+        if (!showQuotaError(error)) {
+          setError(getChatModelQuotaUserMessage(error) || error.message || 'Failed to get answer. Please try again.');
+        }
       }
     }
   };
@@ -2808,7 +3553,6 @@ const ChatModelPage = () => {
     setError(null);
     setAnimatedResponseContent('');
     setIsAnimatingResponse(false);
-    setShowSplitView(false);
     setBatchUploads([]);
     setUploadedDocuments([]);
     setIsSecretPromptSelected(false);
@@ -2828,6 +3572,8 @@ const ChatModelPage = () => {
     localStorage.removeItem('fileId');
     localStorage.removeItem('processingStatus');
     localStorage.removeItem('progressPercentage');
+    setSessionTokenUsage({ inputTokens: 0, outputTokens: 0, totalTokens: 0, modelName: '' });
+    setFileTokenCount({ totalTokens: 0, modelName: '', mimeType: null, filename: null, isLoading: false, error: null });
     setSuccess('New chat session started!');
     // Refresh sessions list after a brief moment
     setTimeout(() => fetchChatSessions(), 500);
@@ -2920,9 +3666,7 @@ const ChatModelPage = () => {
       if (streamReaderRef.current) {
         streamReaderRef.current.cancel().catch(() => {});
       }
-      if (streamUpdateTimeoutRef.current) {
-        clearTimeout(streamUpdateTimeoutRef.current);
-      }
+      cancelStreamUiSchedule();
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
@@ -2945,7 +3689,7 @@ const ChatModelPage = () => {
   }, []);
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
     fetchChatSessions();
   }, []);
 
@@ -3011,7 +3755,11 @@ const ChatModelPage = () => {
       if (selectedMessageId != null) setSelectedMessageId(null);
       setCurrentResponse('');
       setAnimatedResponseContent('');
-      setHasResponse(false);
+      // Don't clear hasResponse when a file is loaded — it's a fresh session with no messages yet.
+      // fileId being set means the user uploaded a document and is ready to chat.
+      if (!fileId) {
+        setHasResponse(false);
+      }
       return;
     }
     const stillValid =
@@ -3026,7 +3774,7 @@ const ChatModelPage = () => {
       setIsAnimatingResponse(false);
       setHasResponse(true);
     }
-  }, [sessionId, messages, selectedMessageId]);
+  }, [sessionId, messages, selectedMessageId, fileId]);
 
 
 
@@ -3079,7 +3827,6 @@ const ChatModelPage = () => {
           setProcessingStatus(finalStatus);
           setProgressPercentage(actualProgress);
           setHasResponse(true);
-          setShowSplitView(true);
           const chatToDisplay = selectedChatId
             ? allMessages.find((chat) => chat.id === selectedChatId)
             : allMessages[allMessages.length - 1];
@@ -3173,7 +3920,6 @@ const ChatModelPage = () => {
          
           setSessionId(currentSessionId);
           setHasResponse(true);
-          setShowSplitView(true);
           const chatToDisplay = selectedChatId
             ? allMessages.find((chat) => chat.id === selectedChatId)
             : allMessages[allMessages.length - 1];
@@ -3224,7 +3970,6 @@ const ChatModelPage = () => {
       setFileId(paramFileId);
       chatAttachmentFileIdsRef.current = [paramFileId];
       setSessionId(paramSessionId);
-      setShowSplitView(true);
       setHasResponse(true);
       fetchChatModelHistory(paramFileId, paramSessionId);
       window.history.replaceState({}, document.title);
@@ -3235,7 +3980,6 @@ const ChatModelPage = () => {
       console.log('[ChatModelPage] Loading chat from fileId only (resolve latest session):', { paramFileId });
       setFileId(paramFileId);
       chatAttachmentFileIdsRef.current = [paramFileId];
-      setShowSplitView(true);
       setMessages([]);
       setChatModelHistory([]);
       setSelectedMessageId(null);
@@ -3270,7 +4014,6 @@ const ChatModelPage = () => {
       setDocumentData(null);
       chatAttachmentFileIdsRef.current = [];
       setSessionId(paramSessionId);
-      setShowSplitView(true);
       setHasResponse(true);
       const msgs = messagesRef.current;
       const skipFetch =
@@ -3303,13 +4046,11 @@ const ChatModelPage = () => {
         setFileId(chatData.file_id);
         chatAttachmentFileIdsRef.current = [chatData.file_id];
         setSessionId(chatData.session_id);
-        setShowSplitView(true);
         setHasResponse(true);
         fetchChatHistory(chatData.file_id, chatData.session_id, chatData.id);
       } else if (chatData.session_id) {
         console.log('[DB] Loading chat by session_id only:', chatData.session_id);
         setSessionId(chatData.session_id);
-        setShowSplitView(true);
         setHasResponse(true);
         fetchChatHistoryBySessionId(chatData.session_id, chatData.id);
       } else {
@@ -3358,17 +4099,14 @@ const ChatModelPage = () => {
   }, [sessionId, fileId, hasResponse, navigate, location.pathname, location.state?.newChat, messages.length]);
 
   useEffect(() => {
-    if (showSplitView) {
+    if (isChatActive) {
       setIsSidebarHidden(false);
       setIsSidebarCollapsed(true);
-    } else if (hasResponse) {
-      setIsSidebarHidden(false);
-      setIsSidebarCollapsed(false);
     } else {
       setIsSidebarHidden(false);
       setIsSidebarCollapsed(false);
     }
-  }, [hasResponse, showSplitView, setIsSidebarHidden, setIsSidebarCollapsed]);
+  }, [hasResponse, isChatActive, setIsSidebarHidden, setIsSidebarCollapsed]);
 
   useEffect(() => {
     if (success) {
@@ -3493,17 +4231,25 @@ const ChatModelPage = () => {
   };
 
   const getInputPlaceholder = () => {
-    if (isSecretPromptSelected) {
-      return `Analysis : ${activeDropdown}...`;
+    if (isChatUploading || isUploading) {
+      return 'Uploading document...';
     }
-    if (!fileId) {
-      return 'Ask a legal question... (or upload a document for document-specific chat)';
+    if (isSecretPromptSelected) {
+      return `Analysis: ${activeDropdown}...`;
     }
     if (processingStatus?.status && processingStatus.status !== 'processed' && progressPercentage < 100) {
       return `${processingStatus.current_operation || 'Processing document...'} (${Math.round(progressPercentage)}%)`;
     }
-    return showSplitView ? 'Ask a question about the document...' : 'Ask a legal question or question about your document...';
+    return 'How can I help you today?';
   };
+
+  const hasAssistantContentForPanel =
+    !!(currentResponse || animatedResponseContent) ||
+    sessionMessages.some((m) => String(m.answer || m.response || '').trim());
+
+  const isDocumentTransferBusy = isChatUploading || isUploading;
+
+  const showDocumentPanel = false;
 
   const parseLearningPayloadFromRaw = (rawText) => {
     const text = String(rawText || '').trim();
@@ -3541,13 +4287,36 @@ const ChatModelPage = () => {
 
   const formatResponseForDisplay = (rawAnswer, messageMeta = {}) => {
     const raw = String(rawAnswer || '');
+    if (!raw.trim()) return '';
+
     const learningPayload = messageMeta.learning_payload || parseLearningPayloadFromRaw(raw);
     if (learningPayload) {
       const learningText = formatLearningPayloadToText(learningPayload);
       if (learningText) return learningText;
     }
-    const isStructured = Boolean(messageMeta.used_secret_prompt) && isStructuredJsonResponse(raw);
-    return isStructured ? renderSecretPromptResponse(raw) : convertJsonToPlainText(raw);
+
+    let formatted = formatChatResponseForDisplay(raw);
+    if (
+      (!formatted || isEmptyFormattedChatContent(formatted) || looksLikeRawJsonString(formatted)) &&
+      (messageMeta.used_secret_prompt || isStructuredJsonResponse(raw))
+    ) {
+      const structured = renderSecretPromptResponse(raw);
+      if (structured && !looksLikeRawJsonString(structured) && !isEmptyFormattedChatContent(structured)) {
+        formatted = structured;
+      }
+    }
+    if (!formatted || looksLikeRawJsonString(formatted)) {
+      const plain = convertJsonToPlainText(raw);
+      if (plain && !looksLikeRawJsonString(plain)) formatted = plain;
+    }
+    // Absolute last resort: strip code fences and show the raw content so the screen is never blank
+    if (!formatted || isEmptyFormattedChatContent(formatted)) {
+      const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      if (stripped && stripped.length > 20 && !looksLikeRawJsonString(stripped)) {
+        formatted = stripped;
+      }
+    }
+    return formatted || '';
   };
 
   const getLearningDocumentContext = () => {
@@ -3575,7 +4344,7 @@ const ChatModelPage = () => {
     if (fileId) {
       await askQuestionToChat(text, fileId, chatAttachmentFileIdsRef.current.length > 0 ? chatAttachmentFileIdsRef.current : null);
     } else {
-      await askQuestionToGeneralChat(text);
+      await askGeneralQuestionToChat(text);
     }
   };
 
@@ -3586,73 +4355,267 @@ const ChatModelPage = () => {
     }
   }, [fileId, learningModeActive]);
 
-  // Auto-scroll learning thread to bottom when new messages arrive
-  useEffect(() => {
-    if (learningModeActive && learningThreadRef.current) {
-      learningThreadRef.current.scrollTop = learningThreadRef.current.scrollHeight;
+  // Stable callback — prevents TokenCostPopover from re-rendering on every
+  // ChatModelPage render just because an inline arrow function changed identity.
+  const handleCacheExpired = React.useCallback(() => {
+    setCacheSessionData(prev => prev ? { ...prev, status: 'deleted' } : null);
+  }, []);
+
+  const hasSessions = chatSessions.length > 0;
+  const sidebarSessions = useMemo(
+    () =>
+      chatSessions.map((s, index) => ({
+        sessionId: s.session_id,
+        title: s.name || `Session ${index + 1}`,
+        lastMessageAt: s.created_at,
+      })),
+    [chatSessions]
+  );
+
+  const handleSelectChatSession = (sid) => {
+    const session = chatSessions.find((s) => s.session_id === sid);
+    if (session) handleSessionClick(session);
+  };
+
+  const getAssistantDisplayForMessage = (msg, idx) => {
+    const raw = msg.answer || msg.response || '';
+    const isSelected = msg.id === selectedMessageId;
+    const isLiveStream =
+      msg.isStreaming &&
+      isSelected &&
+      (isLoading || isGeneratingInsights);
+    const isLast = idx === sessionMessages.length - 1;
+
+    if (isLiveStream) {
+      return raw || currentResponse || animatedResponseContent || '';
     }
-  }, [sessionMessages, learningModeActive]);
+    if (isLast && isSelected && isAnimatingResponse && animatedResponseContent) {
+      return animatedResponseContent;
+    }
+    if (isLast && isSelected && !raw && currentResponse) {
+      return currentResponse;
+    }
+
+    if (!raw.trim()) return '';
+
+    const cached = assistantDisplayCacheRef.current.get(msg.id);
+    if (cached && cached.raw === raw) return cached.out;
+
+    let out = raw;
+    const learningPayload = msg.learning_payload || parseLearningPayloadFromRaw(raw);
+    if (learningPayload) {
+      out = formatLearningPayloadToText(learningPayload) || raw;
+    } else if (
+      looksLikeRawJsonString(raw) ||
+      isStructuredJsonResponse(raw) ||
+      (msg.used_secret_prompt && /^\s*[{[]/.test(raw.trim()))
+    ) {
+      // Structured secret/analysis JSON → full HTML from renderSecretPromptResponse
+      const formatted = formatResponseForDisplay(raw, msg);
+      if (formatted && formatted.trim()) out = formatted;
+      else {
+        const plain = convertJsonToPlainText(raw);
+        if (plain && plain.trim()) out = plain;
+      }
+    } else if (msg.used_secret_prompt) {
+      // Plain markdown template output — parseMarkdown must own formatting (no ** → <strong> hybrid)
+      out = raw;
+    }
+
+    assistantDisplayCacheRef.current.set(msg.id, { raw, out });
+    return out;
+  };
+
+  // Auto-scroll chat thread to bottom when new messages arrive
+  useEffect(() => {
+    const el = learningModeActive ? learningThreadRef.current : chatThreadRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [sessionMessages, learningModeActive, pendingQuestion, animatedResponseContent, isAnimatingResponse]);
+
+  const renderChatComposer = () => (
+    <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-white overflow-visible relative z-20">
+      <UpgradePlanBanner className="mb-2 w-full" />
+
+      {/* ── Prompt chips ────────────────────────────────────────────── */}
+      {!isSecretPromptSelected && (isLoadingSecrets || secrets.length > 0) && (
+        <PromptChipsBar
+          secrets={secrets}
+          isLoading={isLoadingSecrets}
+          selectedSecretId={selectedSecretId}
+          activeLabel={null}
+          onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+          disabled={isLoading || isGeneratingInsights}
+          className="mb-2 w-full"
+        />
+      )}
+
+      {/* ── Document attachment pill ─────────────────────────────── */}
+      {documentData && !showDocumentPanel && (
+        <div className="mb-2 flex items-center gap-2 w-full px-3 py-2 rounded-xl border border-green-100 bg-green-50">
+          <div className="w-7 h-7 rounded-lg bg-green-100 flex items-center justify-center flex-shrink-0">
+            <FileCheck className="h-3.5 w-3.5 text-green-600" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-gray-800 truncate">{documentData.originalName}</p>
+            <p className="text-[10px] text-gray-500">{formatFileSize(documentData.size)} · Ready</p>
+          </div>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700">Indexed</span>
+        </div>
+      )}
+
+      {/* ── Upload progress ──────────────────────────────────────── */}
+      {isDocumentTransferBusy && (
+        <div className="mb-2 px-4 py-3 bg-blue-50 rounded-xl border border-blue-100 w-full">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin" />
+              <span className="text-xs font-semibold text-blue-800">Uploading…</span>
+            </div>
+            <span className="text-xs font-bold text-blue-600">{uploadProgress}%</span>
+          </div>
+          <div className="w-full bg-blue-100 rounded-full h-1.5 overflow-hidden">
+            <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+              style={{ width: `${uploadProgress}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* ── Active prompt badge ──────────────────────────────────── */}
+      {isSecretPromptSelected && activeDropdown && (
+        <div className="mb-2 flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#f0fdfa] border border-[#b2f5ea] text-xs font-semibold text-[#0f766e]">
+            <MessageSquare className="h-3 w-3" />
+            {activeDropdown}
+          </span>
+          <button
+            type="button"
+            onClick={() => { setIsSecretPromptSelected(false); setActiveDropdown('Custom Query'); setSelectedSecretId(null); }}
+            className="text-gray-400 hover:text-gray-600 p-0.5 rounded-full hover:bg-gray-100 transition-colors">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* ── Main input card (Claude-style) ───────────────────────── */}
+      <form onSubmit={handleSend} className="w-full">
+        <div
+          className="flex flex-col bg-white rounded-2xl border border-gray-200 shadow-md overflow-visible transition-all focus-within:border-[#21C1B6] focus-within:shadow-lg"
+        >
+          {/* Textarea */}
+          <textarea
+            ref={chatInputRef}
+            rows={1}
+            value={chatInput}
+            onChange={handleChatInputChange}
+            onKeyDown={handleChatInputKeyDown}
+            placeholder={getInputPlaceholder()}
+            className="w-full px-4 pt-3.5 pb-2 bg-transparent border-none outline-none text-gray-800 text-sm min-w-0 placeholder-gray-400 analysis-page-user-input resize-none leading-relaxed"
+            style={{ maxHeight: CHAT_INPUT_MAX_HEIGHT, minHeight: CHAT_INPUT_MIN_HEIGHT }}
+            disabled={isLoading || isGeneratingInsights}
+          />
+
+          {/* Bottom toolbar */}
+          <div className="flex items-center justify-between px-3 pb-3 pt-1 gap-2">
+            {/* Left: upload + mode + mic */}
+            <div className="flex items-center gap-1">
+              <UploadOptionsMenu
+                fileInputRef={fileInputRef}
+                isUploading={isUploading || isChatUploading}
+                onLocalFileClick={() => fileInputRef.current?.click()}
+                onGoogleDriveFilesSelected={handleGoogleDriveUpload}
+                isSplitView={showDocumentPanel}
+                menuPlacement="below"
+                disabled={isUploading || isChatUploading}
+              />
+              <input ref={fileInputRef} type="file" className="hidden"
+                accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aac,.mp4"
+                onChange={handleFileUpload} disabled={isUploading || isChatUploading} multiple />
+
+              {/* Mode selector */}
+              <div className="relative flex-shrink-0" ref={styleDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowStyleDropdown((s) => !s)}
+                  disabled={isLoading || isGeneratingInsights}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-500 bg-gray-50 border border-gray-200 rounded-xl hover:border-[#21C1B6] hover:text-[#21C1B6] transition-colors disabled:opacity-40"
+                  title="Response mode"
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                  {learningModeActive
+                    ? <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
+                    : <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                </button>
+                {showStyleDropdown && (
+                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1">
+                    <button type="button" onClick={() => handleSelectStyle('normal')}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50">
+                      <span className="flex items-center gap-2">
+                        <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" /> Normal
+                      </span>
+                      {!learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                    <button type="button" onClick={() => handleSelectStyle('learning')} disabled={!fileId}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40">
+                      <span className="flex items-center gap-2">
+                        <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" /> Learning
+                      </span>
+                      {learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Divider */}
+              <div className="w-px h-4 bg-gray-200 mx-1 flex-shrink-0" />
+
+              {/* Mic */}
+              <button type="button" onClick={toggleListening}
+                className={`flex-shrink-0 p-2 rounded-xl transition-all duration-200 ${
+                  isListening ? 'text-white shadow-md scale-110' : 'text-[#21C1B6] hover:bg-teal-50 disabled:opacity-40'
+                }`}
+                style={isListening ? { background: '#ef4444' } : {}}
+                disabled={isLoading || isGeneratingInsights || isSecretPromptSelected}
+                title={isListening ? 'Stop listening' : 'Voice input'}>
+                {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              </button>
+            </div>
+
+            {/* Right: send / stop — round button */}
+            <button
+              type={sendButtonType}
+              disabled={isSendButtonDisabled}
+              onClick={handleSendButtonClick}
+              className="flex-shrink-0 w-9 h-9 rounded-full text-white flex items-center justify-center shadow-sm transition-all hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
+              style={{ background: isSendButtonDisabled && !isAnimatingResponse ? '#d1d5db' : '#21C1B6' }}
+              title={sendButtonTitle}
+            >
+              {renderSendButtonIcon('small')}
+            </button>
+          </div>
+        </div>
+      </form>
+
+      {/* File-size limit error */}
+      {fileSizeLimitError && (
+        <div className="mt-2 w-full">
+          <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-xl p-3 text-xs text-gray-700">{fileSizeLimitError.message}</div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
-      {error && (() => {
-        const isLimitError = typeof error === 'object' && error.isLimit;
-        const errorTitle = isLimitError ? error.title : 'Something went wrong';
-        const errorBody = isLimitError ? error.body : (typeof error === 'string' ? error : error.body || String(error));
-        const limitIcons = { minute: '⏱️', hour: '🕐', daily: '📅', tokens: '🔋' };
-        const limitEmoji = isLimitError ? (limitIcons[error.limitType] || '🚫') : null;
-
-        if (isLimitError) {
-          return (
-            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-md">
-              <div className="bg-white rounded-2xl shadow-2xl border border-[#cfe1db] overflow-hidden">
-                <div className="bg-gradient-to-r from-[#21C1B6] to-[#1f6b5f] px-5 py-3.5 flex items-center justify-between">
-                  <div className="flex items-center space-x-2.5">
-                    <span className="text-xl leading-none">{limitEmoji}</span>
-                    <h3 className="text-white font-semibold text-sm tracking-wide">{errorTitle}</h3>
-                  </div>
-                  <button onClick={() => setError(null)} className="text-white/70 hover:text-white transition-colors ml-3">
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="bg-[#eef5f2] px-5 py-4">
-                  <p className="text-sm text-[#2b3528] leading-relaxed">{errorBody}</p>
-                  <div className="mt-4 pt-3 border-t border-[#cfe1db] flex items-center justify-between">
-                    <div className="flex items-center space-x-1.5 text-xs text-[#1f6b5f]/70">
-                      <Clock className="h-3 w-3" />
-                      <span>Limits reset automatically</span>
-                    </div>
-                    <button
-                      onClick={() => setError(null)}
-                      className="px-4 py-1.5 bg-[#21C1B6] hover:bg-[#1AA49B] text-white text-xs font-semibold rounded-lg transition-colors"
-                    >
-                      Got it
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        }
-        return (
-          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-md">
-            <div className="bg-white rounded-xl shadow-xl border border-[#cfe1db] overflow-hidden">
-              <div className="bg-gradient-to-r from-[#21C1B6] to-[#1f6b5f] px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <AlertCircle className="h-4 w-4 text-white flex-shrink-0" />
-                  <h3 className="text-white font-semibold text-sm">{errorTitle}</h3>
-                </div>
-                <button onClick={() => setError(null)} className="text-white/70 hover:text-white transition-colors ml-3">
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="bg-[#eef5f2] px-4 py-3">
-                <p className="text-sm text-[#2b3528] leading-relaxed">{errorBody}</p>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      <ChatQuotaErrorModal
+        error={error}
+        onDismiss={() => setError(null)}
+        onTopupSuccess={() => {
+          invalidateTokenQuotaCache();
+          setError(null);
+        }}
+      />
       {success && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-sm">
           <div className="bg-white rounded-xl shadow-xl border border-[#cfe1db] overflow-hidden">
@@ -3709,8 +4672,86 @@ const ChatModelPage = () => {
           </div>
         </div>
       )}
-      {!showSplitView ? (
-        <div className="flex flex-col h-full w-full">
+      {!isChatActive ? (
+        <div className="flex flex-col h-full w-full relative">
+
+          {/* History button — top right of welcome screen */}
+          {hasSessions && (
+            <div className="absolute top-4 right-4 z-20">
+              <button
+                onClick={() => setShowWelcomeHistory(v => !v)}
+                className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-xl shadow-sm hover:bg-gray-50 hover:text-teal-600 hover:border-teal-200 transition-all"
+              >
+                <Clock className="w-4 h-4" />
+                Session History
+                <span className="ml-1 text-xs font-bold bg-teal-50 text-teal-600 border border-teal-200 rounded-full px-2 py-0.5">
+                  {chatSessions.length}
+                </span>
+              </button>
+            </div>
+          )}
+
+          {/* Slide-in history panel */}
+          {showWelcomeHistory && (
+            <div className="absolute top-0 right-0 h-full w-80 z-30 flex flex-col bg-white border-l border-gray-100 shadow-xl">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <MessageSquare className="w-4 h-4 text-teal-600" />
+                  <span className="text-sm font-bold text-gray-800">Session History</span>
+                </div>
+                <button
+                  onClick={() => setShowWelcomeHistory(false)}
+                  className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
+                {isLoadingSessions ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="w-5 h-5 text-teal-500 animate-spin" />
+                  </div>
+                ) : chatSessions.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center px-4">
+                    <MessageSquare className="w-8 h-8 text-gray-200 mb-2" />
+                    <p className="text-sm text-gray-400">No sessions yet</p>
+                  </div>
+                ) : (
+                  chatSessions.map((session) => (
+                    <button
+                      key={session.session_id}
+                      onClick={() => { handleSessionClick(session); setShowWelcomeHistory(false); }}
+                      className="w-full text-left px-4 py-3 hover:bg-teal-50 transition-colors group"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="w-7 h-7 rounded-lg bg-teal-50 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-teal-100 transition-colors">
+                          <MessageSquare className="w-3.5 h-3.5 text-teal-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-800 truncate leading-snug">
+                            {session.name || 'Untitled session'}
+                          </p>
+                          {session.filename && (
+                            <p className="text-xs text-gray-400 truncate mt-0.5 flex items-center gap-1">
+                              <FileText className="w-3 h-3 shrink-0" />
+                              {session.filename}
+                            </p>
+                          )}
+                          {session.created_at && (
+                            <p className="text-[11px] text-gray-400 mt-0.5">
+                              {new Date(session.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                            </p>
+                          )}
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-teal-500 shrink-0 mt-1 transition-colors" />
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 overflow-y-auto">
             <div className="text-center max-w-2xl mb-8 sm:mb-12">
               <h3 className="text-2xl sm:text-3xl lg:text-4xl font-bold mb-3 sm:mb-4 text-gray-900">Welcome to Smart Legal Insights</h3>
@@ -3718,7 +4759,7 @@ const ChatModelPage = () => {
               your AI partner for fast, precise legal document analysis. Upload a file or ask a question to get instant, context-aware legal insights.
               </p>
             </div>
-            <div className="w-full max-w-4xl">
+            <div className="w-full">
             {documentData && !hasResponse && (
               <div className="mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
                 <div className="flex items-center space-x-3">
@@ -3732,740 +4773,434 @@ const ChatModelPage = () => {
                 </div>
               </div>
             )}
-            {isChatUploading && (
-              <div className="mt-4 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border-2 border-blue-200 shadow-lg">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center space-x-2">
-                    <Loader2 className="h-5 w-5 text-blue-600 animate-spin" />
-                    <span className="text-sm font-semibold text-blue-900">Uploading document...</span>
-                  </div>
-                  <span className="text-base font-bold text-blue-700">{uploadProgress}%</span>
-                </div>
-                <div className="w-full bg-blue-200 rounded-full h-3 overflow-hidden">
-                  <div
-                    className="bg-gradient-to-r from-blue-500 to-blue-600 h-3 rounded-full transition-all duration-300 ease-out flex items-center justify-end pr-2"
-                    style={{ width: `${uploadProgress}%` }}
-                  >
-                    {uploadProgress > 10 && (
-                      <span className="text-xs font-semibold text-white">{uploadProgress}%</span>
-                    )}
-                  </div>
-                </div>
-                <p className="text-xs text-blue-600 mt-2 flex items-center">
-                  <Upload className="h-3 w-3 mr-1" />
-                  Please wait while your document is being uploaded...
-                </p>
+            <div className="mt-4 rounded-2xl border border-gray-100 overflow-visible">
+              {renderChatComposer()}
+            </div>
+            {learningModeActive && (
+              <div className="mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
+                <Sparkles className="h-3 w-3" />
+                <span>Learning mode active</span>
+                {turnCount > 0 && turnCount <= turnThreshold ? <span>{`Turn ${turnCount} of ${turnThreshold}`}</span> : null}
+                <button type="button" onClick={() => setLearningModeActive(false)} className="text-[#11766f] hover:text-[#0e5f59]" title="Disable learning mode">
+                  <X className="h-3 w-3" />
+                </button>
               </div>
             )}
-            <form onSubmit={handleSend} className="mx-auto mt-4">
-              <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
-                <UploadOptionsMenu
-                  fileInputRef={fileInputRef}
-                  isUploading={isUploading || isChatUploading}
-                  onLocalFileClick={() => fileInputRef.current?.click()}
-                  onGoogleDriveFilesSelected={handleGoogleDriveUpload}
-                  isSplitView={false}
-                  disabled={isUploading || isChatUploading}
-                />
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aac,.mp4"
-                  onChange={handleFileUpload}
-                  disabled={isUploading || isChatUploading}
-                  multiple
-                />
-                <div className="relative flex-shrink-0" ref={dropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => setShowDropdown(!showDropdown)}
-                    disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <BookOpen className="h-3 w-3 sm:h-4 sm:w-4" />
-                    <span className="hidden sm:inline">{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                    <span className="inline sm:hidden">{isLoadingSecrets ? '...' : 'Prompts'}</span>
-                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
-                  </button>
-                  {showDropdown && !isLoadingSecrets && (
-                    <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                      {secrets.length > 0 ? (
-                        secrets.map((secret) => (
-                          <button
-                            key={secret.id}
-                            type="button"
-                            onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                            className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                          >
-                            {secret.name}
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="relative flex-shrink-0" ref={styleDropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => setShowStyleDropdown((s) => !s)}
-                    disabled={isLoading || isGeneratingInsights}
-                    className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title={!fileId ? 'Add a document first to use Learning Mode' : 'Choose response style'}
-                  >
-                    <Sparkles className="h-3 w-3 sm:h-4 sm:w-4" />
-                    <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
-                    <ChevronDown className="h-3 w-3 sm:h-4 sm:w-4" />
-                  </button>
-                  {showStyleDropdown && (
-                    <div className="absolute bottom-full left-0 mb-2 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
-                      <button type="button" onClick={() => handleSelectStyle('normal')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">
-                        Normal
-                      </button>
-                      <button type="button" onClick={() => handleSelectStyle('learning')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50" disabled={!fileId}>
-                        Learning
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={handleChatInputChange}
-                  placeholder={getInputPlaceholder()}
-                  className="flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm sm:text-[15px] font-medium py-2 min-w-0 w-full sm:w-auto analysis-page-user-input"
-                  disabled={isLoading || isGeneratingInsights}
-                />
-                <button
-                  type="button"
-                  onClick={toggleListening}
-                  className={`p-2 rounded-full transition-all duration-300 flex-shrink-0 ${
-                    isListening 
-                      ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
-                      : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
-                  }`}
-                  disabled={isLoading || isGeneratingInsights || isSecretPromptSelected}
-                  title={isListening ? "Stop listening" : "Start voice input"}
-                >
-                  {isListening ? (
-                    <MicOff className="h-4 w-4" />
-                  ) : (
-                    <Mic className="h-4 w-4" />
-                  )}
-                </button>
-                <button
-                  type={sendButtonType}
-                  disabled={isSendButtonDisabled}
-                  onClick={handleSendButtonClick}
-                  className={getSendButtonClassName()}
-                  title={sendButtonTitle}
-                >
-                  {renderSendButtonIcon()}
-                </button>
-              </div>
-              {isSecretPromptSelected && (
-                <div className="mt-3 p-2 bg-[#E0F7F6] border border-[#21C1B6] rounded-lg">
-                  <div className="flex items-center space-x-2 text-sm text-[#21C1B6]">
-                    <Bot className="h-4 w-4" />
-                    <span>
-                      Using analysis prompt: <strong>{activeDropdown}</strong>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsSecretPromptSelected(false);
-                        setActiveDropdown('Custom Query');
-                        setSelectedSecretId(null);
-                      }}
-                      className="ml-auto text-[#21C1B6] hover:text-[#1AA49B]"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-                )}
-              {learningModeActive && (
-                <div className="mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
-                  <Sparkles className="h-3 w-3" />
-                  <span>Learning mode active</span>
-                  {turnCount > 0 && turnCount <= turnThreshold ? <span>{`Turn ${turnCount} of ${turnThreshold}`}</span> : null}
-                  <button type="button" onClick={() => setLearningModeActive(false)} className="text-[#11766f] hover:text-[#0e5f59]" title="Disable learning mode">
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              )}
-              </form>
-              <RateQuotaPills limits={limits} className="mt-2" />
-              
-              {fileSizeLimitError && (
-                <div className="mt-2 animate-fadeIn">
-                  <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg p-3">
-                    <div className="flex items-start gap-2">
-                      <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs sm:text-sm font-semibold text-gray-900 mb-1">Upload limit exceeded</p>
-                        <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
-                          {fileSizeLimitError.message}
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setFileSizeLimitError(null)}
-                            className="px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
-                          >
-                            OK
-                          </button>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => setFileSizeLimitError(null)}
-                        className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-0.5"
-                        aria-label="Close"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
           </div>
           </div>
          
-          {sessionMessages.length > 0 && (
-            <div className="border-t border-gray-200 bg-white flex-shrink-0" style={{ height: '30vh', minHeight: '250px' }}>
-              <div className="h-full flex flex-col">
-                <div className="p-2 sm:p-3 border-b border-gray-200 flex-shrink-0">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-sm sm:text-base font-semibold text-gray-900 flex items-center">
-                      <MessageSquare className="h-4 w-4 mr-2" />
-                      Recent Questions
-                    </h2>
-                    <span className="text-xs text-gray-500">{sessionMessages.length} question{sessionMessages.length !== 1 ? 's' : ''}</span>
+        </div>
+      ) : (
+        <div className="flex h-full min-h-0 w-full overflow-hidden bg-white">
+          {hasSessions && chatHistorySidebarOpen && (
+            <div
+              className="flex-shrink-0 flex flex-col border-r border-gray-100"
+              style={{ width: '272px', height: '100%', background: '#fafafa' }}
+            >
+              <div className="px-3 pt-3 pb-2 border-b border-gray-100 bg-white">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-lg flex items-center justify-center" style={{ background: '#f0fdfb' }}>
+                      <MessageSquare className="w-3.5 h-3.5" style={{ color: '#21C1B6' }} />
+                    </div>
+                    <span className="text-xs font-bold text-gray-700 uppercase tracking-widest">Conversations</span>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setChatHistorySidebarOpen(false)}
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
+                    title="Collapse sidebar"
+                    aria-label="Collapse sidebar"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
                 </div>
-               
-                <div className="flex-1 overflow-y-auto px-2 sm:px-3 py-2 [scrollbar-width:thin] [scrollbar-color:#c5c7cc_#f3f4f6] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                    {sessionMessages.slice(0, 9).map((msg, i) => (
-                      <div
-                        key={msg.id || i}
-                        onClick={() => {
-                          handleMessageClick(msg);
-                          setShowSplitView(true);
-                        }}
-                        className="p-2 sm:p-3 rounded-lg border border-gray-200 bg-gray-50 hover:bg-[#E0F7F6] hover:border-[#21C1B6] cursor-pointer transition-all duration-200 hover:shadow-md"
-                      >
-                        <p className="text-xs sm:text-sm font-medium text-gray-900 line-clamp-2 mb-1">
-                          {msg.display_text_left_panel || msg.question}
-                        </p>
-                        <div className="flex items-center justify-between text-xs text-gray-500">
-                          <span className="truncate">{formatDate(msg.timestamp || msg.created_at)}</span>
-                          <ChevronRight className="h-3 w-3 flex-shrink-0 ml-1" />
+                <button
+                  type="button"
+                  onClick={startNewChat}
+                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-white transition-all hover:opacity-90 shadow-sm"
+                  style={{ background: 'linear-gradient(135deg,#21C1B6,#1AA49B)' }}
+                  title="Start New Chat"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  New Conversation
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 scrollbar-custom">
+                {isLoadingSessions ? (
+                  <div className="flex justify-center py-10">
+                    <Loader2 className="h-6 w-6 animate-spin text-[#21C1B6]" />
+                  </div>
+                ) : (
+                  <ChatSessionList
+                    sessions={sidebarSessions}
+                    selectedSessionId={sessionId}
+                    onSelectSession={handleSelectChatSession}
+                    onDeleteSession={() => {}}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+          {hasSessions && !chatHistorySidebarOpen && (
+            <div className="flex-shrink-0 flex flex-col items-center border-r border-gray-100 bg-white w-10 py-3 gap-2">
+              <button
+                type="button"
+                onClick={() => setChatHistorySidebarOpen(true)}
+                className="p-2 rounded-xl hover:bg-gray-50 text-gray-400 hover:text-[#21C1B6] transition-colors"
+                title="Show chat history"
+                aria-label="Show chat history"
+              >
+                <MessageSquare className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          <div ref={splitContainerRef} className="flex flex-1 min-w-0 h-full overflow-hidden">
+            <div
+              className="flex flex-col min-w-0 h-full overflow-hidden bg-white"
+              style={{ width: showDocumentPanel ? `${splitLeftWidth}%` : '100%' }}
+            >
+            <div className="flex items-center justify-between px-5 py-2.5 border-b border-gray-100 flex-shrink-0 bg-white">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-1.5 h-4 rounded-full flex-shrink-0" style={{ background: '#21C1B6' }} />
+                <span className="text-xs font-semibold text-gray-600 truncate flex items-center gap-1">
+                  {documentData?.originalName ? (
+                    <>
+                      <span>{documentData.originalName}</span>
+                      {isInitializingCache && (
+                        <span className="text-[10px] font-normal text-slate-400 animate-pulse ml-1">
+                          (calculating tokens...)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    sessionMessages.length > 0
+                      ? generateSessionName(sessionMessages[0]?.display_text_left_panel || sessionMessages[0]?.question || '')
+                      : 'New Conversation'
+                  )}
+                </span>
+              </div>
+
+              {/* Token count chip — Google AI Studio style */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {/* Cached session: full cache cost popover */}
+                {useCache && fileId ? (
+                  <TokenCostPopover
+                    sessionId={cacheSessionData?.sessionId}
+                    fileId={fileId}
+                    initialData={cacheSessionData}
+                    preSessionDocTokens={fileTokenCount.totalTokens || 0}
+                    isLoadingTokens={fileTokenCount.isLoading}
+                    modelName={cacheSessionData?.modelName || fileTokenCount.modelName || 'gemini-2.5-pro'}
+                    onCacheExpired={handleCacheExpired}
+                  />
+                ) : sessionTokenUsage.totalTokens > 0 ? (
+                  /* After first Q&A: show cumulative session usage + live prompt typing */
+                  <SessionTokenBadge
+                    usage={sessionTokenUsage}
+                    modelName={sessionTokenUsage.modelName || 'gemini-2.5-flash'}
+                    promptTokens={Math.ceil((chatInput || '').length / 4)}
+                  />
+                ) : (
+                  /* Document uploaded but no chat yet: show live document token count + typed prompt */
+                  <FileTokenBadge
+                    tokenData={fileTokenCount.totalTokens ? fileTokenCount : null}
+                    isLoading={fileTokenCount.isLoading}
+                    promptTokens={Math.ceil((chatInput || '').length / 4)}
+                  />
+                )}
+
+                <button
+                  onClick={startNewChat}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white"
+                  style={{ background: '#21C1B6' }}
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  New Chat
+                </button>
+              </div>
+            </div>
+
+            <div
+              ref={(el) => {
+                if (learningModeActive) learningThreadRef.current = el;
+                else chatThreadRef.current = el;
+              }}
+              className={`flex-1 overflow-y-auto py-6 scrollbar-custom bg-white ${learningModeActive ? 'learning-chat-thread px-4 md:px-6' : showDocumentPanel ? 'px-3' : 'px-4 md:px-6'}`}
+            >
+              <div
+                style={{
+                  maxWidth: '100%',
+                  margin: '0 auto',
+                  width: '100%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: learningModeActive ? undefined : '32px',
+                }}
+              >
+                {learningModeActive ? (
+                  <>
+                    {sessionMessages.length === 0 && (
+                      <div className="learning-thread-empty">
+                        <Sparkles className="h-6 w-6 text-[#21C1B6] mb-2" />
+                        <p className="text-sm text-gray-500">Ask a question about the document to start learning.</p>
+                      </div>
+                    )}
+                    {sessionMessages.map((msg) => (
+                      <div key={msg.id} className="learning-thread-item">
+                        {msg.question && (
+                          <div className="learning-user-bubble">
+                            <p className="learning-user-text">{msg.display_text_left_panel || msg.question}</p>
+                          </div>
+                        )}
+                        <div className="learning-ai-bubble">
+                          {msg.learning_payload ? (
+                            <LearningBubble
+                              payload={msg.learning_payload}
+                              isStreaming={msg.isStreaming && (isLoading || isGeneratingInsights)}
+                              onOptionSelect={handleLearningOptionSelect}
+                            />
+                          ) : msg.isStreaming && msg.id === selectedMessageId ? (
+                            <div className="learning-thinking-indicator">
+                              <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
+                              <span>{streamingMessage || 'Thinking...'}</span>
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     ))}
-                  </div>
-                 
-                  {sessionMessages.length > 9 && (
-                    <div className="mt-2 text-center">
-                      <button
-                        onClick={() => setShowSplitView(true)}
-                        className="text-xs text-[#21C1B6] hover:text-[#1AA49B] font-medium"
-                      >
-                        View all {sessionMessages.length} questions →
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
-
-
-        <>
-          <div
-            ref={splitContainerRef}
-            className={`w-full h-full flex flex-col lg:flex-row ${isResizingSplit ? 'select-none' : ''}`}
-          >
-          <div
-            className={`w-full flex flex-col bg-white ${learningModeActive ? 'h-full' : 'border-r-0 lg:border-r border-b lg:border-b-0 border-gray-200 h-1/2 lg:h-full'}`}
-            style={
-              learningModeActive
-                ? { width: '100%', flex: '1 1 auto' }
-                : isDesktopSplit
-                  ? { width: `${splitLeftWidth}%`, flex: `0 0 ${splitLeftWidth}%` }
-                  : undefined
-            }
-          >
-            <div className="flex flex-col h-full">
-            {/* Left panel: Sessions List + Current Session Messages */}
-            <div className="p-3 border-b border-gray-200 bg-white flex-shrink-0">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="min-w-0 flex items-center gap-2">
-                  <button
-                    onClick={() => setShowSessionsPanel((p) => !p)}
-                    className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-800 transition-colors"
-                    title={showSessionsPanel ? 'Hide chat history' : 'Show chat history'}
-                  >
-                    <MessageSquare className="h-3.5 w-3.5" />
-                    <span className="hidden sm:inline">History</span>
-                  </button>
-                  <span className="text-gray-300">|</span>
-                  <p className="text-xs font-semibold text-[#2b3528] truncate max-w-[120px] sm:max-w-[180px]" title="Current session">
-                    {documentData?.originalName
-                      ? documentData.originalName
-                      : sessionMessages.length > 0
-                        ? generateSessionName(sessionMessages[0]?.display_text_left_panel || sessionMessages[0]?.question || '')
-                        : 'New Conversation'}
-                  </p>
-                </div>
-                <button
-                  onClick={startNewChat}
-                  title="New Chat"
-                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-white bg-[#21C1B6] hover:bg-[#1AA49B] rounded-lg transition-colors shadow-sm flex-shrink-0"
-                >
-                  <span>+ New Chat</span>
-                </button>
-              </div>
-              {/* Sessions list panel */}
-              {showSessionsPanel && (
-                <div className="border border-gray-200 rounded-lg bg-gray-50 max-h-48 overflow-y-auto mb-2">
-                  <div className="px-2 py-1.5 border-b border-gray-200 flex items-center justify-between">
-                    <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Recent Chats</span>
-                    <button
-                      onClick={fetchChatSessions}
-                      className="text-[10px] text-[#21C1B6] hover:text-[#1AA49B] font-medium"
-                      disabled={isLoadingSessions}
-                    >
-                      {isLoadingSessions ? '...' : 'Refresh'}
-                    </button>
-                  </div>
-                  {isLoadingSessions ? (
-                    <div className="px-3 py-3 text-xs text-gray-400 text-center">Loading sessions...</div>
-                  ) : chatSessions.length === 0 ? (
-                    <div className="px-3 py-3 text-xs text-gray-400 text-center">No previous chats</div>
-                  ) : (
-                    chatSessions.map((session) => (
-                      <button
-                        key={session.session_id}
-                        onClick={() => handleSessionClick(session)}
-                        className={`w-full text-left px-3 py-2 hover:bg-white transition-colors border-b border-gray-100 last:border-b-0 group ${
-                          session.session_id === sessionId ? 'bg-[#E0F7F6] border-l-2 border-l-[#21C1B6]' : ''
-                        }`}
-                      >
-                        <p className="text-xs font-medium text-gray-800 line-clamp-1 group-hover:text-[#21C1B6] transition-colors">
-                          {session.name}
+                  </>
+                ) : sessionMessages.length === 0 && !pendingQuestion ? (
+                  <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                    {isDocumentTransferBusy ? (
+                      <>
+                        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4" style={{ background: 'linear-gradient(135deg,#dbeafe,#bfdbfe)' }}>
+                          <Loader2 className="h-7 w-7 text-blue-500 animate-spin" />
+                        </div>
+                        <p className="text-base font-semibold text-gray-700 mb-1">Uploading document…</p>
+                        <p className="text-sm text-gray-400">Your document is being processed. You can start asking questions shortly.</p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-5 shadow-sm" style={{ background: 'linear-gradient(135deg,#f0fdfb,#e0f7f5)' }}>
+                          <MessageSquare className="h-7 w-7" style={{ color: '#21C1B6' }} />
+                        </div>
+                        <p className="text-base font-bold text-gray-800 mb-2">Ready to answer your questions</p>
+                        <p className="text-sm text-gray-400 leading-relaxed max-w-xs">
+                          {documentData
+                            ? `"${documentData.originalName}" is indexed and ready. Ask anything about this document.`
+                            : 'Upload a legal document or start a new conversation below.'}
                         </p>
-                        {session.message_count > 0 && (
-                          <p className="text-[10px] text-gray-400 mt-0.5">{session.message_count} message{session.message_count !== 1 ? 's' : ''}</p>
+                        {documentData && (
+                          <div className="mt-6 grid grid-cols-2 gap-2 max-w-sm w-full">
+                            {['Summarize this document', 'What are the key obligations?', 'Identify any legal risks', 'Extract important dates'].map((q) => (
+                              <button key={q} type="button"
+                                onClick={() => { if (setChatInput) setChatInput(q); chatInputRef.current?.focus(); }}
+                                className="flex items-center gap-2 px-3 py-2.5 bg-white rounded-xl border border-gray-200 text-left text-xs text-gray-600 font-medium hover:border-[#21C1B6] hover:text-gray-900 hover:shadow-sm transition-all">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#21C1B6] flex-shrink-0" />
+                                {q}
+                              </button>
+                            ))}
+                          </div>
                         )}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#8e8678]" />
-                <input
-                  type="text"
-                  placeholder="Search questions..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-3 py-1.5 bg-white rounded-lg text-xs text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1f6b5f] border border-gray-200"
-                />
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    {sessionMessages
+                      .filter((msg) =>
+                        (msg.display_text_left_panel || msg.question || '').toLowerCase().includes(searchQuery.toLowerCase())
+                      )
+                      .map((msg, idx, arr) => {
+                        const assistantContent = getAssistantDisplayForMessage(msg, idx);
+                        const questionLabel =
+        (msg.used_secret_prompt || msg.isSecretPrompt) && (msg.prompt_label || msg.promptLabel)
+          ? `Analysis: ${msg.prompt_label || msg.promptLabel}`
+          : sanitizeVisibleChatText(msg.display_text_left_panel || msg.question, 'Your question');
+                        const isCurrentStreaming = msg.isStreaming && msg.id === selectedMessageId;
+                        // content-visibility:auto tells the browser to skip layout + paint for
+                        // messages that are well off-screen. We leave the last 2 entries and
+                        // the live-streaming message always visible so scroll anchoring is stable.
+                        const offscreenStyle =
+                          !isCurrentStreaming && idx < arr.length - 2
+                            ? { contentVisibility: 'auto', containIntrinsicSize: '0 220px' }
+                            : undefined;
+                        return (
+                          <div key={msg.id || idx} className="flex flex-col gap-3" style={offscreenStyle}>
+                            <div className="chat-thread-card chat-thread-card--user">
+                              <div className="chat-thread-card__label">You</div>
+                              <div className="chat-thread-card__body">{questionLabel}</div>
+                            </div>
+                            {(assistantContent || (msg.isStreaming && msg.id === selectedMessageId)) && (
+                              <div
+                                className={`chat-thread-card ${assistantContent ? 'cursor-pointer hover:shadow-md transition-shadow' : ''} ${selectedMessageId === msg.id ? 'ring-2 ring-[#21C1B6]/35' : ''}`}
+                                onClick={() => assistantContent && handleMessageClick(msg)}
+                                onKeyDown={(e) => {
+                                  if (assistantContent && (e.key === 'Enter' || e.key === ' ')) {
+                                    e.preventDefault();
+                                    handleMessageClick(msg);
+                                  }
+                                }}
+                                role={assistantContent ? 'button' : undefined}
+                                tabIndex={assistantContent ? 0 : undefined}
+                              >
+                                <div className="chat-thread-card__label">Assistant</div>
+                                {!assistantContent && msg.isStreaming && msg.id === selectedMessageId && streamingStatus !== 'generating' ? (
+                                  <div className="p-4">
+                                    {processingTimeline.length > 0 && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => setShowProcessingTimeline((prev) => !prev)}
+                                          className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
+                                        >
+                                          <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                                          <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
+                                          <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
+                                        </button>
+                                        {showProcessingTimeline && (
+                                          <div className="border-l border-[#c9ddd5] pl-3 space-y-3 mb-3">
+                                            {processingTimeline.map((step) => (
+                                              <div key={step.id}>
+                                                <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
+                                                <p className="text-xs text-[#4f5b56]">{step.description}</p>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                    {/* Gemini-style bouncing dots while waiting for first token */}
+                                    <TypingDots />
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="chat-thread-card__body analysis-page-ai-response">
+                                      {msg.isStreaming && msg.id === selectedMessageId ? (
+                                        <>
+                                          <StreamingMarkdown key={`stream-${selectedMessageId}-${streamResetKey}`} bufferRef={streamBufferRef} scrollTargetRef={chatThreadRef} />
+                                          {/* Dots shown in the gap between status='generating' and first visible text */}
+                                          {streamingStatus === 'generating' && !streamBufferRef.current && (
+                                            <TypingDots />
+                                          )}
+                                        </>
+                                      ) : (
+                                        <AssistantMessageBody content={assistantContent} />
+                                      )}
+                                    </div>
+                                    {assistantContent && (
+                                      <div className="chat-thread-card__footer">
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleMessageClick(msg);
+                                            handleCopyResponse();
+                                          }}
+                                          className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50"
+                                        >
+                                          <Copy className="h-3 w-3" />
+                                          Copy
+                                        </button>
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    {pendingQuestion && !sessionMessages.some((m) => m.isStreaming && m.id === selectedMessageId) && (
+                      <div className="flex flex-col gap-3">
+                        <div className="chat-thread-card chat-thread-card--user">
+                          <div className="chat-thread-card__label">You</div>
+                          <div className="chat-thread-card__body">{pendingQuestion}</div>
+                        </div>
+                        <div className="chat-thread-card">
+                          <div className="chat-thread-card__label">Assistant</div>
+                          <div className="p-4">
+                            <button
+                              type="button"
+                              onClick={() => setShowProcessingTimeline((prev) => !prev)}
+                              className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
+                            >
+                              <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                              <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
+                              <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
+                            </button>
+                            {showProcessingTimeline && processingTimeline.length > 0 && (
+                              <div className="border-l border-[#c9ddd5] pl-3 space-y-3 mb-3">
+                                {processingTimeline.map((step) => (
+                                  <div key={step.id}>
+                                    <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
+                                    <p className="text-xs text-[#4f5b56]">{step.description}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <div className="flex items-center gap-2 text-sm text-[#1f6b5f]">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <span>{streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
 
-            <div className="flex-1 min-h-0 px-4 pt-3 pb-2 bg-white flex flex-col">
-              {learningModeActive ? (
-                /* ── Learning mode: single-screen chat thread ── */
-                <div
-                  ref={learningThreadRef}
-                  className="learning-chat-thread flex-1 min-h-0 overflow-y-auto"
-                >
-                  {sessionMessages.length === 0 && (
-                    <div className="learning-thread-empty">
-                      <Sparkles className="h-6 w-6 text-[#21C1B6] mb-2" />
-                      <p className="text-sm text-gray-500">Ask a question about the document to start learning.</p>
-                    </div>
-                  )}
-                  {sessionMessages.map((msg) => (
-                    <div key={msg.id} className="learning-thread-item">
-                      {/* User question */}
-                      {msg.question && (
-                        <div className="learning-user-bubble">
-                          <p className="learning-user-text">{msg.display_text_left_panel || msg.question}</p>
-                        </div>
-                      )}
-                      {/* AI response */}
-                      <div className="learning-ai-bubble">
-                        {msg.learning_payload ? (
-                          <LearningBubble
-                            payload={msg.learning_payload}
-                            isStreaming={msg.isStreaming && (isLoading || isGeneratingInsights)}
-                            onOptionSelect={handleLearningOptionSelect}
-                          />
-                        ) : msg.isStreaming ? (
-                          <div className="learning-thinking-indicator">
-                            <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                            <span>{streamingMessage || 'Thinking...'}</span>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                /* ── Normal mode: question history list ── */
-                <>
-                  <p className="text-[11px] uppercase tracking-[0.16em] text-[#807868] mb-2 flex-shrink-0">
-                    Recent Questions
-                  </p>
-                  {pendingQuestion && (
-                    <div className="mb-2 p-3 rounded-xl border border-[#cfe1db] bg-[#f6fbf9] flex-shrink-0">
-                      <p className="text-xs font-medium text-[#2b3528] line-clamp-2 mb-3">{pendingQuestion}</p>
-                      <button
-                        type="button"
-                        onClick={() => setShowProcessingTimeline((prev) => !prev)}
-                        className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
-                      >
-                        <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
-                        <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
-                        <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
-                      </button>
-                      {showProcessingTimeline && processingTimeline.length > 0 && (
-                        <div className="border-l border-[#c9ddd5] pl-3 space-y-3">
-                          {processingTimeline.map((step) => (
-                            <div key={step.id}>
-                              <div className="flex items-center gap-2 mb-1">
-                                {step.state === 'active' ? (
-                                  <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
-                                ) : (
-                                  <CheckCircle className="h-3 w-3 text-[#1f6b5f] flex-shrink-0" />
-                                )}
-                                <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
-                              </div>
-                              <p className="text-xs text-[#4f5b56] leading-5">{step.description}</p>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {normalizedReasoningText && (
-                        <div className="mt-3 pt-3 border-t border-[#dbe9e3]">
-                          <button
-                            type="button"
-                            onClick={() => setShowReasoning((prev) => !prev)}
-                            className="flex items-center gap-2 text-xs font-medium text-[#6f7f79] mb-2"
-                          >
-                            <span>Show AI Reasoning</span>
-                            <ChevronDown className={`h-3 w-3 transition-transform ${showReasoning ? 'rotate-180' : ''}`} />
-                          </button>
-                          {showReasoning && (
-                            <div className="border-l border-[#d6e4de] pl-3 max-h-80 overflow-y-auto pr-2">
-                              <div className="prose prose-sm max-w-none text-[#67756f] prose-p:my-2 prose-headings:my-2 prose-strong:text-[#42504a] prose-em:text-[#67756f]">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                  {normalizedReasoningText}
-                                </ReactMarkdown>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {(!showProcessingTimeline || processingTimeline.length === 0) && (
-                        <div className="flex items-center space-x-1.5">
-                          <Loader2 className="h-3 w-3 text-[#1f6b5f] animate-spin flex-shrink-0" />
-                          <span className="text-xs text-[#1f6b5f] font-medium">
-                            {streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white">
-                    <MessagesList
-                      messages={sessionMessages}
-                      selectedMessageId={selectedMessageId}
-                      handleMessageClick={handleMessageClick}
-                      displayLimit={displayLimit}
-                      showAllChats={showAllChats}
-                      setShowAllChats={setShowAllChats}
-                      highlightText={highlightText}
-                      formatDate={formatDate}
-                      searchQuery={searchQuery}
-                    />
-                  </div>
-                </>
-              )}
+            {renderChatComposer()}
             </div>
 
-            </div>{/* end flex flex-col h-full */}
-
-            <div className="border-t border-gray-200 p-3 bg-white flex-shrink-0">
-              {documentData && (
-                <div className="mb-2 p-2 bg-white rounded-lg border border-gray-200">
-                  <div className="flex items-center space-x-1.5">
-                    <FileCheck className="h-3 w-3 text-green-600" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-[#2b3528] truncate">{documentData.originalName}</p>
-                      <p className="text-xs text-[#807868]">{formatFileSize(documentData.size)}</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {isChatUploading && (
-                <div className="mb-2 p-3 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border-2 border-blue-200 shadow-md">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center space-x-1.5">
-                      <Loader2 className="h-3.5 w-3.5 text-blue-600 animate-spin" />
-                      <span className="text-xs font-semibold text-blue-900">Uploading document...</span>
-                    </div>
-                    <span className="text-xs font-bold text-blue-700">{uploadProgress}%</span>
-                  </div>
-                  <div className="w-full bg-blue-200 rounded-full h-2 overflow-hidden">
-                    <div
-                      className="bg-gradient-to-r from-blue-500 to-blue-600 h-2 rounded-full transition-all duration-300 ease-out flex items-center justify-end pr-1"
-                      style={{ width: `${uploadProgress}%` }}
-                    >
-                      {uploadProgress > 15 && (
-                        <span className="text-[10px] font-semibold text-white">{uploadProgress}%</span>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-xs text-blue-600 mt-1.5 flex items-center">
-                    <Upload className="h-3 w-3 mr-1" />
-                    Please wait while your document is being uploaded...
-                  </p>
-                </div>
-              )}
-              <form onSubmit={handleSend}>
-                <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
-                  <UploadOptionsMenu
-                    fileInputRef={fileInputRef}
-                    isUploading={isUploading || isChatUploading}
-                    onLocalFileClick={() => fileInputRef.current?.click()}
-                    onGoogleDriveFilesSelected={handleGoogleDriveUpload}
-                    isSplitView={true}
-                    disabled={isUploading || isChatUploading}
-                  />
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    className="hidden"
-                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aac,.mp4"
-                    onChange={handleFileUpload}
-                    disabled={isUploading || isChatUploading}
-                    multiple
-                  />
-                  <div className="relative flex-shrink-0" ref={dropdownRef}>
-                    <button
-                      type="button"
-                      onClick={() => setShowDropdown(!showDropdown)}
-                      disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <BookOpen className="h-3 w-3" />
-                      <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                      <ChevronDown className="h-3 w-3" />
-                    </button>
-                    {showDropdown && !isLoadingSecrets && (
-                      <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                        {secrets.length > 0 ? (
-                          secrets.map((secret) => (
-                            <button
-                              key={secret.id}
-                              type="button"
-                              onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                              className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                            >
-                              {secret.name}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="relative flex-shrink-0" ref={styleDropdownRef}>
-                    <button
-                      type="button"
-                      onClick={() => setShowStyleDropdown((s) => !s)}
-                      disabled={isLoading || isGeneratingInsights}
-                      className="flex items-center space-x-1 px-2 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title={!fileId ? 'Add a document first to use Learning Mode' : 'Choose response style'}
-                    >
-                      <Sparkles className="h-3 w-3" />
-                      <span>{learningModeActive ? 'Learning' : 'Normal'}</span>
-                      <ChevronDown className="h-3 w-3" />
-                    </button>
-                    {showStyleDropdown && (
-                      <div className="absolute bottom-full left-0 mb-2 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden">
-                        <button type="button" onClick={() => handleSelectStyle('normal')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50">
-                          Normal
-                        </button>
-                        <button type="button" onClick={() => handleSelectStyle('learning')} className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50" disabled={!fileId}>
-                          Learning
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={handleChatInputChange}
-                  placeholder={getInputPlaceholder()}
-                  className="flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-xs font-medium py-1 min-w-0 analysis-page-user-input"
-                  disabled={isLoading || isGeneratingInsights}
-                />
+            {showDocumentPanel && (
+              <>
                 <button
                   type="button"
-                  onClick={toggleListening}
-                  className={`p-1.5 rounded-full transition-all duration-300 flex-shrink-0 ${
-                    isListening 
-                      ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
-                      : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-50'
-                  }`}
-                  disabled={isLoading || isGeneratingInsights || isSecretPromptSelected}
-                  title={isListening ? "Stop listening" : "Start voice input"}
-                >
-                  {isListening ? (
-                    <MicOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Mic className="h-3.5 w-3.5" />
-                  )}
-                </button>
-                  <button
-                    type={sendButtonType}
-                    disabled={isSendButtonDisabled}
-                    onClick={handleSendButtonClick}
-                    className={getSendButtonClassName('small')}
-                    title={sendButtonTitle}
-                  >
-                    {renderSendButtonIcon('small')}
-                  </button>
-                </div>
-                {isSecretPromptSelected && (
-                  <div className="mt-1.5 p-1.5 bg-[#E0F7F6] border border-[#21C1B6] rounded-lg">
-                    <div className="flex items-center space-x-1.5 text-xs text-[#21C1B6]">
-                      <Bot className="h-3 w-3" />
-                      <span>
-                        Using: <strong>{activeDropdown}</strong>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsSecretPromptSelected(false);
-                          setActiveDropdown('Custom Query');
-                          setSelectedSecretId(null);
-                        }}
-                        className="ml-auto text-[#21C1B6] hover:text-[#1AA49B]"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {learningModeActive && (
-                  <div className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
-                    <Sparkles className="h-3 w-3" />
-                    <span>Learning</span>
-                    {turnCount > 0 && turnCount <= turnThreshold ? <span>{`${turnCount}/${turnThreshold}`}</span> : null}
-                    <button type="button" onClick={() => setLearningModeActive(false)} className="text-[#11766f] hover:text-[#0e5f59]" title="Disable learning mode">
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                )}
-              </form>
-              <RateQuotaPills limits={limits} className="mt-2" />
-              
-              {fileSizeLimitError && (
-                <div className="mt-2 animate-fadeIn">
-                  <div className="bg-[#E0F7F6] border border-[#21C1B6] rounded-lg p-3">
-                    <div className="flex items-start gap-2">
-                      <AlertCircle className="h-4 w-4 text-[#21C1B6] flex-shrink-0 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs sm:text-sm font-semibold text-gray-900 mb-1">Upload limit exceeded</p>
-                        <p className="text-xs sm:text-sm text-gray-700 mb-2 leading-relaxed">
-                          {fileSizeLimitError.message}
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setFileSizeLimitError(null)}
-                            className="px-3 py-1.5 bg-[#21C1B6] text-white rounded-md hover:bg-[#1AA49B] transition-colors text-xs font-medium"
-                          >
-                            OK
-                          </button>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => setFileSizeLimitError(null)}
-                        className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors p-0.5"
-                        aria-label="Close"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {!learningModeActive && (
-          <div
-            className="hidden lg:flex items-center justify-center w-3 cursor-col-resize bg-white border-x border-gray-200 hover:bg-[#eef5f2] transition-colors"
-            onMouseDown={() => setIsResizingSplit(true)}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize chat panels"
-            title="Drag to resize panels"
-          >
-            <div className="h-12 w-[3px] rounded-full bg-[#c9c2b4]" />
-          </div>
-          )}
-
-          {!learningModeActive && (
-          <div
-            className="w-full flex flex-col h-1/2 lg:h-full bg-white min-h-0"
-            style={
-              isDesktopSplit
-                ? { width: `${100 - splitLeftWidth}%`, flex: `0 0 ${100 - splitLeftWidth}%` }
-                : undefined
-            }
-          >
-            <div className="flex-1 min-h-0 p-4">
-              <div className="h-[calc(100%-0px)] min-h-0">
-                <DocumentViewer
-                  selectedMessageId={selectedMessageId}
-                  currentResponse={currentResponse}
-                  animatedResponseContent={animatedResponseContent}
-                  messages={sessionMessages}
-                  handleCopyResponse={handleCopyResponse}
-                  markdownOutputRef={markdownOutputRef}
-                  isAnimatingResponse={isAnimatingResponse}
-                  showResponseImmediately={showResponseImmediately}
-                  formatDate={formatDate}
-                  markdownComponents={markdownComponents}
-                  responseContainerRef={responseRef}
-                  exportContentRef={exportContentRef}
-                  suggestedQuestions={suggestedQuestions}
-                  onSuggestedQuestionClick={handleSuggestedQuestionClick}
+                  aria-label="Resize chat and document panels"
+                  onMouseDown={() => setIsResizingSplit(true)}
+                  className="w-1.5 flex-shrink-0 cursor-col-resize bg-gray-100 hover:bg-[#21C1B6]/25 transition-colors border-x border-gray-100"
                 />
-              </div>
-            </div>
+                <div
+                  className="flex flex-col min-w-0 h-full overflow-hidden bg-[#fafaf8]"
+                  style={{ width: `${100 - splitLeftWidth}%` }}
+                >
+                  <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0 bg-white">
+                    <FileText className="w-4 h-4 text-[#21C1B6]" />
+                    <span className="text-xs font-semibold text-gray-600 truncate">
+                      {documentData?.originalName || 'Document response'}
+                    </span>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-hidden p-2">
+                    <DocumentViewer
+                      selectedMessageId={selectedMessageId}
+                      currentResponse={currentResponse}
+                      animatedResponseContent={animatedResponseContent}
+                      messages={sessionMessages}
+                      handleCopyResponse={handleCopyResponse}
+                      markdownOutputRef={markdownOutputRef}
+                      isAnimatingResponse={isAnimatingResponse}
+                      showResponseImmediately={showResponseImmediately}
+                      formatDate={formatDate}
+                      markdownComponents={markdownComponents}
+                      responseContainerRef={responseRef}
+                      exportContentRef={exportContentRef}
+                      suggestedQuestions={suggestedQuestions}
+                      onSuggestedQuestionClick={handleSuggestedQuestionClick}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
           </div>
-          )}
-          </div>
-        </>
+        </div>
       )}
     </div>
   );
 };
 
 export default ChatModelPage;
-

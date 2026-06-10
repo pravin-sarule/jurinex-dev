@@ -35,6 +35,8 @@ const LIST_DRAFTS_TIMEOUT_MS = 8000; // Stop waiting so user isn't stuck when ba
 
 // Module-level cache — persists across navigation, cleared only on page refresh
 let _draftsCache = null;
+// In-flight promise — shared so React StrictMode's double-invoke reuses one fetch
+let _draftsFetchPromise = null;
 
 const DraftSelectionPageEnhanced = () => {
   const navigate = useNavigate();
@@ -53,25 +55,30 @@ const DraftSelectionPageEnhanced = () => {
       setRecentDrafts(_draftsCache);
       return;
     }
+    // Reuse an already-in-flight fetch (React StrictMode fires effects twice in dev)
+    if (!showRefreshSpinner && _draftsFetchPromise) {
+      try { setRecentDrafts((await _draftsFetchPromise) ?? []); } catch { /* ignore */ }
+      return;
+    }
     if (showRefreshSpinner) setLoadingDrafts(true);
+    // Start the fetch and store the promise before the first await so the
+    // second StrictMode invocation sees it synchronously.
+    _draftsFetchPromise = listDrafts(null, 20, 0);
     try {
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('timeout')), LIST_DRAFTS_TIMEOUT_MS)
       );
-      const res = await Promise.race([listDrafts(null, 20, 0), timeoutPromise]);
-      if (res?.success && Array.isArray(res.drafts)) {
-        _draftsCache = res.drafts;
-        setRecentDrafts(res.drafts);
-      } else {
-        _draftsCache = [];
-        setRecentDrafts([]);
-      }
+      const res = await Promise.race([_draftsFetchPromise, timeoutPromise]);
+      const drafts = res?.success && Array.isArray(res.drafts) ? res.drafts : [];
+      _draftsCache = drafts;
+      setRecentDrafts(drafts);
     } catch (err) {
       setRecentDrafts(_draftsCache ?? []);
       if (err?.message === 'timeout') {
         toast.info('Documents are loading in the background. Click refresh to try again.');
       }
     } finally {
+      _draftsFetchPromise = null;
       setLoadingDrafts(false);
     }
   }, []);

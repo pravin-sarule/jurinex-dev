@@ -10,6 +10,9 @@ function getClientSafeCacheError(error) {
   if (geminiCacheService.isCacheTooSmallError?.(error)) {
     return 'Document is too small for Gemini context cache; using standard processing instead.';
   }
+  if (geminiCacheService.isGeminiApiKeyRevokedError?.(error)) {
+    return 'Gemini API key is revoked/blocked (reported as leaked). Caching is temporarily disabled until a new key is configured.';
+  }
   if (/fetch failed|undici|ECONN|ETIMEDOUT|ENOTFOUND|network|googleapis/i.test(message)) {
     return 'The Gemini cache service is temporarily unavailable. Retrying without cache.';
   }
@@ -101,7 +104,8 @@ exports.createCache = async (req, res) => {
         customSessionId,
         file_id,
         false,
-        systemInstruction
+        systemInstruction,
+        userId
       );
 
       return res.status(200).json({
@@ -125,7 +129,8 @@ exports.createCache = async (req, res) => {
       finalModelName,
       customSessionId,
       null,
-      systemInstruction
+      systemInstruction,
+      userId
     );
 
     return res.status(200).json({

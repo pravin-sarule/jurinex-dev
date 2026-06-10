@@ -140,6 +140,7 @@
 
 
 
+const axios = require('axios');
 const File = require('../models/File');
 const FileChat = require('../models/FileChat');
 const {
@@ -153,6 +154,7 @@ const { askLLMWithGCS, streamLLMWithGCS, streamLLMGeneral, countTokensFromGCS } 
 const {
   getLLMConfig,
   getUserActivePlan,
+  getSecretManagerPlanIds,
   getStreamingDelayMs,
   mergeRequestLlmOverrides,
   flattenLlmRequestBody,
@@ -161,6 +163,7 @@ const {
 const {
   assertStoredFileMeetsDashboardLimits,
   assertUploadAllowed,
+  assertStorageAllowed,
   getNextUtcMidnightIsoString,
 } = require('../services/llmChatPolicyService');
 const UserProfileService = require('../services/userProfileService');
@@ -481,6 +484,17 @@ exports.initiateSignedUpload = async (req, res) => {
       });
     }
 
+    // Plan-level storage quota check
+    const storagePolicy = await assertStorageAllowed(userId, parsedSize);
+    if (!storagePolicy.ok) {
+      return res.status(429).json({
+        success: false,
+        code: storagePolicy.code,
+        message: storagePolicy.message,
+        details: storagePolicy.details,
+      });
+    }
+
     const gcsFilePath = buildChatUploadPath(userId, filename);
     const signed = await createSignedUploadUrl(bucketName, gcsFilePath, mimetype || 'application/octet-stream');
     const uploadToken = signUploadToken({
@@ -642,11 +656,22 @@ exports.uploadDocumentAndGetURI = async (req, res) => {
   try {
     const userId = req.user.id;
     const authorizationHeader = req.headers.authorization;
-    
+
     if (!req.file) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        message: 'No file uploaded' 
+        message: 'No file uploaded'
+      });
+    }
+
+    // Storage quota check before touching GCS
+    const storagePolicy = await assertStorageAllowed(userId, req.file.size || 0);
+    if (!storagePolicy.ok) {
+      return res.status(507).json({
+        success: false,
+        code: storagePolicy.code,
+        message: storagePolicy.message || 'Storage limit exceeded. Please delete files or upgrade your plan.',
+        details: storagePolicy.details,
       });
     }
 
@@ -793,6 +818,17 @@ exports.uploadDocumentFromGoogleDrive = async (req, res) => {
         code: uploadPolicy.code,
         message: uploadPolicy.message,
         details: uploadPolicy.details,
+      });
+    }
+
+    // Storage quota check (must pass before writing to GCS)
+    const storagePolicy = await assertStorageAllowed(userId, fileSizeBytes);
+    if (!storagePolicy.ok) {
+      return res.status(507).json({
+        success: false,
+        code: storagePolicy.code,
+        message: storagePolicy.message || 'Storage limit exceeded. Please delete files or upgrade your plan.',
+        details: storagePolicy.details,
       });
     }
 
@@ -2687,8 +2723,12 @@ exports.listSecretPrompts = async (req, res) => {
   try {
     const userId = req.user?.id;
 
-    // Extract role_id from JWT — middleware only sets id/email/role, not role_id
+    // ── Role resolution ──────────────────────────────────────────────────────
+    // Primary: fetch from auth service DB (reliable even when JWT is stale/missing role_id)
     let userRoleId = null;
+    let decodedDomainRole = null;
+
+    // Try JWT first (fast path)
     const authHeader = req.headers.authorization;
     if (authHeader) {
       const token = (authHeader.split(' ')[1] || '').trim();
@@ -2696,23 +2736,52 @@ exports.listSecretPrompts = async (req, res) => {
         try {
           const decoded = jwt.decode(token);
           userRoleId = decoded?.role_id ? String(decoded.role_id) : null;
-        } catch { /* ignore malformed token */ }
+          decodedDomainRole = decoded?.domain_role || null;
+        } catch { /* ignore */ }
       }
     }
 
-    // Get active subscription plan id
-    let userPlanId = null;
+    // Always prefer the auth service DB lookup — roles table is authoritative
     if (userId) {
-      const plan = await getUserActivePlan(userId);
-      userPlanId = plan?.id ?? null;
+      try {
+        const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:5001';
+        const userRoleResp = await axios.get(
+          `${authServiceUrl}/api/auth/internal/user/${userId}/role`,
+          { timeout: 3000 }
+        );
+        const roleData = userRoleResp.data;
+        // role_id returned by the endpoint is already resolved against the roles table
+        if (roleData?.role_id) {
+          userRoleId = String(roleData.role_id);
+          decodedDomainRole = roleData.domain_role || decodedDomainRole;
+          console.log(`[Secrets] role_id=${userRoleId} domain_role=${decodedDomainRole} (from auth DB)`);
+        }
+      } catch (roleErr) {
+        console.warn(`[Secrets] Auth DB role lookup failed for user ${userId}: ${roleErr.message}`);
+        // fall through — use JWT value if available
+      }
     }
 
-    // Visible only when user's plan AND role both match the prompt row (strict AND).
-    if (userPlanId == null || !userRoleId) {
+    // ── Plan resolution ───────────────────────────────────────────────────────
+    // Collect ALL plan IDs that could match secret_manager.plan_id (subscription_plans.id).
+    // Users on monthly_plans get a different id than what secret_manager stores.
+    let planIds = [];
+    if (userId) {
+      planIds = await getSecretManagerPlanIds(userId);
+    }
+    // Also include the gateway-injected header ID as a candidate
+    const headerPlanId = req.headers['x-user-plan-id'];
+    if (headerPlanId && String(headerPlanId).trim().match(/^\d+$/)) {
+      const hid = parseInt(headerPlanId, 10);
+      if (!planIds.includes(hid)) planIds.push(hid);
+    }
+
+    console.log(`[Secrets] listSecretPrompts — user=${userId} role_id=${userRoleId} plan_ids=${JSON.stringify(planIds)} domain_role=${decodedDomainRole}`);
+
+    if (!planIds.length || !userRoleId) {
+      console.warn(`[Secrets] Returning [] — missing plan_ids=${JSON.stringify(planIds)} or role_id=${userRoleId}`);
       return res.status(200).json([]);
     }
-
-    const params = [userPlanId, userRoleId];
 
     const query = `
       SELECT
@@ -2721,13 +2790,12 @@ exports.listSecretPrompts = async (req, res) => {
       FROM secret_manager s
       LEFT JOIN llm_models l ON s.llm_id::text = l.id::text
       WHERE s.plan_id IS NOT NULL
-        AND s.plan_id = $1
-        AND s.role_id IS NOT NULL
-        AND s.role_id::text = $2
+        AND s.plan_id = ANY($1::int[])
+        AND (s.role_id IS NULL OR s.role_id::text = $2)
       ORDER BY s.created_at DESC
     `;
 
-    const result = await pool.query(query, params);
+    const result = await pool.query(query, [planIds, userRoleId]);
     const rows = result.rows;
 
     if (!includeValues) {

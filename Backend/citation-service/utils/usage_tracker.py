@@ -30,6 +30,33 @@ from utils.pricing import (
 logger = logging.getLogger(__name__)
 
 
+def _log_shared_token_pool(
+    user_id: str,
+    model: str | None,
+    tokens_in: int,
+    tokens_out: int,
+    endpoint: str,
+) -> None:
+    """Mirror LLM token usage into payment DB llm_usage_logs (shared across all services)."""
+    uid = str(user_id or "").strip()
+    if not uid or uid.lower() == "anonymous":
+        return
+    if tokens_in <= 0 and tokens_out <= 0:
+        return
+    try:
+        from services.daily_limit_guard import log_llm_usage
+
+        log_llm_usage(
+            user_id=uid,
+            model_name=(model or "unknown").strip() or "unknown",
+            input_tokens=max(0, int(tokens_in)),
+            output_tokens=max(0, int(tokens_out)),
+            endpoint=endpoint,
+        )
+    except Exception as exc:
+        logger.debug("[usage_tracker] shared pool log skipped: %s", exc)
+
+
 def record(
     run_id: Optional[str],
     user_id: str,
@@ -123,9 +150,10 @@ def record_gemini(
     cost_in = (tokens_in / 1_000_000) * GEMINI_INPUT_PER_1M_INR
     cost_out = (tokens_out / 1_000_000) * GEMINI_OUTPUT_PER_1M_INR
     cost_inr = cost_in + cost_out
+    uid = user_id or "anonymous"
     record(
         run_id=run_id,
-        user_id=user_id or "anonymous",
+        user_id=uid,
         service="gemini",
         operation=operation or "generate",
         quantity=tokens_in + tokens_out,
@@ -134,6 +162,7 @@ def record_gemini(
         cost_usd=inr_to_usd(cost_inr),
         metadata={"model": model, "tokens_in": tokens_in, "tokens_out": tokens_out},
     )
+    _log_shared_token_pool(uid, model, tokens_in, tokens_out, f"citation:{operation or 'generate'}")
 
 
 def record_claude(
@@ -148,9 +177,10 @@ def record_claude(
     cost_in = (tokens_in / 1_000_000) * CLAUDE_INPUT_PER_1M_INR
     cost_out = (tokens_out / 1_000_000) * CLAUDE_OUTPUT_PER_1M_INR
     cost_inr = cost_in + cost_out
+    uid = user_id or "anonymous"
     record(
         run_id=run_id,
-        user_id=user_id or "anonymous",
+        user_id=uid,
         service="claude",
         operation=operation or "generate",
         quantity=tokens_in + tokens_out,
@@ -159,6 +189,7 @@ def record_claude(
         cost_usd=inr_to_usd(cost_inr),
         metadata={"model": model, "tokens_in": tokens_in, "tokens_out": tokens_out},
     )
+    _log_shared_token_pool(uid, model, tokens_in, tokens_out, f"citation:{operation or 'generate'}")
 
 
 def record_serper(

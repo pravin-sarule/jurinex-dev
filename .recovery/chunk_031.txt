@@ -1,0 +1,13 @@
+// ── Gemini-style typing dots — shown while waiting for first token ───────────
+const TypingDots = React.memo(function TypingDots() {
+  return (
+    <div className="typing-dots" aria-label="Generating response…">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+});
+
+const PROGRESS_STAGES = {
+  INIT: { range: [0, 15], label: 'Initialization' },

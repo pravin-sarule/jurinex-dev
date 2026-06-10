@@ -45,3 +45,21 @@ def get_payment_db_connection() -> Iterator[Any]:
         yield conn
     finally:
         conn.close()
+
+
+def is_draft_db_available() -> bool:
+    """Draft_DB holds generated_documents, user_drafts, template_assets (agent-draft-service)."""
+    settings = get_settings()
+    return bool(psycopg and settings.agent_prompts_database_url)
+
+
+@contextmanager
+def get_draft_db_connection() -> Iterator[Any]:
+    settings = get_settings()
+    if not psycopg or not settings.agent_prompts_database_url:
+        raise RuntimeError("Draft database access is not configured (set DRAFT_DATABASE_URL).")
+    conn = psycopg.connect(settings.agent_prompts_database_url, row_factory=dict_row)
+    try:
+        yield conn
+    finally:
+        conn.close()

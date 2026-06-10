@@ -86,10 +86,10 @@ function convertMarkdownToHtml(text) {
 function convertMarkdownTableToHtml(tableLines) {
   if (!tableLines || tableLines.length < 2) return null;
   
-  // Filter out separator lines (lines with only dashes and pipes)
+  // Filter out separator lines (lines with only dashes, colons, pipes, and spaces)
   const validLines = tableLines.filter(line => {
     const trimmed = line.trim();
-    return trimmed && !/^\|[\s\-:]+\|\s*$/.test(trimmed);
+    return trimmed && !/^\|[\s\-:|]+\|?\s*$/.test(trimmed);
   });
   
   if (validLines.length === 0) return null;
@@ -149,8 +149,8 @@ function processTextWithTables(text) {
     
     // Check if this is a table line (contains | and has proper format)
     const isTableLine = trimmedLine.includes('|') && trimmedLine.split('|').length >= 2;
-    const isSeparator = /^\|[\s\-:]+\|\s*$/.test(trimmedLine);
-    
+    const isSeparator = /^\|[\s\-:|]+\|?\s*$/.test(trimmedLine);
+
     if (isTableLine || isSeparator) {
       if (!inTable) {
         // Start of a table
@@ -158,12 +158,12 @@ function processTextWithTables(text) {
         tableLines = [];
       }
       tableLines.push(line);
-      
+
       // Check if next line is not a table line (end of table)
       if (i < lines.length - 1) {
         const nextLine = lines[i + 1].trim();
         const nextIsTableLine = nextLine.includes('|') && nextLine.split('|').length >= 2;
-        const nextIsSeparator = /^\|[\s\-:]+\|\s*$/.test(nextLine);
+        const nextIsSeparator = /^\|[\s\-:|]+\|?\s*$/.test(nextLine);
         
         if (!nextIsTableLine && !nextIsSeparator && nextLine.length > 0) {
           // End of table
@@ -492,26 +492,37 @@ export function renderSecretPromptResponse(response) {
 
   function formatProceduralTimeline(text) {
     if (!text) return '';
-    
-    const datePattern = /\*\*(\d{2}\.\d{2}\.\d{4}):\*\*\s*(.+?)(?=\*\*\d{2}\.\d{2}\.\d{4}|$)/g;
+
+    // Matches dates in DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY formats (with optional spaces
+    // around the separator — e.g. "18 / 06 / 2001" as produced by some OCR sources).
+    // The date may or may not be followed by a colon inside the bold markers.
+    const datePattern = /\*\*(\d{1,2}\s*[.\/\-]\s*\d{1,2}\s*[.\/\-]\s*\d{4})\s*:?\*\*\s*([\s\S]*?)(?=\n{1,2}\*\*\d{1,2}\s*[.\/\-]|\s*$)/g;
     const events = [];
     let match;
-    
+
     while ((match = datePattern.exec(text)) !== null) {
-      events.push({
-        date: match[1],
-        event: match[2].trim().replace(/\[SECTION\s+\d+(?:,\s*SECTION\s+\d+)*\]/g, '').trim()
-      });
+      const rawDate = match[1].replace(/\s+/g, '');
+      const event = (match[2] || '')
+        .trim()
+        .replace(/\[SECTION\s+\d+(?:,\s*SECTION\s+\d+)*\]/g, '')
+        .replace(/\n+/g, ' ')
+        .replace(/\|/g, '\\|')
+        .trim();
+      if (rawDate) {
+        events.push({ date: rawDate, event });
+      }
     }
-    
+
     if (events.length > 0) {
-      let formatted = '### Key Dates (Chronology)\n\n';
-      events.forEach(event => {
-        formatted += `- **${event.date}:** ${event.event}\n`;
+      // Return a GFM markdown table — works in both the HTML path (via processTextWithTables)
+      // and the plain-markdown path (via ReactMarkdown + remarkGfm + markdownTableComponents).
+      let table = '| Date | Event |\n|------|-------|\n';
+      events.forEach(({ date, event }) => {
+        table += `| ${date} | ${event} |\n`;
       });
-      return formatted;
+      return table;
     }
-    
+
     return text;
   }
 
@@ -594,7 +605,6 @@ export function renderSecretPromptResponse(response) {
                     if (cells.length > 0) {
                       markdown += '<tr>\n';
                       cells.forEach(cell => {
-                        // Convert markdown formatting in table cells
                         const formattedCell = convertMarkdownToHtml(cell).replace(/\|/g, '|');
                         markdown += `<td style="border: 1px solid #000; padding: 8pt; vertical-align: top;">${formattedCell}</td>\n`;
                       });
@@ -604,47 +614,21 @@ export function renderSecretPromptResponse(response) {
                   
                   markdown += '</tbody>\n</table>\n';
                 } else {
-                  // Convert markdown formatting in text
-                  const formattedText = convertMarkdownToHtml(text);
-                  markdown += `<p style="margin: 6pt 0;">${formattedText.replace(/\n/g, '</p>\n<p style="margin: 6pt 0;">')}</p>\n`;
+                  // parseAnnexureSummary returned a table string but it was empty — fall back
+                  // to processTextWithTables so any embedded markdown tables are preserved
+                  markdown += processTextWithTables(text);
                 }
               } else {
-                // Convert markdown formatting in text
-                const formattedText = convertMarkdownToHtml(text);
-                markdown += `<p style="margin: 6pt 0;">${formattedText.replace(/\n/g, '</p>\n<p style="margin: 6pt 0;">')}</p>\n`;
+                // No exhibit pattern found — render raw text, preserving any markdown tables
+                markdown += processTextWithTables(text);
               }
             }
             else if (key === '2_7_procedural_timeline_summary') {
               const timelineContent = formatProceduralTimeline(text);
-              if (timelineContent.includes('###')) {
-                // Format timeline as structured list
-                const lines = timelineContent.split('\n');
-                markdown += '<div style="margin-left: 24pt;">\n';
-                lines.forEach(line => {
-                  if (line.trim().startsWith('- **')) {
-                    const dateMatch = line.match(/\*\*([^*]+):\*\*\s*(.+)/);
-                    if (dateMatch) {
-                      const formattedDate = convertMarkdownToHtml(dateMatch[1]);
-                      const formattedEvent = convertMarkdownToHtml(dateMatch[2]);
-                      markdown += `<p style="margin: 6pt 0;"><strong>${formattedDate}:</strong> ${formattedEvent}</p>\n`;
-                    } else {
-                      const formattedLine = convertMarkdownToHtml(line.replace(/^-\s*/, ''));
-                      markdown += `<p style="margin: 6pt 0;">${formattedLine}</p>\n`;
-                    }
-                  } else if (line.trim().startsWith('###')) {
-                    const formattedHeading = convertMarkdownToHtml(line.replace(/^###\s*/, ''));
-                    markdown += `<h3 style="font-size: 12pt; font-weight: bold; margin-top: 12pt; margin-bottom: 6pt;">${formattedHeading}</h3>\n`;
-                  } else if (line.trim()) {
-                    // Convert markdown formatting in timeline text
-                    const formattedLine = convertMarkdownToHtml(line);
-                    markdown += `<p style="margin: 6pt 0;">${formattedLine}</p>\n`;
-                  }
-                });
-                markdown += '</div>\n';
-              } else {
-                const formattedTimeline = convertMarkdownToHtml(timelineContent);
-                markdown += `<p style="margin: 6pt 0;">${formattedTimeline.replace(/\n/g, '</p>\n<p style="margin: 6pt 0;">')}</p>\n`;
-              }
+              // processTextWithTables converts GFM markdown tables → HTML tables and
+              // wraps remaining paragraphs in <p> tags, preserving all table structure.
+              const processedContent = processTextWithTables(timelineContent);
+              markdown += processedContent;
             }
             else {
               // Process text with table detection and conversion

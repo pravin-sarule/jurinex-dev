@@ -6,6 +6,7 @@
  * the two services with no other code changes.
  */
 import { CITATION_V1_SERVICE_URL, AUTH_SERVICE_URL } from '../config/apiConfig';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 
 function getAuthHeader() {
   const token =
@@ -80,7 +81,7 @@ export const citationV1Api = {
         `Citation V1 service unreachable at ${CITATION_V1_SERVICE_URL}. ${err?.message || 'Network error'}`,
       );
     }
-    if (!res.ok) throw new Error('Failed to start V1 pipeline');
+    if (!res.ok) await throwIfQuotaResponse(res, 'Failed to start V1 pipeline');
     return res.json();
   },
 

@@ -70,40 +70,62 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         }
 
         const effectivePlan = activePlan;
-        
-        // Calculate total tokens and cost from llm_usage_logs (source of truth)
-        let totalTokensFromLogs = 0;
-        let totalCostFromLogs = 0;
-        try {
-            const llmUsageQuery = `
-                SELECT 
-                    COALESCE(SUM(total_tokens), 0) as total_tokens,
-                    COALESCE(SUM(total_cost), 0) as total_cost
-                FROM public.llm_usage_logs
-                WHERE user_id = $1
-            `;
-            const llmUsageResult = await pool.query(llmUsageQuery, [userId]);
-            if (llmUsageResult.rows && llmUsageResult.rows.length > 0) {
-                totalTokensFromLogs = parseInt(llmUsageResult.rows[0].total_tokens) || 0;
-                totalCostFromLogs = parseFloat(llmUsageResult.rows[0].total_cost) || 0;
-            }
-        } catch (err) {
-            console.error('❌ Error fetching total tokens from llm_usage_logs:', err.message);
-            // Fallback to document service if llm_usage_logs query fails
-            totalTokensFromLogs = userUsageFromDocumentService ? userUsageFromDocumentService.tokens_used : 0;
-        }
-        
-        // Use tokens from llm_usage_logs (source of truth) instead of user_usage
-        const totalTokensUsed = totalTokensFromLogs;
-        const currentTokenBalance = effectivePlan ? (effectivePlan.token_limit + (userUsageFromDocumentService?.carry_over_tokens || 0) - totalTokensUsed) : 0;
-        const currentDocumentCount = userUsageFromDocumentService ? userUsageFromDocumentService.documents_used : 0;
-        const currentAiAnalysisUsed = userUsageFromDocumentService ? userUsageFromDocumentService.ai_analysis_used : 0;
-        const totalStorageUsedGB = userUsageFromDocumentService ? userUsageFromDocumentService.storage_used_gb : 0;
+        const effectiveTopupBalance = Number(effectivePlan?.topup_token_balance || 0);
 
+        // Resolve token limit: prefer monthly_tokens (new plans), fall back to token_limit (legacy)
+        const planTokenLimit = Number(effectivePlan.monthly_tokens || effectivePlan.token_limit || 0);
         const planStorageLimitGB = effectivePlan.storage_limit_gb || 0;
-        const planTokenLimit = effectivePlan.token_limit || 0;
         const planAiAnalysisLimit = effectivePlan.ai_analysis_limit || 0;
         const planDocumentLimit = effectivePlan.document_limit || 0;
+
+        // Calculate total tokens and daily tokens from llm_usage_logs (source of truth)
+        let totalTokensFromLogs = 0;
+        let totalCostFromLogs = 0;
+        let tokensUsedToday = 0;
+        let tokensUsedThisPeriod = 0;
+        try {
+            const llmUsageResult = await pool.query(
+                `SELECT
+                    COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+                    COALESCE(SUM(total_cost), 0) AS total_cost,
+                    COALESCE(
+                        SUM(total_tokens) FILTER (
+                            WHERE (used_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+                        ),
+                        0
+                    )::bigint AS tokens_today
+                 FROM public.llm_usage_logs
+                 WHERE user_id = $1`,
+                [userId]
+            );
+            if (llmUsageResult.rows.length > 0) {
+                totalTokensFromLogs = parseInt(llmUsageResult.rows[0].total_tokens) || 0;
+                totalCostFromLogs   = parseFloat(llmUsageResult.rows[0].total_cost)  || 0;
+                tokensUsedToday     = parseInt(llmUsageResult.rows[0].tokens_today)  || 0;
+            }
+
+            if (effectivePlan?.last_reset_date && planTokenLimit > 0) {
+                const periodResult = await pool.query(
+                    `SELECT COALESCE(SUM(total_tokens), 0)::bigint AS tokens_period
+                     FROM public.llm_usage_logs
+                     WHERE user_id = $1 AND used_at >= $2::timestamptz`,
+                    [userId, effectivePlan.last_reset_date]
+                );
+                tokensUsedThisPeriod = parseInt(periodResult.rows[0]?.tokens_period) || 0;
+            } else {
+                tokensUsedThisPeriod = totalTokensFromLogs;
+            }
+        } catch (err) {
+            console.error('❌ Error fetching tokens from llm_usage_logs:', err.message);
+            totalTokensFromLogs = userUsageFromDocumentService?.tokens_used || 0;
+            tokensUsedThisPeriod = totalTokensFromLogs;
+        }
+
+        const totalTokensUsed = tokensUsedThisPeriod;
+        const currentDocumentCount = userUsageFromDocumentService?.documents_used || 0;
+        const currentAiAnalysisUsed = userUsageFromDocumentService?.ai_analysis_used || 0;
+        const totalStorageUsedGB  = userUsageFromDocumentService?.storage_used_gb  || 0;
+        const storageBreakdown    = userUsageFromDocumentService?.storage_breakdown || null;
 
         const calculateUtilization = (used, limit) => {
             if (limit === 0) return { used, limit, percentage_used: 0, status: 'unlimited' };
@@ -115,8 +137,9 @@ exports.getPlanAndResourceDetails = async (req, res) => {
         const resourceUtilization = {
             tokens: {
                 ...calculateUtilization(totalTokensUsed, planTokenLimit),
-                cost: totalCostFromLogs, // Include total cost from llm_usage_logs
-                total_tokens: totalTokensUsed // Include total tokens for reference
+                cost: totalCostFromLogs,
+                total_tokens: totalTokensFromLogs,
+                tokens_this_period: tokensUsedThisPeriod,
             },
             queries: calculateUtilization(currentAiAnalysisUsed, planAiAnalysisLimit),
             documents: calculateUtilization(currentDocumentCount, planDocumentLimit),
@@ -125,21 +148,41 @@ exports.getPlanAndResourceDetails = async (req, res) => {
                 limit_gb: planStorageLimitGB,
                 percentage_used: planStorageLimitGB > 0 ? ((totalStorageUsedGB / planStorageLimitGB) * 100).toFixed(0) : 0,
                 status: planStorageLimitGB > 0 && totalStorageUsedGB >= planStorageLimitGB ? 'exceeded' : 'within_limit',
-                note: planStorageLimitGB === 0 ? "No storage limit defined for this plan." : undefined
+                note: planStorageLimitGB === 0 ? "No storage limit defined for this plan." : undefined,
+                ...(storageBreakdown ? { storage_breakdown: storageBreakdown } : {}),
             },
             timeLeftUntilReset: timeLeftUntilReset ? `${Math.floor(timeLeftUntilReset / 3600)}h ${Math.floor((timeLeftUntilReset % 3600) / 60)}m ${timeLeftUntilReset % 60}s` : 'N/A'
         };
         
 
+        // Also fetch monthly_plans so the billing UI can show correct data
+        const monthlyPlansResult = await pool.query(
+            `SELECT id, name, description, price, currency, monthly_tokens,
+                    storage_limit_gb, billing_interval_months, is_active, sort_order
+             FROM monthly_plans WHERE is_active = true ORDER BY sort_order ASC, price ASC`
+        );
+
+        const activePlanSource = effectivePlan?.plan_source;
+        const activePlanId = effectivePlan?.plan_id;
+        const activeMonthlyPlanId = effectivePlan?.monthly_plan_id;
+
         const allPlanConfigurationsWithActiveFlag = allPlanConfigurations.map(plan => ({
             ...plan,
-            is_active_plan: activePlan && plan.id === activePlan.plan_id
+            is_active_plan: activePlanSource === 'subscription_plans' && plan.id === activePlanId
         }));
 
         res.status(200).json({
-            activePlan: effectivePlan,
+            activePlan: {
+                ...effectivePlan,
+                topup_token_balance: effectiveTopupBalance,
+                topup_expired: false,
+            },
             resourceUtilization,
             allPlanConfigurations: allPlanConfigurationsWithActiveFlag,
+            monthlyPlans: monthlyPlansResult.rows.map(plan => ({
+                ...plan,
+                is_active_plan: activePlanSource === 'monthly_plans' && plan.id === activeMonthlyPlanId
+            })),
             latestPayment
         });
 

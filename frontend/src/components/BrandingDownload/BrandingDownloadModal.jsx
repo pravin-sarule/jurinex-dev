@@ -5,7 +5,7 @@ import { getProfiles } from '../../utils/brandingStorage';
 import { normalizeBrandingProfile } from '../../utils/brandingProfileDefaults';
 import { getUserIdForDrafting } from '../../config/apiConfig';
 import { downloadWithBranding } from '../../utils/brandingExport';
-import { downloadAsPdf, downloadAsWord } from '../../utils/responseExportUtils';
+import { downloadAsPdf, downloadAsWord, downloadAsHtml } from '../../utils/responseExportUtils';
 
 /**
  * BrandingDownloadModal
@@ -16,7 +16,7 @@ import { downloadAsPdf, downloadAsWord } from '../../utils/responseExportUtils';
  *   contentRef   — React ref pointing at the DOM element to export
  *   contentHtml  — string (alternative to contentRef; raw HTML)
  *   filename     — string  e.g. "AI_Response_2024-01-01.pdf" or ".doc"
- *   format       — 'pdf' | 'word'  (default 'pdf')
+ *   format       — 'pdf' | 'word' | 'html'  (default 'pdf')
  *   xUserId      — string | number (required for branded PDF — Chromium print on server)
  *   module       — string (analytics tag, e.g. "chat", "analysis")
  */
@@ -30,8 +30,10 @@ export default function BrandingDownloadModal({
   xUserId,
   module: mod = 'download-modal',
 }) {
-  const isPdf = format !== 'word';
-  const defaultFilename = isPdf ? 'document.pdf' : 'document.docx';
+  const isPdf = format === 'pdf';
+  const isWord = format === 'word';
+  const isHtml = format === 'html';
+  const defaultFilename = isWord ? 'document.docx' : isHtml ? 'document.html' : 'document.pdf';
   const resolvedFilename = filename || defaultFilename;
   const navigate = useNavigate();
   const [mode, setMode] = useState('direct');
@@ -68,27 +70,35 @@ export default function BrandingDownloadModal({
     setDone(false);
     const resolvedUserId = xUserId ?? getUserIdForDrafting();
     try {
-      const el = contentRef?.current ?? contentSnapshot.current ?? null;
+      let el = contentRef?.current ?? contentSnapshot.current ?? null;
+      if (!el && String(contentHtml ?? '').trim()) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = contentHtml;
+        el = tmp;
+      }
       if (mode === 'direct') {
         if (!el) throw new Error('Content not found. Scroll to the response and try again.');
         if (isPdf) {
           setStatus('Generating PDF…');
           await downloadAsPdf(el, resolvedFilename);
-        } else {
+        } else if (isWord) {
           setStatus('Generating Word document…');
           downloadAsWord(el, resolvedFilename);
+        } else {
+          setStatus('Generating HTML file…');
+          downloadAsHtml(el, resolvedFilename);
         }
       } else {
         if (!el && !String(contentHtml ?? '').trim()) {
           throw new Error('Content not found. Scroll to the response and try again.');
         }
-        setStatus(isPdf ? 'Generating branded PDF…' : 'Applying branding…');
+        setStatus(isPdf ? 'Generating branded PDF…' : isWord ? 'Applying branding…' : 'Generating branded HTML…');
         const profile = normalizeBrandingProfile(selectedProfile);
         await downloadWithBranding({
           element: el ?? undefined,
           contentHtml: el ? undefined : (contentHtml ?? ''),
           filename: resolvedFilename,
-          type: isPdf ? 'pdf' : 'word',
+          type: isPdf ? 'pdf' : isWord ? 'word' : 'html',
           module: mod,
           profile,
           profileId: selectedProfile.id,
@@ -117,7 +127,7 @@ export default function BrandingDownloadModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
             {isPdf ? <Download className="w-4 h-4 text-teal-600 flex-shrink-0" /> : <FileText className="w-4 h-4 text-teal-600 flex-shrink-0" />}
-            {isPdf ? 'Download as PDF' : 'Download as Word'}
+            {isPdf ? 'Download as PDF' : isWord ? 'Download as Word' : 'Download as HTML'}
           </h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer focus:outline-none">
             <X className="w-4 h-4" />
@@ -136,7 +146,9 @@ export default function BrandingDownloadModal({
             />
             <div>
               <p className="text-sm font-medium text-gray-800">Quick Download</p>
-              <p className="text-xs text-gray-500 mt-0.5">{isPdf ? 'Plain PDF without firm letterhead or styling' : 'Plain Word document without firm letterhead or styling'}</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {isPdf ? 'Plain PDF without firm letterhead or styling' : isWord ? 'Plain Word document without firm letterhead or styling' : 'Plain HTML file without firm letterhead or styling'}
+              </p>
             </div>
           </label>
 
@@ -232,8 +244,10 @@ export default function BrandingDownloadModal({
               <><span className="w-3.5 h-3.5 border border-white border-t-transparent rounded-full animate-spin flex-shrink-0" />{status || 'Processing…'}</>
             ) : isPdf ? (
               <><Download className="w-3.5 h-3.5" /> Download PDF</>
-            ) : (
+            ) : isWord ? (
               <><FileText className="w-3.5 h-3.5" /> Download Word</>
+            ) : (
+              <><FileText className="w-3.5 h-3.5" /> Download HTML</>
             )}
           </button>
         </div>

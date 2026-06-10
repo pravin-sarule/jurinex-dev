@@ -13,9 +13,12 @@ import React from 'react';
 export function ensureTableSeparators(text) {
   if (!text) return text;
 
-  const lines = text.split('\n');
+  // Normalize Windows line endings so split/join is consistent
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = normalized.split('\n');
   const out = [];
   let insertedSepForTable = false;
+  let prevLineWasTableOrSep = false;
 
   for (let i = 0; i < lines.length; i++) {
     const curr = lines[i].trim();
@@ -44,6 +47,7 @@ export function ensureTableSeparators(text) {
       !/^\|[\s\-:|]+\|$/.test(next);
 
     const isNextSeparator = /^\|[\s\-:|]+\|$/.test(next);
+    const isOrphanedAlignmentFragment = /^:{1,3}$/.test(curr);
 
     // Models sometimes emit ASCII table scaffolding as content:
     // |----|----, repeated dashed lines, or rows with only blank cells.
@@ -54,22 +58,36 @@ export function ensureTableSeparators(text) {
       (isEmptyPipeRow && !isSeparatorRow) ||
       (isPipeDividerOnly && !isSeparatorRow) ||
       (isLongDividerOnly && !isSeparatorRow) ||
+      isOrphanedAlignmentFragment ||
       (isSeparatorRow && insertedSepForTable)
     ) {
       continue;
+    }
+
+    // Ensure a blank line before a table row when transitioning from non-table content.
+    // remark-gfm parses tables more reliably when preceded by a blank line.
+    if (isTableRow && !prevLineWasTableOrSep && out.length > 0) {
+      const lastOut = out[out.length - 1].trim();
+      if (lastOut !== '') {
+        out.push('');
+      }
     }
 
     out.push(lines[i]);
 
     if (!isTableRow && !isSeparatorRow) {
       insertedSepForTable = false;
+      prevLineWasTableOrSep = curr === '';  // blank lines reset table context
       continue;
     }
 
     if (isSeparatorRow) {
       insertedSepForTable = true;
+      prevLineWasTableOrSep = true;
       continue;
     }
+
+    prevLineWasTableOrSep = true;
 
     // Insert exactly one GFM separator after the header row (before first data row).
     if (isTableRow && isNextDataRow && !isNextSeparator && !insertedSepForTable) {
@@ -112,14 +130,59 @@ export function splitMarkdownIntoRenderChunks(text, maxChars = 18000) {
 }
 
 /**
- * ReactMarkdown `components` override that wraps every <table> in a
- * horizontally-scrollable container so wide tables never force the cell text
- * to break mid-word or mid-date.
+ * ReactMarkdown `components` override — matches AppAssistant's full MD_COMPONENTS
+ * pattern so DeepSeek and Gemini tables render identically across all chat surfaces.
+ *
+ * Covers every table element (table, thead, tbody, tr, th, td) with explicit inline
+ * styles so rendering is consistent regardless of which CSS file is loaded.
+ * The color palette uses the main chat's warm-gray scheme (not AppAssistant's teal).
  */
 export const markdownTableComponents = {
   table: ({ node, ...props }) => (
-    <div className="md-table-scroll">
-      <table {...props} />
+    <div
+      className="md-table-scroll"
+      style={{ border: '1px solid #d6d0c4', borderRadius: '8px', overflow: 'hidden' }}
+    >
+      <table
+        style={{ borderCollapse: 'collapse', width: '100%', fontSize: '13.5px' }}
+        {...props}
+      />
     </div>
+  ),
+  thead: ({ node, ...props }) => (
+    <thead style={{ background: '#f6f8f7' }} {...props} />
+  ),
+  th: ({ node, ...props }) => (
+    <th
+      style={{
+        padding: '9px 14px',
+        textAlign: 'left',
+        fontWeight: '600',
+        fontSize: '11.5px',
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        color: '#374151',
+        borderBottom: '1.5px solid #d6d0c4',
+        borderRight: '1px solid #ece7de',
+        whiteSpace: 'nowrap',
+      }}
+      {...props}
+    />
+  ),
+  tbody: ({ node, ...props }) => <tbody {...props} />,
+  tr: ({ node, ...props }) => (
+    <tr style={{ borderBottom: '1px solid #ece7de' }} {...props} />
+  ),
+  td: ({ node, ...props }) => (
+    <td
+      style={{
+        padding: '8px 14px',
+        verticalAlign: 'top',
+        color: '#374151',
+        borderRight: '1px solid #ece7de',
+        lineHeight: '1.5',
+      }}
+      {...props}
+    />
   ),
 };

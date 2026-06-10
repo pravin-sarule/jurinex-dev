@@ -1,84 +1,3 @@
-//     // TODO: Call API to save star state if needed
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import React, { useState, useEffect, useContext } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { FileManagerContext } from "../context/FileManagerContext";
@@ -100,8 +19,6 @@ const FolderDetailPage = () => {
     setSelectedFolder,
     selectedFolder,
     loadFoldersAndFiles,
-    hasAiResponse,
-    selectedChatSessionId,
   } = useContext(FileManagerContext);
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [isStarred, setIsStarred] = useState(false);
@@ -151,12 +68,11 @@ const FolderDetailPage = () => {
   };
 
   return (
-    <div className="h-screen overflow-hidden" style={{ background: '#f8fafc', marginLeft: '0px', marginRight: '0px' }}>
+    <div className="h-screen overflow-hidden" style={{ background: '#f8fafc' }}>
       <div className="h-full flex flex-col mx-auto">
 
         {/* ── Top bar ── */}
         <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-white relative" style={{ minHeight: '3rem' }}>
-          {/* Back button */}
           <button
             onClick={() => navigate('/documents')}
             className="flex items-center gap-1.5 text-xs font-semibold text-gray-400 hover:text-[#21C1B6] transition-colors group"
@@ -165,12 +81,10 @@ const FolderDetailPage = () => {
             <span>All projects</span>
           </button>
 
-          {/* Case title — centred */}
           <h1 className="absolute left-1/2 -translate-x-1/2 text-sm font-bold text-gray-800 max-w-[min(60%,40rem)] truncate text-center px-2">
             {selectedFolder || 'Document Upload'}
           </h1>
 
-          {/* Actions */}
           <div className="flex items-center gap-1 relative">
             <button
               type="button"
@@ -203,35 +117,44 @@ const FolderDetailPage = () => {
           </div>
         </div>
 
-        {/* ── Main content ── */}
-        <div className={`flex-1 flex ${(!hasAiResponse && !selectedChatSessionId) ? 'gap-2 p-2' : ''} overflow-hidden`}>
-          <div className="flex-1 h-full flex flex-col min-w-0 overflow-hidden rounded-xl bg-white"
-            style={{ boxShadow: (!hasAiResponse && !selectedChatSessionId) ? '0 1px 4px rgba(0,0,0,0.05)' : 'none' }}>
+        {/* Chat (left) + Files panel (right) — both always visible */}
+        <div className="flex-1 flex gap-2 p-2 overflow-hidden min-h-0">
+          <div
+            className="flex-1 min-w-0 h-full flex flex-col overflow-hidden rounded-xl bg-white border border-gray-100"
+            style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}
+          >
             <ChatInterface />
           </div>
-          {!selectedChatSessionId && !hasAiResponse && (
-            <div className="w-1/3 flex flex-col h-full overflow-hidden flex-shrink-0">
-              <div className="bg-white rounded-xl border border-gray-100 flex-1 flex flex-col overflow-hidden p-3"
-                style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
-                <div className="flex items-center gap-2 mb-2 flex-shrink-0 pb-2 border-b border-gray-100">
-                  <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: '#f0fdfb' }}>
-                    <span className="text-[8px] font-bold" style={{ color: '#21C1B6' }}>F</span>
-                  </div>
-                  <h3 className="text-xs font-semibold text-gray-600">Files</h3>
+
+          <div className="w-full max-w-[360px] min-w-[280px] flex flex-col h-full overflow-hidden flex-shrink-0">
+            <div
+              className="bg-white rounded-xl border border-gray-100 flex-1 flex flex-col overflow-hidden p-3 min-h-0"
+              style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}
+            >
+              <div className="flex items-center gap-2 mb-2 flex-shrink-0 pb-2 border-b border-gray-100">
+                <div
+                  className="w-4 h-4 rounded flex items-center justify-center"
+                  style={{ background: '#f0fdfb' }}
+                >
+                  <span className="text-[8px] font-bold" style={{ color: '#21C1B6' }}>
+                    F
+                  </span>
                 </div>
-                {selectedDocument ? (
-                  <DocumentPreviewModal document={selectedDocument} onClose={handleClosePreview} />
-                ) : (
-                  <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-                    <FolderContent onDocumentClick={handleDocumentClick} />
-                  </div>
-                )}
+                <h3 className="text-xs font-semibold text-gray-600">Files</h3>
               </div>
+              {selectedDocument ? (
+                <DocumentPreviewModal document={selectedDocument} onClose={handleClosePreview} />
+              ) : (
+                <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                  <FolderContent onDocumentClick={handleDocumentClick} />
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
     </div>
   );
 };
+
 export default FolderDetailPage;

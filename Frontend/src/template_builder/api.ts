@@ -8,6 +8,7 @@
 
 import axios, { AxiosError } from 'axios';
 import { TEMPLATE_ANALYZER_API_BASE } from '../config/apiConfig.js';
+import { throwIfQuotaResponse } from '../utils/quotaError.js';
 import type {
   ExtractedField,
   ParsedSection,
@@ -392,15 +393,13 @@ export const templateBuilderApi = {
       body,
     });
 
-    if (!response.ok || !response.body) {
-      let message = `Request failed (${response.status})`;
-      try {
-        const data = await response.json();
-        message = data?.detail || message;
-      } catch {
-        // ignore
-      }
-      throw new Error(message);
+    if (!response.ok) {
+      // Throws a quota error (isQuotaError=true) for 429/503 token-limit responses,
+      // or a plain Error for other failures.
+      await throwIfQuotaResponse(response, `Request failed (${response.status})`);
+    }
+    if (!response.body) {
+      throw new Error('No response body from generation service');
     }
 
     const reader = response.body.getReader();

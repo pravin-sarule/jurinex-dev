@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
-import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles } from 'lucide-react';
+import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles, Copy, Download, FileText, Printer, Code } from 'lucide-react';
+import { getCleanText, downloadAsPdf, downloadAsHtml, printResponse } from '../utils/responseExportUtils';
+import BrandingDownloadModal from './BrandingDownload/BrandingDownloadModal';
 import './IntelligentFolderChat.css';
 import CitationsPanel from '../AnalysisPage/CitationsPanel';
 import apiService from '../services/api';
@@ -11,9 +13,16 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
+import {
+  ensureTableSeparators,
+  markdownTableComponents,
+  splitMarkdownIntoRenderChunks,
+} from '../utils/markdownUtils';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCS_BASE_URL } from '../config/apiConfig';
+import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import ChatQuotaErrorModal from './ChatQuotaErrorModal';
+import UpgradePlanBanner from './UpgradePlanBanner';
 
 export default function IntelligentFolderChat({
   folderName,
@@ -53,6 +62,9 @@ export default function IntelligentFolderChat({
   const dropdownRef = useRef(null);
   const styleDropdownRef = useRef(null);
   const finalizedMessageIds = useRef(new Set());
+  const messageRefs = useRef({});
+  const [msgCopySuccess, setMsgCopySuccess] = useState(null);
+  const [wordModalMsgId, setWordModalMsgId] = useState(null);
 
   // Setup speech recognition
   useEffect(() => {
@@ -219,30 +231,13 @@ export default function IntelligentFolderChat({
     }
   };
 
-  const fetchSecrets = async () => {
+  const loadSecrets = async () => {
+    const cached = peekSecretsList();
+    if (cached?.length) setSecrets(cached);
+    if (!cached?.length) setIsLoadingSecrets(true);
     try {
-      setIsLoadingSecrets(true);
-
-      const token = authToken || getAuthToken();
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-
-      const response = await fetch(`${String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL).replace(/\/$/, '')}/secrets?fetch=true`, {
-        method: 'GET',
-        headers,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch secrets: ${response.status}`);
-      }
-
-      const secretsData = await response.json();
+      const secretsData = await fetchSecretsList();
       setSecrets(secretsData || []);
-
-      if (secretsData && secretsData.length > 0) {
-        setActiveDropdown(secretsData[0].name);
-        setSelectedSecretId(secretsData[0].id);
-      }
     } catch (error) {
       console.error('Error fetching secrets:', error);
     } finally {
@@ -635,6 +630,37 @@ export default function IntelligentFolderChat({
     setShowStyleDropdown(false);
   };
 
+  const getProcessedMsgText = (text) => {
+    if (!text) return '';
+    const isStructured = isStructuredJsonResponse(text);
+    if (isStructured) return renderSecretPromptResponse(text);
+    return convertJsonToPlainText(text);
+  };
+
+  const handleCopyMessage = async (msgId, msgText) => {
+    try {
+      const text = getCleanText(messageRefs.current[msgId], msgText);
+      await navigator.clipboard.writeText(text);
+      setMsgCopySuccess(msgId);
+      setTimeout(() => setMsgCopySuccess(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const handleDownloadMsgPdf = async (msgId) => {
+    try {
+      const el = messageRefs.current[msgId];
+      await downloadAsPdf(el, `AI_Response_${new Date().toISOString().slice(0, 10)}.pdf`);
+    } catch (err) {
+      console.error('Failed to generate PDF:', err);
+    }
+  };
+
+  const handleDownloadMsgWord = (msgId) => {
+    setWordModalMsgId(msgId);
+  };
+
   const handleStop = () => {
     stopStreaming();
     if (currentMessageId) {
@@ -660,7 +686,7 @@ export default function IntelligentFolderChat({
   };
 
   useEffect(() => {
-    fetchSecrets();
+    loadSecrets();
   }, []);
 
   useEffect(() => {
@@ -850,7 +876,10 @@ export default function IntelligentFolderChat({
                     </div>
                   )}
 
-                  <div className="ai-message">
+                  <div
+                    className="ai-message"
+                    ref={el => { if (el) messageRefs.current[msg.id] = el; else delete messageRefs.current[msg.id]; }}
+                  >
                     {msg.learningPayload ? (
                       <LearningBubble
                         payload={msg.learningPayload}
@@ -858,18 +887,25 @@ export default function IntelligentFolderChat({
                         onOptionSelect={handleQuickReply}
                       />
                     ) : msg.text ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeRaw, rehypeSanitize]}
-                      >
-                        {(() => {
-                          const rawResponse = msg.text || '';
-                          if (!rawResponse) return '';
-                          const isStructured = isStructuredJsonResponse(rawResponse);
-                          if (isStructured) return renderSecretPromptResponse(rawResponse);
-                          return convertJsonToPlainText(rawResponse);
-                        })()}
-                      </ReactMarkdown>
+                      {(() => {
+                        const rawResponse = msg.text || '';
+                        if (!rawResponse) return null;
+                        const isStructured = isStructuredJsonResponse(rawResponse);
+                        const formatted = isStructured
+                          ? renderSecretPromptResponse(rawResponse)
+                          : convertJsonToPlainText(rawResponse);
+                        const prepared = ensureTableSeparators(formatted);
+                        return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
+                          <ReactMarkdown
+                            key={`${index}-${chunk.length}`}
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                            components={markdownTableComponents}
+                          >
+                            {chunk}
+                          </ReactMarkdown>
+                        ));
+                      })()}
                     ) : (
                       msg.isStreaming && !msg.thinking ? 'Generating response...' : ''
                     )}
@@ -877,6 +913,51 @@ export default function IntelligentFolderChat({
                       <span className="typing-indicator">▋</span>
                     )}
                   </div>
+
+                  {!msg.isStreaming && msg.text && (
+                    <div className="ai-message-actions">
+                      <button
+                        className="ai-msg-action-btn"
+                        onClick={() => handleCopyMessage(msg.id, msg.text)}
+                        title="Copy response"
+                      >
+                        <Copy size={13} />
+                        <span>{msgCopySuccess === msg.id ? 'Copied!' : 'Copy'}</span>
+                      </button>
+                      <button
+                        className="ai-msg-action-btn"
+                        onClick={() => handleDownloadMsgPdf(msg.id)}
+                        title="Download as PDF"
+                      >
+                        <Download size={13} />
+                        <span>PDF</span>
+                      </button>
+                      <button
+                        className="ai-msg-action-btn"
+                        onClick={() => handleDownloadMsgWord(msg.id)}
+                        title="Download as Word"
+                      >
+                        <FileText size={13} />
+                        <span>Word</span>
+                      </button>
+                      <button
+                        className="ai-msg-action-btn"
+                        onClick={() => downloadAsHtml(messageRefs.current[msg.id], `AI_Response_${new Date().toISOString().slice(0, 10)}.html`)}
+                        title="Download as HTML"
+                      >
+                        <Code size={13} />
+                        <span>HTML</span>
+                      </button>
+                      <button
+                        className="ai-msg-action-btn"
+                        onClick={() => printResponse(messageRefs.current[msg.id])}
+                        title="Print response"
+                      >
+                        <Printer size={13} />
+                        <span>Print</span>
+                      </button>
+                    </div>
+                  )}
 
                   {msg.status && (
                     <div className="status-display">
@@ -934,6 +1015,7 @@ export default function IntelligentFolderChat({
         <div ref={messagesEndRef} />
       </div>
 
+      <UpgradePlanBanner className="chat-upgrade-banner mb-2" />
       <form onSubmit={handleSubmit} className="chat-input-form">
         <div className="input-container flex items-center space-x-2 bg-white rounded-xl border border-[#21C1B6] px-4 py-2 focus-within:ring-2 focus-within:ring-[#21C1B6]/20 transition-all">
           {learningMode && (
@@ -1061,9 +1143,14 @@ export default function IntelligentFolderChat({
           }}
         />
       )}
+      <BrandingDownloadModal
+        isOpen={wordModalMsgId != null}
+        onClose={() => setWordModalMsgId(null)}
+        contentRef={{ current: wordModalMsgId ? messageRefs.current[wordModalMsgId] : null }}
+        filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.docx`}
+        format="word"
+        module="folder-chat"
+      />
     </div>
   );
 }
-
-
-

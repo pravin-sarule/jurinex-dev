@@ -54,6 +54,143 @@
   cursor: not-allowed;
 }
 
+/* Unified chat thread cards — same layout for user questions and AI responses */
+.chat-thread-card {
+  width: 100%;
+  background: #fafafa;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.chat-thread-card--user {
+  background: #ffffff;
+  border-color: #d1fae5;
+}
+
+.chat-thread-card__label {
+  padding: 10px 20px;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.chat-thread-card--user .chat-thread-card__label {
+  color: #0d9488;
+  border-bottom-color: #d1fae5;
+  background: #f0fdfa;
+}
+
+.chat-thread-card__body {
+  padding: 16px 24px;
+  font-size: 15px;
+  line-height: 1.7;
+  color: #1f1f1f;
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  word-break: break-word;
+}
+
+.chat-thread-card__footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid #e5e7eb;
+  background: #fff;
+}
+
+/* Professional legal finding header (replaces ASCII box art) */
+.legal-response-banner {
+  margin: 0 0 20px;
+  padding: 16px 20px;
+  border-radius: 10px;
+  border: 1px solid #99f6e4;
+  background: linear-gradient(135deg, #f0fdfa 0%, #ecfdf5 100%);
+  box-shadow: 0 1px 3px rgba(33, 193, 182, 0.12);
+}
+
+.legal-response-banner__title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f766e;
+  letter-spacing: 0.01em;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+
+.legal-response-banner__meta {
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.formatted-assistant-html {
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  color: #1f1f1f;
+}
+
+.formatted-assistant-html p {
+  margin: 0 0 14px;
+}
+
+.formatted-assistant-html h1,
+.formatted-assistant-html h2,
+.formatted-assistant-html h3 {
+  margin: 18px 0 8px;
+  color: #111827;
+  font-weight: 700;
+}
+
+.formatted-assistant-html table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 14px;
+}
+
+.formatted-assistant-html th,
+.formatted-assistant-html td {
+  border: 1px solid #e5e7eb;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.formatted-assistant-html th {
+  background: #f8fafc;
+  font-weight: 600;
+}
+
+/* --- Rendering performance ------------------------------------------------
+   contain:content  → layout/style/paint changes inside this subtree do NOT
+                       propagate to the rest of the page. Prevents streaming
+                       innerHTML writes from triggering full-page reflows.
+   will-change:contents (stream-active only) → promotes the live streaming div
+                       to its own compositor layer so token-by-token paint
+                       updates are composited on the GPU, not the main thread.
+-------------------------------------------------------------------------- */
+/* contain:content only while streaming — it clips tall final responses/tables */
+.formatted-assistant-markdown.stream-active {
+  contain: content;
+  will-change: contents;
+}
+
+.formatted-assistant-markdown strong,
+.formatted-assistant-html strong {
+  font-weight: 600;
+  color: #0f766e;
+}
+
+.formatted-assistant-markdown em {
+  font-style: italic;
+  color: #374151;
+}
+
 
 /* Word Document Style for Legal Documents */
 .word-document-style {
@@ -167,10 +304,10 @@
 }
 
 .analysis-page-ai-response {
-  font-family: "Times New Roman", Times, serif !important;
-  font-size: 17px !important;
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+  font-size: 15px !important;
   line-height: 1.75 !important;
-  color: #1a1a1a !important;
+  color: #1f1f1f !important;
 }
 
 .response-content h1 {
@@ -320,6 +457,166 @@
   font-size: 14px !important;
 }
 
+/* Scrollable table wrapper — injected by markdownTableComponents */
+.formatted-assistant-markdown .md-table-scroll,
+.analysis-page-response .md-table-scroll {
+  overflow-x: auto;
+  margin: 12px 0;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+.formatted-assistant-markdown table,
+.analysis-page-response table {
+  border-collapse: collapse;
+  min-width: 480px;
+  width: max-content;
+  font-size: 13px;
+  font-family: 'DM Sans', sans-serif;
+  margin: 0;
+}
+
+.formatted-assistant-markdown table th,
+.analysis-page-response table th {
+  background: #f8fafc;
+  font-weight: 600;
+  border: 1px solid #d1d5db;
+  padding: 7px 12px;
+  text-align: left;
+  white-space: nowrap;
+  color: #1f2937;
+}
+
+.formatted-assistant-markdown table td,
+.analysis-page-response table td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 12px;
+  vertical-align: top;
+  word-break: normal;
+  word-wrap: normal;
+  white-space: normal;
+  min-width: 70px;
+  color: #374151;
+  line-height: 1.55;
+}
+
+.formatted-assistant-markdown table tbody tr:nth-child(even) td,
+.analysis-page-response table tbody tr:nth-child(even) td {
+  background: #f9fafb;
+}
+
+.formatted-assistant-markdown table tbody tr:hover td,
+.analysis-page-response table tbody tr:hover td {
+  background: #eff6ff;
+}
+
+.formatted-assistant-markdown {
+  font-size: 15px;
+  line-height: 1.75;
+  color: #1f2a24;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.formatted-assistant-markdown h1,
+.formatted-assistant-markdown h2,
+.formatted-assistant-markdown h3,
+.formatted-assistant-markdown h4 {
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.2em 0 0.5em;
+  color: #143027;
+}
+
+.formatted-assistant-markdown h1 { font-size: 1.5em; }
+.formatted-assistant-markdown h2 { font-size: 1.3em; }
+.formatted-assistant-markdown h3 { font-size: 1.12em; }
+.formatted-assistant-markdown p { margin: 0 0 0.9em; }
+
+.formatted-assistant-markdown ul,
+.formatted-assistant-markdown ol {
+  margin: 0 0 0.9em;
+  padding-left: 1.5em;
+}
+
+.formatted-assistant-markdown li { margin: 0.25em 0; }
+
+.formatted-assistant-markdown blockquote {
+  border-left: 4px solid #1f6b5f;
+  padding: 0.4em 1em;
+  margin: 0.9em 0;
+  background: #f4f8f6;
+  color: #4a5751;
+  font-style: italic;
+  border-radius: 0 6px 6px 0;
+}
+
+.formatted-assistant-markdown code {
+  background: #eef2f0;
+  color: #a53d2d;
+  padding: 0.12em 0.4em;
+  border-radius: 4px;
+  font-size: 0.88em;
+  font-family: ui-monospace, monospace;
+}
+
+.formatted-assistant-markdown .md-pre {
+  background: #f3f4f6;
+  border: 1px solid #d8d1c5;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0.9em 0;
+  overflow-x: auto;
+}
+
+.formatted-assistant-markdown .md-pre code {
+  background: none;
+  color: #243124;
+  padding: 0;
+  white-space: pre;
+}
+
+.formatted-assistant-markdown .md-table-scroll {
+  width: 100%;
+  overflow-x: auto;           /* wide tables scroll inside the bubble, never blow out page */
+  margin: 1em 0;
+  border: 1px solid #d6d0c4;
+  border-radius: 8px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.formatted-assistant-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+
+.formatted-assistant-markdown th,
+.formatted-assistant-markdown td {
+  border: 1px solid #ece7de;
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+  min-width: 90px;
+}
+
+.formatted-assistant-markdown th {
+  background: #f6f8f7;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #5b554a;
+}
+
+.formatted-assistant-markdown tr:last-child td { border-bottom: none; }
+
+.formatted-assistant-markdown th:last-child,
+.formatted-assistant-markdown td:last-child { border-right: none; }
+
+.formatted-assistant-markdown.stream-active { will-change: contents; }
+
 .response-content ul,
 .response-content ol {
   margin: 12px 0 !important;
@@ -430,4 +727,8 @@
 .response-content * {
   box-sizing: border-box !important;
   max-width: 100% !important;
+}
+
+.prompt-chips-scroll::-webkit-scrollbar {
+  display: none;
 }

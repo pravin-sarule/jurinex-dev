@@ -1,0 +1,6 @@
+      setCurrentResponse('');
+      streamBufferRef.current = '';
+      streamingGeneratingFiredRef.current = false;
+      setStreamingStatus('initializing');
+      setStreamingMessage('Starting legal chat...');
+      startProcessingTimeline(question.trim(), 'initializing', 'Starting legal chat...');

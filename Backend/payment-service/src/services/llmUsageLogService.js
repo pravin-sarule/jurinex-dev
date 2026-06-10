@@ -81,7 +81,6 @@ class LLMUsageLogService {
           total_cost = public.llm_usage_logs.total_cost + EXCLUDED.total_cost,
           -- Increment request count: each conflict means another request
           request_count = public.llm_usage_logs.request_count + 1,
-          used_at = NOW(),
           -- Keep the first endpoint and session_id, or update if they're provided
           endpoint = COALESCE(EXCLUDED.endpoint, public.llm_usage_logs.endpoint),
           session_id = COALESCE(EXCLUDED.session_id, public.llm_usage_logs.session_id)

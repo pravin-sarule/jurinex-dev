@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const chatController = require('../controllers/chatController');
 const geminiCacheController = require('../controllers/geminiCacheController');
+const storageController = require('../controllers/storageController');
 const { protect } = require('../middleware/auth');
 const { enforceLLMChatPolicy } = require('../middleware/llmChatPolicy');
 
@@ -107,11 +108,16 @@ router.get(
 router.post('/count-tokens', protect, chatController.countFileTokens);
 
 /* ─────────────────────────────────────────────────────────────────────────
+   Storage Usage — real bytes from Document_DB + GCS fallback
+───────────────────────────────────────────────────────────────────────── */
+router.get('/storage/usage', protect, storageController.getUserStorageUsage);
+
+/* ─────────────────────────────────────────────────────────────────────────
    Gemini Context Caching Routes
 ───────────────────────────────────────────────────────────────────────── */
-router.post('/cache/create', protect, geminiCacheController.createCache);
-router.post('/cache/ask', protect, geminiCacheController.askQuestion);
-router.post('/cache/ask/stream', protect, geminiCacheController.askQuestionStream);
+router.post('/cache/create', protect, enforceLLMChatPolicy, geminiCacheController.createCache);
+router.post('/cache/ask', protect, enforceLLMChatPolicy, geminiCacheController.askQuestion);
+router.post('/cache/ask/stream', protect, enforceLLMChatPolicy, geminiCacheController.askQuestionStream);
 router.get('/cache/status/:sessionId', protect, geminiCacheController.getStatus);
 router.get('/cache/file-status/:fileId', protect, geminiCacheController.getFileStatus);
 router.post('/cache/delete', protect, geminiCacheController.deleteCache);

@@ -107,7 +107,7 @@ class TokenUsageService {
             );
 
             await client.query(
-                `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE WHERE user_id = $1`,
+                `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE, plan_tokens_used = 0 WHERE user_id = $1`,
                 [userId]
             );
 

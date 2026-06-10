@@ -1,0 +1,879 @@
+{
+  "info": {
+    "_postman_id": "jurinex-ai-chatbot-v1",
+    "name": "JuriNex — AI Chatbot API",
+    "description": "Complete API collection for JuriNex AI Chatbot services.\n\n## Services\n- **Service A** — AI-Chatbot (FastAPI / Python) — Port 8095 — No auth required\n- **Service B** — ChatModel (Express.js / Node) — Port 5003 — JWT Bearer auth required\n\n## Setup\n1. Import this collection\n2. Import `JuriNex_AI_Chatbot.postman_environment.json`\n3. Select the **JuriNex Dev** environment\n4. Set `jwt_token` variable with a valid token before running Service B requests",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "ai_chatbot_url",
+      "value": "http://localhost:8095",
+      "type": "string",
+      "description": "Base URL for AI-Chatbot (FastAPI)"
+    },
+    {
+      "key": "chat_model_url",
+      "value": "http://localhost:5003",
+      "type": "string",
+      "description": "Base URL for ChatModel (Express)"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string",
+      "description": "JWT Bearer token — required for all Service B requests"
+    },
+    {
+      "key": "session_id",
+      "value": "",
+      "type": "string",
+      "description": "AI-Chatbot session UUID — auto-set by POST /api/chat test script"
+    },
+    {
+      "key": "file_id",
+      "value": "",
+      "type": "string",
+      "description": "Uploaded file UUID — set after completing document upload"
+    },
+    {
+      "key": "general_session_id",
+      "value": "gen_sess_001",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "🤖 Service A — AI-Chatbot (FastAPI · No Auth)",
+      "description": "Public chatbot endpoints. No authentication required.\nBase URL: {{ai_chatbot_url}} (default: http://localhost:8095)",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_chatbot_url}}/health",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["health"]
+            },
+            "description": "Check if the AI-Chatbot service is running and the database is connected."
+          },
+          "response": [
+            {
+              "name": "200 OK — Service Healthy",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"status\": \"healthy\",\n  \"database\": \"connected\",\n  \"timestamp\": \"2026-05-06T10:00:00.000Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "📨 Text Chat — First Message (no session)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.session_id) {",
+                  "    pm.collectionVariables.set('session_id', res.session_id);",
+                  "    pm.environment.set('session_id', res.session_id);",
+                  "    console.log('session_id saved:', res.session_id);",
+                  "}",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has answer', () => pm.expect(res.answer).to.be.a('string').and.not.empty);",
+                  "pm.test('Has session_id', () => pm.expect(res.session_id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"What is the difference between BNS and IPC?\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/chat",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "chat"]
+            },
+            "description": "Send a text message to the AI assistant.\n\n**First message** — omit `session_id` to start a new conversation. The response will include a `session_id` — save it and send it in all subsequent requests to maintain conversation context.\n\n**Test script** automatically saves the returned `session_id` to the collection variable."
+          },
+          "response": [
+            {
+              "name": "200 OK — First Message",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"answer\": \"The **Bharatiya Nyaya Sanhita (BNS)** replaces the Indian Penal Code (IPC) effective July 2024.\\n\\n**Key differences:**\\n\\n1. **New name** — IPC is now BNS\\n2. **Renumbered sections** — Section 302 (murder) is now Section 103\\n3. **New offences** — Organised crime and terrorism explicitly defined\\n4. **Community service** — Added as a form of punishment\\n\\nWould you like details on any specific section?\",\n  \"session_id\": \"550e8400-e29b-41d4-a716-446655440000\"\n}"
+            },
+            {
+              "name": "422 — Message too long",
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"detail\": [\n    {\n      \"type\": \"string_too_long\",\n      \"loc\": [\"body\", \"message\"],\n      \"msg\": \"String should have at most 2000 characters\",\n      \"ctx\": { \"max_length\": 2000 }\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "📨 Text Chat — Follow-up Message (with session)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Tell me more about Section 103 specifically.\",\n  \"session_id\": \"{{session_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/chat",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "chat"]
+            },
+            "description": "Continue an existing conversation by passing `session_id` from the previous response.\n\n**session_id** is automatically populated if you ran the 'First Message' request above."
+          },
+          "response": [
+            {
+              "name": "200 OK — Follow-up with context",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"answer\": \"**Section 103 BNS — Murder**\\n\\nSection 103 of the Bharatiya Nyaya Sanhita corresponds to the old Section 302 IPC.\\n\\n**Punishment:** Death or imprisonment for life, and fine.\\n\\nThe provision is largely unchanged in substance — the renumbering is part of the broader restructuring of the criminal code.\",\n  \"session_id\": \"550e8400-e29b-41d4-a716-446655440000\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "📨 Text Chat — In-App with Page Context",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"[APP CONTEXT: User is on the Documents page] How do I upload a new document?\",\n  \"session_id\": \"{{session_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/chat",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "chat"]
+            },
+            "description": "In the AppAssistant component, messages are prefixed with the current page context so the AI provides page-relevant guidance.\n\n**Format:** `[APP CONTEXT: User is on the {PageName} page] {user message}`\n\nValid page names: Dashboard, Documents, Drafting, Analysis, Evidence, Timeline, Cases, Billing, Settings"
+          },
+          "response": [
+            {
+              "name": "200 OK — Page-aware response",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"answer\": \"To upload a document on the **Documents** page:\\n\\n1. Click **Upload Document** in the top-right corner\\n2. Select your PDF file (max 50 MB)\\n3. Wait for the upload to complete — status changes to \\\"Ready\\\"\\n4. You can then start asking questions about the document\",\n  \"session_id\": \"550e8400-e29b-41d4-a716-446655440000\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "📜 Chat History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/chat/history/{{session_id}}?limit=20",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "chat", "history", "{{session_id}}"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Max number of messages to return (default: 20)"
+                }
+              ]
+            },
+            "description": "Retrieve all messages for a session.\n\nMessages are returned **oldest first**.\n\nReplace `{{session_id}}` with a valid session UUID, or let the test script from 'Text Chat — First Message' populate it automatically."
+          },
+          "response": [
+            {
+              "name": "200 OK — History list",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "[\n  {\n    \"role\": \"user\",\n    \"content\": \"What is the difference between BNS and IPC?\",\n    \"created_at\": \"2026-05-06T10:15:00.000Z\"\n  },\n  {\n    \"role\": \"assistant\",\n    \"content\": \"The **Bharatiya Nyaya Sanhita (BNS)** replaces the Indian Penal Code (IPC)...\",\n    \"created_at\": \"2026-05-06T10:15:02.345Z\"\n  }\n]"
+            },
+            {
+              "name": "404 — Session not found",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"detail\": \"Session not found\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "🎤 Audio WebSocket — Connection Info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_chatbot_url}}/health",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["health"]
+            },
+            "description": "⚠️ WebSocket connections cannot be tested directly in Postman HTTP requests.\n\n**WebSocket URL:**\n```\nws://localhost:8095/ws/audio?mode=app\n```\n\nUse Postman's **WebSocket** tab (New → WebSocket) to connect.\n\n**Mode options:**\n- `mode=app` — In-app assistant (search only, no demo booking)\n- `mode=landing` — Landing page (search + demo booking)\n- `mode=booking` — Opens with demo slots announcement\n\n**After connecting, send JSON messages:**\n\nAudio chunk (while user speaks):\n```json\n{\"type\": \"audio\", \"data\": \"<base64 PCM-16 @ 16kHz>\"}\n```\n\nText message:\n```json\n{\"type\": \"text\", \"content\": \"What is bail procedure in BNSS?\"}\n```\n\nEnd of user turn:\n```json\n{\"type\": \"end\"}\n```\n\n**Server sends back:**\n- `{\"type\": \"audio\", \"data\": \"<base64>\", \"mime_type\": \"audio/pcm\"}` — spoken response\n- `{\"type\": \"text\", \"content\": \"...\"}` — text transcript\n- `{\"type\": \"tool_call\", \"tool\": \"search_documents\", \"query\": \"...\"}` — tool used\n- `{\"type\": \"turn_complete\"}` — AI finished responding\n- `{\"type\": \"error\", \"message\": \"...\"}` — error"
+          },
+          "response": []
+        },
+        {
+          "name": "📅 Get Demo Slots",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/demo-slots",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "demo-slots"]
+            },
+            "description": "Fetch all available demo booking time slots.\n\nUsed by the landing page chatbot's `getAvailableSlots` tool. Can also be called directly by the frontend to render a booking calendar."
+          },
+          "response": [
+            {
+              "name": "200 OK — Available slots",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "[\n  {\n    \"id\": 1,\n    \"slot_time\": \"2026-05-07T10:00:00.000Z\",\n    \"display\": \"Wed, 7 May 2026 at 10:00 AM IST\",\n    \"available\": true\n  },\n  {\n    \"id\": 2,\n    \"slot_time\": \"2026-05-07T14:00:00.000Z\",\n    \"display\": \"Wed, 7 May 2026 at 2:00 PM IST\",\n    \"available\": true\n  },\n  {\n    \"id\": 3,\n    \"slot_time\": \"2026-05-08T11:00:00.000Z\",\n    \"display\": \"Thu, 8 May 2026 at 11:00 AM IST\",\n    \"available\": false\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "📅 Book a Demo",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Rahul Sharma\",\n  \"email\": \"rahul.sharma@lawfirm.in\",\n  \"slot_id\": 1,\n  \"company\": \"Sharma & Associates\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/book-demo",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "book-demo"]
+            },
+            "description": "Book a product demo slot.\n\n**Required fields:** `name`, `email`, `slot_id`\n**Optional fields:** `company`\n\nGet `slot_id` values from `GET /api/demo-slots`. Only book slots where `available: true`."
+          },
+          "response": [
+            {
+              "name": "200 OK — Booked successfully",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Demo booked successfully. A confirmation will be sent to rahul.sharma@lawfirm.in.\",\n  \"booking_id\": \"BK-20260507-001\"\n}"
+            },
+            {
+              "name": "400 — Slot unavailable",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": false,\n  \"message\": \"This slot is no longer available. Please choose another time.\"\n}"
+            },
+            {
+              "name": "422 — Validation error",
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"detail\": [\n    {\n      \"type\": \"missing\",\n      \"loc\": [\"body\", \"email\"],\n      \"msg\": \"Field required\"\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "⚙️ Get Chatbot Config",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/admin/config",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "admin", "config"]
+            },
+            "description": "Retrieve current AI model configuration and system prompts.\n\nConfig is cached for 2 minutes server-side."
+          },
+          "response": [
+            {
+              "name": "200 OK — Current config",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"model_text\": \"gemini-2.5-flash\",\n  \"model_audio\": \"gemini-2.0-flash-live-001\",\n  \"max_tokens\": 1024,\n  \"temperature\": 0.7,\n  \"top_p\": 0.95,\n  \"top_k_results\": 5,\n  \"voice_name\": \"Aoede\",\n  \"language_code\": \"en-IN\",\n  \"speaking_rate\": 1.0,\n  \"pitch\": 0.0,\n  \"volume_gain_db\": 0.0,\n  \"system_prompt\": \"You are JuriNex AI, an expert legal assistant for Indian law...\",\n  \"audio_system_prompt\": \"You are a voice-first legal assistant for the JuriNex platform...\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "⚙️ Update Chatbot Config",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"temperature\": 0.5,\n  \"max_tokens\": 2048,\n  \"top_k_results\": 8\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_chatbot_url}}/api/admin/config",
+              "host": ["{{ai_chatbot_url}}"],
+              "path": ["api", "admin", "config"]
+            },
+            "description": "Update chatbot AI settings. **All fields are optional** — only include what you want to change.\n\n| Field | Type | Constraints |\n|---|---|---|\n| model_text | string | Gemini model name |\n| model_audio | string | Gemini Live model name |\n| max_tokens | integer | 1–8192 |\n| temperature | float | 0.0–2.0 |\n| top_p | float | 0.0–1.0 |\n| top_k_results | integer | 1–20 |\n| voice_name | string | e.g. Aoede, Charon, Fenrir |\n| language_code | string | e.g. en-IN, hi-IN |\n| speaking_rate | float | 0.25–4.0 |\n| pitch | float | -20.0 to 20.0 |\n| volume_gain_db | float | -96.0 to 16.0 |\n| system_prompt | string | max 4000 chars |\n| audio_system_prompt | string | max 4000 chars |"
+          },
+          "response": [
+            {
+              "name": "200 OK — Config updated",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"message\": \"Configuration updated successfully\",\n  \"updated_fields\": [\"temperature\", \"max_tokens\", \"top_k_results\"]\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🔐 Service B — ChatModel (Express · JWT Required)",
+      "description": "Document Q&A and general legal chat for authenticated users.\nBase URL: {{chat_model_url}} (default: http://localhost:5003)\n\n⚠️ ALL requests require: `Authorization: Bearer {{jwt_token}}`\n\nSet the `jwt_token` collection variable before running any request in this folder.",
+      "item": [
+        {
+          "name": "Auth",
+          "item": [
+            {
+              "name": "🔑 Set JWT Token (instructions)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/limits",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "limits"]
+                },
+                "description": "This is a test request to verify your JWT token works.\n\n**Before running Service B requests:**\n1. Obtain a JWT token by logging in through your auth service\n2. Go to the collection variables (or environment)\n3. Set `jwt_token` = your token value (without 'Bearer' prefix)\n4. All Service B requests use `{{jwt_token}}` automatically\n\n**Token errors:**\n- `401 Unauthorized` — token missing\n- `403 Forbidden` — token expired or invalid signature"
+              },
+              "response": [
+                {
+                  "name": "401 — No token",
+                  "status": "Unauthorized",
+                  "code": 401,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"error\": \"No token provided\"\n}"
+                },
+                {
+                  "name": "403 — Invalid/expired token",
+                  "status": "Forbidden",
+                  "code": 403,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"error\": \"Invalid or expired token\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Limits & Secrets",
+          "item": [
+            {
+              "name": "📊 Get Chat Limits",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{jwt_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/limits",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "limits"]
+                },
+                "description": "Get the authenticated user's LLM quota and rate limit configuration.\n\nUse this to display quota usage in the UI (e.g. tokens remaining this month)."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Limits",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"model\": \"gemini-2.5-flash\",\n  \"rate_limit_rpm\": 10,\n  \"rate_limit_tpm\": 100000,\n  \"quota_monthly\": 500000,\n  \"quota_used\": 42300,\n  \"quota_remaining\": 457700,\n  \"temperature\": 0.7,\n  \"max_output_tokens\": 8192\n}"
+                }
+              ]
+            },
+            {
+              "name": "🔒 List Secret Prompts",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{jwt_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/secrets",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "secrets"]
+                },
+                "description": "List available secret prompt templates (admin-defined system prompts for specific workflows).\n\nTo use a secret prompt in a chat request, include `secret_id` in the request body."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Secret prompts",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "[\n  {\n    \"id\": 1,\n    \"label\": \"Contract Review\",\n    \"description\": \"Optimised for reviewing commercial contracts\"\n  },\n  {\n    \"id\": 2,\n    \"label\": \"Criminal Case Analysis\",\n    \"description\": \"Tailored for analysing criminal case documents\"\n  }\n]"
+                }
+              ]
+            },
+            {
+              "name": "🔒 Get Secret Prompt by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{jwt_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/secrets/1",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "secrets", "1"]
+                },
+                "description": "Fetch a specific secret prompt template by its ID."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Single secret",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"id\": 1,\n  \"label\": \"Contract Review\",\n  \"description\": \"Optimised for reviewing commercial contracts\",\n  \"temperature\": 0.3,\n  \"max_tokens\": 4096\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Document Upload",
+          "item": [
+            {
+              "name": "📁 Step 1 — Initiate Upload (get signed URL)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const res = pm.response.json();",
+                      "if (res.file_id) {",
+                      "    pm.collectionVariables.set('file_id', res.file_id);",
+                      "    pm.environment.set('file_id', res.file_id);",
+                      "    console.log('file_id saved:', res.file_id);",
+                      "}",
+                      "if (res.upload_url) {",
+                      "    pm.collectionVariables.set('upload_url', res.upload_url);",
+                      "    console.log('upload_url saved');",
+                      "}",
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "pm.test('Has upload_url', () => pm.expect(res.upload_url).to.be.a('string'));",
+                      "pm.test('Has file_id', () => pm.expect(res.file_id).to.be.a('string'));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"filename\": \"contract_2026.pdf\",\n  \"mimetype\": \"application/pdf\",\n  \"size\": 524288\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/upload-document/initiate",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "upload-document", "initiate"]
+                },
+                "description": "**Step 1 of 3** — Initiate a document upload.\n\nReturns a signed GCS URL and a `file_id`.\n\n**Test script** saves `file_id` and `upload_url` to collection variables automatically.\n\n**File limits:**\n- Max size: 50 MB\n- Supported formats: PDF (primary)"
+              },
+              "response": [
+                {
+                  "name": "200 OK — Signed URL ready",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"upload_url\": \"https://storage.googleapis.com/jurinex-docs/uuid/contract_2026.pdf?X-Goog-Signature=...\",\n  \"file_id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"expires_at\": \"2026-05-06T10:15:00.000Z\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "📁 Step 2 — Upload to GCS (direct, no auth header)",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  { "key": "Content-Type", "value": "application/pdf" }
+                ],
+                "body": {
+                  "mode": "file",
+                  "file": {
+                    "src": ""
+                  }
+                },
+                "url": {
+                  "raw": "{{upload_url}}",
+                  "host": ["{{upload_url}}"]
+                },
+                "description": "**Step 2 of 3** — Upload the file binary directly to Google Cloud Storage using the signed URL from Step 1.\n\n⚠️ **Do NOT include the Authorization header** — this request goes directly to GCS, not to the JuriNex backend.\n\n**In frontend code:**\n```javascript\nawait fetch(uploadUrl, {\n  method: 'PUT',\n  headers: { 'Content-Type': 'application/pdf' },\n  body: fileBlob\n});\n```\n\nSet the body to **Binary** and select your PDF file."
+              },
+              "response": [
+                {
+                  "name": "200 OK — GCS upload successful",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [],
+                  "body": ""
+                }
+              ]
+            },
+            {
+              "name": "📁 Step 3 — Complete Upload (notify backend)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const res = pm.response.json();",
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "pm.test('Success true', () => pm.expect(res.success).to.be.true);",
+                      "pm.test('File status ready', () => pm.expect(res.file.status).to.equal('ready'));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"file_id\": \"{{file_id}}\"\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/upload-document/complete",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "upload-document", "complete"]
+                },
+                "description": "**Step 3 of 3** — Notify the backend that the GCS upload is complete.\n\nThe backend creates the file record and marks it as `ready`. After this step, use `{{file_id}}` in chat requests."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Upload complete",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"success\": true,\n  \"file\": {\n    \"id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n    \"originalname\": \"contract_2026.pdf\",\n    \"status\": \"ready\"\n  }\n}"
+                }
+              ]
+            },
+            {
+              "name": "📁 List Uploaded Files",
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/files",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "files"]
+                },
+                "description": "List all documents uploaded by the authenticated user, ordered by most recent first.\n\n**File status values:**\n- `uploading` — upload in progress\n- `ready` — available for Q&A\n- `error` — upload or processing failed"
+              },
+              "response": [
+                {
+                  "name": "200 OK — Files list",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "[\n  {\n    \"id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n    \"originalname\": \"contract_2026.pdf\",\n    \"mimetype\": \"application/pdf\",\n    \"size\": 524288,\n    \"status\": \"ready\",\n    \"created_at\": \"2026-05-05T14:30:00.000Z\",\n    \"updated_at\": \"2026-05-05T14:31:05.000Z\"\n  },\n  {\n    \"id\": \"b2c3d4e5-f6a7-8901-bcde-f12345678901\",\n    \"originalname\": \"employment_contract.pdf\",\n    \"mimetype\": \"application/pdf\",\n    \"size\": 204800,\n    \"status\": \"ready\",\n    \"created_at\": \"2026-05-04T09:00:00.000Z\",\n    \"updated_at\": \"2026-05-04T09:01:15.000Z\"\n  }\n]"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Document Q&A",
+          "item": [
+            {
+              "name": "💬 Ask — Synchronous (full response)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Summarise the key obligations in clause 5 of this contract.\",\n  \"file_id\": \"{{file_id}}\",\n  \"prompt\": \"Focus on delivery timelines and penalties.\",\n  \"session_id\": \"sess_20260506_001\"\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/ask",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "ask"]
+                },
+                "description": "Ask a question about an uploaded document. Returns the **complete answer** in one response (not streamed).\n\nFor better UX, prefer `/api/chat/ask/stream` instead — it shows tokens as they are generated.\n\n**Fields:**\n- `question` (required) — the user's question\n- `file_id` (required) — UUID from the file upload flow\n- `prompt` (optional) — additional context or instructions\n- `session_id` (optional) — group multiple questions into a session\n- `secret_id` (optional) — use a specific secret prompt template"
+              },
+              "response": [
+                {
+                  "name": "200 OK — Answer",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"success\": true,\n  \"answer\": \"**Clause 5 — Delivery Obligations**\\n\\nThe vendor is required to:\\n\\n1. Deliver within **30 days** of purchase order\\n2. Penalty of **2% per week** for delays\\n3. Maximum penalty capped at **10% of contract value**\\n\\nNo force majeure exemption applies to delays under 7 days.\",\n  \"chunks\": [\n    {\n      \"content\": \"5.1 The Vendor shall deliver Goods within thirty (30) days...\",\n      \"page_number\": 4,\n      \"file_name\": \"supply_agreement_2026.pdf\"\n    }\n  ],\n  \"tokens_used\": {\n    \"input\": 1842,\n    \"output\": 312\n  },\n  \"session_id\": \"sess_20260506_001\"\n}"
+                },
+                {
+                  "name": "429 — Rate limit exceeded",
+                  "status": "Too Many Requests",
+                  "code": 429,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"error\": \"Rate limit exceeded\",\n  \"code\": \"RATE_LIMIT_RPM\",\n  \"message\": \"You have exceeded the requests-per-minute limit. Please wait before sending another message.\",\n  \"retry_after_seconds\": 45\n}"
+                },
+                {
+                  "name": "503 — Policy check unavailable",
+                  "status": "Service Unavailable",
+                  "code": 503,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "{\n  \"error\": \"Policy check unavailable\",\n  \"code\": \"POLICY_CHECK_UNAVAILABLE\",\n  \"message\": \"Unable to verify chat policy. Please try again shortly.\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "💬 Ask — SSE Stream (recommended)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" },
+                  { "key": "Accept", "value": "text/event-stream" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"What are the termination clauses in this agreement?\",\n  \"file_id\": \"{{file_id}}\",\n  \"session_id\": \"sess_20260506_002\"\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/ask/stream",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "ask", "stream"]
+                },
+                "description": "Ask a question about a document with **Server-Sent Events (SSE) streaming**.\n\nTokens are pushed to the client as they are generated — no waiting for the full answer.\n\n**Response format (text/event-stream):**\n```\ndata: {\"type\":\"token\",\"content\":\"The \"}\ndata: {\"type\":\"token\",\"content\":\"termination \"}\ndata: {\"type\":\"done\",\"session_id\":\"...\",\"tokens_used\":{...}}\n```\n\n**Event types:**\n- `token` — append `content` to the displayed answer\n- `done` — stream ended, includes final metadata\n- `error` — something went wrong mid-stream\n\n**Frontend example:**\n```javascript\nconst reader = response.body.getReader();\nwhile (true) {\n  const { done, value } = await reader.read();\n  if (done) break;\n  // parse SSE lines, handle token events\n}\n```"
+              },
+              "response": [
+                {
+                  "name": "200 OK — SSE Stream",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "text/event-stream" }],
+                  "body": "data: {\"type\":\"token\",\"content\":\"The \"}\n\ndata: {\"type\":\"token\",\"content\":\"termination \"}\n\ndata: {\"type\":\"token\",\"content\":\"clauses \"}\n\ndata: {\"type\":\"token\",\"content\":\"are \"}\n\ndata: {\"type\":\"token\",\"content\":\"as follows:\"}\n\ndata: {\"type\":\"done\",\"session_id\":\"sess_20260506_002\",\"tokens_used\":{\"input\":1200,\"output\":180}}\n"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "General Legal Chat",
+          "item": [
+            {
+              "name": "⚖️ General Chat — SSE Stream (no document)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "pm.test('Content-Type is SSE', () => {",
+                      "    pm.expect(pm.response.headers.get('Content-Type')).to.include('text/event-stream');",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" },
+                  { "key": "Accept", "value": "text/event-stream" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"What are the rights of an arrested person under BNSS?\",\n  \"session_id\": \"{{general_session_id}}\"\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/ask/general/stream",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "ask", "general", "stream"]
+                },
+                "description": "General legal Q&A **without requiring a document**.\n\nSame SSE streaming format as `/api/chat/ask/stream`.\n\n**Fields:**\n- `question` (required) — the legal question\n- `session_id` (optional) — group questions into a session\n\n**Response format (text/event-stream):**\n```\ndata: {\"type\":\"token\",\"content\":\"Under \"}\ndata: {\"type\":\"token\",\"content\":\"BNSS \"}\ndata: {\"type\":\"done\",\"session_id\":\"gen_sess_001\",\"tokens_used\":{...}}\n```"
+              },
+              "response": [
+                {
+                  "name": "200 OK — SSE Stream",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "text/event-stream" }],
+                  "body": "data: {\"type\":\"token\",\"content\":\"Under \"}\n\ndata: {\"type\":\"token\",\"content\":\"BNSS \"}\n\ndata: {\"type\":\"token\",\"content\":\"Section 47, \"}\n\ndata: {\"type\":\"token\",\"content\":\"an arrested person \"}\n\ndata: {\"type\":\"token\",\"content\":\"has the right to...\"}\n\ndata: {\"type\":\"done\",\"session_id\":\"gen_sess_001\",\"tokens_used\":{\"input\":450,\"output\":290}}\n"
+                }
+              ]
+            },
+            {
+              "name": "📜 General Chat History",
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/general/history/{{general_session_id}}",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "general", "history", "{{general_session_id}}"]
+                },
+                "description": "Retrieve the chat history for a specific general (no-document) session."
+              },
+              "response": [
+                {
+                  "name": "200 OK — History",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "[\n  {\n    \"id\": \"gen_chat_001\",\n    \"question\": \"What are the rights of an arrested person under BNSS?\",\n    \"answer\": \"Under BNSS Section 47, an arrested person has the right to...\",\n    \"session_id\": \"gen_sess_001\",\n    \"created_at\": \"2026-05-06T09:00:00.000Z\"\n  }\n]"
+                }
+              ]
+            },
+            {
+              "name": "📂 All General Sessions",
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/general/sessions",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "general", "sessions"]
+                },
+                "description": "List all general chat sessions for the authenticated user."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Sessions list",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "[\n  {\n    \"session_id\": \"gen_sess_001\",\n    \"first_question\": \"What are the rights of an arrested person under BNSS?\",\n    \"message_count\": 4,\n    \"last_message_at\": \"2026-05-06T09:15:00.000Z\"\n  }\n]"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "File Chat History",
+          "item": [
+            {
+              "name": "📜 File Chat History",
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/history/{{file_id}}",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "history", "{{file_id}}"],
+                  "query": [
+                    {
+                      "key": "session_id",
+                      "value": "sess_20260506_001",
+                      "description": "Optional — filter by session",
+                      "disabled": true
+                    }
+                  ]
+                },
+                "description": "Get all Q&A exchanges for a specific document.\n\nPass `session_id` as a query param to filter to a specific session."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Chat history",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "[\n  {\n    \"id\": \"chat_001\",\n    \"file_id\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n    \"question\": \"Summarise the key obligations in clause 5.\",\n    \"answer\": \"**Clause 5 — Delivery Obligations**\\n\\nThe vendor is required to...\",\n    \"session_id\": \"sess_20260506_001\",\n    \"created_at\": \"2026-05-06T10:30:00.000Z\"\n  }\n]"
+                }
+              ]
+            },
+            {
+              "name": "📂 File Sessions List",
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{jwt_token}}" }
+                ],
+                "url": {
+                  "raw": "{{chat_model_url}}/api/chat/sessions/{{file_id}}",
+                  "host": ["{{chat_model_url}}"],
+                  "path": ["api", "chat", "sessions", "{{file_id}}"]
+                },
+                "description": "List all chat sessions for a specific document."
+              },
+              "response": [
+                {
+                  "name": "200 OK — Sessions",
+                  "status": "OK",
+                  "code": 200,
+                  "header": [{ "key": "Content-Type", "value": "application/json" }],
+                  "body": "[\n  {\n    \"session_id\": \"sess_20260506_001\",\n    \"message_count\": 5,\n    \"last_message_at\": \"2026-05-06T11:00:00.000Z\"\n  },\n  {\n    \"session_id\": \"sess_20260505_001\",\n    \"message_count\": 3,\n    \"last_message_at\": \"2026-05-05T15:45:00.000Z\"\n  }\n]"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🔁 End-to-End Flows",
+      "description": "Run these folders in order to test complete user journeys.\n\n**Flow 1 — Landing Page Chatbot:**\n1. Text Chat → First Message\n2. Text Chat → Follow-up Message\n3. Get Demo Slots\n4. Book a Demo\n\n**Flow 2 — In-App Assistant:**\n1. Text Chat → In-App with Page Context\n2. Chat History\n\n**Flow 3 — Document Q&A:**\n1. Step 1 — Initiate Upload\n2. Step 2 — Upload to GCS\n3. Step 3 — Complete Upload\n4. Ask → SSE Stream\n5. File Chat History\n\n**Flow 4 — General Legal Chat:**\n1. General Chat → SSE Stream\n2. General Chat History",
+      "item": []
+    }
+  ]
+}

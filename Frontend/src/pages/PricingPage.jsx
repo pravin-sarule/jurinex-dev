@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { CheckIcon } from '@heroicons/react/20/solid';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { useNavigate } from 'react-router-dom';
 import Footer from '../components/Footer';
 import apiService from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context';
+import { getPlanDisplayName } from '../utils/planUtils';
+import { invalidateSecretsListCache } from '../services/secretsService';
+import PlanLimitsDisplay from '../components/PlanLimitsDisplay';
+import { toDisplayString } from '../utils/planDisplayConfig';
 
 import { PAYMENT_SERVICE_URL } from '../config/apiConfig';
 const BACKEND_BASE_URL = PAYMENT_SERVICE_URL;
@@ -13,7 +16,7 @@ console.log('Environment variables:', { BACKEND_BASE_URL });
 
 const PricingPage = () => {
  const navigate = useNavigate();
- const { user, token, loading: authLoading } = useAuth();
+ const { user, token, loading: authLoading, fetchAndStorePlan } = useAuth();
  
  const [billingCycle, setBillingCycle] = useState('yearly');
  const [planType, setPlanType] = useState('individual');
@@ -91,19 +94,35 @@ const PricingPage = () => {
  });
  };
 
- const handlePaymentSuccess = async (planName, paymentData) => {
+ const handlePaymentSuccess = async (planName, paymentData, verifyResult = null) => {
  try {
  console.log('Payment successful:', paymentData);
- 
+
+ const activePlan = verifyResult?.activePlan;
+ const resolvedPlanName =
+   getPlanDisplayName(activePlan) ||
+   activePlan?.plan_name ||
+   activePlan?.planName ||
+   planName;
+
  const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}');
- userInfo.plan = planName;
+ userInfo.plan = resolvedPlanName;
+ userInfo.planId = activePlan?.plan_id ?? activePlan?.id ?? userInfo.planId ?? null;
  userInfo.lastPayment = {
  id: paymentData.razorpay_payment_id,
  subscription_id: paymentData.razorpay_subscription_id,
  date: new Date().toISOString()
  };
  localStorage.setItem('userInfo', JSON.stringify(userInfo));
- 
+
+ invalidateSecretsListCache();
+
+ if (token && typeof fetchAndStorePlan === 'function') {
+   await fetchAndStorePlan(token).catch((planError) => {
+     console.error('Failed to refresh plan after payment success:', planError);
+   });
+ }
+
  window.dispatchEvent(new CustomEvent('userInfoUpdated', { detail: userInfo }));
  
  alert('🎉 Payment successful! Your subscription is now active.');
@@ -249,8 +268,32 @@ const PricingPage = () => {
  email: currentUser?.email || '',
  contact: currentUser?.phone || currentUser?.contact || ''
  },
+ config: {
+   display: {
+     blocks: {
+       upi: {
+         name: "Pay using UPI",
+         instruments: [
+           // test UPI ID: success@razorpay (success) | failure@razorpay (fail)
+           { method: "upi", flows: ["collect"] },
+         ],
+       },
+       other: {
+         name: "Other Payment Methods",
+         instruments: [
+           { method: "card" },
+           { method: "netbanking" },
+           { method: "wallet" },
+           { method: "emi" },
+         ],
+       },
+     },
+     sequence: ["block.upi", "block.other"],
+     preferences: { show_default_blocks: false },
+   },
+ },
  theme: {
- color: "#1a202c"
+ color: "#0D9488"
  },
  handler: async function (response) {
  console.log('Razorpay payment handler response:', response);
@@ -281,7 +324,7 @@ const PricingPage = () => {
  console.log('Verification response:', verifyResult);
 
  if (verifyResult.success) {
- await handlePaymentSuccess(plan.name, response);
+ await handlePaymentSuccess(plan.name, response, verifyResult);
  } else {
  throw new Error(verifyResult.message || 'Payment verification failed.');
  }
@@ -487,7 +530,7 @@ const PricingPage = () => {
  {error && (
  <div className="bg-red-50 border border-red-200 rounded-md p-4 mb-8">
  <div className="flex justify-between items-center">
- <div className="text-red-800">{error}</div>
+ <div className="text-red-800">{toDisplayString(error, 'Something went wrong')}</div>
  <button
  onClick={handleRetry}
  className="text-red-600 hover:text-red-500 text-sm font-medium"
@@ -538,7 +581,7 @@ const PricingPage = () => {
  
  <h2 className="text-2xl font-bold text-gray-900 mb-2">{plan.name}</h2>
  <p className="text-gray-500 text-sm mb-6 flex-grow">
- {plan.description || plan.tagline || 'Subscription plan'}
+ {toDisplayString(plan.description || plan.tagline, 'Subscription plan')}
  </p>
  
  <div className="flex items-baseline mb-6">
@@ -585,21 +628,12 @@ const PricingPage = () => {
  </button>
  
  <div className="flex-1">
- <ul className="space-y-3">
- {plan.features ? (
- (typeof plan.features === 'string' ?
- plan.features.split(',').map(f => f.trim()).filter(f => f) :
- Array.isArray(plan.features) ? plan.features : []
- ).map((feature, index) => (
- <li key={index} className="flex items-start">
- <CheckIcon className="h-5 w-5 text-green-500 flex-shrink-0 mr-3 mt-0.5" />
- <span className="text-gray-700 text-sm">{feature}</span>
- </li>
- ))
- ) : (
- <li className="text-gray-500 text-sm italic">No features listed</li>
- )}
- </ul>
+ <PlanLimitsDisplay
+ plan={plan}
+ iconClassName="h-5 w-5 text-green-500"
+ textClassName="text-gray-700 text-sm"
+ sectionTitleClassName="text-[10px] font-semibold uppercase tracking-wide text-green-800 mt-3 mb-1"
+ />
  </div>
  </div>
  );

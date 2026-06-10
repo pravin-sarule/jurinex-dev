@@ -62,6 +62,24 @@ def complete(
             response = client.messages.create(**kwargs)
             if not response.content:
                 return None
+            usage = getattr(response, "usage", None)
+            ti = int(getattr(usage, "input_tokens", 0) or 0)
+            to = int(getattr(usage, "output_tokens", 0) or 0)
+            try:
+                from services.request_context import current_user_id
+                from services.daily_limit_guard import log_llm_usage
+
+                uid = current_user_id.get()
+                if uid and (ti > 0 or to > 0):
+                    log_llm_usage(
+                        user_id=uid,
+                        model_name=model,
+                        input_tokens=ti,
+                        output_tokens=to,
+                        endpoint="agent-draft:claude",
+                    )
+            except Exception:
+                pass
             for block in response.content:
                 text = getattr(block, "text", None) if not isinstance(block, dict) else block.get("text")
                 if text:

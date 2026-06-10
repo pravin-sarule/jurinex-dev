@@ -1,757 +1,755 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { CheckIcon } from '@heroicons/react/20/solid';
-import { ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { useNavigate, useLocation } from 'react-router-dom';
-import apiService from '../services/api';
-import { useAuth } from '../context/AuthContext';
-import { getPlanDisplayName } from '../utils/planUtils';
-
+import { useAuth } from '../context';
+import { invalidateSecretsListCache } from '../services/secretsService';
 import { PAYMENT_SERVICE_URL } from '../config/apiConfig';
+
 const BACKEND_BASE_URL = PAYMENT_SERVICE_URL;
 
-console.log('Environment variables:', { BACKEND_BASE_URL });
+// ─── helpers ────────────────────────────────────────────────────────────────
 
-const LANDING_PLAN_CONFIG = [
- { id: 'enterprise', name: 'Enterprise', description: 'Custom enterprise plan - Contact sales for pricing and features', monthlyPrice: null, annualPrice: null, monthlyPeriod: null, annualPeriod: null, type: 'business', ctaMonthly: 'Contact Us', ctaAnnual: 'Select Plan' },
- { id: 'law-firm', name: 'Law Firm', description: 'Full access for law firms with 5 users', monthlyPrice: '₹9,999', annualPrice: '₹59,990', monthlyPeriod: '/month', annualPeriod: '/year', type: 'business', ctaMonthly: 'Select Plan', ctaAnnual: 'Select Plan' },
- { id: 'free', name: 'SoloLite', description: 'Starter plan for individual legal professionals', monthlyPrice: '₹999', annualPrice: '₹9,990', monthlyPeriod: '/month', annualPeriod: '/year', type: 'individual', ctaMonthly: 'Select Plan', ctaAnnual: 'Select Plan' },
- { id: 'solo-lawyer', name: 'Solo Lawyer', description: 'Full access for individual lawyers', monthlyPrice: '₹2,004', annualPrice: '₹24,990', monthlyPeriod: '/month', annualPeriod: '/year', type: 'individual', ctaMonthly: 'Select Plan', ctaAnnual: 'Select Plan' },
+const fmt = (n, currency = 'INR') => {
+  const num = Number(n);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return (currency === 'INR' ? '₹' : `${currency} `) + num.toLocaleString('en-IN');
+};
+
+const fmtTokens = (n) => {
+  const num = Number(n);
+  if (!Number.isFinite(num) || num <= 0) return '—';
+  if (num >= 1_000_000) return `${(num / 1_000_000).toLocaleString('en-IN')}M`;
+  if (num >= 1_000) return `${(num / 1_000).toLocaleString('en-IN')}K`;
+  return num.toLocaleString('en-IN');
+};
+
+const BILLING_PERIODS = [
+  { label: 'Monthly',     months: 1  },
+  { label: 'Quarterly',   months: 3  },
+  { label: 'Half-Yearly', months: 6  },
+  { label: 'Yearly',      months: 12 },
 ];
 
-const PLAN_NAME_HINTS = {
- enterprise: ['enterprise'],
- 'law-firm': ['law firm', 'lawfirm', 'team', 'business'],
- free: ['sololite', 'solo lite', 'free', 'starter', 'basic'],
- 'solo-lawyer': ['solo lawyer', 'solo'],
+const billingLabel = (months) => {
+  if (!months || months === 1) return '/month';
+  if (months === 3) return '/quarter';
+  if (months === 6) return '/6 months';
+  if (months === 12) return '/year';
+  return `/${months}mo`;
 };
 
-const normalizePlanLabel = (value) => String(value || '').toLowerCase().trim();
-
-const getEffectivePlanLabel = (planInfo) => {
-  if (!planInfo) return '';
-  return getPlanDisplayName(planInfo.subscription || planInfo) || planInfo.plan || planInfo.planName || '';
+const savingsLabel = (months) => {
+  if (months === 3)  return 'Save ~10%';
+  if (months === 6)  return 'Save ~20%';
+  if (months === 12) return 'Save ~33%';
+  return null;
 };
 
-const isSamePlanFamily = (userPlanName, uiPlan) => {
-  const normalizedUserPlan = normalizePlanLabel(userPlanName);
-  if (!normalizedUserPlan) return false;
+function getPlanCategory(plan) {
+  if (plan.plan_category) return plan.plan_category.toLowerCase();
+  const name = (plan.name || '').toLowerCase();
+  if (name.includes('firm') || name.includes('team') || name.includes('enterprise')) return 'firm';
+  if (name.includes('custom')) return 'firm';
+  return 'solo';
+}
 
-  if (normalizePlanLabel(uiPlan.name) === normalizedUserPlan) {
-    return true;
+function loadRazorpay() {
+  return new Promise((resolve) => {
+    if (window.Razorpay) return resolve(true);
+    if (document.getElementById('rzp-script')) return resolve(true);
+    const s = document.createElement('script');
+    s.id = 'rzp-script';
+    s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.body.appendChild(s);
+  });
+}
+
+function extractUserId(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  return obj.id ?? obj.user_id ?? obj.userId ?? obj.uid ?? null;
+}
+
+function resolveCurrentUser(authUser) {
+  for (const key of ['userInfo', 'user', 'userData', 'authUser']) {
+    const raw = localStorage.getItem(key);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      const id = extractUserId(parsed) ?? extractUserId(parsed?.user) ?? extractUserId(parsed?.data);
+      if (id) return { ...(parsed.user || parsed.data || parsed), id };
+    } catch (_) {}
   }
+  const id = extractUserId(authUser);
+  if (id) return { ...authUser, id };
+  return null;
+}
 
-  const hints = PLAN_NAME_HINTS[uiPlan.id] || [];
-  return hints.some((hint) => normalizedUserPlan.includes(hint));
-};
+// ─── component ──────────────────────────────────────────────────────────────
 
-const priceStringToPaise = (price) => {
-  const raw = String(price || "").replace(/[^0-9.]/g, "");
-  if (!raw) return 0;
-  const amount = Number(raw);
-  if (!Number.isFinite(amount) || amount <= 0) return 0;
-  return Math.round(amount * 100);
-};
+export default function SubscriptionPlanPage() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user, token, planInfo, fetchAndStorePlan } = useAuth();
 
-const resolveBackendPlanForUi = (backendPlans, uiPlanId, cycle, uiPlanType) => {
- const intervals = cycle === 'yearly'
- ? ['year', 'yearly', 'annual']
- : cycle === 'quarterly'
- ? ['quarter', 'quarterly']
- : ['month', 'monthly'];
- const hints = PLAN_NAME_HINTS[uiPlanId] || [];
- const active = backendPlans.filter((p) => p?.is_active !== false);
- const intervalMatched = active.filter((p) =>
- intervals.includes(String(p?.interval || '').toLowerCase())
- );
- const intervalAndTypeMatched = intervalMatched.filter((p) => {
- const t = String(p?.type || '').toLowerCase();
- if (uiPlanType === 'business') return t === 'business' || t === 'team' || t === 'enterprise';
- if (uiPlanType === 'individual') return t === 'individual' || t === 'solo';
- return true;
- });
- const byName = intervalAndTypeMatched.find((p) =>
- hints.some((hint) => String(p?.name || '').toLowerCase().includes(hint))
- );
- if (byName) return byName;
- if (intervalAndTypeMatched.length > 0) return intervalAndTypeMatched[0];
- if (intervalMatched.length > 0) return intervalMatched[0];
- const nameOnly = active.find((p) =>
- hints.some((hint) => String(p?.name || '').toLowerCase().includes(hint))
- );
- if (nameOnly) return nameOnly;
- // Last fallback: any active plan so checkout can proceed.
- return active[0] || null;
-};
+  const [plans, setPlans]               = useState([]);
+  const [loading, setLoading]           = useState(true);
+  const [error, setError]               = useState(null);
+  const [processingId, setProcessingId] = useState(null);
+  const [pendingCheckout, setPendingCheckout] = useState(null);
 
-const SubscriptionPlanPage = () => {
- const navigate = useNavigate();
- const location = useLocation();
- const { user, token, loading: authLoading, planInfo, fetchAndStorePlan } = useAuth();
- 
- const [billingCycle, setBillingCycle] = useState('yearly');
- const [plans, setPlans] = useState([]);
- const [backendPlans, setBackendPlans] = useState([]);
- const [loading, setLoading] = useState(true);
- const [error, setError] = useState(null);
- const [processingPayment, setProcessingPayment] = useState(false);
- const [selectedPlanId, setSelectedPlanId] = useState(null);
- const [pendingCheckout, setPendingCheckout] = useState(null);
+  // Filter state
+  const [activeCategory, setActiveCategory]       = useState('solo');
+  const [activeBillingMonths, setActiveBillingMonths] = useState(1);
 
- const currentPlanName = useMemo(() => getEffectivePlanLabel(planInfo), [planInfo]);
+  // Current plan name (from auth context)
+  const currentPlanName = useMemo(() => {
+    const sub = planInfo?.subscription || planInfo;
+    return (sub?.plan_name || sub?.planName || planInfo?.plan || '').toLowerCase().trim();
+  }, [planInfo]);
 
- useEffect(() => {
- if (!token || currentPlanName || typeof fetchAndStorePlan !== 'function') return;
- fetchAndStorePlan(token).catch((fetchError) => {
- console.error('Failed to refresh current plan on subscription page:', fetchError);
- });
- }, [token, currentPlanName, fetchAndStorePlan]);
+  const isCurrentPlan = (plan) =>
+    currentPlanName && plan.name.toLowerCase().trim() === currentPlanName;
 
- useEffect(() => {
- const statePending = location.state?.pendingUpgradePlan;
- if (statePending && typeof statePending === 'object') {
- setPendingCheckout(statePending);
- localStorage.setItem('pendingUpgradeCheckout', JSON.stringify(statePending));
- return;
- }
- const storedPending = localStorage.getItem('pendingUpgradeCheckout');
- if (storedPending) {
- try {
- setPendingCheckout(JSON.parse(storedPending));
- } catch (error) {
- console.error('Failed to parse pending upgrade checkout:', error);
- localStorage.removeItem('pendingUpgradeCheckout');
- }
- }
- }, [location.state]);
+  // ── Fetch monthly_plans ───────────────────────────────────────────────────
+  const fetchPlans = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const storedToken = localStorage.getItem('token');
+      const res = await fetch(`${BACKEND_BASE_URL}/api/payments/monthly-plans`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}),
+        },
+        cache: 'no-store',
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) throw new Error(json.message || `Status ${res.status}`);
+      setPlans(json.data || []);
+    } catch (err) {
+      setError(`Failed to load plans: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
- const fetchPlans = useCallback(async () => {
- console.log('Fetching plans for:', { billingCycle });
- setLoading(true);
- setError(null);
- 
- try {
- let plansData = null;
- try {
- const response = await apiService.getPublicPlans();
- console.log('API response:', response);
- if (response?.success && Array.isArray(response.data)) {
- plansData = response.data;
- }
- } catch (apiErr) {
- console.warn('apiService.getPublicPlans failed, trying direct fetch:', apiErr?.message);
- }
+  useEffect(() => { fetchPlans(); }, [fetchPlans]);
 
- if (!plansData) {
- const token = localStorage.getItem('token');
- const directRes = await fetch(`${BACKEND_BASE_URL}/api/payments/plans`, {
- method: 'GET',
- headers: {
- 'Content-Type': 'application/json',
- ...(token ? { Authorization: `Bearer ${token}` } : {}),
- },
- cache: 'no-store',
- });
- if (!directRes.ok) {
- throw new Error(`Failed to fetch plans (${directRes.status})`);
- }
- const directJson = await directRes.json();
- plansData = Array.isArray(directJson?.data) ? directJson.data : [];
- }
+  useEffect(() => {
+    if (!token || currentPlanName || typeof fetchAndStorePlan !== 'function') return;
+    fetchAndStorePlan(token).catch(() => {});
+  }, [token, currentPlanName, fetchAndStorePlan]);
 
- if (Array.isArray(plansData) && plansData.length > 0) {
- setBackendPlans(plansData);
- const visiblePlans = LANDING_PLAN_CONFIG
- .map((uiPlan) => ({
- ...uiPlan,
- backendPlan: resolveBackendPlanForUi(plansData, uiPlan.id, billingCycle, uiPlan.type),
- }));
- 
- console.log('Visible landing-aligned plans:', visiblePlans);
- setPlans(visiblePlans);
- } else {
- throw new Error('No plans available from payment service');
- }
- } catch (err) {
- console.error('Error fetching plans:', err);
- setError(`Failed to fetch plans: ${err.message}`);
- } finally {
- setLoading(false);
- }
- }, [billingCycle]);
+  useEffect(() => {
+    const statePending = location.state?.pendingUpgradePlan;
+    if (statePending && typeof statePending === 'object') {
+      setPendingCheckout(statePending);
+      localStorage.setItem('pendingUpgradeCheckout', JSON.stringify(statePending));
+      return;
+    }
+    const stored = localStorage.getItem('pendingUpgradeCheckout');
+    if (stored) {
+      try { setPendingCheckout(JSON.parse(stored)); } catch (_) { localStorage.removeItem('pendingUpgradeCheckout'); }
+    }
+  }, [location.state]);
 
- useEffect(() => {
- fetchPlans();
- }, [fetchPlans]);
+  useEffect(() => {
+    if (!pendingCheckout || loading || processingId || plans.length === 0) return;
+    const targetName = String(pendingCheckout.planName || '').toLowerCase();
+    const match = plans.find((p) => p.name.toLowerCase().includes(targetName) || targetName.includes(p.name.toLowerCase()));
+    if (!match) return;
+    localStorage.removeItem('pendingUpgradeCheckout');
+    setPendingCheckout(null);
+    handleSelectPlan(match);
+  }, [pendingCheckout, loading, processingId, plans]);
 
- const loadRazorpayScript = () => {
- return new Promise((resolve) => {
- if (window.Razorpay) {
- console.log('Razorpay already loaded');
- return resolve(true);
- }
- 
- if (document.getElementById('razorpay-script')) {
- console.log('Razorpay script already in DOM');
- return resolve(true);
- }
- 
- console.log('Loading Razorpay script...');
- const script = document.createElement('script');
- script.id = 'razorpay-script';
- script.src = 'https://checkout.razorpay.com/v1/checkout.js';
- script.onload = () => {
- console.log('Razorpay script loaded successfully');
- resolve(true);
- };
- script.onerror = (error) => {
- console.error('Failed to load Razorpay script:', error);
- resolve(false);
- };
- document.body.appendChild(script);
- });
- };
+  // ── Derived: which billing periods have plans for active category ──────────
+  const availableBillingMonths = useMemo(() => {
+    const set = new Set(
+      plans
+        .filter((p) => getPlanCategory(p) === activeCategory)
+        .map((p) => p.billing_interval_months || 1)
+    );
+    return set;
+  }, [plans, activeCategory]);
 
- const handlePaymentSuccess = async (planName, paymentData) => {
- try {
- console.log('Payment successful:', paymentData);
- 
- const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}');
- userInfo.plan = planName;
- userInfo.lastPayment = {
- id: paymentData.razorpay_payment_id,
- subscription_id: paymentData.razorpay_subscription_id,
- date: new Date().toISOString()
- };
- localStorage.setItem('userInfo', JSON.stringify(userInfo));
- 
- if (token && typeof fetchAndStorePlan === 'function') {
- await fetchAndStorePlan(token).catch((planError) => {
- console.error('Failed to refresh plan after payment success:', planError);
- });
- }
- 
- window.dispatchEvent(new CustomEvent('userInfoUpdated', { detail: userInfo }));
- 
- alert('🎉 Payment successful! Your subscription is now active.');
- 
- navigate('/dashboard', { replace: true });
- } catch (error) {
- console.error('Error handling payment success:', error);
- }
- };
+  // Reset to first available billing period when switching category
+  useEffect(() => {
+    const firstAvailable = BILLING_PERIODS.find(({ months }) => availableBillingMonths.has(months));
+    setActiveBillingMonths(firstAvailable?.months ?? 1);
+  }, [activeCategory]); // availableBillingMonths recomputes sync during same render, safe to omit
 
- const handlePaymentFailure = (error) => {
- console.error('Payment failed:', error);
- const errorMessage = error?.description || error?.message || 'Payment failed due to unknown error';
- alert(`❌ Payment Failed: ${errorMessage}`);
- setError(`Payment failed: ${errorMessage}`);
- setProcessingPayment(false);
- setSelectedPlanId(null);
- };
-
- const handleSelectPlan = async (plan) => {
- console.log('Selected plan:', plan);
-
- console.log('All localStorage keys:', Object.keys(localStorage));
- console.log('token:', localStorage.getItem('token'));
- console.log('userInfo:', localStorage.getItem('userInfo'));
-
- const storedToken = localStorage.getItem('token');
- 
- if (!storedToken) {
- setError('Please log in to continue with your subscription.');
- return;
- }
-
- const extractUserId = (candidate) => {
- if (!candidate || typeof candidate !== 'object') return null;
- return (
- candidate.id ??
- candidate.user_id ??
- candidate.userId ??
- candidate.uid ??
- candidate.profile_id ??
- null
- );
- };
-
- let currentUser = null;
- const possibleUserKeys = ['userInfo', 'user', 'userData', 'authUser'];
- 
- for (const key of possibleUserKeys) {
- const storedData = localStorage.getItem(key);
- if (storedData) {
- try {
- const parsedData = JSON.parse(storedData);
- console.log(`Found user data in ${key}:`, parsedData);
-
- const directId = extractUserId(parsedData);
- if (directId) {
- currentUser = { ...parsedData, id: directId };
- console.log(`Using user data from ${key}`);
- break;
- }
-
- const nestedUserId = extractUserId(parsedData.user);
- if (nestedUserId) {
- currentUser = { ...parsedData.user, id: nestedUserId };
- console.log(`Using nested user data from ${key}.user`);
- break;
- }
-
- const nestedDataId = extractUserId(parsedData.data);
- if (nestedDataId) {
- currentUser = { ...parsedData.data, id: nestedDataId };
- console.log(`Using nested user data from ${key}.data`);
- break;
- }
- } catch (e) {
- console.error(`Error parsing ${key} from localStorage:`, e);
- }
- }
- }
-
- const authUserId = extractUserId(user);
- if (!currentUser && authUserId) {
- currentUser = { ...user, id: authUserId };
- console.log('Using user from AuthContext as fallback');
- }
-
- if (!currentUser || !currentUser.id) {
- console.error('No valid user found in localStorage or AuthContext');
- console.log('Available localStorage keys:', Object.keys(localStorage));
- setError('User information not found. Please log in again.');
- return;
- }
-
- console.log('Final currentUser object:', currentUser);
-
- if (plan.id === 'enterprise' && billingCycle === 'monthly') {
- navigate('/contact');
- return;
- }
-
- const shownPrice = billingCycle === 'yearly' ? plan.annualPrice : plan.monthlyPrice;
- const amountInPaise = priceStringToPaise(shownPrice);
- if (!amountInPaise) {
- setError('Invalid plan amount. Please try another plan.');
- return;
- }
-
- setProcessingPayment(true);
- setSelectedPlanId(plan.id);
- setError(null);
-
- try {
- const scriptLoaded = await loadRazorpayScript();
- if (!scriptLoaded) {
- throw new Error('Payment gateway failed to load. Please refresh and try again.');
- }
-
- console.log('Initiating one-time payment:', { planName: plan.name, amountInPaise });
- console.log('Token being sent for payment:', storedToken?.substring(0, 20) + '...');
- console.log('User ID from localStorage:', currentUser.id);
-
- const response = await fetch(`${BACKEND_BASE_URL}/api/payments/order/create`, {
- method: 'POST',
- headers: {
- 'Content-Type': 'application/json',
- 'Authorization': `Bearer ${storedToken}`,
- },
- body: JSON.stringify({
- amount: amountInPaise,
- currency: 'INR',
- plan_name: plan.name,
- plan_id: plan.backendPlan?.id || null,
- }),
- });
-
- if (!response.ok) {
- const errorText = await response.text();
- console.error('HTTP Error:', response.status, errorText);
- throw new Error(`Server error: ${response.status} ${response.statusText}`);
- }
-
- const createOrderResponse = await response.json();
- console.log('[Razorpay Debug] createOrder API raw response:', createOrderResponse);
-
- if (!createOrderResponse.success) {
- throw new Error(createOrderResponse.message || createOrderResponse.error || 'Failed to create payment order.');
- }
-
- const orderId = createOrderResponse.order?.id;
- const orderAmount = createOrderResponse.order?.amount;
- const razorpayKeyId = createOrderResponse.key || import.meta.env.VITE_RAZORPAY_KEY_ID;
- 
- if (!orderId) {
- console.error('[Razorpay Debug] Missing order ID in createOrder response:', createOrderResponse);
- throw new Error('Invalid response from payment server. Missing order ID.');
- }
-
- if (!razorpayKeyId) {
- console.error('[Razorpay Debug] Missing Razorpay key in createOrder response:', createOrderResponse);
- throw new Error('Invalid response from payment server. Missing Razorpay key.');
- }
- const isLocalhost =
-  window.location.hostname === 'localhost' ||
-  window.location.hostname === '127.0.0.1';
- if (isLocalhost && String(razorpayKeyId).startsWith('rzp_live_')) {
-  throw new Error(
-   'Live Razorpay key detected on localhost. Use test keys for local development or run via a public HTTPS URL.'
+  // Filtered plans
+  const filteredPlans = useMemo(() =>
+    plans.filter(
+      (p) =>
+        getPlanCategory(p) === activeCategory &&
+        (p.billing_interval_months || 1) === activeBillingMonths
+    ),
+    [plans, activeCategory, activeBillingMonths]
   );
- }
 
- console.log(`[Razorpay Debug] Received orderId: ${orderId}`);
- console.log(`[Razorpay Debug] Received Razorpay key: ${razorpayKeyId}`);
+  // ── Payment ────────────────────────────────────────────────────────────────
+  const handleSelectPlan = async (plan) => {
+    const storedToken = localStorage.getItem('token');
+    if (!storedToken) { setError('Please log in to continue.'); return; }
 
- const razorpayOptions = {
- key: razorpayKeyId,
- order_id: orderId,
- amount: orderAmount || amountInPaise,
- currency: 'INR',
- name: "NexintelAI Subscriptions",
- description: `${plan.name} Payment`,
- image: "https://www.nexintelai.com/assets/img/Ai%20logo-01.png",
- prefill: {
- name: currentUser?.name || currentUser?.username || '',
- email: currentUser?.email || '',
- contact: currentUser?.phone || currentUser?.contact || ''
- },
- theme: {
- color: "#1a202c"
- },
- handler: async function (response) {
- console.log('Razorpay payment handler response:', response);
- 
- setProcessingPayment(true);
- 
- try {
- const verificationResponse = await fetch(`${BACKEND_BASE_URL}/api/payments/order/verify`, {
- method: 'POST',
- headers: {
- 'Content-Type': 'application/json',
- 'Authorization': `Bearer ${storedToken}`,
- },
- body: JSON.stringify({
- razorpay_order_id: response.razorpay_order_id,
- razorpay_payment_id: response.razorpay_payment_id,
- razorpay_signature: response.razorpay_signature,
- plan_name: plan.name,
- plan_id: plan.backendPlan?.id || null,
- }),
- });
+    const currentUser = resolveCurrentUser(user);
+    if (!currentUser?.id) { setError('User info not found. Please log in again.'); return; }
 
- if (!verificationResponse.ok) {
- const errorText = await verificationResponse.text();
- console.error('Verification HTTP Error:', verificationResponse.status, errorText);
- throw new Error(`Verification failed: ${verificationResponse.status} ${verificationResponse.statusText}`);
- }
+    if (!plan.price || Number(plan.price) <= 0) {
+      navigate('/contact');
+      return;
+    }
 
- const verifyResult = await verificationResponse.json();
- console.log('Verification response:', verifyResult);
+    setProcessingId(plan.id);
+    setError(null);
 
- if (verifyResult.success) {
- await handlePaymentSuccess(plan.name, response);
- } else {
- throw new Error(verifyResult.message || 'Payment verification failed.');
- }
- } catch (verifyError) {
- console.error('Error during payment verification:', verifyError);
- handlePaymentFailure({ description: verifyError.message || 'Payment verification failed.' });
- } finally {
- setProcessingPayment(false);
- setSelectedPlanId(null);
- }
- },
- modal: {
- ondismiss: function() {
- console.log('Payment modal dismissed by user');
- setProcessingPayment(false);
- setSelectedPlanId(null);
- },
- escape: true,
- backdropclose: false
- },
- notes: {
- plan_name: plan.name,
- user_id: currentUser?.id || 'anonymous'
- }
- };
+    try {
+      const rzpLoaded = await loadRazorpay();
+      if (!rzpLoaded) throw new Error('Payment gateway failed to load. Please refresh.');
 
- console.log('Opening Razorpay checkout with options:', razorpayOptions);
- 
- const razorpayInstance = new window.Razorpay(razorpayOptions);
- 
- razorpayInstance.on('payment.failed', function (response) {
- console.error('Razorpay payment.failed event:', response);
- handlePaymentFailure(response.error);
- });
+      const startRes = await fetch(`${BACKEND_BASE_URL}/api/payments/monthly-plans/subscribe/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${storedToken}` },
+        body: JSON.stringify({ plan_id: plan.id }),
+      });
+      const startData = await startRes.json();
+      if (!startRes.ok || !startData.success) {
+        throw new Error(startData.error || startData.message || 'Could not initiate payment.');
+      }
 
- razorpayInstance.open();
+      const key            = startData.key;
+      const isSubscription = startData.type === 'subscription';
+      const orderId        = startData.order?.id ?? null;
+      const subscriptionId = startData.subscription?.id ?? null;
 
- } catch (err) {
- console.error('Error in payment process:', err);
- setError(err.message || 'Payment process failed. Please try again.');
- setProcessingPayment(false);
- setSelectedPlanId(null);
- }
- };
+      const verifyResult = await new Promise((resolve, reject) => {
+        const options = {
+          key,
+          currency: plan.currency || 'INR',
+          name: 'JuriNex',
+          description: `${plan.name} Subscription`,
+          image: 'https://www.nexintelai.com/assets/img/Ai%20logo-01.png',
+          prefill: {
+            name:    currentUser.name || currentUser.username || '',
+            email:   currentUser.email || '',
+            contact: currentUser.phone || '',
+          },
+          theme: { color: '#0D9488' },
+          modal: {
+            ondismiss:   () => reject(new Error('Payment cancelled by user.')),
+            escape:      true,
+            backdropclose: false,
+          },
+          notes: { plan_name: plan.name, user_id: String(currentUser.id) },
+          handler: async (response) => {
+            try {
+              const verifyRes = await fetch(
+                `${BACKEND_BASE_URL}/api/payments/monthly-plans/subscribe/verify`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${storedToken}` },
+                  body: JSON.stringify({
+                    razorpay_payment_id:      response.razorpay_payment_id,
+                    razorpay_subscription_id: response.razorpay_subscription_id ?? subscriptionId,
+                    razorpay_order_id:        response.razorpay_order_id ?? orderId,
+                    razorpay_signature:       response.razorpay_signature,
+                    plan_id: plan.id,
+                  }),
+                }
+              );
+              const verifyData = await verifyRes.json();
+              if (!verifyRes.ok || !verifyData.success) throw new Error(verifyData.message || 'Verification failed.');
 
- const handleGoBack = () => {
- navigate(-1);
- };
+              invalidateSecretsListCache();
+              const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}');
+              userInfo.plan            = verifyData.plan?.name || plan.name;
+              userInfo.planId          = verifyData.plan?.id   || plan.id;
+              userInfo.monthly_tokens  = verifyData.plan?.monthly_tokens ?? null;
+              localStorage.setItem('userInfo', JSON.stringify(userInfo));
+              window.dispatchEvent(new CustomEvent('userInfoUpdated', { detail: userInfo }));
 
- const handleRetry = () => {
- setError(null);
- fetchPlans();
- };
+              if (token && typeof fetchAndStorePlan === 'function') {
+                fetchAndStorePlan(token).catch(() => {});
+              }
+              resolve(verifyData);
+            } catch (vErr) { reject(vErr); }
+          },
+        };
 
- useEffect(() => {
- if (!pendingCheckout || loading || processingPayment || plans.length === 0) return;
+        if (isSubscription && subscriptionId) {
+          options.subscription_id = subscriptionId;
+        } else if (orderId) {
+          options.order_id = orderId;
+          options.amount   = Math.round(Number(plan.price) * 100);
+        } else {
+          reject(new Error('No order or subscription ID returned from server.'));
+          return;
+        }
 
- const desiredBilling = pendingCheckout.billing === 'annual' ? 'yearly' : pendingCheckout.billing;
- const normalizedPlanId = String(pendingCheckout.planId || '').toLowerCase();
- const normalizedPlanName = String(pendingCheckout.planName || '').toLowerCase();
- const mapNameHints = {
- 'law-firm': ['law firm', 'lawfirm', 'team', 'business'],
- 'solo-lawyer': ['solo lawyer', 'solo'],
- 'free': ['sololite', 'solo lite', 'free', 'starter', 'basic'],
- enterprise: ['enterprise'],
- };
- const hints = mapNameHints[normalizedPlanId] || [normalizedPlanName].filter(Boolean);
+        const rzp = new window.Razorpay(options);
+        rzp.on('payment.failed', (r) => reject(new Error(r.error?.description || 'Payment failed.')));
+        rzp.open();
+      });
 
- if (desiredBilling && billingCycle !== desiredBilling) {
- setBillingCycle(desiredBilling);
- return;
- }
+      navigate('/billing-usage', { replace: true, state: { planActivated: verifyResult?.plan?.name || plan.name } });
+    } catch (err) {
+      if (err.message !== 'Payment cancelled by user.') {
+        setError(err.message || 'Payment failed. Please try again.');
+      }
+    } finally {
+      setProcessingId(null);
+    }
+  };
 
- const match = plans.find((plan) => {
- const n = String(plan?.name || '').toLowerCase();
- return hints.some((hint) => hint && n.includes(hint));
- });
- if (!match) return;
+  // ─── render ───────────────────────────────────────────────────────────────
+  return (
+    <div className="min-h-screen bg-gray-50 py-16 sm:py-24">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
 
- localStorage.removeItem('pendingUpgradeCheckout');
- setPendingCheckout(null);
- handleSelectPlan(match);
- }, [pendingCheckout, loading, processingPayment, plans, billingCycle]);
+        {/* Back */}
+        <button
+          onClick={() => navigate(-1)}
+          disabled={!!processingId}
+          className="mb-8 flex items-center text-gray-500 hover:text-teal-700 transition-colors"
+        >
+          <ArrowLeftIcon className="h-5 w-5 mr-2" />
+          Back
+        </button>
 
- return (
- <div className="min-h-screen bg-white py-20 sm:py-28">
- <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
- <button
- onClick={handleGoBack}
- className="mb-8 flex items-center text-juri-muted transition-colors hover:text-teal-700"
- disabled={processingPayment}
- >
- <ArrowLeftIcon className="h-5 w-5 mr-2" />
- Back
- </button>
+        {/* Heading */}
+        <div className="text-center mb-10">
+          <h1 className="font-playfair text-3xl font-bold text-teal-700 sm:text-4xl">Choose Your Plan</h1>
+          <p className="mx-auto mt-3 max-w-xl font-dmSans text-base text-gray-500">
+            Select the perfect plan for your legal practice. All plans include our core AI features.
+          </p>
+        </div>
 
- <div className="text-center">
- <h1 className="font-playfair text-3xl font-bold text-teal-700 sm:text-4xl">
- Choose Your Plan
- </h1>
- <p className="mx-auto mt-4 max-w-xl font-dmSans text-base text-juri-muted">
- Select the perfect plan for your legal practice. All plans include our core
- AI features with scalable pricing.
- </p>
- </div>
+        {/* Error */}
+        {error && (
+          <div className="mb-8 rounded-xl border border-red-200 bg-red-50 p-4 flex items-center justify-between">
+            <span className="font-dmSans text-red-800 text-sm">{error}</span>
+            <button onClick={fetchPlans} className="text-red-600 hover:text-red-500 text-sm font-medium ml-4">
+              Retry
+            </button>
+          </div>
+        )}
 
- <div className="mt-8 mb-12 flex justify-center">
- <div className="relative inline-flex rounded-full border border-teal-300/60 bg-white p-1 shadow-sm">
- <button
- type="button"
- className={`rounded-full px-6 py-2 font-dmSans text-sm font-semibold transition-all duration-200 ${
- billingCycle === 'monthly'
- ? 'text-white'
- : 'text-teal-700 hover:text-juri-muted'
- }`}
- style={billingCycle === 'monthly' ? { backgroundColor: '#0D9488' } : {}}
- onMouseEnter={(e) => {
- if (billingCycle === 'monthly') {
- e.currentTarget.style.backgroundColor = '#1AA49B';
- }
- }}
- onMouseLeave={(e) => {
- if (billingCycle === 'monthly') {
- e.currentTarget.style.backgroundColor = '#21C1B6';
- }
- }}
- onClick={() => setBillingCycle('monthly')}
- disabled={loading || processingPayment}
- >
- Monthly
- </button>
- <button
- type="button"
- className={`rounded-full px-6 py-2 font-dmSans text-sm font-semibold transition-all duration-200 ${
- billingCycle === 'yearly'
- ? 'text-white'
- : 'text-teal-700 hover:text-juri-muted'
- }`}
- style={billingCycle === 'yearly' ? { backgroundColor: '#0D9488' } : {}}
- onMouseEnter={(e) => {
- if (billingCycle === 'yearly') {
- e.currentTarget.style.backgroundColor = '#1AA49B';
- }
- }}
- onMouseLeave={(e) => {
- if (billingCycle === 'yearly') {
- e.currentTarget.style.backgroundColor = '#21C1B6';
- }
- }}
- onClick={() => setBillingCycle('yearly')}
- disabled={loading || processingPayment}
- >
- Yearly
- </button>
- </div>
- </div>
+        {/* Loading */}
+        {loading && (
+          <div className="py-20 text-center">
+            <div className="mb-4 inline-block h-12 w-12 animate-spin rounded-full border-b-2 border-teal-600" />
+            <p className="font-dmSans text-gray-500">Loading plans…</p>
+          </div>
+        )}
 
- {loading && (
- <div className="py-12 text-center">
- <div className="mb-4 inline-block h-12 w-12 animate-spin rounded-full border-b-2 border-teal-700"></div>
- <p className="font-dmSans text-juri-muted">Loading subscription plans...</p>
- </div>
- )}
+        {!loading && plans.length > 0 && (
+          <>
+            {/* ── Category tabs ───────────────────────────────────────────── */}
+            <div className="flex justify-center mb-8">
+              <div className="inline-flex rounded-xl bg-white border border-gray-200 shadow-sm p-1 gap-1">
+                {['solo', 'firm'].map((cat) => (
+                  <button
+                    key={cat}
+                    onClick={() => setActiveCategory(cat)}
+                    className={`px-8 py-2.5 rounded-lg font-dmSans text-sm font-semibold transition-all duration-200 ${
+                      activeCategory === cat
+                        ? 'bg-teal-600 text-white shadow-sm'
+                        : 'text-gray-500 hover:text-teal-700 hover:bg-teal-50'
+                    }`}
+                  >
+                    {cat === 'solo' ? 'Solo' : 'Firm'}
+                  </button>
+                ))}
+              </div>
+            </div>
 
- {error && (
- <div className="mb-8 rounded-xl border border-red-200 bg-red-50 p-4">
- <div className="flex items-center justify-between">
- <div className="font-dmSans text-red-800">{error}</div>
- <button
- onClick={handleRetry}
- className="text-red-600 hover:text-red-500 text-sm font-medium"
- disabled={loading}
- >
- Try Again
- </button>
- </div>
- </div>
- )}
+            {/* ── Billing period pills ─────────────────────────────────────── */}
+            <div className="flex justify-center mb-10">
+              <div className="inline-flex flex-wrap justify-center gap-2">
+                {BILLING_PERIODS.filter(({ months }) => availableBillingMonths.has(months)).map(({ label, months }) => {
+                  const active  = activeBillingMonths === months;
+                  const savings = savingsLabel(months);
+                  return (
+                    <button
+                      key={months}
+                      onClick={() => setActiveBillingMonths(months)}
+                      className={`relative flex flex-col items-center px-5 py-2 rounded-full border text-sm font-dmSans font-medium transition-all duration-200 ${
+                        active
+                          ? 'bg-teal-600 border-teal-600 text-white shadow-sm'
+                          : 'bg-white border-gray-200 text-gray-600 hover:border-teal-400 hover:text-teal-700'
+                      }`}
+                    >
+                      <span>{label}</span>
+                      {savings && (
+                        <span className={`text-[10px] font-semibold leading-none mt-0.5 ${
+                          active ? 'text-teal-100' : 'text-teal-500'
+                        }`}>
+                          {savings}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
- {!loading && !error && plans.length === 0 && (
- <div className="py-12 text-center">
- <p className="mb-4 font-dmSans text-lg text-juri-muted">
- No plans available for {billingCycle} billing
- </p>
- <button
- onClick={handleRetry}
- className="font-dmSans font-medium text-teal-700 hover:text-teal-600"
- >
- Refresh Plans
- </button>
- </div>
- )}
+            {/* ── Plan cards ───────────────────────────────────────────────── */}
+            {filteredPlans.length === 0 ? (
+              <div className="py-16 text-center">
+                <p className="font-dmSans text-gray-400 text-base">
+                  No {activeCategory === 'solo' ? 'Solo' : 'Firm'} plans available for this billing period.
+                </p>
+              </div>
+            ) : (
+              <div className={`grid grid-cols-1 gap-6 ${
+                filteredPlans.length === 1 ? 'max-w-sm mx-auto' :
+                filteredPlans.length === 2 ? 'sm:grid-cols-2 max-w-2xl mx-auto' :
+                filteredPlans.length === 3 ? 'sm:grid-cols-3 max-w-4xl mx-auto' :
+                'sm:grid-cols-2 lg:grid-cols-4'
+              }`}>
+                {filteredPlans.map((plan) => {
+                  const isProcessing  = processingId === plan.id;
+                  const isCurrent     = isCurrentPlan(plan);
+                  const isDisabled    = !!processingId || isCurrent;
+                  const priceDisplay  = fmt(plan.price, plan.currency);
+                  const isEnterprise  = !priceDisplay || Number(plan.price) <= 0;
 
-{!loading && !error && plans.length > 0 && (
- <div className="mt-12 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
- {plans.map((plan) => {
-const displayPrice = billingCycle === 'yearly' ? plan.annualPrice : plan.monthlyPrice;
-const displayPeriod = billingCycle === 'yearly' ? plan.annualPeriod : plan.monthlyPeriod;
- const isCurrentlyProcessing = processingPayment && selectedPlanId === plan.id;
- const isCurrentPlan = isSamePlanFamily(currentPlanName, plan);
-const isDisabled = processingPayment || isCurrentPlan;
-const ctaLabel = isCurrentPlan ? 'Current Plan' : (billingCycle === 'monthly' ? plan.ctaMonthly : plan.ctaAnnual);
+                  return (
+                    <div
+                      key={plan.id}
+                      className={`relative flex flex-col rounded-2xl border bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
+                        isCurrent
+                          ? 'border-teal-500 ring-2 ring-teal-400 shadow-[0_4px_24px_rgba(13,148,136,0.18)]'
+                          : 'border-gray-200 hover:border-teal-300'
+                      }`}
+                    >
+                      {/* Current badge */}
+                      {isCurrent && (
+                        <span className="absolute top-4 right-4 inline-flex items-center rounded-full bg-teal-50 border border-teal-200 px-3 py-0.5 text-xs font-semibold text-teal-700">
+                          Current Plan
+                        </span>
+                      )}
 
- return (
- <div
- key={plan.id}
- className={`group flex flex-col rounded-2xl border border-teal-300/60 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-2 hover:border-teal-500 hover:shadow-[0_8px_32px_rgba(13,148,136,0.2)] ${
- isCurrentlyProcessing || isCurrentPlan ? 'ring-2 ring-teal-500 shadow-[0_8px_32px_rgba(13,148,136,0.28)]' : ''
- }`}
- >
- <div className="mb-3 flex min-h-[1.75rem] justify-end">
- {isCurrentPlan ? (
- <span className="inline-flex items-center rounded-full bg-[#E8F7F5] px-3 py-1 text-xs font-semibold text-[#0F766E]">
- Current Plan
- </span>
- ) : null}
- </div>
- <h2 className="text-center font-playfair text-lg font-semibold text-teal-700 transition-colors duration-300 group-hover:text-teal-600">
- {plan.name}
- </h2>
- <p className="mt-2 text-center font-dmSans text-xs leading-snug text-juri-muted">
- {plan.description || plan.tagline || 'Subscription plan'}
- </p>
- 
- <div className="mt-5 flex items-end justify-center gap-1">
-{displayPrice ? (
-<>
-<span className="font-playfair text-4xl font-bold text-teal-700">
-{displayPrice}
-</span>
-{displayPeriod && (
-<span className="mb-1 font-dmSans text-sm text-juri-muted">
-{displayPeriod}
-</span>
-)}
-</>
-) : (
-<span className="font-dmSans text-sm italic text-juri-muted">Contact us for pricing</span>
-)}
- </div>
- 
- <button
- onClick={() => handleSelectPlan(plan)}
- disabled={isDisabled}
- className={`mt-5 mb-6 w-full rounded-lg border border-teal-300/60 bg-white py-2.5 font-dmSans text-sm font-medium transition-all duration-300 active:scale-[0.98] ${
- isDisabled
- ? isCurrentPlan
- ? 'border-[#99F6E4] bg-[#E8F7F5] text-[#0F766E] cursor-not-allowed'
- : 'bg-gray-300 text-gray-500 cursor-not-allowed'
- : 'text-teal-700 group-hover:border-teal-500 group-hover:bg-teal-600 group-hover:text-white'
- }`}
- style={isDisabled ? {} : { backgroundColor: '#FFFFFF' }}
- onMouseEnter={(e) => {
- if (!isDisabled) {
- e.currentTarget.style.backgroundColor = '#1AA49B';
- }
- }}
- onMouseLeave={(e) => {
- if (!isDisabled) {
- e.currentTarget.style.backgroundColor = '#21C1B6';
- }
- }}
- >
- {isCurrentlyProcessing ? (
- <div className="flex items-center justify-center">
- <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
- Processing...
- </div>
- ) : (
-ctaLabel
- )}
- </button>
- 
- <hr className="my-5 border-teal-300/60" />
+                      {/* Name */}
+                      <h2 className="font-playfair text-xl font-bold text-teal-700 mt-1">{plan.name}</h2>
 
- <div className="flex-1">
- <ul className="space-y-3">
- {plan.features ? (
- (typeof plan.features === 'string' ?
- plan.features.split(',').map(f => f.trim()).filter(f => f) :
- Array.isArray(plan.features) ? plan.features : []
- ).map((feature, index) => (
- <li key={index} className="flex items-start">
- <CheckIcon className="mt-0.5 mr-3 h-5 w-5 flex-shrink-0 text-teal-600" />
- <span className="font-dmSans text-xs leading-snug text-teal-700">{feature}</span>
- </li>
- ))
- ) : (
- <li className="font-dmSans text-sm italic text-juri-muted">No features listed</li>
- )}
- </ul>
- </div>
- </div>
- );
- })}
- </div>
- )}
- </div>
- </div>
- );
-};
+                      {/* Description */}
+                      {plan.description && (
+                        <p className="mt-1.5 font-dmSans text-xs text-gray-500 leading-snug">
+                          {plan.description}
+                        </p>
+                      )}
 
-export default SubscriptionPlanPage;
+                      {/* Price */}
+                      <div className="mt-5 pb-5 border-b border-gray-100">
+                        {priceDisplay ? (
+                          <div className="flex items-end gap-1">
+                            <span className="font-playfair text-4xl font-bold text-gray-900">{priceDisplay}</span>
+                            <span className="font-dmSans text-sm text-gray-400 mb-1">
+                              {billingLabel(plan.billing_interval_months)}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="font-dmSans text-sm italic text-gray-400">Contact us for pricing</span>
+                        )}
+                      </div>
+
+                      {/* Token limits */}
+                      <div className="mt-5 flex-1 space-y-3">
+                        <TokenRow label="Monthly tokens" value={fmtTokens(plan.monthly_tokens)} highlight />
+                        {plan.billing_interval_months > 1 && (
+                          <TokenRow label="Billing interval" value={`${plan.billing_interval_months} months`} />
+                        )}
+                      </div>
+
+                      {/* CTA */}
+                      <button
+                        onClick={() => handleSelectPlan(plan)}
+                        disabled={isDisabled}
+                        className={`mt-6 w-full rounded-xl py-3 font-dmSans text-sm font-semibold transition-all duration-200 active:scale-[0.98] ${
+                          isCurrent
+                            ? 'bg-teal-50 border border-teal-200 text-teal-700 cursor-not-allowed'
+                            : isDisabled
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-teal-600 hover:bg-teal-700 text-white shadow-sm hover:shadow-md'
+                        }`}
+                      >
+                        {isProcessing ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <span className="inline-block h-4 w-4 animate-spin rounded-full border-b-2 border-white" />
+                            Processing…
+                          </span>
+                        ) : isCurrent ? (
+                          <span className="flex items-center justify-center gap-1.5">
+                            <CheckIcon className="h-4 w-4" />
+                            Current Plan
+                          </span>
+                        ) : isEnterprise ? (
+                          'Contact Us'
+                        ) : (
+                          'Select Plan'
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Empty state */}
+        {!loading && !error && plans.length === 0 && (
+          <div className="py-16 text-center">
+            <p className="mb-4 font-dmSans text-lg text-gray-500">No plans available right now.</p>
+            <button onClick={fetchPlans} className="font-dmSans font-medium text-teal-700 hover:text-teal-600">
+              Refresh
+            </button>
+          </div>
+        )}
+
+        {/* ── Top-up Plans (optional, collapsed by default) ──────── */}
+        <TopupPlansSection />
+
+        {/* Footer note */}
+        <p className="mt-10 text-center font-dmSans text-xs text-gray-400">
+          Payments are processed securely via Razorpay. Token limits reset at the start of each billing period.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Top-up Plans Section (collapsed by default) ────────────────────────────
+
+function TopupPlansSection() {
+  const { user } = useAuth();
+  const [open, setOpen]               = useState(false);
+  const [topupPlans, setTopupPlans]   = useState([]);
+  const [fetched, setFetched]         = useState(false);
+  const [topupLoading, setTopupLoading] = useState(false);
+  const [topupError, setTopupError]   = useState(null);
+  const [processingId, setProcessingId] = useState(null);
+  const [successMsg, setSuccessMsg]   = useState(null);
+
+  // Only fetch once when the user first expands the section
+  const handleToggle = () => {
+    setOpen((prev) => {
+      if (!prev && !fetched) {
+        setTopupLoading(true);
+        const storedToken = localStorage.getItem('token');
+        fetch(`${BACKEND_BASE_URL}/api/payments/topup-plans`, {
+          headers: { 'Content-Type': 'application/json', ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}) },
+          cache: 'no-store',
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (!data.success) throw new Error(data.message || 'Failed to load top-up plans');
+            setTopupPlans(data.data || []);
+            setFetched(true);
+          })
+          .catch((err) => setTopupError(err.message))
+          .finally(() => setTopupLoading(false));
+      }
+      return !prev;
+    });
+  };
+
+  const handleBuyTopup = async (plan) => {
+    const storedToken = localStorage.getItem('token');
+    if (!storedToken) { setTopupError('Please log in to continue.'); return; }
+
+    const currentUser = (() => {
+      for (const key of ['userInfo', 'user', 'userData']) {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        try { const p = JSON.parse(raw); const u = p.user || p.data || p; if (u?.id || u?.user_id) return u; } catch (_) {}
+      }
+      return user;
+    })();
+    const userId = currentUser?.id || currentUser?.user_id;
+    if (!userId) { setTopupError('User info not found. Please log in again.'); return; }
+
+    setProcessingId(plan.id);
+    setTopupError(null);
+    setSuccessMsg(null);
+
+    try {
+      const rzpLoaded = await loadRazorpay();
+      if (!rzpLoaded) throw new Error('Payment gateway failed to load. Please refresh.');
+
+      const orderRes = await fetch(`${BACKEND_BASE_URL}/api/payments/topup/order/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${storedToken}` },
+        body: JSON.stringify({ topup_plan_id: plan.id }),
+      });
+      const orderData = await orderRes.json();
+      if (!orderRes.ok || !orderData.success) throw new Error(orderData.message || 'Could not create order.');
+
+      const { order, key } = orderData;
+
+      await new Promise((resolve, reject) => {
+        const rzp = new window.Razorpay({
+          key,
+          amount: order.amount,
+          currency: order.currency,
+          name: 'JuriNex',
+          description: `${plan.name} — ${fmtTokens(plan.tokens)} tokens`,
+          order_id: order.id,
+          prefill: { email: currentUser?.email || '', name: currentUser?.name || currentUser?.username || '' },
+          theme: { color: '#0D9488' },
+          handler: async (response) => {
+            try {
+              const verifyRes = await fetch(`${BACKEND_BASE_URL}/api/payments/topup/order/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${storedToken}` },
+                body: JSON.stringify({
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature,
+                  topup_plan_id: plan.id,
+                }),
+              });
+              const verifyData = await verifyRes.json();
+              if (!verifyRes.ok || !verifyData.success) throw new Error(verifyData.message || 'Verification failed.');
+              setSuccessMsg(`${Number(plan.tokens).toLocaleString()} tokens added!`);
+              resolve(verifyData);
+            } catch (vErr) { reject(vErr); }
+          },
+          modal: { ondismiss: () => reject(new Error('Payment cancelled by user.')) },
+        });
+        rzp.on('payment.failed', (r) => reject(new Error(r.error?.description || 'Payment failed.')));
+        rzp.open();
+      });
+    } catch (err) {
+      if (err.message !== 'Payment cancelled by user.') setTopupError(err.message);
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  return (
+    <div className="mt-12">
+      {/* Toggle trigger — visually secondary, below the main plans */}
+      <div className="flex items-center justify-center">
+        <button
+          onClick={handleToggle}
+          className="group flex items-center gap-2 font-dmSans text-sm text-gray-400 hover:text-teal-600 transition-colors duration-200"
+        >
+          <span className={`inline-block transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
+            ▾
+          </span>
+          {open ? 'Hide top-up packs' : 'Need extra tokens? View top-up packs'}
+        </button>
+      </div>
+
+      {/* Collapsible panel */}
+      {open && (
+        <div className="mt-6 mx-auto max-w-2xl">
+
+          {/* Loading */}
+          {topupLoading && (
+            <div className="flex items-center justify-center gap-2 py-8 text-gray-400">
+              <span className="inline-block h-4 w-4 animate-spin rounded-full border-b-2 border-teal-500" />
+              <span className="font-dmSans text-sm">Loading packs…</span>
+            </div>
+          )}
+
+          {/* Error */}
+          {topupError && !topupLoading && (
+            <p className="text-center font-dmSans text-sm text-red-500 py-4">{topupError}</p>
+          )}
+
+          {/* Success */}
+          {successMsg && (
+            <div className="mb-4 flex items-center justify-center gap-2 rounded-xl bg-teal-50 border border-teal-200 px-4 py-2.5">
+              <span className="text-teal-600 text-sm">✓</span>
+              <span className="font-dmSans text-sm font-medium text-teal-700">{successMsg}</span>
+            </div>
+          )}
+
+          {/* Plans list */}
+          {!topupLoading && !topupError && topupPlans.length > 0 && (
+            <div className="rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-50 bg-gray-50/60">
+                <p className="font-dmSans text-xs text-gray-400 uppercase tracking-wide font-semibold">
+                  One-time token packs · valid for duration shown
+                </p>
+              </div>
+              {topupPlans.map((plan, idx) => {
+                const isProcessing = processingId === plan.id;
+                const validityDays = Number(plan.validity_days) || 0;
+                const price = `${plan.currency === 'INR' ? '₹' : plan.currency}${Number(plan.price).toLocaleString('en-IN')}`;
+                return (
+                  <div
+                    key={plan.id}
+                    className={`flex items-center justify-between px-5 py-3.5 gap-4 transition-colors hover:bg-gray-50/60 ${
+                      idx < topupPlans.length - 1 ? 'border-b border-gray-100' : ''
+                    }`}
+                  >
+                    {/* Info */}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-dmSans text-sm font-semibold text-gray-700">{plan.name}</span>
+                        <span className="font-dmSans text-xs text-teal-600 font-medium bg-teal-50 px-2 py-0.5 rounded-full">
+                          {fmtTokens(plan.tokens)} tokens
+                        </span>
+                        {validityDays > 0 && (
+                          <span className="font-dmSans text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
+                            {validityDays}d validity
+                          </span>
+                        )}
+                      </div>
+                      {plan.description && (
+                        <p className="font-dmSans text-xs text-gray-400 mt-0.5 truncate">{plan.description}</p>
+                      )}
+                    </div>
+
+                    {/* Buy button */}
+                    <button
+                      onClick={() => handleBuyTopup(plan)}
+                      disabled={!!processingId}
+                      className="flex-shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-dmSans text-sm font-semibold transition-all duration-200 active:scale-[0.97]"
+                    >
+                      {isProcessing ? (
+                        <>
+                          <span className="inline-block h-3 w-3 animate-spin rounded-full border-b-2 border-white" />
+                          <span>Processing…</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-white/70 font-normal text-xs">{price}</span>
+                          <span className="text-white/40 text-xs">·</span>
+                          <span>Buy</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {!topupLoading && !topupError && topupPlans.length === 0 && fetched && (
+            <p className="text-center font-dmSans text-sm text-gray-400 py-4">No top-up packs available right now.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TokenRow({ label, value, highlight }) {
+  return (
+    <div className="flex items-center justify-between text-xs">
+      <span className="text-gray-400">{label}</span>
+      <span className={`font-semibold tabular-nums ${highlight ? 'text-teal-700' : 'text-gray-700'}`}>
+        {value}
+      </span>
+    </div>
+  );
+}

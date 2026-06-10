@@ -288,6 +288,10 @@ class LegalCasePipelineService:
         output_format: str = "plain",
         extra_instructions: str | None = None,
         system_instruction: str | None = None,
+        user_id: str | int | None = None,
+        summarization_llm_config: dict | None = None,
+        agent_name: str | None = None,
+        model_name_override: str | None = None,
     ) -> tuple[str, bool]:
         qa_result = _call_gemini_for_qa(
             query,
@@ -296,6 +300,10 @@ class LegalCasePipelineService:
             output_format=output_format,
             extra_instructions=extra_instructions,
             system_instruction=system_instruction,
+            user_id=user_id,
+            summarization_llm_config=summarization_llm_config,
+            agent_name=agent_name,
+            model_name_override=model_name_override,
         )
         synthesized_answer = (qa_result.get("answer") or "").strip()
         if synthesized_answer:
@@ -932,10 +940,18 @@ class LegalCasePipelineService:
         file_ids: list[str],
         *,
         system_instruction: str | None = None,
+        summarization_llm_config: dict | None = None,
+        agent_name: str | None = "grounded_retrieval_agent",
+        model_name_override: str | None = None,
     ) -> QueryResponse:
         valid_file_ids = [str(item) for item in file_ids if item]
         if not valid_file_ids or not is_db_available():
-            return self.answer_query(request)
+            return self.answer_query(
+                request,
+                summarization_llm_config=summarization_llm_config,
+                agent_name=agent_name,
+                model_name_override=model_name_override,
+            )
 
         llm_config = get_llm_chat_config()
         retrieval_params = self._resolve_retrieval_params(request, llm_config)
@@ -990,6 +1006,10 @@ class LegalCasePipelineService:
             intent=intent,
             output_format="structured",
             system_instruction=system_instruction,
+            user_id=request.user_id,
+            summarization_llm_config=summarization_llm_config,
+            agent_name=agent_name,
+            model_name_override=model_name_override,
         )
         segment = AnswerSegment(statement=answer_text, confidence=0.9 if grounded else 0.72, citations=citations)
         return QueryResponse(
@@ -1002,7 +1022,14 @@ class LegalCasePipelineService:
             generated_at=datetime.now(tz=UTC),
         )
 
-    def answer_query(self, request: QueryRequest) -> QueryResponse:
+    def answer_query(
+        self,
+        request: QueryRequest,
+        *,
+        summarization_llm_config: dict | None = None,
+        agent_name: str | None = "grounded_retrieval_agent",
+        model_name_override: str | None = None,
+    ) -> QueryResponse:
         case = self._cases.get(request.case_id)
         if not case:
             raise ValueError(f"Case '{request.case_id}' not found.")
@@ -1053,6 +1080,10 @@ class LegalCasePipelineService:
             citations=citations,
             intent=intent,
             output_format="structured",
+            user_id=request.user_id,
+            summarization_llm_config=summarization_llm_config,
+            agent_name=agent_name,
+            model_name_override=model_name_override,
         )
         segment = AnswerSegment(statement=answer_text, confidence=0.9 if grounded else 0.72, citations=citations)
         return QueryResponse(
@@ -1096,7 +1127,8 @@ class LegalCasePipelineService:
                 case_id=request.case_id,
                 query=effective_query,
                 required_doc_types=preset.required_doc_types,
-            )
+            ),
+            agent_name="preset_execution_agent",
         )
         return PresetExecutionResponse(
             preset_id=preset.id,

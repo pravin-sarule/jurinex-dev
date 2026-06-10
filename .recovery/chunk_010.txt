@@ -1,0 +1,15 @@
+        (text) => {
+          appendStreamChunk(text);
+          if (typeof text === 'string' && text && !streamingGeneratingFiredRef.current) {
+            streamingGeneratingFiredRef.current = true;
+            setStreamingStatus('generating');
+            setStreamingMessage('Model thinking');
+          }
+        },
+        (status, message) => {
+          setStreamingStatus(status);
+          setStreamingMessage(
+            status === 'generating' ? 'Model thinking' : message || getStatusMessage(status)
+          );
+          pushProcessingStep(status, message || getStatusMessage(status));
+          console.log('[askQuestionToChat] Status:', status, message);

@@ -216,9 +216,8 @@ function applyPlanLimitsToConfig(cfg, plan, service = 'chat') {
       if (!planColSet('chat_max_file_upload_per_day')) {
         cfg.max_file_upload_per_day = legacyDocLimit;
       }
-      if (!planColSet('chat_max_document_pages')) {
-        cfg.max_document_pages = legacyDocLimit;
-      }
+      // NOTE: document_limit is an upload-count column, never a page-count limit.
+      // max_document_pages is only set via chat_max_document_pages (plan) or the admin config default.
       if (!planColSet('chat_max_document_size_mb') && plan.storage_limit_gb > 0) {
         const storageMb = Math.ceil(finiteNumber(plan.storage_limit_gb, 0) * 1024);
         if (storageMb > 0) cfg.max_document_size_mb = storageMb;
@@ -355,9 +354,62 @@ function mergeRequestLlmOverrides(baseConfig, body = {}) {
   return out;
 }
 
+/**
+ * Returns all plan IDs (monthly_plans.id + subscription_plans.id) that could
+ * match secret_manager.plan_id. Admins may store either ID depending on which
+ * billing table they used when creating the secret.
+ */
+async function getSecretManagerPlanIds(userId) {
+  const uid = normalizeUserId(userId);
+  if (!uid) return [];
+
+  try {
+    // Get the user's active plan with both the effective id and the subscription_plan id
+    const { rows } = await paymentPool.query(
+      `SELECT
+         COALESCE(mp.id, sp.id)   AS effective_plan_id,
+         sp.id                    AS subscription_plan_id,
+         COALESCE(mp.name, sp.name) AS plan_name
+       FROM user_subscriptions us
+       LEFT JOIN monthly_plans      mp ON mp.id = us.monthly_plan_id AND mp.is_active = true
+       LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
+       WHERE us.user_id = $1
+         AND LOWER(COALESCE(us.status, 'active')) = 'active'
+         AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+         AND (mp.id IS NOT NULL OR sp.id IS NOT NULL)
+       ORDER BY us.activated_at DESC NULLS LAST, us.start_date DESC, us.updated_at DESC
+       LIMIT 1`,
+      [uid]
+    );
+
+    if (!rows.length) return [];
+
+    const { effective_plan_id, subscription_plan_id, plan_name } = rows[0];
+    const ids = new Set();
+
+    if (subscription_plan_id) ids.add(Number(subscription_plan_id));
+    if (effective_plan_id)    ids.add(Number(effective_plan_id));
+
+    // If still no subscription_plan_id, look it up by name
+    if (!subscription_plan_id && plan_name) {
+      const nameRows = await paymentPool.query(
+        `SELECT id FROM subscription_plans WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 5`,
+        [plan_name]
+      );
+      for (const r of nameRows.rows) ids.add(Number(r.id));
+    }
+
+    return [...ids].filter(id => id > 0);
+  } catch (err) {
+    console.warn('[LLMConfig] getSecretManagerPlanIds failed:', err.message);
+    return [];
+  }
+}
+
 module.exports = {
   getLLMConfig,
   getUserActivePlan,
+  getSecretManagerPlanIds,
   applyPlanLimitsToConfig,
   invalidateConfigCache,
   resolveVertexModelId,

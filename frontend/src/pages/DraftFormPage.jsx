@@ -46,6 +46,8 @@ import DraftingLayout from '../components/DraftingRedesign/DraftingLayout';
 import { createChatDraftSession, exportChatDraftDocx } from '../services/chatDraftApi';
 import googleDriveApi from '../services/googleDriveApi';
 import { AGENT_DRAFT_TEMPLATE_API, CHAT_DRAFT_BACKEND_URL, getUserIdForDrafting } from '../config/apiConfig';
+import { useTokenQuota } from '../context/TokenQuotaContext';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 import html2pdf from 'html2pdf.js';
 
 /* ─── Chat-draft streaming helper ───────────────────────────────────── */
@@ -60,7 +62,7 @@ async function streamChatDraftMessage(sessionId, message, onChunk, signal) {
   const res = await fetch(`${CHAT_DRAFT_BACKEND_URL}/api/chat-draft/session/${sessionId}/message-stream`, {
     method: 'POST', headers, body: JSON.stringify({ message }), signal,
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) await throwIfQuotaResponse(res, `HTTP ${res.status}`);
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -259,6 +261,7 @@ const buildAssembledResumePayload = (draftMetadata) => {
 const DraftFormPage = () => {
   const { draftId } = useParams();
   const navigate = useNavigate();
+  const { showQuotaError } = useTokenQuota();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Initial step from URL so refresh keeps you on the same page (e.g. ?step=3 = Configure Sections)
@@ -978,8 +981,10 @@ const DraftFormPage = () => {
         }
       }
     } catch (err) {
-      setUploadedDocuments((prev) => prev.map((d) => ({ ...d, status: 'failed' })));
-      toast.error(err?.message || 'Upload failed');
+      if (!showQuotaError(err)) {
+        setUploadedDocuments((prev) => prev.map((d) => ({ ...d, status: 'failed' })));
+        toast.error(err?.message || 'Upload failed');
+      }
     } finally {
       setUploadFileLoading(false);
     }
@@ -1016,6 +1021,7 @@ const DraftFormPage = () => {
         const warns = (res.documents || []).filter(d => d.warning).map(d => `"${d.name}": ${d.warning}`);
         if (warns.length) setChatWarnings(warns);
       } catch (err) {
+        if (showQuotaError(err)) { setChatIsSending(false); setChatIsCreating(false); return; }
         setChatError(err.message || 'Failed to start session.');
         setChatIsSending(false);
         setChatIsCreating(false);
@@ -1045,6 +1051,11 @@ const DraftFormPage = () => {
       }
     } catch (err) {
       if (err.name === 'AbortError') { setChatIsSending(false); return; }
+      if (showQuotaError(err)) {
+        setChatMessages(prev => prev.slice(0, -1));
+        setChatIsSending(false);
+        return;
+      }
       // fallback to regular POST
       try {
         const { sendChatDraftMessage } = await import('../services/chatDraftApi');
@@ -1053,8 +1064,10 @@ const DraftFormPage = () => {
         setChatStreamingHtml('');
         setChatMessages(prev => [...prev, { role: 'assistant', content: res.html }]);
       } catch (fb) {
-        setChatError(fb.message || 'Something went wrong.');
-        setChatMessages(prev => prev.slice(0, -1));
+        if (!showQuotaError(fb)) {
+          setChatError(fb.message || 'Something went wrong.');
+          setChatMessages(prev => prev.slice(0, -1));
+        }
       }
     } finally {
       setChatIsSending(false);

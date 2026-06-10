@@ -505,7 +505,7 @@ const handleSubscriptionActivated = async (subscription) => {
         if (interval === 'lifetime' || now >= nextResetDate) {
           await TokenUsageService.resetUserUsage(user_id, tokenLimit, 'Subscription Activated');
           await db.query(
-            `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE WHERE user_id = $1`,
+            `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE, plan_tokens_used = 0 WHERE user_id = $1`,
             [user_id]
           );
           console.log(`User ${user_id} tokens reset to ${tokenLimit}`);
@@ -565,7 +565,7 @@ const handleSubscriptionCharged = async (payment, subscription) => {
         if (interval === 'lifetime' || now >= nextResetDate) {
           await TokenUsageService.resetUserUsage(user_id, tokenLimit, 'Subscription Charged/Renewed');
           await db.query(
-            `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE WHERE user_id = $1`,
+            `UPDATE user_subscriptions SET last_reset_date = CURRENT_DATE, plan_tokens_used = 0 WHERE user_id = $1`,
             [user_id]
           );
           console.log(`User ${user_id} tokens reset to ${tokenLimit}`);

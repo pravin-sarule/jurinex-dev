@@ -451,6 +451,7 @@
 
 import React, { Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import StorageFullModal from './components/StorageFullModal';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import MainLayout from './layouts/MainLayout';
@@ -492,10 +493,14 @@ import UserManagementPage from './pages/UserManagementPage';
 import GetHelpPage from './pages/GetHelpPage';
 import CitationReportPage from './pages/CitationReportPage';
 import EnterpriseAnalyticsPage from './pages/EnterpriseAnalyticsPage';
+import BrandingProfilesPage from './pages/BrandingProfilesPage';
+import BrandingProfileEditorPage from './pages/BrandingProfileEditorPage';
+import BatchRequestPage from './pages/BatchRequestPage';
 import CaseDetailView from './components/DashboardComponents/CaseDetailView';
 import GoogleDriveCallback from './pages/GoogleDriveCallback';
 import { SidebarProvider } from './context/SidebarContext';
 import { FileManagerProvider } from './context/FileManagerContext';
+import { TokenQuotaProvider } from './context/TokenQuotaContext';
 import AuthChecker from './components/AuthChecker';
 import { TemplateListingPage, TemplatePreviewPage, DraftEditorPage as TemplateDraftEditorPage, SectionDraftingPage, AssembledPreviewPage } from './template_drafting_component';
 
@@ -517,7 +522,9 @@ function ContactPageRoute() {
 function App() {
   return (
     <Router>
+      <TokenQuotaProvider>
       <ToastContainer />
+      <StorageFullModal />
       <SidebarProvider>
         <FileManagerProvider>
           <Routes>
@@ -989,9 +996,40 @@ function App() {
                 </AuthChecker>
               }
             />
+            <Route
+              path="/batch-request"
+              element={
+                <AuthChecker>
+                  <MainLayout useNoPadding={true}>
+                    <BatchRequestPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/branding"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <BrandingProfilesPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/branding/:id"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <BrandingProfileEditorPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
           </Routes>
         </FileManagerProvider>
       </SidebarProvider>
+      </TokenQuotaProvider>
     </Router>
   );
 }

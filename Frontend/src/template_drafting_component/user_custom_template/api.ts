@@ -101,7 +101,15 @@ analyzerClient.interceptors.response.use(
         return response;
     },
     (error) => {
-        console.error('[Custom Template API] Request failed:', error.config?.url, error.response?.status, error.message);
+        // Network errors (ERR_CONNECTION_REFUSED) mean the template analyzer
+        // service is not running locally — log as a warning, not an error,
+        // to avoid alarming console noise when the service is optional.
+        const isNetworkError = !error.response;
+        if (isNetworkError) {
+            console.warn('[Custom Template API] Service unavailable:', error.config?.url, '— custom templates skipped');
+        } else {
+            console.error('[Custom Template API] Request failed:', error.config?.url, error.response?.status, error.message);
+        }
         return Promise.reject(error);
     }
 );

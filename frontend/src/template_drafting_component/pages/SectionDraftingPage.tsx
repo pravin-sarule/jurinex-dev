@@ -38,6 +38,25 @@ import { getUniversalSections } from '../services/universalSectionsApi';
 import { getErrorMessage, isTimeoutError } from '../services/api';
 import type { UniversalSection } from '../components/constants';
 import { toast } from 'react-toastify';
+import { useTokenQuota } from '../../context/TokenQuotaContext';
+
+/** Convert an Axios 429/503 error to a quota error that showQuotaError() understands. */
+function toQuotaError(error: unknown): Error | null {
+    const axErr = error as any;
+    const status: number = axErr?.response?.status;
+    const data = axErr?.response?.data || {};
+    const code: string = data?.code || '';
+    if ((status === 429 || status === 503) && code) {
+        const err = new Error(data.message || 'Token limit reached.');
+        (err as any).code = code;
+        (err as any).isQuotaError = true;
+        (err as any).details = data.details || {};
+        (err as any).status = status;
+        (err as any).response = { status, data };
+        return err;
+    }
+    return null;
+}
 
 interface SectionState {
     sectionId: string;
@@ -78,6 +97,7 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
     const params = useParams<{ draftId: string }>();
     const draftId = draftIdProp || params.draftId;
     const navigate = useNavigate();
+    const { showQuotaError } = useTokenQuota();
 
     const [loading, setLoading] = useState(true);
     const [selectedSections, setSelectedSections] = useState<string[]>([]);
@@ -523,17 +543,21 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             throw new Error(response.error || response.message || 'Failed to queue section generation');
         } catch (error) {
             timeouts.forEach(t => clearTimeout(t));
+            setSectionStates(prev => ({
+                ...prev,
+                [sectionId]: { ...prev[sectionId], isGenerating: false }
+            }));
+
+            // Show quota upgrade popup for 429/503 token-limit errors
+            const quotaErr = toQuotaError(error);
+            if (quotaErr && showQuotaError(quotaErr)) return;
+
             if (isTimeoutError(error)) {
                 toast.info('Request timed out. Checking backend for result…');
                 if (addActivity) {
                     addActivity('System', 'Request timed out. Checking for completed section…', 'in-progress');
                 }
-                void refetchSectionContent(sectionId).finally(() => {
-                    setSectionStates(prev => ({
-                        ...prev,
-                        [sectionId]: { ...prev[sectionId], isGenerating: false }
-                    }));
-                });
+                void refetchSectionContent(sectionId);
                 return;
             }
             const message = getErrorMessage(error) || 'Failed to generate section';
@@ -542,10 +566,6 @@ export const SectionDraftingPage: React.FC<SectionDraftingPageProps> = ({ draftI
             if (addActivity) {
                 addActivity('System', message.length > 60 ? `Failed: ${message.slice(0, 57)}…` : `Failed: ${message}`, 'completed');
             }
-            setSectionStates(prev => ({
-                ...prev,
-                [sectionId]: { ...prev[sectionId], isGenerating: false }
-            }));
         }
     };
 

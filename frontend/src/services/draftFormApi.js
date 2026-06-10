@@ -5,6 +5,7 @@
  */
 
 import { AGENT_DRAFT_TEMPLATE_API, getUserIdForDrafting } from '../config/apiConfig';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 
 const BASE = `${AGENT_DRAFT_TEMPLATE_API}/api`;
 
@@ -372,10 +373,7 @@ export const uploadDocumentForDraft = async (file, options = {}) => {
     headers: authHeaders,
     body: form,
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
-  }
+  if (!res.ok) await throwIfQuotaResponse(res, 'Upload failed');
   return res.json();
 };
 
@@ -404,10 +402,7 @@ export const uploadDocumentsForDraft = async (files, options = {}) => {
     headers: authHeaders,
     body: form,
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || err.message || `HTTP ${res.status}`);
-  }
+  if (!res.ok) await throwIfQuotaResponse(res, 'Upload failed');
   return res.json();
 };
 

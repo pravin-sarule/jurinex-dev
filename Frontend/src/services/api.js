@@ -6,6 +6,8 @@ import {
   DOCS_BASE_URL,
   getUserIdForDrafting,
 } from '../config/apiConfig';
+import { createQuotaError, parseQuotaHttpError } from '../utils/quotaError';
+import { emitStorageFull, isStorageFullError } from '../utils/storageGuard';
 
 class ApiService {
  constructor() {
@@ -83,6 +85,10 @@ class ApiService {
  data: normalizedErrorData,
  rawData: errorData,
  };
+ // Auto-emit global storage-full modal for HTTP 507 from any service
+ if (response.status === 507 || isStorageFullError(error)) {
+   emitStorageFull(error);
+ }
  throw error;
  }
 
@@ -121,14 +127,14 @@ class ApiService {
   }
 
   async registerSoloLawyer(userData) {
-    return this.request("/api/auth/register/solo", {
+    return this.request(`${AUTH_SERVICE_URL}/api/auth/register/solo`, {
       method: "POST",
       body: JSON.stringify(userData),
     });
   }
 
   async registerFirm(firmData) {
-    return this.request("/api/auth/register/firm", {
+    return this.request(`${AUTH_SERVICE_URL}/api/auth/register/firm`, {
       method: "POST",
       body: JSON.stringify(firmData),
     });
@@ -137,6 +143,7 @@ class ApiService {
  async logout() {
  localStorage.removeItem("token");
  localStorage.removeItem("user");
+ localStorage.removeItem("userInfo");
  window.dispatchEvent(new Event("userUpdated"));
  return { message: "Logged out successfully locally" };
  }
@@ -481,7 +488,7 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
 
  async getSecrets() {
  const base = String(SECRET_PROMPTS_API_BASE || CHAT_MODEL_BASE_URL || '').replace(/\/$/, '');
- return this.request(`${base}/secrets?fetch=true`);
+ return this.request(`${base}/secrets?fetch=false`);
  }
 
  async getSecretById(secretId) {
@@ -570,15 +577,20 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
 
    if (!response.ok) {
      const errorData = await response.json().catch(() => ({}));
+     const quota = parseQuotaHttpError(response.status, errorData);
+     if (quota) {
+       throw createQuotaError(quota, response.status);
+     }
+     const normalized =
+       errorData && typeof errorData === 'object' && errorData.detail && typeof errorData.detail === 'object'
+         ? errorData.detail
+         : errorData;
      const error = new Error(
-       errorData.message || errorData.error || `HTTP error! status: ${response.status}`
+       normalized.message || normalized.error || `HTTP error! status: ${response.status}`
      );
-     error.code = errorData.code;
-     error.details = errorData.details;
-     error.response = {
-       status: response.status,
-       data: errorData
-     };
+     error.code = normalized.code;
+     error.details = normalized.details;
+     error.response = { status: response.status, data: normalized, rawData: errorData };
      throw error;
    }
 
@@ -676,7 +688,7 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  });
  }
 
- async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null, extraFetchParams = null, fileIds = null, onThought = null) {
+ async askChatModelQuestionStream(question, fileId, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, secretId = null, usedSecretPrompt = false, promptLabel = null, additionalInput = null, llmName = null, extraFetchParams = null, fileIds = null, onThought = null, onUsage = null, abortSignal = null) {
  const token = this.getAuthToken();
  
  const body = { question, file_id: fileId };
@@ -742,14 +754,24 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
      method: "POST",
      headers,
      body: JSON.stringify(body),
+     ...(abortSignal ? { signal: abortSignal } : {}),
    });
 
    if (!response.ok) {
      const errorData = await response.json().catch(() => ({}));
-     const err = new Error(errorData.message || errorData.error || `HTTP error! status: ${response.status}`);
-     err.code = errorData.code;
-     err.details = errorData.details;
+     const quota = parseQuotaHttpError(response.status, errorData);
+     if (quota) {
+       throw createQuotaError(quota, response.status);
+     }
+     const normalized =
+       errorData && typeof errorData === 'object' && errorData.detail && typeof errorData.detail === 'object'
+         ? errorData.detail
+         : errorData;
+     const err = new Error(normalized.message || normalized.error || `HTTP error! status: ${response.status}`);
+     err.code = normalized.code;
+     err.details = normalized.details;
      err.status = response.status;
+     err.response = { status: response.status, data: normalized, rawData: errorData };
      throw err;
    }
 
@@ -759,6 +781,9 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
    let streamDone = false;
    let doneDispatched = false;
    let accumulatedAnswer = '';
+   // Yield to the browser if we've blocked the main thread for >16ms (one frame).
+   const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
+   let lastYieldTime = performance.now();
 
    while (true) {
      const { done, value } = await reader.read();
@@ -797,6 +822,13 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
            onStatus(parsed.status, parsed.message);
          } else if (parsed.type === 'metadata' && onMetadata) {
            onMetadata(parsed);
+         } else if (parsed.type === 'cache_session' && onMetadata) {
+           onMetadata(parsed);
+         } else if (parsed.type === 'usage') {
+           if (onUsage) onUsage(parsed);
+           if (onMetadata && parsed.sessionMetrics) {
+             onMetadata({ cache_session_metrics: parsed.sessionMetrics });
+           }
          } else if (parsed.type === 'thought' && onThought) {
            const thoughtPiece = typeof parsed.text === 'string' ? parsed.text : '';
            if (thoughtPiece) onThought(thoughtPiece);
@@ -818,7 +850,14 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
        } catch (e) {
          console.warn('Failed to parse SSE data:', data, e);
        }
-     }
+        
+        // Only yield if the thread has been busy for >16ms. This prevents
+        // artificial delays on fast streams while still preventing UI lockups.
+        if (performance.now() - lastYieldTime > 16) {
+          await yieldToMain();
+          lastYieldTime = performance.now();
+        }
+      }
      
      if (streamDone) break;
    }
@@ -860,7 +899,11 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
    return this.chatModelRequest('/api/chat/general/sessions');
  }
 
- async askGeneralChatStream(question, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, extraFetchParams = null, onThought = null) {
+ async getAllDocumentSessions() {
+   return this.chatModelRequest('/api/chat/document-sessions');
+ }
+
+ async askGeneralChatStream(question, sessionId = null, onChunk, onStatus, onMetadata, onDone, onError, extraFetchParams = null, onThought = null, abortSignal = null) {
    const token = this.getAuthToken();
 
    const body = { question };
@@ -897,20 +940,33 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
      endpoint: `${CHAT_MODEL_BASE_URL}/api/chat/ask/general/stream`,
    });
 
+   // Micro-yield helper for the general chat stream
+   const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
+
    try {
      const response = await fetch(`${CHAT_MODEL_BASE_URL}/api/chat/ask/general/stream`, {
        method: 'POST',
        headers,
        body: JSON.stringify(body),
        credentials: 'omit',
+       ...(abortSignal ? { signal: abortSignal } : {}),
      });
 
      if (!response.ok) {
        const errorData = await response.json().catch(() => ({}));
-       const err = new Error(errorData.message || errorData.error || `HTTP error! status: ${response.status}`);
-       err.code = errorData.code;
-       err.details = errorData.details;
+       const quota = parseQuotaHttpError(response.status, errorData);
+       if (quota) {
+         throw createQuotaError(quota, response.status);
+       }
+       const normalized =
+         errorData && typeof errorData === 'object' && errorData.detail && typeof errorData.detail === 'object'
+           ? errorData.detail
+           : errorData;
+       const err = new Error(normalized.message || normalized.error || `HTTP error! status: ${response.status}`);
+       err.code = normalized.code;
+       err.details = normalized.details;
        err.status = response.status;
+       err.response = { status: response.status, data: normalized, rawData: errorData };
        throw err;
      }
 
@@ -920,6 +976,7 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
      let streamDone = false;
      let doneDispatched = false;
      let accumulatedAnswer = '';
+     let lastYieldTime = performance.now();
 
      while (true) {
        const { done, value } = await reader.read();
@@ -957,9 +1014,17 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
              doneDispatched = true;
              onDone({ ...parsed, answer: merged });
              streamDone = true;
-           } else if (parsed.type === 'error' && onError) { onError(parsed.message, parsed.details); streamDone = true; }
+           } else if (parsed.type === 'error' && onError) {
+             onError(parsed.message, parsed.details, parsed.code);
+             streamDone = true;
+           }
          } catch (e) {
            console.warn('[API] Failed to parse SSE data:', data, e);
+         }
+
+         if (performance.now() - lastYieldTime > 16) {
+           await yieldToMain();
+           lastYieldTime = performance.now();
          }
        }
 
@@ -1018,7 +1083,172 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
      }
    }
  }
+
+  async createGeminiCache(payload) {
+    return this.chatModelRequest('/api/chat/cache/create', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async askGeminiCacheQuestion(fileId, question, displayName = '') {
+    return this.chatModelRequest('/api/chat/cache/ask', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, question, displayName }),
+    });
+  }
+
+  async askGeminiCacheQuestionStream(fileId, question, displayName = '', onChunk, onStatus, onDone, onError, abortSignal = null) {
+    const token = this.getAuthToken();
+    const base  = CHAT_MODEL_BASE_URL || 'http://localhost:8096';
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    try {
+      const response = await fetch(`${base}/api/chat/cache/ask/stream`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ file_id: fileId, question, displayName }),
+        credentials: 'omit',
+        ...(abortSignal ? { signal: abortSignal } : {}),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const quota = parseQuotaHttpError(response.status, errorData);
+        if (quota) {
+          throw createQuotaError(quota, response.status);
+        }
+        const normalized =
+          errorData && typeof errorData === 'object' && errorData.detail && typeof errorData.detail === 'object'
+            ? errorData.detail
+            : errorData;
+        const err = new Error(normalized.message || `HTTP error! status: ${response.status}`);
+        err.code = normalized.code;
+        err.details = normalized.details;
+        err.status = response.status;
+        throw err;
+      }
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let streamDone = false;
+      let doneDispatched = false;
+      let accumulatedAnswer = '';
+      let latestTokenUsage = null;
+      let latestSessionMetrics = null;
+      let streamError = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r\n|\n|\r/);
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let data = line.trim();
+          if (data.startsWith('data: ')) data = data.substring(6).trim();
+          if (data === '[PING]') continue;
+          if (data === '[DONE]') { streamDone = true; break; }
+          if (!data) continue;
+
+          let parsed;
+          try {
+            parsed = JSON.parse(data);
+          } catch (e) {
+            console.warn('[API] Failed to parse cache SSE data:', data, e);
+            continue;
+          }
+
+          if (parsed.type === 'status' && onStatus) {
+            onStatus(parsed.status, parsed.message);
+          } else if (parsed.type === 'thought') {
+            // Model is in thinking phase — signal 'generating' so the UI shows the active spinner
+            if (onStatus) onStatus('generating', 'Model thinking...');
+          } else if (parsed.type === 'cache_session') {
+            latestSessionMetrics =
+              parsed.cache_session_metrics || parsed.sessionMetrics || latestSessionMetrics;
+          } else if (parsed.type === 'chunk' && onChunk) {
+            const piece = typeof parsed.text === 'string' ? parsed.text : '';
+            accumulatedAnswer += piece;
+            onChunk(piece);
+          } else if (parsed.type === 'cache_session') {
+            latestSessionMetrics =
+              parsed.cache_session_metrics || parsed.sessionMetrics || latestSessionMetrics;
+          } else if (parsed.type === 'usage') {
+            latestTokenUsage = parsed.tokenUsage || parsed;
+            latestSessionMetrics = parsed.sessionMetrics || parsed.session_metrics || latestSessionMetrics;
+          } else if (parsed.type === 'done' && onDone) {
+            const fromServer = typeof parsed.answer === 'string' ? parsed.answer : '';
+            const merged = fromServer.length > accumulatedAnswer.length ? fromServer : (accumulatedAnswer || fromServer);
+            doneDispatched = true;
+            onDone({
+              ...parsed,
+              answer: merged,
+              tokenUsage: parsed.tokenUsage || latestTokenUsage || parsed.token_usage,
+              sessionMetrics: parsed.sessionMetrics || latestSessionMetrics || parsed.session_metrics,
+            });
+            streamDone = true;
+          } else if (parsed.type === 'error') {
+            streamError = new Error(parsed.message || 'Cache stream failed');
+            streamError.code = parsed.code;
+            streamError.details = parsed.details;
+            if (onError) onError(parsed.message, parsed.details, parsed.code);
+            streamDone = true;
+          }
+        }
+
+        if (streamDone) break;
+      }
+
+      if (streamError) throw streamError;
+
+      if (onDone && !doneDispatched) {
+        doneDispatched = true;
+        onDone({ answer: accumulatedAnswer, tokenUsage: latestTokenUsage, sessionMetrics: latestSessionMetrics });
+      }
+    } catch (error) {
+      console.error('[API] Cache streaming error:', error);
+      if (onError) onError(error.message);
+      throw error;
+    }
+  }
+
+  async getGeminiCacheStatus(sessionId) {
+    return this.chatModelRequest(`/api/chat/cache/status/${sessionId}`);
+  }
+
+  async getGeminiCacheFileStatus(fileId) {
+    return this.chatModelRequest(`/api/chat/cache/file-status/${fileId}`);
+  }
+
+  async deleteGeminiCache(sessionId) {
+    return this.chatModelRequest('/api/chat/cache/delete', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId }),
+    });
+  }
+
+  /**
+   * Count tokens for an uploaded file using Vertex AI's free countTokens API.
+   * Mirrors the Google AI Studio live token count — call immediately after upload.
+   * @param {string} fileId  The uploaded file UUID
+   * @param {string} [modelName]  Gemini model (default: gemini-2.5-pro)
+   */
+  async countFileTokens(fileId, modelName = 'gemini-2.5-pro') {
+    return this.chatModelRequest('/api/chat/count-tokens', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, model_name: modelName }),
+    });
+  }
 }
 
 export default new ApiService();
-

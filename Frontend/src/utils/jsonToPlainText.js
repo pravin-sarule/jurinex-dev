@@ -92,6 +92,47 @@ function learningPayloadToPlainText(obj) {
   return parts.join('\n\n');
 }
 
+/**
+ * Last-resort text extractor for JSON that failed all parse attempts.
+ * Uses regex to pull out string values for common legal response fields.
+ */
+function extractReadableTextFromMalformedJson(raw) {
+  const parts = [];
+
+  // Title / document_title
+  const titleMatch = raw.match(/"(?:title|document_title)":\s*"((?:[^"\\]|\\.)*)"/);
+  if (titleMatch && titleMatch[1].trim()) parts.push(`# ${titleMatch[1].trim()}`);
+
+  // Summary
+  const summaryMatch = raw.match(/"summary":\s*"((?:[^"\\]|\\.){20,})"/);
+  if (summaryMatch && summaryMatch[1].trim()) parts.push(summaryMatch[1].trim());
+
+  // Sections array: extract heading + content pairs
+  const sectionRegex = /"heading":\s*"((?:[^"\\]|\\.)*)"/g;
+  const contentRegex = /"content":\s*"((?:[^"\\]|\\.){10,})"/g;
+  const headings = [];
+  const contents = [];
+  let m;
+  while ((m = sectionRegex.exec(raw)) !== null) headings.push(m[1].trim());
+  while ((m = contentRegex.exec(raw)) !== null) contents.push(m[1].trim());
+  const maxSections = Math.max(headings.length, contents.length);
+  for (let i = 0; i < maxSections; i++) {
+    if (headings[i]) parts.push(`## ${headings[i]}`);
+    if (contents[i]) parts.push(contents[i]);
+  }
+
+  // If no sections found, fall back to extracting all string values > 30 chars
+  if (parts.length === 0) {
+    const allStrings = raw.matchAll(/"[^"]+?":\s*"((?:[^"\\]|\\.){30,})"/g);
+    for (const match of allStrings) {
+      const val = match[1].trim();
+      if (val && !/^Summary Type:/i.test(val)) parts.push(val);
+    }
+  }
+
+  return parts.join('\n\n');
+}
+
 export function convertJsonToPlainText(text) {
   if (!text) {
     return '';
@@ -133,15 +174,39 @@ export function convertJsonToPlainText(text) {
           }
           if (vals.length > 0) return vals.join('\n\n');
         }
+      }
+      const partial = tryParsePartialJson(trimmed);
+      if (partial) {
+        if (isLearningPayload(partial)) return learningPayloadToPlainText(partial);
+        return formatJsonAsPlainText(partial);
+      }
+      const fenced = text.match(/```json\s*([\s\S]*?)\s*```/i);
+      if (fenced) {
+        const inner = tryParsePartialJson(fenced[1].trim()) || (() => {
+          try {
+            return JSON.parse(fenced[1].trim());
+          } catch {
+            return null;
+          }
+        })();
+        if (inner) {
+          if (isLearningPayload(inner)) return learningPayloadToPlainText(inner);
+          return formatJsonAsPlainText(inner);
+        }
+      }
+      if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && /"[^"]+"\s*:/.test(trimmed)) {
+        // Try rich extraction first (handles escaped chars, structured headings + content)
+        const salvaged = extractReadableTextFromMalformedJson(trimmed);
+        if (salvaged && salvaged.trim().length > 20) return salvaged;
+        // Fallback: simple key-value pairs for short/simple JSON objects
         const keyValuePairs = [];
-        const regex = /"([^"]+)":\s*"([^"]*)"/g;
-        let match;
-        while ((match = regex.exec(trimmed)) !== null) {
-          keyValuePairs.push(`**${match[1]}:** ${match[2]}\n`);
+        const kvRegex = /"([^"]+)":\s*"([^"]*)"/g;
+        let kv;
+        while ((kv = kvRegex.exec(trimmed)) !== null) {
+          keyValuePairs.push(`**${kv[1]}:** ${kv[2]}\n`);
         }
-        if (keyValuePairs.length > 0) {
-          return keyValuePairs.join('\n');
-        }
+        if (keyValuePairs.length > 0) return keyValuePairs.join('\n');
+        return '';
       }
       return text;
     }
@@ -155,8 +220,40 @@ export function convertJsonToPlainText(text) {
   return text;
 }
 
+const GENERATED_SECTION_ORDER = [
+  { key: '2_1_ground_wise_summary', title: 'Ground-wise Summary' },
+  { key: '2_2_annexure_summary', title: 'Annexure Summary' },
+  { key: '2_3_risk_and_weak_points', title: 'Risk and Weak Points' },
+  { key: '2_4_expected_counter_arguments', title: 'Expected Counter Arguments' },
+  { key: '2_5_evidence_matrix', title: 'Evidence Matrix' },
+  { key: '2_6_opponent_submissions_summary', title: 'Opponent Submissions Summary' },
+  { key: '2_7_procedural_timeline_summary', title: 'Procedural Timeline Summary' },
+  { key: '2_8_legal_strategy_note', title: 'Legal Strategy Note' },
+  { key: '2_9_compliance_and_deficiency_summary', title: 'Compliance and Deficiency Summary' },
+  { key: '2_10_court_history_summary', title: 'Court History Summary' },
+];
+
+function appendGeneratedSectionsMarkdown(formattedText, sections) {
+  if (!sections || typeof sections !== 'object') return formattedText;
+  let out = formattedText;
+  GENERATED_SECTION_ORDER.forEach(({ key, title }) => {
+    const section = sections[key];
+    if (section && section.generated_text) {
+      const sectionText = String(section.generated_text).trim();
+      if (sectionText && !/^Summary Type:\s*(Extractive|Abstractive)/i.test(sectionText)) {
+        out += `## ${title}\n\n${sectionText}\n\n`;
+      }
+    }
+  });
+  return out;
+}
+
 function formatJsonAsPlainText(jsonData) {
   let formattedText = '';
+
+  if (jsonData.generated_sections && typeof jsonData.generated_sections === 'object') {
+    formattedText = appendGeneratedSectionsMarkdown('', jsonData.generated_sections);
+  }
 
   if (jsonData.schemas && jsonData.schemas.output_summary_template) {
     const template = jsonData.schemas.output_summary_template;
@@ -176,35 +273,7 @@ function formatJsonAsPlainText(jsonData) {
     }
 
     if (template.generated_sections) {
-      const sections = template.generated_sections;
-      
-      const sectionOrder = [
-        { key: '2_1_ground_wise_summary', title: 'Ground-wise Summary' },
-        { key: '2_2_annexure_summary', title: 'Annexure Summary' },
-        { key: '2_3_risk_and_weak_points', title: 'Risk and Weak Points' },
-        { key: '2_4_expected_counter_arguments', title: 'Expected Counter Arguments' },
-        { key: '2_5_evidence_matrix', title: 'Evidence Matrix' },
-        { key: '2_6_opponent_submissions_summary', title: 'Opponent Submissions Summary' },
-        { key: '2_7_procedural_timeline_summary', title: 'Procedural Timeline Summary' },
-        { key: '2_8_legal_strategy_note', title: 'Legal Strategy Note' },
-        { key: '2_9_compliance_and_deficiency_summary', title: 'Compliance and Deficiency Summary' },
-        { key: '2_10_court_history_summary', title: 'Court History Summary' },
-      ];
-
-      sectionOrder.forEach(({ key, title }) => {
-        const section = sections[key];
-        if (section && section.generated_text) {
-          const text = section.generated_text.trim();
-          if (text && !text.match(/^Summary Type:\s*(Extractive|Abstractive|Extractive \+ Abstractive)$/i)) {
-            formattedText += `## ${title}\n\n`;
-            formattedText += `${text}\n\n`;
-            if (section.required_summary_type) {
-              formattedText += `*Summary Type: ${section.required_summary_type}*\n\n`;
-            }
-            formattedText += '---\n\n';
-          }
-        }
-      });
+      formattedText = appendGeneratedSectionsMarkdown(formattedText, template.generated_sections);
     }
 
     if (!formattedText || formattedText.trim().length < 50) {
@@ -229,6 +298,34 @@ function formatJsonAsPlainText(jsonData) {
   return formattedText;
 }
 
+function escapeMarkdownTableCell(value) {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+}
+
+function objectArrayToMarkdownTable(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  if (!items.every(item => item && typeof item === 'object' && !Array.isArray(item))) return '';
+
+  const columns = [];
+  const seen = new Set();
+  items.forEach(item => {
+    Object.keys(item).forEach(key => {
+      if (!seen.has(key)) {
+        seen.add(key);
+        columns.push(key);
+      }
+    });
+  });
+  if (columns.length < 2 || columns.length > 12) return '';
+
+  const header = `| ${columns.map(key => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())).join(' | ')} |`;
+  const separator = `| ${columns.map(() => '---').join(' | ')} |`;
+  const rows = items.map(item => `| ${columns.map(key => escapeMarkdownTableCell(item[key])).join(' | ')} |`);
+  return [header, separator, ...rows].join('\n');
+}
+
 function extractTextFromJson(obj, depth = 0) {
   if (depth > 10) return '';
   
@@ -246,6 +343,8 @@ function extractTextFromJson(obj, depth = 0) {
   }
   
   if (Array.isArray(obj)) {
+    const table = objectArrayToMarkdownTable(obj);
+    if (table) return table;
     obj.forEach((item, index) => {
       const extracted = extractTextFromJson(item, depth + 1);
       if (extracted && extracted.trim()) {
@@ -327,4 +426,3 @@ function extractTextFromJson(obj, depth = 0) {
   
   return text.trim();
 }
-

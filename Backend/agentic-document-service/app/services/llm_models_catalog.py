@@ -29,6 +29,7 @@ _QUERIES = (
       AND (
         LOWER(TRIM(name::text)) LIKE 'gemini%'
         OR LOWER(TRIM(name::text)) LIKE 'claude%'
+        OR LOWER(TRIM(name::text)) LIKE 'deepseek%'
       )
     ORDER BY id NULLS LAST
     """,
@@ -39,6 +40,7 @@ _QUERIES = (
       AND (
         LOWER(TRIM(name::text)) LIKE 'gemini%'
         OR LOWER(TRIM(name::text)) LIKE 'claude%'
+        OR LOWER(TRIM(name::text)) LIKE 'deepseek%'
       )
     ORDER BY id NULLS LAST
     """,
@@ -128,7 +130,7 @@ def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
         return catalog[tail]
     if not catalog:
         return candidate
-    if tail.startswith("gemini") or tail.startswith("claude"):
+    if tail.startswith("gemini") or tail.startswith("claude") or tail.startswith("deepseek"):
         return candidate
     return fb if fb else candidate
 

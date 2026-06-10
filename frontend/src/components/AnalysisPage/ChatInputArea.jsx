@@ -1,7 +1,10 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Send, Loader2, ChevronDown, Bot, X, Wrench, Mic, MicOff } from 'lucide-react';
 import UploadOptionsMenu from '../UploadOptionsMenu';
 import PromptChipsBar from '../PromptChipsBar';
+
+const CHAT_INPUT_MIN_HEIGHT = 24;
+const CHAT_INPUT_MAX_HEIGHT = 200;
 
 const ChatInputArea = ({
   fileInputRef,
@@ -38,6 +41,7 @@ const ChatInputArea = ({
   setChatInput, // Need this to update input from voice
 }) => {
   const toolsDropdownRef = useRef(null);
+  const chatInputRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
 
@@ -73,6 +77,31 @@ const ChatInputArea = ({
       setRecognition(recognitionInstance);
     }
   }, [isSecretPromptSelected, setChatInput, setActiveDropdown, setSelectedSecretId, setIsSecretPromptSelected]);
+
+  const resizeChatInput = useCallback(() => {
+    const ta = chatInputRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(ta.scrollHeight, CHAT_INPUT_MIN_HEIGHT), CHAT_INPUT_MAX_HEIGHT);
+    ta.style.height = `${nextHeight}px`;
+    ta.style.overflowY = ta.scrollHeight > CHAT_INPUT_MAX_HEIGHT ? 'auto' : 'hidden';
+  }, []);
+
+  useEffect(() => {
+    resizeChatInput();
+  }, [chatInput, resizeChatInput]);
+
+  const onInputChange = (e) => {
+    handleChatInputChange(e);
+    requestAnimationFrame(resizeChatInput);
+  };
+
+  const onInputKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      e.currentTarget.form?.requestSubmit();
+    }
+  };
 
   const toggleListening = () => {
     if (!recognition) {
@@ -116,7 +145,7 @@ const ChatInputArea = ({
               className={isSplitView ? 'mb-1' : 'mb-1.5'}
             />
           )}
-          <div className={`flex items-center space-x-3 bg-gray-50 rounded-xl border ${isSplitView ? 'border-gray-200 px-2.5 py-2' : 'border-gray-500 px-5 py-6'} focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container`}>
+          <div className={`flex items-end space-x-3 bg-gray-50 rounded-xl border ${isSplitView ? 'border-gray-200 px-2.5 py-2' : 'border-gray-500 px-5 py-6'} focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container`}>
             <UploadOptionsMenu
               fileInputRef={fileInputRef}
               isUploading={isUploading}
@@ -161,12 +190,15 @@ const ChatInputArea = ({
                 </div>
               )}
             </div>
-            <input
-              type="text"
+            <textarea
+              ref={chatInputRef}
+              rows={1}
               value={chatInput}
-              onChange={handleChatInputChange}
+              onChange={onInputChange}
+              onKeyDown={onInputKeyDown}
               placeholder={getInputPlaceholder()}
-              className={`flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 ${isSplitView ? 'text-xs' : 'text-[15px]'} font-medium ${isSplitView ? 'py-1' : 'py-2'} min-w-0 analysis-page-user-input`}
+              className={`flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 ${isSplitView ? 'text-xs' : 'text-[15px]'} font-medium ${isSplitView ? 'py-1' : 'py-2'} min-w-0 analysis-page-user-input resize-none leading-relaxed`}
+              style={{ maxHeight: CHAT_INPUT_MAX_HEIGHT, minHeight: CHAT_INPUT_MIN_HEIGHT }}
               disabled={
                 isLoading ||
                 isGeneratingInsights ||

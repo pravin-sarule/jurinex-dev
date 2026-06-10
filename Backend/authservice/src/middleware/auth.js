@@ -10,7 +10,7 @@
 
 //     if (!req.user || (roles.length > 0 && !roles.includes(req.user.role))) {
 
-const { verifyToken } = require('../utils/jwt');
+const { verifyToken, verifyTokenLenient } = require('../utils/jwt');
 const User = require('../models/User');
 
 const authenticateToken = async (req, res, next) => {
@@ -59,6 +59,37 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
+// Lenient version for fire-and-forget endpoints (e.g. activity ping).
+// Accepts expired tokens so a session timeout never causes a hard 403.
+// If the token is missing or fully invalid (bad signature), sets req.user = null and continues.
+const softProtect = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (!token) {
+      req.user = null;
+      return next();
+    }
+    const decoded = verifyTokenLenient(token);
+    if (!decoded) {
+      req.user = null;
+      return next();
+    }
+    const userId = decoded.id || decoded.userId;
+    if (!userId) {
+      req.user = null;
+      return next();
+    }
+    const user = await User.findById(userId);
+    req.user = user || null;
+    next();
+  } catch (error) {
+    console.error('❌ softProtect error:', error.message);
+    req.user = null;
+    next();
+  }
+};
+
 const authorize = (roles = []) => {
   if (typeof roles === 'string') roles = [roles];
   return (req, res, next) => {
@@ -73,5 +104,6 @@ const authorize = (roles = []) => {
 
 module.exports = {
   protect: authenticateToken,
+  softProtect,
   authorize,
 };

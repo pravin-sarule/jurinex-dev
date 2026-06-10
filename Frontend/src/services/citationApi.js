@@ -3,6 +3,7 @@
  * Base URL: CITATION_SERVICE_URL (citation-service Cloud Run)
  */
 import { CITATION_SERVICE_URL, AUTH_SERVICE_URL } from '../config/apiConfig';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 
 function getAuthHeader() {
   const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
@@ -69,8 +70,7 @@ export const citationApi = {
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || err.error || 'Failed to generate report');
+      await throwIfQuotaResponse(res, 'Failed to generate report');
     }
     return res.json();
   },
@@ -169,7 +169,7 @@ export const citationApi = {
       const msg = err?.message || 'Network request failed';
       throw new Error(`Citation service unreachable at ${CITATION_SERVICE_URL}. ${msg}`);
     }
-    if (!res.ok) throw new Error('Failed to start pipeline');
+    if (!res.ok) await throwIfQuotaResponse(res, 'Failed to start pipeline');
     return res.json(); // { run_id, status: 'running' }
   },
 

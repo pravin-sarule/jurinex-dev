@@ -1,4 +1,5 @@
 import { CHAT_DRAFT_BACKEND_URL, getUserIdForDrafting } from '../config/apiConfig';
+import { throwIfQuotaResponse } from '../utils/quotaError';
 
 const getAuthToken = () =>
   localStorage.getItem('token') ||
@@ -30,8 +31,7 @@ export const createChatDraftSession = async ({ templateText, templateFile, docum
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.detail || `HTTP ${res.status}`);
+    await throwIfQuotaResponse(res, 'Failed to create draft session');
   }
   return res.json();
 };
@@ -44,8 +44,7 @@ export const sendChatDraftMessage = async (sessionId, message) => {
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.detail || `HTTP ${res.status}`);
+    await throwIfQuotaResponse(res, 'Failed to send message');
   }
   return res.json();
 };
@@ -56,8 +55,7 @@ export const exportChatDraftDocx = async (sessionId) => {
     headers: authHeaders(),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.detail || `HTTP ${res.status}`);
+    await throwIfQuotaResponse(res, 'Export failed');
   }
   return res.blob();
 };
@@ -81,8 +79,7 @@ export const saveChatDraftToGoogleDocs = async ({
     }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.detail || `HTTP ${res.status}`);
+    await throwIfQuotaResponse(res, 'Failed to save to Google Docs');
   }
   return res.json();
 };

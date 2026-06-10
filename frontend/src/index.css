@@ -6,6 +6,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+button, [role="button"] {
+  cursor: pointer;
+}
+
 body::-webkit-scrollbar {}
 
 

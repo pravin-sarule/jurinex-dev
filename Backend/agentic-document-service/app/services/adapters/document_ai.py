@@ -8,8 +8,35 @@ from typing import Any
 
 from app.schemas.contracts import DocumentReference, DocumentType
 from app.services.llm_chat_config import get_summarization_chat_config, resolve_model_name
+from app.services.token_usage_log import log_token_usage_table
 
 logger = logging.getLogger("agentic_document_service.document_ai")
+DEFAULT_MAX_OUTPUT_TOKENS = 65536
+DEEPSEEK_MAX_OUTPUT_TOKENS = 384000
+
+_MARKDOWN_RENDERING_CONTRACT = """
+OUTPUT RENDERING CONTRACT:
+- Return GitHub-Flavored Markdown only. Do not wrap the whole answer in a markdown code fence.
+- Use clear headings, short paragraphs, bullets, and numbered lists where appropriate.
+- CRITICAL: When source data is comparative, chronological, evidentiary, financial, or otherwise tabular (including numbered proceedings lists, schedules, S.No / date / description rows, or any list with consistent columns), you MUST reconstruct it as a proper Markdown table — do NOT present it as a flat paragraph or bullet list.
+- Infer column headers from context if the source document headers are unclear or poorly OCR'd.
+- Every Markdown table MUST include a header row and a valid separator row, for example:
+  | S.No | Date | Description | Reference |
+  |---|---|---|---|
+- Keep every table row on one physical line. Replace line breaks inside cells with spaces.
+- Escape literal pipe characters inside table cells as \\|.
+- Do not emit HTML tables.
+""".strip()
+
+_JSON_RENDERING_CONTRACT = """
+OUTPUT RENDERING CONTRACT:
+- Return valid JSON only, matching the requested structure. Do not add explanations before or after the JSON.
+- When a JSON string value contains comparative, chronological, evidentiary, financial, or otherwise tabular data, represent it as a GitHub-Flavored Markdown table inside that string value.
+- Every Markdown table inside a JSON string value MUST include a header row and a valid separator row (e.g. | Date | Event | Source |\\n|---|---|---|).
+- Keep every table row on one physical line inside the JSON string; replace cell-internal newlines with spaces.
+- Also use bold, italic, and bullet lists inside JSON string values to preserve rich structure from source documents.
+- Do not emit HTML tables anywhere in the JSON.
+""".strip()
 _gemini_extract_unavailable_logged = False
 _gemini_qa_unavailable_logged = False
 _SPEAKER_LINE_RE = re.compile(r"\[\s*Speaker\s+([^\]]+?)\s*\]\s*:\s*(.+)", re.IGNORECASE)
@@ -117,18 +144,30 @@ def _model_tail_lower(model_name: str) -> str:
 def _detect_provider(model_name: str) -> str:
     """
     Detect the LLM provider from the model name string (from agent_prompts → llm_models.name).
-    Returns 'gemini' or 'claude'.
+    Returns 'gemini', 'claude', or 'deepseek'.
     Uses the last path segment so DB values like 'anthropic/claude-sonnet-4-20250514' route to Claude.
     Default is 'gemini' for unknown names.
     """
     tail = _model_tail_lower(model_name)
     if tail.startswith("claude"):
         return "claude"
+    if tail.startswith("deepseek"):
+        return "deepseek"
     return "gemini"
 
 
 def _anthropic_messages_model_id(model_name: str) -> str:
     """Anthropic Messages API expects 'claude-...' without vendor or URI prefix."""
+    s = (model_name or "").strip()
+    if not s:
+        return s
+    if "/" in s:
+        return s.split("/")[-1].strip()
+    return s
+
+
+def _deepseek_model_id(model_name: str) -> str:
+    """Return the bare model id expected by DeepSeek API (strip any vendor/ prefix)."""
     s = (model_name or "").strip()
     if not s:
         return s
@@ -172,16 +211,88 @@ def _anthropic_client():
         return None
 
 
+def _deepseek_client():
+    """Return an OpenAI-compatible client configured for DeepSeek API, or None if unavailable."""
+    try:
+        import openai  # type: ignore
+        from app.core.config import get_settings
+
+        api_key = get_settings().deepseek_api_key
+        if not api_key:
+            logger.warning("[DocumentAI] DEEPSEEK_API_KEY is not set — DeepSeek calls will fail")
+            return None
+        return openai.OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com",
+            timeout=600.0,
+            max_retries=2,
+        )
+    except ImportError:
+        logger.warning("[DocumentAI] openai package not installed — run: pip install openai")
+        return None
+    except Exception as exc:
+        logger.warning("[DocumentAI] DeepSeek client init failed: %s", exc)
+        return None
+
+
+def _deepseek_expects_json(prompt: str, llm_params: dict) -> bool:
+    if llm_params.get("structured_outputs_enabled"):
+        return True
+    prompt_lower = str(prompt or "").lower()
+    # Only trigger JSON mode when the FORMATTING INSTRUCTIONS explicitly request JSON output.
+    # Check for the critical output formatting block injected by secret_prompt_display /
+    # addSecretPromptJsonFormatting — not just any occurrence of "```json" in document content.
+    json_instruction_markers = (
+        "response must be valid json",
+        "return valid json",
+        "output must be valid json",
+        "absolute requirement: your response must be valid json",
+        "critical output formatting requirements",
+    )
+    return any(marker in prompt_lower for marker in json_instruction_markers)
+
+
+_DEEPSEEK_JSON_MODE_SUFFIX = (
+    "\n\n"
+    "IMPORTANT (DeepSeek JSON mode): respond with raw JSON only — no markdown wrapper. "
+    "Use Markdown formatting (tables, bold, lists) inside JSON string values where the data is structured or tabular."
+)
+
+
+def _deepseek_output_contract(prompt: str, llm_params: dict) -> str:
+    if _deepseek_expects_json(prompt, llm_params):
+        return _JSON_RENDERING_CONTRACT + _DEEPSEEK_JSON_MODE_SUFFIX
+    return _MARKDOWN_RENDERING_CONTRACT
+
+
+def _deepseek_messages(prompt: str, llm_params: dict) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    sys_instr = str(llm_params.get("system_instructions") or "").strip()
+    rendering_contract = _deepseek_output_contract(prompt, llm_params)
+    combined_system = "\n\n".join(part for part in (sys_instr, rendering_contract) if part)
+    if combined_system:
+        messages.append({"role": "system", "content": combined_system})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def normalize_markdown_render_output(text: str) -> str:
+    """Remove provider-added outer Markdown fences while preserving inner code blocks."""
+    cleaned = str(text or "").strip()
+    match = re.fullmatch(r"```(?:markdown|md)?\s*\n([\s\S]*?)\n```", cleaned, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else cleaned
+
+
 def _max_tokens_from_summarization_config(config: dict, *, for_summary: bool) -> int:
     """Compute effective max_output_tokens from a merged summarization_chat_config dict."""
     max_tokens = int(
         config.get("max_summarization_output_tokens") if for_summary
         else (config.get("max_output_tokens") or 0)
     )
-    max_cap = max(1, int(config.get("max_output_tokens_cap") or 65536))
+    max_cap = max(1, int(config.get("max_output_tokens_cap") or DEFAULT_MAX_OUTPUT_TOKENS))
     min_tokens = max(1, int(config.get("min_output_tokens") or 1))
     if max_tokens <= 0:
-        max_tokens = 15000 if for_summary else 20000
+        max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
     return max(min_tokens, min(max_tokens, max_cap))
 
 
@@ -200,10 +311,10 @@ def _max_tokens_from_agent_prompt(cfg: Any, llm_params: dict, *, for_summary: bo
       1) llm_parameters.max_summarization_output_tokens (summary calls only)
       2) llm_parameters.max_output_tokens
       3) llm_parameters.max_tokens
-      4) defaults (summary: 10000, non-summary: 10000)
+      4) service default (65536)
     """
-    default_tokens = 10000 if for_summary else 10000
-    cap = _int_or_default(llm_params.get("max_output_tokens_cap"), 65536)
+    default_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+    cap = _int_or_default(llm_params.get("max_output_tokens_cap"), DEFAULT_MAX_OUTPUT_TOKENS)
     min_tokens = _int_or_default(llm_params.get("min_output_tokens"), 1)
     if min_tokens > cap:
         min_tokens, cap = cap, min_tokens
@@ -282,6 +393,7 @@ def _generation_config(
     agent_name: str | None = None,
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
+    model_name_override: str | None = None,
 ) -> tuple[str, dict, dict]:
     """
     Build (model_name, gen_kwargs, llm_params) for a Gemini call.
@@ -331,7 +443,8 @@ def _generation_config(
                 llm_params.get("grounding_google_search", False),
                 llm_params.get("code_execution", False),
             )
-            return cfg.model_name, gen_kwargs, llm_params
+            resolved_model_name = str(model_name_override or cfg.model_name).strip()
+            return resolved_model_name, gen_kwargs, llm_params
         except Exception as exc:
             logger.warning(
                 "[DocumentAI] agent_config_service failed for agent=%s: %s "
@@ -343,6 +456,7 @@ def _generation_config(
     # ── Fallback: summarization_chat_config (no agent_name or agent load error) ──
     config = summarization_llm_config or get_summarization_chat_config(user_id=user_id)
     model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
+    model_name = str(model_name_override or model_name).strip()
     max_tokens = _max_tokens_from_summarization_config(config, for_summary=for_summary)
     temperature = float(config.get("model_temperature") or 0.7)
     temperature = min(
@@ -551,6 +665,7 @@ def stream_config_for_folder_chat(
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
     agent_name: str | None = None,
+    model_name_override: str | None = None,
 ) -> tuple[str, str, Any]:
     """
     Unified streaming config for folder intelligent-chat SSE.
@@ -569,10 +684,13 @@ def stream_config_for_folder_chat(
         agent_name=agent_name or GROUNDED_RETRIEVAL_AGENT_NAME,
         user_id=user_id,
         summarization_llm_config=summarization_llm_config,
+        model_name_override=model_name_override,
     )
     provider = _detect_provider(model_name)
     if provider == "claude":
         return "claude", model_name, (gen_kwargs, llm_params)
+    if provider == "deepseek":
+        return "deepseek", model_name, (gen_kwargs, llm_params)
     return "gemini", model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
 
 
@@ -596,7 +714,10 @@ def claude_stream_generator(
         logger.warning("[DocumentAI] Claude stream skipped — Anthropic client unavailable")
         return
 
-    max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
+    max_tokens = min(
+        DEEPSEEK_MAX_OUTPUT_TOKENS,
+        int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
+    )
     temperature = float(gen_kwargs.get("temperature") or 1.0)
     api_model = _anthropic_messages_model_id(model_name)
 
@@ -625,6 +746,22 @@ def claude_stream_generator(
     with client.messages.stream(**create_kwargs) as stream:
         for text_chunk in stream.text_stream:
             yield text_chunk
+        final_msg = stream.get_final_message()
+        usage = getattr(final_msg, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        log_token_usage_table(
+            context="claude_stream",
+            usage={
+                "provider": "claude",
+                "model": api_model,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": input_tokens + output_tokens,
+            },
+            provider="claude",
+            model_name=api_model,
+        )
 
 
 # ── Claude (Anthropic) generation ─────────────────────────────────────────────
@@ -694,11 +831,173 @@ def _generate_text_claude(
 
     response = client.messages.create(**create_kwargs)
 
+    usage = getattr(response, "usage", None)
+    logger.info(
+        "[TokenUsage] provider=claude  model=%s  prompt_tokens=%s  completion_tokens=%s  total_tokens=%s",
+        api_model,
+        getattr(usage, "input_tokens", "?"),
+        getattr(usage, "output_tokens", "?"),
+        (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0),
+    )
+
     # Extract text from content blocks (thinking blocks are skipped)
     for block in response.content:
         if getattr(block, "type", None) == "text":
             return (block.text or "").strip()
     return ""
+
+
+# ── DeepSeek (OpenAI-compatible) generation ──────────────────────────────────
+
+def _generate_text_deepseek(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+) -> str:
+    """
+    Call the DeepSeek chat completions API (OpenAI-compatible).
+
+    Supported llm_parameters flags:
+      system_instructions str  — system prompt
+      max_output_tokens   int  — mapped to max_tokens
+      thinking_mode       bool — enables DeepSeek reasoning (reasoning_effort=high)
+    """
+    client = _deepseek_client()
+    if client is None:
+        logger.warning("[DocumentAI] DeepSeek call skipped — client unavailable")
+        return ""
+
+    max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
+    temperature = float(gen_kwargs.get("temperature") or 1.0)
+    api_model = _deepseek_model_id(model_name)
+
+    messages = _deepseek_messages(prompt, llm_params)
+
+    create_kwargs: dict = {
+        "model": api_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if _deepseek_expects_json(prompt, llm_params):
+        create_kwargs["response_format"] = {"type": "json_object"}
+
+    if llm_params.get("thinking_mode"):
+        create_kwargs["reasoning_effort"] = "high"
+        create_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+    else:
+        create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+    logger.info(
+        "[DocumentAI] ▶ DeepSeek generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
+        api_model, model_name, temperature, max_tokens,
+    )
+
+    try:
+        response = client.chat.completions.create(**create_kwargs)
+    except Exception as exc:
+        logger.exception(
+            "[DocumentAI] DeepSeek generate failed model=%s error=%s",
+            api_model,
+            exc,
+        )
+        raise
+    usage = getattr(response, "usage", None)
+    logger.info(
+        "[TokenUsage] provider=deepseek  model=%s  prompt_tokens=%s  completion_tokens=%s  total_tokens=%s",
+        api_model,
+        getattr(usage, "prompt_tokens", "?"),
+        getattr(usage, "completion_tokens", "?"),
+        getattr(usage, "total_tokens", "?"),
+    )
+    return normalize_markdown_render_output(response.choices[0].message.content or "") if response.choices else ""
+
+
+def deepseek_stream_generator(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+):
+    """
+    Yield text chunks from the DeepSeek streaming API (OpenAI-compatible SSE).
+
+    Supported flags: system_instructions, max_output_tokens, thinking_mode.
+    """
+    client = _deepseek_client()
+    if client is None:
+        logger.warning("[DocumentAI] DeepSeek stream skipped — client unavailable")
+        return
+
+    max_tokens = min(
+        DEEPSEEK_MAX_OUTPUT_TOKENS,
+        int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
+    )
+    temperature = float(gen_kwargs.get("temperature") or 1.0)
+    api_model = _deepseek_model_id(model_name)
+
+    messages = _deepseek_messages(prompt, llm_params)
+
+    create_kwargs: dict = {
+        "model": api_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if _deepseek_expects_json(prompt, llm_params):
+        create_kwargs["response_format"] = {"type": "json_object"}
+
+    if llm_params.get("thinking_mode"):
+        create_kwargs["reasoning_effort"] = "high"
+        create_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+    else:
+        create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+    logger.info(
+        "[DocumentAI] ▶ DeepSeek stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
+        api_model, model_name, temperature, max_tokens,
+    )
+
+    try:
+        stream = client.chat.completions.create(**create_kwargs)
+    except Exception as exc:
+        logger.exception(
+            "[DocumentAI] DeepSeek stream failed model=%s error=%s",
+            api_model,
+            exc,
+        )
+        raise
+    final_usage: dict[str, int] | None = None
+    for chunk in stream:
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            if not total_tokens and (prompt_tokens or completion_tokens):
+                total_tokens = prompt_tokens + completion_tokens
+            final_usage = {
+                "inputTokens": prompt_tokens,
+                "outputTokens": completion_tokens,
+                "totalTokens": total_tokens,
+            }
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta and delta.content:
+            yield delta.content
+    if final_usage:
+        log_token_usage_table(
+            context="deepseek_stream",
+            usage={"provider": "deepseek", "model": api_model, **final_usage},
+            provider="deepseek",
+            model_name=api_model,
+        )
 
 
 # ── Unified text generation (routes Gemini ↔ Claude) ─────────────────────────
@@ -710,6 +1009,7 @@ def _generate_text(
     agent_name: str | None = None,
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
+    model_name_override: str | None = None,
 ) -> str:
     """
     Generate text using either Gemini or Claude depending on the model name
@@ -724,6 +1024,7 @@ def _generate_text(
         agent_name=agent_name,
         user_id=user_id,
         summarization_llm_config=summarization_llm_config,
+        model_name_override=model_name_override,
     )
     provider = _detect_provider(model_name)
 
@@ -740,6 +1041,14 @@ def _generate_text(
             llm_params=llm_params,
         )
 
+    if provider == "deepseek":
+        return _generate_text_deepseek(
+            prompt,
+            model_name=model_name,
+            gen_kwargs=gen_kwargs,
+            llm_params=llm_params,
+        )
+
     # ── Gemini ───────────────────────────────────────────────────────────────
     client = _gemini_client()
     if client is None:
@@ -750,6 +1059,24 @@ def _generate_text(
         model=model_name,
         contents=prompt,
         config=gemini_config,
+    )
+    um = getattr(response, "usage_metadata", None)
+    prompt_tokens = int(getattr(um, "prompt_token_count", 0) or 0)
+    completion_tokens = int(getattr(um, "candidates_token_count", 0) or 0)
+    total_tokens = int(getattr(um, "total_token_count", 0) or 0)
+    if not total_tokens and (prompt_tokens or completion_tokens):
+        total_tokens = prompt_tokens + completion_tokens
+    log_token_usage_table(
+        context="gemini_generate",
+        usage={
+            "provider": "gemini",
+            "model": model_name,
+            "inputTokens": prompt_tokens,
+            "outputTokens": completion_tokens,
+            "totalTokens": total_tokens,
+        },
+        provider="gemini",
+        model_name=model_name,
     )
     return (getattr(response, "text", None) or "").strip()
 
@@ -849,6 +1176,7 @@ def _call_gemini_for_qa(
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
     agent_name: str | None = None,
+    model_name_override: str | None = None,
 ) -> dict[str, str]:
     """
     Ask Gemini a question grounded in the provided document texts.
@@ -925,7 +1253,12 @@ def _call_gemini_for_qa(
             elif intent_hint == "summary":
                 instruction_parts.append("Provide a structured summary that captures the most material facts and issues from the record.")
             if format_hint == "structured":
-                instruction_parts.append("Use a structured format with short headings and bullet points where useful.")
+                instruction_parts.append(
+                    "Use GitHub-Flavored Markdown with short headings and bullets. "
+                    "For comparative, chronological, evidentiary, or financial information, use a Markdown table "
+                    "with a header row and a valid separator row such as |---|---|. "
+                    "Keep each table row on one line and do not use HTML tables."
+                )
         if extra_instructions:
             instruction_parts.append(extra_instructions.strip())
 
@@ -943,6 +1276,7 @@ def _call_gemini_for_qa(
             agent_name=agent_name or _AGENT_QA,
             user_id=user_id,
             summarization_llm_config=summarization_llm_config,
+            model_name_override=model_name_override,
         )
         if require_speaker_diarization:
             diarization_suffix = _build_speaker_diarization_suffix(document_texts)

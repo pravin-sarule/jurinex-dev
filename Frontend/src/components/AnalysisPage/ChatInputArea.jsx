@@ -1,15 +1,18 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { Send, Loader2, BookOpen, ChevronDown, Bot, X, Wrench, Mic, MicOff } from 'lucide-react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { Send, Loader2, ChevronDown, Bot, X, Wrench, Mic, MicOff } from 'lucide-react';
 import UploadOptionsMenu from '../UploadOptionsMenu';
+import PromptChipsBar from '../PromptChipsBar';
+
+const CHAT_INPUT_MIN_HEIGHT = 24;
+const CHAT_INPUT_MAX_HEIGHT = 200;
 
 const ChatInputArea = ({
   fileInputRef,
   isUploading,
   handleFileUpload,
   handleGoogleDriveUpload,
-  showDropdown,
-  setShowDropdown,
   fileId,
+  selectedSecretId,
   processingStatus,
   isLoading,
   isGeneratingInsights,
@@ -37,8 +40,8 @@ const ChatInputArea = ({
   folderName = null,
   setChatInput, // Need this to update input from voice
 }) => {
-  const dropdownRef = useRef(null);
   const toolsDropdownRef = useRef(null);
+  const chatInputRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
 
@@ -75,6 +78,31 @@ const ChatInputArea = ({
     }
   }, [isSecretPromptSelected, setChatInput, setActiveDropdown, setSelectedSecretId, setIsSecretPromptSelected]);
 
+  const resizeChatInput = useCallback(() => {
+    const ta = chatInputRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(ta.scrollHeight, CHAT_INPUT_MIN_HEIGHT), CHAT_INPUT_MAX_HEIGHT);
+    ta.style.height = `${nextHeight}px`;
+    ta.style.overflowY = ta.scrollHeight > CHAT_INPUT_MAX_HEIGHT ? 'auto' : 'hidden';
+  }, []);
+
+  useEffect(() => {
+    resizeChatInput();
+  }, [chatInput, resizeChatInput]);
+
+  const onInputChange = (e) => {
+    handleChatInputChange(e);
+    requestAnimationFrame(resizeChatInput);
+  };
+
+  const onInputKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      e.currentTarget.form?.requestSubmit();
+    }
+  };
+
   const toggleListening = () => {
     if (!recognition) {
       alert("Speech recognition is not supported in this browser.");
@@ -105,7 +133,19 @@ const ChatInputArea = ({
       
       <div className={isSplitView ? '' : 'w-full max-w-4xl px-6'}>
         <form onSubmit={handleSend} className="mx-auto">
-          <div className={`flex items-center space-x-3 bg-gray-50 rounded-xl border ${isSplitView ? 'border-gray-200 px-2.5 py-2' : 'border-gray-500 px-5 py-6'} focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container`}>
+          {(isLoadingSecrets || secrets.length > 0) && (
+            <PromptChipsBar
+              secrets={secrets}
+              isLoading={isLoadingSecrets}
+              selectedSecretId={selectedSecretId}
+              activeLabel={isSecretPromptSelected ? activeDropdown : null}
+              onSelect={(secret) => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
+              disabled={isLoading || isGeneratingInsights}
+              size={isSplitView ? 'compact' : 'default'}
+              className={isSplitView ? 'mb-1' : 'mb-1.5'}
+            />
+          )}
+          <div className={`flex items-end space-x-3 bg-gray-50 rounded-xl border ${isSplitView ? 'border-gray-200 px-2.5 py-2' : 'border-gray-500 px-5 py-6'} focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container`}>
             <UploadOptionsMenu
               fileInputRef={fileInputRef}
               isUploading={isUploading}
@@ -123,36 +163,6 @@ const ChatInputArea = ({
               disabled={isUploading}
               multiple
             />
-            <div className="relative flex-shrink-0" ref={dropdownRef}>
-              <button
-                type="button"
-                onClick={() => setShowDropdown(!showDropdown)}
-                disabled={isLoading || isGeneratingInsights || isLoadingSecrets}
-                className={`flex items-center space-x-2 ${isSplitView ? 'px-2 py-1 text-xs' : 'px-3 py-2 text-sm'} font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed`}
-              >
-                <BookOpen className={isSplitView ? 'h-3 w-3' : 'h-4 w-4'} />
-                <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
-                <ChevronDown className={isSplitView ? 'h-3 w-3' : 'h-4 w-4'} />
-              </button>
-              {showDropdown && !isLoadingSecrets && (
-                <div className="absolute bottom-full left-0 mb-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-60 overflow-y-auto">
-                  {secrets.length > 0 ? (
-                    secrets.map((secret) => (
-                      <button
-                        key={secret.id}
-                        type="button"
-                        onClick={() => handleDropdownSelect(secret.name, secret.id, secret.llm_name)}
-                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                      >
-                        {secret.name}
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-4 py-2.5 text-sm text-gray-500">No analysis prompts available</div>
-                  )}
-                </div>
-              )}
-            </div>
             <div className="relative flex-shrink-0" ref={toolsDropdownRef}>
               <button
                 type="button"
@@ -180,12 +190,15 @@ const ChatInputArea = ({
                 </div>
               )}
             </div>
-            <input
-              type="text"
+            <textarea
+              ref={chatInputRef}
+              rows={1}
               value={chatInput}
-              onChange={handleChatInputChange}
+              onChange={onInputChange}
+              onKeyDown={onInputKeyDown}
               placeholder={getInputPlaceholder()}
-              className={`flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 ${isSplitView ? 'text-xs' : 'text-[15px]'} font-medium ${isSplitView ? 'py-1' : 'py-2'} min-w-0 analysis-page-user-input`}
+              className={`flex-1 bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 ${isSplitView ? 'text-xs' : 'text-[15px]'} font-medium ${isSplitView ? 'py-1' : 'py-2'} min-w-0 analysis-page-user-input resize-none leading-relaxed`}
+              style={{ maxHeight: CHAT_INPUT_MAX_HEIGHT, minHeight: CHAT_INPUT_MIN_HEIGHT }}
               disabled={
                 isLoading ||
                 isGeneratingInsights ||

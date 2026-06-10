@@ -807,7 +807,6 @@ const Sidebar = () => {
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
     { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
-    { name: 'Billing & Usage', path: '/billing-usage', icon: CreditCardIcon },
     { name: 'User Management', path: '/user-management', icon: UserGroupIcon, firmMemberOnly: true },
   ];
 
@@ -965,10 +964,13 @@ const Sidebar = () => {
         {isProfileMenuOpen && !isSidebarCollapsed && (
           <div
             ref={profileMenuRef}
-            className={`absolute bottom-full ${isSidebarCollapsed && !isMobileView ? 'left-0 w-64 ml-[-50%]' : 'left-0 w-full'} mb-2 bg-[#161b22] border border-gray-800 rounded-xl shadow-2xl z-50 overflow-hidden max-w-xs`}
-            style={{ transform: isSidebarCollapsed && !isMobileView ? 'translateX(-50%)' : 'none' }}
+            className="absolute bottom-full left-0 w-full mb-2 z-50"
           >
-            <UserProfileMenu userData={userData || user} navigate={navigate} />
+            <UserProfileMenu
+              userData={userData || user}
+              navigate={navigate}
+              onClose={() => setIsProfileMenuOpen(false)}
+            />
           </div>
         )}
       </div>
@@ -978,13 +980,12 @@ const Sidebar = () => {
   const calculatePopupPosition = () => {
     if (profileButtonRef.current) {
       const rect = profileButtonRef.current.getBoundingClientRect();
-      const isCollapsed = isSidebarCollapsed && !isMobile;
-      if (isCollapsed) {
-        setProfileMenuPosition({
-          top: Math.max(10, window.innerHeight - 350),
-          left: rect.right + 8,
-        });
-      }
+      const menuHeight = 420;
+      const top = Math.max(8, Math.min(rect.top, window.innerHeight - menuHeight - 8));
+      setProfileMenuPosition({
+        top,
+        left: rect.right + 8,
+      });
     }
   };
 
@@ -993,15 +994,19 @@ const Sidebar = () => {
     return createPortal(
       <div
         ref={profileMenuRef}
-        className="bg-[#161b22] border border-gray-800 rounded-xl shadow-2xl z-50 overflow-hidden max-w-xs"
         style={{
           position: 'fixed',
           top: `${profileMenuPosition.top}px`,
           left: `${profileMenuPosition.left}px`,
-          width: '256px',
+          width: '272px',
+          zIndex: 9999,
         }}
       >
-        <UserProfileMenu userData={userData || user} navigate={navigate} />
+        <UserProfileMenu
+          userData={userData || user}
+          navigate={navigate}
+          onClose={() => setIsProfileMenuOpen(false)}
+        />
       </div>,
       document.body
     );
@@ -1017,7 +1022,7 @@ const Sidebar = () => {
       {!isSidebarHidden && (
         <div
           className={`hidden lg:flex bg-[#0d1117] border-r border-gray-900 flex-col transition-all duration-300 ease-in-out shadow-2xl ${isSidebarCollapsed ? 'w-20' : 'w-72'
-            } relative h-screen overflow-visible`}
+            } relative h-full overflow-visible`}
           data-sidebar-root
           style={{ display: 'flex' }}
         >

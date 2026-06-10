@@ -1,0 +1,81 @@
+// ─── Streaming renderer ───────────────────────────────────────────────────────
+// React.memo(() => true) blocks ALL props-triggered re-renders.
+// The rAF loop owns the DOM — it reads bufferRef directly and writes innerHTML,
+// bypassing React reconciliation entirely. Chunk handler is just bufferRef.current += text.
+//
+// Performance strategy for long responses:
+//   • Base THROTTLE is 120ms (~8 writes/sec) — enough for a smooth streaming feel.
+//   • For buffers > 4 KB the throttle scales up (max 350ms) so the O(n) parse
+//     never blocks the main thread long enough to cause a dropped frame.
+//   • requestIdleCallback (when available) offloads the parse to idle time so
+//     the browser can paint/scroll between parse runs.
+const StreamingMarkdown = React.memo(
+  function StreamingMarkdown({ bufferRef, scrollTargetRef }) {
+    const domRef     = useRef(null);
+    const prevLenRef = useRef(0);
+
+    useEffect(() => {
+      const BASE_THROTTLE = 120; // ms base — smooth but not aggressive
+      let lastFlush = 0;
+      let rafId;
+      let idleCbId = null;
+
+      const doWrite = (el, cur) => {
+        prevLenRef.current = cur.length;
+        lastFlush = performance.now();
+        el.innerHTML = parseMarkdown(cur);
+        // Defer the scroll check so the browser has finished layout after innerHTML
+        requestAnimationFrame(() => {
+          const sc = scrollTargetRef?.current;
+          if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 280) {
+            sc.scrollTop = sc.scrollHeight;
+          }
+        });
+      };
+
+      function tick(now) {
+        rafId = requestAnimationFrame(tick);
+        const el  = domRef.current;
+        if (!el) return;
+        const cur = bufferRef.current || '';
+        if (cur.length === prevLenRef.current) return; // nothing new
+
+        // Scale throttle with buffer size: larger buffers → less frequent parses
+        const throttle = Math.min(
+          350,
+          BASE_THROTTLE + Math.floor(cur.length / 200) * 5,
+        );
+        if (now - lastFlush < throttle) return;
+
+        // For large buffers use requestIdleCallback so the O(n) parse runs in
+        // idle time and never starves animations / scroll on the main thread.
+        if (cur.length > 5000 && typeof requestIdleCallback !== 'undefined') {
+          if (idleCbId != null) return; // already queued
+          idleCbId = requestIdleCallback(
+            () => {
+              idleCbId = null;
+              const latestEl  = domRef.current;
+              const latestCur = bufferRef.current || '';
+              if (!latestEl) return;
+              doWrite(latestEl, latestCur);
+            },
+            { timeout: 400 },
+          );
+        } else {
+          doWrite(el, cur);
+        }
+      }
+
+      rafId = requestAnimationFrame(tick);
+      return () => {
+        cancelAnimationFrame(rafId);
+        if (idleCbId != null && typeof cancelIdleCallback !== 'undefined') {
+          cancelIdleCallback(idleCbId);
+        }
+      };
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    return <div ref={domRef} className="formatted-assistant-markdown stream-active" />;
+  },
+  () => true, // never re-render from props — rAF loop owns the DOM
+);

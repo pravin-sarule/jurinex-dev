@@ -891,9 +891,10 @@ export default function IntelligentFolderChat({
                         const rawResponse = msg.text || '';
                         if (!rawResponse) return null;
                         const isStructured = isStructuredJsonResponse(rawResponse);
-                        const prepared = isStructured
+                        const formatted = isStructured
                           ? renderSecretPromptResponse(rawResponse)
-                          : ensureTableSeparators(convertJsonToPlainText(rawResponse));
+                          : convertJsonToPlainText(rawResponse);
+                        const prepared = ensureTableSeparators(formatted);
                         return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
                           <ReactMarkdown
                             key={`${index}-${chunk.length}`}

@@ -5,9 +5,9 @@
 // Calculate similarity between two strings (0-1)
 function stringSimilarity(str1, str2) {
   if (!str1 || !str2) return 0;
-  
-  const s1 = str1.toLowerCase().trim();
-  const s2 = str2.toLowerCase().trim();
+
+  const s1 = String(str1).toLowerCase().trim();
+  const s2 = String(str2).toLowerCase().trim();
   
   // Exact match
   if (s1 === s2) return 1;
@@ -127,7 +127,7 @@ export function matchPriorityLevel(extractedPriority) {
   if (!extractedPriority) return null;
   
   const priorityOptions = ['Low', 'Medium', 'High'];
-  const normalized = extractedPriority.trim();
+  const normalized = String(extractedPriority).trim();
   
   // Exact match
   const exactMatch = priorityOptions.find(p => 
