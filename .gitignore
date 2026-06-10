@@ -68,7 +68,16 @@ web_modules/
 # dotenv environment variable files
 .env
 .env.*
-!.env.example
+.env.local
+.env.*.local
+
+# GCP / API credentials
+credentials.json
+gcs-key.json
+*-credentials.json
+service-account*.json
+*.pem
+*.key
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
