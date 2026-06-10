@@ -5,7 +5,7 @@
  * Environment variables are supported with sensible defaults.
  */
 
-const DEFAULT_GATEWAY_URL = 'http://localhost:5000';
+const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
 // Get base gateway URL from environment or use deployed default
 const GATEWAY_URL =
@@ -35,7 +35,7 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'http://localhost:5001';
+  'https://authservice-120280829617.asia-south1.run.app';
 
 const IS_LOCAL_DEV_HOST =
   typeof window !== 'undefined' &&
@@ -43,7 +43,7 @@ const IS_LOCAL_DEV_HOST =
 
 /** Python ADK agentic chat service (replaces legacy Node ChatModel when set). */
 const DEFAULT_AGENTIC_CHAT_HOST =
-  'http://localhost:8096';
+  'https://agentic-chat-service-120280829617.asia-south1.run.app';
 
 const rawAgenticChat =
   import.meta.env.VITE_APP_AGENTIC_CHAT_SERVICE_URL ||
