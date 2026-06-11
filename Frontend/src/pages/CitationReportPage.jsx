@@ -3006,23 +3006,11 @@ export default function CitationReportPage({ embedded = false }) {
     setSuggestingKeywords(true);
     setSuggestedKeywords(null);
     try {
-      let ctx = null;
-      if (selCase) {
-        try {
-          const cr = await documentApi.getCaseById(selCase);
-          const cd = cr?.case ?? cr;
-          const fn = cd?.folders?.[0]?.name ?? cd?.folders?.[0]?.originalname;
-          if (fn) {
-            const fr = await documentApi.getDocumentsInFolder(fn);
-            const files = fr?.files ?? fr?.data ?? (Array.isArray(fr) ? fr : []);
-            ctx = (Array.isArray(files) ? files : []).map(f => ({ name: f.originalname || f.name || 'doc', snippet: (f.summary || f.full_text_content || '').slice(0, 4000) })).filter(f => f.snippet);
-          }
-        } catch (e) { console.warn(e); }
-      }
+      // Backend fetches all case chunks and summarizes them — just pass case_id
       const suggestions = await citationApi.suggestKeywords(
         selCase || null,
         input.trim() || selCaseName || null,
-        ctx?.length ? ctx : null,
+        null,
       );
       setSuggestedKeywords(suggestions);
     } catch (e) {
@@ -3449,42 +3437,125 @@ export default function CitationReportPage({ embedded = false }) {
             )}
           </div>
         )}
-        {/* ── IK Fetch Log panel ── */}
+        {/* ── Pipeline Fetch Log — tabular ── */}
         {showFetchLog && (
-          <div style={{ background: '#0F172A', borderBottom: '2px solid #1E3A5F', maxHeight: 340, overflowY: 'auto', flexShrink: 0 }}>
-            <div style={{ padding: '8px 16px', background: '#1E293B', display: 'flex', alignItems: 'center', gap: 8, position: 'sticky', top: 0, zIndex: 1 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#38BDF8', letterSpacing: '.06em', textTransform: 'uppercase' }}>📋 Pipeline Fetch Log</span>
-              <span style={{ fontSize: 9, color: '#475569', marginLeft: 4 }}>
+          <div style={{ background: '#F8FAFC', borderBottom: '2px solid #E2E8F0', maxHeight: 380, overflowY: 'auto', flexShrink: 0 }}>
+            {/* Header bar */}
+            <div style={{
+              padding: '8px 16px', background: '#1E293B',
+              display: 'flex', alignItems: 'center', gap: 10,
+              position: 'sticky', top: 0, zIndex: 1,
+            }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#38BDF8', letterSpacing: '.06em', textTransform: 'uppercase' }}>
+                📋 Pipeline Fetch Log
+              </span>
+              <span style={{ fontSize: 10, color: '#64748B' }}>
                 {report?.run_id ? `run: ${report.run_id.slice(0, 8)}…` : ''}
               </span>
-              {reportLogsLoading && <span style={{ fontSize: 10, color: '#38BDF8', marginLeft: 6 }}>Loading…</span>}
-              <span style={{ marginLeft: 'auto', fontSize: 9, color: '#475569' }}>{reportLogs.length} entries</span>
+              {reportLogsLoading && (
+                <span style={{ fontSize: 10, color: '#38BDF8', marginLeft: 4 }}>Loading…</span>
+              )}
+              <span style={{ marginLeft: 'auto', fontSize: 10, color: '#94A3B8' }}>
+                {reportLogs.length} {reportLogs.length === 1 ? 'entry' : 'entries'}
+              </span>
             </div>
-            <div style={{ fontFamily: '"JetBrains Mono","Fira Code",monospace', padding: '4px 0' }}>
-              {reportLogsLoading && reportLogs.length === 0 ? (
-                <div style={{ padding: '12px 16px', fontSize: 11, color: '#475569' }}>Loading logs…</div>
-              ) : reportLogs.length === 0 ? (
-                <div style={{ padding: '12px 16px', fontSize: 11, color: '#475569' }}>No logs found for this run.</div>
-              ) : reportLogs.map((log, i) => {
-                const isIK = log.agent_name === 'fetcher' || log.message?.includes('/doc/') || log.message?.includes('/docfragment/') || log.message?.includes('/docmeta/') || log.message?.includes('/origdoc/') || log.message?.includes('CACHE');
-                const isSec = log.message?.startsWith('✅') || log.message?.startsWith('🎉') || log.message?.startsWith('📡') || log.message?.startsWith('🗄');
-                const levelColor = { ERROR: '#F87171', WARNING: '#FCD34D', INFO: '#86EFAC', DEBUG: '#94A3B8' }[log.log_level] || '#94A3B8';
-                const ts = log.created_at ? new Date(log.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }) : '';
-                return (
-                  <div key={log.id || i} style={{
-                    display: 'flex', gap: 8, alignItems: 'flex-start',
-                    padding: isSec ? '5px 16px' : '2px 16px',
-                    borderBottom: '1px solid #1E293B',
-                    background: isIK && isSec ? '#0C2847' : isIK ? '#0D1B2A' : 'transparent',
-                  }}>
-                    <span style={{ fontSize: 9, color: '#0EA5E9', flexShrink: 0, minWidth: 56, marginTop: 2 }}>{ts}</span>
-                    <span style={{ fontSize: 8, color: '#475569', flexShrink: 0, minWidth: 60, marginTop: 2, textTransform: 'uppercase', letterSpacing: '.05em' }}>{log.agent_name}</span>
-                    <span style={{ fontSize: 8, color: levelColor, flexShrink: 0, minWidth: 36, marginTop: 2 }}>{log.log_level}</span>
-                    <span style={{ fontSize: 11, color: isIK ? '#BAE6FD' : '#64748B', lineHeight: 1.5, flex: 1, wordBreak: 'break-word' }}>{log.message}</span>
-                  </div>
-                );
-              })}
-            </div>
+
+            {/* Table */}
+            {reportLogsLoading && reportLogs.length === 0 ? (
+              <div style={{ padding: '16px 20px', fontSize: 12, color: '#94A3B8' }}>Loading logs…</div>
+            ) : reportLogs.length === 0 ? (
+              <div style={{ padding: '16px 20px', fontSize: 12, color: '#94A3B8' }}>No logs found for this run.</div>
+            ) : (
+              <table style={{
+                width: '100%', borderCollapse: 'collapse',
+                fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+              }}>
+                <thead>
+                  <tr style={{ background: '#F1F5F9', borderBottom: '2px solid #CBD5E1', position: 'sticky', top: 41, zIndex: 1 }}>
+                    {['#', 'Time (IST)', 'Agent', 'Level', 'Message'].map((col, ci) => (
+                      <th key={ci} style={{
+                        padding: '6px 10px', textAlign: 'left',
+                        fontWeight: 700, fontSize: 10, color: '#475569',
+                        letterSpacing: '.05em', textTransform: 'uppercase',
+                        whiteSpace: 'nowrap',
+                        width: ci === 0 ? 36 : ci === 1 ? 78 : ci === 2 ? 90 : ci === 3 ? 70 : 'auto',
+                        borderRight: ci < 4 ? '1px solid #E2E8F0' : 'none',
+                      }}>{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {reportLogs.map((log, i) => {
+                    const isAdmin = log.message?.includes('admin') || log.message?.includes('Admin') || log.message?.includes('judgment-service-embeddings');
+                    const isIK    = log.agent_name === 'fetcher' || log.message?.includes('/doc/') || log.message?.includes('CACHE');
+                    const isOk    = log.message?.startsWith('✅') || log.message?.startsWith('🎉');
+                    const levelMeta = {
+                      ERROR:   { bg: '#FEF2F2', color: '#DC2626', badge: '#FCA5A5' },
+                      WARNING: { bg: '#FFFBEB', color: '#D97706', badge: '#FDE68A' },
+                      INFO:    { bg: isAdmin ? '#ECFDF5' : isOk ? '#F0FDF4' : 'transparent', color: '#059669', badge: '#6EE7B7' },
+                      DEBUG:   { bg: '#F8FAFC', color: '#94A3B8', badge: '#CBD5E1' },
+                    }[log.log_level] || { bg: 'transparent', color: '#64748B', badge: '#E2E8F0' };
+
+                    const ts = log.created_at
+                      ? new Date(log.created_at).toLocaleTimeString('en-IN', {
+                          hour: '2-digit', minute: '2-digit', second: '2-digit',
+                          hour12: false, timeZone: 'Asia/Kolkata',
+                        })
+                      : '—';
+
+                    return (
+                      <tr key={log.id || i} style={{
+                        background: levelMeta.bg,
+                        borderBottom: '1px solid #F1F5F9',
+                        transition: 'background .1s',
+                      }}
+                        onMouseEnter={e => { e.currentTarget.style.background = '#EFF6FF'; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = levelMeta.bg; }}
+                      >
+                        {/* # */}
+                        <td style={{ padding: '5px 10px', color: '#CBD5E1', fontVariantNumeric: 'tabular-nums', borderRight: '1px solid #F1F5F9', textAlign: 'right' }}>
+                          {i + 1}
+                        </td>
+                        {/* Time */}
+                        <td style={{ padding: '5px 10px', color: '#0EA5E9', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', borderRight: '1px solid #F1F5F9' }}>
+                          {ts}
+                        </td>
+                        {/* Agent */}
+                        <td style={{ padding: '5px 10px', borderRight: '1px solid #F1F5F9' }}>
+                          <span style={{
+                            display: 'inline-block', padding: '1px 6px', borderRadius: 4,
+                            background: isIK ? '#EFF6FF' : isAdmin ? '#ECFDF5' : '#F8FAFC',
+                            color: isIK ? '#3B82F6' : isAdmin ? '#059669' : '#64748B',
+                            fontSize: 10, fontWeight: 600, letterSpacing: '.03em', textTransform: 'uppercase',
+                          }}>
+                            {log.agent_name || '—'}
+                          </span>
+                        </td>
+                        {/* Level */}
+                        <td style={{ padding: '5px 10px', borderRight: '1px solid #F1F5F9' }}>
+                          <span style={{
+                            display: 'inline-block', padding: '1px 7px', borderRadius: 4,
+                            background: levelMeta.badge + '44',
+                            color: levelMeta.color,
+                            fontSize: 10, fontWeight: 700, letterSpacing: '.04em',
+                          }}>
+                            {log.log_level || '—'}
+                          </span>
+                        </td>
+                        {/* Message */}
+                        <td style={{
+                          padding: '5px 10px',
+                          color: log.log_level === 'ERROR' ? '#DC2626' : isAdmin ? '#065F46' : isIK ? '#1E40AF' : '#334155',
+                          lineHeight: 1.5, wordBreak: 'break-word', maxWidth: 0,
+                        }}>
+                          {log.message}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         )}
 
@@ -3846,10 +3917,10 @@ export default function CitationReportPage({ embedded = false }) {
 
       {/* AI Research tab */}
       {activeTab === 'research' && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: (suggestedKeywords && runMode !== 'manual') ? `280px 1fr 340px` : '1fr 340px', gap: 0, overflow: 'hidden', transition: 'grid-template-columns .25s ease' }}>
+        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: suggestedKeywords ? `280px 1fr 340px` : '1fr 340px', gap: 0, overflow: 'hidden', transition: 'grid-template-columns .25s ease' }}>
 
           {/* ── LEFT suggestions panel (appears after Suggest Keywords, hidden in manual mode) ── */}
-          {suggestedKeywords && runMode !== 'manual' && (() => {
+          {suggestedKeywords && (() => {
             const kwGroups = [
               { label: 'Statute / Section',  key: 'statute_keywords',   color: '#3B6FE8', isCase: false },
               { label: 'Legal Principle',     key: 'principle_keywords', color: '#7C3AED', isCase: false },
@@ -3866,7 +3937,7 @@ export default function CitationReportPage({ embedded = false }) {
               });
             };
             return (
-              <div className="sc" style={{ borderRight: `1px solid ${g200}`, background: `linear-gradient(180deg,#F0F4FF 0%,${g50} 100%)`, overflowY: 'auto', display: 'flex', flexDirection: 'column', animation: 'fdUp .22s ease' }}>
+              <div className="sc" style={{ borderRight: `1px solid ${g200}`, background: `linear-gradient(180deg,#F0F4FF 0%,${g50} 100%)`, overflow: 'hidden', display: 'flex', flexDirection: 'column', animation: 'fdUp .22s ease' }}>
                 {/* Header */}
                 <div style={{ padding: '12px 14px 10px', borderBottom: `1px solid ${g200}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, background: W }}>
                   <div>
@@ -3894,7 +3965,7 @@ export default function CitationReportPage({ embedded = false }) {
                   </div>
                 )}
                 {/* Chip groups */}
-                <div style={{ padding: '10px 12px', flex: 1, minHeight: 0 }}>
+                <div style={{ padding: '10px 12px', flex: 1, minHeight: 0, overflowY: 'auto' }}>
                   {kwGroups.map(grp => {
                     const kws = suggestedKeywords[grp.key] || [];
                     if (!kws.length) return null;
@@ -3938,6 +4009,39 @@ export default function CitationReportPage({ embedded = false }) {
                     );
                   })}
                 </div>
+
+                {/* ── Sticky Generate footer ── */}
+                {(selectedKeywordChips.size > 0 || selectedCaseChips.size > 0) && (
+                  <div style={{ padding: '10px 12px 12px', borderTop: `1px solid ${g200}`, background: W, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                    {selectedKeywordChips.size > 0 && (
+                      <button
+                        onClick={() => handleSend(true, null, [...selectedKeywordChips])}
+                        disabled={sending}
+                        style={{ width: '100%', padding: '10px 0', background: sending ? g200 : `linear-gradient(135deg,${T},${TD})`, color: sending ? g400 : W, border: 'none', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, fontFamily: "'DM Sans',sans-serif", boxShadow: sending ? 'none' : `0 4px 14px rgba(33,193,182,.35)`, transition: 'all .2s' }}
+                      >
+                        {sending ? <><Spin /> Generating…</> : <>⚡ Generate Report &nbsp;<span style={{ background: 'rgba(255,255,255,.25)', borderRadius: 6, padding: '1px 7px', fontSize: 11 }}>{selectedKeywordChips.size} keyword{selectedKeywordChips.size > 1 ? 's' : ''}</span></>}
+                      </button>
+                    )}
+                    {selectedCaseChips.size > 0 && (
+                      <button
+                        onClick={() => handleSend(true, [...selectedCaseChips], null)}
+                        disabled={sending}
+                        style={{ width: '100%', padding: '9px 0', background: sending ? g200 : `linear-gradient(135deg,#6D28D9,#7C3AED)`, color: sending ? g400 : W, border: 'none', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, fontFamily: "'DM Sans',sans-serif", boxShadow: sending ? 'none' : `0 4px 14px rgba(109,40,217,.3)`, transition: 'all .2s' }}
+                      >
+                        {sending ? <><Spin /> Generating…</> : <>⚖️ Generate from Cases &nbsp;<span style={{ background: 'rgba(255,255,255,.25)', borderRadius: 6, padding: '1px 7px', fontSize: 11 }}>{selectedCaseChips.size}</span></>}
+                      </button>
+                    )}
+                    {selectedKeywordChips.size > 0 && selectedCaseChips.size > 0 && (
+                      <button
+                        onClick={() => handleSend(true, [...selectedCaseChips], [...selectedKeywordChips])}
+                        disabled={sending}
+                        style={{ width: '100%', padding: '8px 0', background: 'transparent', color: T, border: `1.5px solid ${T}`, borderRadius: 10, fontSize: 11, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .2s' }}
+                      >
+                        Generate with All Selected
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })()}
@@ -4016,17 +4120,17 @@ export default function CitationReportPage({ embedded = false }) {
               )}
 
               {!sending && msgs.length === 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', minHeight: '100%', animation: 'fdUp .4s ease', padding: '60px 28px 20px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', minHeight: '100%', animation: 'fdUp .4s ease', padding: '40px 32px 24px' }}>
 
                   {/* Icon */}
-                  <div style={{ position: 'relative', marginBottom: 16 }}>
-                    <div style={{ position: 'absolute', inset: -14, borderRadius: 38, background: `radial-gradient(circle,rgba(33,193,182,.14) 0%,transparent 70%)` }} />
-                    <div style={{ width: 72, height: 72, borderRadius: 20, background: `linear-gradient(145deg,${N} 0%,${TD} 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, position: 'relative', animation: 'glow 3s ease-in-out infinite', boxShadow: `0 8px 28px rgba(27,42,74,.28)` }}>⚖️</div>
+                  <div style={{ position: 'relative', marginBottom: 12 }}>
+                    <div style={{ position: 'absolute', inset: -18, borderRadius: 42, background: `radial-gradient(circle,rgba(33,193,182,.12) 0%,transparent 70%)` }} />
+                    <div style={{ width: 68, height: 68, borderRadius: 20, background: `linear-gradient(145deg,${N} 0%,${TD} 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, position: 'relative', animation: 'glow 3s ease-in-out infinite', boxShadow: `0 8px 28px rgba(27,42,74,.28)` }}>⚖️</div>
                   </div>
 
-                  <h3 style={{ fontSize: 22, fontWeight: 800, color: N, marginBottom: 6, letterSpacing: '-.03em', lineHeight: 1.2, textAlign: 'center' }}>AI Legal Research</h3>
-                  <p style={{ fontSize: 12.5, color: T, maxWidth: 340, lineHeight: 1.65, margin: '0 auto 22px', textAlign: 'center', fontWeight: 500 }}>
-                    Find verified citations from Supreme Court & High Courts,<br />grouped by extracted keywords from your case document.
+                  <h3 style={{ fontSize: 21, fontWeight: 800, color: N, marginBottom: 4, letterSpacing: '-.03em', lineHeight: 1.2, textAlign: 'center' }}>AI Legal Research</h3>
+                  <p style={{ fontSize: 12, color: g500, maxWidth: 380, lineHeight: 1.7, margin: '0 auto 20px', textAlign: 'center' }}>
+                    Find verified citations from Supreme Court & High Courts, grouped by AI-extracted keywords from your case document.
                   </p>
 
                   {/* ── Custom case selector card ── */}
@@ -4123,29 +4227,33 @@ export default function CitationReportPage({ embedded = false }) {
 
                   {/* Mode selector — shown after case is selected */}
                   {selCase && runMode === null && (
-                    <div style={{ width: '100%', maxWidth: 580, marginTop: 16, display: 'flex', gap: 12 }}>
+                    <div style={{ width: '100%', maxWidth: 580, marginTop: 14, display: 'flex', gap: 10 }}>
                       <button
                         onClick={() => { setSuggestedKeywords(null); setSelectedKeywordChips(new Set()); setSelectedCaseChips(new Set()); setRunMode('auto'); }}
-                        style={{ flex: 1, padding: '20px 16px', background: W, border: `2px solid ${g200}`, borderRadius: 14, cursor: 'pointer', textAlign: 'left', fontFamily: "'DM Sans',sans-serif", transition: 'border-color .2s, box-shadow .2s' }}
-                        onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.boxShadow = `0 4px 18px rgba(33,193,182,.15)`; }}
-                        onMouseLeave={e => { e.currentTarget.style.borderColor = g200; e.currentTarget.style.boxShadow = 'none'; }}
+                        style={{ flex: 1, padding: '14px 16px', background: W, border: `1.5px solid ${g100}`, borderRadius: 14, cursor: 'pointer', textAlign: 'left', fontFamily: "'DM Sans',sans-serif", transition: 'border-color .2s, box-shadow .2s', boxShadow: '0 2px 10px rgba(27,42,74,.06)' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.boxShadow = `0 4px 20px rgba(33,193,182,.18)`; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = g100; e.currentTarget.style.boxShadow = '0 2px 10px rgba(27,42,74,.06)'; }}
                       >
-                        <div style={{ fontSize: 22, marginBottom: 8 }}>⚡</div>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: N }}>Automatic</div>
-                        <div style={{ fontSize: 11, color: g400, marginTop: 4, lineHeight: 1.5 }}>
-                          AI extracts keywords from your case, searches Indian Kanoon, validates citations, and generates a full report.
+                        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                          <div style={{ width: 38, height: 38, borderRadius: 10, background: `linear-gradient(135deg,rgba(33,193,182,.15),rgba(33,193,182,.05))`, border: `1px solid rgba(33,193,182,.2)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>⚡</div>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: N, marginBottom: 3 }}>Automatic</div>
+                            <div style={{ fontSize: 11, color: g400, lineHeight: 1.55 }}>AI extracts keywords, searches Indian Kanoon & validates all citations automatically.</div>
+                          </div>
                         </div>
                       </button>
                       <button
                         onClick={() => setRunMode('manual')}
-                        style={{ flex: 1, padding: '20px 16px', background: W, border: `2px solid ${g200}`, borderRadius: 14, cursor: 'pointer', textAlign: 'left', fontFamily: "'DM Sans',sans-serif", transition: 'border-color .2s, box-shadow .2s' }}
-                        onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.boxShadow = `0 4px 18px rgba(33,193,182,.15)`; }}
-                        onMouseLeave={e => { e.currentTarget.style.borderColor = g200; e.currentTarget.style.boxShadow = 'none'; }}
+                        style={{ flex: 1, padding: '14px 16px', background: W, border: `1.5px solid ${g100}`, borderRadius: 14, cursor: 'pointer', textAlign: 'left', fontFamily: "'DM Sans',sans-serif", transition: 'border-color .2s, box-shadow .2s', boxShadow: '0 2px 10px rgba(27,42,74,.06)' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = T; e.currentTarget.style.boxShadow = `0 4px 20px rgba(33,193,182,.18)`; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = g100; e.currentTarget.style.boxShadow = '0 2px 10px rgba(27,42,74,.06)'; }}
                       >
-                        <div style={{ fontSize: 22, marginBottom: 8 }}>🔍</div>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: N }}>Manual</div>
-                        <div style={{ fontSize: 11, color: g400, marginTop: 4, lineHeight: 1.5 }}>
-                          Type keywords, browse AI-suggested keywords by category, or select specific case names.
+                        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                          <div style={{ width: 38, height: 38, borderRadius: 10, background: `linear-gradient(135deg,rgba(27,42,74,.1),rgba(27,42,74,.04))`, border: `1px solid rgba(27,42,74,.12)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>🔍</div>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: N, marginBottom: 3 }}>Manual</div>
+                            <div style={{ fontSize: 11, color: g400, lineHeight: 1.55 }}>Type keywords or browse AI-suggested categories to find specific citations.</div>
+                          </div>
                         </div>
                       </button>
                     </div>
@@ -4189,92 +4297,84 @@ export default function CitationReportPage({ embedded = false }) {
                   {selCase && runMode === 'manual' && (
                     <div style={{ width: '100%', maxWidth: 580, marginTop: 12 }}>
                       {/* Section A — Custom Keywords */}
-                      <div style={{ marginBottom: 14, padding: 14, background: g50, borderRadius: 12, border: `1px solid ${g200}` }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '.08em' }}>A — Custom Keywords</div>
-                        <textarea
-                          value={customKeywordsInput}
-                          onChange={(e) => setCustomKeywordsInput(e.target.value)}
-                          placeholder="e.g. Section 300 IPC, anticipatory bail, res judicata"
-                          rows={2}
-                          style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", color: g700, background: W, resize: 'vertical', outline: 'none', lineHeight: 1.5 }}
-                        />
-                        <div style={{ fontSize: 11, color: g400, marginTop: 3, marginBottom: 8 }}>Comma-separated — searches Indian Kanoon and local DB.</div>
-                        <button
-                          onClick={handleManualKeywordSearch}
-                          disabled={manualSearching || !customKeywordsInput.trim()}
-                          style={{ padding: '8px 18px', background: manualSearching || !customKeywordsInput.trim() ? g100 : `linear-gradient(135deg,${T},${TD})`, color: manualSearching || !customKeywordsInput.trim() ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: manualSearching || !customKeywordsInput.trim() ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: "'DM Sans',sans-serif" }}
-                        >
-                          {manualSearching ? <><Spin /> Searching…</> : 'Search Keywords'}
-                        </button>
+                      <div style={{ marginBottom: 12, background: W, borderRadius: 14, border: `1.5px solid ${g100}`, boxShadow: '0 2px 8px rgba(27,42,74,.05)', overflow: 'hidden' }}>
+                        <div style={{ padding: '11px 16px 10px', borderBottom: `1px solid ${g100}`, display: 'flex', alignItems: 'center', gap: 9, background: g50 }}>
+                          <div style={{ width: 26, height: 26, borderRadius: 8, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: W, fontSize: 12, fontWeight: 800, flexShrink: 0, boxShadow: `0 2px 6px rgba(33,193,182,.3)` }}>A</div>
+                          <div>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: N }}>Custom Keywords</div>
+                            <div style={{ fontSize: 10, color: g400, marginTop: 1 }}>Comma-separated — searches Indian Kanoon and local DB</div>
+                          </div>
+                        </div>
+                        <div style={{ padding: '12px 16px 14px' }}>
+                          <textarea
+                            value={customKeywordsInput}
+                            onChange={(e) => setCustomKeywordsInput(e.target.value)}
+                            placeholder="e.g. Section 300 IPC, anticipatory bail, res judicata"
+                            rows={2}
+                            style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", color: g700, background: g50, resize: 'vertical', outline: 'none', lineHeight: 1.5, transition: 'border-color .2s, box-shadow .2s' }}
+                            onFocus={e => { e.target.style.borderColor = T; e.target.style.boxShadow = `0 0 0 3px rgba(33,193,182,.1)`; }}
+                            onBlur={e => { e.target.style.borderColor = g200; e.target.style.boxShadow = 'none'; }}
+                          />
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+                            <button
+                              onClick={handleManualKeywordSearch}
+                              disabled={manualSearching || !customKeywordsInput.trim()}
+                              style={{ padding: '8px 20px', background: manualSearching || !customKeywordsInput.trim() ? g100 : `linear-gradient(135deg,${T},${TD})`, color: manualSearching || !customKeywordsInput.trim() ? g400 : W, border: 'none', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: manualSearching || !customKeywordsInput.trim() ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: "'DM Sans',sans-serif", boxShadow: manualSearching || !customKeywordsInput.trim() ? 'none' : `0 3px 10px rgba(33,193,182,.3)`, transition: 'all .2s' }}
+                            >
+                              {manualSearching ? <><Spin /> Searching…</> : '🔍 Search Keywords'}
+                            </button>
+                          </div>
+                        </div>
                       </div>
 
                       {/* Section B — Suggest Keywords */}
-                      <div style={{ marginBottom: 14, padding: 14, background: g50, borderRadius: 12, border: `1px solid ${g200}` }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: N, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '.08em' }}>B — Suggest Keywords</div>
-                        <button
-                          onClick={handleSuggestKeywords}
-                          disabled={suggestingKeywords}
-                          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: suggestingKeywords ? g100 : `linear-gradient(135deg,${T},${TD})`, color: suggestingKeywords ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: suggestingKeywords ? 'not-allowed' : 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .2s' }}
-                        >
-                          {suggestingKeywords ? <><Spin /> Suggesting…</> : <>✦ Suggest Keywords</>}
-                        </button>
-                        {suggestedKeywords && (() => {
-                          const manualGroups = [
-                            { label: 'Statutes & Laws',    key: 'statute_keywords',   color: '#3B6FE8', isCase: false },
-                            { label: 'Legal Principles',   key: 'principle_keywords', color: '#7C3AED', isCase: false },
-                            { label: 'Facts & Patterns',   key: 'fact_keywords',      color: '#0891B2', isCase: false },
-                            { label: 'Related Cases',      key: 'case_keywords',      color: '#6D28D9', isCase: true  },
-                          ];
-                          const toggleManualChip = (kw, isCase) => {
-                            const setter = isCase ? setSelectedCaseChips : setSelectedKeywordChips;
-                            setter(prev => { const next = new Set(prev); if (next.has(kw)) next.delete(kw); else next.add(kw); return next; });
-                          };
-                          return (
-                            <div style={{ marginTop: 12 }}>
-                              {manualGroups.map(grp => {
-                                const chips = suggestedKeywords[grp.key] || [];
-                                if (!chips.length) return null;
-                                const selectedSet = grp.isCase ? selectedCaseChips : selectedKeywordChips;
-                                return (
-                                  <div key={grp.key} style={{ marginBottom: 10 }}>
-                                    <div style={{ fontSize: 10, fontWeight: 700, color: grp.color, marginBottom: 5, textTransform: 'uppercase', letterSpacing: '.06em' }}>{grp.label}</div>
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                                      {chips.map(kw => {
-                                        const sel = selectedSet.has(kw);
-                                        return (
-                                          <button key={kw} onClick={() => toggleManualChip(kw, grp.isCase)}
-                                            style={{ padding: '4px 10px', borderRadius: 20, border: `1.5px solid ${sel ? grp.color : g200}`, background: sel ? grp.color : W, color: sel ? W : g700, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .15s' }}>
-                                            {kw}
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                                {selectedKeywordChips.size > 0 && (
-                                  <button
-                                    onClick={handleManualKeywordChipSearch}
-                                    disabled={manualSearching}
-                                    style={{ padding: '7px 14px', background: manualSearching ? g100 : `linear-gradient(135deg,${T},${TD})`, color: manualSearching ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: manualSearching ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'DM Sans',sans-serif" }}
-                                  >
-                                    {manualSearching ? <><Spin /> Searching…</> : `Search ${selectedKeywordChips.size} keyword(s)`}
-                                  </button>
-                                )}
-                                {selectedCaseChips.size > 0 && (
-                                  <button
-                                    onClick={handleManualCaseSearch}
-                                    disabled={manualSearching}
-                                    style={{ padding: '7px 14px', background: manualSearching ? g100 : `linear-gradient(135deg,#6D28D9,#7C3AED)`, color: manualSearching ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: manualSearching ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'DM Sans',sans-serif" }}
-                                  >
-                                    {manualSearching ? <><Spin /> Fetching…</> : `Find ${selectedCaseChips.size} case(s)`}
-                                  </button>
-                                )}
+                      <div style={{ marginBottom: 12, background: W, borderRadius: 14, border: `1.5px solid ${g100}`, boxShadow: '0 2px 8px rgba(27,42,74,.05)', overflow: 'hidden' }}>
+                        <div style={{ padding: '11px 16px 10px', borderBottom: `1px solid ${g100}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: g50 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                            <div style={{ width: 26, height: 26, borderRadius: 8, background: `linear-gradient(135deg,#7C3AED,#5B21B6)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: W, fontSize: 12, fontWeight: 800, flexShrink: 0, boxShadow: `0 2px 6px rgba(124,58,237,.3)` }}>B</div>
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: N }}>AI Keyword Suggestions</div>
+                              <div style={{ fontSize: 10, color: g400, marginTop: 1 }}>AI analyses your case and suggests relevant legal keywords</div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={handleSuggestKeywords}
+                            disabled={suggestingKeywords}
+                            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: suggestingKeywords ? g100 : `linear-gradient(135deg,${T},${TD})`, color: suggestingKeywords ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: suggestingKeywords ? 'not-allowed' : 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .2s', boxShadow: suggestingKeywords ? 'none' : `0 3px 10px rgba(33,193,182,.3)`, whiteSpace: 'nowrap' }}
+                          >
+                            {suggestingKeywords ? <><Spin /> Suggesting…</> : <>✦ Suggest</>}
+                          </button>
+                        </div>
+                        {/* Empty state */}
+                        {!suggestedKeywords && !suggestingKeywords && (
+                          <div style={{ padding: '20px 16px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                            <div style={{ fontSize: 22, opacity: .25 }}>🔑</div>
+                            <div style={{ fontSize: 11, color: g400, lineHeight: 1.6 }}>
+                              Click <strong style={{ color: N }}>Suggest</strong> — AI reads all case chunks, summarises them, and generates targeted keyword categories in the left panel.
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Loading state */}
+                        {suggestingKeywords && (
+                          <div style={{ padding: '20px 16px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                            <Spin />
+                            <div style={{ fontSize: 11, color: g500 }}>Reading all case chunks and generating keywords…</div>
+                          </div>
+                        )}
+
+                        {/* Keywords loaded — point to left panel */}
+                        {suggestedKeywords && (
+                          <div style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, background: '#EEF4FF', borderTop: `1px solid #D1E0FF` }}>
+                            <div style={{ width: 32, height: 32, borderRadius: 9, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>🔑</div>
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: N }}>Keywords ready in the left panel</div>
+                              <div style={{ fontSize: 10.5, color: g500, marginTop: 2 }}>
+                                {(suggestedKeywords.statute_keywords?.length || 0) + (suggestedKeywords.principle_keywords?.length || 0) + (suggestedKeywords.fact_keywords?.length || 0) + (suggestedKeywords.case_keywords?.length || 0)} keywords across 4 categories — click to select, then search or generate a report.
                               </div>
                             </div>
-                          );
-                        })()}
+                          </div>
+                        )}
                       </div>
 
                       {/* Manual search results */}
@@ -4369,36 +4469,45 @@ export default function CitationReportPage({ embedded = false }) {
 
             {/* Selected case indicator — compact */}
             {selCase && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: `linear-gradient(135deg,rgba(33,193,182,.07),rgba(27,42,74,.04))`, border: `1.5px solid rgba(33,193,182,.3)`, borderRadius: 10 }}>
-                <Dot c={T} s={7} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, color: T, textTransform: 'uppercase', letterSpacing: '.08em' }}>Active Case</div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>{selCaseName || selCase}</div>
+              <div style={{ background: W, borderRadius: 12, border: `1.5px solid rgba(33,193,182,.3)`, boxShadow: '0 2px 10px rgba(33,193,182,.1)', overflow: 'hidden' }}>
+                <div style={{ padding: '7px 12px', background: `linear-gradient(135deg,rgba(33,193,182,.12),rgba(33,193,182,.04))`, borderBottom: `1px solid rgba(33,193,182,.15)`, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: T, boxShadow: `0 0 0 2.5px rgba(33,193,182,.25)`, flexShrink: 0 }} />
+                  <span style={{ fontSize: 9, fontWeight: 800, color: T, textTransform: 'uppercase', letterSpacing: '.1em' }}>Active Case</span>
                 </div>
-                <button
-                  onClick={() => { resetForNewCase(); setSelCase(''); setSelCaseName(''); }}
-                  style={{ flexShrink: 0, width: 18, height: 18, borderRadius: '50%', border: 'none', background: g100, color: g500, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}
-                  title="Clear case"
-                >×</button>
+                <div style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: `linear-gradient(135deg,${N},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, flexShrink: 0 }}>📂</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selCaseName || selCase}</div>
+                  </div>
+                  <button
+                    onClick={() => { resetForNewCase(); setSelCase(''); setSelCaseName(''); }}
+                    style={{ flexShrink: 0, width: 20, height: 20, borderRadius: '50%', border: 'none', background: g100, color: g500, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, transition: 'all .15s' }}
+                    title="Clear case"
+                    onMouseEnter={e => { e.currentTarget.style.background = '#FEE2E2'; e.currentTarget.style.color = '#DC2626'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = g100; e.currentTarget.style.color = g500; }}
+                  >×</button>
+                </div>
               </div>
             )}
 
             {/* Case-specific reports */}
             {selCase && (
-              <div style={{ background: W, borderRadius: 14, padding: '13px 13px 10px', border: `1px solid ${g200}`, boxShadow: '0 2px 8px rgba(27,42,74,.06)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <div style={{ width: 22, height: 22, borderRadius: 6, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>📋</div>
-                    <div className="sidebar-label" style={{ marginBottom: 0 }}>Reports</div>
+              <div style={{ background: W, borderRadius: 14, border: `1px solid ${g100}`, boxShadow: '0 2px 10px rgba(27,42,74,.06)', overflow: 'hidden' }}>
+                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${g100}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: g50 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <div style={{ width: 24, height: 24, borderRadius: 7, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, boxShadow: `0 2px 6px rgba(33,193,182,.25)` }}>📋</div>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: N }}>Reports</span>
                   </div>
                   {caseReportsLoading && <Spin />}
                 </div>
+                <div style={{ padding: '8px 8px 10px' }}>
                 {!caseReportsLoading && caseReports.length === 0 ? (
-                  <div style={{ fontSize: 11, color: g400, fontStyle: 'italic', textAlign: 'center', padding: '12px 0' }}>
-                    No reports yet. Generate one above.
+                  <div style={{ fontSize: 11, color: g400, textAlign: 'center', padding: '18px 8px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                    <div style={{ fontSize: 24, opacity: .3 }}>📋</div>
+                    <span>No reports yet. Generate one above.</span>
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                     {caseReports.map(r => (
                       <div key={r.id}
                         className="case-card"
@@ -4435,6 +4544,7 @@ export default function CitationReportPage({ embedded = false }) {
                     ))}
                   </div>
                 )}
+                </div>
               </div>
             )}
 
@@ -4464,17 +4574,18 @@ export default function CitationReportPage({ embedded = false }) {
 
             {/* Empty sidebar state — no case selected yet */}
             {!selCase && !report && (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '24px 8px', gap: 8 }}>
-                <div style={{ fontSize: 28, opacity: .35 }}>📋</div>
-                <div style={{ fontSize: 11, color: g400, lineHeight: 1.6 }}>Select a case in the centre panel to see reports here</div>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '28px 12px', gap: 8, background: W, borderRadius: 14, border: `1px solid ${g100}` }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: g50, border: `1px solid ${g100}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>📋</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: N }}>No case selected</div>
+                <div style={{ fontSize: 10.5, color: g400, lineHeight: 1.6, maxWidth: 160 }}>Select a case in the centre panel to see your reports here</div>
               </div>
             )}
 
             {/* Disclaimer */}
-            <div style={{ padding: '10px 12px', background: 'linear-gradient(135deg,#FFFBEB,#FFF7ED)', border: '1px solid #FDE68A', borderRadius: 10, marginTop: 'auto' }}>
-              <div style={{ fontSize: 10, color: '#92400E', lineHeight: 1.6, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: 12, flexShrink: 0 }}>⚠️</span>
-                <span><span style={{ fontWeight: 700 }}>AI research only.</span> Always verify citations independently before court proceedings.</span>
+            <div style={{ padding: '10px 12px', background: 'linear-gradient(135deg,#FFFBEB,#FEF3C7)', border: '1px solid #FDE68A', borderRadius: 10, marginTop: 'auto' }}>
+              <div style={{ fontSize: 10, color: '#78350F', lineHeight: 1.65, display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+                <div style={{ width: 16, height: 16, borderRadius: 4, background: '#F59E0B', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 10, color: W, fontWeight: 800, marginTop: 0.5 }}>!</div>
+                <span><span style={{ fontWeight: 800, color: '#92400E' }}>AI research only.</span> Always verify citations independently before court proceedings.</span>
               </div>
             </div>
           </div>

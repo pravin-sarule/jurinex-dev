@@ -201,16 +201,38 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
   return ordered;
 }
 
-function normalizeRelevance(value) {
-  const raw = String(value || '').toUpperCase();
-  if (raw.includes('HIGH')) return 'High';
-  return 'Medium';
+function normalizeRelevance(badge, tier) {
+  const t = String(tier || '').toUpperCase();
+  if (t === 'STRONG')   return 'Strong';
+  if (t === 'RELEVANT') return 'Relevant';
+  if (t === 'WEAK')     return 'Weak';
+  const b = String(badge || '').toUpperCase();
+  if (b.includes('HIGH'))   return 'Strong';
+  if (b.includes('MEDIUM')) return 'Relevant';
+  if (b.includes('LOW'))    return 'Weak';
+  return 'Relevant';
+}
+
+const RELEVANCE_STYLE = {
+  Strong:   { bg: '#DCFCE7', color: '#15803D', dot: '●' },
+  Relevant: { bg: '#FEF9C3', color: '#92400E', dot: '◆' },
+  Weak:     { bg: '#FEE2E2', color: '#991B1B', dot: '▲' },
+};
+
+function isAdminUpload(citation) {
+  if (citation.isLocalAdmin === true || citation.is_local_admin === true) return true;
+  const raw = String(
+    citation.source || citation.sourceType || citation.sourceLabel || citation.source_type || ''
+  ).trim().toLowerCase();
+  return (
+    raw === 'admin' || raw.includes('admin_upload') || raw.includes('admin-upload')
+    || raw.includes('adminupload') || raw.includes('manual_upload')
+    || raw.includes('judgment_upload') || raw.startsWith('admin')
+  );
 }
 
 function getSourceMeta(citation) {
-  // isLocalAdmin flag: set by backend when source_type == 'admin' (uploaded via admin panel)
-  // Always show the local DB icon for admin-sourced judgments regardless of source string.
-  if (citation.isLocalAdmin === true || citation.is_local_admin === true) return { icon: '🗄️', label: 'Local DB' };
+  if (isAdminUpload(citation)) return { icon: '🏛️', label: 'Admin Upload' };
 
   const raw = String(
     citation.source ||
@@ -219,14 +241,6 @@ function getSourceMeta(citation) {
     citation.sourceApplication ||
     ''
   ).toLowerCase();
-  if (
-    raw === 'admin'
-    || raw.includes('admin upload')
-    || raw.includes('admin_upload')
-    || raw.includes('adminupload')
-    || raw.includes('manual_upload')
-    || raw.includes('judgment_upload')
-  ) return { icon: '🗄️', label: 'Local DB' };
   if (raw.includes('local') || raw.includes('db')) return { icon: '🗄️', label: 'Local DB' };
   if (raw.includes('indian') || raw.includes('kanoon') || raw.includes('ik')) return { icon: '📚', label: 'Indian Kanoon' };
   if (raw.includes('google')) return { icon: '🌐', label: 'Google Search' };
@@ -377,11 +391,17 @@ function parseJudgmentText(rawText) {
   return { metaPairs, sections: cleaned };
 }
 
-function RelevanceBadge({ value }) {
-  const relevance = normalizeRelevance(value);
-  const relClass = relevance === 'High' ? 'rel-high' : 'rel-med';
+function RelevanceBadge({ value, tier }) {
+  const relevance = normalizeRelevance(value, tier);
+  const st = RELEVANCE_STYLE[relevance] || RELEVANCE_STYLE.Relevant;
   return (
-    <span className={`rel-badge ${relClass}`}>Relevance: {relevance}</span>
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 700,
+      background: st.bg, color: st.color, letterSpacing: '.03em',
+    }}>
+      <span aria-hidden="true">{st.dot}</span> {relevance}
+    </span>
   );
 }
 
@@ -515,19 +535,31 @@ function citationContextItemToLink(item) {
 function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, dimensionLabel, isPriority }) {
   const courtBadgeClass = getCourtBadgeClass(citation.court);
   const sourceMeta = getSourceMeta(citation);
+  const isAdmin = isAdminUpload(citation);
   return (
     <div
-      className={`cite-card ${isPriority ? 'sc-priority' : ''}`}
+      className={`cite-card ${isPriority ? 'sc-priority' : ''} ${isAdmin ? 'cite-card-admin' : ''}`}
       onClick={() => onSelect(citation.id)}
+      style={isAdmin ? { borderLeft: '3px solid #059669' } : {}}
     >
       <div className="cc-top">
         <span className={`court-badge ${courtBadgeClass}`}>{getCourtLabel(citation.court)}</span>
         <span className="dimension-badge" title={dimensionLabel}>🔑 {dimensionLabel}</span>
-        <span className="source-badge" title={sourceMeta.label}>
-          <span className="source-icon" aria-hidden="true">{sourceMeta.icon}</span>
-          {sourceMeta.label}
-        </span>
-        <RelevanceBadge value={citation.relevanceBadge} />
+        {isAdmin ? (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 700,
+            background: '#ECFDF5', color: '#065F46', border: '1px solid #6EE7B7',
+          }}>
+            🏛️ Admin Upload
+          </span>
+        ) : (
+          <span className="source-badge" title={sourceMeta.label}>
+            <span className="source-icon" aria-hidden="true">{sourceMeta.icon}</span>
+            {sourceMeta.label}
+          </span>
+        )}
+        <RelevanceBadge value={citation.relevanceBadge} tier={citation.relevanceTier} />
       </div>
       {Array.isArray(citation.citationTags) && citation.citationTags.length > 0 ? (
         <div className="cite-tag-row" aria-label="Citation tags">
@@ -605,7 +637,7 @@ export default function RedesignedCitationReportDoc({
   };
 
   const [dimension, setDimension] = useState(initialDimension || 'all');
-  const [courtFilter, setCourtFilter] = useState('all'); // 'all', 'sc', 'hc'
+  const [courtFilter, setCourtFilter] = useState('all'); // 'all', 'sc', 'hc', 'admin'
   const [perspective, setPerspective] = useState(initialPerspective || 'all');
   const [search, setSearch] = useState('');
   const [activeId, setActiveId] = useState(null);
@@ -668,6 +700,7 @@ export default function RedesignedCitationReportDoc({
       ) return false;
       if (courtFilter === 'sc' && !(citation.normalizedCourt.includes('supreme court'))) return false;
       if (courtFilter === 'hc' && !(citation.normalizedCourt.includes('high court'))) return false;
+      if (courtFilter === 'admin' && !isAdminUpload(citation)) return false;
       if (!matchesPerspective(citation, perspective)) return false;
       if (term && !citation.searchableText.includes(term)) return false;
       return true;
@@ -796,8 +829,31 @@ export default function RedesignedCitationReportDoc({
                 <button className={`flt ${courtFilter === 'all' ? 'active' : ''}`} onClick={() => setCourtFilter('all')}>All courts</button>
                 <button className={`flt ${courtFilter === 'sc' ? 'active' : ''}`} onClick={() => setCourtFilter('sc')}>Supreme Court</button>
                 <button className={`flt ${courtFilter === 'hc' ? 'active' : ''}`} onClick={() => setCourtFilter('hc')}>High Court</button>
-                <input 
-                  type="text" 
+                {/* Admin Upload tab — only shown when report has at least one admin citation */}
+                {(() => {
+                  const adminCount = verified.filter(c => isAdminUpload(c)).length;
+                  if (!adminCount) return null;
+                  return (
+                    <button
+                      className={`flt ${courtFilter === 'admin' ? 'active' : ''}`}
+                      onClick={() => setCourtFilter('admin')}
+                      style={courtFilter === 'admin' ? {
+                        background: '#ECFDF5', color: '#065F46',
+                        border: '1px solid #6EE7B7', fontWeight: 700,
+                      } : {
+                        color: '#065F46', border: '1px solid #BBF7D0',
+                      }}
+                    >
+                      🏛️ Admin Upload
+                      <span style={{
+                        marginLeft: 5, padding: '0 5px', borderRadius: 8,
+                        background: '#6EE7B7', color: '#065F46', fontSize: 9, fontWeight: 800,
+                      }}>{adminCount}</span>
+                    </button>
+                  );
+                })()}
+                <input
+                  type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search citation, ratio..."
@@ -845,7 +901,8 @@ export default function RedesignedCitationReportDoc({
 
               {/* REPORT TAB — Legal Intelligence Document */}
               {activeTab === 'rep' && (() => {
-                const isHigh = String(active.relevanceBadge || '').toUpperCase() === 'HIGH';
+                const relLevel = normalizeRelevance(active.relevanceBadge, active.relevanceTier);
+                const isHigh = relLevel === 'Strong';
                 const confidenceScore = active.confidenceScore ?? active.confidence_score ?? (isHigh ? 94.8 : 72.3);
                 const verStatus = String(active.verificationStatus || active.verification_status || 'VERIFIED').toUpperCase();
                 const isVerified = ['APPROVED','VERIFIED','GREEN','VERIFIED_WARN'].includes(verStatus);
@@ -996,8 +1053,12 @@ export default function RedesignedCitationReportDoc({
                               {active.dimensionId != null ? `DIMENSION ${active.dimensionId}` : 'LEGAL DIMENSION'}
                             </span>
                             <span className="ld-dim-name">{active.dimensionName}</span>
-                            <span className={`ld-rel-pill ${isHigh ? 'ld-rel-high' : 'ld-rel-med'}`}>
-                              {isHigh ? '★ High Relevance' : '◆ Medium Relevance'}
+                            <span style={{
+                              padding: '2px 10px', borderRadius: 10, fontSize: 10, fontWeight: 700,
+                              background: (RELEVANCE_STYLE[relLevel] || RELEVANCE_STYLE.Relevant).bg,
+                              color: (RELEVANCE_STYLE[relLevel] || RELEVANCE_STYLE.Relevant).color,
+                            }}>
+                              {(RELEVANCE_STYLE[relLevel] || RELEVANCE_STYLE.Relevant).dot} {relLevel} Relevance
                             </span>
                           </div>
                         )}

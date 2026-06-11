@@ -315,6 +315,323 @@ def judgement_search_semantic(
     return out[:fetch_limit]
 
 
+def _score_admin_vs_query(query: str, row: Dict[str, Any]) -> float:
+    """
+    Score a DB-only admin record against the search query using keyword overlap.
+    Returns 0.6–1.0 so admin uploads always rank well above zero.
+
+    Base 0.60 for any admin upload (manually curated → presumed relevant).
+    Up to +0.40 bonus from keyword overlap against case text.
+    """
+    import re as _re
+    if not query:
+        return 0.70  # startup / no-query path: neutral score
+
+    q_words = set(_re.findall(r'\b\w{3,}\b', query.lower()))
+    if not q_words:
+        return 0.70
+
+    doc_parts = [
+        str(row.get("case_name") or row.get("title") or ""),
+        str(row.get("primary_citation") or ""),
+        str(row.get("court") or ""),
+        # Use only the first 2 000 chars of full text to keep it fast
+        str(row.get("full_text") or row.get("merged_text") or "")[:2000],
+    ]
+    doc_text = " ".join(doc_parts).lower()
+    d_words  = set(_re.findall(r'\b\w{3,}\b', doc_text))
+
+    if not d_words:
+        return 0.65
+
+    overlap  = len(q_words & d_words)
+    bonus    = min(0.40, (overlap / len(q_words)) * 0.40)
+    return round(0.60 + bonus, 3)
+
+
+def fetch_admin_judgments_semantic(
+    query: str = "",
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch ALL admin-uploaded judgments with their complete text from judgment_uploads.
+
+    Strategy (DB-first, Qdrant for scoring only):
+      1. Query judgment_uploads directly — guarantees complete merged_text for every upload.
+      2. If a query is provided, run Qdrant search to get semantic scores.
+         Records found in Qdrant get upgraded to the cosine-similarity score.
+         Records NOT in Qdrant keep a keyword-overlap score (0.60–1.00).
+      3. Sort by score descending; admin uploads are never filtered out.
+
+    This ensures no admin judgment is missed due to missing Qdrant embeddings.
+    """
+    import json as _json
+
+    collection = os.environ.get("ADMIN_QDRANT_COLLECTION", "judgment-service-embeddings")
+    text = (query or "").strip()
+    results: List[Dict[str, Any]] = []
+
+    # ── Step 1: Fetch ALL records from judgment_uploads (complete merged_text) ─
+    conn = get_pg_conn()
+    if conn:
+        try:
+            upload_table = _resolve_admin_upload_table(conn) or ""
+            if not upload_table:
+                for _tname in ("judgment_uploads", "judgement_uploads",
+                               "judgment_documents", "judgement_documents"):
+                    try:
+                        with conn.cursor() as _tc:
+                            _tc.execute(f"SELECT 1 FROM {_tname} LIMIT 1")
+                        upload_table = _tname
+                        break
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+            if upload_table:
+                upload_cols = _get_table_columns(conn, upload_table)
+                want = [
+                    "canonical_id", "judgment_uuid", "merged_text", "metadata",
+                    "original_filename", "admin_user_id", "admin_role",
+                    "status", "es_doc_id", "created_at",
+                ]
+                sel = [c for c in want if c in upload_cols] or ["canonical_id"]
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        f"SELECT {', '.join(sel)} FROM {upload_table} "
+                        f"ORDER BY created_at DESC LIMIT %s",
+                        (limit * 3,),
+                    )
+                    upload_rows = cur.fetchall() or []
+
+                for ur in upload_rows:
+                    cid = str(ur.get("canonical_id") or "").strip()
+                    meta_raw = ur.get("metadata") or {}
+                    if isinstance(meta_raw, str):
+                        try:
+                            meta_raw = _json.loads(meta_raw)
+                        except Exception:
+                            meta_raw = {}
+                    merged_text = str(ur.get("merged_text") or "").strip()
+                    orig_name = (
+                        str(ur.get("original_filename") or "")
+                        .rsplit(".", 1)[0].replace("_", " ").strip()
+                    )
+                    case_name = (
+                        str(meta_raw.get("case_name") or meta_raw.get("caseName") or "").strip()
+                        or orig_name
+                    )
+                    court = str(
+                        meta_raw.get("court_code") or meta_raw.get("court") or ""
+                    ).strip()
+                    primary_citation = str(
+                        meta_raw.get("primary_citation") or meta_raw.get("citation") or ""
+                    ).strip()
+                    row = {
+                        "canonical_id":           cid,
+                        "id":                     cid,
+                        "judgment_uuid":          ur.get("judgment_uuid"),
+                        "title":                  case_name,
+                        "case_name":              case_name,
+                        "court":                  court,
+                        "court_code":             court,
+                        "primary_citation":       primary_citation,
+                        "full_text":              merged_text,
+                        "raw_content":            merged_text,
+                        "source":                 "admin_upload",
+                        "source_type":            "admin_upload",
+                        "is_local_admin":         True,
+                        "_source":                "admin_upload",
+                        "_from_judgment_uploads": True,
+                        "_from_qdrant":           False,
+                        "_qdrant_collection":     collection,
+                        "admin_user_id":          ur.get("admin_user_id"),
+                        "status":                 ur.get("status"),
+                        "created_at":             ur.get("created_at"),
+                        # Keyword-overlap score as baseline; upgraded by Qdrant below.
+                        "_semantic_score":        _score_admin_vs_query(text, {
+                            "case_name": case_name,
+                            "primary_citation": primary_citation,
+                            "court": court,
+                            "full_text": merged_text,
+                        }),
+                    }
+                    results.append(row)
+
+                logger.debug(
+                    "[ADMIN_QDRANT] DB primary → %d upload(s) from table '%s'",
+                    len(results), upload_table,
+                )
+        except Exception as exc:
+            logger.warning("[ADMIN_QDRANT] DB fetch failed: %s", exc)
+        finally:
+            conn.close()
+
+    # ── Step 2: Qdrant — upgrade scores for records already in results ─────────
+    # We do NOT use Qdrant to discover records; only to improve the score ranking.
+    if text and results:
+        qdr = get_qdrant_client()
+        if qdr:
+            vector = get_query_embedding(text)
+            if vector:
+                try:
+                    try:
+                        qp = qdr.query_points(
+                            collection_name=collection,
+                            query=vector,
+                            limit=min(len(results) + 10, 100),
+                            with_payload=True,
+                        )
+                        points = list(getattr(qp, "points", None) or [])
+                    except Exception:
+                        points = qdr.search(
+                            collection_name=collection,
+                            query_vector=vector,
+                            limit=min(len(results) + 10, 100),
+                            with_payload=True,
+                        ) or []
+
+                    # Build cid → cosine_score map from Qdrant results
+                    qdrant_score_map: Dict[str, float] = {}
+                    for p in points:
+                        payload = getattr(p, "payload", None) or {}
+                        cid = str(payload.get("canonical_id") or "").strip()
+                        if cid:
+                            qdrant_score_map[cid] = float(getattr(p, "score", 0.0) or 0.0)
+
+                    # Upgrade scores for matching records
+                    upgraded = 0
+                    for row in results:
+                        cid = str(row.get("canonical_id") or "").strip()
+                        if cid and cid in qdrant_score_map:
+                            row["_semantic_score"] = qdrant_score_map[cid]
+                            row["_from_qdrant"] = True
+                            upgraded += 1
+
+                    logger.debug(
+                        "[ADMIN_QDRANT] Qdrant score upgrade → %d/%d record(s) got cosine score",
+                        upgraded, len(results),
+                    )
+                except Exception as exc:
+                    logger.warning("[ADMIN_QDRANT] Qdrant score upgrade failed: %s", exc)
+
+    # Sort: Qdrant-scored records naturally float to top via higher scores
+    results.sort(key=lambda r: float(r.get("_semantic_score") or 0.0), reverse=True)
+    out = results[:limit]
+
+    # ── Console table output ──────────────────────────────────────────────────
+    _print_admin_judgments_table(out, collection)
+
+    return out
+
+
+def _print_admin_judgments_table(rows: List[Dict[str, Any]], collection: str = "") -> None:
+    """
+    Print admin-uploaded judgments to the server console as a table.
+    Uses UTF-8 output with ASCII fallback for environments that don't
+    support unicode box-drawing characters (e.g. Windows cmd).
+    """
+    import sys
+
+    W_NO   = 4
+    W_NAME = 50
+    W_CRT  = 30
+    W_CIT  = 28
+    W_SCR  = 8
+    W_SRC  = 14
+    # total width = sum of column widths + separators (| SP col SP | = col+3 per col, plus outer 2)
+    total = W_NO + W_NAME + W_CRT + W_CIT + W_SCR + W_SRC + (7 * 3) + 2
+
+    def _cell(text: str, width: int) -> str:
+        t = (str(text) or "-").strip()
+        t = t.replace("\n", " ")
+        if len(t) > width:
+            t = t[:width - 1] + ">"
+        return t.ljust(width)
+
+    def _safe_print(line: str) -> None:
+        """Write line to stdout, encoding safely for any terminal."""
+        try:
+            # Try direct print first (works on most modern terminals)
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            try:
+                # Force UTF-8 bytes on Windows
+                sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
+                sys.stdout.buffer.flush()
+            except Exception:
+                # Last resort: ASCII-only
+                print(line.encode("ascii", errors="replace").decode("ascii"), flush=True)
+
+    # Build table lines
+    DIV  = "+" + ("-" * (total - 2)) + "+"
+    SEP  = "|" + ("-" * (W_NO + 2)) + "+" + ("-" * (W_NAME + 2)) + "+" + \
+           ("-" * (W_CRT + 2)) + "+" + ("-" * (W_CIT + 2)) + "+" + \
+           ("-" * (W_SCR + 2)) + "+" + ("-" * (W_SRC + 2)) + "|"
+
+    def _row(*cols) -> str:
+        return "| " + " | ".join(cols) + " |"
+
+    coll_label = collection or "judgment-service-embeddings"
+    title_line = f"  ADMIN UPLOADED JUDGMENTS  [{coll_label}]  ({len(rows)} found)"
+
+    _safe_print("")
+    _safe_print(DIV)
+    _safe_print(f"|{title_line:^{total - 2}}|")
+    _safe_print(DIV)
+    _safe_print(_row(
+        _cell("#",           W_NO),
+        _cell("Case Name",   W_NAME),
+        _cell("Court",       W_CRT),
+        _cell("Citation",    W_CIT),
+        _cell("Score",       W_SCR),
+        _cell("Source",      W_SRC),
+    ))
+    _safe_print(DIV)
+
+    if not rows:
+        _safe_print(f"|{'  No admin-uploaded judgments found.':^{total - 2}}|")
+    else:
+        for i, r in enumerate(rows, 1):
+            score = float(r.get("_semantic_score") or 0.0)
+            score_str = f"{score:.3f}"
+            src = "Qdrant" if r.get("_from_qdrant") else "DB(kw)"
+            _safe_print(_row(
+                _cell(str(i),                                     W_NO),
+                _cell(r.get("case_name") or r.get("title") or "", W_NAME),
+                _cell(r.get("court") or r.get("court_code") or "", W_CRT),
+                _cell(r.get("primary_citation") or "",             W_CIT),
+                _cell(score_str,                                   W_SCR),
+                _cell(src,                                         W_SRC),
+            ))
+            # Text preview row
+            ft = str(r.get("full_text") or r.get("merged_text") or "").strip()
+            if ft:
+                preview = ft[:total - 8].replace("\n", " ")
+                _safe_print(f"|  >> {preview:<{total - 8}}|")
+            if i < len(rows):
+                _safe_print(SEP)
+
+    _safe_print(DIV)
+    _safe_print("")
+
+    # Also emit via logger so it appears in structured log files
+    logger.info(
+        "[ADMIN_JUDGMENTS] %d admin judgment(s) from '%s' — see console table above",
+        len(rows), coll_label,
+    )
+    for i, r in enumerate(rows, 1):
+        logger.debug(
+            "[ADMIN_JUDGMENTS] [%d] %s | %s | %s | score=%.3f",
+            i,
+            (r.get("case_name") or r.get("title") or "Unknown")[:60],
+            (r.get("court") or "-")[:30],
+            (r.get("primary_citation") or "-")[:25],
+            float(r.get("_semantic_score") or 0.0),
+        )
+
+
 def _judgment_citation_data_has_analysis_report(cd: Any) -> bool:
     """True when citation_data already carries a persisted Clerk / analysis payload."""
     if not isinstance(cd, dict):
@@ -4013,5 +4330,5 @@ def search_admin_uploads_pg(
             conn.close()
         except Exception:
             pass
-    logger.info("[ADMIN_UPLOAD_SEARCH] %r → %d admin upload result(s)", query[:60], len(results))
+    logger.debug("[ADMIN_UPLOAD_SEARCH] %r → %d admin upload result(s)", query[:60], len(results))
     return results

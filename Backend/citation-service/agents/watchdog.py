@@ -471,18 +471,61 @@ def _search_local_by_keywords(
             if "Keyword Query" not in entry["dimension_names"]:
                 entry["dimension_names"].append("Keyword Query")
 
+    # ── Admin-first: Qdrant search on judgment-service-embeddings ────────────
+    # Always run this regardless of controversy_query so admin uploads are
+    # always surfaced first with highest priority in the merged result set.
+    admin_collection = os.environ.get("ADMIN_QDRANT_COLLECTION", "judgment-service-embeddings")
+    admin_sem_query = (controversy_query or " ".join(keyword_sets[:3]) or "").strip()
+    try:
+        from db.client import fetch_admin_judgments_semantic
+        admin_rows = fetch_admin_judgments_semantic(
+            query=admin_sem_query,
+            limit=20,
+        )
+        for r in admin_rows:
+            cid = str(r.get("canonical_id") or r.get("id") or "").strip()
+            if not cid:
+                continue
+            sem = float(r.get("_semantic_score") or 0.0)
+            if cid not in cid_map:
+                cid_map[cid] = {
+                    "row": dict(r),
+                    "keyword_score": 0,
+                    "semantic_score": sem,
+                    "matched_queries": [],
+                    "dimension_ids": [],
+                    "dimension_names": [],
+                }
+            else:
+                entry = cid_map[cid]
+                entry["semantic_score"] = max(float(entry.get("semantic_score") or 0.0), sem)
+                if not entry.get("row"):
+                    entry["row"] = dict(r)
+        logger.info(
+            "[WATCHDOG_ES] Admin-first (judgment-service-embeddings) → %d judgment(s)",
+            len(admin_rows),
+        )
+        _db_log(
+            run_id, "watchdog", "watchdog", "INFO",
+            f"🏛 Admin-first (judgment-service-embeddings) → {len(admin_rows)} judgment(s)",
+            {"source": "admin_qdrant", "count": len(admin_rows), "collection": admin_collection},
+        )
+    except Exception as exc:
+        logger.warning("[WATCHDOG_ES] Admin-first Qdrant lookup failed: %s", exc)
+
     # Semantic local recall: Qdrant nearest-neighbours for controversy query.
     sem_query = (controversy_query or "").strip()
     if sem_query:
         try:
             from db.client import judgement_search_semantic
+            qdrant_collection = os.environ.get("QDRANT_COLLECTION", "legal_embeddings_v2")
             sem_rows = judgement_search_semantic(
                 sem_query,
                 limit=10,
                 case_state=case_state,
                 approved_only=True,
                 exclude_low_hierarchy=True,
-                qdrant_collection="legal_embeddings",
+                qdrant_collection=qdrant_collection,
             )
             for r in sem_rows:
                 cid = str(r.get("canonical_id") or r.get("id") or "").strip()
@@ -509,7 +552,7 @@ def _search_local_by_keywords(
             _db_log(
                 run_id, "watchdog", "watchdog", "INFO",
                 f"🏛 Qdrant semantic local → {len(sem_rows)} judgment(s)",
-                {"source": "qdrant_semantic", "count": len(sem_rows), "collection": "legal_embeddings"},
+                {"source": "qdrant_semantic", "count": len(sem_rows), "collection": qdrant_collection},
             )
         except Exception as exc:
             logger.warning("[WATCHDOG_ES] Qdrant semantic lookup failed: %s", exc)
@@ -581,6 +624,8 @@ def _search_local_by_keywords(
 
     out.sort(
         key=lambda r: (
+            # Admin-uploaded judgments always surface first
+            1 if r.get("is_local_admin") else 0,
             float(r.get("_keyword_score", 0) or 0.0),
             float(r.get("_semantic_score", 0.0) or 0.0),
             float(r.get("_es_score", 0.0) or 0.0),

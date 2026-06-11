@@ -2329,6 +2329,10 @@ def _judgement_to_citation(
         "ikDocMeta":                j.get("ik_doc_meta") or {},
         # ── Dimension & relevance fields ───────────────────────────────────
         "relevanceBadge":           relevance_badge,
+        "relevanceTier":            (
+            "STRONG" if str(relevance_badge).upper() == "HIGH" else
+            "RELEVANT" if str(relevance_badge).upper() == "MEDIUM" else "WEAK"
+        ),
         "dimensionJustification":   dim_justification,
         "dimensionId":              dim_id_value,
         "dimensionName":            dim_name_value,

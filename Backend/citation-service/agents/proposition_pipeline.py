@@ -257,7 +257,7 @@ def _gemini_json(
             **({"thinking_config": thinking_config} if thinking_config is not None else {}),
         )
         response = None
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 response = client.models.generate_content(
                     model=model, contents=user, config=config,
@@ -265,8 +265,18 @@ def _gemini_json(
                 break
             except Exception as exc:
                 msg = str(exc)
-                if ("429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()) and attempt < 2:
-                    _time.sleep(5 * (attempt + 1))
+                is_retriable = (
+                    "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()
+                    or "503" in msg or "UNAVAILABLE" in msg.upper()
+                    or "Service Unavailable" in msg
+                )
+                if is_retriable and attempt < 3:
+                    wait = [3, 6, 12][min(attempt, 2)]
+                    logger.warning(
+                        "[PROP] Gemini transient error on %r (attempt %d/4): %s — retrying in %ds",
+                        operation, attempt + 1, msg[:80], wait,
+                    )
+                    _time.sleep(wait)
                     continue
                 raise
         if response is None:
@@ -1209,7 +1219,7 @@ def _ik_search_one(query: str, pagenum: int = 0) -> List[Dict[str, Any]]:
                 "_query":  query,
                 "_page":   pagenum,
             })
-        logger.info("[PROP] IK search p%d %r → %d result(s)", pagenum, query[:60], len(results))
+        logger.debug("[PROP] IK search p%d %r → %d result(s)", pagenum, query[:60], len(results))
         return results
     except Exception as exc:
         logger.warning("[PROP] IK search p%d failed %r: %s", pagenum, query[:60], exc)
@@ -1766,13 +1776,13 @@ def _search_local_one(query: str) -> List[Dict[str, Any]]:
             _local_count = len(results) - _admin_count
             for r in results:
                 _src_label = "📂 admin_upload" if r.get("source") == "admin_upload" else "🗄 local_db"
-                logger.info("[LOCAL] %s | %s | cid=%s | text=%d chars",
-                            _src_label,
-                            str(r.get("title") or "")[:80],
-                            r.get("canonical_id", ""),
-                            len(r.get("full_text") or ""))
-            logger.info("[PROP] ES local search %r → %d result(s) [admin=%d local_db=%d] (%d with full_text)",
-                        query[:60], len(results), _admin_count, _local_count,
+                logger.debug("[LOCAL] %s | %s | cid=%s | text=%d chars",
+                             _src_label,
+                             str(r.get("title") or "")[:80],
+                             r.get("canonical_id", ""),
+                             len(r.get("full_text") or ""))
+            logger.info("[LOCAL] ES search → %d result(s) [admin=%d  local=%d  with-text=%d]",
+                        len(results), _admin_count, _local_count,
                         sum(1 for r in results if len(r.get("full_text", "")) > 100))
             return results
     except Exception as exc:
@@ -1855,6 +1865,78 @@ def search_local_parallel(
             {"result_count": len(deduped)})
     logger.info("[PROP] LocalDB search done — %d unique results", len(deduped))
     return deduped
+
+
+def search_admin_qdrant(
+    case_context: str,
+    query: str,
+    run_id: str,
+    similarity_threshold: float = 0.55,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch admin-uploaded judgments and rank them by Qdrant embedding similarity
+    against the user's case context + query.
+
+    Admin judgments with cosine similarity >= similarity_threshold (or keyword-overlap
+    score >= 0.70 when not yet in Qdrant) are included in the pipeline so they can
+    go through normal scoring/validation.
+
+    Returns results normalised to the same shape as search_local_parallel output.
+    """
+    combined_text = ((case_context or "")[:4000] + " " + (query or "")[:400]).strip()
+    if not combined_text:
+        return []
+
+    try:
+        from db.client import fetch_admin_judgments_semantic
+    except Exception as exc:
+        logger.warning("[PROP] fetch_admin_judgments_semantic unavailable: %s", exc)
+        return []
+
+    try:
+        rows = fetch_admin_judgments_semantic(combined_text, limit=limit) or []
+    except Exception as exc:
+        logger.warning("[PROP] Admin Qdrant search failed: %s", exc)
+        return []
+
+    if not rows:
+        logger.info("[ADMIN] Qdrant similarity search → 0 admin judgment(s) found")
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for r in rows:
+        score = float(r.get("_semantic_score") or 0.0)
+        from_qdrant = bool(r.get("_from_qdrant"))
+        # For Qdrant-scored rows use the threshold; for keyword-only keep >=0.70
+        min_score = similarity_threshold if from_qdrant else 0.70
+        if score < min_score:
+            continue
+        norm = _pg_row_to_local_result(r, query, es_score=0.0)
+        if not norm:
+            continue
+        norm["_semantic_score"] = score
+        norm["_from_qdrant"] = from_qdrant
+        norm["source"] = "admin_upload"
+        normalized.append(norm)
+
+    # Log a clean summary table to the console
+    logger.info("[ADMIN] Qdrant similarity search → %d admin judgment(s) above threshold %.2f",
+                len(normalized), similarity_threshold)
+    for i, r in enumerate(normalized, 1):
+        logger.info(
+            "[ADMIN] [%d] %-55s | %-25s | score=%.3f | src=%s",
+            i,
+            (r.get("title") or r.get("case_name") or "Unknown")[:55],
+            (r.get("court") or "-")[:25],
+            float(r.get("_semantic_score") or 0.0),
+            "Qdrant" if r.get("_from_qdrant") else "keyword-overlap",
+        )
+
+    _db_log(run_id, "SearchAgent", "search_admin_qdrant", "INFO",
+            f"Admin Qdrant: {len(normalized)} judgment(s) above threshold {similarity_threshold}",
+            {"count": len(normalized), "threshold": similarity_threshold})
+    return normalized
 
 
 def search_local_semantic(
@@ -2000,9 +2082,14 @@ def _search_google_one(
                 break
             except Exception as exc:
                 msg = str(exc)
-                if ("429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()) and attempt < 2:
+                is_retriable = (
+                    "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()
+                    or "503" in msg or "UNAVAILABLE" in msg.upper()
+                    or "Service Unavailable" in msg
+                )
+                if is_retriable and attempt < 2:
                     wait = 10 * (attempt + 1)   # 10s, 20s
-                    logger.warning("[PROP] Gemini 429 on %r — retrying in %ds (attempt %d/3)",
+                    logger.warning("[PROP] Gemini transient error on %r — retrying in %ds (attempt %d/3)",
                                    query[:60], wait, attempt + 1)
                     _time.sleep(wait)
                     continue
@@ -3391,6 +3478,89 @@ def semantic_rerank_survivors(
     return out
 
 
+def _print_admin_used_in_report(admin_cits: List[Dict[str, Any]], run_id: str = "") -> None:
+    """
+    Print a clean table of admin-uploaded judgments that made it into the final report.
+    Shown every run so the admin can see which uploaded documents are being cited.
+    """
+    import sys
+
+    W_NO  = 3
+    W_NAME = 52
+    W_CRT  = 28
+    W_CIT  = 26
+    W_SCORE = 7
+    total = W_NO + W_NAME + W_CRT + W_CIT + W_SCORE + (6 * 3) + 2
+
+    def _cell(text: str, width: int) -> str:
+        t = (str(text) or "-").strip().replace("\n", " ")
+        return (t[:width - 1] + ">") if len(t) > width else t.ljust(width)
+
+    def _pr(line: str) -> None:
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
+            sys.stdout.buffer.flush()
+
+    DIV = "+" + "-" * (total - 2) + "+"
+    SEP = ("|" + "-" * (W_NO + 2) + "+" + "-" * (W_NAME + 2) + "+"
+           + "-" * (W_CRT + 2) + "+" + "-" * (W_CIT + 2) + "+" + "-" * (W_SCORE + 2) + "|")
+
+    def _row(*cols) -> str:
+        return "| " + " | ".join(cols) + " |"
+
+    rid_label = f"  run={run_id[:8]}  " if run_id else ""
+    title_line = f"  ADMIN JUDGMENTS USED IN REPORT{rid_label} ({len(admin_cits)} citation(s))  "
+
+    _pr("")
+    _pr(DIV)
+    _pr(f"|{title_line:^{total - 2}}|")
+    _pr(DIV)
+    _pr(_row(
+        _cell("#",         W_NO),
+        _cell("Case Name", W_NAME),
+        _cell("Court",     W_CRT),
+        _cell("Citation",  W_CIT),
+        _cell("Rel.",      W_SCORE),
+    ))
+    _pr(DIV)
+
+    if not admin_cits:
+        _pr(f"|{'  No admin-uploaded judgments were included in this report.':^{total - 2}}|")
+    else:
+        for i, c in enumerate(admin_cits, 1):
+            rel = float(c.get("relevanceScore") or 0.0)
+            _pr(_row(
+                _cell(str(i),                                     W_NO),
+                _cell(c.get("caseName") or c.get("title") or "", W_NAME),
+                _cell(c.get("court") or "",                       W_CRT),
+                _cell(c.get("primaryCitation") or "",             W_CIT),
+                _cell(f"{rel:.2f}",                               W_SCORE),
+            ))
+            excerpt = str(c.get("excerptText") or c.get("ratio") or "").strip()
+            if excerpt:
+                preview = excerpt[:total - 8].replace("\n", " ")
+                _pr(f"|  >> {preview:<{total - 8}}|")
+            if i < len(admin_cits):
+                _pr(SEP)
+
+    _pr(DIV)
+    _pr("")
+
+    # Mirror to logger
+    logger.info("[ADMIN_REPORT] %d admin judgment(s) used in citation report", len(admin_cits))
+    for i, c in enumerate(admin_cits, 1):
+        logger.info(
+            "[ADMIN_REPORT] [%d] %-52s | %-28s | %-26s | rel=%.2f",
+            i,
+            (c.get("caseName") or c.get("title") or "Unknown")[:52],
+            (c.get("court") or "-")[:28],
+            (c.get("primaryCitation") or "-")[:26],
+            float(c.get("relevanceScore") or 0.0),
+        )
+
+
 def _build_report_format(
     citations: List[Dict[str, Any]],
     query: str,
@@ -3470,6 +3640,10 @@ def _build_report_format(
             "searchQuery":       _clean_report_query_label(c.get("_query") or c.get("search_query") or c.get("query") or ""),
             "relevanceScore":    float(c.get("relevanceScore", 0.7)),
             "relevanceBadge":    "High" if float(c.get("relevanceScore", 0.7)) >= 0.75 else "Medium",
+            "relevanceTier":     c.get("_ranker_tier") or c.get("relevanceTier") or (
+                "STRONG" if float(c.get("relevanceScore", 0.7)) >= 0.85 else
+                "RELEVANT" if float(c.get("relevanceScore", 0.7)) >= 0.65 else "WEAK"
+            ),
             "argumentParty":     "neutral",
             "source":            src_key,
             "sourceType":        src_type,
@@ -3508,6 +3682,11 @@ def _build_report_format(
         dim_map[dim_id]["citations"].append(cid)
 
     dims = list(dim_map.values())
+
+    # ── Console table: admin-uploaded judgments used in this report ───────────
+    admin_used = [c for c in final_cits if c.get("isLocalAdmin")]
+    _print_admin_used_in_report(admin_used, run_id)
+
     return {
         "citations":       final_cits,
         "generatedAt":     now,
@@ -3518,12 +3697,14 @@ def _build_report_format(
         "searchKeywordsByRoute": search_keywords_by_route or {},
         "researchPlan": research_plan or {},
         "status":          "completed",
+        "adminJudgments":  admin_used,
         "metadata": {
             "query":          query,
             "user_id":        user_id,
             "case_id":        case_id,
             "run_id":         run_id,
             "citation_count": len(final_cits),
+            "admin_citation_count": len(admin_used),
             "generated_at":   now,
             "service_version": "proposition-ik",
             "legal_issues":   [i.get("issue_title", "") for i in issues],
@@ -3702,6 +3883,10 @@ def run_proposition_pipeline(
         selected_case_names:  Case-name chips selected from Suggest Keywords panel.
                               When present, triggers strict targeted extraction mode.
     """
+    logger.info("=" * 70)
+    logger.info("  CITATION PIPELINE START  |  run_id=%s", run_id)
+    logger.info("  query: %s", query[:100])
+    logger.info("=" * 70)
     _db_log(run_id, "PropositionPipeline", "start", "INFO",
             f"Pipeline started — query: {query[:120]}",
             {"selected_keywords": len(selected_keywords or []),
@@ -3748,6 +3933,7 @@ def run_proposition_pipeline(
     # PATH 1: Case name chips → IK title search → return directly, NO AI operations.
 
     # Stage 1: always run (needed for Stage 5 validation context)
+    logger.info("── STAGE 1: Legal Point Extraction ─────────────────────────────────")
     legal_points = extract_all_legal_points(query, case_context, run_id, user_id)
     case_fact_summary = str(legal_points.get("case_fact_summary") or "").strip()
     issues = legal_points.get("issues", [])
@@ -3854,12 +4040,16 @@ def run_proposition_pipeline(
     #    Each stage is only triggered if the previous didn't yield enough candidates.
     _ENOUGH = 10   # skip next source if we already have this many candidates
 
-    # Stage A: Local keyword (ES/PG) + Local semantic (Qdrant) — run in parallel.
+    logger.info("── STAGE 3: Source Search ───────────────────────────────────────────")
+    # Stage A: Local keyword (ES/PG) + Local semantic (Qdrant) + Admin Qdrant — all in parallel.
     # Semantic search fails open if Qdrant is unavailable or the collection is empty.
-    with ThreadPoolExecutor(max_workers=2) as _local_pool:
-        _fut_kw  = _local_pool.submit(search_local_parallel, ik_queries, run_id)
-        _fut_sem = _local_pool.submit(search_local_semantic, case_context, query, run_id,
-                                      int(os.environ.get("CITATION_LOCAL_SEMANTIC_LIMIT", "30")))
+    _admin_sim_threshold = float(os.environ.get("CITATION_ADMIN_SIM_THRESHOLD", "0.55"))
+    with ThreadPoolExecutor(max_workers=3) as _local_pool:
+        _fut_kw    = _local_pool.submit(search_local_parallel, ik_queries, run_id)
+        _fut_sem   = _local_pool.submit(search_local_semantic, case_context, query, run_id,
+                                        int(os.environ.get("CITATION_LOCAL_SEMANTIC_LIMIT", "30")))
+        _fut_admin = _local_pool.submit(search_admin_qdrant, case_context, query, run_id,
+                                        _admin_sim_threshold)
         try:
             raw_local_kw = _fut_kw.result(timeout=30)
         except Exception as exc:
@@ -3870,9 +4060,16 @@ def run_proposition_pipeline(
         except Exception as exc:
             logger.warning("[PROP] search_local_semantic failed: %s", exc)
             raw_local_sem = []
-    raw_local = merge_local(raw_local_kw, raw_local_sem)
+        try:
+            raw_admin = _fut_admin.result(timeout=30)
+        except Exception as exc:
+            logger.warning("[PROP] search_admin_qdrant failed: %s", exc)
+            raw_admin = []
+
+    raw_local = merge_local(merge_local(raw_local_kw, raw_local_sem), raw_admin)
     _db_log(run_id, "PropositionPipeline", "search_local", "INFO",
-            f"🏛 Local: {len(raw_local)} result(s) (kw={len(raw_local_kw)}, sem={len(raw_local_sem)})")
+            f"🏛 Local: {len(raw_local)} result(s) "
+            f"(kw={len(raw_local_kw)}, sem={len(raw_local_sem)}, admin={len(raw_admin)})")
 
     # Stage B: Indian Kanoon — always run, gives the bulk of case law.
     # When case names were selected, only verified exact case-name winners are merged
@@ -3950,6 +4147,7 @@ def run_proposition_pipeline(
             research_plan=research_plan,
         )
 
+    logger.info("── STAGE 4: Fetch Full Texts ────────────────────────────────────────")
     # 4. Fetch full judgment texts in parallel
     enriched = fetch_full_texts_parallel(
         raw_results, run_id,

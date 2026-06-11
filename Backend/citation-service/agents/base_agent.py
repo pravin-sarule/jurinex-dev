@@ -83,11 +83,11 @@ class BaseAgent:
         if not api_key:
             logger.warning("[%s] GEMINI_API_KEY not set", self.name)
             return None
-        _RETRY_DELAYS = [5, 10, 20]
+        _RETRY_DELAYS = [3, 7, 15]
         last_exc: Optional[Exception] = None
         for attempt, delay in enumerate([0] + _RETRY_DELAYS):
             if delay:
-                logger.warning("[%s] Gemini 429 — retrying in %ds (attempt %d/3)",
+                logger.warning("[%s] Gemini transient error — retrying in %ds (attempt %d/4)",
                                self.name, delay, attempt)
                 time.sleep(delay)
             try:
@@ -116,8 +116,11 @@ class BaseAgent:
                 return resp.text or ""
             except Exception as e:
                 last_exc = e
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    continue  # retry
+                msg = str(e)
+                if ("429" in msg or "RESOURCE_EXHAUSTED" in msg
+                        or "503" in msg or "UNAVAILABLE" in msg.upper()
+                        or "Service Unavailable" in msg):
+                    continue  # retry with backoff
                 logger.warning("[%s] Gemini call failed: %s", self.name, e)
                 return None
         logger.warning("[%s] Gemini call failed after retries: %s", self.name, last_exc)

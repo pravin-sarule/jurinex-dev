@@ -57,7 +57,21 @@ from db.connections import get_qdrant_client, get_neo4j_driver
 from pipeline import run_pipeline
 from utils.usage_analytics import normalize_aggregate_by_service, normalize_user_by_service
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+# Silence noisy third-party libraries
+for _noisy in (
+    "httpx", "httpcore",
+    "google_genai", "google.genai",
+    "elastic_transport", "elastic_transport.transport",
+    "elasticsearch",
+    "urllib3", "urllib3.connectionpool",
+    "qdrant_client",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 _project_root = Path(__file__).resolve().parent
@@ -636,6 +650,23 @@ def startup():
                 logger.info("[QDRANT] Collection exists: %s (expected vector size=%d)", qdrant_collection, vector_size)
         except Exception as exc:
             logger.warning("[QDRANT] Init failed: %s", exc)
+
+    # ── Print admin-uploaded judgments table at startup ───────────────────────
+    # Runs in a background thread so it does not block the server from accepting
+    # requests while embeddings are being generated.
+    def _show_admin_judgments_on_startup() -> None:
+        try:
+            from db.client import fetch_admin_judgments_semantic
+            fetch_admin_judgments_semantic(query="", limit=50)
+        except Exception as exc:
+            logger.warning("[BOOT] Admin judgments table failed: %s", exc)
+
+    import threading as _threading
+    _threading.Thread(
+        target=_show_admin_judgments_on_startup,
+        daemon=True,
+        name="startup-admin-table",
+    ).start()
 
 
 @app.get("/")
@@ -1974,13 +2005,58 @@ async def suggest_citation_keywords(
         auth_header_pre = request.headers.get("authorization")
         case_file_context, _ = await _fetch_case_context(case_id, auth_header_pre)
 
-    # Build compact context blob
-    context_parts: List[str] = []
-    for f in (case_file_context or [])[:5]:
-        snippet = (f.get("snippet") or f.get("content") or "").strip()
-        if snippet:
-            context_parts.append(snippet[:3000])
-    context_text = "\n\n".join(context_parts)[:8000]
+    # Gather ALL chunks for comprehensive analysis
+    all_text_parts: List[str] = []
+    for f in (case_file_context or []):
+        chunk = (f.get("snippet") or f.get("content") or "").strip()
+        if chunk:
+            all_text_parts.append(chunk)
+
+    full_case_text = "\n\n---\n\n".join(all_text_parts)
+
+    # If substantial text exists, summarize all chunks first for richer keyword quality
+    if len(full_case_text) > 5000:
+        logger.info("[SUGGEST_KW] Summarizing %d chars across %d chunks before keyword generation",
+                    len(full_case_text), len(all_text_parts))
+
+        _sum_system = (
+            "You are a senior Indian legal analyst. Read the following case documents carefully and "
+            "produce a concise 500-700 word structured case summary covering:\n"
+            "1. Parties and their roles\n"
+            "2. Factual background (key facts)\n"
+            "3. Legal issues and questions in dispute\n"
+            "4. Relevant statutes and sections cited (with exact numbers)\n"
+            "5. Key legal principles involved\n"
+            "Be specific — include exact statute names, section numbers, and concrete facts."
+        )
+        _sum_user = f"Case documents:\n\n{full_case_text[:40000]}"
+
+        def _call_summary() -> str:
+            try:
+                raw = forward_to_claude({
+                    "model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
+                    "max_tokens": 1024,
+                    "system": _sum_system,
+                    "messages": [{"role": "user", "content": _sum_user}],
+                })
+                for block in (raw.get("content") or []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        return block.get("text", "").strip()
+                return ""
+            except Exception as e:
+                logger.warning("[SUGGEST_KW] Summarization failed: %s", e)
+                return ""
+
+        context_text = await asyncio.to_thread(_call_summary)
+        if not context_text:
+            context_text = full_case_text[:8000]
+        else:
+            logger.info("[SUGGEST_KW] Case summarized to %d chars for keyword generation", len(context_text))
+    elif full_case_text:
+        context_text = full_case_text[:8000]
+    else:
+        context_text = ""
+
     if not context_text and query:
         context_text = query.strip()
     if not context_text:

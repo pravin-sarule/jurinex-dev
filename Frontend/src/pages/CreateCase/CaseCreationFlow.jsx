@@ -602,63 +602,69 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
 
 
   return (
-    <div className="h-screen bg-[#FDFCFB] flex flex-col overflow-hidden">
-      <div className="bg-white border-b shadow-sm sticky top-0 z-10 flex-shrink-0">
-        <div className="max-w-6xl mx-auto px-8 py-6">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-800">Create New Case</h1>
-              <p className="text-sm text-gray-500">
-                Step {currentStep} of {steps.length}
-              </p>
+    <div className="h-screen bg-[#F8FAFA] flex flex-col overflow-hidden">
+      <div className="bg-white border-b border-gray-100 shadow-sm sticky top-0 z-10 flex-shrink-0">
+        <div className="max-w-6xl mx-auto px-8 py-5">
+          {/* Title row */}
+          <div className="flex items-center justify-between mb-5">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#21C1B6] to-[#1AA89E] flex items-center justify-center shadow-md shadow-[#21C1B6]/25">
+                <Scale className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-gray-900 leading-tight">Create New Case</h1>
+                <p className="text-xs text-gray-400 font-medium">Step {currentStep} of {steps.length}</p>
+              </div>
             </div>
             <button
               onClick={handleCancel}
-              className="text-gray-500 hover:text-gray-700 text-sm transition-colors"
+              className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-700 hover:bg-gray-50 px-3 py-1.5 rounded-lg transition-all duration-200 font-medium"
             >
+              <span>✕</span>
               Cancel
             </button>
           </div>
 
-          <div className="flex items-center justify-between">
+          {/* Step Progress */}
+          <div className="flex items-center">
             {steps.map((step, index) => {
               const isCurrentStep = currentStep === step.number;
               const isCompletedStep = currentStep > step.number;
-              
+
               return (
                 <React.Fragment key={step.number}>
-                  <div className="flex flex-col items-center">
-                    <div className="relative">
-                      <div
-                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
-                          isCompletedStep
-                            ? 'bg-[#21C1B6] text-white'
-                            : isCurrentStep
-                            ? 'bg-[#21C1B6] text-white'
-                            : 'bg-gray-200 text-gray-400'
-                        }`}
-                      >
-                        <step.icon className="w-5 h-5" />
-                      </div>
-                    </div>
-                    <span
-                      className={`text-xs mt-2 ${
-                        isCompletedStep || isCurrentStep
-                          ? 'text-gray-700 font-medium'
-                          : 'text-gray-400'
+                  <div className="flex flex-col items-center gap-1.5 relative">
+                    <div
+                      className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-300 ${
+                        isCompletedStep
+                          ? 'bg-[#21C1B6] text-white shadow-md shadow-[#21C1B6]/25'
+                          : isCurrentStep
+                          ? 'bg-gradient-to-br from-[#21C1B6] to-[#1AA89E] text-white shadow-lg shadow-[#21C1B6]/30 scale-105'
+                          : 'bg-gray-100 text-gray-400'
                       }`}
                     >
+                      {isCompletedStep
+                        ? <CheckCircle className="w-4.5 h-4.5" style={{ width: 18, height: 18 }} />
+                        : <step.icon className="w-4 h-4" />
+                      }
+                    </div>
+                    <span className={`text-[11px] font-semibold whitespace-nowrap transition-colors duration-300 ${
+                      isCurrentStep ? 'text-[#21C1B6]' :
+                      isCompletedStep ? 'text-gray-600' : 'text-gray-300'
+                    }`}>
                       {step.name}
                     </span>
                   </div>
                   {index < steps.length - 1 && (
-                    <div
-                      className={`flex-1 h-1 mx-2 transition-all ${
-                        isCompletedStep 
-                          ? 'bg-[#21C1B6]'
-                          : 'bg-gray-200'
-                      }`}
-                    />
+                    <div className="flex-1 mx-2 mb-5 relative h-1 rounded-full overflow-hidden bg-gray-100">
+                      <div
+                        className="absolute inset-y-0 left-0 rounded-full transition-all duration-500 ease-out"
+                        style={{
+                          width: isCompletedStep ? '100%' : '0%',
+                          background: 'linear-gradient(90deg, #21C1B6, #1AA89E)',
+                        }}
+                      />
+                    </div>
                   )}
                 </React.Fragment>
               );
@@ -669,7 +675,7 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-8 py-8">
-          <div className="bg-white rounded-lg shadow-sm p-8 min-h-[500px]">
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 min-h-[500px]">
             {/* Upload Step */}
             {currentStep === 1 && (
               <UploadStep 
@@ -707,57 +713,51 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
           {/* Navigation buttons */}
           {currentStep < 5 && !editingFromReview && (
             <div className="mt-6 flex justify-end">
-              <div className="flex space-x-2">
+              <div className="flex items-center gap-2">
                 {currentStep > 1 && (
                   <button
                     onClick={handleBack}
-                    className="px-4 py-1.5 border border-[#21C1B6] text-[#21C1B6] rounded-sm text-sm hover:bg-[#E6F8F7] transition-colors"
+                    className="px-5 py-2 border border-gray-200 text-gray-600 rounded-xl text-sm font-semibold hover:border-gray-300 hover:bg-gray-50 transition-all duration-200"
                   >
-                    Back
+                    ← Back
                   </button>
                 )}
-                {/* Show Skip button for steps 2-4 (not step 1 after upload) */}
                 {currentStep > 1 && currentStep < 4 && (
                   <button
                     onClick={handleNext}
-                    className="px-4 py-1.5 border border-[#21C1B6] text-[#21C1B6] rounded-sm text-sm hover:bg-[#E6F8F7] transition-colors"
+                    className="px-5 py-2 border border-[#21C1B6]/50 text-[#21C1B6] rounded-xl text-sm font-semibold hover:bg-[#21C1B6]/5 transition-all duration-200"
                   >
                     Skip
                   </button>
                 )}
-                {/* Show Next/Continue button - Hide on step 1 until upload is complete */}
                 {(currentStep !== 1 || isUploadComplete) && (
                   <button
                     onClick={handleNext}
-                    className="px-4 py-1.5 bg-[#21C1B6] text-white rounded-sm text-sm font-medium hover:bg-[#1AA89E] transition-colors flex items-center"
+                    className="px-6 py-2 bg-gradient-to-r from-[#21C1B6] to-[#1AA89E] text-white rounded-xl text-sm font-bold shadow-md shadow-[#21C1B6]/25 hover:shadow-lg hover:shadow-[#21C1B6]/35 hover:scale-[1.02] transition-all duration-200 flex items-center gap-1.5"
                   >
-                    {currentStep === 1 ? 'Next' : 'Continue'}
-                    <span className="ml-1">→</span>
+                    {currentStep === 1 ? 'Continue' : 'Continue'}
+                    <span>→</span>
                   </button>
                 )}
               </div>
             </div>
           )}
-          
-          {/* Navigation buttons when editing from Review - show Save/Cancel */}
+
+          {/* Navigation buttons when editing from Review */}
           {editingFromReview && (currentStep === 2 || currentStep === 3 || currentStep === 4) && (
             <div className="mt-6 flex justify-end">
-              <div className="flex space-x-2">
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => {
-                    setCurrentStep(5);
-                    setEditingFromReview(false);
-                    setEditingStep(null);
-                  }}
-                  className="px-4 py-1.5 border border-gray-300 text-gray-700 rounded-sm text-sm hover:bg-gray-50 transition-colors"
+                  onClick={() => { setCurrentStep(5); setEditingFromReview(false); setEditingStep(null); }}
+                  className="px-5 py-2 border border-gray-200 text-gray-600 rounded-xl text-sm font-semibold hover:bg-gray-50 transition-all duration-200"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleNext}
-                  className="px-4 py-1.5 bg-[#21C1B6] text-white rounded-sm text-sm font-medium hover:bg-[#1AA89E] transition-colors"
+                  className="px-6 py-2 bg-gradient-to-r from-[#21C1B6] to-[#1AA89E] text-white rounded-xl text-sm font-bold shadow-md shadow-[#21C1B6]/25 hover:shadow-lg transition-all duration-200"
                 >
-                  Save
+                  Save Changes
                 </button>
               </div>
             </div>
