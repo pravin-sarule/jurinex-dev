@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        env_ignore_empty=True,
     )
 
     service_name: str = "agentic-chat-service"
@@ -27,6 +28,8 @@ class Settings(BaseSettings):
             "http://localhost:3000",
             "http://localhost:5173",
             "http://localhost:5000",
+            "http://ailearn.co.in",
+            "http://www.ailearn.co.in",
             "https://ailearn.co.in",
             "https://www.ailearn.co.in",
             "https://nexintelagent.netlify.app",
