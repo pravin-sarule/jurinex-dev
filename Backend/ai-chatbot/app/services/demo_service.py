@@ -94,13 +94,15 @@ def get_available_slots() -> list[dict]:
         return []
 
 
-def save_lead(name: str, email: str, phone: str) -> dict:
+def save_lead(name: str, email: str, phone: str = "") -> dict:
     """
     Saves contact info collected by the landing page chatbot into Auth_DB.demo_bookings.
-    No time slot required — slot_id is NULL, scheduled_at is set to now.
+    Phone is optional. No time slot required — slot_id is NULL, scheduled_at is set to now.
     """
-    if not name or not email or not phone:
-        return {"success": False, "error": "name, email, and phone are required"}
+    if not name or not email:
+        return {"success": False, "error": "name and email are required"}
+
+    phone_val = phone.strip() if phone and phone.strip() else None
 
     try:
         with get_auth_db_connection() as conn:
@@ -112,7 +114,7 @@ def save_lead(name: str, email: str, phone: str) -> dict:
                     ON CONFLICT DO NOTHING
                     RETURNING id
                     """,
-                    (name.strip(), email.strip(), phone.strip()),
+                    (name.strip(), email.strip(), phone_val),
                 )
                 row = cur.fetchone()
             conn.commit()

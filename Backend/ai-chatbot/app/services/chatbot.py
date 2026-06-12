@@ -47,17 +47,18 @@ GREETING RULE:
 - Do not repeat the greeting if the conversation is already underway.
 
 CONTACT COLLECTION RULES:
-- Ask one question at a time: name first, then email, then mobile number.
-- Once you have all three, call saveLeadInfo() IMMEDIATELY without asking for any time slot or schedule.
+- Ask one question at a time: name first, then email, then mobile number (optional).
+- Mobile number is OPTIONAL — if the user skips it or says "no", "skip", "don't have", call saveLeadInfo() with phone="".
+- Once you have name + email (and optionally phone), call saveLeadInfo() IMMEDIATELY without asking for any time slot or schedule.
 - After a successful save, confirm warmly:
   "Thank you, [name]! Our team will reach out to you at [email] shortly."
 
 EXTRACTION — CRITICAL:
 - Extract name, email, and phone ONLY from the user's CURRENT message. Never carry over or merge text from earlier messages.
-- If the user provides all three in one message (e.g. "Pravin pravin@gmail.com 9876543210"):
+- If the user provides details in one message (e.g. "Pravin pravin@gmail.com 9876543210"):
     • name  = the word(s) before the email, ignoring any greeting words (hi/hello/hii/hey)
     • email = the token containing "@"
-    • phone = the numeric string
+    • phone = the numeric string (leave empty "" if not present)
 - Greeting words ("hi", "hello", "hii", "hey") are NOT part of the name. If the user says "hii pravin pravin@gmail.com 9876543210", the name is "pravin", not "hii pravin".
 
 LEGAL ASSISTANCE:
@@ -86,7 +87,8 @@ GREETING:
 - Then collect: email address → mobile number, one question at a time.
 
 CONTACT COLLECTION:
-- After all three details are given, call saveLeadInfo() immediately.
+- After name and email are given, ask for mobile number but make it clear it is optional.
+- If the user skips mobile or says "no"/"skip", call saveLeadInfo() with phone="" — do not block on it.
 - Confirm: "Thank you, [name]! Our team will reach out to [email] very soon."
 - Do NOT ask for any time slot or demo schedule.
 
@@ -120,18 +122,18 @@ _SEARCH_FN_DECLARATION = {
 _SAVE_LEAD_FN_DECLARATION = {
     "name": "saveLeadInfo",
     "description": (
-        "Saves the user's contact information (name, email, mobile number) after all three have been collected. "
-        "Call this immediately once the user has provided their full name, email address, and mobile number. "
-        "Do NOT ask for a time slot — just call this tool with the three details."
+        "Saves the user's contact information. Call this as soon as name and email are collected. "
+        "Mobile number (phone) is optional — pass phone=\"\" if the user skipped it. "
+        "Do NOT ask for a time slot — just call this tool with the collected details."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "name":  {"type": "STRING", "description": "Full name of the person"},
             "email": {"type": "STRING", "description": "Email address"},
-            "phone": {"type": "STRING", "description": "Mobile phone number"},
+            "phone": {"type": "STRING", "description": "Mobile phone number (optional, pass empty string if not provided)"},
         },
-        "required": ["name", "email", "phone"],
+        "required": ["name", "email"],
     },
 }
 
