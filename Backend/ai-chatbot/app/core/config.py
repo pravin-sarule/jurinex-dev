@@ -12,6 +12,7 @@ _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 class Settings(BaseSettings):
     database_url: str = Field("", alias="DATABASE_URL")
+    auth_db_url: str = Field("", alias="AUTH_DB_URL")
     gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
     port: int = Field(8095, alias="PORT")
     host: str = Field("0.0.0.0", alias="HOST")

@@ -417,31 +417,29 @@ async def payment_token_limit_middleware(request: Request, call_next):
                     service="citation-service",
                 )
                 if not result.get("ok"):
-                    import json
-                    from starlette.responses import Response
-                    body = json.dumps(quota_block_body(result))
-                    return Response(
-                        content=body,
-                        status_code=quota_block_status(result),
-                        media_type="application/json",
-                        headers=_quota_cors_headers(request),
-                    )
+                    # TOKEN_CHECK_UNAVAILABLE means the payment service is unreachable
+                    # (wrong PAYMENT_SERVICE_URL, cold start, etc.). Fail open so the
+                    # citation pipeline is not blocked by an infra misconfiguration.
+                    # Real quota exhaustion (code != TOKEN_CHECK_UNAVAILABLE) still blocks.
+                    if result.get("code") == "TOKEN_CHECK_UNAVAILABLE":
+                        logger.warning(
+                            "[PaymentTokenLimit] payment service unreachable — failing open for "
+                            "uid=%s path=%s reason=%s",
+                            uid, path, result.get("details", {}).get("reason", ""),
+                        )
+                    else:
+                        import json as _json
+                        from starlette.responses import Response as _Resp
+                        return _Resp(
+                            content=_json.dumps(quota_block_body(result)),
+                            status_code=quota_block_status(result),
+                            media_type="application/json",
+                            headers=_quota_cors_headers(request),
+                        )
         except Exception as exc:
-            logger.warning("[PaymentTokenLimit] middleware error: %s", exc)
-            if os.environ.get("TOKEN_CHECK_FAIL_OPEN", "false").lower() != "true":
-                import json
-                from starlette.responses import Response
-                body = json.dumps({
-                    "success": False,
-                    "code": "TOKEN_CHECK_UNAVAILABLE",
-                    "message": "Unable to verify token availability.",
-                })
-                return Response(
-                    content=body,
-                    status_code=503,
-                    media_type="application/json",
-                    headers=_quota_cors_headers(request),
-                )
+            # Middleware-level exception (import error, unexpected crash) — fail open
+            # to avoid blocking all citation generation for infrastructure issues.
+            logger.warning("[PaymentTokenLimit] middleware exception — failing open: %s", exc)
     return await call_next(request)
 
 

@@ -31,58 +31,70 @@ _MIN_TEXT_OUTPUT_TOKENS = 1
 _MAX_TEXT_OUTPUT_TOKENS = 8192
 
 _DEFAULT_SYSTEM_PROMPT = """
-You are the JuriNex AI Legal Assistant, a high-speed legal intelligence agent
-specializing in the Indian legal system.
+You are the JuriNex AI Legal Assistant on the JuriNex landing page.
 
-Operating rules:
-- Provide legal information and research, not legal advice.
-- Always prioritize retrieved RAG context from JuriNex/Indian legal sources over
-  general model knowledge, especially for BNS, BNSS, and BSA versus IPC, CrPC,
-  and IEA.
-- If a user mentions a case name, section number, statute, or legal doctrine,
-  rely on retrieved context before answering.
-- Summarize the core legal principle first. Include citations when available in
-  the retrieved context, but do not over-list citations unless asked.
-- LANGUAGE: Always reply in the exact same language the user used. If the user
-  writes in Marathi → reply in Marathi. Hindi → Hindi. English → English.
-  Hinglish (mixed) → match the same mix. Never switch languages unprompted.
-- Keep initial answers concise. If the topic is complex, offer to provide more
-  detail.
-- If no retrieved context is available, say: "My current database doesn't have
-  the specific document, but based on general legal principles..." and clearly
-  mark the answer as general legal information.
+YOUR GOALS (in order):
+1. Greet the user warmly on the very first turn.
+2. Collect their contact details: full name → email address → mobile number (one at a time).
+3. Once all three are provided, call saveLeadInfo() immediately — do NOT ask for a time slot.
+4. Answer any legal questions the user has throughout the conversation.
 
-RESPONSE FORMATTING — always use rich Markdown:
-- Use **bold** for legal terms, section names, and key points.
-- Use numbered lists for step-by-step legal procedures.
-- Use bullet lists for provisions, rights, or comparisons.
-- Use ## or ### headings to separate sections (e.g. "## Key Provisions").
-- Use | tables | for comparing statutes, penalties, or timeframes.
-- Use > blockquotes for important warnings or legal notes.
-- Never write long unbroken paragraphs — keep answers scannable.
+GREETING RULE:
+- On the very first user message (even if it is just "hi" or "hello"), respond with ONLY a warm greeting and ask for their full name — do NOT list all the fields you need.
+  Example: "Hello! Welcome to JuriNex — India's AI-powered legal platform. I'm your AI assistant. May I know your full name?"
+- Ask ONLY for the name first. After the user replies with their name, ask for email. After email, ask for mobile number.
+- NEVER ask for all three in a single bullet-list or combined question.
+- Do not repeat the greeting if the conversation is already underway.
+
+CONTACT COLLECTION RULES:
+- Ask one question at a time: name first, then email, then mobile number.
+- Once you have all three, call saveLeadInfo() IMMEDIATELY without asking for any time slot or schedule.
+- After a successful save, confirm warmly:
+  "Thank you, [name]! Our team will reach out to you at [email] shortly."
+
+EXTRACTION — CRITICAL:
+- Extract name, email, and phone ONLY from the user's CURRENT message. Never carry over or merge text from earlier messages.
+- If the user provides all three in one message (e.g. "Pravin pravin@gmail.com 9876543210"):
+    • name  = the word(s) before the email, ignoring any greeting words (hi/hello/hii/hey)
+    • email = the token containing "@"
+    • phone = the numeric string
+- Greeting words ("hi", "hello", "hii", "hey") are NOT part of the name. If the user says "hii pravin pravin@gmail.com 9876543210", the name is "pravin", not "hii pravin".
+
+LEGAL ASSISTANCE:
+- Answer legal questions at any point using retrieved context from the knowledge base.
+- Provide legal information, not legal advice.
+- Prioritize retrieved RAG context (BNS, BNSS, BSA, IPC, CrPC, IEA, etc.) over general knowledge.
+- Keep answers concise and use Markdown formatting (bold, lists, tables, blockquotes).
+
+LANGUAGE:
+- Always reply in the exact same language the user used.
+- Marathi → Marathi, Hindi → Hindi, Hinglish → match the mix. Never switch unprompted.
 """.strip()
 
 _DEFAULT_AUDIO_SYSTEM_PROMPT = """
-You are the JuriNex AI Assistant, a voice-first guide for the JuriNex legal platform.
+You are the JuriNex AI Assistant — a voice-first guide on the JuriNex landing page.
 
-Voice behavior:
-- Speak clearly, professionally, and conversationally.
-- Always call search_documents first for every question — the knowledge base has
-  step-by-step platform guides and legal documents.
-- When you find relevant guide content, read the steps aloud in order:
-  "Step 1: ... Step 2: ... Step 3: ..."
-- Keep spoken answers clear and structured — read numbered steps one at a time.
-- Default to English. If the user speaks Marathi, Hindi, or Hinglish, respond in
-  that language but keep the step numbering ("Step 1", "Step 2", etc.) clear.
-- If interrupted, stop and listen for the new question.
+YOUR GOALS (in order):
+1. Greet the user warmly at the start of the conversation.
+2. Collect their contact details: full name → email address → mobile number (one at a time).
+3. Once all three are provided, call saveLeadInfo() immediately. Do NOT ask for a time slot.
+4. Answer any legal questions the user has.
 
-Retrieval behavior:
-- Call search_documents for EVERY question — platform guides are uploaded in the DB.
-- If the retrieved context has step-by-step instructions, follow them exactly.
-- If no relevant content is found, answer from general JuriNex platform knowledge.
-- For legal questions: prioritize retrieved context, especially for BNS, BNSS, BSA.
-- If retrieval returns nothing useful: "My knowledge base doesn't have that specific
-  document, but here is what I know about this topic..."
+GREETING:
+- Begin by saying warmly: "Hello! Welcome to JuriNex — India's AI-powered legal platform.
+  I'm your AI assistant. May I know your full name?"
+- Then collect: email address → mobile number, one question at a time.
+
+CONTACT COLLECTION:
+- After all three details are given, call saveLeadInfo() immediately.
+- Confirm: "Thank you, [name]! Our team will reach out to [email] very soon."
+- Do NOT ask for any time slot or demo schedule.
+
+VOICE BEHAVIOR:
+- Speak clearly, naturally, and conversationally. Keep answers to 2–3 sentences.
+- For legal questions: call search_documents first, then summarise in simple spoken language.
+- Default to English. If the user speaks Marathi, Hindi, or Hinglish, respond in that language.
+- If interrupted, stop immediately and listen for the new question.
 """.strip()
 
 _SEARCH_FN_DECLARATION = {
@@ -105,31 +117,21 @@ _SEARCH_FN_DECLARATION = {
     },
 }
 
-_GET_SLOTS_FN_DECLARATION = {
-    "name": "getAvailableSlots",
+_SAVE_LEAD_FN_DECLARATION = {
+    "name": "saveLeadInfo",
     "description": (
-        "Fetches all available JuriNex product demo time slots. "
-        "Call this immediately when the user asks to book, schedule, or see a demo."
+        "Saves the user's contact information (name, email, mobile number) after all three have been collected. "
+        "Call this immediately once the user has provided their full name, email address, and mobile number. "
+        "Do NOT ask for a time slot — just call this tool with the three details."
     ),
     "parameters": {
         "type": "OBJECT",
-        "properties": {},
-    },
-}
-
-_BOOK_DEMO_FN_DECLARATION = {
-    "name": "bookDemo",
-    "description": "Books a JuriNex product demo for the user after collecting their details.",
-    "parameters": {
-        "type": "OBJECT",
         "properties": {
-            "name":    {"type": "STRING",  "description": "Full name of the person"},
-            "email":   {"type": "STRING",  "description": "Email address"},
-            "phone":   {"type": "STRING",  "description": "Mobile phone number (required)"},
-            "company": {"type": "STRING",  "description": "Company or organisation name (optional)"},
-            "slot_id": {"type": "INTEGER", "description": "The exact numeric `id` field returned by getAvailableSlots (e.g. if getAvailableSlots returned [{\"id\": 12, ...}], pass slot_id=12). Never use the option number or position — always use the id value."},
+            "name":  {"type": "STRING", "description": "Full name of the person"},
+            "email": {"type": "STRING", "description": "Email address"},
+            "phone": {"type": "STRING", "description": "Mobile phone number"},
         },
-        "required": ["name", "email", "phone", "slot_id"],
+        "required": ["name", "email", "phone"],
     },
 }
 
@@ -187,27 +189,35 @@ _APP_CONTEXT_RE = re.compile(
     re.DOTALL,
 )
 
-_DEMO_TEXT_ADDENDUM = """
-DEMO BOOKING CAPABILITY:
-- When the user asks to book, schedule, or see a demo — IMMEDIATELY call getAvailableSlots().
-- After getAvailableSlots() returns, reply with ONLY this raw JSON (no extra text before or after):
-  {"type":"slot_selection","message":"Great choice! Here are our available demo slots — pick a time that works for you and I'll collect your details.","slots":[{"id":<id>,"label":"<label>"},...]}
-- If no slots are returned, respond warmly: "I'm sorry, no demo slots are available right now. Please check back tomorrow or drop us an email at demo@jurinex.com."
-- After the user selects a slot and provides their name, email, and mobile number, call bookDemo() immediately to confirm — do not ask the user to fill any form.
-- On successful bookDemo(), confirm warmly: "Your demo is confirmed for <slot label>! We'll send details to <email> shortly."
+_LEAD_TEXT_ADDENDUM = """
+CONTACT COLLECTION FLOW:
+- Greet the user on the first turn and ask for their full name.
+- Then ask for email address, then mobile number — one question at a time.
+- Once all three (name, email, mobile) are provided, call saveLeadInfo() IMMEDIATELY.
+- Do NOT ask for any time slot or schedule a demo.
+- After saving, confirm: "Thank you, [name]! Our team will reach out to you at [email] shortly."
+- You may answer legal questions at any point — just ensure contact details are collected.
+
+EXTRACTION RULES — CRITICAL:
+- Extract name, email, and phone ONLY from the user's CURRENT message. Never combine or merge words from previous messages.
+- If the user sends all three in one message (e.g. "Pravin pravin@gmail.com 9876543210"), parse them out:
+    • name  = the word(s) before the email address (ignore any greeting words like hi/hello/hii)
+    • email = the token containing "@"
+    • phone = the numeric string (10+ digits)
+- Greeting words ("hi", "hello", "hii", "hey") are NOT part of the name — skip them entirely.
+- If the user types "hii pravin pravin@gmail.com 9876543210", the name is "pravin", NOT "hii pravin".
 """.strip()
 
-_DEMO_AUDIO_ADDENDUM = """
-DEMO BOOKING CAPABILITY:
-- When the user asks to book or schedule a demo, IMMEDIATELY call getAvailableSlots().
-- Read the available slots aloud clearly as numbered options, e.g.: "We have slots available: Option 1 — Monday May 5th at 10 AM. Option 2 — Tuesday May 6th at 2 PM. Which one works for you?"
-- A slot selection panel also appears on screen. The user may EITHER tap a slot on screen OR say the option number aloud — both are valid. Do NOT wait for a UI tap; accept verbal selection immediately.
-- When the user says their choice (e.g. "option 1", "the first one", "Monday 10 AM"), identify the matching slot from the getAvailableSlots result and remember its exact numeric id.
-- If the user taps a slot on screen, you will receive a message like "The user tapped and selected slot_id=X (label)." — use that slot_id.
-- After the slot is chosen (verbally or via tap), ask in order: "What is your full name?" then "What is your email address?" then "What is your mobile number?" then "Which company are you from?" (optional — skip if user says none).
-- Once you have name, email, mobile number, and slot_id, call bookDemo() IMMEDIATELY. Never ask the user to fill a form.
-- After bookDemo() succeeds, confirm: "Your demo is confirmed for <slot label>! We will send details to <email> shortly."
-- If no slots are available, apologise warmly and suggest trying again tomorrow.
+_LEAD_AUDIO_ADDENDUM = """
+VOICE CONTACT COLLECTION:
+- Greet warmly at the start: "Hello! Welcome to JuriNex. May I know your full name?"
+- Then collect email address, then mobile number — one at a time.
+- Once all three are provided, call saveLeadInfo() immediately.
+- Confirm: "Thank you, [name]! Our team will reach out to [email] very soon."
+- Do NOT ask for any time slots or demo scheduling.
+
+EXTRACTION RULE: Extract name, email, and phone only from what the user said in this turn.
+Greeting sounds ("hi", "hello", "hii", "hey") spoken before the name are NOT part of the name — ignore them.
 """.strip()
 
 
@@ -246,8 +256,8 @@ class ChatbotConfig:
         "ALWAYS call search_documents first before answering.\n"
         "Never offer demo booking in the in-app panel."
     )
-    demo_text_addendum: str     = _DEMO_TEXT_ADDENDUM
-    demo_audio_addendum: str    = _DEMO_AUDIO_ADDENDUM
+    lead_text_addendum: str      = _LEAD_TEXT_ADDENDUM
+    lead_audio_addendum: str     = _LEAD_AUDIO_ADDENDUM
 
 
 @dataclass
@@ -325,8 +335,7 @@ def load_chatbot_config(bypass_cache: bool = False) -> ChatbotConfig:
             cfg.audio_system_prompt   = row["audio_system_prompt"]    if row.get("audio_system_prompt")    is not None else cfg.audio_system_prompt
             cfg.in_app_system_prompt  = row["in_app_system_prompt"]   if row.get("in_app_system_prompt")   is not None else cfg.in_app_system_prompt
             cfg.in_app_audio_override = row["in_app_audio_override"]  if row.get("in_app_audio_override")  is not None else cfg.in_app_audio_override
-            cfg.demo_text_addendum    = row["demo_text_addendum"]     if row.get("demo_text_addendum")     is not None else cfg.demo_text_addendum
-            cfg.demo_audio_addendum   = row["demo_audio_addendum"]    if row.get("demo_audio_addendum")    is not None else cfg.demo_audio_addendum
+            # lead_text_addendum and lead_audio_addendum always use code defaults (not DB-configurable)
             logger.info(
                 "Loaded chatbot config from DB: model_text=%s model_audio=%s voice=%s",
                 cfg.model_text, cfg.model_audio, cfg.voice_name,
@@ -361,22 +370,12 @@ def _execute_text_tool(name: str, args: dict, cfg: ChatbotConfig, top_k_override
         logger.info("TEXT TOOL: search_documents returned %d chunks", len(chunks))
         return format_chunks_for_context(chunks) or "No relevant documents found."
 
-    if name == "getAvailableSlots":
-        logger.info("TEXT TOOL: getAvailableSlots")
-        from app.services.demo_service import get_available_slots
-        slots = get_available_slots()
-        if not slots:
-            return {"available": False, "message": "No demo slots available. Please try again tomorrow."}
-        return {"available": True, "slots": [{"id": s["id"], "label": s["label"]} for s in slots]}
-
-    if name == "bookDemo":
-        logger.info("TEXT TOOL: bookDemo args=%r", args)
-        from app.services.demo_service import book_demo
-        return book_demo(
+    if name == "saveLeadInfo":
+        logger.info("TEXT TOOL: saveLeadInfo args=%r", args)
+        from app.services.demo_service import save_lead
+        return save_lead(
             name=str(args.get("name", "")),
             email=str(args.get("email", "")),
-            slot_id=int(args.get("slot_id", 0)),
-            company=str(args.get("company", "")),
             phone=str(args.get("phone", "")),
         )
 
@@ -513,11 +512,10 @@ def landing_page_agent(user_message: str, session_id: str | None = None) -> Chat
         cfg = load_chatbot_config()
         client = genai.Client(api_key=api_key)
 
-        system_instruction = cfg.system_prompt + "\n\n" + cfg.demo_text_addendum
+        system_instruction = cfg.system_prompt + "\n\n" + cfg.lead_text_addendum
         tools = [gt.Tool(function_declarations=[
             gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
-            gt.FunctionDeclaration(**_GET_SLOTS_FN_DECLARATION),
-            gt.FunctionDeclaration(**_BOOK_DEMO_FN_DECLARATION),
+            gt.FunctionDeclaration(**_SAVE_LEAD_FN_DECLARATION),
         ])]
 
         history_contents = _load_history_contents(session_id, gt)
@@ -650,16 +648,15 @@ async def handle_audio_session(
         else:
             audio_system_instruction = (
                 cfg.audio_system_prompt
-                + "\n\n" + cfg.demo_audio_addendum
-                + "\nAlways call search_documents with the user's question before answering. "
+                + "\n\n" + cfg.lead_audio_addendum
+                + "\nFor legal questions: call search_documents before answering. "
                   "Use retrieved context first. If no useful context is returned, say the "
                   "database does not have the specific document and give only general "
                   "information, not legal advice."
             )
             audio_tools = [gt.Tool(function_declarations=[
                 gt.FunctionDeclaration(**_SEARCH_FN_DECLARATION),
-                gt.FunctionDeclaration(**_GET_SLOTS_FN_DECLARATION),
-                gt.FunctionDeclaration(**_BOOK_DEMO_FN_DECLARATION),
+                gt.FunctionDeclaration(**_SAVE_LEAD_FN_DECLARATION),
             ])]
             logger.debug("AUDIO CONFIG (landing) model=%s voice=%s", cfg.model_audio, cfg.voice_name)
 
@@ -811,52 +808,23 @@ async def handle_audio_session(
                                     )
                                     await send_response({"type": "tool_call", "tool": "search_documents", "query": audio_query})
 
-                                elif fc.name == "getAvailableSlots" and not is_in_app:
-                                    logger.info("AUDIO TOOL: getAvailableSlots")
-                                    from app.services.demo_service import get_available_slots
-                                    slots = await asyncio.get_event_loop().run_in_executor(None, get_available_slots)
-                                    if slots:
-                                        formatted = [{"id": s["id"], "label": s["label"]} for s in slots]
-                                        await send_response({
-                                            "type": "slot_selection",
-                                            "message": "Here are the available demo slots. Please select one:",
-                                            "slots": formatted,
-                                        })
-                                        fn_responses.append(
-                                            gt.FunctionResponse(
-                                                id=fc.id, name=fc.name,
-                                                response={"result": {"available": True, "slots": formatted}},
-                                            )
-                                        )
-                                    else:
-                                        fn_responses.append(
-                                            gt.FunctionResponse(
-                                                id=fc.id, name=fc.name,
-                                                response={"result": {"available": False, "message": "No slots available."}},
-                                            )
-                                        )
-
-                                elif fc.name == "bookDemo" and not is_in_app:
+                                elif fc.name == "saveLeadInfo" and not is_in_app:
                                     args = dict(fc.args or {})
-                                    logger.info("AUDIO TOOL: bookDemo args=%r", args)
-                                    from app.services.demo_service import book_demo
+                                    logger.info("AUDIO TOOL: saveLeadInfo args=%r", args)
+                                    from app.services.demo_service import save_lead
                                     result = await asyncio.get_event_loop().run_in_executor(
                                         None,
-                                        lambda: book_demo(
+                                        lambda: save_lead(
                                             name=str(args.get("name", "")),
                                             email=str(args.get("email", "")),
-                                            slot_id=int(args.get("slot_id", 0)),
-                                            company=str(args.get("company", "")),
                                             phone=str(args.get("phone", "")),
                                         ),
                                     )
-                                    # Push booking result to frontend so it can show confirmation UI
                                     if result.get("success"):
                                         await send_response({
-                                            "type": "booking_confirmed",
-                                            "label": result.get("label", ""),
+                                            "type": "lead_saved",
                                             "message": result.get("message", ""),
-                                            "booking_id": result.get("booking_id"),
+                                            "lead_id": result.get("lead_id"),
                                         })
                                     fn_responses.append(
                                         gt.FunctionResponse(id=fc.id, name=fc.name, response={"result": result})

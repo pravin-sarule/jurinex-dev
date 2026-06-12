@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.auth import get_current_user
 from app.core.config import get_settings
+from app.services.db import doc_conn
 from app.services.gemini_pricing import DEFAULT_CACHE_MODEL
 from app.services import chat_orchestrator, gemini_cache_service
 from app.services.chat_repository import FileChatRepository, FileRepository
@@ -119,6 +120,50 @@ def _policy_check(user: dict, body: dict[str, Any] | None = None) -> tuple[dict,
 @router.get("/limits")
 async def get_limits(user: dict = Depends(get_current_user)):
     return chat_orchestrator.get_limits_payload(user["id"])
+
+
+@router.get("/storage/usage")
+async def get_storage_usage(user: dict = Depends(get_current_user)):
+    uid = str(user["id"])
+    try:
+        with doc_conn() as conn:
+            file_row = conn.execute(
+                """SELECT COUNT(*)::int AS file_count,
+                          COALESCE(SUM(size), 0)::bigint AS files_bytes
+                   FROM user_files
+                   WHERE user_id = %s AND (is_folder IS NULL OR is_folder = FALSE)""",
+                (uid,),
+            ).fetchone() or {}
+            chat_row = conn.execute(
+                """SELECT COUNT(*)::int AS chat_count,
+                          COALESCE(SUM(
+                            OCTET_LENGTH(COALESCE(question, '')) +
+                            OCTET_LENGTH(COALESCE(answer, ''))
+                          ), 0)::bigint AS chat_bytes
+                   FROM file_chats WHERE user_id = %s""",
+                (uid,),
+            ).fetchone() or {}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to calculate storage usage") from exc
+
+    files_bytes = int(file_row.get("files_bytes") or 0)
+    chat_bytes  = int(chat_row.get("chat_bytes") or 0)
+    total_bytes = files_bytes + chat_bytes
+    return {
+        "success": True,
+        "totalBytes": total_bytes,
+        "filesBytes": files_bytes,
+        "chatBytes": chat_bytes,
+        "questionBytes": 0,
+        "embeddingBytes": 0,
+        "totalMB": round(total_bytes / 1024 ** 2, 4),
+        "totalGB": round(total_bytes / 1024 ** 3, 6),
+        "counts": {
+            "files": int(file_row.get("file_count") or 0),
+            "chats": int(chat_row.get("chat_count") or 0),
+            "embeddings": 0,
+        },
+    }
 
 
 @router.get("/secrets")

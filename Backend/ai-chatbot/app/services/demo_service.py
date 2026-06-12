@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from app.services.db import get_db_connection, is_db_available
+from app.services.db import get_db_connection, get_auth_db_connection, is_db_available
 
 logger = logging.getLogger("ai_chatbot.demo")
 
@@ -92,6 +92,40 @@ def get_available_slots() -> list[dict]:
     except Exception:
         logger.exception("get_available_slots error")
         return []
+
+
+def save_lead(name: str, email: str, phone: str) -> dict:
+    """
+    Saves contact info collected by the landing page chatbot into Auth_DB.demo_bookings.
+    No time slot required — slot_id is NULL, scheduled_at is set to now.
+    """
+    if not name or not email or not phone:
+        return {"success": False, "error": "name, email, and phone are required"}
+
+    try:
+        with get_auth_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO demo_bookings (name, email, phone, slot_id, scheduled_at, status, notes)
+                    VALUES (%s, %s, %s, NULL, CURRENT_TIMESTAMP, 'lead', 'Collected via landing page chatbot')
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """,
+                    (name.strip(), email.strip(), phone.strip()),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        lead_id = row["id"] if row else None
+        logger.info("Lead saved to Auth_DB.demo_bookings: id=%s name=%r email=%r", lead_id, name, email)
+        return {
+            "success": True,
+            "lead_id": lead_id,
+            "message": f"Thank you, {name}! Our team will reach out to you at {email} shortly.",
+        }
+    except Exception as exc:
+        logger.exception("save_lead error")
+        return {"success": False, "error": f"Failed to save contact info: {exc}"}
 
 
 def book_demo(name: str, email: str, slot_id: int, company: str = "", phone: str = "") -> dict:

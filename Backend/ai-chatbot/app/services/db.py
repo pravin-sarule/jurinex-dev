@@ -74,6 +74,19 @@ def close_pool() -> None:
 
 
 @contextmanager
+def get_auth_db_connection() -> Iterator[Any]:
+    """Direct connection to Auth_DB (used for saving leads to demo_bookings)."""
+    settings = get_settings()
+    if not psycopg or not settings.auth_db_url:
+        raise RuntimeError("AUTH_DB_URL not configured.")
+    conn = psycopg.connect(settings.auth_db_url, row_factory=dict_row)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
 def get_db_connection() -> Iterator[Any]:
     """
     Yields a psycopg connection.

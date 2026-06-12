@@ -30,17 +30,17 @@ logger = logging.getLogger("ai_chatbot.audio_route")
 @router.websocket("/ws/audio")
 async def audio_chat_ws(websocket: WebSocket, mode: str = "landing") -> None:
     """
-    mode="app"     → in-app assistant audio (search only, no demo booking)
-    mode="landing" → landing page audio (search + demo booking)
-    mode="booking" → landing page audio, agent opens by announcing available demo slots
+    mode="app"     → in-app assistant audio (search only)
+    mode="landing" → landing page audio (greet user, collect name/email/phone, answer legal questions)
+    mode="booking" → alias for landing; agent opens by greeting and starting contact collection
     """
     await websocket.accept()
     ip_address = websocket.client.host if websocket.client else None
     is_in_app = (mode == "app")
-    # booking mode: inject opening message so agent speaks first
+    # For landing/booking modes, inject an opening prompt so the agent greets first
     initial_message = (
-        "I want to book a JuriNex product demo. Please fetch and announce the available time slots right away."
-        if mode == "booking" else None
+        "Please greet the user warmly, introduce yourself as the JuriNex AI Assistant, and ask for their full name to get started."
+        if not is_in_app else None
     )
     session_id = get_or_create_session(None, mode="audio")
     logger.info(
