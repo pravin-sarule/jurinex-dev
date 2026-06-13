@@ -107,6 +107,92 @@ const TypingIndicator = () => (
   </div>
 )
 
+// ── Lead capture inline form ─────────────────────────────────────────────────
+
+const LeadCaptureForm = ({ apiBase, onSaved }) => {
+  const [form, setForm]         = useState({ name: "", email: "", phone: "" })
+  const [emailErr, setEmailErr] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError]       = useState("")
+
+  const validEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim())
+
+  const set = (k) => (e) => {
+    setForm(prev => ({ ...prev, [k]: e.target.value }))
+    if (k === "email") setEmailErr("")
+  }
+
+  const handleSubmit = async () => {
+    if (!form.name.trim()) return
+    if (!validEmail(form.email)) { setEmailErr("That email doesn't look right."); return }
+    setSubmitting(true); setError("")
+    try {
+      const res = await fetch(`${apiBase}/api/save-lead`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: form.name.trim(), email: form.email.trim(), phone: form.phone.trim() || null }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || "Failed")
+      onSaved(form.name.trim())
+    } catch (err) {
+      setError(err.message || "Something went wrong. Please try again.")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const inputStyle = {
+    width: "100%", padding: "8px 10px", borderRadius: "8px", fontSize: "12.5px",
+    border: "1.5px solid #e2e8f0", background: "#f8fafc", color: "#1a202c",
+    outline: "none", fontFamily: "inherit",
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <p style={{ fontSize: "11px", color: "#64748b", margin: 0, fontWeight: 600 }}>
+        One form. We won&apos;t ask again.
+      </p>
+      <input
+        style={inputStyle} placeholder="Your name" value={form.name}
+        onChange={set("name")}
+        onFocus={e => { e.target.style.borderColor = "#0d9488"; e.target.style.boxShadow = "0 0 0 2px rgba(13,148,136,0.12)" }}
+        onBlur={e => { e.target.style.borderColor = "#e2e8f0"; e.target.style.boxShadow = "none" }}
+      />
+      <div>
+        <input
+          style={{ ...inputStyle, borderColor: emailErr ? "#e53e3e" : "#e2e8f0" }}
+          placeholder="Email address" type="email" value={form.email}
+          onChange={set("email")}
+          onFocus={e => { e.target.style.borderColor = emailErr ? "#e53e3e" : "#0d9488"; e.target.style.boxShadow = "0 0 0 2px rgba(13,148,136,0.12)" }}
+          onBlur={e => { e.target.style.borderColor = emailErr ? "#e53e3e" : "#e2e8f0"; e.target.style.boxShadow = "none" }}
+        />
+        {emailErr && <p style={{ fontSize: "11px", color: "#e53e3e", margin: "3px 0 0", fontWeight: 500 }}>{emailErr}</p>}
+      </div>
+      <input
+        style={inputStyle} placeholder="Mobile number (optional)" type="tel" value={form.phone}
+        onChange={set("phone")}
+        onFocus={e => { e.target.style.borderColor = "#0d9488"; e.target.style.boxShadow = "0 0 0 2px rgba(13,148,136,0.12)" }}
+        onBlur={e => { e.target.style.borderColor = "#e2e8f0"; e.target.style.boxShadow = "none" }}
+      />
+      {error && <p style={{ fontSize: "11px", color: "#e53e3e", margin: 0 }}>{error}</p>}
+      <button
+        onClick={handleSubmit}
+        disabled={submitting || !form.name.trim() || !form.email.trim()}
+        style={{
+          padding: "9px", borderRadius: "8px", fontWeight: 700, fontSize: "12.5px",
+          background: submitting || !form.name.trim() || !form.email.trim()
+            ? "#cbd5e0" : "linear-gradient(135deg,#dc2626,#b91c1c)",
+          color: "#fff", border: "none", cursor: submitting ? "wait" : "pointer",
+          letterSpacing: "0.01em", transition: "background 0.2s",
+        }}
+      >
+        {submitting ? "Saving…" : "Request callback"}
+      </button>
+    </div>
+  )
+}
+
 // ── Suggestions quick chips ───────────────────────────────────────────────────
 
 const SUGGESTIONS = [
@@ -119,10 +205,12 @@ const SUGGESTIONS = [
 
 const ChatbotWidget = () => {
   const [open, setOpen]               = useState(false)
+  const [leadSaved, setLeadSaved]     = useState(false)
+  const [leadFormShown, setLeadFormShown] = useState(false)
   const [messages, setMessages]       = useState([
     {
       role: "assistant",
-      text: "Hello! I'm JuriNex AI, your dedicated legal intelligence assistant. Ask me anything about our platform, features, or Indian legal workflows.",
+      text: "Hi — I'm the JuriNex assistant. Ask me about plans, features, drafting, or Indian legal workflows.",
     },
   ])
   const [input, setInput]             = useState("")
@@ -156,6 +244,7 @@ const ChatbotWidget = () => {
   const userClosedDemoRef      = useRef(false)
   const bottomRef              = useRef(null)
   const inputRef               = useRef(null)
+  const pendingQuestionRef     = useRef(null)  // first question, answered after lead form is submitted
 
   useEffect(() => {
     chatbotLog("mounted", {
@@ -173,14 +262,79 @@ const ChatbotWidget = () => {
     if (open) setTimeout(() => inputRef.current?.focus(), 120)
   }, [open])
 
+  // ── lead form ───────────────────────────────────────────────────────────────
+
+  const isConvertIntent = (text) =>
+    /(contact|reach out|call me|demo|sales|connect|speak to|talk to|team|callback|get in touch)/i.test(text)
+
+  const isLeadTopic = (text) =>
+    /(trial|free|price|pricing|cost|plan|feature|offer|discount|subscription)/i.test(text)
+
+  const showLeadForm = () => {
+    if (leadSaved) {
+      setMessages(prev => [...prev, { role: "assistant", text: "You're all set — our team already has your details and will be in touch shortly." }])
+      return
+    }
+    if (leadFormShown) return
+    setLeadFormShown(true)
+    setMessages(prev => [
+      // Remove any nudge messages
+      ...prev.filter(m => !m.nudge),
+      {
+        role: "assistant",
+        text: "Happy to connect you with the team. Drop your details below — one quick form and that's the last I'll ask.",
+        leadCard: true,
+      },
+    ])
+  }
+
+  const handleLeadSaved = (name) => {
+    setLeadSaved(true)
+    setLeadFormShown(true)
+    const pending = pendingQuestionRef.current
+    pendingQuestionRef.current = null
+    setMessages(prev => [
+      ...prev,
+      {
+        role: "assistant",
+        text: pending
+          ? `Thanks, ${name.split(" ")[0]}! Here's the answer to your question:`
+          : `Thanks, ${name.split(" ")[0]} — you're all set. Ask me anything!`,
+      },
+    ])
+    // Now answer the question the user originally asked (only once we have their details)
+    if (pending) sendText(pending, { skipEcho: true })
+  }
+
   // ── text ────────────────────────────────────────────────────────────────────
 
-  const sendText = async (overrideText) => {
+  const sendText = async (overrideText, opts = {}) => {
     const text = (typeof overrideText === "string" ? overrideText : input).trim()
     if (!text || textLoading || micStatus === "live") return
     setInput("")
     setShowSuggestions(false)
-    setMessages(prev => [...prev, { role: "user", text }])
+
+    // First-time gate: greet and collect name/email/mobile once, before answering
+    // the very first question. The question is stored and answered after the form
+    // is submitted. `leadFormShown` flips to true here so the gate never fires again.
+    if (!leadSaved && !leadFormShown) {
+      setLeadFormShown(true)
+      pendingQuestionRef.current = text
+      setMessages(prev => [
+        ...prev,
+        { role: "user", text },
+        {
+          role: "assistant",
+          text: "Hello, and welcome to JuriNex! 👋 I'd be glad to help with that. First, could you share a few quick details below? I'll only ask this once — then I'll answer your question right away.",
+          leadForm: true,
+        },
+      ])
+      return
+    }
+
+    if (!opts.skipEcho) {
+      setMessages(prev => [...prev, { role: "user", text }])
+    }
     setTextLoading(true)
     try {
       chatbotLog("text request", { url: `${AI_CHATBOT_DIRECT_URL}/api/chat`, text, sessionId })
@@ -768,39 +922,6 @@ const ChatbotWidget = () => {
                 </button>
               </div>
 
-              {/* Book Demo CTA in header */}
-              <div className="relative z-10 px-4 pb-3.5">
-                <Motion.button
-                  onClick={handleBookDemoClick}
-                  disabled={bookingLoading || textLoading || isLive || micStatus === "connecting"}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.97 }}
-                  className="w-full flex items-center justify-center gap-2 py-2 rounded-xl font-dmSans font-semibold text-[12px] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{
-                    background: "rgba(255,255,255,0.13)",
-                    border: "1px solid rgba(255,255,255,0.28)",
-                    color: "#ffffff",
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.22)" }}
-                  onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.13)" }}
-                >
-                  {bookingLoading ? (
-                    <Motion.svg
-                      className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24"
-                      stroke="currentColor" strokeWidth={2}
-                      animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                    >
-                      <path strokeLinecap="round" d="M12 3a9 9 0 010 18" />
-                    </Motion.svg>
-                  ) : (
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                  )}
-                  {bookingLoading ? "Loading slots…" : "Book a Free Demo"}
-                </Motion.button>
-              </div>
             </div>
 
             {/* ── Messages ─────────────────────────────────────────────────── */}
@@ -844,8 +965,8 @@ const ChatbotWidget = () => {
                     {!isUser && <BotAvatar />}
 
                     <div
-                      className={`max-w-[80%] text-sm leading-relaxed whitespace-pre-wrap font-dmSans ${
-                        isUser ? "px-4 py-2.5" : "px-3.5 py-2.5"
+                      className={`max-w-[80%] text-sm leading-relaxed font-dmSans ${
+                        isUser ? "px-4 py-2.5 whitespace-pre-wrap" : "px-3.5 py-2.5"
                       }`}
                       style={
                         isUser
@@ -873,7 +994,17 @@ const ChatbotWidget = () => {
                             }
                       }
                     >
-                      {m.text}
+                      <span className="whitespace-pre-wrap">{m.text}</span>
+
+                      {/* Inline lead capture form on the first bot message */}
+                      {m.leadForm && !leadSaved && (
+                        <div style={{ marginTop: "12px" }}>
+                          <LeadCaptureForm
+                            apiBase={AI_CHATBOT_DIRECT_URL}
+                            onSaved={handleLeadSaved}
+                          />
+                        </div>
+                      )}
                     </div>
                   </Motion.div>
                 )

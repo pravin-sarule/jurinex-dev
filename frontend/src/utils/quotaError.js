@@ -28,13 +28,10 @@ export function parseQuotaHttpError(status, body) {
   const data = unwrapBody(body);
   const code = data.code;
   if (!code) return null;
-  if (status === 503 && code === 'TOKEN_CHECK_UNAVAILABLE') {
-    return {
-      code,
-      message: data.message || 'Unable to verify token availability. Please try again shortly.',
-      details: data.details || {},
-    };
-  }
+  // TOKEN_CHECK_UNAVAILABLE means the payment service is temporarily unreachable —
+  // it is a service availability issue, NOT a quota exhaustion. Return null so the
+  // caller treats it as a plain HTTP error instead of triggering the quota modal.
+  if (code === 'TOKEN_CHECK_UNAVAILABLE') return null;
   if (status === 429 || isQuotaErrorCode(code)) {
     return {
       code,

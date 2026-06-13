@@ -738,7 +738,8 @@ export default function BillingAndUsagePage() {
       // Fallback: ChatModel's own storage endpoint (directly queries Document_DB)
       if (!data) {
         try {
-          const res = await apiFetch(`${CHAT_MODEL_BASE_URL}/api/chat/storage/usage`);
+          const chatBase = String(CHAT_MODEL_BASE_URL || '').replace(/\/api\/chat\/?$/, '').replace(/\/$/, '');
+          const res = await apiFetch(`${chatBase}/api/chat/storage/usage`);
           const d = res?.data || res;
           if (d?.totalBytes !== undefined || d?.storage_used_bytes !== undefined) {
             // Normalise ChatModel response shape → StorageTab format
