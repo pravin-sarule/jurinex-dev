@@ -140,6 +140,17 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
     }
   });
 
+  // V2 Side-aware citation mapping
+  if (Array.isArray(reportFormat.recommended_citations) && reportFormat.recommended_citations.length > 0) {
+    groups.set('recommended', { id: 'recommended', name: 'Recommended Citations', reasoning: 'Supporting citations for the selected side.', ids: new Set(reportFormat.recommended_citations.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
+  }
+  if (Array.isArray(reportFormat.adverse_citations) && reportFormat.adverse_citations.length > 0) {
+    groups.set('adverse', { id: 'adverse', name: 'Adverse Citations / Opposite-side Risk', reasoning: 'These cases may support the opposite side or may need to be distinguished.', ids: new Set(reportFormat.adverse_citations.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
+  }
+  if (Array.isArray(reportFormat.use_with_caution) && reportFormat.use_with_caution.length > 0) {
+    groups.set('caution', { id: 'caution', name: 'Use With Caution', reasoning: 'Use for distinguishable cases, weak contextual cases.', ids: new Set(reportFormat.use_with_caution.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
+  }
+
   citations.forEach((citation) => {
     const rawDimId =
       citation.dimensionId ??
@@ -191,6 +202,16 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
   });
   const ordered = Array.from(groups.values());
   ordered.sort((a, b) => {
+    const v2Order = {
+      'recommended': -3,
+      'adverse': -2,
+      'caution': -1,
+      'ungrouped': 1000
+    };
+    const aOrder = v2Order[a.id] ?? 0;
+    const bOrder = v2Order[b.id] ?? 0;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    
     if (a.id === 'ungrouped') return 1;
     if (b.id === 'ungrouped') return -1;
     const an = Number(a.id);
@@ -592,7 +613,12 @@ function DimensionGroup({
   return (
     <div className="dim-group">
       <button className="dim-header dim-toggle" onClick={() => onToggle(group.id)}>
-        <span className="dim-pill">🔑 Keyword</span>
+        <span className="dim-pill" style={{
+          background: group.id === 'recommended' ? '#D1FAE5' : group.id === 'adverse' ? '#FEE2E2' : group.id === 'caution' ? '#FEF3C7' : '#F1F5F9',
+          color: group.id === 'recommended' ? '#065F46' : group.id === 'adverse' ? '#991B1B' : group.id === 'caution' ? '#92400E' : '#334155'
+        }}>
+          {group.id === 'recommended' ? '⭐ Recommended' : group.id === 'adverse' ? '⚠️ Adverse Risk' : group.id === 'caution' ? '🤔 Caution' : '🔑 Keyword'}
+        </span>
         <span className="dim-title">{group.name}</span>
         <span className="dim-count">{group.citations.length} citations</span>
       </button>
@@ -676,7 +702,15 @@ export default function RedesignedCitationReportDoc({
     ].filter(Boolean).join(' ')),
   }));
 
-  const verified = all.filter((citation) => ['GREEN', 'YELLOW', 'STALE'].includes(citation.verificationStatus));
+  // Show citations that passed legacy verification (GREEN/YELLOW/STALE) OR carry a V2
+  // review status (SUGGESTED_FOR_REVIEW/NEEDS_REVIEW/ADVERSE). Without this, V2 reports
+  // render "0 citations" because their status vocabulary differs. Only REJECTED / no-result
+  // are hidden.
+  const SHOWABLE_STATUS = ['GREEN', 'YELLOW', 'STALE', 'SUGGESTED_FOR_REVIEW', 'NEEDS_REVIEW', 'ADVERSE', 'VERIFIED', 'APPROVED'];
+  const verified = all.filter((citation) => {
+    const s = String(citation.verificationStatus || citation.status || '').toUpperCase();
+    return s === '' || SHOWABLE_STATUS.includes(s);
+  });
   const extraDims = report?.dimensions_metadata || report?.dimensionsMeta || [];
   const groups = dimensionGroups(reportFormat, verified, extraDims);
   const sidebarGroups = groups.filter((group) => group.id !== 'ungrouped');
@@ -801,7 +835,9 @@ export default function RedesignedCitationReportDoc({
               ) ? 'active' : ''}`}
               onClick={() => { setDimension((group.name || '').trim() || normalizeDimensionKey(group.id) || group.id); setActiveId(null); }}
             >
-              <span className="chip-num">🔑</span>
+              <span className="chip-num">
+                {group.id === 'recommended' ? '⭐' : group.id === 'adverse' ? '⚠️' : group.id === 'caution' ? '🤔' : '🔑'}
+              </span>
               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {getKeywordLabel(group, index)}
               </span>

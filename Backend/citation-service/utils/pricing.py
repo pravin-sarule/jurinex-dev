@@ -95,6 +95,13 @@ GEMINI_GROUNDING_PER_CALL_INR = _inr_or_usd_legacy(
     2.975,  # ~$0.035 × 85
 )
 
+# Gemini embeddings (semantic ranking) — INR per 1M input tokens (USD × FX via .env).
+GEMINI_EMBED_PER_1M_INR = _inr_or_usd_legacy(
+    "CITATION_PRICING_GEMINI_EMBED_PER_1M_INR",
+    "CITATION_PRICING_GEMINI_EMBED_PER_1M",
+    14.4,  # ~$0.15/1M × 96
+)
+
 # ── Claude (INR per 1M tokens) ──────────────────────────────────────────────
 # Defaults ≈ $3/$15 per 1M @ 85
 CLAUDE_INPUT_PER_1M_INR = _inr_or_usd_legacy(

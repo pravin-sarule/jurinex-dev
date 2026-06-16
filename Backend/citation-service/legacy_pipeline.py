@@ -179,6 +179,8 @@ def run_pipeline(
     custom_keywords: Optional[List[str]] = None,
     selected_keywords: Optional[List[str]] = None,
     selected_case_names: Optional[List[str]] = None,
+    perspective: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the proposition-based citation pipeline (sync — called via asyncio.to_thread).
@@ -194,7 +196,7 @@ def run_pipeline(
         return {"error": "query is required", "report_id": None,
                 "report_format": None, "run_id": None, "status": None}
 
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     try:
         pipeline_run_insert(run_id, user_id, query, case_id=case_id)
     except Exception as exc:
@@ -218,7 +220,7 @@ def run_pipeline(
             query=query,
             case_context=case_context,
             run_id=run_id,
-            perspective="all",
+            perspective=(perspective or "all"),
             user_id=user_id,
             case_id=case_id,
             custom_keywords=custom_keywords,

@@ -644,24 +644,3 @@ def fetch_ik_candidates(
     )
 
     return out
-
-
-# ─────────────────────────────────────────────────────────────
-# 🔥 MODIFICATION: INSIDE _fetch_one_ik_sync
-# Add this BEFORE returning result
-# ─────────────────────────────────────────────────────────────
-
-# After:
-# raw_content = fields.get("raw_content")
-
-fragment = fields.get("ik_fragment_headline", "") or ""
-
-if query:
-    score = _score_candidate(
-        {"title": title, "snippet": fragment},
-        query
-    )
-
-    if score < 2:
-        logger.info("[FETCHER] ❌ Low relevance fragment — discard %s", tid)
-        return None

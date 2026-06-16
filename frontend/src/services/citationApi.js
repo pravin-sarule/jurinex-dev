@@ -148,7 +148,7 @@ export const citationApi = {
    * Start citation report pipeline in background. Returns run_id immediately.
    * perspective: 'all' | 'appellant' | 'respondent' | 'court'
    */
-  async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null, perspective = 'all', retrievalMethod = 'indiankanoon', customKeywords = null, selectedKeywords = null, selectedCaseNames = null) {
+  async startReport(query, userId = 'anonymous', caseId = null, caseFileContext = null, perspective = 'all', retrievalMethod = 'indiankanoon', customKeywords = null, selectedKeywords = null, selectedCaseNames = null, representedSide = null, caseType = null, jurisdiction = null, legalIssueFocus = null, mode = 'auto') {
     const body = { query, user_id: coalesceUserId(userId), use_pipeline: true };
     if (caseId) body.case_id = caseId;
     if (caseFileContext?.length) body.case_file_context = caseFileContext;
@@ -157,6 +157,11 @@ export const citationApi = {
     if (customKeywords?.length) body.custom_keywords = customKeywords;
     if (selectedKeywords?.length) body.selected_keywords = selectedKeywords;
     if (selectedCaseNames?.length) body.selected_case_names = selectedCaseNames;
+    if (representedSide) body.represented_side = representedSide;
+    if (caseType) body.case_type = caseType;
+    if (jurisdiction) body.jurisdiction = jurisdiction;
+    if (legalIssueFocus) body.legal_issue_focus = legalIssueFocus;
+    if (mode) body.mode = mode;
     const endpoint = `${CITATION_SERVICE_URL}/citation/report/start`;
     let res;
     try {

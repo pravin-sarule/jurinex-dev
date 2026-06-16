@@ -19,12 +19,14 @@ from collections import deque
 import httpx
 from pathlib import Path
 from urllib.parse import quote
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Body, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from citation_agent import run_citation_agent
 from claude_proxy import forward_to_claude
@@ -55,7 +57,10 @@ from db.client import (
 )
 from db.connections import get_qdrant_client, get_neo4j_driver
 from pipeline import run_pipeline
+from api.middleware import structured_request_logging
+from core.logging import configure_structured_logging
 from utils.usage_analytics import normalize_aggregate_by_service, normalize_user_by_service
+from utils.validators import normalize_case_file_context
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +78,7 @@ for _noisy in (
 ):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+configure_structured_logging()
 
 _project_root = Path(__file__).resolve().parent
 load_dotenv(_project_root / ".env")
@@ -88,6 +94,7 @@ def _env_int(name: str, default: int) -> int:
 PIPELINE_MAX_CONCURRENT_RUNS = max(1, _env_int("CITATION_MAX_CONCURRENT_RUNS", 2))
 RUN_STATE_MAX_ENTRIES = max(50, _env_int("CITATION_RUN_STATE_MAX_ENTRIES", 500))
 SYNC_PIPELINE_TIMEOUT_SECONDS = max(60, _env_int("CITATION_SYNC_PIPELINE_TIMEOUT_SECONDS", 840))
+CaseFileContextInput = Optional[Union[List[Dict[str, Any]], str]]
 _pipeline_slots = threading.BoundedSemaphore(PIPELINE_MAX_CONCURRENT_RUNS)
 _run_state_lock = threading.Lock()
 _run_state_order: deque[str] = deque()
@@ -366,6 +373,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.middleware("http")(structured_request_logging)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError):
+    errors = [
+        {key: value for key, value in error.items() if key not in {"input", "ctx"}}
+        for error in exc.errors()
+    ]
+    logger.warning(
+        "[REQUEST_VALIDATION] Rejected %s %s: %s",
+        request.method,
+        request.url.path,
+        errors,
+        extra={"details": {"endpoint": request.url.path, "method": request.method, "validation_errors": errors}},
+    )
+    return JSONResponse(status_code=422, content={"detail": errors})
+
 
 # ── Token limit guard (payment-service) ───────────────────────────────────────
 _CITATION_LLM_POST_PREFIXES = (
@@ -606,8 +631,16 @@ async def _fetch_case_context(case_id: str, auth_header: Optional[str]):
     if not context_items and case_title_fallback:
         context_items = [{"name": "Case", "content": case_title_fallback}]
 
-    logger.info("[CASE_CONTEXT] Loaded %d items from %d chunk(s) for case_id=%s",
-                len(context_items), len(chunks), case_id)
+    total_chars = sum(len(str(it.get("content") or "")) for it in context_items)
+    logger.info("[CASE_CONTEXT] Loaded %d items / %d chunk(s) / %d chars for case_id=%s",
+                len(context_items), len(chunks), total_chars, case_id)
+    if total_chars < 800:
+        logger.warning(
+            "[CASE_CONTEXT] Only %d chars of text for case_id=%s — likely a cover-page/snippet only "
+            "(full_text_content not extracted upstream). Citations will be poor until the document "
+            "is fully text-extracted by the document service.",
+            total_chars, case_id,
+        )
     return context_items, summary
 
 
@@ -815,7 +848,7 @@ async def search_judgements(
                 index="judgments",
                 size=limit,
                 query=es_query,
-                _source=[
+                _source=[  # pyrefly: ignore[unexpected-keyword]  # valid ES-py body param
                     "canonical_id", "case_name", "primary_citation", "court_code", "court_name", "area",
                     "audit_status", "audit_confidence", "year", "judgment_date", "source_type",
                     "coram", "holding_text", "summary_text", "statutes", "excerpt_para", "excerpt_text",
@@ -859,7 +892,7 @@ async def search_judgements(
             for r in results:
                 if not (r.get("ratio") or r.get("statutes") or r.get("excerpt")):
                     try:
-                        j = judgement_get(r.get("canonicalId") or "")
+                        j = judgement_get(str(r.get("canonicalId") or ""))
                         if j:
                             if not r.get("ratio") and j.get("ratio"):
                                 r["ratio"] = str(j.get("ratio") or "")
@@ -925,7 +958,7 @@ async def search_judgements(
             for r in results:
                 if not (r.get("ratio") or r.get("statutes") or r.get("excerpt")):
                     try:
-                        j = judgement_get(r.get("canonicalId") or "")
+                        j = judgement_get(str(r.get("canonicalId") or ""))
                         if j:
                             if not r.get("ratio") and j.get("ratio"):
                                 r["ratio"] = str(j.get("ratio") or "")
@@ -957,12 +990,12 @@ async def build_citation_report(
     query: str = Body(..., embed=True, description="Search query / case context"),
     case_title: Optional[str] = Body(None, embed=True, description="Case title (used as Stage 1 title field)"),
     raw_judgment: Optional[str] = Body(None, embed=True, description="Full raw judgment text (preferred)"),
-    case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True, description="Attached case files [{name, content/snippet}]"),
+    case_file_context: CaseFileContextInput = Body(None, embed=True, description="Attached case files [{name, content/snippet}] or manual case facts text"),
     output_format: str = Body("html", embed=True, description="'html' or 'markdown'"),
     case_id: Optional[str] = Body(None, embed=True),
     user_id: Optional[str] = Body("anonymous", embed=True),
     perspective: Optional[str] = Body(None, embed=True, description="Party perspective filter: 'appellant' | 'respondent' | 'court' | 'all'"),
-    request: Request = None,
+    request: Request = None,  # pyrefly: ignore[bad-function-definition]  # FastAPI injects Request; bare type required
 ) -> Dict[str, Any]:
     """
     2-Stage Claude Report Builder.
@@ -997,6 +1030,8 @@ async def build_citation_report(
     query = (query or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="query is required")
+
+    case_file_context = normalize_case_file_context(case_file_context)
 
     # Fetch case context if case_id provided but no files/raw text
     if case_id and not case_file_context and not raw_judgment:
@@ -1067,7 +1102,7 @@ async def generate_citation_report(
     query: str = Body(..., embed=True),
     user_id: Optional[str] = Body("anonymous", embed=True),
     case_id: Optional[str] = Body(None, embed=True),
-    case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
+    case_file_context: CaseFileContextInput = Body(None, embed=True),
     search_results: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
     use_pipeline: bool = Body(True, embed=True),
     retrieval_method: str = Body("indiankanoon", embed=True, description="Retrieval mode: 'indiankanoon' | 'web'"),
@@ -1075,7 +1110,7 @@ async def generate_citation_report(
     custom_keywords: Optional[List[str]] = Body(None, embed=True, description="User-supplied keyword strings injected directly into the IK query pool"),
     selected_keywords: Optional[List[str]] = Body(None, embed=True, description="Keyword chips selected from suggestion panel — bypasses Stage 2 AI query generation"),
     selected_case_names: Optional[List[str]] = Body(None, embed=True, description="Case name chips selected from suggestion panel — searched on IK by title"),
-    request: Request = None,
+    request: Request = None,  # pyrefly: ignore[bad-function-definition]  # FastAPI injects Request; bare type required
 ) -> Dict[str, Any]:
     """
     Generate a citation report (user-specific, stored in DB).
@@ -1092,6 +1127,7 @@ async def generate_citation_report(
     """
     query = (query or "").strip()
     user_id = _resolve_citation_user_id(request, user_id)
+    case_file_context = normalize_case_file_context(case_file_context)
     # If case_id provided, fetch case context from document-service when missing
     if case_id and not case_file_context:
         auth_header = request.headers.get("authorization") if request else None
@@ -1115,6 +1151,10 @@ async def generate_citation_report(
         raise HTTPException(status_code=400, detail="query is required and must be non-empty")
 
     if use_pipeline:
+        import uuid as _pipeline_uuid
+        pipeline_run_id = str(_pipeline_uuid.uuid4())
+        if request is not None:
+            request.state.run_id = pipeline_run_id
         if not _try_acquire_pipeline_slot():
             raise HTTPException(
                 status_code=429,
@@ -1124,15 +1164,17 @@ async def generate_citation_report(
             out = await asyncio.wait_for(
                 asyncio.to_thread(
                     run_pipeline,
-                    query,
-                    user_id,
-                    True,
-                    case_file_context or [],
-                    case_id,
-                    retrieval_method,
-                    custom_keywords or [],
-                    selected_keywords or [],
-                    selected_case_names or [],
+                    query=query,
+                    user_id=user_id,
+                    ingest_external=True,
+                    case_file_context=case_file_context or [],
+                    case_id=case_id,
+                    retrieval_method=retrieval_method,
+                    custom_keywords=custom_keywords or [],
+                    selected_keywords=selected_keywords or [],
+                    selected_case_names=selected_case_names or [],
+                    perspective=perspective or "all",
+                    run_id=pipeline_run_id,
                 ),
                 timeout=SYNC_PIPELINE_TIMEOUT_SECONDS,
             )
@@ -1162,7 +1204,7 @@ async def generate_citation_report(
 
         _perspective = (perspective or "all").lower().strip()
         if isinstance(fmt, dict):
-            fmt = {**fmt, "perspective": _perspective}
+            fmt = {**fmt, "perspective": fmt.get("perspective") or _perspective}
             if run_id_out:
                 try:
                     from utils.pricing import inr_to_usd
@@ -1981,6 +2023,9 @@ def _gemini_grounding_json(prompt: str, max_tokens: int = 1024) -> str:
                 _time.sleep(8 * (attempt + 1))
                 continue
             raise
+    # Unreachable (loop always returns or raises) — present so the type checker
+    # can see this -> str function never falls through to an implicit None.
+    raise RuntimeError("Gemini grounding failed after retries")
 
 
 @app.post("/citation/suggest-keywords")
@@ -1988,7 +2033,7 @@ async def suggest_citation_keywords(
     request: Request,
     case_id: Optional[str] = Body(None, embed=True),
     query: Optional[str] = Body(None, embed=True),
-    case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
+    case_file_context: CaseFileContextInput = Body(None, embed=True),
 ) -> Dict[str, Any]:
     """Generate 3 categories of IK keyword suggestions + related landmark cases via Google Grounding.
 
@@ -1998,6 +2043,7 @@ async def suggest_citation_keywords(
     """
     import json as _json, re as _re
 
+    case_file_context = normalize_case_file_context(case_file_context)
     # Fetch case context if not provided
     if case_id and not case_file_context:
         auth_header_pre = request.headers.get("authorization")
@@ -2194,7 +2240,7 @@ async def start_citation_report(
     query: str = Body("", embed=True),
     user_id: Optional[str] = Body("anonymous", embed=True),
     case_id: Optional[str] = Body(None, embed=True),
-    case_file_context: Optional[List[Dict[str, Any]]] = Body(None, embed=True),
+    case_file_context: CaseFileContextInput = Body(None, embed=True),
     use_pipeline: bool = Body(True, embed=True),
     retrieval_method: str = Body("indiankanoon", embed=True, description="Retrieval mode: 'indiankanoon' | 'web'"),
     perspective: Optional[str] = Body(None, embed=True, description="Party perspective: 'appellant' | 'respondent' | 'court' | 'all'"),
@@ -2210,12 +2256,26 @@ async def start_citation_report(
     query = (query or "").strip()
     user_id = _resolve_citation_user_id(request, user_id)
     perspective = (perspective or "all").strip().lower() or "all"
+    case_file_context = normalize_case_file_context(case_file_context)
 
-    # Fetch case context from document-service when case_id is provided but context is missing.
-    # Must be done here (async handler) before spawning the sync background thread.
-    if case_id and not case_file_context:
+    # Fetch the FULL case context from the document-service when case_id is provided and the
+    # supplied payload is missing OR thin (a ~500-char cover-page snippet). The frontend can
+    # send only a short summary; the document service holds the full extracted text/chunks.
+    def _ctx_chars(items: Any) -> int:
+        return sum(
+            len(str((it or {}).get("content") or (it or {}).get("snippet") or "").strip())
+            for it in (items or [])
+        )
+
+    if case_id and _ctx_chars(case_file_context) < 800:
         auth_header_pre = request.headers.get("authorization")
-        case_file_context, _ = await _fetch_case_context(case_id, auth_header_pre)
+        fetched, _ = await _fetch_case_context(case_id, auth_header_pre)
+        if _ctx_chars(fetched) > _ctx_chars(case_file_context):
+            logger.info(
+                "[CASE_CONTEXT] Thin payload (%d chars) replaced with full fetched context (%d chars) for case_id=%s",
+                _ctx_chars(case_file_context), _ctx_chars(fetched), case_id,
+            )
+            case_file_context = fetched
 
     if not _try_acquire_pipeline_slot():
         raise HTTPException(
@@ -2225,6 +2285,7 @@ async def start_citation_report(
 
     # Pre-generate run_id so frontend can start polling before pipeline creates it
     run_id = str(_uuid.uuid4())
+    request.state.run_id = run_id
     _set_run_state(run_id, {"status": "running", "report_id": None, "report_format": None, "error": None})
 
     # Seed a first log immediately so frontend sees something
@@ -2250,6 +2311,8 @@ async def start_citation_report(
                 custom_keywords=custom_keywords or [],
                 selected_keywords=selected_keywords or [],
                 selected_case_names=selected_case_names or [],
+                perspective=perspective,
+                run_id=run_id,
             )
             if out.get("error"):
                 _set_run_state(run_id, {"status": "failed", "report_id": None,
@@ -2261,7 +2324,7 @@ async def start_citation_report(
             else:
                 report_format = out.get("report_format") or {}
                 if isinstance(report_format, dict):
-                    report_format = {**report_format, "perspective": perspective if perspective and perspective != "all" else "all"}
+                    report_format = {**report_format, "perspective": report_format.get("perspective") or (perspective if perspective and perspective != "all" else "neutral")}
                     try:
                         from utils.pricing import inr_to_usd
                         usage_rows = usage_get_by_run(run_id)
@@ -2306,7 +2369,13 @@ async def start_citation_report(
             _release_pipeline_slot()
 
     threading.Thread(target=_run_bg, daemon=True, name=f"citation-run-{run_id[:8]}").start()
-    return {"success": True, "run_id": run_id, "status": "running"}
+    try:
+        from services.cost_service import pre_run_cost_estimate
+        _pre_run_estimate = pre_run_cost_estimate()
+    except Exception as exc:
+        logger.warning("[START] pre-run cost estimate failed: %s", exc)
+        _pre_run_estimate = None
+    return {"success": True, "run_id": run_id, "status": "running", "pre_run_cost_estimate": _pre_run_estimate}
 
 
 @app.get("/citation/runs/{run_id}/status")

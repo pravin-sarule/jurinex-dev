@@ -8,6 +8,8 @@ import { QUOTA_ERROR_CODES } from '../utils/quotaError';
 import { CITATION_SERVICE_URL } from '../config/apiConfig';
 import html2pdf from 'html2pdf.js';
 import RedesignedCitationReportDoc from '../components/CitationReport/RedesignedCitationReportDoc';
+import PipelineDetailModal from '../components/CitationReport/PipelineDetailModal';
+import ReportErrorBoundary from '../components/CitationReport/ReportErrorBoundary';
 
 /* ── tokens ── */
 const N = '#1B2A4A', NL = '#2C4066', ND = '#0F1A30';
@@ -65,6 +67,17 @@ function normalizeCourtKey(value) {
   const raw = normalizeSearchText(value);
   if (!raw || raw === 'court not specified' || raw === '—') return 'unknown';
   return raw;
+}
+
+function resolveCaseFolderName(caseData) {
+  const folder = caseData?.folders?.[0] || caseData?.folder || null;
+  return (
+    folder?.name ||
+    folder?.originalname ||
+    caseData?.folder_name ||
+    caseData?.folderName ||
+    ''
+  );
 }
 
 /** Party bucket for Appellant / Respondent / Court / Both — uses backend argumentParty plus partyArguments when present. */
@@ -1493,7 +1506,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, onFetchFullJ
     try {
       const cr = await documentApi.getCaseById(atcCase);
       const cd = cr?.case ?? cr;
-      const folderName = cd?.folders?.[0]?.name ?? cd?.folders?.[0]?.originalname;
+      const folderName = resolveCaseFolderName(cd);
       if (!folderName) throw new Error('No folder found for this case. Please add a document to the case first to create its folder.');
 
       // Build PDF-ready HTML for this single citation (reuse existing builder)
@@ -2728,12 +2741,16 @@ export default function CitationReportPage({ embedded = false }) {
   const [query, setQuery] = useState('');
   const [generating, setGenerating] = useState(false);
   const [reportError, setReportError] = useState(null);
+  const [runLiveStatus, setRunLiveStatus] = useState(null);
+  const [startTime, setStartTime] = useState(null);
   const [showReport, setShowReport] = useState(false);
 
   // live agent logs
   const [agentLogs, setAgentLogs] = useState([]);
   const [runId, setRunId] = useState(null);
   const [showFetchLog, setShowFetchLog] = useState(false);
+  const [showCostPopup, setShowCostPopup] = useState(false);
+  const [showDetailModal, setShowDetailModal] = useState(false);
   const [reportLogs, setReportLogs] = useState([]);
   const [reportLogsLoading, setReportLogsLoading] = useState(false);
   const logPollRef = useRef(null);
@@ -2779,7 +2796,15 @@ export default function CitationReportPage({ embedded = false }) {
   const [queryCount, setQueryCount] = useState(0);
   const [refDocs, setRefDocs] = useState([]);
   const [selectedPerspective, setSelectedPerspective] = useState('all');
-  const [retrievalMethod, setRetrievalMethod] = useState('indiankanoon');
+  const [representedSide, setRepresentedSide] = useState('');
+  const [caseType, setCaseType] = useState('');
+  const [jurisdiction, setJurisdiction] = useState('');
+  const [legalIssueFocus, setLegalIssueFocus] = useState('');
+  const [caseContextStatus, setCaseContextStatus] = useState(null);
+  const [caseDocumentCount, setCaseDocumentCount] = useState(0);
+  const [caseContextError, setCaseContextError] = useState(null);
+  const [caseContextReloadKey, setCaseContextReloadKey] = useState(0);
+
   const [customKeywordsInput, setCustomKeywordsInput] = useState('');
   const [suggestedKeywords, setSuggestedKeywords] = useState(null);
   const [suggestingKeywords, setSuggestingKeywords] = useState(false);
@@ -2859,6 +2884,50 @@ export default function CitationReportPage({ embedded = false }) {
       .catch(() => setCaseReports([]))
       .finally(() => setCaseReportsLoading(false));
   }, [selCase, reportId, navigate]);
+
+  // Load case context status when case selection changes
+  useEffect(() => {
+    if (!selCase) {
+      setCaseContextStatus(null);
+      setCaseDocumentCount(0);
+      setCaseContextError(null);
+      return;
+    }
+    setCaseContextStatus('loading');
+    setCaseContextError(null);
+    documentApi.getCaseById(selCase)
+      .then(async (cr) => {
+        const cd = cr?.case ?? cr;
+        if (cd?.perspective) setRepresentedSide(cd.perspective.toLowerCase());
+        if (cd?.case_type) setCaseType(cd.case_type);
+        if (cd?.jurisdiction) setJurisdiction(cd.jurisdiction);
+
+        const fn = resolveCaseFolderName(cd);
+        if (!fn) {
+          setCaseContextStatus('empty');
+          setCaseDocumentCount(0);
+          return;
+        }
+        try {
+          const fr = await documentApi.getDocumentsInFolder(fn);
+          const files = fr?.files ?? fr?.data ?? (Array.isArray(fr) ? fr : []);
+          const validFiles = files.filter(f => f.summary || f.full_text_content || f.name);
+          setCaseDocumentCount(validFiles.length);
+          if (validFiles.length > 0) {
+            setCaseContextStatus('loaded');
+          } else {
+            setCaseContextStatus('empty');
+          }
+        } catch (e) {
+          setCaseContextStatus('failed');
+          setCaseContextError(e.message || 'Failed to fetch folder contents');
+        }
+      })
+      .catch(e => {
+        setCaseContextStatus('failed');
+        setCaseContextError(e.message || 'Failed to fetch case details');
+      });
+  }, [selCase, caseContextReloadKey]);
 
   useEffect(() => { chatRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs, sending]);
 
@@ -3058,18 +3127,25 @@ export default function CitationReportPage({ embedded = false }) {
 
   const handleSend = async (force = false, overrideCaseNames = null, overrideKeywords = null) => {
     const q = (input).trim();
-    const hasContext = Boolean(selCase) || refDocs.length > 0;
+    const isManual = runMode === 'manual';
+    const hasContext = Boolean(selCase) || refDocs.length > 0 || (isManual && customKeywordsInput.trim());
     if (sending) return;
     if (!q && !hasContext) {
-      addMsg('error', 'Please enter a query, select a case, or attach reference documents before generating a report.');
+      addMsg('error', 'Please enter a query, select a case, enter manual facts, or attach reference documents before generating a report.');
       return;
     }
+    if (!representedSide && (runMode === 'auto' || runMode === 'manual')) {
+      addMsg('error', 'Please select who we are representing before starting the scan.');
+      return;
+    }
+
     setInput('');
     addMsg('user', q || 'Generate verified citation report from case context.');
     setSending(true); setGenerating(true); setReportError(null);
     setReportSaveToCaseStatus(null);
     setReportSaveToCaseProgress(0);
     setAgentLogs([]); setRunId(null);
+    setRunLiveStatus(null); setStartTime(Date.now());
     setQueryCount(p => p + 1);
     stopPolling();
 
@@ -3081,11 +3157,14 @@ export default function CitationReportPage({ embedded = false }) {
         try {
           const cr = await documentApi.getCaseById(selCase);
           const cd = cr?.case ?? cr;
-          const fn = cd?.folders?.[0]?.name ?? cd?.folders?.[0]?.originalname;
+          const fn = resolveCaseFolderName(cd);
           if (fn) {
             const fr = await documentApi.getDocumentsInFolder(fn);
             const files = fr?.files ?? fr?.data ?? (Array.isArray(fr) ? fr : []);
-            ctx = (Array.isArray(files) ? files : []).map(f => ({ name: f.originalname || f.name || 'doc', snippet: (f.summary || f.full_text_content || '').slice(0, 4000) })).filter(f => f.snippet || f.name);
+            // Prefer the FULL extracted text over the short summary, and send it as
+            // `content` (full document) — not `snippet` — so the pipeline extracts real
+            // legal issues instead of cover-page/cause-title tokens. (summary is ~500 chars.)
+            ctx = (Array.isArray(files) ? files : []).map(f => ({ name: f.originalname || f.name || 'doc', content: (f.full_text_content || f.summary || '').slice(0, 60000) })).filter(f => f.content || f.name);
           }
         } catch (e) { console.warn(e); }
       }
@@ -3093,7 +3172,7 @@ export default function CitationReportPage({ embedded = false }) {
       // Reference docs are used only when no case is selected.
       if (!selCase && refDocs.length > 0) {
         ctx = (ctx || []).concat(
-          refDocs.map(d => ({ name: d.name, snippet: d.content.slice(0, 4000) })),
+          refDocs.map(d => ({ name: d.name, content: d.content.slice(0, 60000) })),
         );
       }
       // If no real document content, send null so the backend fetches proper RAG chunks via case_id.
@@ -3101,30 +3180,61 @@ export default function CitationReportPage({ embedded = false }) {
       if (ctx && ctx.length === 0) ctx = null;
 
       // Start async pipeline — get run_id immediately
-      const generationPerspective = ['all', 'appellant', 'respondent', 'court'].includes(selectedPerspective)
-        ? selectedPerspective
-        : 'all';
+      const isManual = runMode === 'manual';
+      const generationPerspective = representedSide || 'neutral';
       const activeApi = useV1 ? citationV1Api : citationApi;
-      const apiQuery = q || selCaseName || 'Find relevant citations for this case';
-      const parsedKeywords = customKeywordsInput
-        .split(',')
-        .map(k => k.trim())
-        .filter(Boolean);
+      const apiQuery = isManual ? customKeywordsInput : (q || selCaseName || 'Find relevant citations for this case');
+      
+      let finalCtx = ctx;
+      if (isManual) {
+        finalCtx = customKeywordsInput;
+      }
+      
+      const parsedKeywords = (!isManual && customKeywordsInput)
+        ? customKeywordsInput.split(',').map(k => k.trim()).filter(Boolean)
+        : null;
+        
       const selKwArr = overrideKeywords ?? [...selectedKeywordChips];
       const selCnArr = overrideCaseNames ?? [...selectedCaseChips];
+      if (import.meta.env.DEV) {
+        console.groupCollapsed('[Citation] Submit Payload');
+        console.table({
+          mode: runMode || 'auto',
+          case_id: isManual ? null : (selCase || null),
+          represented_side: representedSide,
+          case_type: caseType,
+          preferred_court: jurisdiction,
+          legal_issue_focus: legalIssueFocus,
+          retrieval_method: 'indiankanoon',
+          case_context_length: finalCtx?.length || 0,
+        });
+        console.groupEnd();
+      }
+
       const startData = await activeApi.startReport(
         apiQuery,
         uid,
-        selCase || null,
-        ctx,
+        isManual ? null : (selCase || null),
+        finalCtx,
         generationPerspective,
-        useV1 ? 'serper' : retrievalMethod,
-        parsedKeywords.length ? parsedKeywords : null,
+        'indiankanoon',
+        parsedKeywords?.length ? parsedKeywords : null,
         selKwArr.length ? selKwArr : null,
         selCnArr.length ? selCnArr : null,
+        representedSide,
+        caseType,
+        jurisdiction,
+        legalIssueFocus,
+        runMode || 'auto'
       );
       const rid = startData.run_id;
       setRunId(rid);
+
+      if (import.meta.env.DEV) {
+        console.groupCollapsed(`[Citation][${rid}] Run Started`);
+        console.log({ run_id: rid, report_id: startData.report_id });
+        console.groupEnd();
+      }
 
       // Poll agent logs at a calmer interval and never overlap requests.
       let lastLogTime = '';
@@ -3169,8 +3279,21 @@ export default function CitationReportPage({ embedded = false }) {
         statusPollInFlight = true;
         try {
           const st = await activeApi.getRunStatus(rid);
+          setRunLiveStatus(st);
           statusPollErrors = 0;
           lastProgressAt = Date.now();
+          if (import.meta.env.DEV) {
+            console.groupCollapsed(`[Citation] Status Poll [${st.status}]`);
+            console.log({
+              run_id: rid,
+              status: st.status,
+              stage: st.stage || 'unknown',
+              message: st.message || '',
+              elapsed_seconds: Math.floor((Date.now() - pollStarted) / 1000),
+              estimated_cost: st.report_format?.runCostInr || 0
+            });
+            console.groupEnd();
+          }
           const terminalSuccessStates = new Set(['completed', 'pending_hitl']);
           const terminalFailureStates = new Set(['failed', 'unknown']);
           if (terminalSuccessStates.has(st.status) || terminalFailureStates.has(st.status)) {
@@ -3188,6 +3311,38 @@ export default function CitationReportPage({ embedded = false }) {
               }
               if (rpt) {
                 setReport(rpt); setQuery(q);
+
+                if (import.meta.env.DEV) {
+                  console.groupCollapsed('[Citation] Final Report');
+                  console.log({
+                    result_status: rpt.report_format?.result_status || 'UNKNOWN',
+                    message: rpt.report_format?.message || '',
+                    recommended_count: rpt.report_format?.recommended_count || 0,
+                    adverse_count: rpt.report_format?.adverse_count || 0,
+                    caution_count: rpt.report_format?.caution_count || 0,
+                    citation_count: rpt.report_format?.citations?.length || 0,
+                    cost_summary: rpt.report_format?.cost_summary || {},
+                    pipeline_diagnostics: rpt.report_format?.pipeline_diagnostics || {}
+                  });
+                  console.groupEnd();
+
+                  if (rpt.report_format?.result_status === 'NO_RELIABLE_CITATION_FOUND') {
+                    console.groupCollapsed('[Citation] No Result Diagnostics');
+                    const diag = rpt.report_format?.pipeline_diagnostics || {};
+                    console.table({
+                      no_result_reason: diag.no_result_reason || rpt.report_format?.message || 'unknown',
+                      issues_count: diag.issues_count || 0,
+                      queries_count: diag.queries_count || 0,
+                      raw_candidates_count: diag.raw_candidates_count || 0,
+                      deduped_candidates_count: diag.deduped_candidates_count || 0,
+                      fragment_checked_count: diag.fragment_checked_count || 0,
+                      full_docs_fetched_count: diag.full_docs_fetched_count || 0,
+                      rejected_count: diag.rejected_count || 0
+                    });
+                    console.groupEnd();
+                  }
+                }
+
                 setSelectedPerspective(normalizePerspectiveKey(rpt?.report_format?.perspective || selectedPerspective || 'all', 'all'));
                 setSelectedDimension('all');
                 setVaultCount(p => p + (rpt?.report_format?.citations?.length || 0));
@@ -3354,6 +3509,7 @@ export default function CitationReportPage({ embedded = false }) {
     const currentReportId = report?.report_id || report?.id || reportId;
     const reportPerspective = normalizePerspectiveKey(report?.report_format?.perspective || selectedPerspective || 'all', 'all');
     return (
+      <ReportErrorBoundary onClose={() => { setShowReport(false); setShowCostPopup(false); setShowDetailModal(false); }}>
       <div style={{ fontFamily: "'DM Sans',sans-serif", display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
         <div style={{ background: g50, borderBottom: `1px solid ${g200}`, padding: '10px 24px', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -3364,13 +3520,146 @@ export default function CitationReportPage({ embedded = false }) {
               ← Back to Research
             </button>
             <span style={{ color: g300 }}>|</span>
-            <span style={{ fontSize: 12, color: g400 }}>
-              Verified Citation Report · {report?.report_format?.citations?.length || 0} citations
+            <span style={{ fontSize: 12, color: g400, display: 'flex', alignItems: 'center', gap: 6 }}>
+              {report?.report_format?.result_status === 'NO_RELIABLE_CITATION_FOUND' ? (
+                <span style={{ color: '#DC2626', fontWeight: 500 }}>
+                  ⚠️ {report.report_format.message || 'No safe citations found after strict filtering.'}
+                </span>
+              ) : (
+                <span>
+                  Suggested Citations for Review · 
+                  <span style={{ fontWeight: 600, color: '#059669', marginLeft: 4 }}>{report?.report_format?.recommended_count ?? report?.report_format?.citations?.length ?? 0} recommended</span>
+                  {report?.report_format?.adverse_count > 0 && <span style={{ fontWeight: 600, color: '#DC2626' }}> · {report.report_format.adverse_count} adverse</span>}
+                  {report?.report_format?.caution_count > 0 && <span style={{ fontWeight: 600, color: '#D97706' }}> · {report.report_format.caution_count} caution</span>}
+                </span>
+              )}
               {report?.report_format?.runCostInr != null && Number(report.report_format.runCostInr) > 0 && (
-                <span style={{ color: g500 }}> · Est. run cost ₹{Number(report.report_format.runCostInr).toFixed(2)}</span>
+                <button 
+                  onClick={() => setShowCostPopup(true)}
+                  style={{ background: 'transparent', border: 'none', color: g500, cursor: 'pointer', fontSize: 12, textDecoration: 'underline' }}
+                >
+                  · Est. run cost ₹{Number(report.report_format.runCostInr).toFixed(2)}
+                </button>
               )}
             </span>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {showCostPopup && (
+              <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+                <div style={{ background: W, padding: 24, borderRadius: 12, width: 600, maxWidth: '94%', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 10px 25px rgba(0,0,0,0.2)' }}>
+                  <h3 style={{ margin: '0 0 16px 0', fontSize: 18, color: N }}>Run Cost Breakdown — end to end</h3>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {(() => {
+                      const cs = report?.report_format?.cost_summary || {};
+                      const rates = cs.rates || {};
+                      const ik = cs.ik_breakdown || [];
+                      const ai = cs.ai_breakdown || [];
+                      const ikRates = rates.indian_kanoon_per_call_inr || {};
+                      const inr = (n) => `₹${Number(n || 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`;
+                      const f2 = (n) => `₹${Number(n || 0).toFixed(2)}`;
+                      const isEmbed = (m) => String(m || '').includes('embedding');
+                      const rateFor = (row) => {
+                        if (row.service === 'gemini') return isEmbed(row.model) ? (rates.gemini_embedding || {}) : (rates.gemini || {});
+                        if (row.service === 'claude') return rates.claude || {};
+                        return {};
+                      };
+                      return (
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 16 }}>
+                            <span>Total run cost</span>
+                            <span>{f2(report.report_format.runCostInr)}</span>
+                          </div>
+                          {rates.inr_per_usd ? (
+                            <div style={{ fontSize: 11, color: g500, marginTop: -6 }}>FX: ₹{rates.inr_per_usd}/USD · AI priced in USD × FX · Indian Kanoon priced in INR/call</div>
+                          ) : null}
+
+                          {/* AI models */}
+                          {ai.length > 0 && (
+                            <div style={{ padding: 12, background: g50, borderRadius: 8 }}>
+                              <div style={{ fontWeight: 600, marginBottom: 8, color: N }}>AI models — {f2(cs.ai_total_inr)}</div>
+                              {ai.map((row, idx) => {
+                                const r = rateFor(row);
+                                const tin = Number(row.input_tokens || 0), tout = Number(row.output_tokens || 0);
+                                return (
+                                  <div key={idx} style={{ fontSize: 12.5, color: g600, marginBottom: 10, borderBottom: idx < ai.length - 1 ? `1px solid ${g200}` : 'none', paddingBottom: 6 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', color: N, fontWeight: 600 }}>
+                                      <span>{row.model} <span style={{ color: g400, fontWeight: 400 }}>· {Number(row.calls || 0)} call(s)</span></span>
+                                      <span>{f2(row.cost_inr)}</span>
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                      <span>{tin.toLocaleString()} input × ₹{r.input_per_1m_inr ?? '?'}/1M</span>
+                                      <span>{inr((tin / 1e6) * (r.input_per_1m_inr || 0))}</span>
+                                    </div>
+                                    {!isEmbed(row.model) && (
+                                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        <span>{tout.toLocaleString()} output × ₹{r.output_per_1m_inr ?? '?'}/1M</span>
+                                        <span>{inr((tout / 1e6) * (r.output_per_1m_inr || 0))}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* Indian Kanoon */}
+                          {ik.length > 0 && (
+                            <div style={{ padding: 12, background: g50, borderRadius: 8 }}>
+                              <div style={{ fontWeight: 600, marginBottom: 8, color: N }}>Indian Kanoon API — {f2(cs.ik_total_inr)}</div>
+                              {ik.map((row, idx) => {
+                                const rate = ikRates[row.operation];
+                                return (
+                                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: g600 }}>
+                                    <span>{Number(row.hits || 0)} × {row.operation}{rate != null ? ` @ ₹${rate}/call` : ''}</span>
+                                    <span>{f2(row.cost_inr)}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {(!ai.length && !ik.length) && (
+                            <div style={{ fontSize: 13, color: g500 }}>No billable calls recorded for this run.</div>
+                          )}
+
+                          {/* Rate card */}
+                          {(rates.gemini || rates.indian_kanoon_per_call_inr) && (
+                            <div style={{ fontSize: 11, color: g500, lineHeight: 1.6 }}>
+                              <div style={{ fontWeight: 600, color: g600, marginBottom: 2 }}>Rate card</div>
+                              {rates.gemini && <div>{rates.gemini.model}: ₹{rates.gemini.input_per_1m_inr}/1M in · ₹{rates.gemini.output_per_1m_inr}/1M out</div>}
+                              {rates.gemini_embedding && <div>{rates.gemini_embedding.model}: ₹{rates.gemini_embedding.input_per_1m_inr}/1M in (embeddings)</div>}
+                              {ikRates.search != null && <div>Indian Kanoon: search ₹{ikRates.search} · doc ₹{ikRates.document} · fragment ₹{ikRates.fragment} · meta ₹{ikRates.meta}/call</div>}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+                  <div style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      onClick={() => setShowCostPopup(false)}
+                      style={{ padding: '8px 16px', background: N, color: W, border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {showDetailModal && (
+              <PipelineDetailModal report={report} onClose={() => setShowDetailModal(false)} />
+            )}
+            <button
+              onClick={() => setShowDetailModal(true)}
+              style={{
+                padding: '6px 12px', fontSize: 11, fontWeight: 600, color: '#3730A3',
+                background: '#EEF2FF', border: '1px solid #C7D2FE',
+                borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+              }}
+              title="Inspect the full pipeline data flow: what the AI read, the issues/summary it built, the keyword searches, results and re-ranking"
+            >
+              <span style={{ fontSize: 12 }}>🔬</span>
+              Detailed View
+            </button>
             {(report?.run_id || runId) && (
               <button
                 onClick={handleToggleFetchLog}
@@ -3560,16 +3849,100 @@ export default function CitationReportPage({ embedded = false }) {
         )}
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-          <ReportDoc
-            report={report}
-            query={query}
-            cases={cases}
-            onViewFullJudgment={handleViewFullJudgment}
-            onFetchFullJudgment={fetchFullJudgmentInline}
-            initialPerspective={selectedPerspective}
-            initialDimension={selectedDimension}
-            onPerspectiveChange={setSelectedPerspective}
-          />
+          {report?.report_format?.result_status === 'NO_RELIABLE_CITATION_FOUND' ? (
+            <div style={{ padding: 40, maxWidth: 600, margin: '0 auto' }}>
+              <div style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 12, padding: 24, marginBottom: 24 }}>
+                <h2 style={{ margin: '0 0 12px 0', fontSize: 18, color: '#991B1B' }}>No reliable supporting citation found in this run</h2>
+                <p style={{ margin: 0, fontSize: 14, color: '#DC2626' }}>{report.report_format.message}</p>
+              </div>
+
+              <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 12, padding: 24, marginBottom: 24 }}>
+                <h3 style={{ margin: '0 0 16px 0', fontSize: 16, color: '#334155' }}>Pipeline Diagnostics</h3>
+                {report?.report_format?.pipeline_diagnostics ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                    <div>
+                      <h4 style={{ margin: '0 0 8px 0', fontSize: 14, color: '#475569' }}>Case context:</h4>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, paddingLeft: 12, borderLeft: '2px solid #CBD5E1' }}>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>case_id:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A', wordBreak: 'break-all' }}>{report.report_format.pipeline_diagnostics.case_id ?? 'N/A'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>case name:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.case_name ?? 'N/A'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>context character count:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.case_context_chars ?? '0'}</div>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <h4 style={{ margin: '0 0 8px 0', fontSize: 14, color: '#475569' }}>Indian Kanoon search:</h4>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, paddingLeft: 12, borderLeft: '2px solid #CBD5E1' }}>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>issues extracted:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.issues_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>queries generated:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.queries_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>raw candidates:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.raw_candidates_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>deduped candidates:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.deduped_candidates_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>fragments checked:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.fragment_checked_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>full docs fetched:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.full_docs_fetched_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>recommended count:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.recommended_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>adverse count:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.adverse_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>caution count:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.caution_count ?? '0'}</div>
+                        <div style={{ fontSize: 13, color: '#64748B' }}>rejected count:</div><div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>{report.report_format.pipeline_diagnostics.rejected_count ?? '0'}</div>
+                      </div>
+                      
+                      {report.report_format.pipeline_diagnostics.raw_candidates_count === 0 && report.report_format.pipeline_diagnostics.queries?.length > 0 && (
+                        <div style={{ marginTop: 16 }}>
+                          <h5 style={{ margin: '0 0 8px 0', fontSize: 13, color: '#475569' }}>Generated Queries (0 results):</h5>
+                          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12, color: '#64748B', fontFamily: 'monospace' }}>
+                            {report.report_format.pipeline_diagnostics.queries.map((q, i) => {
+                              // Supports both the legacy string form and the new dict form
+                              // ({query_id, query_type, query_string, is_fallback, docs_count, doctypes}).
+                              if (typeof q === 'string') return <li key={i}>{q}</li>;
+                              const qStr = q.query_string || q.formInput || q.query || '';
+                              const hits = q.docs_count ?? q.result_count;
+                              return (
+                                <li key={q.query_id || i}>
+                                  {qStr || '—'}
+                                  {q.query_type ? <span style={{ color: '#94A3B8' }}> · {q.query_type}{q.is_fallback ? ' (fallback)' : ''}</span> : null}
+                                  {q.doctypes ? <span style={{ color: '#94A3B8' }}> · {q.doctypes}</span> : null}
+                                  {hits != null ? <span style={{ color: hits === 0 ? '#DC2626' : '#059669' }}> · {hits} hits</span> : null}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div>
+                      <h4 style={{ margin: '0 0 8px 0', fontSize: 14, color: '#475569' }}>Failure reason:</h4>
+                      <div style={{ paddingLeft: 12, borderLeft: '2px solid #CBD5E1', fontSize: 13, fontWeight: 600, color: '#991B1B' }}>
+                        {report.report_format.pipeline_diagnostics.no_result_reason || report.report_format.message || 'Unknown reason'}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 13, color: '#64748B' }}>Diagnostics data not available.</div>
+                )}
+              </div>
+
+              <div style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 12, padding: 24 }}>
+                <h3 style={{ margin: '0 0 12px 0', fontSize: 15, color: '#92400E' }}>Suggestions</h3>
+                <ul style={{ margin: 0, paddingLeft: 20, color: '#B45309', fontSize: 13, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <li>Check if the correct represented side is selected.</li>
+                  <li>Verify the case context is fully loaded and relevant.</li>
+                  <li>Try adding a specific citation focus or legal issue manually.</li>
+                  <li>Try selecting a broader jurisdiction if no specific court was matched.</li>
+                  <li>Retry the scan if Indian Kanoon or document service was temporarily unavailable.</li>
+                </ul>
+              </div>
+            </div>
+          ) : (
+            <ReportDoc
+              report={report}
+              query={query}
+              cases={cases}
+              onViewFullJudgment={handleViewFullJudgment}
+              onFetchFullJudgment={fetchFullJudgmentInline}
+              initialPerspective={selectedPerspective}
+              initialDimension={selectedDimension}
+              onPerspectiveChange={setSelectedPerspective}
+            />
+          )}
         </div>
 
         {/* ── Share Report Modal ── */}
@@ -3878,6 +4251,7 @@ export default function CitationReportPage({ embedded = false }) {
           </div>
         )}
       </div>
+      </ReportErrorBoundary>
     );
   }
 
@@ -4059,9 +4433,20 @@ export default function CitationReportPage({ embedded = false }) {
                   </div>
 
                   <h3 style={{ fontSize: 20, fontWeight: 800, color: N, marginBottom: 6, letterSpacing: '-.02em', textAlign: 'center' }}>Generating Citations…</h3>
-                  <p style={{ fontSize: 12, color: g400, marginBottom: 28, textAlign: 'center' }}>
-                    {selCaseName ? `Analysing case context for "${selCaseName.length > 40 ? selCaseName.slice(0,38)+'…' : selCaseName}"` : 'Processing case context…'}
+                  <p style={{ fontSize: 12, color: g400, marginBottom: 16, textAlign: 'center' }}>
+                    {selCaseName && runMode === 'auto' ? `Analysing case context for "${selCaseName.length > 40 ? selCaseName.slice(0,38)+'…' : selCaseName}"` : 'Processing case context…'}
                   </p>
+
+                  {/* Run Info */}
+                  <div style={{ display: 'flex', gap: 24, marginBottom: 24, fontSize: 11, color: g500, fontFamily: 'monospace', background: g50, padding: '8px 16px', borderRadius: 8, border: `1px solid ${g100}` }}>
+                    {runId && <span>ID: {runId.split('-')[0]}...</span>}
+                    {startTime && <span>Elapsed: {Math.floor((Date.now() - startTime) / 1000)}s</span>}
+                    {runLiveStatus?.report_format?.runCostInr != null ? (
+                      <span style={{ color: '#059669', fontWeight: 600 }}>Cost: ₹{Number(runLiveStatus.report_format.runCostInr).toFixed(2)}</span>
+                    ) : (
+                      <span>Cost: pending</span>
+                    )}
+                  </div>
 
                   {/* Progress steps derived from agentLogs */}
                   {(() => {
@@ -4128,9 +4513,9 @@ export default function CitationReportPage({ embedded = false }) {
                     <div style={{ width: 68, height: 68, borderRadius: 20, background: `linear-gradient(145deg,${N} 0%,${TD} 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, position: 'relative', animation: 'glow 3s ease-in-out infinite', boxShadow: `0 8px 28px rgba(27,42,74,.28)` }}>⚖️</div>
                   </div>
 
-                  <h3 style={{ fontSize: 21, fontWeight: 800, color: N, marginBottom: 4, letterSpacing: '-.03em', lineHeight: 1.2, textAlign: 'center' }}>AI Legal Research</h3>
+                  <h3 style={{ fontSize: 21, fontWeight: 800, color: N, marginBottom: 4, letterSpacing: '-.03em', lineHeight: 1.2, textAlign: 'center' }}>Citation Assistant</h3>
                   <p style={{ fontSize: 12, color: g500, maxWidth: 380, lineHeight: 1.7, margin: '0 auto 20px', textAlign: 'center' }}>
-                    Find verified citations from Supreme Court & High Courts, grouped by AI-extracted keywords from your case document.
+                    Find suggested citations supporting the selected side. AI-assisted legal research. Always verify before court use.
                   </p>
 
                   {/* ── Custom case selector card ── */}
@@ -4158,7 +4543,10 @@ export default function CitationReportPage({ embedded = false }) {
                             {selCase ? (
                               <>
                                 <div style={{ fontSize: 13.5, fontWeight: 700, color: N, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selCaseName}</div>
-                                <div style={{ fontSize: 10.5, color: T, fontWeight: 600, marginTop: 2 }}>✓ Case context active</div>
+                                {caseContextStatus === 'loading' && <div style={{ fontSize: 10.5, color: g500, fontWeight: 600, marginTop: 2 }}>⏳ Loading case context...</div>}
+                                {caseContextStatus === 'loaded' && <div style={{ fontSize: 10.5, color: T, fontWeight: 600, marginTop: 2 }}>✓ Case context active ({caseDocumentCount} document{caseDocumentCount !== 1 ? 's' : ''})</div>}
+                                {caseContextStatus === 'empty' && <div style={{ fontSize: 10.5, color: '#D97706', fontWeight: 600, marginTop: 2 }}>⚠️ Case context is missing or empty</div>}
+                                {caseContextStatus === 'failed' && <div style={{ fontSize: 10.5, color: '#DC2626', fontWeight: 600, marginTop: 2 }}>❌ {caseContextError || 'Failed to load case context'}</div>}
                               </>
                             ) : (
                               <div style={{ fontSize: 13, color: g400, fontWeight: 500 }}>{casesLoading ? 'Loading cases…' : cases.length === 0 ? 'No cases found' : 'Select a case…'}</div>
@@ -4179,11 +4567,24 @@ export default function CitationReportPage({ embedded = false }) {
                       </button>
 
                       {/* Active case — confirmation bar only */}
-                      {selCase && (
+                      {selCase && caseContextStatus === 'loaded' && (
                         <div style={{ margin: '0 12px 12px' }}>
                           <div style={{ padding: '8px 12px', background: `linear-gradient(135deg,rgba(33,193,182,.08),rgba(27,42,74,.05))`, border: `1px solid rgba(33,193,182,.25)`, borderRadius: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
                             <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3 8l4 4 6-7" stroke={T} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
                             <span style={{ fontSize: 11, color: N, fontWeight: 600 }}>Case context loaded — ready to generate report</span>
+                          </div>
+                        </div>
+                      )}
+                      {selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && (
+                        <div style={{ margin: '0 12px 12px' }}>
+                          <div style={{ padding: '12px', background: '#FEF2F2', border: `1px solid #FCA5A5`, borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: 11.5, color: '#DC2626', fontWeight: 600 }}>Case context is missing or empty. Citation scan cannot run because there is no case text to analyze.</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); setCaseContextReloadKey(key => key + 1); }} style={{ padding: '6px 12px', fontSize: 11, background: '#DC2626', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Retry loading case context</button>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); setRunMode('manual'); }} style={{ padding: '6px 12px', fontSize: 11, background: '#fff', color: '#DC2626', border: '1px solid #DC2626', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Use manual facts instead</button>
+                            </div>
                           </div>
                         </div>
                       )}
@@ -4225,8 +4626,8 @@ export default function CitationReportPage({ embedded = false }) {
                     )}
                   </div>
 
-                  {/* Mode selector — shown after case is selected */}
-                  {selCase && runMode === null && (
+                  {/* Mode selector */}
+                  {runMode === null && (
                     <div style={{ width: '100%', maxWidth: 580, marginTop: 14, display: 'flex', gap: 10 }}>
                       <button
                         onClick={() => { setSuggestedKeywords(null); setSelectedKeywordChips(new Set()); setSelectedCaseChips(new Set()); setRunMode('auto'); }}
@@ -4252,191 +4653,154 @@ export default function CitationReportPage({ embedded = false }) {
                           <div style={{ width: 38, height: 38, borderRadius: 10, background: `linear-gradient(135deg,rgba(27,42,74,.1),rgba(27,42,74,.04))`, border: `1px solid rgba(27,42,74,.12)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>🔍</div>
                           <div>
                             <div style={{ fontSize: 13, fontWeight: 700, color: N, marginBottom: 3 }}>Manual</div>
-                            <div style={{ fontSize: 11, color: g400, lineHeight: 1.55 }}>Type keywords or browse AI-suggested categories to find specific citations.</div>
+                            <div style={{ fontSize: 11, color: g400, lineHeight: 1.55 }}>Search using typed legal facts/issues instead of uploaded case context.</div>
                           </div>
                         </div>
                       </button>
                     </div>
                   )}
-                  {selCase && runMode !== null && (
+                  {runMode !== null && (
                     <button
                       onClick={() => { setRunMode(null); setManualSearchResults(null); setSuggestedKeywords(null); setSelectedKeywordChips(new Set()); setSelectedCaseChips(new Set()); }}
                       style={{ fontSize: 11, color: T, background: 'none', border: 'none', cursor: 'pointer', marginTop: 8, paddingLeft: 0, fontFamily: "'DM Sans',sans-serif", fontWeight: 600 }}
                     >← Change mode</button>
                   )}
 
-                  {/* Automatic mode */}
-                  {selCase && runMode === 'auto' && (
+                  {/* Form fields for both modes */}
+                  {runMode !== null && (
                     <div style={{ width: '100%', maxWidth: 580, marginTop: 12 }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
-                        Judgment Retrieval Method
-                      </div>
-                      <select
-                        className="sel-in"
-                        value={retrievalMethod}
-                        onChange={(e) => setRetrievalMethod(String(e.target.value || 'indiankanoon'))}
-                        style={{ height: 42, marginBottom: 12 }}
-                      >
-                        <option value="indiankanoon">Indian Kanoon</option>
-                        <option value="web">Web Search (Claude)</option>
-                      </select>
-                      <button
-                        onClick={() => handleSend(true)}
-                        disabled={sending}
-                        style={{ width: '100%', padding: '13px 0', background: sending ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, boxShadow: sending ? 'none' : `0 4px 16px rgba(33,193,182,.35)`, transition: 'all .2s', fontFamily: "'DM Sans',sans-serif" }}
-                      >
-                        {sending ? <><Spin /> Generating…</> : <>⚡ Start Automatic Scan</>}
-                      </button>
-                      <div style={{ fontSize: 11, color: g400, marginTop: 6, textAlign: 'center' }}>
-                        AI generates keywords from your case context and runs the full citation pipeline.
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Manual mode */}
-                  {selCase && runMode === 'manual' && (
-                    <div style={{ width: '100%', maxWidth: 580, marginTop: 12 }}>
-                      {/* Section A — Custom Keywords */}
-                      <div style={{ marginBottom: 12, background: W, borderRadius: 14, border: `1.5px solid ${g100}`, boxShadow: '0 2px 8px rgba(27,42,74,.05)', overflow: 'hidden' }}>
-                        <div style={{ padding: '11px 16px 10px', borderBottom: `1px solid ${g100}`, display: 'flex', alignItems: 'center', gap: 9, background: g50 }}>
-                          <div style={{ width: 26, height: 26, borderRadius: 8, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: W, fontSize: 12, fontWeight: 800, flexShrink: 0, boxShadow: `0 2px 6px rgba(33,193,182,.3)` }}>A</div>
-                          <div>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: N }}>Custom Keywords</div>
-                            <div style={{ fontSize: 10, color: g400, marginTop: 1 }}>Comma-separated — searches Indian Kanoon and local DB</div>
+                      {/* Manual mode specific field */}
+                      {runMode === 'manual' && (
+                        <>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                            Case facts / issue text *
                           </div>
-                        </div>
-                        <div style={{ padding: '12px 16px 14px' }}>
                           <textarea
+                            className="inp"
                             value={customKeywordsInput}
                             onChange={(e) => setCustomKeywordsInput(e.target.value)}
-                            placeholder="e.g. Section 300 IPC, anticipatory bail, res judicata"
-                            rows={2}
-                            style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", color: g700, background: g50, resize: 'vertical', outline: 'none', lineHeight: 1.5, transition: 'border-color .2s, box-shadow .2s' }}
+                            placeholder="Enter the facts or legal issues of your case..."
+                            rows={4}
+                            style={{ width: '100%', boxSizing: 'border-box', marginBottom: 12, resize: 'vertical', padding: '10px 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", background: g50, outline: 'none' }}
                             onFocus={e => { e.target.style.borderColor = T; e.target.style.boxShadow = `0 0 0 3px rgba(33,193,182,.1)`; }}
                             onBlur={e => { e.target.style.borderColor = g200; e.target.style.boxShadow = 'none'; }}
                           />
-                          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-                            <button
-                              onClick={handleManualKeywordSearch}
-                              disabled={manualSearching || !customKeywordsInput.trim()}
-                              style={{ padding: '8px 20px', background: manualSearching || !customKeywordsInput.trim() ? g100 : `linear-gradient(135deg,${T},${TD})`, color: manualSearching || !customKeywordsInput.trim() ? g400 : W, border: 'none', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: manualSearching || !customKeywordsInput.trim() ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: "'DM Sans',sans-serif", boxShadow: manualSearching || !customKeywordsInput.trim() ? 'none' : `0 3px 10px rgba(33,193,182,.3)`, transition: 'all .2s' }}
-                            >
-                              {manualSearching ? <><Spin /> Searching…</> : '🔍 Search Keywords'}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
+                        </>
+                      )}
 
-                      {/* Section B — Suggest Keywords */}
-                      <div style={{ marginBottom: 12, background: W, borderRadius: 14, border: `1.5px solid ${g100}`, boxShadow: '0 2px 8px rgba(27,42,74,.05)', overflow: 'hidden' }}>
-                        <div style={{ padding: '11px 16px 10px', borderBottom: `1px solid ${g100}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: g50 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                            <div style={{ width: 26, height: 26, borderRadius: 8, background: `linear-gradient(135deg,#7C3AED,#5B21B6)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: W, fontSize: 12, fontWeight: 800, flexShrink: 0, boxShadow: `0 2px 6px rgba(124,58,237,.3)` }}>B</div>
-                            <div>
-                              <div style={{ fontSize: 12, fontWeight: 700, color: N }}>AI Keyword Suggestions</div>
-                              <div style={{ fontSize: 10, color: g400, marginTop: 1 }}>AI analyses your case and suggests relevant legal keywords</div>
-                            </div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                        Who are we representing? *
+                      </div>
+                      <select
+                        className="sel-in"
+                        value={representedSide}
+                        onChange={(e) => setRepresentedSide(e.target.value)}
+                        style={{ height: 42, marginBottom: 12, borderColor: !representedSide ? '#EF4444' : undefined }}
+                      >
+                        <option value="" disabled>Select represented side</option>
+                        <option value="petitioner">Petitioner</option>
+                        <option value="respondent">Respondent</option>
+                        <option value="appellant">Appellant</option>
+                        <option value="accused">Accused / Applicant</option>
+                        <option value="complainant">Complainant</option>
+                        <option value="plaintiff">Plaintiff</option>
+                        <option value="defendant">Defendant</option>
+                        <option value="state">State / Prosecution</option>
+                        <option value="opposite_party">Opposite Party</option>
+                        <option value="neutral">Neutral research only</option>
+                      </select>
+                      {representedSide === 'neutral' && (
+                        <div style={{ fontSize: 11, color: '#D97706', marginBottom: 12, marginTop: -6 }}>
+                          ⚠️ Neutral research may return citations for both sides. For drafting, select the represented side.
+                        </div>
+                      )}
+
+                      <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                            Matter type (optional)
                           </div>
-                          <button
-                            onClick={handleSuggestKeywords}
-                            disabled={suggestingKeywords}
-                            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', background: suggestingKeywords ? g100 : `linear-gradient(135deg,${T},${TD})`, color: suggestingKeywords ? g400 : W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: suggestingKeywords ? 'not-allowed' : 'pointer', fontFamily: "'DM Sans',sans-serif", transition: 'all .2s', boxShadow: suggestingKeywords ? 'none' : `0 3px 10px rgba(33,193,182,.3)`, whiteSpace: 'nowrap' }}
+                          <select
+                            className="sel-in"
+                            value={caseType}
+                            onChange={(e) => setCaseType(e.target.value)}
+                            style={{ height: 42, width: '100%' }}
                           >
-                            {suggestingKeywords ? <><Spin /> Suggesting…</> : <>✦ Suggest</>}
-                          </button>
+                            <option value="">Any</option>
+                            <option value="writ">Writ / Constitutional</option>
+                            <option value="criminal">Criminal</option>
+                            <option value="civil">Civil</option>
+                            <option value="service">Service</option>
+                            <option value="property">Property</option>
+                            <option value="family">Family</option>
+                            <option value="consumer">Consumer</option>
+                            <option value="tax">Tax</option>
+                            <option value="arbitration">Arbitration</option>
+                            <option value="company">Company</option>
+                            <option value="labour">Labour</option>
+                            <option value="other">Other</option>
+                          </select>
                         </div>
-                        {/* Empty state */}
-                        {!suggestedKeywords && !suggestingKeywords && (
-                          <div style={{ padding: '20px 16px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                            <div style={{ fontSize: 22, opacity: .25 }}>🔑</div>
-                            <div style={{ fontSize: 11, color: g400, lineHeight: 1.6 }}>
-                              Click <strong style={{ color: N }}>Suggest</strong> — AI reads all case chunks, summarises them, and generates targeted keyword categories in the left panel.
-                            </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                            Preferred court (optional)
                           </div>
-                        )}
-
-                        {/* Loading state */}
-                        {suggestingKeywords && (
-                          <div style={{ padding: '20px 16px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                            <Spin />
-                            <div style={{ fontSize: 11, color: g500 }}>Reading all case chunks and generating keywords…</div>
-                          </div>
-                        )}
-
-                        {/* Keywords loaded — point to left panel */}
-                        {suggestedKeywords && (
-                          <div style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, background: '#EEF4FF', borderTop: `1px solid #D1E0FF` }}>
-                            <div style={{ width: 32, height: 32, borderRadius: 9, background: `linear-gradient(135deg,${T},${TD})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>🔑</div>
-                            <div>
-                              <div style={{ fontSize: 12, fontWeight: 700, color: N }}>Keywords ready in the left panel</div>
-                              <div style={{ fontSize: 10.5, color: g500, marginTop: 2 }}>
-                                {(suggestedKeywords.statute_keywords?.length || 0) + (suggestedKeywords.principle_keywords?.length || 0) + (suggestedKeywords.fact_keywords?.length || 0) + (suggestedKeywords.case_keywords?.length || 0)} keywords across 4 categories — click to select, then search or generate a report.
-                              </div>
-                            </div>
-                          </div>
-                        )}
+                          <input
+                            className="inp"
+                            value={jurisdiction}
+                            onChange={(e) => setJurisdiction(e.target.value)}
+                            placeholder="e.g. Supreme Court"
+                            style={{ width: '100%', boxSizing: 'border-box', height: 42, padding: '0 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", background: g50, outline: 'none' }}
+                            onFocus={e => { e.target.style.borderColor = T; e.target.style.boxShadow = `0 0 0 3px rgba(33,193,182,.1)`; }}
+                            onBlur={e => { e.target.style.borderColor = g200; e.target.style.boxShadow = 'none'; }}
+                          />
+                        </div>
                       </div>
 
-                      {/* Manual search results */}
-                      {manualSearchResults && (
-                        <div style={{ marginTop: 16 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: N }}>
-                              {manualSearchResults.type === 'cases'
-                                ? `${manualSearchResults.data?.results?.length || 0} judgment(s) found`
-                                : `${manualSearchResults.data?.total || manualSearchResults.data?.results?.length || 0} result(s)`}
-                            </div>
-                            {(() => {
-                              const found = (manualSearchResults.data?.results || []).filter(r => r.source !== 'not_found');
-                              if (!found.length) return null;
-                              const onClick = () => {
-                                if (manualSearchResults.type === 'cases') {
-                                  const names = found.map(r => r.matched_title || r.case_name).filter(Boolean);
-                                  handleSend(true, names, null);
-                                } else {
-                                  const kws = [...new Set(found.map(r => r.matched_keyword).filter(Boolean))];
-                                  handleSend(true, null, kws.length ? kws : null);
-                                }
-                              };
-                              return (
-                                <button
-                                  onClick={onClick}
-                                  disabled={sending}
-                                  style={{ padding: '6px 14px', background: sending ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'DM Sans',sans-serif", boxShadow: sending ? 'none' : `0 2px 8px rgba(33,193,182,.3)` }}
-                                >
-                                  {sending ? <><Spin /> Generating…</> : <>⚡ Generate Full Report</>}
-                                </button>
-                              );
-                            })()}
-                          </div>
-                          {(manualSearchResults.data?.results || []).map((r, i) => {
-                            const canonicalId = r.canonical_id || (r.ik_tid ? `ik:${r.ik_tid}` : null);
-                            const displayName = r.matched_title || r.case_name;
-                            return (
-                              <div key={i} style={{ padding: '12px 14px', background: W, border: `1px solid ${g200}`, borderRadius: 10, marginBottom: 8 }}>
-                                <div style={{ fontSize: 13, fontWeight: 700, color: N }}>{displayName}</div>
-                                <div style={{ fontSize: 11, color: g400, marginTop: 3, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                  {r.metadata?.court && <span>{r.metadata.court}</span>}
-                                  {r.metadata?.date && <span>· {r.metadata.date}</span>}
-                                  <span style={{ padding: '2px 8px', background: r.source === 'local_db' ? '#F0FDF4' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#EFF6FF' : '#FFF7ED', borderRadius: 12, fontSize: 10, fontWeight: 700, color: r.source === 'local_db' ? '#065F46' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#1D4ED8' : '#92400E' }}>
-                                    {r.source === 'local_db' ? 'Local DB' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? 'Indian Kanoon' : 'Google'}
-                                  </span>
-                                </div>
-                                {r.snippet && <div style={{ fontSize: 12, color: g600, marginTop: 6, lineHeight: 1.6 }}>{String(r.snippet).slice(0, 300)}…</div>}
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8, flexWrap: 'wrap' }}>
-                                  {canonicalId && (
-                                    <button
-                                      onClick={() => handleViewFullJudgment(canonicalId, displayName)}
-                                      style={{ fontSize: 11, fontWeight: 700, color: W, background: `linear-gradient(135deg,${T},${TD})`, border: 'none', borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontFamily: "'DM Sans',sans-serif" }}
-                                    >View Full Judgment</button>
-                                  )}
-                                  {r.source_url && (
-                                    <a href={r.source_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: T, fontWeight: 600 }}>View on Indian Kanoon →</a>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
+                      <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                        Citation focus / legal issue (optional)
+                      </div>
+                      <textarea
+                        className="inp"
+                        value={legalIssueFocus}
+                        onChange={(e) => setLegalIssueFocus(e.target.value)}
+                        placeholder="Example: delay and laches in writ petition, natural justice before termination"
+                        rows={2}
+                        style={{ width: '100%', boxSizing: 'border-box', marginBottom: 12, resize: 'vertical', padding: '10px 12px', border: `1.5px solid ${g200}`, borderRadius: 10, fontSize: 13, fontFamily: "'DM Sans',sans-serif", background: g50, outline: 'none' }}
+                        onFocus={e => { e.target.style.borderColor = T; e.target.style.boxShadow = `0 0 0 3px rgba(33,193,182,.1)`; }}
+                        onBlur={e => { e.target.style.borderColor = g200; e.target.style.boxShadow = 'none'; }}
+                      />
+
+                      <div style={{ fontSize: 10, fontWeight: 700, color: g400, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
+                        Judgment Source
+                      </div>
+                      <div style={{ padding: '12px', background: g50, border: `1px solid ${g200}`, borderRadius: 10, marginBottom: 16 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: N, marginBottom: 4 }}>Indian Kanoon</div>
+                        <div style={{ fontSize: 11, color: g500, lineHeight: 1.5 }}>
+                          Indian Kanoon retrieves candidate judgments. JuriNex ranks them by relevance, side-support, authority, and risk.
+                        </div>
+                      </div>
+                      <div style={{ padding: '12px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 10, marginBottom: 16 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6 }}>Estimated cost before scan</div>
+                        <div style={{ fontSize: 13, color: '#334155', fontWeight: 600, marginBottom: 4 }}>Estimated Indian Kanoon max: ₹7.80</div>
+                        <div style={{ fontSize: 11, color: '#64748B' }}>AI token cost will depend on shortlisted judgments and model usage. Actual cost will be shown after the run.</div>
+                      </div>
+                      <button
+                        onClick={() => handleSend(true)}
+                        disabled={sending || (!representedSide) || (runMode === 'auto' && selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && refDocs.length === 0) || (runMode === 'manual' && !customKeywordsInput.trim()) || (runMode === 'auto' && !selCase)}
+                        title={(!representedSide) ? "Please select who we are representing to start the scan" : (runMode === 'auto' && selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && refDocs.length === 0) ? "Case context is missing. Please add reference documents or use manual mode." : (runMode === 'manual' && !customKeywordsInput.trim()) ? "Please enter facts or legal issues" : (runMode === 'auto' && !selCase) ? "Select a case first." : ""}
+                        style={{ width: '100%', padding: '13px 0', background: (sending || (!representedSide) || (runMode === 'auto' && selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && refDocs.length === 0) || (runMode === 'manual' && !customKeywordsInput.trim()) || (runMode === 'auto' && !selCase)) ? g300 : `linear-gradient(135deg,${T},${TD})`, color: W, border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: (sending || (!representedSide) || (runMode === 'auto' && selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && refDocs.length === 0) || (runMode === 'manual' && !customKeywordsInput.trim()) || (runMode === 'auto' && !selCase)) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, boxShadow: (sending || (!representedSide) || (runMode === 'auto' && selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && refDocs.length === 0) || (runMode === 'manual' && !customKeywordsInput.trim()) || (runMode === 'auto' && !selCase)) ? 'none' : `0 4px 16px rgba(33,193,182,.35)`, transition: 'all .2s', fontFamily: "'DM Sans',sans-serif" }}
+                      >
+                        {sending ? <><Spin /> Generating…</> : <>⚡ Start {runMode === 'auto' ? 'Automatic' : 'Manual'} Scan</>}
+                      </button>
+                      {(!representedSide) && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 8, textAlign: 'center' }}>Select who we are representing.</div>}
+                      {(runMode === 'auto' && !selCase) && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 8, textAlign: 'center' }}>Select a case first.</div>}
+                      {(runMode === 'auto' && selCase && (caseContextStatus === 'empty' || caseContextStatus === 'failed') && refDocs.length === 0) && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 8, textAlign: 'center' }}>Case context is missing.</div>}
+                      {(runMode === 'manual' && !customKeywordsInput.trim()) && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 8, textAlign: 'center' }}>Enter manual facts to continue.</div>}
+                      
+                      {runMode === 'auto' && (
+                        <div style={{ fontSize: 11, color: g400, marginTop: 6, textAlign: 'center' }}>
+                          AI generates keywords from your case context and runs the full citation pipeline.
                         </div>
                       )}
                     </div>

@@ -88,7 +88,13 @@ def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str 
             req.add_header("Accept", "application/json")
             req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                status = getattr(resp, "status", None) or resp.getcode()
+                body = resp.read().decode("utf-8", errors="replace")
+                logger.info(
+                    "[IK] %s %s -> HTTP %s (%d bytes); body[:300]=%s",
+                    method, url, status, len(body), body[:300],
+                )
+                return json.loads(body)
         except urllib.error.HTTPError as e:
             body = ""
             try:
@@ -110,11 +116,11 @@ def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str 
             return None
 
 
-def _ik_request_raw(path: str) -> Optional[bytes]:
+def _ik_request_raw(path: str) -> tuple[Optional[bytes], str]:
     """Same as _ik_request but returns raw bytes (for origdoc PDF download)."""
     token = _get_token()
     if not token:
-        return None
+        return None, ""
     url = _IK_BASE + path
     for attempt in range(1, _IK_MAX_RETRIES + 1):
         try:
@@ -136,6 +142,7 @@ def _ik_request_raw(path: str) -> Optional[bytes]:
                 continue
             logger.warning("[IK] Raw request failed for %s: %s", path, exc)
             return None, ""
+    return None, ""
 
 
 def _clean_case_name(case_name: str) -> str:
@@ -214,7 +221,19 @@ def ik_search(
     if maxcites:
         params["maxcites"] = maxcites
 
-    return _ik_request("/search/", params=params)
+    result = _ik_request("/search/", params=params)
+    if isinstance(result, dict):
+        docs = result.get("docs") or []
+        logger.info(
+            "[IK] search formInput=%r doctypes=%r -> found=%r docs=%d keys=%s",
+            effective_query, doctypes, result.get("found"), len(docs), sorted(result.keys()),
+        )
+    else:
+        logger.warning(
+            "[IK] search returned NO results dict for formInput=%r doctypes=%r (result=%r)",
+            effective_query, doctypes, result,
+        )
+    return result
 
 
 # ─── 2. Document API ──────────────────────────────────────────────────────────
@@ -299,8 +318,8 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str) -> tuple
     Subfolder: 'ik_origdocs/'.
     """
     try:
-        from google.cloud import storage as gcs_storage
-        from google.oauth2 import service_account
+        from google.cloud import storage as gcs_storage  # pyrefly: ignore[missing-import]
+        from google.oauth2 import service_account  # pyrefly: ignore[missing-import]
 
         bucket_name = os.environ.get("GCS_BUCKET_NAME", "draft_templates")
         gcs_key_b64 = os.environ.get("GCS_KEY_BASE64")
