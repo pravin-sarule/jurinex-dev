@@ -6,7 +6,7 @@ import uuid
 from typing import Any, Callable
 
 from core.logging import configure_structured_logging, stage_span
-from integrations.document_service.context_loader import from_case_file_context
+from integrations.document_service.context_loader import extract_source_identifiers, from_case_file_context
 from integrations.indian_kanoon.client import IndianKanoonClient
 from models.run_models import PipelineResult
 from pipeline.pipeline_context import PipelineContext
@@ -97,6 +97,12 @@ def run_v2_pipeline(
         perspective=normalized, case_context=case_context,
         custom_keywords=custom_pool,
     )
+    # FAILURE 2 — register the user's own source documents so they can never be returned
+    # as citation candidates (circular contamination).
+    excluded_ids, excluded_titles = extract_source_identifiers(case_file_context, case_context)
+    context.case_title = query
+    context.excluded_doc_ids = excluded_ids
+    context.excluded_titles = excluded_titles
     ensure_run(run_id, user_id, query, case_id)
     client = IndianKanoonClient(run_id, user_id, context.budget)
     logger.info(

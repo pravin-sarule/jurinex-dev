@@ -18,6 +18,11 @@ class PipelineContext:
     perspective: str
     case_context: str
     custom_keywords: list[str] = field(default_factory=list)
+    # Source-document exclusion (FAILURE 2): IK doc_ids and titles of the user's own
+    # uploaded/source documents, which must never be returned as citation candidates.
+    case_title: str = ""
+    excluded_doc_ids: set[str] = field(default_factory=set)
+    excluded_titles: list[str] = field(default_factory=list)
     budget: BudgetTracker = field(default_factory=BudgetTracker)
     case_profile: CaseProfile = field(default_factory=CaseProfile)
     issues: list[IssueCard] = field(default_factory=list)

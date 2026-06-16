@@ -48,8 +48,23 @@ def _clean_term(term: str) -> str:
     return f'"{cleaned}"' if ' ' in cleaned else cleaned
 
 
+# Execution priority by query type (1 = highest = runs/protected first). FAILURE 1:
+# doctrine queries must never be starved by opponent/fallback queries.
+QUERY_PRIORITY = {
+    "doctrine": 1,
+    "strict": 2,
+    "supreme_court": 3,
+    "court_filtered": 4,
+    "custom": 4,
+    "opponent": 5,
+    "broad_fallback": 6,
+}
+
+
 def _row(issue_id: str, query_id: str, query_type: str, form_input: str,
-         expected: list[str], is_fallback: bool = False, doctypes: str = DEFAULT_DOCTYPE) -> dict:
+         expected: list[str], is_fallback: bool = False, doctypes: str = DEFAULT_DOCTYPE,
+         priority: int | None = None) -> dict:
+    prio = priority if priority is not None else QUERY_PRIORITY.get(query_type, 6)
     return {
         "issue_id": issue_id,
         "query_id": query_id,
@@ -62,6 +77,8 @@ def _row(issue_id: str, query_id: str, query_type: str, form_input: str,
         "expected_terms": expected,
         "negative_terms": [],  # never restrict the first pass with negatives
         "is_fallback": is_fallback,
+        "priority": prio,
+        "rank": prio,  # back-compat: retrieval previously sorted on rank
     }
 
 
@@ -100,7 +117,6 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             ))
             counter += 1
 
-        # Strict main phrase (all courts).
         if phrases:
             strict_terms = phrases[:1] + [m for m in must_haves if m not in phrases][:1]
         elif len(must_haves) >= 2:
@@ -109,33 +125,31 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             strict_terms = must_haves[:1]
         else:
             strict_terms = synonyms[:2]
+
+        # Queries are emitted in MANDATORY priority order (FAILURE 1): doctrine queries are
+        # the most legally critical and must run/protect first; opponent + fallback are last.
+
+        # Priority 1 — DOCTRINE queries (the fix for doctrines never searched).
+        for d in doctrines[:3]:
+            _add("doctrine", [d] + anchor, expected=[d])
+
+        # Priority 2 — STRICT fact-pattern query.
         _add("strict", strict_terms)
 
-        # Primary doctrine (the fix for FAILURE 2/3 — doctrines never searched).
-        if doctrines:
-            _add("doctrine", [doctrines[0]] + anchor, expected=[doctrines[0]])
-
-        # Supreme Court targeting — ADDITIVE (a separate doctypes=supremecourt query),
-        # NOT a replacement, so SC precedent is reached even for a High Court matter.
-        # Ranked high so it actually executes within the IK search budget.
+        # Priority 3 — SUPREME COURT (additive doctypes=supremecourt, not a replacement).
         if strict_terms:
             _add("supreme_court", strict_terms, doctypes=SUPREME_COURT_DOCTYPE)
 
-        # Opponent query — surfaces ADVERSE authority for the opposition bundle.
-        if opponent:
-            _add("opponent", opponent[:1] + anchor, expected=opponent[:1])
-
-        # Secondary doctrine (lower rank — runs only if budget allows). Kept to one so
-        # the additive court-filtered query still fits inside max_queries_per_issue.
-        for d in doctrines[1:2]:
-            _add("doctrine", [d] + anchor, expected=[d])
-
-        # Local High Court (or whichever court the issue names) — also additive.
+        # Priority 4 — local HIGH COURT (or whichever court the issue names), additive.
         court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
         if court_doctype and court_doctype != SUPREME_COURT_DOCTYPE:
             _add("court_filtered", strict_terms, doctypes=court_doctype)
 
-        # Broad fallback — OR the top phrases for recall when strict queries return little.
+        # Priority 5 — OPPONENT query (adverse authority for the opposition bundle).
+        if opponent:
+            _add("opponent", opponent[:1] + anchor, expected=opponent[:1])
+
+        # Priority 6 — BROAD FALLBACK (lowest; OR the top phrases for recall).
         fallback_src = (
             [t for t in issue.phrase_terms if t and t.strip()]
             or [t for t in (getattr(issue, "doctrines", None) or []) if t and t.strip()]
@@ -144,16 +158,10 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         fb_terms = [c for c in (_clean_term(t) for t in fallback_src) if c][:2]
         _add("broad_fallback", fb_terms, is_fallback=True)
 
-        # Cap initial queries at max_per_issue; keep 1 fallback. Tag rank (position within
-        # the issue) so retrieval can round-robin across issues within the IK search budget.
-        initial = [q for q in issue_queries if not q.get("is_fallback")]
+        # Cap initial queries at max_per_issue (keeps highest-priority since emitted in
+        # priority order); always keep the single fallback.
+        initial = [q for q in issue_queries if not q.get("is_fallback")][:max_per_issue]
         fallback = [q for q in issue_queries if q.get("is_fallback")][:1]
-        if len(initial) > max_per_issue:
-            initial = initial[:max_per_issue]
-        for rank, q in enumerate(initial):
-            q["rank"] = rank
-        for q in fallback:
-            q["rank"] = max_per_issue
         generated.extend(initial + fallback)
 
     # Custom keywords / case-name chips searched verbatim.

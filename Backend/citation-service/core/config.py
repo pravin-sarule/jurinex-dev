@@ -29,7 +29,11 @@ def _float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     pipeline_version: str = os.environ.get("CITATION_PIPELINE_VERSION", "v2").lower()
-    max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 10)
+    max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 14)
+    # Soft budget: non-protected queries (priority >= 3 — SC/court/opponent/fallback) stop
+    # here. Protected doctrine + strict queries (priority <= 2) may run up to the hard cap
+    # above so the most legally critical queries are never starved (FAILURE 1).
+    ik_search_soft_budget: int = _int("CITATION_V2_IK_SEARCH_SOFT_BUDGET", 10)
     max_ik_fragment_calls: int = _int("CITATION_V2_MAX_IK_FRAGMENT_CALLS", 20)
     max_ik_meta_calls: int = _int("CITATION_V2_MAX_IK_META_CALLS", 20)
     max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 7)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from core.config import settings
 from models.issue_models import IssueCard
 from services.query_service import SUPREME_COURT_DOCTYPE, generate_ik_queries
 
@@ -54,7 +55,19 @@ class TestRicherQueryBuilder(unittest.TestCase):
 
     def test_per_issue_cap_respected(self):
         initial = [q for q in self.qs if not q.get("is_fallback")]
-        self.assertLessEqual(len(initial), 6)
+        self.assertLessEqual(len(initial), settings.max_queries_per_issue)
+
+    def test_doctrine_queries_have_highest_priority(self):
+        # FAILURE 1: doctrine=1 must outrank strict=2, opponent=5, fallback=6.
+        prio = {q["query_type"]: q["priority"] for q in self.qs}
+        self.assertEqual(prio["doctrine"], 1)
+        self.assertEqual(prio["strict"], 2)
+        self.assertLess(prio["doctrine"], prio.get("opponent", 5))
+        self.assertLess(prio["doctrine"], prio.get("broad_fallback", 6))
+        # Doctrine queries are emitted before opponent/fallback ones.
+        first_doctrine = next(i for i, q in enumerate(self.qs) if q["query_type"] == "doctrine")
+        first_opponent = next(i for i, q in enumerate(self.qs) if q["query_type"] == "opponent")
+        self.assertLess(first_doctrine, first_opponent)
 
 
 if __name__ == "__main__":

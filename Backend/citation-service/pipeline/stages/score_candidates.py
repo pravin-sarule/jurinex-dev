@@ -18,7 +18,7 @@ def run(context: PipelineContext):
             context.rejected.append(candidate)
             continue
         score(candidate, issue, candidate.matched_query, context.perspective, context.case_context,
-              context.case_profile.court, semantic_score=sims.get(candidate.doc_id))
+              context.case_profile.court, semantic_score=sims.get(candidate.doc_id), run_id=context.run_id)
         if candidate.relevance_score < 0.25:
             candidate.rejection_reason = "scoring relevance below threshold"
             context.rejected.append(candidate)

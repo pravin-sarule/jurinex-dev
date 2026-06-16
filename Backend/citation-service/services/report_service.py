@@ -51,6 +51,7 @@ def citation_to_dict(candidate: Candidate) -> dict:
         # Opposition bundle + reranking.
         "counter_argument_hint": candidate.counter_argument_hint,
         "rerank_score": candidate.rerank_score,
+        "direction_flag": candidate.direction_flag,
         "argumentParty": "selected_side" if candidate.supports_selected_side else "opposite_side" if candidate.adverse_to_selected_side else "neutral",
         "source": "Indian Kanoon",
         "sourceUrl": f"https://indiankanoon.org/doc/{candidate.doc_id}/",

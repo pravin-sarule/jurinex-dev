@@ -37,6 +37,8 @@ def evaluate_batch(candidates: list[Candidate], issues: list[IssueCard], perspec
         "disposition": item.disposition or "UNKNOWN",
         "winning_party": item.winning_party or "UNCLEAR",
         "operative_quote": (item.operative_quote or "")[:300],
+        # Direction signal (FAILURE 3): PRINCIPLE_REVERSED = directed principle applied to wrong party.
+        "direction": item.direction_flag or "",
     } for item in candidates[:7]]
     prompt = batch_judge_prompt(perspective, [issue.to_dict() for issue in issues], compact)
     model = os.environ.get("CITATION_V2_JUDGE_MODEL") or os.environ.get("CITATION_V2_GEMINI_MODEL") or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")

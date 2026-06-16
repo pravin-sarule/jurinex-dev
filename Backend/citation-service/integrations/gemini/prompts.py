@@ -85,6 +85,12 @@ def batch_judge_prompt(perspective: str, issue_cards: list[dict], candidates: li
         "but ultimately DISMISSED the petition is ADVERSE to a petitioner (and SUPPORTING to a "
         "respondent), and vice-versa. When a disposition is given, your classification MUST be "
         "consistent with who actually won; do not be misled by favourable-sounding reasoning.\n"
+        "IMPORTANT — principle direction: for DIRECTED principles like 'cannot take advantage of "
+        "its own wrong' or 'estoppel', check carefully which PARTY the court applies the principle "
+        "AGAINST. If the court applies it against the petitioner/bidder (not the authority), the "
+        "case is ADVERSE to our client even if the principle sounds relevant. Look for who is being "
+        "told they cannot take advantage of their own wrong. A candidate flagged "
+        "direction=PRINCIPLE_REVERSED applies the principle against the wrong party.\n"
         f"Selected side: {perspective}. Issues: {issue_cards}. Candidates: {candidates}"
     )
 

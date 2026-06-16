@@ -42,3 +42,5 @@ class Candidate:
     # Opposition bundle (PART 6) + arithmetic reranking (PART 8).
     counter_argument_hint: str = ""
     rerank_score: float = 0.0
+    # Direction-aware principle detection (FAILURE 3): "" / PRINCIPLE_REVERSED / PRINCIPLE_ALIGNED.
+    direction_flag: str = ""

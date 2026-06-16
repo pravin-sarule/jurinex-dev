@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from core.enums import Authority, Classification
 from models.citation_models import Candidate
 from models.issue_models import IssueCard
 from utils.text import overlap_score
+
+logger = logging.getLogger(__name__)
 
 
 def authority_for(source: str, same_court: str = "") -> tuple[Authority, float]:
@@ -21,7 +25,7 @@ def authority_for(source: str, same_court: str = "") -> tuple[Authority, float]:
     return Authority.UNKNOWN, 0.2
 
 
-def score(candidate: Candidate, issue: IssueCard, query: str, perspective: str, case_context: str, same_court: str = "", semantic_score: float | None = None) -> Candidate:
+def score(candidate: Candidate, issue: IssueCard, query: str, perspective: str, case_context: str, same_court: str = "", semantic_score: float | None = None, run_id: str = "") -> Candidate:
     candidate.authority, candidate.authority_score = authority_for(candidate.docsource, same_court)
 
     # BM25 title score approximation (overlap of query and title)
@@ -52,7 +56,28 @@ def score(candidate: Candidate, issue: IssueCard, query: str, perspective: str, 
         candidate.favorability_score = 0.5
     else:
         candidate.favorability_score = round(min(1.0, max(0.0, 0.5 + 0.15 * (support_hits - adverse_hits))), 3)
-        
+
+    # FAILURE 3 — direction-aware adjustment. A directed principle (e.g. "advantage of
+    # its own wrong") applied against the WRONG party makes a phrase-matching case adverse,
+    # not supporting. Penalise heavily on reversal; small boost when correctly directed.
+    if perspective != "neutral":
+        from services.direction_service import (
+            CORRECT_DIRECTION, WRONG_DIRECTION, assess_fragment_direction,
+        )
+        principles = list(issue.phrase_terms or []) + list(getattr(issue, "doctrines", None) or [])
+        direction, principle, evidence = assess_fragment_direction(candidate.fragment, principles)
+        if direction == WRONG_DIRECTION:
+            candidate.favorability_score = round(candidate.favorability_score * 0.3, 3)
+            candidate.direction_flag = "PRINCIPLE_REVERSED"
+            logger.info('[JURINEX][%s][DIRECTION_FLAG] %s principle="%s" applied to WRONG party '
+                        '— penalising score. Fragment: "%s"',
+                        run_id[:8], (candidate.title or candidate.doc_id)[:50], principle, evidence[:100])
+        elif direction == CORRECT_DIRECTION:
+            candidate.favorability_score = round(min(1.0, candidate.favorability_score * 1.2), 3)
+            candidate.direction_flag = "PRINCIPLE_ALIGNED"
+            logger.info('[JURINEX][%s][DIRECTION] %s principle="%s" direction=CORRECT penalty=1.2',
+                        run_id[:8], (candidate.title or candidate.doc_id)[:40], principle)
+
     candidate.risk_score = round(max(0.0, 1.0 - candidate.relevance_score) * 0.7 + (0.2 if candidate.authority_score < 0.5 else 0), 3)
     candidate.confidence = round(
         0.45 * candidate.relevance_score + 0.25 * candidate.authority_score

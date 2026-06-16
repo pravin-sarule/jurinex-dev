@@ -1,11 +1,51 @@
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
 # Max characters of case context kept for the pipeline. Edit via .env. This is the
 # "Context chars" number shown in the Pipeline Data Flow.
 _MAX_CONTEXT_CHARS = int(os.environ.get("CITATION_V2_MAX_CONTEXT_CHARS", "60000"))
+
+# indiankanoon.org/doc/12345/ or /docfragment/12345/ — used to harvest IK ids that the
+# uploaded source document refers to, so they are never returned as citations (FAILURE 2).
+_IK_DOC_ID_RX = re.compile(r"indiankanoon\.org/doc(?:fragment)?/(\d+)", re.IGNORECASE)
+_ID_KEYS = ("doc_id", "docId", "tid", "canonical_id", "canonicalId", "ik_doc_id", "ikDocId")
+_TITLE_KEYS = ("title", "case_name", "caseName", "name", "filename", "file_name")
+
+
+def extract_source_identifiers(
+    case_file_context: list[dict] | None, case_context_text: str = "",
+) -> tuple[set[str], list[str]]:
+    """Collect IK doc_ids and titles of the user's source documents for exclusion.
+
+    Returns (excluded_doc_ids, excluded_titles). doc_ids are bare numeric IK tids
+    (an ``ik:12345`` / ``ik-12345`` canonical id is reduced to ``12345``).
+    """
+    ids: set[str] = set()
+    titles: list[str] = []
+    for row in (case_file_context or []):
+        if not isinstance(row, dict):
+            continue
+        for key in _ID_KEYS:
+            raw = str(row.get(key) or "").strip()
+            if raw:
+                m = re.search(r"(\d{3,})", raw)
+                if m:
+                    ids.add(m.group(1))
+        for key in _TITLE_KEYS:
+            t = str(row.get(key) or "").strip()
+            if t and t.lower() not in ("manual case facts",):
+                titles.append(t)
+    for m in _IK_DOC_ID_RX.finditer(case_context_text or ""):
+        ids.add(m.group(1))
+    # De-dupe titles, preserve order.
+    titles = list(dict.fromkeys(titles))
+    if ids or titles:
+        logger.info("[CONTEXT_LOADER] Registered %d source doc_id(s) and %d source title(s) "
+                    "for exclusion", len(ids), len(titles))
+    return ids, titles
 
 
 def from_case_file_context(case_file_context: list[dict] | None) -> str:
