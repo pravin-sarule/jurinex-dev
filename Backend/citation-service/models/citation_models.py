@@ -31,3 +31,14 @@ class Candidate:
     use_in_argument: str = ""
     risk_note: str = ""
     rejection_reason: str = ""
+    # Outcome-aware adverse detection (disposition service). disposition / winning_party
+    # use the core.enums string values; default "" / UNKNOWN until detect_dispositions runs.
+    disposition: str = ""
+    winning_party: str = ""
+    operative_quote: str = ""
+    outcome_confidence: float = 0.0
+    outcome_source: str = ""
+    outcome_overridden: bool = False
+    # Opposition bundle (PART 6) + arithmetic reranking (PART 8).
+    counter_argument_hint: str = ""
+    rerank_score: float = 0.0

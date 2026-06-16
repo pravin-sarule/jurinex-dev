@@ -2,6 +2,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from core.config import settings
 from core.exceptions import BudgetExceeded
 from integrations.indian_kanoon.client import IndianKanoonClient
 from pipeline.pipeline_context import PipelineContext
@@ -11,13 +12,16 @@ logger = logging.getLogger(__name__)
 
 def run(context: PipelineContext, client: IndianKanoonClient):
     found = []
-    
+
     # Split queries into initial and fallback
     initial_queries = [q for q in context.queries if not q.get("is_fallback")]
     fallback_queries = [q for q in context.queries if q.get("is_fallback")]
-    
+
     # Track results per issue to know when to trigger fallback
     issue_results = {q["issue_id"]: 0 for q in context.queries}
+    # Count distinct non-fallback queries that returned >=1 result per issue — used to
+    # measure doctrine coverage (fallback fires on weak coverage, not just on zero).
+    issue_query_hits = {q["issue_id"]: 0 for q in context.queries}
     
     def _execute_query(query):
         start_t = time.monotonic()
@@ -82,14 +86,19 @@ def run(context: PipelineContext, client: IndianKanoonClient):
             q, res = future.result()
             found.extend(res)
             issue_results[q["issue_id"]] += len(res)
+            if res:
+                issue_query_hits[q["issue_id"]] += 1
 
-    # 2. Check for fallbacks
+    # 2. Check for fallbacks — fire when doctrine coverage is weak (fewer than
+    #    min_doctrine_coverage non-fallback queries returned anything), not only on zero.
     fallbacks_to_run = []
     for fq in fallback_queries:
-        if issue_results.get(fq["issue_id"], 0) == 0:
-            logger.info("strict_query_zero_results -> broad_fallback_started", extra={"details": {
+        if issue_query_hits.get(fq["issue_id"], 0) < settings.min_doctrine_coverage:
+            logger.info("weak_doctrine_coverage -> broad_fallback_started", extra={"details": {
                 "run_id": context.run_id,
-                "issue_id": fq["issue_id"]
+                "issue_id": fq["issue_id"],
+                "queries_with_hits": issue_query_hits.get(fq["issue_id"], 0),
+                "min_required": settings.min_doctrine_coverage,
             }})
             fallbacks_to_run.append(fq)
             

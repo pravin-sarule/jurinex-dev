@@ -41,6 +41,16 @@ def citation_to_dict(candidate: Candidate) -> dict:
         "reason": candidate.reason,
         "use_in_argument": candidate.use_in_argument,
         "risk_note": candidate.risk_note,
+        # Outcome-aware adverse detection (disposition service).
+        "disposition": candidate.disposition,
+        "winning_party": candidate.winning_party,
+        "operative_quote": candidate.operative_quote,
+        "outcome_confidence": candidate.outcome_confidence,
+        "outcome_source": candidate.outcome_source,
+        "outcome_overridden": candidate.outcome_overridden,
+        # Opposition bundle + reranking.
+        "counter_argument_hint": candidate.counter_argument_hint,
+        "rerank_score": candidate.rerank_score,
         "argumentParty": "selected_side" if candidate.supports_selected_side else "opposite_side" if candidate.adverse_to_selected_side else "neutral",
         "source": "Indian Kanoon",
         "sourceUrl": f"https://indiankanoon.org/doc/{candidate.doc_id}/",
@@ -90,6 +100,10 @@ def build_report(run_id: str, perspective: str, profile: dict, issues: list[dict
         "recommended_citations": recommended,
         "adverse_citations": adverse_rows,
         "use_with_caution": caution_rows,
+        # Explicit two-bundle view (PART 6). client = authority FOR the selected side;
+        # opponent = adverse authority WITH counter_argument_hint to prepare against.
+        "client_citations": recommended,
+        "opponent_citations": adverse_rows,
         "citations": recommended + adverse_rows + caution_rows,
         "citation_count": total,
         "recommended_count": recommended_count,

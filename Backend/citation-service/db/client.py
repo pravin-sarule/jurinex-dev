@@ -60,6 +60,22 @@ def _query_embed_config(model: str) -> Dict[str, Any]:
     return {"output_dimensionality": dims}
 
 
+def _document_embed_config(model: str) -> Dict[str, Any]:
+    """Config for embedding CANDIDATE DOCUMENTS (not queries).
+
+    Gemini's asymmetric retrieval embeddings require the query and the document to
+    use DIFFERENT task types — RETRIEVAL_QUERY for the search text, RETRIEVAL_DOCUMENT
+    for the corpus item. Previously every text (case AND candidates) went through
+    get_query_embeddings_batch → RETRIEVAL_QUERY, which degrades cosine similarity.
+    Use this for the candidate side. text-embedding models omit task_type.
+    """
+    dims = int(os.environ.get("CITATION_EMBED_OUTPUT_DIMS", "768"))
+    if "gemini-embedding" in model:
+        task_type = os.environ.get("CITATION_EMBED_DOCUMENT_TASK_TYPE", "RETRIEVAL_DOCUMENT")
+        return {"task_type": task_type, "output_dimensionality": dims}
+    return {"output_dimensionality": dims}
+
+
 def _ensure_query_embed_client() -> bool:
     """Lazily initialise google.genai client for query embeddings. Returns True if usable."""
     global _qdrant_embed_client, _qdrant_embed_available
@@ -120,14 +136,18 @@ def _embed_with_retries(model: str, contents: List[str], config: Dict[str, Any],
     raise RuntimeError(f"{label} embed failed without an exception")
 
 
-def _embed_strings_gemini(strings: List[str]) -> List[List[float]]:
-    """Call Gemini embed_content for one or more non-empty strings; returns vectors (same length)."""
+def _embed_strings_gemini(strings: List[str], task: str = "query") -> List[List[float]]:
+    """Call Gemini embed_content for one or more non-empty strings; returns vectors (same length).
+
+    task='query' uses RETRIEVAL_QUERY (search side); task='document' uses
+    RETRIEVAL_DOCUMENT (corpus side). They must match Gemini's asymmetric scheme.
+    """
     if not strings:
         return []
     if not _ensure_query_embed_client():
         return [[] for _ in strings]
     model = _resolve_query_embed_model()
-    config = _query_embed_config(model)
+    config = _document_embed_config(model) if task == "document" else _query_embed_config(model)
     try:
         resp = _embed_with_retries(model, strings, config, "batch")
     except Exception as exc:
@@ -165,11 +185,7 @@ def _embed_strings_gemini(strings: List[str]) -> List[List[float]]:
     return out_full
 
 
-def get_query_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """
-    Embed every string in `texts` (e.g. sc_query, hc_query, provision_query per dimension).
-    Preserves list length and index alignment; blank strings produce [].
-    """
+def _embeddings_batch(texts: List[str], task: str) -> List[List[float]]:
     if not texts:
         return []
     out: List[List[float]] = [[] for _ in texts]
@@ -178,10 +194,26 @@ def get_query_embeddings_batch(texts: List[str]) -> List[List[float]]:
         return out
     idxs = [p[0] for p in need_pairs]
     batch = [p[1] for p in need_pairs]
-    vectors = _embed_strings_gemini(batch)
+    vectors = _embed_strings_gemini(batch, task=task)
     for j, i in enumerate(idxs):
         out[i] = vectors[j] if j < len(vectors) else []
     return out
+
+
+def get_query_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """
+    Embed search-side text with RETRIEVAL_QUERY (e.g. the case/issue query vectors).
+    Preserves list length and index alignment; blank strings produce [].
+    """
+    return _embeddings_batch(texts, task="query")
+
+
+def get_document_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """
+    Embed corpus-side text (candidate judgments) with RETRIEVAL_DOCUMENT so cosine
+    similarity against a RETRIEVAL_QUERY case/issue vector is correct.
+    """
+    return _embeddings_batch(texts, task="document")
 
 
 def _get_qdrant_query_embedding(query: str) -> List[float]:

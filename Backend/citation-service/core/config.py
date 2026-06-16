@@ -38,6 +38,20 @@ class Settings:
     max_runtime_seconds: int = _int("CITATION_V2_MAX_RUNTIME_SECONDS", 180)
     max_raw_candidates: int = _int("CITATION_V2_MAX_RAW_CANDIDATES", 80)
     enable_final_ai_judge: bool = os.environ.get("CITATION_V2_ENABLE_FINAL_AI_JUDGE", "true").lower() == "true"
+    # Outcome-aware adverse detection (disposition service).
+    enable_disposition_check: bool = os.environ.get("CITATION_V2_ENABLE_DISPOSITION_CHECK", "true").lower() == "true"
+    max_disposition_ai_calls: int = _int("CITATION_V2_MAX_DISPOSITION_AI_CALLS", 8)
+    # Cheap metadata/doctrine pre-screen before fragment enrichment.
+    enable_cheap_prescreen: bool = os.environ.get("CITATION_V2_ENABLE_CHEAP_PRESCREEN", "true").lower() == "true"
+    prescreen_max_age_years: int = _int("CITATION_V2_PRESCREEN_MAX_AGE_YEARS", 15)
+    # Opposition bundle (counter-argument hints for adverse authority).
+    enable_opposition_bundle: bool = os.environ.get("CITATION_V2_ENABLE_OPPOSITION_BUNDLE", "true").lower() == "true"
+    # Arithmetic reranking within client/opponent bundles.
+    enable_rerank: bool = os.environ.get("CITATION_V2_ENABLE_RERANK", "true").lower() == "true"
+    # Richer query builder caps (per legal issue).
+    max_queries_per_issue: int = _int("CITATION_V2_MAX_QUERIES_PER_ISSUE", 6)
+    min_queries_per_issue: int = _int("CITATION_V2_MIN_QUERIES_PER_ISSUE", 3)
+    min_doctrine_coverage: int = _int("CITATION_V2_MIN_DOCTRINE_COVERAGE", 2)
 
 
 settings = Settings()

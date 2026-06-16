@@ -5,9 +5,11 @@ from services.semantic_service import case_similarity_scores
 
 def run(context: PipelineContext):
     issues = {issue.issue_id: issue for issue in context.issues}
-    # Semantic relevance: one embedding batch (case + all candidates) → {doc_id: cosine}.
+    # Semantic relevance: per-issue query vectors vs candidate document vectors → {doc_id: cosine}.
     # Empty dict means embeddings unavailable → scoring falls back to lexical.
-    sims = case_similarity_scores(context.case_context, context.candidates, context.run_id, context.user_id)
+    sims = case_similarity_scores(
+        context.case_context, context.candidates, context.run_id, context.user_id, context.issues,
+    )
     scored = []
     for candidate in context.candidates:
         issue = issues.get(candidate.matched_issue_id)

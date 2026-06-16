@@ -11,10 +11,10 @@ from integrations.indian_kanoon.client import IndianKanoonClient
 from models.run_models import PipelineResult
 from pipeline.pipeline_context import PipelineContext
 from pipeline.stages import (
-    build_report, cheap_filter, classify_results, deduplicate_candidates, enrich_fragments,
-    extract_case_profile, extract_issues, fetch_full_documents, final_ai_judge,
-    generate_queries, normalize_perspective, retrieve_candidates, score_candidates,
-    shortlist_candidates,
+    build_report, cheap_filter, cheap_prescreen, classify_results, deduplicate_candidates,
+    detect_disposition, enrich_fragments, extract_case_profile, extract_issues,
+    fetch_full_documents, final_ai_judge, generate_queries, normalize_perspective,
+    retrieve_candidates, score_candidates, shortlist_candidates,
 )
 from repositories.cost_repository import summarize_cost
 from repositories.report_repository import save_report
@@ -99,6 +99,10 @@ def run_v2_pipeline(
     )
     ensure_run(run_id, user_id, query, case_id)
     client = IndianKanoonClient(run_id, user_id, context.budget)
+    logger.info(
+        "[JURINEX][%s][START] case=%s client_role=%s context_chars=%d custom_keywords=%d",
+        run_id[:8], (case_id or query)[:60], normalized, case_context_chars, len(custom_pool),
+    )
     try:
         _stage(context, "extract_case_profile", extract_case_profile.run)
         _stage(context, "extract_issues", extract_issues.run)
@@ -108,6 +112,7 @@ def run_v2_pipeline(
         _stage(context, "retrieve_candidates", retrieve_candidates.run, client)
         _stage(context, "deduplicate_candidates", deduplicate_candidates.run)
         _stage(context, "cheap_filter", cheap_filter.run)
+        _stage(context, "cheap_prescreen", cheap_prescreen.run)
         _stage(context, "enrich_fragments", enrich_fragments.run, client)
         _stage(context, "score_candidates", score_candidates.run)
         logger.debug("Candidate scores and rejections", extra={"details": {
@@ -117,6 +122,7 @@ def run_v2_pipeline(
         }})
         _stage(context, "shortlist_candidates", shortlist_candidates.run)
         _stage(context, "fetch_full_documents", fetch_full_documents.run, client)
+        _stage(context, "detect_disposition", detect_disposition.run)
         _stage(context, "final_ai_judge", final_ai_judge.run)
         supporting, adverse, caution = _stage(context, "classify_results", classify_results.run)
         cost = summarize_cost(run_id)
@@ -196,6 +202,13 @@ def run_v2_pipeline(
         report_id = str(uuid.uuid4())
         save_report(report_id, user_id, query, report, case_id, run_id)
         complete_run(run_id, report_id, len(context.candidates), len(supporting), len(adverse) + len(caution))
+        logger.info(
+            "[JURINEX][%s][END] completed in %.2fs supporting=%d adverse=%d caution=%d "
+            "total_cost=Rs%.2f disposition_overrides=%d",
+            run_id[:8], context.timings.get("total_duration", 0.0),
+            len(supporting), len(adverse), len(caution),
+            round(context.budget.estimated_cost_inr, 2), context.timings.get("_disposition_flips", 0),
+        )
         logging.getLogger("citation.audit").info("Citation report generated", extra={"details": {
             "run_id": run_id, "user_id": user_id, "report_id": report_id,
             "cost": cost, "recommended": len(supporting), "adverse": len(adverse), "caution": len(caution),

@@ -86,15 +86,29 @@ def extract_issue_cards(
     detected_court = str(data.get("court") or "").strip()
     preferred_courts = [detected_court, "Supreme Court"] if detected_court else ["Supreme Court", "High Court"]
 
+    def _strs(value, cap: int) -> list[str]:
+        return [str(t).strip() for t in (value or []) if str(t).strip()][:cap]
+
+    # Case-level opponent modelling (shared across cards so query_service can reach it).
+    opp_args = _strs(data.get("opponent_arguments"), 6)
+    opp_doctrines = _strs(data.get("opponent_doctrines"), 6)
+    opp_terms = _strs(data.get("opponent_phrase_terms"), 8)
+
     cards: list[IssueCard] = []
+    any_main = False
     for index, issue in enumerate((data.get("issues") or [])[:5], 1):
         if not isinstance(issue, dict):
             continue
-        phrase_terms = [str(t).strip() for t in (issue.get("phrase_terms") or []) if str(t).strip()][:3]
-        must = [str(t).strip() for t in (issue.get("must_have_terms") or []) if str(t).strip()][:6]
-        statutes = [str(t).strip() for t in (issue.get("statutes") or []) if str(t).strip()][:6]
+        phrase_terms = _strs(issue.get("phrase_terms"), 8)
+        must = _strs(issue.get("must_have_terms"), 6)
+        statutes = _strs(issue.get("statutes"), 6)
+        doctrines = _strs(issue.get("doctrines"), 8)
+        synonyms = _strs(issue.get("synonyms"), 8) or must
+        landmarks = _strs(issue.get("landmark_cases"), 8)
         legal_issue = str(issue.get("legal_issue") or "").strip()[:300]
-        if not (legal_issue or phrase_terms or must or statutes):
+        is_main = bool(issue.get("is_main_issue"))
+        any_main = any_main or is_main
+        if not (legal_issue or phrase_terms or must or statutes or doctrines):
             continue
         cards.append(IssueCard(
             issue_id=f"issue-{index}",
@@ -105,18 +119,30 @@ def extract_issue_cards(
             statutes=statutes,
             must_have_terms=must,
             phrase_terms=phrase_terms,
-            optional_synonyms=must,
+            optional_synonyms=synonyms,
             negative_terms=[],
             preferred_courts=preferred_courts,
-            expected_citation_use="support or test the selected side's legal proposition",
+            expected_citation_use=str(issue.get("outcome_sought") or "").strip()[:300]
+                or "support or test the selected side's legal proposition",
+            doctrines=doctrines,
+            is_main_issue=is_main,
+            landmark_cases=landmarks,
+            outcome_sought=str(issue.get("outcome_sought") or "").strip()[:300],
+            opponent_arguments=opp_args,
+            opponent_doctrines=opp_doctrines,
+            opponent_phrase_terms=opp_terms,
         ))
 
     if not cards:
         return None
+    # Guarantee exactly one main issue (the gravamen) — default to the first.
+    if not any_main:
+        cards[0].is_main_issue = True
 
     logger.info(
-        "[ISSUE_EXTRACT] AI extracted %d issue card(s) via %s | summary=%s | sample_terms=%s",
-        len(cards), model, str(data.get("case_summary") or "")[:200],
-        (cards[0].phrase_terms + cards[0].must_have_terms)[:6],
+        "[ISSUE_EXTRACT] AI extracted %d issue card(s) via %s | main=%s | doctrines=%s | opp_terms=%d",
+        len(cards), model,
+        next((c.issue_id for c in cards if c.is_main_issue), "?"),
+        (cards[0].doctrines or cards[0].phrase_terms)[:5], len(opp_terms),
     )
     return cards

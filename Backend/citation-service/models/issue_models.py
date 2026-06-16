@@ -17,6 +17,15 @@ class IssueCard:
     negative_terms: list[str] = field(default_factory=list)
     preferred_courts: list[str] = field(default_factory=list)
     expected_citation_use: str = ""
+    # Richer issue model (tender/procurement prompt redesign — PART 3).
+    doctrines: list[str] = field(default_factory=list)
+    is_main_issue: bool = False
+    landmark_cases: list[str] = field(default_factory=list)
+    outcome_sought: str = ""
+    # Opponent modelling — drives adverse-authority queries + the opposition bundle.
+    opponent_arguments: list[str] = field(default_factory=list)
+    opponent_doctrines: list[str] = field(default_factory=list)
+    opponent_phrase_terms: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

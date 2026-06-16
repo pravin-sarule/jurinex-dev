@@ -20,10 +20,23 @@ def evaluate_batch(candidates: list[Candidate], issues: list[IssueCard], perspec
     if not client or not candidates:
         return candidates
     budget.consume("ai", estimated_cost=5.0)
+
+    def _window(text: str) -> str:
+        """Indian judgments put the operative order at the END — send head (facts)
+        + tail (holding/order), not just the opening (which was FAILURE 4)."""
+        t = text or ""
+        if len(t) <= 4500:
+            return t
+        return t[:1500] + "\n\n[...middle omitted...]\n\n" + t[-3000:]
+
     compact = [{
         "doc_id": item.doc_id, "title": item.title, "source": item.docsource,
-        "fragment": item.fragment[:1200], "full_text": item.full_text[:3500],
+        "fragment": item.fragment[:1200], "full_text": _window(item.full_text),
         "deterministic_classification": item.classification.value,
+        # Outcome signals from the disposition stage (judge must respect who actually won).
+        "disposition": item.disposition or "UNKNOWN",
+        "winning_party": item.winning_party or "UNCLEAR",
+        "operative_quote": (item.operative_quote or "")[:300],
     } for item in candidates[:7]]
     prompt = batch_judge_prompt(perspective, [issue.to_dict() for issue in issues], compact)
     model = os.environ.get("CITATION_V2_JUDGE_MODEL") or os.environ.get("CITATION_V2_GEMINI_MODEL") or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")

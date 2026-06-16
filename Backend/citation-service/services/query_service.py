@@ -1,5 +1,6 @@
 import logging
 
+from core.config import settings
 from models.issue_models import IssueCard
 
 logger = logging.getLogger(__name__)
@@ -7,6 +8,7 @@ logger = logging.getLogger(__name__)
 # Indian Kanoon `doctypes` value used when no specific court applies — covers
 # Supreme Court + all High Courts + District Courts combined.
 DEFAULT_DOCTYPE = "judgments"
+SUPREME_COURT_DOCTYPE = "supremecourt"
 
 # Maps a preferred-court label (lower-cased) to the IK `doctypes` filter value.
 COURT_DOCTYPE_MAP = {
@@ -66,17 +68,40 @@ def _row(issue_id: str, query_id: str, query_type: str, form_input: str,
 def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | None = None) -> list[dict]:
     generated: list[dict] = []
     counter = 1
+    max_per_issue = settings.max_queries_per_issue
+    min_per_issue = settings.min_queries_per_issue
 
     for issue in issues[:5]:
         issue_queries: list[dict] = []
+        seen_inputs: set[str] = set()
 
         phrases = [c for c in (_clean_term(t) for t in issue.phrase_terms) if c]
         must_haves = [c for c in (_clean_term(t) for t in issue.must_have_terms) if c]
-        doctrines = [c for c in (_clean_term(t) for t in issue.statutes) if c]
+        # Doctrines now come from the dedicated field (was incorrectly issue.statutes).
+        doctrines = [c for c in (_clean_term(t) for t in (getattr(issue, "doctrines", None) or [])) if c]
         synonyms = [c for c in (_clean_term(t) for t in issue.optional_synonyms) if c]
+        opponent = [c for c in (_clean_term(t) for t in (getattr(issue, "opponent_phrase_terms", None) or [])) if c]
+        anchor = (must_haves[:1] or phrases[:1] or synonyms[:1])
 
-        # Level 1 — strict: top doctrine phrase ANDD a key term. IK has flat operators
-        # (ANDD/ORR/NOTT) and does NOT support parentheses/grouping, so we keep it flat.
+        def _add(qtype: str, terms: list[str], *, doctypes: str = DEFAULT_DOCTYPE,
+                 is_fallback: bool = False, expected: list[str] | None = None) -> None:
+            nonlocal counter
+            terms = list(dict.fromkeys([t for t in terms if t]))
+            if not terms:
+                return
+            form_input = (" ORR " if is_fallback and len(terms) >= 2 else " ANDD ").join(terms) \
+                if len(terms) >= 2 else terms[0]
+            key = f"{doctypes}::{form_input.lower()}"
+            if key in seen_inputs:
+                return
+            seen_inputs.add(key)
+            issue_queries.append(_row(
+                issue.issue_id, f"Q{counter}", qtype, form_input,
+                expected or terms, is_fallback=is_fallback, doctypes=doctypes,
+            ))
+            counter += 1
+
+        # Strict main phrase (all courts).
         if phrases:
             strict_terms = phrases[:1] + [m for m in must_haves if m not in phrases][:1]
         elif len(must_haves) >= 2:
@@ -85,54 +110,47 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             strict_terms = must_haves[:1]
         else:
             strict_terms = synonyms[:2]
-        strict_terms = list(dict.fromkeys(strict_terms))
+        _add("strict", strict_terms)
+
+        # One query PER DOCTRINE (the fix for FAILURE 2/3 — doctrines never searched).
+        for d in doctrines[:4]:
+            _add("doctrine", [d] + anchor, expected=[d])
+
+        # Supreme Court targeting — ADDITIVE (a separate doctypes=supremecourt query),
+        # NOT a replacement, so SC precedent is reached even for a High Court matter.
         if strict_terms:
-            # If the issue names a recognized court, the strict query becomes a
-            # court-filtered query (REPLACEMENT, not an extra) so the count stays controlled.
-            court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
-            if court_doctype:
-                issue_queries.append(_row(
-                    issue.issue_id, f"Q{counter}", "court_filtered",
-                    " ANDD ".join(strict_terms), strict_terms, doctypes=court_doctype,
-                ))
-            else:
-                issue_queries.append(_row(
-                    issue.issue_id, f"Q{counter}", "strict",
-                    " ANDD ".join(strict_terms), strict_terms,
-                ))
-            counter += 1
+            _add("supreme_court", strict_terms, doctypes=SUPREME_COURT_DOCTYPE)
 
-        # Level 2 — doctrine/statute anchored (all courts). Anchor on a *different*
-        # doctrine phrase than the strict query when available, so the two initial
-        # queries cover two distinct doctrines.
-        if doctrines:
-            anchor = phrases[1:2] or phrases[:1] or must_haves[:1]
-            doc_terms = list(dict.fromkeys(doctrines[:1] + anchor))
-            issue_queries.append(_row(
-                issue.issue_id, f"Q{counter}", "doctrine",
-                " ANDD ".join(doc_terms), doctrines[:1],
-            ))
-            counter += 1
+        # Local High Court (or whichever court the issue names) — also additive.
+        court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
+        if court_doctype and court_doctype != SUPREME_COURT_DOCTYPE:
+            _add("court_filtered", strict_terms, doctypes=court_doctype)
 
-        # Level 3 — broad fallback: OR the top two doctrines for maximum recall (no ANDD).
-        # e.g. "natural justice" ORR "legitimate expectation". Semantic ranking then sorts.
+        # Opponent query — surfaces ADVERSE authority for the opposition bundle.
+        if opponent:
+            _add("opponent", opponent[:1] + anchor, expected=opponent[:1])
+
+        # Ensure a minimum breadth: if too few distinct initial queries, add synonym
+        # queries (each synonym ANDD the anchor term) until we reach min_per_issue.
+        for syn in synonyms:
+            if len([q for q in issue_queries if not q.get("is_fallback")]) >= min_per_issue:
+                break
+            _add("synonym", [syn] + anchor, expected=[syn])
+
+        # Broad fallback — OR the top phrases for recall when strict queries return little.
         fallback_src = (
             [t for t in issue.phrase_terms if t and t.strip()]
+            or [t for t in (getattr(issue, "doctrines", None) or []) if t and t.strip()]
             or [t for t in issue.must_have_terms if t and t.strip()]
-            or [t for t in issue.optional_synonyms if t and t.strip()]
         )
         fb_terms = [c for c in (_clean_term(t) for t in fallback_src) if c][:2]
-        if fb_terms:
-            fb_input = " ORR ".join(fb_terms) if len(fb_terms) >= 2 else fb_terms[0]
-            issue_queries.append(_row(
-                issue.issue_id, f"Q{counter}", "broad_fallback",
-                fb_input, fb_terms, is_fallback=True,
-            ))
-            counter += 1
+        _add("broad_fallback", fb_terms, is_fallback=True)
 
-        # Max 2 initial queries + 1 fallback per issue.
-        initial = [q for q in issue_queries if not q.get("is_fallback")][:2]
+        # Cap initial queries at max_per_issue; keep 1 fallback.
+        initial = [q for q in issue_queries if not q.get("is_fallback")]
         fallback = [q for q in issue_queries if q.get("is_fallback")][:1]
+        if len(initial) > max_per_issue:
+            initial = initial[:max_per_issue]
         generated.extend(initial + fallback)
 
     # Custom keywords / case-name chips searched verbatim.

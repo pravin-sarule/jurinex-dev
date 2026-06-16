@@ -30,4 +30,20 @@ def run(context: PipelineContext):
         context.issues = build_issue_cards(
             context.query, context.case_profile, context.perspective, context.case_context,
         )
+
+    rid = context.run_id[:8]
+    all_doctrines = sorted({d.lower() for issue in context.issues for d in (getattr(issue, "doctrines", None) or [])})
+    main_issue = next((i.issue_id for i in context.issues if getattr(i, "is_main_issue", False)), "?")
+    logger.info("[JURINEX][%s][ISSUES] extracted %d issue(s); main=%s; doctrines_found=%s",
+                rid, len(context.issues), main_issue, all_doctrines or "[]")
+    for issue in context.issues:
+        logger.info("[JURINEX][%s][ISSUES] %s: %s", rid, issue.issue_id, (issue.legal_issue or "")[:80])
+    # Doctrine-gap alarm: oral-assurance facts but no estoppel/legitimate-expectation doctrine.
+    ctx_low = (context.case_context or "").lower()
+    if any(k in ctx_low for k in ("oral assurance", "orally assured", "oral direction", "assured", "promised")):
+        if not any(("estoppel" in d or "legitimate expectation" in d or "own wrong" in d) for d in all_doctrines):
+            logger.warning(
+                "[JURINEX][%s][ISSUES] WARNING: oral-assurance facts present but no estoppel/"
+                "legitimate-expectation doctrine extracted — check prompt output", rid,
+            )
     return context.issues
