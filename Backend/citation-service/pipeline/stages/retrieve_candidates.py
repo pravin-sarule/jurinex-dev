@@ -17,6 +17,14 @@ def run(context: PipelineContext, client: IndianKanoonClient):
     initial_queries = [q for q in context.queries if not q.get("is_fallback")]
     fallback_queries = [q for q in context.queries if q.get("is_fallback")]
 
+    # Round-robin across issues by rank: every issue's strict query runs before any
+    # issue's 2nd query, etc. So when the IK search budget is hit, spend landed on the
+    # highest-value query of every issue (fair doctrine coverage), not all of issue-1.
+    issue_order = {}
+    for q in initial_queries:
+        issue_order.setdefault(q.get("issue_id"), len(issue_order))
+    initial_queries.sort(key=lambda q: (q.get("rank", 99), issue_order.get(q.get("issue_id"), 99)))
+
     # Track results per issue to know when to trigger fallback
     issue_results = {q["issue_id"]: 0 for q in context.queries}
     # Count distinct non-fallback queries that returned >=1 result per issue — used to

@@ -69,7 +69,6 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
     generated: list[dict] = []
     counter = 1
     max_per_issue = settings.max_queries_per_issue
-    min_per_issue = settings.min_queries_per_issue
 
     for issue in issues[:5]:
         issue_queries: list[dict] = []
@@ -112,30 +111,29 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             strict_terms = synonyms[:2]
         _add("strict", strict_terms)
 
-        # One query PER DOCTRINE (the fix for FAILURE 2/3 — doctrines never searched).
-        for d in doctrines[:4]:
-            _add("doctrine", [d] + anchor, expected=[d])
+        # Primary doctrine (the fix for FAILURE 2/3 — doctrines never searched).
+        if doctrines:
+            _add("doctrine", [doctrines[0]] + anchor, expected=[doctrines[0]])
 
         # Supreme Court targeting — ADDITIVE (a separate doctypes=supremecourt query),
         # NOT a replacement, so SC precedent is reached even for a High Court matter.
+        # Ranked high so it actually executes within the IK search budget.
         if strict_terms:
             _add("supreme_court", strict_terms, doctypes=SUPREME_COURT_DOCTYPE)
-
-        # Local High Court (or whichever court the issue names) — also additive.
-        court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
-        if court_doctype and court_doctype != SUPREME_COURT_DOCTYPE:
-            _add("court_filtered", strict_terms, doctypes=court_doctype)
 
         # Opponent query — surfaces ADVERSE authority for the opposition bundle.
         if opponent:
             _add("opponent", opponent[:1] + anchor, expected=opponent[:1])
 
-        # Ensure a minimum breadth: if too few distinct initial queries, add synonym
-        # queries (each synonym ANDD the anchor term) until we reach min_per_issue.
-        for syn in synonyms:
-            if len([q for q in issue_queries if not q.get("is_fallback")]) >= min_per_issue:
-                break
-            _add("synonym", [syn] + anchor, expected=[syn])
+        # Secondary doctrine (lower rank — runs only if budget allows). Kept to one so
+        # the additive court-filtered query still fits inside max_queries_per_issue.
+        for d in doctrines[1:2]:
+            _add("doctrine", [d] + anchor, expected=[d])
+
+        # Local High Court (or whichever court the issue names) — also additive.
+        court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
+        if court_doctype and court_doctype != SUPREME_COURT_DOCTYPE:
+            _add("court_filtered", strict_terms, doctypes=court_doctype)
 
         # Broad fallback — OR the top phrases for recall when strict queries return little.
         fallback_src = (
@@ -146,11 +144,16 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         fb_terms = [c for c in (_clean_term(t) for t in fallback_src) if c][:2]
         _add("broad_fallback", fb_terms, is_fallback=True)
 
-        # Cap initial queries at max_per_issue; keep 1 fallback.
+        # Cap initial queries at max_per_issue; keep 1 fallback. Tag rank (position within
+        # the issue) so retrieval can round-robin across issues within the IK search budget.
         initial = [q for q in issue_queries if not q.get("is_fallback")]
         fallback = [q for q in issue_queries if q.get("is_fallback")][:1]
         if len(initial) > max_per_issue:
             initial = initial[:max_per_issue]
+        for rank, q in enumerate(initial):
+            q["rank"] = rank
+        for q in fallback:
+            q["rank"] = max_per_issue
         generated.extend(initial + fallback)
 
     # Custom keywords / case-name chips searched verbatim.
