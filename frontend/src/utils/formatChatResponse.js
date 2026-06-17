@@ -100,11 +100,13 @@ export function convertMarkdownBoldMarkers(text) {
   let iterations = 0;
   while (converted !== previous && iterations < 12) {
     previous = converted;
-    converted = converted.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    converted = converted.replace(/\*\*([^\n]+?)\*\*(?!\*)/g, '<strong>$1</strong>');
     iterations += 1;
   }
 
-  converted = converted.replace(/\*\*/g, '');
+  // Only remove stray double-asterisks if they are not part of a larger block
+  // but generally it's safer to leave them if we can't be sure.
+  // converted = converted.replace(/\*\*/g, ''); 
 
   return converted;
 }
