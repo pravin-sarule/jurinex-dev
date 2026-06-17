@@ -8,8 +8,15 @@ def run(context: PipelineContext):
     unique = {}
     for candidate in context.candidates:
         if candidate.doc_id in unique:
-            # Merge matched queries/issues if needed
-            pass
+            # Keep the BEST (lowest) source-query priority across duplicates so the
+            # cheap filter's priority protection reflects the strongest query that
+            # found this doc (ADDITIONAL FIX).
+            kept = unique[candidate.doc_id]
+            a = kept.metadata.get("query_priority")
+            b = candidate.metadata.get("query_priority")
+            if isinstance(b, int) and (not isinstance(a, int) or b < a):
+                kept.metadata["query_priority"] = b
+                kept.metadata.setdefault("query_type", candidate.metadata.get("query_type", ""))
         else:
             unique[candidate.doc_id] = candidate
     

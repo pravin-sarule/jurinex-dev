@@ -151,7 +151,64 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
     groups.set('caution', { id: 'caution', name: 'Use With Caution', reasoning: 'Use for distinguishable cases, weak contextual cases.', ids: new Set(reportFormat.use_with_caution.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
   }
 
+  // ── V2 category routing (recommended / adverse / caution) ───────────────────────
+  // V2 citations carry no keyword/dimension id, so without this every citation falls
+  // into a single "ungrouped" bucket and the Adverse / Use-With-Caution sections never
+  // appear (sidebar shows 0). Route each citation to its category bucket FIRST — by
+  // id-set membership, then by its classification — so the counts are correct and the
+  // adverse cases the client can be hit with (and the caution cases) are shown distinctly.
+  const CATEGORY_META = {
+    recommended: { name: 'Recommended Citations', reasoning: 'Supporting citations for the selected side.' },
+    adverse: { name: 'Adverse Citations / Opposite-side Risk', reasoning: 'Cases the opposite side can rely on — be prepared to distinguish them.' },
+    caution: { name: 'Use With Caution', reasoning: 'Distinguishable or weak-contextual cases — verify the fit before relying on them.' },
+  };
+  const ensureCategoryGroup = (cid) => {
+    if (!groups.has(cid)) {
+      groups.set(cid, { id: cid, name: CATEGORY_META[cid].name, reasoning: CATEGORY_META[cid].reasoning, ids: new Set(), citations: [] });
+    }
+    return groups.get(cid);
+  };
+  // Only a V2 (side-aware) report has these category arrays; legacy reports keep their
+  // keyword/dimension grouping untouched.
+  const hasV2Categories = ['recommended', 'adverse', 'caution'].some((cid) => groups.has(cid));
+  const categoryByCitationId = new Map();
+  ['recommended', 'adverse', 'caution'].forEach((cid) => {
+    const g = groups.get(cid);
+    if (g && g.ids) g.ids.forEach((idVal) => categoryByCitationId.set(String(idVal).trim(), cid));
+  });
+  const categoryFromClassification = (citation) => {
+    const cls = String(citation.classification || citation.classificationLabel || '').toUpperCase();
+    if (cls === 'SUPPORTING') return 'recommended';
+    if (cls === 'ADVERSE') return 'adverse';
+    if (cls === 'DISTINGUISHABLE' || cls === 'WEAK_CONTEXTUAL') return 'caution';
+    const party = String(citation.argumentParty || citation.argument_party || '').toLowerCase();
+    if (party === 'opposite_party' || party === 'opposite-party') return 'adverse';
+    return '';
+  };
+
   citations.forEach((citation) => {
+    const citationKeys = new Set(
+      [
+        citation.id,
+        citation.canonicalId,
+        citation.canonical_id,
+        citation.externalId,
+        citation.external_id,
+      ]
+        .filter(Boolean)
+        .map((v) => String(v).trim())
+    );
+
+    // Category routing takes precedence over keyword/dimension grouping (V2 reports only).
+    const catId = hasV2Categories
+      ? (Array.from(citationKeys).map((k) => categoryByCitationId.get(k)).find(Boolean)
+         || categoryFromClassification(citation))
+      : '';
+    if (catId && CATEGORY_META[catId]) {
+      ensureCategoryGroup(catId).citations.push(citation);
+      return;
+    }
+
     const rawDimId =
       citation.dimensionId ??
       citation.dimension_id ??
@@ -182,17 +239,6 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
       });
     }
     const group = groups.get(key);
-    const citationKeys = new Set(
-      [
-        citation.id,
-        citation.canonicalId,
-        citation.canonical_id,
-        citation.externalId,
-        citation.external_id,
-      ]
-        .filter(Boolean)
-        .map((v) => String(v).trim())
-    );
     // If the citation carries an explicit dimensionId from backend, always assign it to that
     // group — don't let the backward-compat ids set block it. The ids set is only consulted
     // for legacy payloads where citations have no dimensionId field.
@@ -553,10 +599,17 @@ function citationContextItemToLink(item) {
   };
 }
 
-function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, dimensionLabel, isPriority }) {
+const CATEGORY_CARD_BADGE = {
+  recommended: { icon: '⭐', label: 'Recommended', bg: '#D1FAE5', color: '#065F46' },
+  adverse: { icon: '⚠️', label: 'Adverse — opposite side', bg: '#FEE2E2', color: '#991B1B' },
+  caution: { icon: '🤔', label: 'Use with caution', bg: '#FEF3C7', color: '#92400E' },
+};
+
+function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, dimensionLabel, isPriority, categoryId }) {
   const courtBadgeClass = getCourtBadgeClass(citation.court);
   const sourceMeta = getSourceMeta(citation);
   const isAdmin = isAdminUpload(citation);
+  const catBadge = CATEGORY_CARD_BADGE[categoryId];
   return (
     <div
       className={`cite-card ${isPriority ? 'sc-priority' : ''} ${isAdmin ? 'cite-card-admin' : ''}`}
@@ -565,7 +618,14 @@ function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, d
     >
       <div className="cc-top">
         <span className={`court-badge ${courtBadgeClass}`}>{getCourtLabel(citation.court)}</span>
-        <span className="dimension-badge" title={dimensionLabel}>🔑 {dimensionLabel}</span>
+        {catBadge ? (
+          <span className="dimension-badge" title={catBadge.label}
+            style={{ background: catBadge.bg, color: catBadge.color, fontWeight: 700 }}>
+            {catBadge.icon} {catBadge.label}
+          </span>
+        ) : (
+          <span className="dimension-badge" title={dimensionLabel}>🔑 {dimensionLabel}</span>
+        )}
         {isAdmin ? (
           <span style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -632,6 +692,7 @@ function DimensionGroup({
               getCourtBadgeClass={getCourtBadgeClass}
               getCourtLabel={getCourtLabel}
               dimensionLabel={getDimensionDisplayLabel(group, index)}
+              categoryId={['recommended', 'adverse', 'caution'].includes(group.id) ? group.id : ''}
               isPriority={priorityIds.has(citation.id)}
             />
           ))}
@@ -735,7 +796,11 @@ export default function RedesignedCitationReportDoc({
       if (courtFilter === 'sc' && !(citation.normalizedCourt.includes('supreme court'))) return false;
       if (courtFilter === 'hc' && !(citation.normalizedCourt.includes('high court'))) return false;
       if (courtFilter === 'admin' && !isAdminUpload(citation)) return false;
-      if (!matchesPerspective(citation, perspective)) return false;
+      // Category buckets already encode the side relationship: adverse = opposite_party,
+      // caution = neutral. Applying the perspective filter here would wrongly hide exactly
+      // the adverse / caution citations the user wants to see. Only filter keyword groups.
+      const isCategoryGroup = group.id === 'recommended' || group.id === 'adverse' || group.id === 'caution';
+      if (!isCategoryGroup && !matchesPerspective(citation, perspective)) return false;
       if (term && !citation.searchableText.includes(term)) return false;
       return true;
     }),
@@ -857,7 +922,7 @@ export default function RedesignedCitationReportDoc({
             <>
               <div className="panel-header">
                 <div className="panel-title">Find Citations</div>
-                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> keyword groups</div>
+                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> groups</div>
               </div>
 
               <div className="filter-row">

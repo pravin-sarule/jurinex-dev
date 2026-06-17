@@ -50,10 +50,10 @@ def run(context: PipelineContext, client: IndianKanoonClient):
     by_type = Counter(q.get("query_type") for q in selected)
     logger.info(
         "[JURINEX][%s][QUERY_ORDER] Executing %d/%d queries in priority order "
-        "doctrine=%d strict=%d sc=%d court=%d opponent=%d fallback=%d",
-        rid, len(selected), len(queries), by_type.get("doctrine", 0), by_type.get("strict", 0),
-        by_type.get("supreme_court", 0), by_type.get("court_filtered", 0),
-        by_type.get("opponent", 0), by_type.get("broad_fallback", 0),
+        "doctrine=%d landmark=%d strict=%d sc=%d statute=%d court=%d opponent=%d fallback=%d",
+        rid, len(selected), len(queries), by_type.get("doctrine", 0), by_type.get("landmark", 0),
+        by_type.get("strict", 0), by_type.get("supreme_court", 0), by_type.get("statute_combined", 0),
+        by_type.get("court_filtered", 0), by_type.get("opponent", 0), by_type.get("broad_fallback", 0),
     )
     if len(selected) < len(queries):
         pct = int(round(100 * len(selected) / max(1, hard)))
@@ -83,6 +83,15 @@ def run(context: PipelineContext, client: IndianKanoonClient):
         try:
             res = client.search(q_str, doctypes, query["issue_id"])
             dur = int((time.monotonic() - start_t) * 1000)
+
+            # Stamp the source-query priority/type onto every candidate so the cheap
+            # filter never discards a result retrieved by a high-priority doctrine/
+            # precision query (ADDITIONAL FIX). Keep the BEST (lowest) priority seen.
+            prio = query.get("priority", 6)
+            for cand in res:
+                existing = cand.metadata.get("query_priority")
+                cand.metadata["query_priority"] = min(prio, existing) if isinstance(existing, int) else prio
+                cand.metadata.setdefault("query_type", query.get("query_type", ""))
 
             # The exact HTTP status / IK 'found' total / response keys are logged by
             # services.indian_kanoon.ik_search (INFO). Here we record the parsed outcome.

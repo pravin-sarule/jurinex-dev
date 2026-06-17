@@ -17,6 +17,10 @@ class PipelineContext:
     case_id: str | None
     perspective: str
     case_context: str
+    # FAILURE 3 — the resolved represented side after multi-signal detection. Mirrors
+    # `perspective` (kept identical); both are corrected together so every stage
+    # (scoring, evaluator, disposition) classifies for the same party.
+    represented_side: str = ""
     custom_keywords: list[str] = field(default_factory=list)
     # Source-document exclusion (FAILURE 2): IK doc_ids and titles of the user's own
     # uploaded/source documents, which must never be returned as citation candidates.

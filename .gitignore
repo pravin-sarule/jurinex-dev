@@ -172,3 +172,5 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+skills/
+Frontend/

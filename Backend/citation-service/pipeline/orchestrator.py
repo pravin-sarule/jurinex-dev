@@ -92,11 +92,18 @@ def run_v2_pipeline(
             logger.debug("Unable to persist DOCUMENT_CONTEXT_MISSING state", exc_info=True)
         return PipelineResult(None, None, run_id, "failed", "DOCUMENT_CONTEXT_MISSING").to_dict()
 
+    # FAILURE 3 — resolve the represented side from multiple signals (frontend value +
+    # document framing). A wrong side flips every SUPPORTING/ADVERSE label, so a
+    # high-confidence petitioner-side writ may correct a wrong "respondent" perspective.
+    from services.perspective_service import detect_represented_side
+    represented_side = detect_represented_side(normalized, case_context, query, run_id)
+
     context = PipelineContext(
         run_id=run_id, query=query, user_id=user_id, case_id=case_id,
-        perspective=normalized, case_context=case_context,
+        perspective=represented_side, case_context=case_context,
         custom_keywords=custom_pool,
     )
+    context.represented_side = represented_side
     # FAILURE 2 — register the user's own source documents so they can never be returned
     # as citation candidates (circular contamination).
     excluded_ids, excluded_titles = extract_source_identifiers(case_file_context, case_context)
@@ -107,7 +114,7 @@ def run_v2_pipeline(
     client = IndianKanoonClient(run_id, user_id, context.budget)
     logger.info(
         "[JURINEX][%s][START] case=%s client_role=%s context_chars=%d custom_keywords=%d",
-        run_id[:8], (case_id or query)[:60], normalized, case_context_chars, len(custom_pool),
+        run_id[:8], (case_id or query)[:60], represented_side, case_context_chars, len(custom_pool),
     )
     try:
         _stage(context, "extract_case_profile", extract_case_profile.run)

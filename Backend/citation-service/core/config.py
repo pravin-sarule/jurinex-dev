@@ -52,10 +52,16 @@ class Settings:
     enable_opposition_bundle: bool = os.environ.get("CITATION_V2_ENABLE_OPPOSITION_BUNDLE", "true").lower() == "true"
     # Arithmetic reranking within client/opponent bundles.
     enable_rerank: bool = os.environ.get("CITATION_V2_ENABLE_RERANK", "true").lower() == "true"
-    # Richer query builder caps (per legal issue).
-    max_queries_per_issue: int = _int("CITATION_V2_MAX_QUERIES_PER_ISSUE", 6)
+    # Richer query builder caps (per legal issue). 9 leaves room for 2-3 precision +
+    # 2 landmark + strict + SC + court + opponent queries to coexist (FAILURE 2). The
+    # execution budget (max_ik_search_calls) is the real cost ceiling.
+    max_queries_per_issue: int = _int("CITATION_V2_MAX_QUERIES_PER_ISSUE", 9)
     min_queries_per_issue: int = _int("CITATION_V2_MIN_QUERIES_PER_ISSUE", 3)
     min_doctrine_coverage: int = _int("CITATION_V2_MIN_DOCTRINE_COVERAGE", 2)
+    # Represented-side auto-correction (FAILURE 3): when ON, a high-confidence
+    # petitioner-side writ document can correct a wrong "respondent" perspective.
+    # Set false to always trust the frontend-provided perspective verbatim.
+    enable_perspective_autocorrect: bool = os.environ.get("CITATION_V2_ENABLE_PERSPECTIVE_AUTOCORRECT", "true").lower() == "true"
 
 
 settings = Settings()
