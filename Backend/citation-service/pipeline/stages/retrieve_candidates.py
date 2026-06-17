@@ -28,10 +28,13 @@ def run(context: PipelineContext, client: IndianKanoonClient):
 
     soft = settings.ik_search_soft_budget
     hard = settings.max_ik_search_calls
+    opp_reserve = settings.max_opponent_search_calls
     selected: list = []
     n = 0
+    opp_taken = 0
     for q in queries:
         prio = q.get("priority", 6)
+        qtype = q.get("query_type")
         if n < soft:
             selected.append(q)
             n += 1
@@ -40,6 +43,13 @@ def run(context: PipelineContext, client: IndianKanoonClient):
             n += 1
             logger.info('[JURINEX][%s][QUERY_PROTECTED] %s "%s" PROTECTED from budget cut priority=%s '
                         '— doctrine/strict queries always execute', rid, q.get("query_id"), q.get("formInput"), prio)
+        elif qtype == "opponent" and opp_taken < opp_reserve:
+            selected.append(q)
+            n += 1
+            opp_taken += 1
+            logger.info('[JURINEX][%s][QUERY_PROTECTED] %s "%s" PROTECTED (opponent reserve %d/%d) '
+                        '— adverse authority always searched', rid, q.get("query_id"), q.get("formInput"),
+                        opp_taken, opp_reserve)
         else:
             q["skipped"] = True
             q["result_count"] = 0

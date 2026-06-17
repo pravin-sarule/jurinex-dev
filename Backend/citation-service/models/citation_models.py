@@ -44,3 +44,10 @@ class Candidate:
     rerank_score: float = 0.0
     # Direction-aware principle detection (FAILURE 3): "" / PRINCIPLE_REVERSED / PRINCIPLE_ALIGNED.
     direction_flag: str = ""
+    # Usage analysis memo (500-600 words, category-aware) + relevance gate signals.
+    # usage_analysis is a list of {"heading", "body"} sections; relevance_verdict is one of
+    # RELEVANT / PARTIALLY_RELEVANT / NOT_RELEVANT and drives the report-time relevance gate.
+    usage_analysis: list = field(default_factory=list)
+    usage_verdict: str = ""
+    relevance_verdict: str = ""
+    relevance_reason: str = ""

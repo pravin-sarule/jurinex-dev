@@ -30,6 +30,9 @@ def _float(name: str, default: float) -> float:
 class Settings:
     pipeline_version: str = os.environ.get("CITATION_PIPELINE_VERSION", "v2").lower()
     max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 14)
+    # Opponent (adverse-authority) queries always get this many guaranteed execution
+    # slots so the Adverse bundle is never fully starved under a multi-issue load.
+    max_opponent_search_calls: int = _int("CITATION_V2_MAX_OPPONENT_SEARCH_CALLS", 2)
     # Soft budget: non-protected queries (priority >= 3 — SC/court/opponent/fallback) stop
     # here. Protected doctrine + strict queries (priority <= 2) may run up to the hard cap
     # above so the most legally critical queries are never starved (FAILURE 1).
@@ -62,6 +65,12 @@ class Settings:
     # petitioner-side writ document can correct a wrong "respondent" perspective.
     # Set false to always trust the frontend-provided perspective verbatim.
     enable_perspective_autocorrect: bool = os.environ.get("CITATION_V2_ENABLE_PERSPECTIVE_AUTOCORRECT", "true").lower() == "true"
+    # Per-citation usage-analysis memo (500-600 words, category-aware) + relevance gate.
+    # One batched Gemini call after classification; the relevance verdict cleans the
+    # Recommended bucket (NOT_RELEVANT dropped, PARTIALLY_RELEVANT demoted to Caution).
+    enable_usage_analysis: bool = os.environ.get("CITATION_V2_ENABLE_USAGE_ANALYSIS", "true").lower() == "true"
+    enable_relevance_gate: bool = os.environ.get("CITATION_V2_ENABLE_RELEVANCE_GATE", "true").lower() == "true"
+    usage_analysis_max_tokens: int = _int("CITATION_V2_USAGE_ANALYSIS_MAX_TOKENS", 6000)
 
 
 settings = Settings()

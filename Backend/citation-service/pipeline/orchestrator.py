@@ -13,8 +13,8 @@ from pipeline.pipeline_context import PipelineContext
 from pipeline.stages import (
     build_report, cheap_filter, cheap_prescreen, classify_results, deduplicate_candidates,
     detect_disposition, enrich_fragments, extract_case_profile, extract_issues,
-    fetch_full_documents, final_ai_judge, generate_queries, normalize_perspective,
-    retrieve_candidates, score_candidates, shortlist_candidates,
+    fetch_full_documents, final_ai_judge, generate_queries, generate_usage_analysis,
+    normalize_perspective, retrieve_candidates, score_candidates, shortlist_candidates,
 )
 from repositories.cost_repository import summarize_cost
 from repositories.report_repository import save_report
@@ -138,6 +138,11 @@ def run_v2_pipeline(
         _stage(context, "detect_disposition", detect_disposition.run)
         _stage(context, "final_ai_judge", final_ai_judge.run)
         supporting, adverse, caution = _stage(context, "classify_results", classify_results.run)
+        # Per-citation usage memo + relevance gate (keeps Recommended genuinely relevant).
+        supporting, adverse, caution = _stage(
+            context, "generate_usage_analysis", generate_usage_analysis.run,
+            supporting, adverse, caution,
+        )
         cost = summarize_cost(run_id)
         cost["estimatedCostInr"] = round(context.budget.estimated_cost_inr, 4)
         cost["operationCounts"] = context.budget.counts
@@ -188,6 +193,7 @@ def run_v2_pipeline(
             "recommended_count": len(supporting),
             "adverse_count": len(adverse),
             "caution_count": len(caution),
+            "relevance_filtered_count": context.timings.get("_relevance_filtered", 0),
             "rejected_count": len(context.rejected),
             "no_result_reason": "" if supporting else (
                 "document context missing" if not case_context and not query

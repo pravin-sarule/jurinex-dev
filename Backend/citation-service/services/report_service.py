@@ -52,6 +52,11 @@ def citation_to_dict(candidate: Candidate) -> dict:
         "counter_argument_hint": candidate.counter_argument_hint,
         "rerank_score": candidate.rerank_score,
         "direction_flag": candidate.direction_flag,
+        # Usage-analysis memo (500-600 words, category-aware) + relevance verdict.
+        "usage_analysis": candidate.usage_analysis,
+        "usage_verdict": candidate.usage_verdict,
+        "relevance_verdict": candidate.relevance_verdict,
+        "relevance_reason": candidate.relevance_reason,
         "argumentParty": "selected_side" if candidate.supports_selected_side else "opposite_side" if candidate.adverse_to_selected_side else "neutral",
         "source": "Indian Kanoon",
         "sourceUrl": f"https://indiankanoon.org/doc/{candidate.doc_id}/",

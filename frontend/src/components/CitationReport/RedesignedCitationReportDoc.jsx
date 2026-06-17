@@ -1165,6 +1165,51 @@ export default function RedesignedCitationReportDoc({
                         )}
                       </div>
 
+                      {/* ── How to use this authority (usage-analysis memo) ── */}
+                      {Array.isArray(active.usage_analysis) && active.usage_analysis.length > 0 && (() => {
+                        const rv = String(active.relevance_verdict || active.relevanceVerdict || '').toUpperCase();
+                        const RVS = {
+                          RELEVANT:           { bg: '#DCFCE7', color: '#15803D', label: 'Relevant',           dot: '●' },
+                          PARTIALLY_RELEVANT: { bg: '#FEF3C7', color: '#92400E', label: 'Partially relevant', dot: '◆' },
+                          NOT_RELEVANT:       { bg: '#FEE2E2', color: '#991B1B', label: 'Not relevant',       dot: '▲' },
+                        };
+                        const rvs = RVS[rv];
+                        const verdict = active.usage_verdict || active.usageVerdict || '';
+                        const reason = active.relevance_reason || active.relevanceReason || '';
+                        return (
+                          <div className="ld-section">
+                            <div className="ld-section-hdr">
+                              <span className="ld-section-num" style={{ color: '#0f766e' }}>★</span>
+                              HOW TO USE THIS AUTHORITY
+                            </div>
+                            {(rvs || verdict) && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', margin: '2px 0 14px' }}>
+                                {rvs && (
+                                  <span title={reason} style={{ padding: '3px 12px', borderRadius: 20, fontSize: 11, fontWeight: 800, background: rvs.bg, color: rvs.color, whiteSpace: 'nowrap' }}>
+                                    {rvs.dot} {rvs.label}
+                                  </span>
+                                )}
+                                {verdict && <span style={{ fontSize: 13, color: '#334155', fontWeight: 600, lineHeight: 1.5 }}>{verdict}</span>}
+                              </div>
+                            )}
+                            <div style={{ display: 'grid', gap: 14 }}>
+                              {active.usage_analysis.map((sec, i) => (
+                                <div key={i} style={{ borderLeft: '3px solid #0f766e', padding: '2px 0 2px 14px' }}>
+                                  {sec.heading && (
+                                    <div style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase', color: '#0f766e', marginBottom: 5 }}>
+                                      {sec.heading}
+                                    </div>
+                                  )}
+                                  {sec.body && (
+                                    <div style={{ fontSize: 13.5, lineHeight: 1.65, color: '#1f2937' }}>{sec.body}</div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {/* ── SECTION I: Legal Analysis & Ratio ── */}
                       <div className="ld-section">
                         <div className="ld-section-hdr">

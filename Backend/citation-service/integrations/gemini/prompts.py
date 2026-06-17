@@ -104,6 +104,49 @@ def batch_judge_prompt(perspective: str, issue_cards: list[dict], candidates: li
     )
 
 
+def usage_analysis_prompt(perspective: str, case_summary: str, issues: list[dict], candidates: list[dict]) -> str:
+    """Per-citation 'how to use this judgment' memo (500-600 words) + relevance verdict.
+
+    Each candidate carries a 'category' (recommended / adverse / caution); the memo is
+    framed accordingly. The model also returns an honest relevance verdict used to keep the
+    Recommended bucket genuinely relevant — it must NOT manufacture a use for an off-point case.
+    """
+    return (
+        "You are a senior Indian advocate writing a practical research note for a colleague "
+        f"who represents the {perspective}. For EACH judgment below, write a focused memo on how "
+        "to use it in THIS matter — grounded in the actual holding, disposition, and facts given. "
+        "Do not invent holdings or citations.\n\n"
+        "FIRST decide relevance + stance honestly (the 'category' field is only a preliminary "
+        "guess — decide the TRUE stance yourself and override it if wrong):\n"
+        f"- RELEVANT: squarely supports the {perspective}'s position on an issue in this matter.\n"
+        f"- ADVERSE: it DOES bear on this matter but goes AGAINST the {perspective} (the opposite "
+        f"side would cite it, e.g. it refused similar relief or set the proposition the other way). "
+        "An adverse-but-on-point judgment is RELEVANT and valuable — mark it ADVERSE, never drop it.\n"
+        "- PARTIALLY_RELEVANT: touches the area but on different facts/sub-points.\n"
+        "- NOT_RELEVANT: a different area of law / off-topic only. If so, say so plainly and do NOT "
+        "pretend it helps.\n"
+        "When you mark a judgment ADVERSE, write the memo with the ADVERSE framing/headings below "
+        "(why the opposite side cites it, how to distinguish it), even if its 'category' said recommended.\n\n"
+        "Each candidate has a 'category' (your starting guess). Frame the four sections by the TRUE stance:\n"
+        "- recommended → headings: 'Why this judgment helps you', 'The argument it supports & how "
+        "to deploy it', 'Factual fit with your case', 'When not to rely on it / risks'.\n"
+        "- adverse → headings: 'Why the opposite side will cite this', 'The proposition it sets "
+        "against you', 'How to distinguish it on the facts', 'Fallback — how to blunt its impact'.\n"
+        "- caution → headings: 'Why it is borderline', 'The limited way it can help', "
+        "'Factual or legal gaps', 'How to use it carefully'.\n\n"
+        "Length: 4 sections, ~120-150 words EACH (total 500-600 words). Concrete and specific to "
+        "the facts — name the doctrine, the disposition, the parallel/distinction. Plain English.\n\n"
+        f"This matter (summary): {case_summary}\n"
+        f"Issues: {issues}\n\n"
+        f"Judgments: {candidates}\n\n"
+        'Return ONLY JSON of this exact shape: {"items": [{"doc_id": "...", '
+        '"relevance": "RELEVANT|ADVERSE|PARTIALLY_RELEVANT|NOT_RELEVANT", "relevance_reason": "one line", '
+        '"verdict": "one-line bottom line for the lawyer", '
+        '"sections": [{"heading": "...", "body": "..."}, {"heading": "...", "body": "..."}, '
+        '{"heading": "...", "body": "..."}, {"heading": "...", "body": "..."}]}]}'
+    )
+
+
 def disposition_prompt(tail_text: str) -> str:
     """Outcome-only extractor over the END of an Indian judgment (PART 1, Step 2)."""
     return (
