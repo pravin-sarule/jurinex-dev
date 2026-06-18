@@ -491,16 +491,27 @@ class LegalCasePipelineService:
 
         non_empty = len(non_empty_sections)
         logger.info(
-            "[Pipeline] Step 3/4: Embedding — %d non-empty chunks (batch mode, size=%s)",
+            "[Pipeline] Step 3/4: Embedding — %d non-empty chunks (parallel batches, size=%s)",
             non_empty,
             self._settings.embedding_batch_size,
         )
 
+        if progress_callback:
+            try:
+                progress_callback(64.0)
+            except Exception:
+                pass
+
         if non_empty_sections:
             chunk_texts = [(s.text or "").strip() for _, s in non_empty_sections]
-            # Single embed_batch call; internally splits into sub-batches with
-            # rate-limit protection and exponential-backoff retry.
-            chunk_embeddings = embeddings.embed_batch(chunk_texts)
+            # Parallel embed_batch: sub-batches sent concurrently via ThreadPoolExecutor.
+            # Rate limiter + exponential-backoff retry per sub-batch.
+            chunk_embeddings = embeddings.embed_batch(
+                chunk_texts,
+                progress_callback=progress_callback,
+                progress_start=65.0,
+                progress_end=78.0,
+            )
 
             for (section_idx, section), chunk_text, chunk_embedding in zip(
                 non_empty_sections, chunk_texts, chunk_embeddings

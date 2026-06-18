@@ -131,7 +131,16 @@ class DocumentProcessingQueue:
             try:
                 fn(*args, **kwargs)
             except Exception as exc:
-                logger.exception("[DocumentProcessingQueue] worker error: %s", exc)
+                logger.exception("[DocumentProcessingQueue] worker crashed: %s", exc)
+                # Best-effort: if _run_job crashed before updating documents,
+                # mark any documents still at 20% (processing) as failed via the
+                # FolderWorkflowService callback stored in kwargs.
+                _on_crash = kwargs.get("_on_crash")
+                if callable(_on_crash):
+                    try:
+                        _on_crash(exc)
+                    except Exception:
+                        pass
             finally:
                 self._task_queue.task_done()
                 with self._count_lock:
@@ -1600,7 +1609,51 @@ class FolderWorkflowService:
             job.updated_at = datetime.now(tz=UTC)
             document_ids = list(job.documents.keys())
 
-        stored_case = self._pipeline._cases[case_id]
+        # Re-create the case in memory if service restarted and case was lost
+        stored_case = self._pipeline._cases.get(case_id)
+        if stored_case is None:
+            with self._lock:
+                job_ref = self._jobs.get(job_id)
+                user_id = job_ref.user_id if job_ref else "unknown"
+            stored_case = self._ensure_case(user_id, case_id)
+            logger.warning(
+                "[FolderService] _run_job: case_id=%s not in memory — re-created (service may have restarted)",
+                case_id,
+            )
+
+        try:
+            self._run_job_inner(job_id, case_id, documents, stored_case, document_ids)
+        except Exception as exc:
+            # Catch-all: if _run_job_inner crashes before processing futures, mark every
+            # document that is still at 20% (processing) as failed so they never get stuck.
+            logger.exception(
+                "[FolderService] _run_job crashed before completing case_id=%s job_id=%s: %s",
+                case_id, job_id, exc,
+            )
+            with self._lock:
+                job_ref = self._jobs.get(job_id)
+                if job_ref:
+                    for doc_id, doc_status in job_ref.documents.items():
+                        if doc_status.status == ProcessingState.processing and doc_status.processing_progress <= 20.0:
+                            db_file_id = str(doc_status.metadata.get("db_file_id") or doc_status.file_id or "")
+                            self._update_db_file_processing_state(
+                                file_id=db_file_id or None,
+                                status=ProcessingState.error.value,
+                                processing_progress=100.0,
+                                current_operation="failed",
+                            )
+                            self._update_document(job_id, doc_id, ProcessingState.error, 100.0, "failed", error=str(exc))
+                    job_ref.status = ProcessingState.error
+                    job_ref.updated_at = datetime.now(tz=UTC)
+
+    def _run_job_inner(
+        self,
+        job_id: str,
+        case_id: str,
+        documents: list[DocumentReference],
+        stored_case: Any,
+        document_ids: list[str],
+    ) -> None:
         max_workers = max(1, min(self._pipeline._settings.max_parallel_document_workers, len(documents) or 1))
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="doc-worker") as executor:
             future_map = {}
@@ -1651,13 +1704,17 @@ class FolderWorkflowService:
                     "source_document": document,
                 }
 
-            for future in as_completed(future_map):
+            # Per-document timeout (env-overridable via DOCUMENT_PROCESSING_TIMEOUT_SECONDS).
+            # Covers large PDFs with many Document AI OCR batches + embedding.
+            _doc_timeout = int(settings.document_processing_timeout_seconds)
+
+            for future in as_completed(future_map, timeout=None):
                 future_context = future_map[future]
                 document_id = future_context["document_id"]
                 source_document = future_context["source_document"]
                 db_file_id = source_document.metadata.get("db_file_id") if isinstance(source_document.metadata, dict) else None
                 try:
-                    bundle = future.result()
+                    bundle = future.result(timeout=_doc_timeout)
                     self._update_db_file_processing_state(
                         file_id=db_file_id,
                         status=ProcessingState.embedding_pending.value,
@@ -1702,6 +1759,27 @@ class FolderWorkflowService:
                         chunk_count=bundle.process_result.chunk_count,
                         quality_score=bundle.process_result.quality_score,
                         metadata=bundle.process_result.metadata,
+                    )
+                except TimeoutError as exc:
+                    # future.result(timeout=...) raises concurrent.futures.TimeoutError
+                    # (subclass of TimeoutError in Python 3.11+).
+                    # The worker thread continues running but we stop waiting for it.
+                    logger.error(
+                        "[Agent:DocumentClassificationAgent] status=timeout task=parallel_document_processing "
+                        "case_id=%s document_id=%s timeout=%ss — marking as failed",
+                        case_id,
+                        document_id,
+                        _doc_timeout,
+                    )
+                    self._update_db_file_processing_state(
+                        file_id=db_file_id,
+                        status=ProcessingState.error.value,
+                        processing_progress=100.0,
+                        current_operation="timeout",
+                    )
+                    self._update_document(
+                        job_id, document_id, ProcessingState.error, 100.0, "timeout",
+                        error=f"Processing timed out after {_doc_timeout}s",
                     )
                 except Exception as exc:
                     logger.exception(

@@ -161,6 +161,12 @@ class Settings(BaseSettings):
         default=4,
         validation_alias=AliasChoices("PROCESSING_QUEUE_WORKERS"),
     )
+    # Max seconds to wait for a single document to finish OCR + embedding.
+    # If exceeded the document is marked as failed (error) instead of staying at 20%.
+    document_processing_timeout_seconds: int = Field(
+        default=600,
+        validation_alias=AliasChoices("DOCUMENT_PROCESSING_TIMEOUT_SECONDS"),
+    )
     auto_fill_confidence_threshold: float = 0.90
 
     # Embedding batching & rate-limit protection
