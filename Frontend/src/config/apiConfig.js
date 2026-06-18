@@ -7,11 +7,26 @@
 
 const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
+// Upgrade any accidentally-set http:// Cloud Run URL to https:// (Mixed Content guard).
+// localhost / 127.0.0.1 URLs are left untouched so local dev still works.
+function ensureHttps(url) {
+  if (!url) return url;
+  const s = String(url).trim();
+  if (
+    s.startsWith('http://') &&
+    !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(s)
+  ) {
+    return 'https://' + s.slice(7);
+  }
+  return s;
+}
+
 // Get base gateway URL from environment or use deployed default
-const GATEWAY_URL =
+const GATEWAY_URL = ensureHttps(
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  DEFAULT_GATEWAY_URL;
+  DEFAULT_GATEWAY_URL
+);
 
 function ensureLocalhostPort(url, fallbackPort) {
   try {
@@ -51,7 +66,7 @@ const rawAgenticChat =
   '';
 
 function agenticChatHost() {
-  const s = String(rawAgenticChat || '').trim().replace(/\/$/, '');
+  const s = ensureHttps(String(rawAgenticChat || '').trim().replace(/\/$/, ''));
   if (s) return s;
   if (IS_LOCAL_DEV_HOST) return '';
   return DEFAULT_AGENTIC_CHAT_HOST;
@@ -59,9 +74,10 @@ function agenticChatHost() {
 
 export const AGENTIC_CHAT_SERVICE_URL = agenticChatHost();
 
-export const CHAT_MODEL_BASE_URL =
+export const CHAT_MODEL_BASE_URL = ensureHttps(
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
-  AGENTIC_CHAT_SERVICE_URL;
+  AGENTIC_CHAT_SERVICE_URL
+);
 
 /** Secret prompts list/detail via gateway file proxy (`/files/secrets`). */
 export const SECRET_PROMPTS_API_BASE =
@@ -126,7 +142,7 @@ export const DRAFTING_SERVICE_URL =
 
 // AI Chatbot support agent (port 8095)
 export const AI_CHATBOT_URL =
-  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://ai-chatbot-120280829617.asia-south1.run.app';
+  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://agentic-chatbot-service-120280829617.asia-south1.run.app';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =

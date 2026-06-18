@@ -1198,6 +1198,7 @@ async function downloadCitationPDF(c, query, generatedAt) {
   const srcLabel = c.source === 'local' ? 'Local DB'
     : c.source === 'indian_kanoon' ? 'Indian Kanoon'
     : c.source === 'google' ? 'Google Search'
+    : (c.source === 'web' || c.sourceTier === 'web' || c._source === 'web_tier3') ? 'Web (Verified)'
     : (c.sourceApplication || c.sourceLabel || 'Source');
   const caseNameHtml = srcUrl
     ? `<a href="${srcUrl}" target="_blank" style="color:inherit;text-decoration:none;border-bottom:2px solid #21C1B6">${c.caseName}</a>`
@@ -1615,6 +1616,7 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, onFetchFullJ
                 if (srcKey === 'local') { srcIcon = '🏛'; srcLabel = 'Local DB'; }
                 else if (srcKey === 'indian_kanoon') { srcIcon = '📚'; srcLabel = 'Indian Kanoon'; }
                 else if (srcKey === 'google') { srcIcon = '🌐'; srcLabel = 'Google Search (Gemini)'; }
+                else if (srcKey === 'web' || c.sourceTier === 'web' || c._source === 'web_tier3') { srcIcon = '🌍'; srcLabel = 'Web (Verified)'; }
                 return (
                   <React.Fragment key={c.id}>
                     {showGroupHeader && (
@@ -1712,6 +1714,9 @@ function ReportDoc({ report, query, cases = [], onViewFullJudgment, onFetchFullJ
             } else if (srcKey === 'google') {
               srcIcon = '🌐';
               srcLabel = 'Google Search (Gemini)';
+            } else if (srcKey === 'web' || c.sourceTier === 'web' || c._source === 'web_tier3') {
+              srcIcon = '🌍';
+              srcLabel = 'Web (Verified)';
             }
             const treatRows = [
               ...followedList.map(name => ({ name, type: 'FOLLOWED', col: '#166534', bg: '#F0FDF4', bdr: '#BBF7D0' })),
@@ -2821,13 +2826,14 @@ export default function CitationReportPage({ embedded = false }) {
     if (!reportId) return;
     citationApi.getReport(reportId)
       .then(d => {
+        console.log('[CitationPage] getReport response:', reportId?.slice(0, 8), 'citations=', d?.report_format?.citations?.length, 'hasFormat=', !!d?.report_format);
         if (!d || !d.report_format) return;
         setReport(d);
         setQuery(d?.query || '');
         setSelectedPerspective(prev => normalizePerspectiveKey(d?.report_format?.perspective || prev || 'all', 'all'));
         setSelectedDimension('all');
         setShowReport(true);
-      }).catch(() => { });
+      }).catch((e) => { console.error('[CitationPage] getReport failed:', e); });
   }, [reportId]);
 
   // Load case-specific reports when case selection changes
@@ -3126,7 +3132,7 @@ export default function CitationReportPage({ embedded = false }) {
       const rid = startData.run_id;
       setRunId(rid);
 
-      // Poll agent logs at a calmer interval and never overlap requests.
+      // Poll agent logs — 1.5 s interval, non-overlapping
       let lastLogTime = '';
       let lastProgressAt = Date.now();
       let logPollInFlight = false;
@@ -3143,23 +3149,23 @@ export default function CitationReportPage({ embedded = false }) {
           }
         } catch (_) { }
         finally { logPollInFlight = false; }
-      }, 4000);
+      }, 1500);
 
-      // Poll status every 5s and avoid overlapping requests.
+      // Poll status every 2 s — matches backend 8-min timeout (CITATION_SYNC_PIPELINE_TIMEOUT_SECONDS=480)
       const pollStarted = Date.now();
       let statusPollInFlight = false;
       let statusPollErrors = 0;
       statusPollRef.current = setInterval(async () => {
         if (statusPollInFlight) return;
-        if (Date.now() - pollStarted > 15 * 60 * 1000) {
+        if (Date.now() - pollStarted > 9 * 60 * 1000) {
           stopPolling();
-          addMsg('error', '❌ Pipeline timed out after 15 minutes. Please try again.');
+          addMsg('error', '❌ Pipeline timed out after 9 minutes. Please try again.');
           setReportError('Pipeline timed out.');
           setSending(false); setGenerating(false);
           return;
         }
-        // Fail-safe: backend often hangs during long clerk runs; avoid infinite loader.
-        if (Date.now() - lastProgressAt > 2 * 60 * 1000) {
+        // Fail-safe: no progress for 90 s → treat as stuck
+        if (Date.now() - lastProgressAt > 90 * 1000) {
           stopPolling();
           addMsg('error', '❌ Citation generation seems stuck. Please retry once.');
           setReportError('Pipeline appears stuck (no progress updates).');
@@ -3227,7 +3233,7 @@ export default function CitationReportPage({ embedded = false }) {
           }
         }
         finally { statusPollInFlight = false; }
-      }, 5000);
+      }, 2000);
 
     } catch (e) {
       stopPolling();
@@ -3276,7 +3282,7 @@ export default function CitationReportPage({ embedded = false }) {
   const handleToggleFetchLog = async () => {
     if (showFetchLog) { setShowFetchLog(false); return; }
     setShowFetchLog(true);
-    const rid = report?.run_id || runId;
+    const rid = report?.run_id || report?.report_format?.metadata?.run_id || runId;
     if (!rid || reportLogs.length > 0) return;
     setReportLogsLoading(true);
     try {
@@ -3371,7 +3377,7 @@ export default function CitationReportPage({ embedded = false }) {
               )}
             </span>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            {(report?.run_id || runId) && (
+            {(report?.run_id || report?.report_format?.metadata?.run_id || runId) && (
               <button
                 onClick={handleToggleFetchLog}
                 style={{
@@ -3450,7 +3456,7 @@ export default function CitationReportPage({ embedded = false }) {
                 📋 Pipeline Fetch Log
               </span>
               <span style={{ fontSize: 10, color: '#64748B' }}>
-                {report?.run_id ? `run: ${report.run_id.slice(0, 8)}…` : ''}
+                {(report?.run_id || report?.report_format?.metadata?.run_id) ? `run: ${(report.run_id || report.report_format.metadata.run_id).slice(0, 8)}…` : ''}
               </span>
               {reportLogsLoading && (
                 <span style={{ fontSize: 10, color: '#38BDF8', marginLeft: 4 }}>Loading…</span>
@@ -4418,8 +4424,10 @@ export default function CitationReportPage({ embedded = false }) {
                                 <div style={{ fontSize: 11, color: g400, marginTop: 3, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                   {r.metadata?.court && <span>{r.metadata.court}</span>}
                                   {r.metadata?.date && <span>· {r.metadata.date}</span>}
-                                  <span style={{ padding: '2px 8px', background: r.source === 'local_db' ? '#F0FDF4' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#EFF6FF' : '#FFF7ED', borderRadius: 12, fontSize: 10, fontWeight: 700, color: r.source === 'local_db' ? '#065F46' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#1D4ED8' : '#92400E' }}>
-                                    {r.source === 'local_db' ? 'Local DB' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? 'Indian Kanoon' : 'Google'}
+                                  <span style={{ padding: '2px 8px', borderRadius: 12, fontSize: 10, fontWeight: 700,
+                                    background: r.source === 'local_db' ? '#F0FDF4' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#EFF6FF' : (r.source === 'web' || r.sourceTier === 'web' || r._source === 'web_tier3') ? '#F0F9FF' : '#FFF7ED',
+                                    color: r.source === 'local_db' ? '#065F46' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? '#1D4ED8' : (r.source === 'web' || r.sourceTier === 'web' || r._source === 'web_tier3') ? '#0C4A6E' : '#92400E' }}>
+                                    {r.source === 'local_db' ? 'Local DB' : (r.source === 'indian_kanoon' || r.source === 'indiankanoon_live') ? 'Indian Kanoon' : (r.source === 'web' || r.sourceTier === 'web' || r._source === 'web_tier3') ? '🌍 Web (Verified)' : 'Google'}
                                   </span>
                                 </div>
                                 {r.snippet && <div style={{ fontSize: 12, color: g600, marginTop: 6, lineHeight: 1.6 }}>{String(r.snippet).slice(0, 300)}…</div>}

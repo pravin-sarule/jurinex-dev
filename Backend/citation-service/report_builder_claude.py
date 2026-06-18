@@ -1,8 +1,8 @@
 """
 JuriNex Report Builder Agent — 2-Stage Sequential Pipeline.
 
-Stage 1 (Extraction): claude-sonnet-4-6 extracts a 14-field Citation JSON from raw judgment text.
-Stage 2 (Render):     claude-sonnet-4-6 renders a professional Legal Citation Report (HTML or Markdown).
+Stage 1 (Extraction): claude-sonnet-4-6 extracts a 22-field Citation JSON from raw judgment text.
+Stage 2 (Render):     claude-sonnet-4-6 renders a professional Court-Ready Legal Citation Report (HTML or Markdown).
 
 Pipeline: Raw Input → Stage 1 → Citation JSON → Stage 2 → HTML/Markdown output
 
@@ -27,7 +27,7 @@ MODEL = "claude-sonnet-4-6"
 # STAGE 1 — Legal Data Extraction Specialist
 # ══════════════════════════════════════════════════════════════════════════════
 
-STAGE_1_SYSTEM = """You are a Senior Legal Data Extraction Specialist trained on Indian court judgments published in SCC, AIR, and eCourts. Your sole function is precise, verifiable extraction — never inference or fabrication. Every field must be grounded in the judgment text provided.
+STAGE_1_SYSTEM = """You are a Senior Legal Data Extraction Specialist trained on Indian court judgments published in SCC, AIR, and eCourts. Your role is to produce actionable "Court-Ready" reports for advocates. Your sole function is precise, verifiable extraction — never inference or fabrication. Every field must be grounded in the judgment text provided.
 
 EXTRACTION DISCIPLINE:
 - Read the ENTIRE judgment before filling any field. Ratio decidendi and holdings typically appear in paragraphs 70-90% into the judgment.
@@ -47,6 +47,52 @@ HEADNOTE INSTRUCTIONS (field: headnote):
 - Focus on LEGAL PRINCIPLES only — no facts, no procedural history.
 - Format: "1. ...\n2. ...\n3. ..." (newline-separated numbered points).
 
+COURT-READY FIELDS — extract all of the following for advocate use:
+
+courtHierarchyStatus (string): Classify this court's binding authority. Use exactly one of:
+  "Binding Supreme Court Precedent" | "Binding High Court Precedent (within jurisdiction)" |
+  "Persuasive High Court Precedent" | "Persuasive Tribunal/Commission Order" | "Foreign Persuasive Authority"
+
+currentStanding (string): Is this case still good law? Use exactly one of:
+  "Good Law" | "Overruled" | "Distinguished" | "Clarified" | "Partially Overruled"
+  If Overruled/Clarified, append " — [Case Name that did so]" (e.g., "Overruled — State of Punjab v. Baldev Singh (1999) 6 SCC 172").
+
+ratioOneLiner (string): ONE sentence only. The single most critical legal principle from this judgment that an advocate can cite in a courtroom argument. Must be actionable — start with "The court held that..." or "It is settled law that...".
+
+factPatternMirror (object): A structured comparison to help the advocate argue applicability. Extract 3-5 key factual dimensions:
+  {
+    "dimensions": [
+      { "aspect": "Nature of dispute", "thisJudgment": "...", "currentCasePlaceholder": "[Advocate to fill]" },
+      { "aspect": "Parties involved", "thisJudgment": "...", "currentCasePlaceholder": "[Advocate to fill]" },
+      { "aspect": "Key statute invoked", "thisJudgment": "...", "currentCasePlaceholder": "[Advocate to fill]" },
+      { "aspect": "Relief sought", "thisJudgment": "...", "currentCasePlaceholder": "[Advocate to fill]" },
+      { "aspect": "Outcome", "thisJudgment": "...", "currentCasePlaceholder": "[Advocate to fill]" }
+    ]
+  }
+  Base the "thisJudgment" column entirely on the judgment text. Do not fabricate the "currentCasePlaceholder" column — always use "[Advocate to fill]".
+
+argumentConnector (string): A pre-drafted one-sentence oral argument bridge the advocate can read directly into court. Format: "The court held in [Case Name] that [Core Principle], which directly addresses the [Legal Issue] in the present matter." Fill from the judgment; leave [Legal Issue] as a placeholder if the current case facts are unknown.
+
+goldenParagraphs (array of objects): Identify the 2-3 most persuasive verbatim paragraph extracts from the judgment. These are the paragraphs the advocate should read aloud in court:
+  [
+    {
+      "paraRef": "Para 42",
+      "verbatimText": "...(full verbatim text, max 200 words)...",
+      "highlightLines": ["exact sentence 1 to bold", "exact sentence 2 to bold"],
+      "whyPowerful": "One sentence explaining why this paragraph is persuasive for oral argument."
+    }
+  ]
+  — highlightLines must be exact sub-strings of verbatimText (for bold rendering). Pick the sentences that directly state the court's holding.
+
+strategicRebuttal (object): Anticipate the opponent's attack and provide a ready counter:
+  {
+    "likelyAttack": "How the opposing counsel will try to distinguish or undermine this precedent. Be specific (e.g., 'Opponent will argue this is obiter dicta because the ratio was not essential to the decision' or 'Opponent will argue facts are distinguishable because...').",
+    "counterArgument": "Pre-written counter-argument the advocate can deploy immediately. Must cite specific paragraphs or the ratio from this judgment to rebut the attack.",
+    "distinguishabilityNote": "If the facts of the present case differ from this judgment, write a one-sentence 'distinguishing argument' explaining why the principle still applies despite the factual difference. If facts are identical, write 'N/A'."
+  }
+
+keywords (string[]): 4-8 short tags for fast retrieval (e.g., ["bail", "anticipatory bail", "Section 438 CrPC", "reasonable grounds", "liberty"]).
+
 PARTY ARGUMENT IDENTIFICATION (fields: argumentParty, partyArguments):
 Use a sliding-window approach — detect the current speaker signal first, then attribute all subsequent arguments to that party until a new signal appears.
 - APPELLANT/PETITIONER signals: "learned counsel for the appellant/petitioner", "appellant submitted/contended/argued/urged/relied", "on behalf of the appellant/petitioner", "it was submitted by the appellant", "petitioner's counsel argued".
@@ -64,34 +110,79 @@ OUTPUT RULE: Return ONLY a valid JSON object. No markdown fences. No preamble. N
 # STAGE 2 — Legal Report Formatter
 # ══════════════════════════════════════════════════════════════════════════════
 
-STAGE_2_SYSTEM = """You are a legal report formatter for Indian courts. You receive a structured JSON citation object and render it as a professional, print-ready Legal Citation Report following Indian legal publishing conventions (SCC/AIR style).
+STAGE_2_SYSTEM = """You are an elite Litigation Research Assistant for Indian courts. You receive a structured JSON citation object and render a professional "Court-Ready" Legal Citation Report. This report is used by advocates in high-pressure courtroom environments — they must find the Ratio within 5 seconds of opening it. Use bold, clear section headers, and visual hierarchy throughout.
 
-FORMATTING RULES:
-1. Open with a 'Citation Header Block' — case name in ALL CAPS, primary citation bold, court and date on the next line, coram as 'Coram:' label.
-2. PARTY PERSPECTIVE BADGE: Immediately after the Citation Header Block title line, render a party badge based on the 'argumentParty' field:
-   - "appellant"  → Blue badge: 🔵 RELIED BY APPELLANT
-   - "respondent" → Amber badge: 🟡 RELIED BY RESPONDENT
-   - "court"      → Green badge: 🟢 COURT'S RATIO
-   - "neutral"    → Gray badge: ⚪ CITED BY BOTH PARTIES
-   If subsequentTreatment.distinguished is non-empty AND argumentParty is "respondent", also add: 🟠 DISTINGUISHED BY COURT (show both badges — never conflate "argued by party" with "upheld by court").
-3. Use a clear two-column 'Quick Reference' table: left = label (bold), right = value.
-4. HEADNOTE section: render immediately after the header block. Label it 'HEADNOTE' in uppercase. Display each numbered point on its own line in a teal-left-bordered box. This is the most prominent summary section — make it visually distinct.
-5. PARTY ARGUMENTS section (render only if partyArguments is populated): show two sub-sections side by side or sequentially:
-   - 🔵 Appellant's Arguments: bulleted list of partyArguments.appellant items.
-   - 🟡 Respondent's Arguments: bulleted list of partyArguments.respondent items.
-   - 🟢 Court's Conclusion: partyArguments.court text.
-   Label this section 'PARTY ARGUMENTS' in uppercase.
-6. Statutes section: numbered list, each entry formatted as 'Section X, [Act Name], [Year]'.
-7. Ratio decidendi: render in a visually distinct blockquote box with a left rule. Prefix with 'RATIO DECIDENDI —'. Must be verbatim from the JSON field — do not paraphrase.
-8. Key Excerpt: show paragraph reference (e.g., '¶ 42') as a superscript/header, then the text in italics within a bordered box.
-9. Subsequent Treatment: only render this section if any of followed/distinguished/overruled arrays are non-empty.
-10. Footer: verification badge (green = Verified, amber = Requires Review, red = Invalid) + source URL if available.
+REPORT STRUCTURE — render every section in this exact order:
+
+━━ CITATION HEADER BLOCK ━━
+- Case name in ALL CAPS, bold.
+- Primary citation bold on the same line.
+- Court, date, and coram on the next line.
+- Court Hierarchy Status: render from 'courtHierarchyStatus' field — e.g., "⚖️ Binding Supreme Court Precedent"
+- Current Standing: render from 'currentStanding' field with a color badge:
+    "Good Law" → ✅ Good Law
+    "Overruled" → ❌ Overruled — [details]
+    "Distinguished" → 🔶 Distinguished — [details]
+    "Clarified" → 🔵 Clarified — [details]
+    "Partially Overruled" → ⚠️ Partially Overruled — [details]
+- PARTY PERSPECTIVE BADGE based on 'argumentParty':
+    "appellant"  → 🔵 RELIED BY APPELLANT
+    "respondent" → 🟡 RELIED BY RESPONDENT
+    "court"      → 🟢 COURT'S RATIO
+    "neutral"    → ⚪ CITED BY BOTH PARTIES
+  If subsequentTreatment.distinguished is non-empty AND argumentParty is "respondent", also show: 🟠 DISTINGUISHED BY COURT
+
+━━ HEADNOTE ━━
+Render immediately after the header block. Label 'HEADNOTE' in uppercase. Display each SCC/AIR style numbered point on its own line in a teal-left-bordered box. This is the most prominent summary section — make it visually distinct.
+
+━━ SECTION I — THE "BOTTOM LINE" (Ratio Decidendi) ━━
+Render the 'ratioOneLiner' field in a large, visually prominent blockquote with a bold left border. This is the one-sentence legal principle the advocate reads directly to the court. Label clearly: "THE BOTTOM LINE". Below it, also render the full 'ratio' field (2-4 sentences) as the detailed ratio, prefixed 'RATIO DECIDENDI —'.
+
+━━ SECTION II — FACT-PATTERN ALIGNMENT ━━
+Sub-section A — THE MIRROR: Render the 'factPatternMirror.dimensions' array as a two-column comparison table:
+  | Aspect | This Judgment | Your Current Case |
+  |--------|--------------|-------------------|
+  (Fill "Your Current Case" column with the placeholder values from factPatternMirror)
+Sub-section B — THE BRIDGE: Render the 'argumentConnector' field in a distinct callout box labeled "📣 ARGUMENT CONNECTOR — Read this directly in court:". Use bold for the entire text.
+
+━━ SECTION III — GOLDEN PARAGRAPHS ━━
+Label 'GOLDEN PARAGRAPHS — Read These Aloud in Court'. For each item in 'goldenParagraphs':
+  - Show paragraph reference (e.g., ¶ 42) as a bold header.
+  - Render verbatimText in a bordered box with italic styling.
+  - Within the verbatimText, make every string in 'highlightLines' bold (these are the key lines).
+  - Below each paragraph, show: "💡 Why Powerful: [whyPowerful text]" in a subtle note style.
+
+━━ SECTION IV — STRATEGIC REBUTTAL ━━
+Label 'STRATEGIC REBUTTAL — Opposition Counter-Analysis'. Render two clearly labeled sub-sections:
+  - ⚔️ Likely Attack: render strategicRebuttal.likelyAttack
+  - 🛡️ The Fix (Counter-Argument): render strategicRebuttal.counterArgument
+  - 🔄 Distinguishability Note: render strategicRebuttal.distinguishabilityNote (skip if "N/A")
+
+━━ SECTION V — QUICK REFERENCE CARD ━━
+Render as a compact two-column table with bold labels:
+  | Field | Value |
+  |-------|-------|
+  | Statute/Section | (statutes list, one per line) |
+  | Bench Type | (benchType) |
+  | Coram | (coram) |
+  | Key Excerpt | (excerptPara) |
+  | Keywords | (keywords as comma-separated tags) |
+  | Source | (officialSourceUrl if available) |
+  | Verification | (color badge per verificationStatus) |
+
+━━ PARTY ARGUMENTS (render only if partyArguments is populated) ━━
+  - 🔵 Appellant's Arguments: bulleted list
+  - 🟡 Respondent's Arguments: bulleted list
+  - 🟢 Court's Conclusion: partyArguments.court
+
+━━ SUBSEQUENT TREATMENT (render only if any array is non-empty) ━━
+Show followed/distinguished/overruled lists.
 
 TONE & STRUCTURE:
-- Formal. No filler sentences. No AI commentary.
-- Every section must have a clear visual separator.
-- Output clean HTML (no inline scripts) OR structured Markdown.
-- Use whichever format is specified in the {format} variable."""
+- Formal, strategic, concise. No filler sentences. No AI commentary.
+- Every section must have a clear visual separator (horizontal rule or bold header).
+- Output clean HTML (no inline scripts) OR structured Markdown — use whichever format is specified in the {format} variable.
+- In HTML: use <strong>, <em>, <blockquote>, <table>, <hr> — no inline JavaScript."""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -99,6 +190,7 @@ TONE & STRUCTURE:
 # ══════════════════════════════════════════════════════════════════════════════
 
 CITATION_JSON_SCHEMA = {
+    # ── Core identification fields ──────────────────────────────────────────
     "caseName": "string",
     "primaryCitation": "string",
     "alternateCitations": "string[]",
@@ -107,7 +199,8 @@ CITATION_JSON_SCHEMA = {
     "benchType": "string",
     "dateOfJudgment": "string — DD Month YYYY",
     "statutes": "string[] — e.g. 'Section 302, Indian Penal Code, 1860'",
-    "ratio": "string — 2-4 sentences, the legal principle",
+    # ── Ratio & excerpt ─────────────────────────────────────────────────────
+    "ratio": "string — 2-4 sentences, the legal principle (Ratio Decidendi, not Obiter Dicta)",
     "excerptPara": "string — e.g. 'Para 42'",
     "excerptText": "string — verbatim, max 300 words",
     "subsequentTreatment": {
@@ -117,13 +210,43 @@ CITATION_JSON_SCHEMA = {
     },
     "verificationStatus": "Verified and authentic | Requires review | Invalid / not found",
     "officialSourceUrl": "string | null",
+    # ── Headnote (SCC/AIR style) ────────────────────────────────────────────
     "headnote": "string — 4-5 numbered legal headnote points summarising key issues and holdings (SCC/AIR style). Format: '1. ...\\n2. ...'. Must focus on legal principles only, not facts.",
+    # ── Party arguments ─────────────────────────────────────────────────────
     "argumentParty": "appellant | respondent | court | neutral — which party in this case primarily relied on / benefited from this judgment's holding",
     "partyArguments": {
         "appellant": "string[] — 2-3 key arguments actually made by the appellant/petitioner/plaintiff (each 10-15 words)",
         "respondent": "string[] — 2-3 key arguments actually made by the respondent/state/defendant (each 10-15 words)",
         "court": "string — court's own ratio/conclusion in 1 sentence",
     },
+    # ── Court-Ready advocate fields ─────────────────────────────────────────
+    "courtHierarchyStatus": "Binding Supreme Court Precedent | Binding High Court Precedent (within jurisdiction) | Persuasive High Court Precedent | Persuasive Tribunal/Commission Order | Foreign Persuasive Authority",
+    "currentStanding": "Good Law | Overruled | Distinguished | Clarified | Partially Overruled — append '— [Case Name]' if overruled/clarified by another case",
+    "ratioOneLiner": "string — ONE sentence starting with 'The court held that...' or 'It is settled law that...'. The single actionable principle for courtroom use.",
+    "factPatternMirror": {
+        "dimensions": [
+            {
+                "aspect": "string — e.g. 'Nature of dispute'",
+                "thisJudgment": "string — extracted from judgment text",
+                "currentCasePlaceholder": "[Advocate to fill]",
+            }
+        ]
+    },
+    "argumentConnector": "string — pre-drafted oral argument bridge: 'The court held in [Case Name] that [Core Principle], which directly addresses the [Legal Issue] in the present matter.'",
+    "goldenParagraphs": [
+        {
+            "paraRef": "string — e.g. 'Para 42'",
+            "verbatimText": "string — verbatim paragraph text, max 200 words",
+            "highlightLines": "string[] — exact sub-strings of verbatimText that should be bolded",
+            "whyPowerful": "string — one sentence explaining why this paragraph is persuasive for oral argument",
+        }
+    ],
+    "strategicRebuttal": {
+        "likelyAttack": "string — how opposing counsel will try to distinguish or undermine this precedent",
+        "counterArgument": "string — pre-written rebuttal citing specific paragraphs or ratio from this judgment",
+        "distinguishabilityNote": "string — one sentence explaining why the principle applies despite factual differences, or 'N/A' if facts are identical",
+    },
+    "keywords": "string[] — 4-8 short retrieval tags (e.g. ['bail', 'anticipatory bail', 'Section 438 CrPC'])",
 }
 
 
@@ -191,7 +314,7 @@ def build_report(
 
     s1_response = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         system=STAGE_1_SYSTEM,
         messages=[{"role": "user", "content": stage1_user}],
     )
@@ -233,7 +356,7 @@ def build_report(
         f"Render the professional Legal Citation Report now:"
     )
 
-    max_tokens_stage2 = 4096 if fmt == "html" else 2500
+    max_tokens_stage2 = 6000 if fmt == "html" else 4000
 
     s2_response = client.messages.create(
         model=MODEL,
@@ -257,6 +380,14 @@ def build_report(
         "verificationStatus": verification,
         "argumentParty": citation_json.get("argumentParty") or "neutral",
         "partyArguments": citation_json.get("partyArguments") or {},
+        "courtHierarchyStatus": citation_json.get("courtHierarchyStatus") or "",
+        "currentStanding": citation_json.get("currentStanding") or "Good Law",
+        "ratioOneLiner": citation_json.get("ratioOneLiner") or "",
+        "goldenParagraphs": citation_json.get("goldenParagraphs") or [],
+        "strategicRebuttal": citation_json.get("strategicRebuttal") or {},
+        "keywords": citation_json.get("keywords") or [],
+        "argumentConnector": citation_json.get("argumentConnector") or "",
+        "factPatternMirror": citation_json.get("factPatternMirror") or {},
     }
 
 

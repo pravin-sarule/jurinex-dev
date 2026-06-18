@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from starlette.requests import ClientDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.auth import get_current_user
@@ -92,9 +93,14 @@ def _build_profile_lookup_answer(profile: dict[str, Any] | None) -> str:
 async def _read_body(request: Request) -> dict[str, Any]:
     if hasattr(request.state, "json_body"):
         return request.state.json_body  # type: ignore[attr-defined]
-    data = await request.json()
-    request.state.json_body = data
-    return data
+    try:
+        data = await request.json()
+        request.state.json_body = data
+        return data
+    except ClientDisconnect:
+        return {}
+    except Exception:
+        return {}
 
 
 def _policy_check(user: dict, body: dict[str, Any] | None = None) -> tuple[dict, dict, dict]:
@@ -316,6 +322,38 @@ async def ask_general_stream(request: Request, user: dict = Depends(get_current_
             yield line
 
     headers = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
+
+
+@router.post("/ask/judgement/stream")
+async def ask_judgement_stream(request: Request, user: dict = Depends(get_current_user)):
+    """Web-search grounded judgement / citation finder (Google Search grounding).
+
+    Works with or without an attached document. The standard /ask/stream and
+    /ask/general/stream endpoints also route here automatically when the request
+    carries a web_search flag (frontend "Citation" mode).
+    """
+    body = await _read_body(request)
+    body["web_search"] = True  # force judgement mode for this explicit endpoint
+    user, cfg, merged = _policy_check(user, body)
+    ctx = {
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "authorization": request.headers.get("authorization"),
+        "request_body": body,
+        "llm_config": cfg,
+        "llm_config_for_request": merged,
+    }
+    origin = request.headers.get("origin")
+
+    async def gen():
+        async for line in chat_orchestrator.stream_judgement_chat(ctx):
+            yield line
+
+    headers = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
     if origin:
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"

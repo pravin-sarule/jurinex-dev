@@ -9,6 +9,7 @@ from google.adk.tools.tool_context import ToolContext
 from app.services.chat_orchestrator import (
     stream_document_chat,
     stream_general_chat,
+    stream_judgement_chat,
 )
 from pipeline import classify_request
 
@@ -63,7 +64,15 @@ async def tool_run_general_content(tool_context: ToolContext) -> Dict[str, Any]:
     return {"success": True, "answer": answer, "route": "general_content"}
 
 
+async def tool_run_judgement_search(tool_context: ToolContext) -> Dict[str, Any]:
+    ctx = dict(tool_context.state)
+    answer = await _collect_stream(stream_judgement_chat, ctx)
+    tool_context.state["answer"] = answer
+    return {"success": True, "answer": answer, "route": "judgement_search"}
+
+
 classify_tool = FunctionTool(tool_classify_chat_request)
 file_based_tool = FunctionTool(tool_run_file_based_chat)
 legal_content_tool = FunctionTool(tool_run_legal_case_content)
 general_content_tool = FunctionTool(tool_run_general_content)
+judgement_search_tool = FunctionTool(tool_run_judgement_search)

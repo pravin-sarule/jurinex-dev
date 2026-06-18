@@ -14,26 +14,11 @@ outage doesn't permanently block users.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict
 
+from app.services.db import doc_conn, payment_conn
+
 logger = logging.getLogger(__name__)
-
-
-def _doc_conn():
-    import psycopg2
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise ValueError("DATABASE_URL is not set")
-    return psycopg2.connect(url)
-
-
-def _payment_conn():
-    import psycopg2
-    url = os.environ.get("PAYMENT_DB_URL")
-    if not url:
-        raise ValueError("PAYMENT_DB_URL is not set")
-    return psycopg2.connect(url)
 
 
 def assert_storage_allowed(user_id: str | int, size_bytes: int = 0) -> Dict[str, Any]:
@@ -49,20 +34,17 @@ def assert_storage_allowed(user_id: str | int, size_bytes: int = 0) -> Dict[str,
     # ── 1. Current storage used (Document_DB → user_files) ───────────────────
     storage_used_bytes = 0
     try:
-        conn = _doc_conn()
-        try:
+        with doc_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT COALESCE(SUM(size), 0)::bigint
+                    """SELECT COALESCE(SUM(size), 0)::bigint AS used
                        FROM user_files
                        WHERE user_id = %s
                          AND (is_folder IS NULL OR is_folder = FALSE)""",
                     (uid,),
                 )
                 row = cur.fetchone()
-                storage_used_bytes = int(row[0]) if row else 0
-        finally:
-            conn.close()
+                storage_used_bytes = int(row["used"]) if row and row.get("used") is not None else 0
     except Exception as exc:
         logger.warning("[storage_policy] doc-db query failed for user %s: %s", uid, exc)
         return {"ok": True}   # fail open
@@ -70,11 +52,11 @@ def assert_storage_allowed(user_id: str | int, size_bytes: int = 0) -> Dict[str,
     # ── 2. Plan storage limit (Payment_DB → monthly_plans) ───────────────────
     storage_limit_gb = 0.0
     try:
-        conn = _payment_conn()
-        try:
+        with payment_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT COALESCE(mp.storage_limit_gb, sp.storage_limit_gb, 0)::numeric
+                              AS storage_limit_gb
                        FROM user_subscriptions us
                        LEFT JOIN monthly_plans      mp ON mp.id = us.monthly_plan_id
                                                       AND mp.is_active = TRUE
@@ -86,10 +68,8 @@ def assert_storage_allowed(user_id: str | int, size_bytes: int = 0) -> Dict[str,
                     (uid,),
                 )
                 row = cur.fetchone()
-                if row and row[0]:
-                    storage_limit_gb = float(row[0])
-        finally:
-            conn.close()
+                if row and row.get("storage_limit_gb"):
+                    storage_limit_gb = float(row["storage_limit_gb"])
     except Exception as exc:
         logger.warning("[storage_policy] payment-db query failed for user %s: %s", uid, exc)
         return {"ok": True}   # fail open

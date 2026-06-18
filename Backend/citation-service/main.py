@@ -26,7 +26,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Body, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from citation_agent import run_citation_agent
 from claude_proxy import forward_to_claude
 from report_builder_claude import build_report, build_report_from_files
 from db.client import (
@@ -54,7 +53,7 @@ from db.client import (
     report_list_shared_with_members,
 )
 from db.connections import get_qdrant_client, get_neo4j_driver
-from pipeline import run_pipeline
+from pipeline_runner import run_pipeline
 from utils.usage_analytics import normalize_aggregate_by_service, normalize_user_by_service
 
 logging.basicConfig(
@@ -85,9 +84,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-PIPELINE_MAX_CONCURRENT_RUNS = max(1, _env_int("CITATION_MAX_CONCURRENT_RUNS", 2))
+PIPELINE_MAX_CONCURRENT_RUNS = max(1, _env_int("CITATION_MAX_CONCURRENT_RUNS", 6))
 RUN_STATE_MAX_ENTRIES = max(50, _env_int("CITATION_RUN_STATE_MAX_ENTRIES", 500))
-SYNC_PIPELINE_TIMEOUT_SECONDS = max(60, _env_int("CITATION_SYNC_PIPELINE_TIMEOUT_SECONDS", 840))
+SYNC_PIPELINE_TIMEOUT_SECONDS = max(60, _env_int("CITATION_SYNC_PIPELINE_TIMEOUT_SECONDS", 480))
 _pipeline_slots = threading.BoundedSemaphore(PIPELINE_MAX_CONCURRENT_RUNS)
 _run_state_lock = threading.Lock()
 _run_state_order: deque[str] = deque()
@@ -400,7 +399,7 @@ async def payment_token_limit_middleware(request: Request, call_next):
     path = request.url.path
     if request.method == "POST" and any(path.startswith(p) for p in _CITATION_LLM_POST_PREFIXES):
         try:
-            from services.payment_token_guard import (
+            from services.payment_guard import (
                 check_token_availability,
                 extract_user_id_from_request,
                 quota_block_body,
@@ -1097,20 +1096,6 @@ async def generate_citation_report(
         auth_header = request.headers.get("authorization") if request else None
         case_file_context, _ = await _fetch_case_context(case_id, auth_header)
 
-    if not query and case_file_context:
-        try:
-            from agents.root_agent import LegalDimensionExtractor, AgentContext
-            ctx = AgentContext(
-                query="",
-                user_id=user_id,
-                case_id=case_id,
-                metadata={"case_file_context": case_file_context or []},
-            )
-            lde = LegalDimensionExtractor()
-            lde.run(ctx)
-            query = (ctx.metadata.get("search_query") or "").strip()
-        except Exception as e:
-            logger.warning("Legal dimension extraction failed for empty query: %s", e)
     if not query:
         raise HTTPException(status_code=400, detail="query is required and must be non-empty")
 
@@ -1193,25 +1178,11 @@ async def generate_citation_report(
             "perspective": _perspective or "all",
         }
 
-    # Legacy: agent-only
-    payload = {
-        "query": query,
-        "case_file_context": case_file_context or [],
-        "search_results": search_results or [],
-    }
-    try:
-        result = run_citation_agent(payload)
-    except Exception as e:
-        logger.exception("Citation report failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    if result.get("error"):
-        raise HTTPException(status_code=500, detail=result["error"])
-    return {
-        "success": True,
-        "report": result.get("report", ""),
-        "citations": result.get("citations", []),
-        "confidence": result.get("confidence", "low"),
-    }
+    # Legacy agent-only path removed — use use_pipeline=true
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy citation agent is no longer supported. Use use_pipeline=true.",
+    )
 
 
 @app.get("/citation/reports/team")
@@ -1452,7 +1423,7 @@ async def get_judgement_full_text(canonical_id: str) -> Dict[str, Any]:
     # Not in any local DB — fetch live from IK API, show result directly without storing
     if ik_tid:
         try:
-            from services.indian_kanoon import ik_fetch_doc
+            from services.indiankanoon_client import ik_fetch_doc
             doc_data = ik_fetch_doc(ik_tid, maxcites=20, maxcitedby=20)
             if doc_data:
                 doc_html = doc_data.get("doc") or ""
@@ -1508,6 +1479,12 @@ async def get_report(report_id: str) -> Dict[str, Any]:
     dims_meta = report.get("dimensions_metadata") or []
     if isinstance(fmt, dict) and dims_meta and not fmt.get("dimensions"):
         fmt["dimensions"] = dims_meta
+    cit_list = (fmt or {}).get("citations") or [] if isinstance(fmt, dict) else []
+    print(
+        f"[GET_REPORT] report_id={report_id[:8]} citations={len(cit_list)}"
+        + (f" vs[0]={cit_list[0].get('verificationStatus','?')}" if cit_list else ""),
+        flush=True,
+    )
     return {
         "success": True,
         "report_id": report_id,
@@ -2239,7 +2216,7 @@ async def start_citation_report(
 
     def _run_bg():
         try:
-            from pipeline import run_pipeline
+            from pipeline_runner import run_pipeline
             out = run_pipeline(
                 query=query,
                 user_id=user_id,
@@ -2250,6 +2227,7 @@ async def start_citation_report(
                 custom_keywords=custom_keywords or [],
                 selected_keywords=selected_keywords or [],
                 selected_case_names=selected_case_names or [],
+                run_id=run_id,
             )
             if out.get("error"):
                 _set_run_state(run_id, {"status": "failed", "report_id": None,
@@ -2421,7 +2399,7 @@ async def manual_fetch_case_judgments(
     """
     import threading as _threading
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-    from services.indian_kanoon import ik_fetch_doc
+    from services.indiankanoon_client import ik_fetch_doc
 
     case_names = [str(n).strip() for n in (case_names or []) if str(n).strip()][:10]
     if not case_names:
@@ -2442,7 +2420,7 @@ async def manual_fetch_case_judgments(
 
         # Step 1 — Local ES: same query strings as IK uses for this case name
         try:
-            from agents.proposition_pipeline import _search_local_one
+            from agents.search_utils import _search_local_one
 
             # Mirror exactly the two query forms _ik_search_by_case_name sends to IK:
             #   - name_no_year : full case name with trailing year stripped
@@ -2490,7 +2468,7 @@ async def manual_fetch_case_judgments(
 
         # Step 2 — Indian Kanoon (only if similarity is high enough)
         try:
-            from agents.proposition_pipeline import _ik_search_by_case_name
+            from agents.search_utils import _ik_search_by_case_name
             ik_hits = _ik_search_by_case_name(case_name, top_n=1)
             if ik_hits:
                 h = ik_hits[0]
@@ -2573,7 +2551,7 @@ async def manual_search_by_keywords(
     """
     import threading as _threading
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-    from services.indian_kanoon import ik_search as _ik_search, ik_fetch_doc as _ik_fetch_doc
+    from services.indiankanoon_client import ik_search as _ik_search, ik_fetch_doc as _ik_fetch_doc
 
     keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()][:15]
     if not keywords:
@@ -2586,7 +2564,7 @@ async def manual_search_by_keywords(
 
         # Local ES — same keyword query format as IK (_search_local_one mirrors ik_search)
         try:
-            from agents.proposition_pipeline import _search_local_one
+            from agents.search_utils import _search_local_one
             for h in _search_local_one(keyword):
                 cid = str(h.get("canonical_id") or "").strip()
                 tid = str(h.get("tid") or "").strip()

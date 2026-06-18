@@ -22,6 +22,8 @@ ROUTE_LEGAL = "legal_case_content"
 
 ROUTE_GENERAL = "general_content"
 
+ROUTE_JUDGEMENT = "judgement_search"
+
 
 
 
@@ -31,6 +33,12 @@ def classify_request(body: dict[str, Any]) -> str:
     if body.get("used_secret_prompt") and body.get("secret_id"):
 
         return ROUTE_LEGAL
+
+    from app.services.chat_helpers import wants_judgement_search
+
+    if wants_judgement_search(body):
+
+        return ROUTE_JUDGEMENT
 
     file_ids = body.get("file_ids") or []
 
@@ -66,7 +74,41 @@ async def run_adk_chat(state: dict[str, Any]) -> dict[str, Any]:
 
     async def _run_direct_route() -> dict[str, Any]:
 
-        from app.services.chat_orchestrator import stream_document_chat, stream_general_chat
+        from app.services.chat_orchestrator import (
+
+            stream_document_chat,
+
+            stream_general_chat,
+
+            stream_judgement_chat,
+
+        )
+
+
+
+        if route == ROUTE_JUDGEMENT:
+
+            answer = ""
+
+            async for line in stream_judgement_chat(state):
+
+                if '"type": "done"' in line:
+
+                    import json
+
+
+
+                    raw = line.replace("data: ", "").strip()
+
+                    try:
+
+                        answer = json.loads(raw).get("answer", answer)
+
+                    except json.JSONDecodeError:
+
+                        pass
+
+            return {"answer": answer, "route": route, "agent_key": route}
 
 
 

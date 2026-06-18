@@ -234,6 +234,15 @@ function isAdminUpload(citation) {
 function getSourceMeta(citation) {
   if (isAdminUpload(citation)) return { icon: '🏛️', label: 'Admin Upload' };
 
+  // Web tier 3 — check before generic source string matching
+  if (
+    citation.sourceTier === 'web' ||
+    citation._source === 'web_tier3' ||
+    citation.source_type === 'web'
+  ) {
+    return { icon: '🌍', label: 'Web (Verified)' };
+  }
+
   const raw = String(
     citation.source ||
     citation.sourceType ||
@@ -244,6 +253,7 @@ function getSourceMeta(citation) {
   if (raw.includes('local') || raw.includes('db')) return { icon: '🗄️', label: 'Local DB' };
   if (raw.includes('indian') || raw.includes('kanoon') || raw.includes('ik')) return { icon: '📚', label: 'Indian Kanoon' };
   if (raw.includes('google')) return { icon: '🌐', label: 'Google Search' };
+  if (raw === 'web' || raw.includes('tier3')) return { icon: '🌍', label: 'Web (Verified)' };
   return { icon: '📄', label: 'Source' };
 }
 
@@ -258,6 +268,7 @@ function formatSourceTypeLabel(citation) {
   if (!raw) return 'Not Available';
   if (raw === 'indian_kanoon') return 'indian_kanoon';
   if (raw === 'google') return 'google search';
+  if (raw === 'web' || raw === 'web_tier3') return 'web (verified)';
   if (raw === 'local' || raw === 'admin_upload') return 'local db';
   return 'local db';
 }
@@ -677,6 +688,9 @@ export default function RedesignedCitationReportDoc({
   }));
 
   const verified = all.filter((citation) => ['GREEN', 'YELLOW', 'STALE'].includes(citation.verificationStatus));
+  // DEBUG: log citation counts so we can diagnose 0-results issues
+  console.log('[CitationReport] all=', all.length, 'verified=', verified.length,
+    'statuses=', all.map(c => c.verificationStatus));
   const extraDims = report?.dimensions_metadata || report?.dimensionsMeta || [];
   const groups = dimensionGroups(reportFormat, verified, extraDims);
   const sidebarGroups = groups.filter((group) => group.id !== 'ungrouped');
@@ -706,6 +720,8 @@ export default function RedesignedCitationReportDoc({
       return true;
     }),
   })).filter((group) => group.citations.length);
+  console.log('[CitationReport] groups=', groups.length, 'filtered=', filtered.length,
+    'dim=', selectedDimension, 'court=', courtFilter, 'persp=', perspective, 'term=', term);
 
   const visible = filtered.flatMap((group) => group.citations);
   const active = visible.find((citation) => citation.id === activeId) || null;
@@ -963,6 +979,17 @@ export default function RedesignedCitationReportDoc({
                           <span className="ld-conf-value">{Number(confidenceScore).toFixed(1)}%</span>
                           <span className="ld-conf-sub">AUTHENTICITY &amp; RESEARCH VERIFIED</span>
                         </div>
+                        {(active.sourceTier === 'web' || active._source === 'web_tier3' || active.source_type === 'web') && (
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                            <span style={{ fontSize: 9, fontWeight: 700, color: '#0C4A6E', letterSpacing: '0.06em' }}>AUTHORITY TIER</span>
+                            <span style={{ fontSize: 14, fontWeight: 800, color: active.authorityTier === 'T1' ? '#065F46' : '#0C4A6E' }}>
+                              {active.authorityTier === 'T1' ? '⭐ T1' : active.authorityTier === 'T2' ? '📚 T2' : '🌍 WEB'}
+                            </span>
+                            <span style={{ fontSize: 8, color: '#64748B' }}>
+                              {active.authorityTier === 'T1' ? 'OFFICIAL SOURCE' : 'RECOGNIZED REPORTER'}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       <div className="ld-divider" />
