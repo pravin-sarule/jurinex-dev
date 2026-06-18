@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from core.budgets import BudgetTracker
+from core.config import settings
 from models.citation_models import Candidate
 from services.cost_service import record_ik_call
 from utils.text import strip_html
@@ -17,14 +17,20 @@ class IndianKanoonClient:
         self.user_id = user_id
         self.budget = budget
 
-    def search(self, query: str, doctypes: str, issue_id: str) -> list[Candidate]:
+    def search(self, query: str, doctypes: str, issue_id: str,
+               is_case_name_search: bool = False) -> list[Candidate]:
         from services.indian_kanoon import ik_search
         self.budget.consume("ik_search")
-        result = ik_search(query=query, pagenum=0, maxpages=1, doctypes=doctypes) or {}
+        # is_case_name_search routes a bare landmark name through IK's title:"..." path
+        # (case_metadata stays None so the title is not narrowed with court terms) — R3.
+        # Phase 3 — page the search (free: one budget unit covers all pages) and lift the
+        # per-query doc cap so a recall query surfaces a wider candidate net.
+        result = ik_search(query=query, pagenum=0, maxpages=settings.ik_search_maxpages,
+                           doctypes=doctypes, is_case_name_search=is_case_name_search) or {}
         record_ik_call(self.run_id, self.user_id, "search", endpoint="/search/", issue_id=issue_id, success=bool(result))
         logger.debug("IK search response", extra={"details": {"run_id": self.run_id, "issue_id": issue_id, "query": query, "found": result.get("found"), "raw_response": result}})
         candidates = []
-        for row in (result.get("docs") or [])[:20]:
+        for row in (result.get("docs") or [])[:settings.per_query_doc_cap]:
             doc_id = str(row.get("tid") or row.get("id") or "").strip()
             if not doc_id:
                 continue

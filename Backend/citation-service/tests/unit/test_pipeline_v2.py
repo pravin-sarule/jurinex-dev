@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from core.budgets import BudgetTracker
+from core.config import settings
 from core.enums import Classification
 from models.citation_models import Candidate
 from pipeline.pipeline_context import PipelineContext
@@ -54,14 +55,16 @@ class TestPerspectiveAndQueries(unittest.TestCase):
         issues = build_issue_cards(QUERY, profile, "petitioner")
         queries = generate_ik_queries(issues)
         self.assertGreaterEqual(len(queries), 6)
-        self.assertLessEqual(len(queries), 10)
+        # Generation is bounded per issue (the round-robin allocator caps EXECUTION).
+        self.assertLessEqual(len(queries), (settings.max_queries_per_issue + 1) * len(issues))
         self.assertEqual({issue.issue_id for issue in issues}, {row["issue_id"] for row in queries})
         self.assertTrue(all(row["query_string"] for row in queries))
         initial = [row for row in queries if not row.get("is_fallback")]
         fallbacks = [row for row in queries if row.get("is_fallback")]
         self.assertTrue(initial)
-        # Initial queries combine legal terms with ANDD; broad fallbacks are single terms.
-        self.assertTrue(all(" ANDD " in row["query_string"] for row in initial))
+        # Initial full-text queries combine terms with ANDD; landmark title queries are a
+        # single bare name (case_name_search); broad fallbacks are single ORR strings.
+        self.assertTrue(all(" ANDD " in row["query_string"] for row in initial if not row.get("case_name_search")))
         self.assertTrue(all(" ANDD " not in row["query_string"] for row in fallbacks))
 
 
@@ -78,10 +81,28 @@ class TestFilteringClassificationAndBudgets(unittest.TestCase):
         report = build_report("run", "petitioner", {}, [], [], [], [], [], {}, {})
         self.assertEqual(report["recommended_citations"], [])
         self.assertEqual(report["citations"], [])
-        self.assertEqual(report["message"], "No reliable supporting citation found in this run.")
+        # With zero candidates retrieved, the report says so (substring keeps this robust
+        # to minor wording changes).
+        self.assertIn("No candidate judgments were retrieved", report["message"])
 
     def test_adverse_citations_are_separated(self):
-        supporting, adverse, caution = classify_results.run(type("Context", (), {"shortlisted": [candidate("s"), candidate("a", classification=Classification.ADVERSE), candidate("c", classification=Classification.DISTINGUISHABLE)]})())
+        # Isolate the classification-separation behaviour: disable rerank (needs
+        # context.issues) and the opposition bundle (would make a Gemini call) so this
+        # unit test stays offline and focused on which bucket each candidate lands in.
+        from core.config import settings as _settings
+        saved = (_settings.enable_rerank, _settings.enable_opposition_bundle)
+        object.__setattr__(_settings, "enable_rerank", False)
+        object.__setattr__(_settings, "enable_opposition_bundle", False)
+        try:
+            ctx = type("Context", (), {"run_id": "run", "shortlisted": [
+                candidate("s"),
+                candidate("a", classification=Classification.ADVERSE),
+                candidate("c", classification=Classification.DISTINGUISHABLE),
+            ]})()
+            supporting, adverse, caution = classify_results.run(ctx)
+        finally:
+            object.__setattr__(_settings, "enable_rerank", saved[0])
+            object.__setattr__(_settings, "enable_opposition_bundle", saved[1])
         self.assertEqual([row.doc_id for row in supporting], ["s"])
         self.assertEqual([row.doc_id for row in adverse], ["a"])
         self.assertEqual([row.doc_id for row in caution], ["c"])

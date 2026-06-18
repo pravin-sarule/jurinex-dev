@@ -94,15 +94,23 @@ def run(context: PipelineContext):
         potentially_adverse = bool(_ADVERSE_HINT_RX.search(text))
         candidate.metadata["_potentially_adverse"] = potentially_adverse
 
+        court_ok = _court_ok(candidate, issue)
+        # R7 — Indian land/tenancy/constitutional law leans on older apex authority, so
+        # the age gate must NOT drop strong precedents: exempt Supreme Court / preferred-
+        # court candidates and anything a top-priority (doctrine/fact) query surfaced.
+        # Provenance (query_priority) is a far better signal than a doctrine-poor headline.
+        high_prio_provenance = int((candidate.metadata or {}).get("query_priority", 99)) <= 1
+        age_protected = court_ok or high_prio_provenance or potentially_adverse
+
         # Discard only when irrelevant on every axis (keep adverse + landmarks always).
         irrelevant = (
             must_hits < 2
             and doctrine_score < 0.10
-            and not _court_ok(candidate, issue)
+            and not court_ok
             and not is_landmark
             and not potentially_adverse
         )
-        if irrelevant or (too_old and doctrine_score < 0.10 and not potentially_adverse):
+        if irrelevant or (too_old and doctrine_score < 0.10 and not age_protected):
             candidate.rejection_reason = (
                 "prescreen: too old + low doctrine overlap" if too_old
                 else "prescreen: irrelevant (terms+court+doctrine all weak)"

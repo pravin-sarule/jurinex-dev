@@ -1,12 +1,15 @@
 import logging
-import os
 import re
+
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Max characters of case context kept for the pipeline. Edit via .env. This is the
-# "Context chars" number shown in the Pipeline Data Flow.
-_MAX_CONTEXT_CHARS = int(os.environ.get("CITATION_V2_MAX_CONTEXT_CHARS", "60000"))
+# Max characters of case context kept for the pipeline ("Context chars" in the Pipeline
+# Data Flow) comes from settings.max_context_chars (CITATION_V2_MAX_CONTEXT_CHARS in
+# .env). It is read at call time below — reading it as a module-level os.environ
+# constant here silently fell back to 60000 when this module imported before core.config
+# had run load_dotenv().
 
 # indiankanoon.org/doc/12345/ or /docfragment/12345/ — used to harvest IK ids that the
 # uploaded source document refers to, so they are never returned as citations (FAILURE 2).
@@ -70,7 +73,7 @@ def from_case_file_context(case_file_context: list[dict] | None) -> str:
         str(row.get("content") or row.get("snippet") or "").strip()
         for row in items[:8]
         if str(row.get("content") or row.get("snippet") or "").strip()
-    )[:_MAX_CONTEXT_CHARS]
+    )[:settings.max_context_chars]
 
     if len(combined) < 800:
         logger.warning(

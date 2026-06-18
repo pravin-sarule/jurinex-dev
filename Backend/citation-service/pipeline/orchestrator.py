@@ -14,7 +14,8 @@ from pipeline.stages import (
     build_report, cheap_filter, cheap_prescreen, classify_results, deduplicate_candidates,
     detect_disposition, enrich_fragments, extract_case_profile, extract_issues,
     fetch_full_documents, final_ai_judge, generate_queries, generate_usage_analysis,
-    normalize_perspective, retrieve_candidates, score_candidates, shortlist_candidates,
+    normalize_perspective, rerank_candidates, retrieve_candidates, score_candidates,
+    shortlist_candidates,
 )
 from repositories.cost_repository import summarize_cost
 from repositories.report_repository import save_report
@@ -126,6 +127,9 @@ def run_v2_pipeline(
         _stage(context, "deduplicate_candidates", deduplicate_candidates.run)
         _stage(context, "cheap_filter", cheap_filter.run)
         _stage(context, "cheap_prescreen", cheap_prescreen.run)
+        # Phase 3 — embedding rerank culls the wider net to the strongest top-K BEFORE
+        # any paid fragment/full-doc spend (no-op if embeddings unavailable or pool small).
+        _stage(context, "rerank_candidates", rerank_candidates.run)
         _stage(context, "enrich_fragments", enrich_fragments.run, client)
         _stage(context, "score_candidates", score_candidates.run)
         logger.debug("Candidate scores and rejections", extra={"details": {

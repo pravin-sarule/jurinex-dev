@@ -34,18 +34,24 @@ def score(candidate: Candidate, issue: IssueCard, query: str, perspective: str, 
     # Fragment overlap approximation
     fragment_score = max(overlap_score(issue.legal_issue, candidate.fragment), overlap_score(query, candidate.fragment))
 
+    # Phase 3 (R6) — overlap with THIS case's own fact terms, so a candidate that matches
+    # the fact pattern (forfeiture / non-utilisation / change of user) out-scores a case
+    # that only shares the generic doctrine.
+    fact_text = " ".join((getattr(issue, "fact_terms", None) or []) + (issue.must_have_terms or []))
+    fact_score = max(overlap_score(fact_text, candidate.title), overlap_score(fact_text, candidate.fragment)) if fact_text else 0.0
+
     text = " ".join((candidate.title, candidate.headline, candidate.fragment))
 
     if semantic_score is not None:
         # Semantic ranking: embedding similarity (case vs candidate) is the primary
-        # relevance signal; lexical overlap + authority refine it.
-        lexical = max(title_score, fragment_score)
+        # relevance signal; lexical + fact overlap + authority refine it.
+        lexical = max(title_score, fragment_score, fact_score)
         candidate.fact_similarity_score = round(float(semantic_score), 3)
         candidate.relevance_score = round((0.65 * float(semantic_score)) + (0.20 * lexical) + (0.15 * candidate.authority_score), 3)
     else:
         # Fallback: deterministic lexical reranking (embeddings unavailable).
-        candidate.relevance_score = round((0.5 * title_score) + (0.3 * fragment_score) + (0.2 * candidate.authority_score), 3)
-        candidate.fact_similarity_score = round(overlap_score(case_context[:3000], text), 3)
+        candidate.relevance_score = round((0.4 * title_score) + (0.25 * fragment_score) + (0.2 * fact_score) + (0.15 * candidate.authority_score), 3)
+        candidate.fact_similarity_score = round(max(overlap_score(case_context[:3000], text), fact_score), 3)
 
     support_terms = ("allowed", "granted", "quashed", "set aside", "in favour", "entitled", "protected")
     adverse_terms = ("dismissed", "rejected", "against", "not entitled", "convicted", "barred")

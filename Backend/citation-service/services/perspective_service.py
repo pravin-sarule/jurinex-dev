@@ -78,18 +78,29 @@ def _extract_side_from_document(case_context: str) -> tuple[str, float, str, lis
     res_hits = [c for c in _RESPONDENT_CUES if c in low]
     writ = any(w in low for w in _WRIT_MARKERS)
 
-    # Respondent-side framing present and at least as strong → respondent document.
-    if res_hits and len(res_hits) >= len(pet_hits):
+    # R8 — a genuine RESPONDENT document is a counter-affidavit / reply: its tell-tale
+    # phrases (_RESPONDENT_CUES) must DOMINATE, not merely tie. A petitioner's writ
+    # always mentions "respondent(s)" incidentally; that must not flip the side.
+    respondent_doc = bool(res_hits) and len(res_hits) > len(pet_hits)
+    if respondent_doc:
         conf = min(0.85, 0.5 + 0.15 * len(res_hits))
         return "respondent", round(conf, 2), "respondent_block", res_hits
 
-    if pet_hits:
-        conf = (0.4 if writ else 0.0) + min(0.5, 0.2 * len(pet_hits))
-        return "petitioner", round(min(0.95, conf), 2), "petitioner_block", pet_hits
-
-    # Only a bare writ marker, no party framing → weak petitioner lean.
+    # R8 — an Article 226/32 WRIT is, by definition, filed BY the petitioner. With no
+    # dominant counter-affidavit framing, treat the writ marker as DECISIVE petitioner
+    # evidence (confidence >= the override threshold) so a wrong "respondent" perspective
+    # is corrected. This is the single largest cause of supporting cases being mislabelled
+    # ADVERSE. Still one-directional (only respondent→petitioner) and gated by the flag.
     if writ:
-        return "petitioner", 0.4, "petitioner_block", ["writ_jurisdiction"]
+        conf = min(0.97, _OVERRIDE_CONFIDENCE + 0.05 * len(pet_hits))
+        return "petitioner", round(conf, 2), "petitioner_block", (pet_hits or ["writ_jurisdiction"])
+
+    # Non-writ document: rely on explicit petitioner cues (kept below the override
+    # threshold so a non-writ doc never silently flips a user-chosen respondent side).
+    if pet_hits:
+        conf = min(0.75, 0.35 + 0.15 * len(pet_hits))
+        return "petitioner", round(conf, 2), "petitioner_block", pet_hits
+
     return "", 0.0, "", []
 
 
@@ -122,9 +133,10 @@ def detect_represented_side(perspective: str, case_context: str, query: str = ""
             and p in _RESPONDENT_PERSPECTIVES
             and doc_side == "petitioner"
             and confidence >= _OVERRIDE_CONFIDENCE):
-        logger.info("[JURINEX][%s][PERSPECTIVE_OVERRIDE] Corrected respondent→petitioner "
-                    "reason=writ_filed_by_client confidence=%.2f cues=%s",
-                    rid, confidence, cues[:4])
+        logger.warning("[JURINEX][%s][PERSPECTIVE_MISMATCH] User said 'respondent' but the document "
+                       "reads as a petitioner's writ — corrected respondent→petitioner "
+                       "reason=writ_filed_by_client confidence=%.2f cues=%s",
+                       rid, confidence, cues[:4])
         logger.info("[JURINEX][%s][PERSPECTIVE_FINAL] represented_side=petitioner "
                     "— all classification will use this value", rid)
         return "petitioner"

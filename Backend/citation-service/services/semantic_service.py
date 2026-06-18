@@ -44,10 +44,15 @@ def _ratio_slice(candidate: Candidate) -> str:
 
 
 def _issue_query_text(issue: IssueCard) -> str:
-    """Build the search-side text for an issue: the question + its doctrines/phrases."""
+    """Build the search-side text for an issue. Phase 3 (R6): include the case's OWN
+    fact terms + must-have keywords so the embedding query vector is grounded in the
+    actual fact pattern (forfeiture, non-utilisation, change of user…). Without them the
+    vector was doctrine-only and cosine capped in the 0.6-0.7 band on real cases."""
     parts = [issue.legal_issue or ""]
+    parts += list(getattr(issue, "fact_terms", None) or [])
     parts += list(getattr(issue, "doctrines", None) or [])
     parts += list(issue.phrase_terms or [])
+    parts += list(issue.must_have_terms or [])
     parts += list(issue.statutes or [])
     return " ".join(p for p in parts if p).strip()[:_ISSUE_QUERY_CHARS]
 

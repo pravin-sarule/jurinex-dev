@@ -4,6 +4,7 @@ import logging
 import os
 
 from core.budgets import BudgetTracker
+from core.config import settings
 from integrations.gemini._jsonsafe import loads_lenient
 from integrations.gemini.client import get_client
 from integrations.gemini.prompts import issue_extraction_prompt
@@ -11,10 +12,12 @@ from models.issue_models import IssueCard
 
 logger = logging.getLogger(__name__)
 
-# How much of the document to send. Skips far past the cover/index so the model
-# reaches the synopsis + grounds. gemini-3.5-flash has a very large context window.
-_MAX_CONTEXT_CHARS = int(os.environ.get("CITATION_V2_ISSUE_EXTRACT_CHARS", "60000"))
-_MAX_OUTPUT_TOKENS = int(os.environ.get("CITATION_V2_ISSUE_MAX_TOKENS", "8192"))
+# How much of the document to send and the output-token cap. Both come from settings
+# (CITATION_V2_ISSUE_EXTRACT_CHARS / CITATION_V2_ISSUE_MAX_TOKENS in .env), read at call
+# time. gemini-3.5-flash has a very large context window, so a big slice is fine; it
+# skips past the cover/index to reach the synopsis + grounds. (Reading these as
+# module-level os.environ constants silently fell back to the defaults when this module
+# imported before core.config had run load_dotenv().)
 
 
 def _issue_model() -> str:
@@ -54,14 +57,14 @@ def extract_issue_cards(
         return None
 
     model = _issue_model()
-    prompt = issue_extraction_prompt(query, text[:_MAX_CONTEXT_CHARS], perspective)
+    prompt = issue_extraction_prompt(query, text[:settings.issue_extract_chars], perspective)
     try:
         response = client.models.generate_content(
             model=model,
             contents=prompt,
             config={
                 "temperature": 0,
-                "max_output_tokens": _MAX_OUTPUT_TOKENS,
+                "max_output_tokens": settings.issue_max_output_tokens,
                 "response_mime_type": "application/json",
                 # Disable "thinking" so output tokens are spent on the JSON, not reasoning
                 # (thinking was eating the budget and truncating the JSON → parse failures).
@@ -88,6 +91,19 @@ def extract_issue_cards(
 
     def _strs(value, cap: int) -> list[str]:
         return [str(t).strip() for t in (value or []) if str(t).strip()][:cap]
+
+    def _recipes(value) -> list[dict]:
+        """Parse the optional AI-authored flat IK query recipes. Lenient — the strict
+        flat-operator validation happens in query_service before any recipe is searched."""
+        out: list[dict] = []
+        for item in (value or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("q") or item.get("query") or "").strip()
+            kind = str(item.get("kind") or item.get("type") or "precision").strip().lower()
+            if q:
+                out.append({"kind": kind, "q": q[:120]})
+        return out
 
     # Case-level opponent modelling (shared across cards so query_service can reach it).
     opp_args = _strs(data.get("opponent_arguments"), 6)
@@ -131,6 +147,10 @@ def extract_issue_cards(
             opponent_arguments=opp_args,
             opponent_doctrines=opp_doctrines,
             opponent_phrase_terms=opp_terms,
+            # Phase 2 — case-specific facts + relief words + ready-made flat IK recipes.
+            fact_terms=_strs(issue.get("fact_terms"), 8),
+            outcome_terms=_strs(issue.get("outcome_terms"), 5),
+            ai_query_recipes=_recipes(issue.get("queries")),
         ))
 
     if not cards:

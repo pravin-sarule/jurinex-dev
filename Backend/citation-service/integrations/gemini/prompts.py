@@ -1,84 +1,96 @@
 def issue_extraction_prompt(query: str, case_context: str, perspective: str) -> str:
-    """Tender/public-law issue extractor: screens each issue against a doctrine checklist
-    so the core doctrines (legitimate expectation, promissory estoppel, etc.) are actually
-    searched, marks the main issue, and models the opponent's authorities."""
+    """Domain-adaptive issue extractor: detects the case's field (tender/public-law,
+    land/tenancy/property, service, contract, criminal, etc.), screens each issue against
+    the doctrines relevant to THAT field, captures this case's OWN facts, and authors
+    ready-to-run flat Indian Kanoon query recipes grounded in those facts (so searches
+    stop collapsing to a bare doctrine + 'quashed')."""
     return (
-        "You are a senior Indian public-law and tender-litigation lawyer preparing to "
-        "search Indian Kanoon for relevant judgments in a writ petition.\n\n"
-        "Analyze the case and extract legal issues with precise search terms that will find "
-        "the most relevant judgments on Indian Kanoon.\n\n"
+        "You are a senior Indian litigation lawyer preparing to search Indian Kanoon for "
+        "judgments relevant to the case below. The case may be from ANY field — public law / "
+        "tender, land / tenancy / property, service, contract, taxation, criminal, family. "
+        "First identify the field, then extract issues with search terms and ready-made "
+        "queries that will find on-point judgments.\n\n"
         f"Represented side (research from their perspective): {perspective}\n"
         f"Case title / user query: {query}\n\n"
         "=== CASE DOCUMENT START ===\n"
         f"{case_context}\n"
         "=== CASE DOCUMENT END ===\n\n"
-        "Indian Kanoon search rules you MUST follow:\n"
+        "Indian Kanoon search rules you MUST follow (used for queries[] and phrase_terms[]):\n"
         "- ANDD between required terms, ORR between alternatives, NOTT to exclude.\n"
         "- Phrases in double quotes, e.g. \"legitimate expectation\".\n"
-        "- NO parentheses, NO nested operators. Flat structure only. Each phrase under 5 words.\n\n"
-        "DOCTRINE CHECKLIST — screen EVERY issue against ALL of these. In doctrines[] output "
-        "ONLY the short canonical phrase on the LEFT of the colon — the words a judgment "
-        "actually uses. NEVER output the description on the right, NEVER add parentheses, "
+        "- NO parentheses, NO nested operators. Flat structure only. Each phrase under 5 words.\n"
+        "- NEVER mix ANDD and ORR in the SAME query string (the engine is flat — '(A ORR B) "
+        "ANDD C' is impossible). Use ANDD for a precision query, ORR for a separate recall query.\n"
+        "- A judgment does NOT contain this petition's sentences verbatim — turn facts into "
+        "SHORT phrases (2-4 words), never whole sentences.\n\n"
+        "DOCTRINE CHECKLIST — screen each issue against the doctrines RELEVANT TO THIS CASE'S "
+        "FIELD. In doctrines[] output ONLY the short canonical phrase on the LEFT of the colon — "
+        "the words a judgment actually uses. NEVER output the right-side description, parentheses, "
         "slashes, or '(... line)' notes:\n"
-        "1. arbitrary and capricious : Article 14 arbitrariness / Tata Cellular line\n"
-        "2. scope of judicial review : judicial review of tender, Wednesbury unreasonableness\n"
-        "3. legitimate expectation : oral or written assurance acted upon\n"
-        "4. promissory estoppel : promissory estoppel against the State\n"
-        "5. cannot take advantage : authority cannot take advantage of its own wrong\n"
-        "6. level playing field : level playing field in public procurement\n"
-        "7. substantial compliance : essential vs ancillary conditions\n"
-        "8. natural justice : audi alteram partem\n"
-        "9. malafides : colourable exercise of power\n"
-        "10. proportionality : disproportionate action\n\n"
-        "GOOD phrase_terms: \"substantial compliance\", \"legitimate expectation\", "
-        "\"arbitrary and capricious\". BAD (never do this): \"Article 14 arbitrariness "
-        "(Tata Cellular line)\", \"essential vs ancillary conditions / substantial compliance\".\n\n"
-        "CONDITIONAL RULES:\n"
-        "- Missing experience certificate or qualification document: MUST include "
-        "\"substantial compliance\" and \"essential condition\" in phrase_terms and the doctrine "
-        "\"essential vs ancillary conditions\".\n"
-        "- Oral assurance or oral direction from authority: MUST include \"promissory estoppel\" "
-        "and \"legitimate expectation\" in phrase_terms and the doctrine \"authority cannot benefit "
-        "from own wrong\".\n"
-        "- Competing bidder accepted with non-compliant documents: MUST include \"level playing "
-        "field\" and \"discriminatory treatment\" in phrase_terms.\n"
-        "- Initial acceptance then later rejection: MUST include \"legitimate expectation\" and "
-        "\"inconsistent conduct\" in phrase_terms.\n\n"
+        "  Public law / tender: arbitrary and capricious : Article 14; scope of judicial review : "
+        "Tata Cellular line; legitimate expectation : assurance acted upon; promissory estoppel : "
+        "against the State; level playing field : public procurement; substantial compliance : "
+        "essential vs ancillary conditions.\n"
+        "  Land / tenancy / property: forfeiture of land : non-utilisation / breach of grant; "
+        "non-utilisation : land not used for sanctioned purpose; change of user : conversion of "
+        "land use; resumption of land : re-entry by lessor/State; bona fide industrial use : "
+        "industrial purpose; breach of condition : condition of grant or lease.\n"
+        "  General: natural justice : audi alteram partem; malafides : colourable exercise of "
+        "power; proportionality : disproportionate action; non-speaking order : no reasons given.\n\n"
+        "GOOD phrase_terms: \"substantial compliance\", \"non-utilisation\", \"change of user\", "
+        "\"arbitrary and capricious\". BAD (never do this): \"Article 14 arbitrariness (Tata "
+        "Cellular line)\", \"essential vs ancillary conditions / substantial compliance\".\n\n"
         "STRICTLY IGNORE boilerplate: cause-title, court/bench/city, party & advocate names, the "
-        "index / list of documents / exhibit & page numbers, e-tender notices and annexure listings.\n\n"
+        "index / list of documents / exhibit & page numbers, notices and annexure listings.\n\n"
+        "For EACH issue you MUST also build queries[] — ready-to-run flat IK strings grounded in "
+        "THIS case's facts. For each issue produce, where possible:\n"
+        "  - 2 precision queries  kind=\"precision\": \"<fact phrase>\" ANDD \"<doctrine phrase>\" "
+        "(ANDD only, 2-3 terms).\n"
+        "  - 1 statute query      kind=\"statute\":   \"<statute token e.g. section 63>\" ANDD "
+        "\"<fact phrase>\" (ANDD only; a short token, never a full citation).\n"
+        "  - 1 recall query       kind=\"recall\":    \"<fact A>\" ORR \"<fact B>\" ORR \"<fact C>\" "
+        "(ORR only — synonyms of ONE concept).\n"
+        "  - landmarks via landmark_cases (bare distinctive surname), NOT inside queries[].\n\n"
         "Return ONLY a JSON object of this exact shape:\n"
         "{\n"
         '  "case_summary": "2-3 sentence neutral summary of the dispute",\n'
+        '  "case_field": "e.g. land/tenancy, tender/public-law, service, contract, criminal",\n'
         '  "court": "court where filed, e.g. Bombay High Court / Supreme Court of India (empty if unclear)",\n'
-        '  "tender_stage": "e.g. technical bid evaluation / financial bid / blacklisting / award (empty if N/A)",\n'
         '  "issues": [\n'
         "    {\n"
         '      "legal_issue": "full legal question in one sentence",\n'
         '      "is_main_issue": true,\n'
-        '      "doctrines": ["applicable doctrines from the checklist"],\n'
-        '      "outcome_sought": "what the petitioner wants the court to order",\n'
-        '      "phrase_terms": ["6-8 exact multi-word phrases for IK, e.g. \\"legitimate expectation\\", \\"substantial compliance\\""],\n'
-        '      "must_have_terms": ["3-4 single salient keywords, e.g. tender, eligibility, blacklisting"],\n'
-        '      "synonyms": ["alternative terms for fallback queries"],\n'
-        '      "statutes": ["Article 14, Article 226, Section X of the Y Act"],\n'
-        '      "landmark_cases": ["Tata Cellular", "Reliance Energy", "Air India Cochin", "Motilal Padampat"]\n'
+        '      "doctrines": ["applicable doctrines from the checklist (canonical phrase only)"],\n'
+        '      "fact_terms": ["3-6 of THIS case\'s own facts as 2-4 word phrases, e.g. \\"non-utilisation\\", \\"change of user\\", \\"forfeiture of land\\""],\n'
+        '      "outcome_terms": ["relief/result words a winning judgment uses, e.g. quashed, set aside, allowed"],\n'
+        '      "outcome_sought": "what the represented side wants the court to order",\n'
+        '      "phrase_terms": ["6-8 exact multi-word legal phrases for IK"],\n'
+        '      "must_have_terms": ["3-4 single salient keywords from the facts"],\n'
+        '      "synonyms": ["alternative fact terms for recall queries"],\n'
+        '      "statutes": ["Article 226, Section 63-1A of the Maharashtra Tenancy Act"],\n'
+        '      "landmark_cases": ["bare distinctive surnames, e.g. \\"Laxmanrao\\", \\"Motilal Padampat\\""],\n'
+        '      "queries": [\n'
+        '        {"kind": "precision", "q": "\\"non-utilisation\\" ANDD \\"forfeiture of land\\""},\n'
+        '        {"kind": "recall", "q": "\\"non-utilisation\\" ORR \\"non-user\\" ORR \\"land not utilised\\""},\n'
+        '        {"kind": "statute", "q": "\\"section 63\\" ANDD tenancy"}\n'
+        "      ]\n"
         "    }\n"
         "  ],\n"
-        '  "opponent_arguments": ["what the respondent will argue"],\n'
+        '  "opponent_arguments": ["what the opposing side will argue"],\n'
         '  "opponent_doctrines": ["doctrines the opponent will cite"],\n'
         '  "opponent_phrase_terms": ["phrases to search for ADVERSE authority"]\n'
         "}\n\n"
         "Rules:\n"
         "- 3 to 5 issues, ordered by importance. EXACTLY ONE issue must have is_main_issue=true "
         "(the gravamen). Never let a sub-issue's terms stand in for the main issue.\n"
-        "- phrase_terms / doctrines must be REAL legal concepts a court would use — never party "
+        "- fact_terms / phrase_terms / doctrines must be REAL words a court uses — never party "
         "names, court names, cities, 'writ petition', 'exhibit', 'index', 'page'.\n"
-        "- Each phrase_term / doctrine MUST be a short phrase under 5 words with NO parentheses, "
-        "NO slashes, and NO descriptive labels — only words that appear verbatim in judgments.\n"
-        "- landmark_cases MUST be bare case names (e.g. \"Tata Cellular\", \"Motilal Padampat\") "
-        "so they can be searched directly.\n"
-        "- If a statute is not explicit, infer the most likely (e.g. Article 14/226 for arbitrary "
-        "state action) rather than leaving it empty.\n"
+        "- Each phrase MUST be under 5 words with NO parentheses, NO slashes, NO descriptive "
+        "labels — only words that appear verbatim in judgments.\n"
+        "- Every q in queries[] MUST obey the flat rules above: ANDD-only OR ORR-only, never both; "
+        "no parentheses; each quoted phrase under 5 words.\n"
+        "- landmark_cases MUST be bare distinctive names (drop 'State of', 'v.', '& Ors').\n"
+        "- If a statute is not explicit, infer the most likely rather than leaving it empty.\n"
         "- Output JSON only. No prose. No markdown."
     )
 

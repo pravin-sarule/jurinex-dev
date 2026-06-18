@@ -73,7 +73,10 @@ class TestRealJudgmentQueries(unittest.TestCase):
         self.assertTrue(any(p in joined for p in DOCTRINE_TO_PHRASES["authority cannot benefit from own wrong"]))
 
     def test_check2_at_least_three_multi_term_queries(self):
-        multi = [f for f in self.forms if f.count(" ANDD ") >= 2]
+        # Multi-term = combines >= 2 terms with ANDD (>= 1 ANDD operator). Queries are now
+        # 2-term precision (phrase + one short anchor) — ANDD-ing 3 rare phrases returned
+        # ~0 hits, so the contract is "combines terms", not "3+ terms".
+        multi = [f for f in self.forms if " ANDD " in f]
         self.assertGreaterEqual(len(multi), 3)
 
     def test_check3_landmark_queries_present(self):
@@ -82,9 +85,23 @@ class TestRealJudgmentQueries(unittest.TestCase):
         self.assertIn("Motilal Padampat", joined)
 
     def test_all_non_fallback_queries_combine_terms(self):
+        # Non-fallback FULL-TEXT queries must combine >= 2 terms with ANDD. Landmark
+        # case-name queries (case_name_search=True) are exempt: they are a single bare
+        # name routed through IK's title:"..." path (R3), so they carry no ANDD.
         for q in self.qs:
-            if not q.get("is_fallback"):
-                self.assertIn(" ANDD ", q["formInput"])
+            if q.get("is_fallback") or q.get("case_name_search"):
+                continue
+            self.assertIn(" ANDD ", q["formInput"])
+
+    def test_landmark_queries_are_bare_title_searches(self):
+        # R3 — landmark "A v. B" cause-titles are reduced to a distinctive party name
+        # and flagged for the title: path; they must NOT be full-text "name ANDD domain".
+        landmarks = [q for q in self.qs if q.get("query_type") == "landmark"]
+        self.assertTrue(landmarks, "expected at least one landmark query")
+        for q in landmarks:
+            self.assertTrue(q.get("case_name_search"), f"landmark not title-routed: {q['formInput']}")
+            self.assertNotIn(" ANDD ", q["formInput"])
+            self.assertNotIn(" v. ", q["formInput"].lower())
 
 
 if __name__ == "__main__":

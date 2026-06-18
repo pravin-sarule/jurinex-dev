@@ -32,6 +32,18 @@ class TestPerspectiveDetection(unittest.TestCase):
         # CHECK 4: Tondare's client is the petitioner; a wrong "respondent" is corrected.
         self.assertEqual(detect_represented_side("respondent", _TONDARE, "Tondare", "r2"), "petitioner")
 
+    def test_bare_writ_without_cue_phrases_is_decisive_petitioner(self):
+        # R8 (the Hitesh land-forfeiture case): a writ petition that lacks the exact
+        # petitioner cue phrases but is clearly an Article 226 petition (and has ZERO
+        # counter-affidavit framing) must still correct a wrong "respondent". Before the
+        # fix this returned "respondent" (confidence capped at 0.4, below the override).
+        doc = (
+            "IN THE HON'BLE HIGH COURT OF JUDICATURE OF BOMBAY. WRIT PETITION NO. OF 2024. "
+            "Hitesh Lahoti ... PETITIONER versus The State of Maharashtra ... RESPONDENTS. "
+            "Memo of Writ Petition under Article 226 of the Constitution of India."
+        )
+        self.assertEqual(detect_represented_side("respondent", doc, "Hitesh", "r8"), "petitioner")
+
     def test_genuine_respondent_document_is_not_flipped(self):
         # A real respondent-side counter-affidavit must stay respondent (no catastrophic flip).
         self.assertEqual(detect_represented_side("respondent", _COUNTER, "x", "r3"), "respondent")
