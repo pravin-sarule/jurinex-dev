@@ -591,24 +591,23 @@ def _gemini_web_queries(query: str) -> List[str]:
         return []
 
 
-def _gemini_grounding_search(query: str, num: int = 6) -> List[Dict[str, Any]]:
+def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
     """
-    Gemini Google Search grounding — the ONLY search method for the Gemini pipeline.
+    Gemini Google Search grounding — primary search for the Gemini pipeline.
 
-    Why: Cloud Run IPs are blocked by indiankanoon.org (instant 403).
-    Gemini's grounding infrastructure can read IK pages; the text is returned in
-    grounding_supports[].segment.text — we use that directly as snippets.
-
-    Steps:
-      1. One Gemini grounding call per query
-      2. Extract snippet text from grounding_supports (no secondary HTTP fetch needed)
-      3. Parallel HEAD requests to follow vertexaisearch redirect → actual source URL
-      4. Accept result if tier_of(url) ∈ {T1,T2} OR title looks like a legal judgment
+    Key design:
+    - Cloud Run IPs are blocked by indiankanoon.org → no direct HTTP scraping.
+    - Gemini grounding CAN read IK pages; actual judgment text is in
+      grounding_supports[i].segment.text — extracted and used as snippets.
+    - vertexaisearch redirect URIs cannot be resolved from Cloud Run (IK blocks
+      the redirect destination too), so we ACCEPT ALL grounding chunks that have
+      any content — Gemini's grounding already ensures relevance to the legal query.
+    - We try GET-based redirect resolution (not HEAD) for a cleaner final URL,
+      but a failure does NOT drop the result.
     """
     import re as _re
     from agents.citation_test_agent.domain_allowlist import tier_of
 
-    # Strip Boolean operators + site: hints — grounding handles search strategy
     clean_q = _re.sub(r'\b(?:AND|OR|NOT)\b', ' ', query)
     clean_q = _re.sub(r'site:\S+', '', clean_q)
     clean_q = _re.sub(r'["\(\)]', ' ', clean_q)
@@ -629,17 +628,17 @@ def _gemini_grounding_search(query: str, num: int = 6) -> List[Dict[str, Any]]:
             model="gemini-2.5-flash",
             contents=(
                 f"Search indiankanoon.org and Indian legal databases for court judgments on this topic.\n\n"
-                f"IMPORTANT: Return judgments from ALL time periods — include:\n"
+                f"Return judgments from ALL time periods — include:\n"
                 f"  • Landmark Supreme Court / Constitution Bench cases from 1960–2000\n"
                 f"  • Established High Court precedents from 2000–2010\n"
                 f"  • Recent judgments from 2010–2024\n"
-                f"Do NOT limit results to only recent judgments. Old landmark cases carry the most binding weight.\n\n"
+                f"Do NOT limit results to only recent judgments. Find as many distinct judgments as possible.\n\n"
                 f"Query: {clean_q}"
             ),
             config=_gtypes.GenerateContentConfig(
                 tools=[_gtypes.Tool(google_search=_gtypes.GoogleSearch())],
                 temperature=0.0,
-                max_output_tokens=2048,
+                max_output_tokens=3000,
             ),
         )
     except Exception as exc:
@@ -662,79 +661,86 @@ def _gemini_grounding_search(query: str, num: int = 6) -> List[Dict[str, Any]]:
         logger.warning("[GEMINI_GROUNDING] 0 chunks for: %s", clean_q[:60])
         return []
 
-    # Build chunk_index → [text …] from grounding_supports
+    # ── 1. Build chunk_index → snippet text from grounding_supports ──────────
     chunk_texts: Dict[int, List[str]] = {}
     for sup in supports:
         txt = getattr(getattr(sup, "segment", None), "text", "") or ""
-        if len(txt) > 40:
+        if len(txt) > 30:
             for idx in (getattr(sup, "grounding_chunk_indices", []) or []):
                 chunk_texts.setdefault(int(idx), []).append(txt)
 
-    # Also pull URLs from the raw text response (Gemini sometimes cites them inline)
+    # ── 2. Also harvest URLs Gemini cited inline in its text response ─────────
     raw_text = "".join(
         getattr(p, "text", "") for p in (
             getattr(getattr(candidate, "content", None), "parts", []) or []
         )
     )
-    inline_urls: List[str] = [
-        u.rstrip(".,;)")
-        for u in _re.findall(r'https?://\S+', raw_text)
-        if tier_of(u.rstrip(".,;)")) in ("T1", "T2")
-    ]
+    inline_urls: List[str] = []
+    for u in _re.findall(r'https?://[^\s<>\"\']+', raw_text):
+        u = u.rstrip(".,;)>")
+        if tier_of(u) in ("T1", "T2"):
+            inline_urls.append(u)
 
-    # Follow vertexaisearch redirect URIs → actual source URLs (parallel HEAD, 5s each)
+    # ── 3. Try GET-based redirect resolution to get clean source URLs ─────────
+    #    Failure = keep redirect URI; never drop a result over this.
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
     import httpx as _hx
 
-    def _head_follow(uri: str) -> str:
+    def _get_follow(uri: str) -> str:
+        """Follow vertexaisearch redirect via GET to retrieve the actual source URL."""
         try:
-            with _hx.Client(timeout=5.0, follow_redirects=True,
-                             headers={"User-Agent": "Mozilla/5.0"}) as c:
-                return str(c.head(uri).url)
+            with _hx.Client(
+                timeout=5.0,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            ) as c:
+                r = c.get(uri)
+                return str(r.url)
         except Exception:
             return uri
 
-    redirect_map: Dict[int, str] = {}
     raw_uris = [
-        (i, getattr(ch.web, "uri", "") if getattr(ch, "web", None) else "")
+        (i, (getattr(ch, "web", None) and getattr(ch.web, "uri", "")) or "")
         for i, ch in enumerate(chunks)
     ]
+    redirect_map: Dict[int, str] = {}
     if raw_uris:
-        with _TPE(max_workers=min(len(raw_uris), 6)) as pool:
-            futs = {pool.submit(_head_follow, u): i for i, u in raw_uris if u}
-            for fut in _ac(futs, timeout=12):
+        with _TPE(max_workers=min(len(raw_uris), 8)) as pool:
+            futs = {pool.submit(_get_follow, u): i for i, u in raw_uris if u}
+            for fut in _ac(futs, timeout=15):
                 i = futs[fut]
                 try:
                     redirect_map[i] = fut.result()
                 except Exception:
                     pass
 
-    # Assemble hits
+    # ── 4. Assemble hits — ACCEPT ALL chunks that have a title or snippet ─────
+    #    Rationale: Gemini's grounding already filtered for relevance to the legal
+    #    query. Dropping by domain kills IK results whose redirects resolve to IK
+    #    pages blocked by Cloud Run. We keep everything and let the extractor judge.
     hits: List[Dict[str, Any]] = []
     seen: set = set()
-
-    _LEGAL_KW = {"vs", "v.", "court", "bench", "tribunal", "high court", "supreme court",
-                 "kanoon", "petitioner", "respondent", "appellant", "writ", "civ", "crl"}
 
     for i, chunk in enumerate(chunks):
         web = getattr(chunk, "web", None)
         if not web:
             continue
-        redirect_uri = getattr(web, "uri", "") or ""
+
+        redirect_uri = (getattr(web, "uri", "") or "")
         actual_uri   = redirect_map.get(i, redirect_uri)
-        title        = getattr(web, "title", "") or ""
-        snippet      = " ".join(chunk_texts.get(i, []))[:1200]
+        title        = (getattr(web, "title", "") or "")
+        snippet      = " ".join(chunk_texts.get(i, []))[:1500]
 
-        # Prefer actual URI for tier; fall back to redirect URI
-        tier = tier_of(actual_uri) or tier_of(redirect_uri)
-        if tier is None:
-            tl = title.lower()
-            if any(kw in tl for kw in _LEGAL_KW):
-                tier = "T2"
-            else:
-                continue  # skip non-legal results
+        # Skip only truly empty results
+        if not title and not snippet:
+            continue
 
-        use_uri = actual_uri if actual_uri != redirect_uri else redirect_uri
+        # Tier: use resolved URL first; fall back to redirect URL; default T2
+        tier = tier_of(actual_uri) or tier_of(redirect_uri) or "T2"
+
+        # Use the cleaner URL for display; prefer resolved if different from redirect
+        use_uri = actual_uri if (actual_uri and actual_uri != redirect_uri) else redirect_uri
+
         if use_uri in seen:
             continue
         seen.add(use_uri)
@@ -748,13 +754,13 @@ def _gemini_grounding_search(query: str, num: int = 6) -> List[Dict[str, Any]]:
         if len(hits) >= num:
             break
 
-    # Append any inline-URL hits not already captured
+    # Append inline-cited URLs not already in hits
     for url in inline_urls:
         if url not in seen and len(hits) < num:
             seen.add(url)
-            hits.append({"uri": url, "title": url, "snippet": "", "authority_tier": tier_of(url)})
+            hits.append({"uri": url, "title": url, "snippet": "", "authority_tier": tier_of(url) or "T2"})
 
-    logger.info("[GEMINI_GROUNDING] %d/%d chunks accepted for %r", len(hits), len(chunks), clean_q[:60])
+    logger.info("[GEMINI_GROUNDING] %d/%d chunks kept for %r", len(hits), len(chunks), clean_q[:60])
     return hits
 
 
@@ -1206,29 +1212,36 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     search_error = ""
 
     if method == "gemini":
-        # Gemini Google Search grounding — 4 parallel calls for full coverage
-        # Slot 1-3: top planned queries (recent + any-era results)
-        # Slot 4:   explicit landmark query to pull pre-2006 Supreme Court cases
+        # 5 parallel Gemini grounding calls for maximum citation coverage:
+        #   Slots 1-3 : top planned queries (mix of recent + any-era)
+        #   Slot 4    : landmark/pre-2006 Supreme Court query
+        #   Slot 5    : broad fact-pattern query with different vocabulary
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+        import re as _re3
 
         top_queries = [q for q in queries[:3] if q.strip()]
 
-        # Build a landmark-targeted query from the case issue text
+        # Landmark query — forces old SC/HC cases into results
         issue_text = state.get("issue") or case_query
-        # Extract key nouns (strip pronouns/filler) for the landmark query
-        import re as _re3
-        _kw = _re3.sub(r'\b(the|a|an|is|are|was|were|of|for|in|on|at|to|and|or|with|by)\b',
-                       ' ', issue_text.lower(), flags=_re3.IGNORECASE)
-        _kw = ' '.join(sorted(set(_re3.findall(r'[a-z]{4,}', _kw)), key=len, reverse=True)[:6])
-        landmark_query = f"Supreme Court landmark judgment {_kw} India 1980 1990 2000"
+        _stop = {'the','a','an','is','are','was','were','of','for','in','on','at','to','and','or','with','by','that','this','have','had','has','been','its'}
+        _kw_tokens = [w for w in _re3.findall(r'[a-zA-Z]{4,}', issue_text.lower()) if w not in _stop]
+        _kw = ' '.join(dict.fromkeys(_kw_tokens)[:5])  # first 5 unique keywords, order-preserved
+        landmark_query  = f"Supreme Court India landmark judgment {_kw} 1970 1980 1990 2000 2005"
 
-        grounding_queries = top_queries + [landmark_query]
-        print(f"[CITATION_TEST]   → {len(grounding_queries)} grounding queries (parallel, inc. landmark)", flush=True)
+        # Broad fact-pattern query using queries[3] or queries[4] for different vocabulary
+        broad_query = queries[3].strip() if len(queries) > 3 and queries[3].strip() else (
+            f"High Court India judgment {_kw} stamp duty revenue"
+        )
+
+        grounding_queries = top_queries + [landmark_query, broad_query]
+        print(f"[CITATION_TEST]   → {len(grounding_queries)} grounding queries (parallel)", flush=True)
+        for i, gq in enumerate(grounding_queries, 1):
+            print(f"[CITATION_TEST]     G{i}. {gq[:90]}", flush=True)
 
         all_hits_ordered: List[Dict[str, Any]] = []
-        with _TPE(max_workers=4) as pool:
-            futs = {pool.submit(_gemini_grounding_search, q, 7): q for q in grounding_queries}
-            for fut in _ac(futs, timeout=55):
+        with _TPE(max_workers=5) as pool:
+            futs = {pool.submit(_gemini_grounding_search, q, 10): q for q in grounding_queries}
+            for fut in _ac(futs, timeout=60):
                 try:
                     for h in (fut.result() or []):
                         all_hits_ordered.append(_normalize_hit(h))
@@ -1240,7 +1253,7 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
             if uri and uri not in seen_uris:
                 seen_uris.add(uri)
                 all_sources.append(hit)
-                if len(all_sources) >= 24:
+                if len(all_sources) >= 30:
                     break
     else:
         # Build Serper-friendly queries: indiankanoon.org first, then cleaned Boolean queries
