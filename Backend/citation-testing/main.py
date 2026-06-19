@@ -1,7 +1,7 @@
 """
 Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) citation research.
 
-Port: 8003 (local dev)
+Port: 8003 (local dev), PORT=8080 (Cloud Run)
 
 Endpoints:
   GET  /                           — service info
@@ -35,7 +35,9 @@ for _noisy in ("httpx", "httpcore", "google_genai", "google.genai"):
 logger = logging.getLogger(__name__)
 
 _project_root = Path(__file__).resolve().parent
-load_dotenv(_project_root / ".env")
+_env_file = _project_root / ".env"
+if _env_file.is_file():
+    load_dotenv(_env_file)
 
 CORS_ORIGINS = os.environ.get(
     "CORS_ORIGINS",
@@ -254,6 +256,6 @@ async def run_research(
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("API_PORT", "8003"))
+    port = int(os.environ.get("PORT") or os.environ.get("API_PORT", "8003"))
     host = os.environ.get("API_HOST", "0.0.0.0")
     uvicorn.run("main:app", host=host, port=port, reload=True)

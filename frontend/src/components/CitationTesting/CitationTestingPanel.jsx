@@ -1,0 +1,629 @@
+import React, { useState, useEffect, useRef } from 'react';
+import documentApi from '../../services/documentApi';
+import { CITATION_TESTING_SERVICE_URL, getUserIdForDrafting } from '../../config/apiConfig';
+
+const T = '#21C1B6';
+
+const METHODS = [
+  {
+    id: 'gemini', label: 'Gemini', sub: 'Google Grounding',
+    color: T, activeBg: '#F0FDFA', activeBorder: T,
+    icon: <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  },
+  {
+    id: 'claude', label: 'Claude', sub: 'Serper Web Search',
+    color: '#E65100', activeBg: '#FFF8F5', activeBorder: '#E65100',
+    icon: <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/><path d="M9 9h6M9 12h6M9 15h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>,
+  },
+];
+
+const PIPELINE_STAGES = [
+  'Fetching case documents…',
+  'Case Analyzer — extracting legal issues, statutes & parties…',
+  'Research Decomposer — building similar-fact research questions…',
+  'Query Planner — generating precedent search queries…',
+  'Searching indiankanoon.org and authorised sources…',
+  'Extracting citation briefs with court arguments…',
+];
+
+const WEIGHT_CFG = {
+  BINDING:           { bg: '#FEF3C7', text: '#92400E', border: '#FDE68A', label: 'BINDING — Supreme Court' },
+  PERSUASIVE:        { bg: '#EFF6FF', text: '#1D4ED8', border: '#BFDBFE', label: 'PERSUASIVE — High Court' },
+  PERSUASIVE_OTHER:  { bg: '#F5F3FF', text: '#6D28D9', border: '#DDD6FE', label: 'PERSUASIVE — Other HC'  },
+  TRIBUNAL:          { bg: '#F9FAFB', text: '#4B5563', border: '#E5E7EB', label: 'Tribunal / Other'       },
+};
+const TIER_CFG = {
+  T1: { bg: '#F0FDF4', text: '#166534', border: '#BBF7D0', label: 'T1 Official' },
+  T2: { bg: '#EFF6FF', text: '#1D4ED8', border: '#BFDBFE', label: 'T2 Reporter' },
+};
+const CONF_CFG = {
+  HIGH:   { bg: '#F0FDF4', text: '#166534', border: '#BBF7D0' },
+  MEDIUM: { bg: '#FFFBEB', text: '#92400E', border: '#FDE68A' },
+};
+
+function Badge({ cfg, label }) {
+  return (
+    <span className="text-xs font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
+      style={{ background: cfg.bg, color: cfg.text, border: `1px solid ${cfg.border}` }}>
+      {label || cfg.label}
+    </span>
+  );
+}
+
+function Section({ title, icon, children, accent }) {
+  return (
+    <div className="rounded-lg border border-gray-200 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+        {icon && <span className="text-base">{icon}</span>}
+        <span className="text-xs font-bold uppercase tracking-wider" style={{ color: accent || '#374151' }}>{title}</span>
+      </div>
+      <div className="px-4 py-3 text-sm text-gray-700 leading-relaxed">{children}</div>
+    </div>
+  );
+}
+
+function Spinner({ size = 4 }) {
+  return (
+    <svg className={`animate-spin h-${size} w-${size}`} viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+    </svg>
+  );
+}
+
+function CitationCard({ c, idx }) {
+  const [open, setOpen] = useState(false);
+  const weightCfg = WEIGHT_CFG[c.authority_weight] || WEIGHT_CFG.PERSUASIVE;
+  const tierCfg   = TIER_CFG[c.authority_tier]     || TIER_CFG.T2;
+  const confCfg   = CONF_CFG[c.confidence]         || CONF_CFG.MEDIUM;
+
+  const similarities = (c.factual_similarity || '')
+    .split(/\n|•|·|-(?=\s)/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+
+      {/* ── Card header ── */}
+      <div
+        className="px-5 py-4 cursor-pointer hover:bg-gray-50 transition-colors"
+        onClick={() => setOpen(!open)}
+      >
+        <div className="flex items-start gap-3">
+          {/* Index badge */}
+          <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 text-xs font-bold text-white"
+            style={{ background: T }}>
+            {idx + 1}
+          </div>
+
+          <div className="flex-1 min-w-0">
+            {/* Authority badges */}
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              <Badge cfg={weightCfg} label={weightCfg.label} />
+              <Badge cfg={tierCfg} />
+              <Badge cfg={confCfg} label={c.confidence} />
+              {c.year && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium">{c.year}</span>
+              )}
+            </div>
+
+            {/* Case name */}
+            <div className="font-bold text-gray-900 text-base leading-snug">{c.parties || 'Unknown Parties'}</div>
+
+            {/* Court + citation */}
+            <div className="flex flex-wrap items-center gap-2 mt-1">
+              {c.court && <span className="text-sm text-gray-500">{c.court}{c.bench ? ` · ${c.bench}` : ''}</span>}
+              {c.citation_no && (
+                <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded" style={{ background: '#F0FDFA', color: T }}>
+                  {c.citation_no}
+                </span>
+              )}
+            </div>
+
+            {/* Key principle preview */}
+            {c.key_principle && (
+              <div className="mt-2 text-sm text-gray-600 italic">"{c.key_principle}"</div>
+            )}
+          </div>
+
+          <svg className={`w-5 h-5 text-gray-400 flex-shrink-0 mt-1 transition-transform ${open ? 'rotate-180' : ''}`}
+            viewBox="0 0 24 24" fill="none">
+            <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </div>
+      </div>
+
+      {/* ── Full brief (expanded) ── */}
+      {open && (
+        <div className="border-t border-gray-100 divide-y divide-gray-100">
+
+          {/* HOW TO USE IN COURT — most prominent */}
+          {c.our_argument && (
+            <div className="px-5 py-4" style={{ background: '#FFFBEB' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" style={{ color: '#B45309' }}>
+                  <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-800">How to Use in Court</span>
+              </div>
+              <p className="text-sm text-amber-900 leading-relaxed font-medium">{c.our_argument}</p>
+            </div>
+          )}
+
+          <div className="px-5 py-4 space-y-4">
+
+            {/* Facts of the precedent case */}
+            {c.facts_of_precedent && (
+              <Section title="Facts of the Precedent Case" icon="📋">
+                {c.facts_of_precedent}
+              </Section>
+            )}
+
+            {/* Legal issue decided */}
+            {c.legal_issue && (
+              <Section title="Legal Issue Decided" icon="⚖️" accent="#1D4ED8">
+                {c.legal_issue}
+              </Section>
+            )}
+
+            {/* Ratio decidendi */}
+            {c.ratio && (
+              <Section title="Ratio Decidendi (What the Court Held)" icon="🏛️" accent="#166534">
+                {c.ratio}
+              </Section>
+            )}
+
+            {/* Key quote */}
+            {c.key_quote && (
+              <div className="rounded-lg border-l-4 bg-gray-50 px-4 py-3" style={{ borderColor: T }}>
+                <div className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Key Quote from Judgment</div>
+                <blockquote className="text-sm text-gray-700 italic leading-relaxed">"{c.key_quote}"</blockquote>
+              </div>
+            )}
+
+            {/* Factual similarity */}
+            {similarities.length > 0 && (
+              <Section title="Why This Case Matches Ours" icon="🔗" accent={T}>
+                <ul className="space-y-1.5">
+                  {similarities.map((s, i) => (
+                    <li key={i} className="flex items-start gap-2">
+                      <svg className="w-4 h-4 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" style={{ color: T }}>
+                        <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                      <span>{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            )}
+
+            {/* Distinguishing notes */}
+            {c.distinguishing_notes && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <svg className="w-4 h-4 text-amber-600 flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                    <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-800">Caution — Distinguishing Facts</span>
+                </div>
+                <p className="text-sm text-amber-900 leading-relaxed">{c.distinguishing_notes}</p>
+              </div>
+            )}
+
+            {/* Source link */}
+            {c.source_url && (
+              <div className="flex items-center gap-2 pt-1">
+                <svg className="w-4 h-4 text-gray-400 flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                  <path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <a href={c.source_url} target="_blank" rel="noopener noreferrer"
+                  className="text-xs break-all hover:underline" style={{ color: T }}>
+                  {c.source_url}
+                </a>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function CitationTestingPanel() {
+  const [method, setMethod]             = useState('gemini');
+  const [cases, setCases]               = useState([]);
+  const [selectedId, setSelectedId]     = useState('');
+  const [casesLoading, setCasesLoading] = useState(false);
+  const [casesError, setCasesError]     = useState('');
+  const [manualQuery, setManualQuery]   = useState('');
+  const [useManual, setUseManual]       = useState(false);
+  const [running, setRunning]           = useState(false);
+  const [result, setResult]             = useState(null);
+  const [error, setError]               = useState('');
+  const [stageIdx, setStageIdx]         = useState(-1);
+  const resultsRef = useRef(null);
+
+  async function loadCases() {
+    setCasesLoading(true);
+    setCasesError('');
+    try {
+      const r = await documentApi.getCases();
+      const list = r?.cases ?? r?.data ?? (Array.isArray(r) ? r : []);
+      const arr = Array.isArray(list) ? list : [];
+      setCases(arr);
+      if (arr.length === 0) {
+        setCasesError('empty');
+      }
+    } catch (e) {
+      setCases([]);
+      setCasesError(e?.message || 'network');
+    } finally {
+      setCasesLoading(false);
+    }
+  }
+
+  useEffect(() => { loadCases(); }, []);
+
+  const caseId   = c => c?.id ?? c?.case_id ?? '';
+  const caseName = c => c?.case_title ?? c?.name ?? c?.title ?? caseId(c) ?? 'Untitled';
+  const selMethod = METHODS.find(m => m.id === method);
+
+  async function handleRun() {
+    const hasCase = useManual ? manualQuery.trim() : selectedId;
+    if (!hasCase) { setError(useManual ? 'Please enter a case name or description.' : 'Please select a case.'); return; }
+    setError(''); setResult(null); setStageIdx(0); setRunning(true);
+
+    let si = 0;
+    const ticker = setInterval(() => {
+      si++;
+      if (si < PIPELINE_STAGES.length) setStageIdx(si);
+      else clearInterval(ticker);
+    }, 2800);
+
+    try {
+      const token  = localStorage.getItem('token') || localStorage.getItem('authToken') || '';
+      const userId = getUserIdForDrafting();
+      const body = useManual
+        ? { method, case_query: manualQuery.trim(), user_id: userId || undefined }
+        : { method, case_id: selectedId, user_id: userId || undefined };
+      const res = await fetch(`${CITATION_TESTING_SERVICE_URL}/citation-test/research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(body),
+      });
+      clearInterval(ticker);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Research failed');
+      setStageIdx(PIPELINE_STAGES.length - 1);
+      setResult(data);
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
+    } catch (e) {
+      clearInterval(ticker);
+      setError(e.message || 'Citation research failed. Check that the citation-testing service is available.');
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  /* Authority weight sort order */
+  const WEIGHT_ORDER = { BINDING: 0, PERSUASIVE: 1, PERSUASIVE_OTHER: 2, TRIBUNAL: 3 };
+  const sortedCitations = result?.citations
+    ? [...result.citations].sort((a, b) =>
+        (WEIGHT_ORDER[a.authority_weight] ?? 4) - (WEIGHT_ORDER[b.authority_weight] ?? 4))
+    : [];
+
+  const binding    = sortedCitations.filter(c => c.authority_weight === 'BINDING');
+  const persuasive = sortedCitations.filter(c => c.authority_weight !== 'BINDING');
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 space-y-5">
+
+        {/* Header */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-5">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ background: '#F0FDFA' }}>
+              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" style={{ color: T }}>
+                <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+                  stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-gray-900">Citation Research — Lawyer Brief</h1>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Finds past court judgments with the same facts · Full citation brief with court argument · No need to read the full judgment
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Method selector */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+          <div className="text-sm font-semibold text-gray-700 mb-3">Select AI Method</div>
+          <div className="grid grid-cols-2 gap-3">
+            {METHODS.map(opt => {
+              const active = method === opt.id;
+              return (
+                <button key={opt.id} onClick={() => setMethod(opt.id)}
+                  className="text-left p-4 rounded-xl border-2 transition-all duration-150"
+                  style={{ background: active ? opt.activeBg : '#FAFAFA', borderColor: active ? opt.activeBorder : '#E5E7EB' }}>
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                      style={{ background: opt.color, color: '#fff' }}>
+                      {opt.icon}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-gray-900 text-sm">{opt.label}</div>
+                      <div className="text-xs text-gray-500">{opt.sub}</div>
+                    </div>
+                    {active && (
+                      <div className="w-5 h-5 rounded-full flex items-center justify-center"
+                        style={{ background: opt.activeBorder }}>
+                        <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
+                          <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                      </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Case selector */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold text-gray-700">
+              {useManual ? 'Enter Case Name / Description' : 'Select Case'}
+              <span className="text-red-500 ml-0.5">*</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {casesLoading && <span className="flex items-center gap-1 text-xs text-gray-400"><Spinner size={3} />Loading…</span>}
+              {!casesLoading && (
+                <button onClick={() => setUseManual(v => !v)}
+                  className="text-xs px-2.5 py-1 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors">
+                  {useManual ? '← Pick from list' : 'Type manually →'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {useManual ? (
+            /* Manual entry mode */
+            <div className="space-y-2">
+              <textarea
+                rows={3}
+                value={manualQuery}
+                onChange={e => { setManualQuery(e.target.value); setResult(null); setError(''); }}
+                placeholder="e.g. GREEN EYE INFRASTRUCTURE PVT. LTD. vs CHIEF CONTROLLING REVENUE AUTHORITY MAHARASHTRA — stamp duty dispute on infrastructure company..."
+                className="w-full border border-gray-300 rounded-lg px-3.5 py-2.5 text-sm text-gray-900 bg-white resize-none
+                           focus:outline-none focus:ring-2 focus:ring-[#21C1B6]/30 focus:border-[#21C1B6] transition-colors"
+              />
+              <p className="text-xs text-gray-500">
+                Type the case title and a brief description of the dispute. The AI will research relevant precedents.
+              </p>
+            </div>
+          ) : cases.length > 0 ? (
+            /* Dropdown mode */
+            <select value={selectedId} onChange={e => { setSelectedId(e.target.value); setResult(null); setError(''); }}
+              className="w-full border border-gray-300 rounded-lg px-3.5 py-2.5 text-sm text-gray-900 bg-white
+                         focus:outline-none focus:ring-2 focus:ring-[#21C1B6]/30 focus:border-[#21C1B6] transition-colors">
+              <option value="">— Choose a case —</option>
+              {cases.map(c => <option key={caseId(c)} value={caseId(c)}>{caseName(c)}</option>)}
+            </select>
+          ) : (
+            /* Empty state with retry */
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 space-y-2">
+              <div className="flex items-start gap-2">
+                <svg className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <div>
+                  <div className="text-sm font-semibold text-amber-800">
+                    {casesError === 'empty' ? 'No cases found for your account' : 'Could not load cases'}
+                  </div>
+                  <div className="text-xs text-amber-700 mt-0.5">
+                    {casesError === 'empty'
+                      ? 'The document service is running but returned no cases. This may be because the firm context service (port 5000/5001) is offline. Use "Type manually" to enter your case directly.'
+                      : `Error: ${casesError}. Check that the agentic-document-service is running on port 8092.`}
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button onClick={loadCases}
+                  className="text-xs px-3 py-1.5 rounded-lg border border-amber-300 text-amber-800 bg-white hover:bg-amber-50 transition-colors font-medium">
+                  Retry
+                </button>
+                <button onClick={() => setUseManual(true)}
+                  className="text-xs px-3 py-1.5 rounded-lg text-white font-medium transition-colors"
+                  style={{ background: T }}>
+                  Type case manually →
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
+            <svg className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none">
+              <path d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+            </svg>
+            <span className="text-sm text-red-700">{error}</span>
+          </div>
+        )}
+
+        {/* Run button */}
+        {(() => {
+          const isReady = useManual ? manualQuery.trim().length > 3 : !!selectedId;
+          return (
+            <button onClick={handleRun} disabled={running || !isReady}
+              className="w-full py-3 px-6 rounded-xl font-semibold text-white text-sm transition-all
+                         disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90 active:scale-[0.99]"
+              style={{ background: running || !isReady ? '#9CA3AF' : selMethod.color }}>
+              {running
+                ? <span className="flex items-center justify-center gap-2"><Spinner size={4} />Finding similar-fact precedents…</span>
+                : `Find Precedents — ${selMethod.label}`}
+            </button>
+          );
+        })()}
+
+        {/* Pipeline progress */}
+        {(running || (stageIdx >= 0 && result)) && (
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+            <div className="text-sm font-semibold text-gray-700 mb-4">Pipeline Progress</div>
+            <div className="space-y-2.5">
+              {PIPELINE_STAGES.map((stage, i) => {
+                const done   = !running && i <= stageIdx;
+                const active = running && i === stageIdx;
+                return (
+                  <div key={i} className="flex items-center gap-3">
+                    <div className="w-5 h-5 flex-shrink-0">
+                      {done ? (
+                        <div className="w-5 h-5 rounded-full flex items-center justify-center"
+                          style={{ background: '#F0FDFA', border: `1.5px solid ${T}` }}>
+                          <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" style={{ color: T }}>
+                            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        </div>
+                      ) : active ? (
+                        <div className="w-5 h-5 rounded-full flex items-center justify-center"
+                          style={{ background: '#EFF6FF', border: '1.5px solid #3B82F6' }}>
+                          <Spinner size={2} />
+                        </div>
+                      ) : (
+                        <div className="w-5 h-5 rounded-full border-2 border-gray-200" />
+                      )}
+                    </div>
+                    <span className={`text-sm ${done ? 'text-gray-700' : active ? 'text-blue-600 font-medium' : 'text-gray-400'}`}>
+                      {stage}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── RESULTS ── */}
+        {result && (
+          <div ref={resultsRef} className="space-y-5">
+
+            {/* Summary */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-base font-bold text-gray-900">Research Results</h2>
+                <span className="text-xs px-2.5 py-1 rounded-full font-semibold text-white"
+                  style={{ background: selMethod.color }}>via {selMethod.label}</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {[
+                  { label: 'Total Citations', value: sortedCitations.length, color: T },
+                  { label: 'Binding (SC)',    value: binding.length,         color: '#B45309' },
+                  { label: 'Sources Found',   value: result.search_results?.length ?? 0, color: '#6366F1' },
+                  { label: 'Time',            value: `${result.elapsed_seconds}s`,       color: '#6B7280' },
+                ].map(({ label, value, color }) => (
+                  <div key={label} className="bg-gray-50 rounded-lg p-3 text-center">
+                    <div className="text-xl font-bold" style={{ color }}>{value}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">{label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {sortedCitations.length > 0 ? (
+              <div className="space-y-5">
+
+                {/* Binding citations */}
+                {binding.length > 0 && (
+                  <div>
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-2 h-2 rounded-full bg-amber-500" />
+                      <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+                        Binding Precedents — Supreme Court of India
+                        <span className="ml-2 text-gray-400 font-normal normal-case">({binding.length})</span>
+                      </h3>
+                    </div>
+                    <div className="space-y-4">
+                      {binding.map((c, i) => <CitationCard key={i} c={c} idx={i} />)}
+                    </div>
+                  </div>
+                )}
+
+                {/* Persuasive citations */}
+                {persuasive.length > 0 && (
+                  <div>
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-2 h-2 rounded-full bg-blue-500" />
+                      <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+                        Persuasive Precedents — High Courts &amp; Others
+                        <span className="ml-2 text-gray-400 font-normal normal-case">({persuasive.length})</span>
+                      </h3>
+                    </div>
+                    <div className="space-y-4">
+                      {persuasive.map((c, i) => <CitationCard key={i} c={c} idx={binding.length + i} />)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-10 text-center">
+                <div className="w-14 h-14 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-3">
+                  <svg className="w-7 h-7 text-gray-400" viewBox="0 0 24 24" fill="none">
+                    <path d="M21 21l-4.35-4.35M17 11A6 6 0 111 11a6 6 0 0116 0z"
+                      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </div>
+                <div className="font-semibold text-gray-800 mb-1">No citations found</div>
+                <div className="text-sm text-gray-500">
+                  {result.gaps?.join(' · ') || 'Try a different method or ensure your case documents are uploaded.'}
+                </div>
+              </div>
+            )}
+
+            {/* Sources searched */}
+            {result.search_results?.length > 0 && (
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <div className="text-sm font-semibold text-gray-700 mb-3">
+                  Sources Searched <span className="text-gray-400 font-normal">({result.search_results.length})</span>
+                </div>
+                <div className="space-y-1.5">
+                  {result.search_results.map((s, i) => {
+                    const cfg = TIER_CFG[s.authority_tier] || TIER_CFG.T2;
+                    return (
+                      <div key={i} className="flex items-center gap-2.5">
+                        <span className="text-xs px-1.5 py-0.5 rounded font-semibold flex-shrink-0"
+                          style={{ background: cfg.bg, color: cfg.text, border: `1px solid ${cfg.border}` }}>
+                          {s.authority_tier}
+                        </span>
+                        <a href={s.uri} target="_blank" rel="noopener noreferrer"
+                          className="text-xs text-gray-500 hover:text-gray-900 truncate hover:underline transition-colors">
+                          {s.title || s.uri}
+                        </a>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Gaps */}
+            {result.gaps?.length > 0 && !sortedCitations.length && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <div className="text-sm font-semibold text-amber-800 mb-1">Research Gaps</div>
+                {result.gaps.map((g, i) => <div key={i} className="text-sm text-amber-700">{g}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
