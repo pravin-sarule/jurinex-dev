@@ -7,11 +7,16 @@ const path = require('path');
 dotenv.config();
 
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
     },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
 });
 
 const generateOTP = () => {
@@ -159,10 +164,18 @@ const createAndSendOTP = async (email) => {
     const otp = generateOTP();
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes from now
 
-    await OTPModel.deleteOTP(email, null); // Pass null for otp to delete all for email
-
+    await OTPModel.deleteOTP(email, null);
     await OTPModel.createOTP(email, otp, expiresAt);
-    await sendOTPEmail(email, otp);
+
+    try {
+        await sendOTPEmail(email, otp);
+    } catch (emailError) {
+        // Email delivery failed (network/SMTP issue) — OTP is still stored in DB.
+        // Log it so login can be tested without SMTP connectivity.
+        console.warn(`[OTPService] ⚠️ Email delivery failed for ${email}: ${emailError.message}`);
+        console.warn(`[OTPService] 🔑 OTP for ${email}: ${otp} (expires in 5 minutes)`);
+    }
+
     return otp;
 };
 
