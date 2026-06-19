@@ -98,7 +98,7 @@ export const VISUAL_SERVICE_URL =
  * Set VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL for a custom host.
  */
 const DEFAULT_AGENTIC_DOCUMENT_HOST =
-  'http://localhost:8092';
+  'https://agentic-document-service-120280829617.asia-south1.run.app';
 
 const rawAgenticDocs =
   import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
@@ -136,10 +136,11 @@ export const CITATION_V1_SERVICE_URL =
     : 'https://citation-service-v1-120280829617.asia-south1.run.app');
 
 // Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) in 1 iteration
-export const CITATION_TESTING_SERVICE_URL = ensureHttps(
+export const CITATION_TESTING_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_TESTING_SERVICE_URL ||
-  'http://localhost:8003'
-);
+  (IS_LOCAL_DEV_HOST
+    ? 'http://localhost:8003'
+    : 'https://citation-testing-120280829617.asia-south1.run.app');
 
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
 export const DRAFTING_SERVICE_URL =
