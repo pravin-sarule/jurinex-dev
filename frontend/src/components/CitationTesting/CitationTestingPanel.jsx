@@ -298,7 +298,12 @@ export default function CitationTestingPanel() {
       });
       clearInterval(ticker);
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Research failed');
+      if (!res.ok) {
+        if (res.status === 504) {
+          throw new Error('Research timed out on the server. The pipeline can take several minutes — try again or use a shorter case query.');
+        }
+        throw new Error(data.detail || 'Research failed');
+      }
       setStageIdx(PIPELINE_STAGES.length - 1);
       setResult(data);
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);

@@ -309,17 +309,21 @@ def _normalize_hit(h: Any) -> Dict[str, str]:
 
 def _gemini_grounding_search(query: str, num: int = 5):
     """
-    Gemini 2.5 Flash grounding returns web_search_queries (not grounding_chunks).
-    Strategy: use Gemini to generate optimised search queries, then execute via Serper.
-    This is the correct approach for google-genai SDK >= 2.5.
+    Gemini 2.5 Flash grounding returns web_search_queries AND grounding_chunks.
+    Strategy: 
+      1. Ask Gemini to find results via grounding.
+      2. If Gemini returns actual web chunks, use them immediately.
+      3. Otherwise, use Gemini's generated queries to search via Serper.
     """
     import os, re, time as _t
+    from agents.citation_test_agent.domain_allowlist import tier_of
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         return _serper_search(f"site:indiankanoon.org {query}", num=num)
 
-    # Step 1: ask Gemini to produce the best search queries via grounding
     web_queries: List[str] = []
+    grounding_hits: List[Dict[str, Any]] = []
+    
     try:
         from google import genai
         from google.genai import types
@@ -327,7 +331,7 @@ def _gemini_grounding_search(query: str, num: int = 5):
 
         cfg = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
-            max_output_tokens=512,
+            max_output_tokens=1024,
             temperature=0.0,
         )
         for attempt in range(2):
@@ -335,21 +339,61 @@ def _gemini_grounding_search(query: str, num: int = 5):
                 resp = client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=(
-                        f"Find Indian court judgments relevant to: {query}. "
-                        f"Focus on indiankanoon.org, sci.gov.in, livelaw.in results."
+                        f"Search for and list the official Indian court judgments (Supreme Court or High Courts) "
+                        f"relevant to this legal issue: {query}. "
+                        f"You MUST provide the direct URLs to the judgments on indiankanoon.org, sci.gov.in, or livelaw.in. "
+                        f"List at least 5-10 specific case links."
                     ),
                     config=cfg,
                 )
-                # Extract web_search_queries from search_entry_point
+                
+                # 1. Extract actual chunks (grounding_chunks) from metadata
                 for cand in (resp.candidates or []):
+                    # Also try to extract URLs from the text response itself as a fallback
+                    text_content = ""
+                    for part in (cand.content.parts or []):
+                        if hasattr(part, "text"):
+                            text_content += part.text
+                    
+                    if text_content:
+                        # Simple regex to find URLs in text
+                        found_urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text_content)
+                        for url in found_urls:
+                            url = url.rstrip(".,;)")
+                            tier = tier_of(url)
+                            if tier in ("T1", "T2"):
+                                grounding_hits.append({
+                                    "uri": url,
+                                    "title": "Judgment found in text",
+                                    "snippet": "Direct link from Gemini grounding response",
+                                    "authority_tier": tier,
+                                })
+
                     gm = getattr(cand, "grounding_metadata", None)
                     if not gm:
                         continue
+                    
+                    chunks = getattr(gm, "grounding_chunks", []) or []
+                    for chunk in chunks:
+                        web = getattr(chunk, "web", None)
+                        if web:
+                            uri = getattr(web, "uri", "")
+                            title = getattr(web, "title", "")
+                            if uri:
+                                tier = tier_of(uri)
+                                if tier in ("T1", "T2"):
+                                    grounding_hits.append({
+                                        "uri": uri,
+                                        "title": title or uri,
+                                        "snippet": "Result from Google Grounding metadata",
+                                        "authority_tier": tier,
+                                    })
+
+                    # Also extract web_search_queries for Serper fallback
                     sep = getattr(gm, "search_entry_point", None)
                     if sep:
                         wq = getattr(sep, "web_search_queries", None) or []
                         web_queries.extend(wq)
-                    # Also try top-level web_search_queries
                     wq2 = getattr(gm, "web_search_queries", None) or []
                     web_queries.extend(wq2)
                 break
@@ -362,6 +406,18 @@ def _gemini_grounding_search(query: str, num: int = 5):
                 break
     except Exception as exc:
         logger.warning("[GROUNDING] client error: %s", exc)
+
+    # If we got direct grounding hits, use them (deduplicated)
+    if grounding_hits:
+        seen_uris = set()
+        final_hits = []
+        for h in grounding_hits:
+            if h["uri"] not in seen_uris:
+                seen_uris.add(h["uri"])
+                final_hits.append(h)
+        if len(final_hits) >= num:
+            logger.info("[GROUNDING] Found %d direct hits from Gemini grounding", len(final_hits))
+            return final_hits[:num]
 
     # Deduplicate and add original query as fallback
     seen: set = set()
@@ -377,9 +433,14 @@ def _gemini_grounding_search(query: str, num: int = 5):
     # Step 2: execute each query via Serper with indiankanoon.org priority
     all_results: list = []
     seen_uris: set = set()
+    serper_error = False
 
     def _add(hits):
+        nonlocal serper_error
         for h in hits:
+            if isinstance(h, dict) and h.get("error") == "credits_exhausted":
+                serper_error = True
+                continue
             uri = h["uri"] if isinstance(h, dict) else h.uri
             if uri not in seen_uris:
                 seen_uris.add(uri)
@@ -387,16 +448,23 @@ def _gemini_grounding_search(query: str, num: int = 5):
 
     for q in final_queries[:5]:
         _add(_serper_search(f"site:indiankanoon.org {q}", num=5))
-        if len(all_results) >= num:
+        if len(all_results) >= num or serper_error:
             break
 
     # If still short, try livelaw and plain queries
-    if len(all_results) < num:
+    if len(all_results) < num and not serper_error:
         for q in final_queries[:3]:
             _add(_serper_search(f"site:livelaw.in {q}", num=3))
             _add(_serper_search(q, num=5))
-            if len(all_results) >= num:
+            if len(all_results) >= num or serper_error:
                 break
+
+    if not all_results and serper_error:
+        # Fallback to whatever grounding hits we found even if less than num
+        if grounding_hits:
+            logger.info("[GROUNDING] Serper failed (credits), using %d direct hits from Gemini", len(grounding_hits))
+            return grounding_hits[:num]
+        return [{"error": "credits_exhausted"}]
 
     logger.info("[GROUNDING] %d T1/T2 results found via Gemini+Serper", len(all_results))
     return all_results[:num]
@@ -432,6 +500,9 @@ def _serper_search(query: str, num: int = 5) -> List[Dict[str, Any]]:
                 headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
                 json={"q": query, "num": num, "gl": "in", "hl": "en"},
             )
+            if resp.status_code == 400 and "credits" in resp.text.lower():
+                logger.error("[RUNNER] Serper API: Not enough credits")
+                return [{"error": "credits_exhausted"}]
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -812,16 +883,22 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     print(f"[CITATION_TEST] Stage 4 — Search ({method.upper()})", flush=True)
     all_sources: list = []
     seen_uris: set = set()
+    search_error = ""
 
     if method == "gemini":
         for q in queries[:9]:
             hits = _gemini_grounding_search(q, num=4)
             for h in hits:
+                if isinstance(h, dict) and h.get("error") == "credits_exhausted":
+                    search_error = "Search API (Serper) credits exhausted. Please top up your credits."
+                    continue
                 hit = _normalize_hit(h)
                 uri = hit["uri"]
                 if uri and uri not in seen_uris:
                     seen_uris.add(uri)
                     all_sources.append(hit)
+            if search_error and not all_sources:
+                break
     else:
         # Build Serper-friendly queries: indiankanoon.org first, then cleaned Boolean queries
         serper_queries = _build_serper_queries(queries, case_query, state.get("case_analysis", "{}"))
@@ -831,10 +908,13 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
         for q in serper_queries[:12]:
             hits = _serper_search(q, num=5)
             for h in hits:
+                if isinstance(h, dict) and h.get("error") == "credits_exhausted":
+                    search_error = "Search API (Serper) credits exhausted. Please top up your credits."
+                    continue
                 if h["uri"] not in seen_uris:
                     seen_uris.add(h["uri"])
                     all_sources.append(h)
-            if len(all_sources) >= 20:
+            if (len(all_sources) >= 20) or (search_error and not all_sources):
                 break
 
     print(f"[CITATION_TEST]   → {len(all_sources)} T1/T2 sources found", flush=True)
@@ -849,7 +929,12 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
 
     elapsed = round(time.time() - start, 2)
     state["citations"] = citations
-    state["gaps"] = [] if citations else ["No T1/T2 sources found" if not all_sources else "Could not extract structured citations"]
+    
+    if search_error and not citations:
+        state["gaps"] = [search_error]
+    else:
+        state["gaps"] = [] if citations else ["No T1/T2 sources found" if not all_sources else "Could not extract structured citations"]
+    
     state["method_used"] = method
     state["elapsed_seconds"] = elapsed
 
