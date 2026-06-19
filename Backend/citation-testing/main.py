@@ -39,10 +39,23 @@ _env_file = _project_root / ".env"
 if _env_file.is_file():
     load_dotenv(_env_file)
 
-CORS_ORIGINS = os.environ.get(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://localhost:5000",
-).strip().split(",")
+_DEFAULT_CORS_ORIGINS = ",".join([
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5000",
+    "https://jurinex.netlify.app",
+    "https://jurinex-dev.netlify.app",
+    "https://nexintel.netlify.app",
+    "https://auth.jurinex.ai",
+    "https://www.jurinex.ai",
+    "https://ailearn.co.in",
+    "https://www.ailearn.co.in",
+])
+
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).strip().split(",")
 
 AGENTIC_DOCUMENT_SERVICE_URL = (
     os.environ.get("AGENTIC_DOCUMENT_SERVICE_URL")
