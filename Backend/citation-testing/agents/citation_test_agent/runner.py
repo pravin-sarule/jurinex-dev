@@ -1225,7 +1225,7 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
         issue_text = state.get("issue") or case_query
         _stop = {'the','a','an','is','are','was','were','of','for','in','on','at','to','and','or','with','by','that','this','have','had','has','been','its'}
         _kw_tokens = [w for w in _re3.findall(r'[a-zA-Z]{4,}', issue_text.lower()) if w not in _stop]
-        _kw = ' '.join(dict.fromkeys(_kw_tokens)[:5])  # first 5 unique keywords, order-preserved
+        _kw = ' '.join(list(dict.fromkeys(_kw_tokens))[:5])  # first 5 unique keywords, order-preserved
         landmark_query  = f"Supreme Court India landmark judgment {_kw} 1970 1980 1990 2000 2005"
 
         # Broad fact-pattern query using queries[3] or queries[4] for different vocabulary
