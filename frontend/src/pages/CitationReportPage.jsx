@@ -3164,7 +3164,7 @@ export default function CitationReportPage({ embedded = false }) {
             // Prefer the FULL extracted text over the short summary, and send it as
             // `content` (full document) — not `snippet` — so the pipeline extracts real
             // legal issues instead of cover-page/cause-title tokens. (summary is ~500 chars.)
-            ctx = (Array.isArray(files) ? files : []).map(f => ({ name: f.originalname || f.name || 'doc', content: (f.full_text_content || f.summary || '').slice(0, 60000) })).filter(f => f.content || f.name);
+            ctx = (Array.isArray(files) ? files : []).map(f => ({ name: f.originalname || f.name || 'doc', content: (f.full_text_content || f.summary || '').slice(0, 160000) })).filter(f => f.content || f.name);
           }
         } catch (e) { console.warn(e); }
       }
@@ -3172,7 +3172,7 @@ export default function CitationReportPage({ embedded = false }) {
       // Reference docs are used only when no case is selected.
       if (!selCase && refDocs.length > 0) {
         ctx = (ctx || []).concat(
-          refDocs.map(d => ({ name: d.name, content: d.content.slice(0, 60000) })),
+          refDocs.map(d => ({ name: d.name, content: d.content.slice(0, 160000) })),
         );
       }
       // If no real document content, send null so the backend fetches proper RAG chunks via case_id.

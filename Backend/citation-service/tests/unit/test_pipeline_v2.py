@@ -109,9 +109,9 @@ class TestFilteringClassificationAndBudgets(unittest.TestCase):
 
     def test_full_document_and_cost_budgets_are_hard_limits(self):
         context = PipelineContext("run", QUERY, "user", None, "petitioner", "facts")
-        context.candidates = [candidate(str(index)) for index in range(15)]
+        context.candidates = [candidate(str(index)) for index in range(20)]
         shortlist_candidates.run(context)
-        self.assertLessEqual(len(context.shortlisted), 7)
+        self.assertLessEqual(len(context.shortlisted), settings.max_ik_full_doc_calls)
 
         class Client:
             def __init__(self):
@@ -122,7 +122,7 @@ class TestFilteringClassificationAndBudgets(unittest.TestCase):
 
         client = Client()
         fetch_full_documents.run(context, client)
-        self.assertLessEqual(client.calls, 7)
+        self.assertLessEqual(client.calls, settings.max_ik_full_doc_calls)
         budget = BudgetTracker()
         for _ in range(budget.config.max_ik_search_calls):
             budget.consume("ik_search")

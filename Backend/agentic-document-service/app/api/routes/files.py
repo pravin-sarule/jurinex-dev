@@ -232,7 +232,7 @@ def _resolve_role_id_from_authservice(domain_role: str) -> str | None:
     """Call authservice to resolve a domain_role string → role UUID."""
     try:
         import httpx
-        base = str(get_settings().auth_service_url or "").rstrip("/")
+        base = (get_settings().auth_service_url or "").rstrip("/")
         if not base:
             return None
         response = httpx.get(
@@ -604,7 +604,7 @@ def _build_gcs_object_path(user_id: str, folder_name: str, filename: str) -> str
 
 def _normalize_gs_uri_from_record(gcs_path: str | None) -> str | None:
     import re as _re
-    raw = str(gcs_path or "").strip()
+    raw = (gcs_path or "").strip()
     if not raw:
         return None
 
@@ -649,7 +649,7 @@ def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | No
               AND user_id::text = ANY(%s::text[])
             LIMIT 1
             """,
-            [str(file_id), accessible_user_ids],
+            [file_id, accessible_user_ids],
         )
         return cur.fetchone()
 
@@ -664,7 +664,7 @@ def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str,
     accessible = get_folder_service()._get_accessible_user_ids(user_id)
     if not accessible:
         return None
-    fid = str(file_id).strip()
+    fid = file_id.strip()
     if not fid:
         return None
     try:
@@ -785,7 +785,7 @@ async def get_analysis_chat_sessions(
     limit: int = 20,
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
-) -> dict:
+) -> list[dict[str, Any]]:
     """Return paginated analysis chat sessions (chat_type = 'analysis') for the current user."""
     user_id = _resolve_user_id(x_user_id, authorization)
     if not user_id:
@@ -836,7 +836,7 @@ async def view_file(
         logger.exception("[Route:view_file] file_id=%s failed to sign read URL: %s", file_id, exc)
         raise HTTPException(status_code=500, detail="Could not generate document view URL") from exc
 
-    page_number = max(1, int(page or 1))
+    page_number = max(1, page or 1)
     return {
         "success": True,
         "document": {
@@ -870,7 +870,7 @@ async def get_llm_limits_for_client(
             "max_file_size_mb": cfg.get("max_file_size_mb"),
             "max_document_size_mb": cfg.get("max_document_size_mb"),
             "max_upload_mb": ceiling,
-            "max_upload_bytes": int(ceiling * 1024 * 1024),
+            "max_upload_bytes": ceiling * 1024 * 1024,
             "max_upload_files": cfg.get("max_upload_files"),
             "max_file_upload_per_day": cfg.get("max_file_upload_per_day"),
             "max_document_pages": cfg.get("max_document_pages"),
@@ -965,7 +965,7 @@ def get_user_usage_and_plan_for_payment(
                     try:
                         blob = _bucket.blob(gcs_path)
                         blob.reload()
-                        real_size = int(blob.size or 0)
+                        real_size = blob.size or 0
                         if real_size > 0:
                             repaired_bytes += real_size
                             cur.execute(
@@ -1224,7 +1224,7 @@ def import_google_drive_documents(
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
-    file_ids = [str(item).strip() for item in (request.file_ids or []) if str(item).strip()]
+    file_ids = [item.strip() for item in (request.file_ids or []) if item.strip()]
     if not file_ids:
         raise HTTPException(status_code=400, detail="file_ids is required")
     if not x_google_access_token:
@@ -1345,14 +1345,14 @@ def generate_upload_url_for_folder(
             user_id,
             llm_config,
             files_count=1,
-            size_bytes=int(request.size or 0),
+            size_bytes=request.size or 0,
             mimetype=request.mimetype,
             originalname=request.filename,
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
         # Plan-level storage quota check
-        storage_check = assert_storage_allowed(user_id, size_bytes=int(request.size or 0))
+        storage_check = assert_storage_allowed(user_id, size_bytes=request.size or 0)
         if not storage_check.get("ok"):
             raise HTTPException(status_code=429, detail=storage_check)
         return _build_signed_upload(user_id, folder_name, request, llm_config)
@@ -1387,7 +1387,7 @@ def complete_upload_for_folder(
             user_id,
             llm_config,
             files_count=1,
-            size_bytes=int(request.size or 0),
+            size_bytes=request.size or 0,
             mimetype=request.mimetype,
             originalname=request.filename,
             buffer=pdf_buffer,
@@ -1395,11 +1395,11 @@ def complete_upload_for_folder(
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
         # Plan-level storage quota check (at completion, file is already in GCS)
-        storage_check = assert_storage_allowed(user_id, size_bytes=int(request.size or 0))
+        storage_check = assert_storage_allowed(user_id, size_bytes=request.size or 0)
         if not storage_check.get("ok"):
             raise HTTPException(status_code=429, detail=storage_check)
         # ── Resolve real file size from GCS when request.size is missing/zero ──
-        declared_size = int(request.size or 0)
+        declared_size = request.size or 0
         real_size = declared_size
         if declared_size == 0 and request.gcsPath:
             try:
@@ -1412,7 +1412,7 @@ def complete_upload_for_folder(
                     _gcs_path = "/".join(_gcs_path.split("/")[3:])
                 _blob = _get_gcs_client().bucket(_bn).blob(_gcs_path)
                 _blob.reload()
-                real_size = int(_blob.size or 0)
+                real_size = _blob.size or 0
                 logger.info(
                     "[Route:complete_upload] resolved real_size=%d bytes from GCS for %s",
                     real_size, request.filename,
@@ -1646,7 +1646,7 @@ def init_learning_session(
     document_context = str(payload.get("documentContext") or payload.get("document_context") or "").strip()
     if not document_context:
         document_context = build_learning_folder_document_context(
-            get_folder_service(), folder_name, str(user_id)
+            get_folder_service(), folder_name, user_id
         ).strip()
     if not document_context:
         raise HTTPException(
@@ -1654,7 +1654,7 @@ def init_learning_session(
             detail="No processed documents with text are available for Learning Mode in this folder.",
         )
     state = LearningAgentController.init_session(
-        user_id=str(user_id),
+        user_id=user_id,
         folder_name=folder_name,
         session_id=session_id,
         document_context=document_context,
@@ -1681,7 +1681,7 @@ def get_learning_session_state(
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     snap = LearningAgentController.get_session_snapshot(
-        user_id=str(user_id),
+        user_id=user_id,
         folder_name=folder_name,
         session_id=session_id,
     )
@@ -1698,15 +1698,15 @@ def submit_learning_question_answer(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    sid = str(body.session_id or "").strip()
+    sid = (body.session_id or "").strip()
     if not sid:
         raise HTTPException(status_code=400, detail="session_id is required")
     result = LearningAgentController.record_mcq_answer(
-        user_id=str(user_id),
+        user_id=user_id,
         folder_name=folder_name,
         session_id=sid,
-        question_id=str(body.question_id or ""),
-        selected_answer=str(body.selected_answer or ""),
+        question_id=body.question_id or "",
+        selected_answer=body.selected_answer or "",
         time_taken=body.time_taken,
     )
     return {"success": True, **result}
@@ -1734,7 +1734,7 @@ def generate_learning_question(
         raise HTTPException(status_code=400, detail="No documents available for this folder.")
     concept_q = (body.concept or "key facts in the record").strip()
     chunks = get_relevant_chunks(
-        user_id=str(user_id),
+        user_id=user_id,
         case_id=folder_name,
         query=concept_q,
         file_ids=fids,
@@ -1775,7 +1775,7 @@ def generate_learning_question(
     except Exception as exc:
         logger.exception("[learning/questions/generate] LLM failed folder=%s", folder_name)
         raise HTTPException(status_code=502, detail="Unable to generate a question right now.") from exc
-    payload, ok = LearningAgentController.parse_model_json_with_status(str(raw or ""))
+    payload, ok = LearningAgentController.parse_model_json_with_status(raw or "")
     if not ok:
         raise HTTPException(status_code=502, detail="Model returned invalid JSON for question generation.")
     pq = payload.get("popup_question") if isinstance(payload.get("popup_question"), dict) else payload
@@ -1791,10 +1791,10 @@ def generate_learning_question(
             status_code=422,
             detail={"message": "Question failed validation", "errors": v.get("errors"), "raw": pq},
         )
-    sid_gen = str(body.session_id or "").strip()
+    sid_gen = (body.session_id or "").strip()
     if sid_gen:
         LearningAgentController.register_popup_question(
-            user_id=str(user_id),
+            user_id=user_id,
             folder_name=folder_name,
             session_id=sid_gen,
             popup=pq2,
@@ -1830,7 +1830,7 @@ def analyze_learning_relationships(
 
     query = str(payload.get("query") or payload.get("focus") or "identify contradictions and statutory requirements").strip()
     chunks = get_relevant_chunks(
-        user_id=str(user_id),
+        user_id=user_id,
         case_id=folder_name,
         query=query,
         file_ids=fids,
@@ -1878,7 +1878,7 @@ def learning_draft_bridge(
         return {"success": True, "trigger_learning_popup": False, "message": "No processed documents yet."}
 
     chunks = get_relevant_chunks(
-        user_id=str(user_id),
+        user_id=user_id,
         case_id=folder_name,
         query="jurisdiction limitation maintainability contradiction grounds",
         file_ids=fids,
@@ -1906,7 +1906,7 @@ def learning_draft_bridge(
         )
     return {
         "success": True,
-        "trigger_learning_popup": bool(weak_signal),
+        "trigger_learning_popup": weak_signal,
         "message": message,
         "grounding_preview": {
             "conflicts": rel.get("conflicting_facts", [])[:2],
@@ -1928,7 +1928,7 @@ def intelligent_chat(
         document_context = str(getattr(request, "document_context", "") or "").strip()
         if not document_context:
             document_context = build_learning_folder_document_context(
-                get_folder_service(), folder_name, str(user_id)
+                get_folder_service(), folder_name, user_id
             ).strip()
         if not document_context:
             raise HTTPException(
@@ -1936,12 +1936,12 @@ def intelligent_chat(
                 detail="No processed documents with text are available for Learning Mode in this folder.",
             )
         if LearningAgentController.get_state(
-            user_id=str(user_id),
+            user_id=user_id,
             folder_name=folder_name,
             session_id=session_id,
         ) is None:
             LearningAgentController.init_session(
-                user_id=str(user_id),
+                user_id=user_id,
                 folder_name=folder_name,
                 session_id=session_id,
                 document_context=document_context,
@@ -1951,7 +1951,7 @@ def intelligent_chat(
         state_meta = LearningAgentController.processMessage(
             sessionId=session_id,
             userMessage=(request.question or ""),
-            userId=str(user_id),
+            userId=user_id,
             folderName=folder_name,
         )
         return {
@@ -1995,7 +1995,7 @@ def intelligent_chat(
             request=request,
             authorization=authorization,
         )
-        requested_model = str(request.llm_name or "").strip()
+        requested_model = (request.llm_name or "").strip()
         if requested_model.lower() in {"", "gemini", "claude", "deepseek", "default"}:
             requested_model = ""
         model_name = str(
@@ -2074,7 +2074,7 @@ async def intelligent_chat_stream(
                 raise TimeoutError(timeout_message) from exc
 
         def _truncate_prompt(text: str, *, max_chars: int, label: str) -> str:
-            raw = str(text or "")
+            raw = text or ""
             if len(raw) <= max_chars:
                 return raw
             logger.warning(
@@ -2131,7 +2131,7 @@ async def intelligent_chat_stream(
         if not query_text:
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
-        requested_model_name = str(chat_request.llm_name or "").strip()
+        requested_model_name = (chat_request.llm_name or "").strip()
         if requested_model_name.lower() in {"", "gemini", "claude", "deepseek", "default"}:
             requested_model_name = ""
         selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
@@ -2157,7 +2157,7 @@ async def intelligent_chat_stream(
                 try:
                     built_ctx = await _run_blocking(
                         lambda: build_learning_folder_document_context(
-                            folder_service, folder_name, str(user_id)
+                            folder_service, folder_name, user_id
                         ),
                         timeout_s=90.0,
                         timeout_message="learning_document_context",
@@ -2180,13 +2180,13 @@ async def intelligent_chat_stream(
                 )
                 return
             existing_state = LearningAgentController.get_state(
-                user_id=str(user_id),
+                user_id=user_id,
                 folder_name=folder_name,
                 session_id=session_id_for_learning,
             )
             if existing_state is None or existing_state.document_context.strip() != document_context:
                 LearningAgentController.init_session(
-                    user_id=str(user_id),
+                    user_id=user_id,
                     folder_name=folder_name,
                     session_id=session_id_for_learning,
                     document_context=document_context,
@@ -2195,7 +2195,7 @@ async def intelligent_chat_stream(
                 )
             chat_request = chat_request.model_copy(update={"session_id": session_id_for_learning})
             learning_state = LearningAgentController.begin_turn(
-                user_id=str(user_id),
+                user_id=user_id,
                 folder_name=folder_name,
                 session_id=session_id_for_learning,
                 user_text=query_text,
@@ -2385,8 +2385,8 @@ async def intelligent_chat_stream(
                 log_llm_usage(
                     user_id=uid_int,
                     model_name=model_name,
-                    input_tokens=int(usage_totals.get("inputTokens") or 0),
-                    output_tokens=int(usage_totals.get("outputTokens") or 0),
+                    input_tokens=usage_totals.get("inputTokens") or 0,
+                    output_tokens=usage_totals.get("outputTokens") or 0,
                     endpoint="/api/files/{folder}/intelligent-chat/stream",
                     request_id=request_id,
                     session_id=str(session_id or ""),
@@ -2430,7 +2430,7 @@ async def intelligent_chat_stream(
                     if isinstance((vector_learning_payload or {}).get("popup_question"), dict):
                         pq_v = vector_learning_payload["popup_question"]
                         LearningAgentController.register_popup_question(
-                            user_id=str(user_id),
+                            user_id=user_id,
                             folder_name=folder_name,
                             session_id=session_id,
                             popup=pq_v,
@@ -2535,7 +2535,7 @@ async def intelligent_chat_stream(
 
                         def _fetch_learning_chunks():
                             return get_relevant_chunks(
-                                user_id=str(user_id),
+                                user_id=user_id,
                                 case_id=folder_name,
                                 query=query_text,
                                 file_ids=fids,
@@ -2993,7 +2993,7 @@ async def intelligent_chat_stream(
                     learning_payload["citations"] = _build_learning_citations_from_chunks(learning_grounding_chunks)
                 if isinstance(pq_fb, dict) and pq_fb:
                     LearningAgentController.register_popup_question(
-                        user_id=str(user_id),
+                        user_id=user_id,
                         folder_name=folder_name,
                         session_id=chat_request.session_id,
                         popup=pq_fb,
@@ -3014,14 +3014,19 @@ async def intelligent_chat_stream(
                         user_id, folder_name, chat_request.session_id, display_question
                     ).id,
                 )
-                await loop.run_in_executor(None, lambda: folder_service._append_message(
-                    folder_service._sessions.get(folder_name, {}).get(session_id),
-                    "user", display_question,
-                ) if folder_service._sessions.get(folder_name, {}).get(session_id) else None)
-                await loop.run_in_executor(None, lambda: folder_service._append_message(
-                    folder_service._sessions.get(folder_name, {}).get(session_id),
-                    "assistant", answer,
-                ) if folder_service._sessions.get(folder_name, {}).get(session_id) else None)
+
+                def _append_user_msg():
+                    sess = folder_service._sessions.get(folder_name, {}).get(session_id)
+                    if sess is not None:
+                        folder_service._append_message(sess, "user", display_question)
+
+                def _append_assistant_msg():
+                    sess = folder_service._sessions.get(folder_name, {}).get(session_id)
+                    if sess is not None:
+                        folder_service._append_message(sess, "assistant", answer)
+
+                await loop.run_in_executor(None, _append_user_msg)
+                await loop.run_in_executor(None, _append_assistant_msg)
                 sec_id = (chat_request.secret_id or "").strip() or None
 
                 # Build stable citations payload for persistence + UI.
@@ -3112,7 +3117,7 @@ async def intelligent_chat_stream(
                 usage_session_key,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
                 user_id=uid_int,
-                session_id=str(session_id or ""),
+                session_id=session_id or "",
                 request_id=request_id,
                 model_name=actual_model_name,
                 answer_length=len(answer or ""),
@@ -3125,11 +3130,11 @@ async def intelligent_chat_stream(
             log_llm_usage(
                 user_id=uid_int,
                 model_name=actual_model_name,
-                input_tokens=int(usage_totals.get("inputTokens") or 0),
-                output_tokens=int(usage_totals.get("outputTokens") or 0),
+                input_tokens=usage_totals.get("inputTokens") or 0,
+                output_tokens=usage_totals.get("outputTokens") or 0,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
                 request_id=request_id,
-                session_id=str(session_id or ""),
+                session_id=session_id or "",
             )
             yield _sse({
                 "type": "done",
@@ -3203,7 +3208,7 @@ def list_folder_chats(
                           AND session_id IS NOT NULL
                         ORDER BY session_id, created_at ASC
                         """,
-                        [folder_name, str(user_id)],
+                        [folder_name, user_id],
                     )
                 else:
                     cur.execute(

@@ -11,6 +11,16 @@ from utils.text import strip_html
 logger = logging.getLogger(__name__)
 
 
+def _as_text(value) -> str:
+    """Coerce an IK API field (often a LIST of HTML blocks, e.g. docfragment 'headline')
+    into one string BEFORE strip_html. str(list) would emit the Python repr — brackets,
+    quotes and literal '\\n' that strip_html can't collapse — which then leaked into the
+    report's headnote/excerpt. Joining first lets strip_html flatten real whitespace."""
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v) for v in value)
+    return str(value or "")
+
+
 class IndianKanoonClient:
     def __init__(self, run_id: str, user_id: str, budget: BudgetTracker):
         self.run_id = run_id
@@ -36,8 +46,8 @@ class IndianKanoonClient:
                 continue
             candidates.append(Candidate(
                 doc_id=doc_id,
-                title=strip_html(str(row.get("title") or "")),
-                headline=strip_html(str(row.get("headline") or "")),
+                title=strip_html(_as_text(row.get("title"))),
+                headline=strip_html(_as_text(row.get("headline"))),
                 docsource=str(row.get("docsource") or ""),
                 matched_issue_id=issue_id,
                 matched_query=query,
@@ -51,7 +61,7 @@ class IndianKanoonClient:
         result = ik_fetch_docfragment(candidate.doc_id, candidate.matched_query) or {}
         record_ik_call(self.run_id, self.user_id, "fragment", endpoint=f"/docfragment/{candidate.doc_id}/", candidate_doc_id=candidate.doc_id, issue_id=candidate.matched_issue_id, success=bool(result))
         logger.debug("IK fragment response", extra={"details": {"run_id": self.run_id, "doc_id": candidate.doc_id, "raw_response": result}})
-        candidate.fragment = strip_html(str(result.get("headline") or ""))
+        candidate.fragment = strip_html(_as_text(result.get("headline")))
         candidate.metadata["fragment_data"] = result
         return candidate
 
@@ -82,7 +92,7 @@ class IndianKanoonClient:
         document = ik_fetch_doc(candidate.doc_id, maxcites=5, maxcitedby=5) or {}
         record_ik_call(self.run_id, self.user_id, "document", endpoint=f"/doc/{candidate.doc_id}/", candidate_doc_id=candidate.doc_id, issue_id=candidate.matched_issue_id, success=bool(document))
         logger.debug("IK document response summary", extra={"details": {"run_id": self.run_id, "doc_id": candidate.doc_id, "chars": len(str(document.get("doc") or "")), "cite_count": len(document.get("cites") or document.get("citeList") or [])}})
-        candidate.full_text = strip_html(str(document.get("doc") or ""))
+        candidate.full_text = strip_html(_as_text(document.get("doc")))
         candidate.metadata["doc_data"] = document
         candidate.metadata["_cache_hit"] = False
         if len(candidate.full_text) >= 500:

@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from core.enums import CitationStatus, Classification
 from models.citation_models import Candidate
+
+# Indian "neutral citation" formats — present in most recent judgments even when no
+# reporter (AIR/SCC) citation exists yet. e.g. "2025:BHC-AS:12345", "2024:DHC:1234",
+# "2024 INSC 123" (Supreme Court). Lets the report show a real, citeable reference.
+_NEUTRAL_CITATION_RX = re.compile(
+    r"\b(\d{4}\s*:\s*[A-Z]{2,6}(?:[-–][A-Z]{2,6})?\s*:\s*\d{3,7})\b"
+    r"|\b(\d{4}\s+INSC\s+\d{1,5})\b",
+    re.IGNORECASE,
+)
+
+
+def _neutral_citation(text: str) -> str:
+    """Extract a neutral citation from judgment text (skips the literal 'undefined' IK
+    sometimes prints when one is not assigned). Returns '' when none is present."""
+    m = _NEUTRAL_CITATION_RX.search(text or "")
+    if not m:
+        return ""
+    return re.sub(r"\s*:\s*", ":", (m.group(1) or m.group(2) or "")).strip().upper()
 
 
 def citation_to_dict(candidate: Candidate) -> dict:
@@ -13,12 +32,18 @@ def citation_to_dict(candidate: Candidate) -> dict:
     elif candidate.classification in {Classification.DISTINGUISHABLE, Classification.WEAK_CONTEXTUAL}:
         status = CitationStatus.NEEDS_REVIEW
     canonical_id = f"ik:{candidate.doc_id}"
+    reporter_citation = candidate.metadata.get("citation") or candidate.metadata.get("primary_citation") or ""
+    neutral_citation = _neutral_citation(candidate.full_text) or _neutral_citation(candidate.fragment)
     return {
         "canonicalId": canonical_id,
         "canonical_id": canonical_id,
         "caseName": candidate.title,
         "case_name": candidate.title,
-        "primaryCitation": candidate.metadata.get("citation") or candidate.metadata.get("primary_citation") or "",
+        # Prefer a reporter citation (AIR/SCC); fall back to the neutral citation that
+        # recent judgments carry, so the report shows a real, citeable reference.
+        "primaryCitation": reporter_citation or neutral_citation or "",
+        "neutralCitation": neutral_citation,
+        "reporterCitation": reporter_citation,
         "court": candidate.docsource,
         "dateOfJudgment": candidate.publishdate,
         "ratio": candidate.reason,
@@ -35,6 +60,10 @@ def citation_to_dict(candidate: Candidate) -> dict:
         "fact_similarity_score": candidate.fact_similarity_score,
         "risk_score": candidate.risk_score,
         "confidence": candidate.confidence,
+        # Ready-to-display 0-100 confidence (the "CONFIDENCE INDEX" the report card shows),
+        # so the UI renders THIS citation's real score instead of a static fallback.
+        "confidenceScore": round((candidate.confidence or 0.0) * 100, 1),
+        "confidence_score": round((candidate.confidence or 0.0) * 100, 1),
         "classification": candidate.classification.value,
         "supports_selected_side": candidate.supports_selected_side,
         "adverse_to_selected_side": candidate.adverse_to_selected_side,

@@ -46,9 +46,15 @@ class Settings:
     # here. Protected doctrine + strict queries (priority <= 2) may run up to the hard cap
     # above so the most legally critical queries are never starved (FAILURE 1).
     ik_search_soft_budget: int = _int("CITATION_V2_IK_SEARCH_SOFT_BUDGET", 10)
-    max_ik_fragment_calls: int = _int("CITATION_V2_MAX_IK_FRAGMENT_CALLS", 28)
-    max_ik_meta_calls: int = _int("CITATION_V2_MAX_IK_META_CALLS", 28)
-    max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 10)
+    max_ik_fragment_calls: int = _int("CITATION_V2_MAX_IK_FRAGMENT_CALLS", 32)
+    max_ik_meta_calls: int = _int("CITATION_V2_MAX_IK_META_CALLS", 32)
+    # Up to this many judged candidates → the report can show up to this many citations
+    # (across all buckets). Raised 10 → 15 so a rich case surfaces 3-15 citations, not 1-4.
+    max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 15)
+    # Per-bucket caps on how many citations the final report shows.
+    max_recommended_citations: int = _int("CITATION_V2_MAX_RECOMMENDED_CITATIONS", 10)
+    max_adverse_citations: int = _int("CITATION_V2_MAX_ADVERSE_CITATIONS", 5)
+    max_caution_citations: int = _int("CITATION_V2_MAX_CAUTION_CITATIONS", 5)
     max_ai_calls: int = _int("CITATION_V2_MAX_AI_CALLS", 3)  # AI issue extraction + final judge (+headroom)
     max_total_estimated_cost: float = _float("CITATION_V2_MAX_COST_INR", 45.0)
     # Raised 180 -> 600: the wider net + paging + embedding reranker make a thorough run
@@ -79,7 +85,7 @@ class Settings:
     # keeps the top-K (>= min/issue) before paid enrichment. Falls back to priority order
     # if embeddings are unavailable, so it never crashes a run.
     enable_rerank_stage: bool = os.environ.get("CITATION_V2_ENABLE_RERANK_STAGE", "true").lower() == "true"
-    rerank_top_k: int = _int("CITATION_V2_RERANK_TOP_K", 14)
+    rerank_top_k: int = _int("CITATION_V2_RERANK_TOP_K", 20)
     rerank_min_per_issue: int = _int("CITATION_V2_RERANK_MIN_PER_ISSUE", 3)
     # Cap how many candidates the reranker EMBEDS (highest query_priority first). Embedding
     # 150+ candidates was the slowest stage (~87s) and blew the runtime budget; 100 keeps

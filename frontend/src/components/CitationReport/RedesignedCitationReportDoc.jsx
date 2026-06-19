@@ -523,23 +523,45 @@ function extractCaseTitle(rawValue) {
   return cleaned;
 }
 
+/* ── clean IK text that leaked a Python list/string repr ──
+   Older reports stored fragment text as str(list), so it carries literal "\n", and
+   "['…', '…']" brackets/quotes. Convert escapes to spaces and strip the repr wrapping
+   so the headnote/excerpt read as clean prose. (New runs are already clean server-side.) */
+function cleanIkText(s) {
+  let t = String(s ?? '');
+  t = t.replace(/\\r\\n|\\n|\\r|\\t/g, ' ')   // literal \n \r \t -> space
+       .replace(/\\"/g, '"')
+       .replace(/\\'/g, "'");
+  t = t.replace(/^\s*\[\s*['"]?/, '')          // leading [ '
+       .replace(/['"]?\s*\]\s*$/, '')          // trailing ' ]
+       .replace(/['"]\s*,\s*['"]/g, ' ');       // ', ' element separators -> space
+  return t.replace(/\s{2,}/g, ' ').trim();
+}
+
 /* ── parse flat text into bullet-point array ── */
+// A judgment's paragraph number (e.g. "29.", "(3)", "30") — noise as a standalone bullet.
+const _isParaMarker = (s) => /^\(?\d{1,4}\)?[.)]?$/.test(String(s).trim());
+// Strip a leading paragraph number when it's glued to real content ("29. It is settled…").
+const _stripParaNum = (s) => String(s).trim().replace(/^\(?\d{1,4}\)?[.)]\s+/, '').trim();
+// Drop bare paragraph-number bullets and de-number the rest, so the headnote reads cleanly.
+const _cleanPoints = (arr) => arr.map(_stripParaNum).filter((s) => s && !_isParaMarker(s));
+
 function parseTextToPoints(text) {
   if (!text || typeof text !== 'string') return [];
   const t = text.trim();
   if (!t) return [];
   // "- Bullet 1: text - Bullet 2: text …"
   const bulletSplit = t.split(/\s*[-–]\s*Bullet\s*\d*\s*:\s*/i).map(s => s.trim()).filter(Boolean);
-  if (bulletSplit.length > 1) return bulletSplit;
+  if (bulletSplit.length > 1) return _cleanPoints(bulletSplit);
   // "1. text" / "1) text" on newlines
   const numberedSplit = t.split(/\n+/).map(s => s.replace(/^\d+[.)]\s*/, '').replace(/^[-•·]\s*/, '').trim()).filter(Boolean);
-  if (numberedSplit.length > 1) return numberedSplit;
+  if (numberedSplit.length > 1) return _cleanPoints(numberedSplit);
   // Sentence-split for very long single paragraphs (ratio decidendi)
   if (t.length > 400) {
     const sentences = t.match(/[^.!?]+[.!?]+["']?(?:\s|$)/g);
-    if (sentences && sentences.length > 1) return sentences.map(s => s.trim()).filter(Boolean);
+    if (sentences && sentences.length > 1) return _cleanPoints(sentences.map(s => s.trim()).filter(Boolean));
   }
-  return [t];
+  return _cleanPoints([t]);
 }
 
 const SECTION_ACCENTS = {
@@ -1004,7 +1026,15 @@ export default function RedesignedCitationReportDoc({
               {activeTab === 'rep' && (() => {
                 const relLevel = normalizeRelevance(active.relevanceBadge, active.relevanceTier);
                 const isHigh = relLevel === 'Strong';
-                const confidenceScore = active.confidenceScore ?? active.confidence_score ?? (isHigh ? 94.8 : 72.3);
+                // Per-citation confidence. The backend sends `confidence` as 0-1 (and now also
+                // a ready 0-100 `confidenceScore`); derive a real percentage from whichever is
+                // present so each citation shows ITS own score — only fall back to a constant
+                // when the backend gave nothing at all.
+                const rawConf = active.confidenceScore ?? active.confidence_score
+                  ?? (active.confidence != null ? Number(active.confidence) * 100 : undefined);
+                const confidenceScore = (rawConf != null && Number.isFinite(Number(rawConf)))
+                  ? Number(rawConf)
+                  : (isHigh ? 94.8 : 72.3);
                 const verStatus = String(active.verificationStatus || active.verification_status || 'VERIFIED').toUpperCase();
                 const isVerified = ['APPROVED','VERIFIED','GREEN','VERIFIED_WARN'].includes(verStatus);
                 const courtRaw = String(active.court || '').toUpperCase();
@@ -1014,11 +1044,11 @@ export default function RedesignedCitationReportDoc({
                 const coramList = (active.coram || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
                 const followedBy = (active.ikCitedByList || []);
                 const citeList   = (active.ikCiteList || []);
-                const excerptText = active.excerpt?.text || active.excerptText || '';
+                const excerptText = cleanIkText(active.excerpt?.text || active.excerptText || '');
                 const hasExcerpt = excerptText && excerptText.trim().toLowerCase() !== 'further research needed';
                 const ratioPoints = (active.ratio && active.ratio !== 'Ratio decidendi not extracted.')
-                  ? parseTextToPoints(active.ratio) : [];
-                const headnotePoints = active.headnote ? parseTextToPoints(active.headnote) : [];
+                  ? parseTextToPoints(cleanIkText(active.ratio)) : [];
+                const headnotePoints = active.headnote ? parseTextToPoints(cleanIkText(active.headnote)) : [];
                 const matchQuery = active.ikFragment?.formInput || active.ikFragment?.headline || '';
                 const ikScore = active.ikFragment?.matchScore ?? active.ikMatchScore ?? null;
                 const kwScore = (active.keywordScore !== undefined && active.keywordScore !== null) ? active.keywordScore : null;
@@ -1080,7 +1110,10 @@ export default function RedesignedCitationReportDoc({
                         <div className="ld-case-meta-row">
                           <div className="ld-case-meta-item">
                             <span className="ld-meta-lbl">PRIMARY CITATION</span>
-                            <span className="ld-meta-val ld-meta-teal">{active.primaryCitation || '—'}</span>
+                            <span className="ld-meta-val ld-meta-teal">{active.primaryCitation || 'Unreported — cite by case name & date'}</span>
+                            {active.neutralCitation && active.reporterCitation && active.neutralCitation !== active.reporterCitation && (
+                              <span className="ld-meta-lbl" style={{ marginTop: 2 }}>Neutral: {active.neutralCitation}</span>
+                            )}
                           </div>
                           <div className="ld-case-meta-divider" />
                           <div className="ld-case-meta-item">

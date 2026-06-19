@@ -1,17 +1,31 @@
-from typing import Any
+from typing import TypedDict
+
+
+class IKCall(TypedDict):
+    hits: int
+    cost_inr: float
+
+
+class AIUsage(TypedDict):
+    service: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_inr: float
+    calls: int
 
 
 def summarize_cost(run_id: str) -> dict:
     from db.client import usage_get_by_run
     rows = usage_get_by_run(run_id)
-    
+
     total_inr = 0.0
     total_usd = 0.0
-    
-    ik_calls = {}
+
+    ik_calls: dict[str, IKCall] = {}
     ik_total_inr = 0.0
-    
-    ai_usage = {}
+
+    ai_usage: dict[str, AIUsage] = {}
     ai_total_inr = 0.0
 
     for row in rows:
@@ -21,7 +35,7 @@ def summarize_cost(run_id: str) -> dict:
         total_usd += cost_usd
         
         service = row.get("service")
-        operation = row.get("operation")
+        operation = str(row.get("operation") or "unknown")  # dict key must be str
         meta = row.get("metadata") or {}
         
         if service == "indian_kanoon":
