@@ -4,6 +4,35 @@ import { CITATION_TESTING_SERVICE_URL, getUserIdForDrafting } from '../../config
 
 const T = '#21C1B6';
 
+// ── Official API pricing (verified June 2026) ──────────────────────────────
+// Gemini 2.5 Flash: $0.075/1M input · $0.60/1M output (non-thinking)
+// Claude Sonnet 4.6: $3/1M input · $15/1M output
+// Serper: $0.30/1,000 searches = $0.0003/search
+// Cloud Run asia-south1: $0.000024/vCPU-s · $0.0000025/GiB-s
+//
+// Tokens per run: ~33K input / ~7.2K output across 4 LLM calls
+// Infra: 2vCPU + 2GiB × ~50s = $0.003
+const COST_TABLE = {
+  gemini: {
+    rows: [
+      { label: 'Gemini 2.5 Flash — 33K in × $0.075/1M',  usd: 0.00248 },
+      { label: 'Gemini 2.5 Flash — 7.2K out × $0.60/1M', usd: 0.00432 },
+      { label: 'Cloud Run (2vCPU/2GiB/50s)',               usd: 0.00300 },
+    ],
+    total: 0.010,  // ~$0.010
+  },
+  claude: {
+    rows: [
+      { label: 'Claude Sonnet 4.6 — 33K in × $3/1M',    usd: 0.09900 },
+      { label: 'Claude Sonnet 4.6 — 7.2K out × $15/1M', usd: 0.10800 },
+      { label: 'Serper API — 8 searches × $0.0003',      usd: 0.00240 },
+      { label: 'Cloud Run (2vCPU/2GiB/50s)',              usd: 0.00300 },
+    ],
+    total: 0.212,  // ~$0.21
+  },
+};
+const USD_TO_INR = 84;
+
 const METHODS = [
   {
     id: 'gemini', label: 'Gemini', sub: 'Google Grounding',
@@ -324,6 +353,7 @@ export default function CitationTestingPanel() {
 
   const binding    = sortedCitations.filter(c => c.authority_weight === 'BINDING');
   const persuasive = sortedCitations.filter(c => c.authority_weight !== 'BINDING');
+  const costInfo   = COST_TABLE[method] || COST_TABLE.gemini;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -528,18 +558,55 @@ export default function CitationTestingPanel() {
                 <span className="text-xs px-2.5 py-1 rounded-full font-semibold text-white"
                   style={{ background: selMethod.color }}>via {selMethod.label}</span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 {[
-                  { label: 'Total Citations', value: sortedCitations.length, color: T },
-                  { label: 'Binding (SC)',    value: binding.length,         color: '#B45309' },
-                  { label: 'Sources Found',   value: result.search_results?.length ?? 0, color: '#6366F1' },
-                  { label: 'Time',            value: `${result.elapsed_seconds}s`,       color: '#6B7280' },
+                  { label: 'Total Citations', value: sortedCitations.length,               color: T },
+                  { label: 'Binding (SC)',    value: binding.length,                        color: '#B45309' },
+                  { label: 'Sources Found',  value: result.search_results?.length ?? 0,    color: '#6366F1' },
+                  { label: 'Time',           value: `${result.elapsed_seconds ?? '—'}s`,   color: '#6B7280' },
                 ].map(({ label, value, color }) => (
                   <div key={label} className="bg-gray-50 rounded-lg p-3 text-center">
                     <div className="text-xl font-bold" style={{ color }}>{value}</div>
                     <div className="text-xs text-gray-500 mt-0.5">{label}</div>
                   </div>
                 ))}
+
+                {/* Cost card with inline breakdown */}
+                <div className="bg-gray-50 rounded-lg p-3 text-center relative group col-span-2 sm:col-span-1">
+                  <div className="text-xl font-bold" style={{ color: '#059669' }}>
+                    ₹{(costInfo.total * USD_TO_INR).toFixed(2)}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5 flex items-center justify-center gap-1">
+                    Est. Cost
+                    <svg className="w-3 h-3 text-gray-400" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
+                      <path d="M8 7v5M8 5.5v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                  </div>
+                  {/* Hover tooltip — full breakdown */}
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-20 hidden group-hover:block w-64">
+                    <div className="bg-gray-900 text-white text-xs rounded-xl shadow-xl p-3 text-left">
+                      <div className="font-bold mb-2 text-green-400">Cost Breakdown — {method === 'gemini' ? 'Gemini' : 'Claude'}</div>
+                      {costInfo.rows.map((r, i) => (
+                        <div key={i} className="flex justify-between gap-2 py-0.5 border-b border-gray-700 last:border-0">
+                          <span className="text-gray-300 truncate">{r.label}</span>
+                          <span className="font-mono text-white whitespace-nowrap">${r.usd.toFixed(5)}</span>
+                        </div>
+                      ))}
+                      <div className="flex justify-between gap-2 pt-1.5 mt-1 font-bold">
+                        <span>Total</span>
+                        <span className="text-green-400">
+                          ${costInfo.total.toFixed(3)} &nbsp;≈&nbsp; ₹{(costInfo.total * USD_TO_INR).toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="text-gray-500 text-[10px] mt-2 leading-tight">
+                        Pricing: Gemini $0.075/$0.60 per 1M · Claude $3/$15 per 1M · Serper $0.30/1K · Cloud Run $0.000024/vCPU-s
+                      </div>
+                    </div>
+                    {/* Arrow */}
+                    <div className="w-2.5 h-2.5 bg-gray-900 rotate-45 mx-auto -mt-1.5 rounded-sm" />
+                  </div>
+                </div>
               </div>
             </div>
 

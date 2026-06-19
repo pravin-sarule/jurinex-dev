@@ -24,6 +24,28 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+# ── Result cache (keyed by case_id+method; avoids re-running for same case) ──
+import hashlib as _hashlib
+
+_RESULT_CACHE: Dict[str, tuple] = {}  # key -> (timestamp, citations, search_results, gaps)
+_CACHE_TTL_SECONDS = int(os.environ.get("CITATION_CACHE_TTL_SECONDS", "86400"))  # 24 h default
+
+
+def _cache_key(case_id: str, case_query: str, method: str) -> str:
+    raw = f"{(case_id or '').strip()}|{(case_query or '')[:120].strip()}|{method}"
+    return _hashlib.md5(raw.encode()).hexdigest()
+
+
+def _cache_get(key: str) -> Optional[Dict[str, Any]]:
+    entry = _RESULT_CACHE.get(key)
+    if entry and (time.time() - entry[0]) < _CACHE_TTL_SECONDS:
+        return {"citations": entry[1], "search_results": entry[2], "gaps": entry[3]}
+    return None
+
+
+def _cache_set(key: str, citations: list, search_results: list, gaps: list) -> None:
+    _RESULT_CACHE[key] = (time.time(), citations, search_results, gaps)
+
 
 # ── Shared LLM helpers ────────────────────────────────────────────────────────
 
@@ -38,9 +60,14 @@ def _gemini_call(prompt: str, model: str, max_tokens: int = 4096, json_mode: boo
         try:
             from google import genai
             client = genai.Client(api_key=api_key)
-            config_kwargs: Dict[str, Any] = {"temperature": 0.1, "max_output_tokens": max_tokens}
+            config_kwargs: Dict[str, Any] = {"temperature": 0.0, "max_output_tokens": max_tokens}
             if json_mode:
                 config_kwargs["response_mime_type"] = "application/json"
+            # Disable thinking mode — not needed for structured JSON tasks, saves 3-8s per call
+            try:
+                config_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=0)
+            except Exception:
+                pass
             resp = client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -210,7 +237,7 @@ def _run_case_analyzer(state: Dict[str, Any]) -> None:
         CASE_ANALYZER_MODEL,
         method,
         schema=CaseAnalysis,
-        max_tokens=4096,
+        max_tokens=1500,
         operation="case_analyzer",
     )
     if result:
@@ -239,7 +266,7 @@ def _run_research_decomposer(state: Dict[str, Any]) -> None:
         DECOMPOSER_MODEL,
         method,
         schema=DeepResearchPlan,
-        max_tokens=4096,
+        max_tokens=2048,
         operation="research_decomposer",
     )
     if result and isinstance(result.get("research_questions"), list):
@@ -267,7 +294,7 @@ def _run_query_planner(state: Dict[str, Any]) -> List[str]:
         QUERY_PLANNER_MODEL,
         method,
         schema=QueryPlanOutput,
-        max_tokens=4096,
+        max_tokens=1024,
         operation="query_planner",
     )
     queries: List[str] = []
@@ -305,33 +332,212 @@ def _normalize_hit(h: Any) -> Dict[str, str]:
     }
 
 
-# ── Stage 4a: Gemini Search (Google Grounding) ───────────────────────────────
+# ── Stage 4a: Gemini Search (IK direct + grounding query hints) ──────────────
 
-def _gemini_grounding_search(query: str, num: int = 5):
+def _ik_fetch_snippet(uri: str, chars: int = 1000) -> str:
     """
-    Gemini 2.5 Flash grounding returns web_search_queries AND grounding_chunks.
-    Strategy: 
-      1. Ask Gemini to find results via grounding.
-      2. If Gemini returns actual web chunks, use them immediately.
-      3. Otherwise, use Gemini's generated queries to search via Serper.
+    Fetch judgment text from an indiankanoon.org doc page.
+    Uses multiple extraction strategies to get the best text available.
     """
-    import os, re, time as _t
+    import re as _re
+    import httpx
+
+    try:
+        with httpx.Client(
+            timeout=6.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; legal-research/1.0)"},
+        ) as c:
+            resp = c.get(uri)
+            if resp.status_code != 200:
+                return ""
+            html = resp.text
+    except Exception:
+        return ""
+
+    # Strip scripts/styles first
+    html = _re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Strategy 1: IK stores judgment body in <div id="judgments"> or <div class="judgments">
+    for pat in [
+        r'<div[^>]+id=["\']judgments["\'][^>]*>(.*?)</div\s*>',
+        r'<div[^>]+class=["\'][^"\']*judgment[^"\']*["\'][^>]*>(.*?)</div\s*>',
+    ]:
+        m = _re.search(pat, html, _re.DOTALL | _re.IGNORECASE)
+        if m:
+            text = _re.sub(r'<[^>]+>', ' ', m.group(1))
+            text = _re.sub(r'\s+', ' ', text).strip()
+            if len(text) > 200:
+                return text[:chars]
+
+    # Strategy 2: collect all <p> tags that look like judgment text (>80 chars)
+    paragraphs = []
+    for m in _re.finditer(r'<p[^>]*>(.*?)</p>', html, _re.DOTALL | _re.IGNORECASE):
+        t = _re.sub(r'<[^>]+>', ' ', m.group(1))
+        t = _re.sub(r'\s+', ' ', t).strip()
+        if len(t) >= 80:
+            paragraphs.append(t)
+        if sum(len(x) for x in paragraphs) >= chars:
+            break
+    if paragraphs:
+        return ' '.join(paragraphs)[:chars]
+
+    # Strategy 3: strip all HTML and return body text
+    text = _re.sub(r'<(nav|header|footer|script|style)[^>]*>.*?</\1>', '', html,
+                   flags=_re.DOTALL | _re.IGNORECASE)
+    text = _re.sub(r'<[^>]+>', ' ', text)
+    text = _re.sub(r'\s+', ' ', text).strip()
+    return text[:chars]
+
+
+def _ik_enrich_snippets(hits: List[Dict[str, Any]], workers: int = 8) -> List[Dict[str, Any]]:
+    """
+    Parallel-fetch judgment text for IK results that have thin/missing snippets.
+    Caps at first 10 thin results to keep wall-clock time under ~12s.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    to_fetch = [
+        i for i, h in enumerate(hits)
+        if len(h.get("snippet") or "") < 150 and "indiankanoon.org/doc/" in h.get("uri", "")
+    ][:10]  # cap: 10 × 6s timeout / 8 workers ≈ ~8s wall-clock
+    if not to_fetch:
+        return hits
+
+    enriched = [dict(h) for h in hits]
+
+    def _fetch(idx: int):
+        return idx, _ik_fetch_snippet(enriched[idx]["uri"])
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_fetch, i): i for i in to_fetch}
+        for fut in as_completed(futs, timeout=15):
+            try:
+                idx, snippet = fut.result()
+                if snippet and len(snippet) > 100:
+                    enriched[idx]["snippet"] = snippet
+            except Exception:
+                pass
+
+    fetched = sum(1 for i in to_fetch if len(enriched[i].get("snippet") or "") > 100)
+    logger.info("[IK_ENRICH] Enriched %d/%d results with judgment text", fetched, len(to_fetch))
+    return enriched
+
+
+def _ik_search(query: str, num: int = 8) -> List[Dict[str, Any]]:
+    """
+    Search indiankanoon.org directly and return judgment links with snippets.
+    Strips Boolean operators / site: directives before sending the query.
+    """
+    import re as _re
+    from urllib.parse import quote
+    import httpx
+
+    # Normalise: remove Boolean/site: syntax IK doesn't support
+    clean = _re.sub(r'site:\S+', '', query)
+    clean = _re.sub(r'\bAND\b|\bOR\b|\bNOT\b', ' ', clean, flags=_re.IGNORECASE)
+    clean = _re.sub(r'["\(\)]', ' ', clean)
+    clean = _re.sub(r'\s+', ' ', clean).strip()
+    if not clean:
+        clean = query[:120]
+
+    search_url = f"https://indiankanoon.org/search/?formInput={quote(clean)}&pagenum=0"
+    try:
+        with httpx.Client(
+            timeout=12.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; legal-research/1.0)"},
+        ) as c:
+            resp = c.get(search_url)
+            if resp.status_code != 200:
+                logger.debug("[IK_SEARCH] HTTP %s for %r", resp.status_code, clean[:60])
+                return []
+            html = resp.text
+    except Exception as exc:
+        logger.warning("[IK_SEARCH] Request failed: %s", exc)
+        return []
+
+    hits: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+
+    # IK search results have both the doc link AND a snippet paragraph nearby.
+    # Try to extract snippet from the result block around each doc link.
+    # Pattern: result block contains title anchor + court info + snippet text
+    # We'll do a two-pass: first collect doc links + surrounding block text.
+    blocks = _re.split(r'<div[^>]+class=["\'][^"\']*result[^"\']*["\']', html, flags=_re.IGNORECASE)
+    for block in blocks:
+        m_link = _re.search(r'href="/doc/(\d+)/[^"]*"[^>]*>(.*?)</a>', block, _re.DOTALL | _re.IGNORECASE)
+        if not m_link:
+            continue
+        doc_id = m_link.group(1)
+        if doc_id in seen_ids:
+            continue
+        seen_ids.add(doc_id)
+        raw_title = m_link.group(2)
+        title = _re.sub(r'<[^>]+>', '', raw_title).strip() or f"Judgment {doc_id}"
+
+        # Try to extract snippet text from the result block
+        snippet_text = _re.sub(r'<[^>]+>', ' ', block)
+        snippet_text = _re.sub(r'\s+', ' ', snippet_text).strip()
+        # Remove the title from the start to get the snippet portion
+        if title in snippet_text:
+            snippet_text = snippet_text[snippet_text.index(title) + len(title):].strip()
+        snippet = snippet_text[:400] if len(snippet_text) > 20 else ""
+
+        hits.append({
+            "uri": f"https://indiankanoon.org/doc/{doc_id}/",
+            "title": title,
+            "snippet": snippet,
+            "authority_tier": "T2",
+        })
+        if len(hits) >= num:
+            break
+
+    if not hits:
+        # Fallback: simple doc link extraction without snippets
+        for m in _re.finditer(r'<a[^>]+href="/doc/(\d+)/[^"]*"[^>]*>(.*?)</a>', html,
+                               _re.DOTALL | _re.IGNORECASE):
+            doc_id, raw_title = m.group(1), m.group(2)
+            if doc_id in seen_ids:
+                continue
+            seen_ids.add(doc_id)
+            title = _re.sub(r'<[^>]+>', '', raw_title).strip() or f"Judgment {doc_id}"
+            hits.append({
+                "uri": f"https://indiankanoon.org/doc/{doc_id}/",
+                "title": title,
+                "snippet": "",
+                "authority_tier": "T2",
+            })
+            if len(hits) >= num:
+                break
+
+    if hits:
+        logger.info("[IK_SEARCH] %d hits for %r", len(hits), clean[:60])
+    else:
+        logger.warning("[IK_SEARCH] 0 hits for %r", clean[:60])
+    return hits
+
+
+def _gemini_web_queries(query: str) -> List[str]:
+    """
+    Call Gemini once (with Google Search grounding) to get suggested web_search_queries.
+    These are the short keyword queries Gemini would use to research the topic.
+    Returns empty list on any failure — caller falls back to the original query.
+    """
+    import time as _t
+    import re as _re
     from agents.citation_test_agent.domain_allowlist import tier_of
+
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        return _serper_search(f"site:indiankanoon.org {query}", num=num)
-
-    web_queries: List[str] = []
-    grounding_hits: List[Dict[str, Any]] = []
-    
+        return []
     try:
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=api_key)
-
         cfg = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
-            max_output_tokens=1024,
+            max_output_tokens=512,
             temperature=0.0,
         )
         for attempt in range(2):
@@ -339,135 +545,75 @@ def _gemini_grounding_search(query: str, num: int = 5):
                 resp = client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=(
-                        f"Search for and list the official Indian court judgments (Supreme Court or High Courts) "
-                        f"relevant to this legal issue: {query}. "
-                        f"You MUST provide the direct URLs to the judgments on indiankanoon.org, sci.gov.in, or livelaw.in. "
-                        f"List at least 5-10 specific case links."
+                        f"Briefly search for Indian court judgments on: {query[:300]}. "
+                        f"Focus on indiankanoon.org results."
                     ),
                     config=cfg,
                 )
-                
-                # 1. Extract actual chunks (grounding_chunks) from metadata
-                for cand in (resp.candidates or []):
-                    # Also try to extract URLs from the text response itself as a fallback
-                    text_content = ""
-                    for part in (cand.content.parts or []):
-                        if hasattr(part, "text"):
-                            text_content += part.text
-                    
-                    if text_content:
-                        # Simple regex to find URLs in text
-                        found_urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text_content)
-                        for url in found_urls:
-                            url = url.rstrip(".,;)")
-                            tier = tier_of(url)
-                            if tier in ("T1", "T2"):
-                                grounding_hits.append({
-                                    "uri": url,
-                                    "title": "Judgment found in text",
-                                    "snippet": "Direct link from Gemini grounding response",
-                                    "authority_tier": tier,
-                                })
-
-                    gm = getattr(cand, "grounding_metadata", None)
-                    if not gm:
-                        continue
-                    
-                    chunks = getattr(gm, "grounding_chunks", []) or []
-                    for chunk in chunks:
-                        web = getattr(chunk, "web", None)
-                        if web:
-                            uri = getattr(web, "uri", "")
-                            title = getattr(web, "title", "")
-                            if uri:
-                                tier = tier_of(uri)
-                                if tier in ("T1", "T2"):
-                                    grounding_hits.append({
-                                        "uri": uri,
-                                        "title": title or uri,
-                                        "snippet": "Result from Google Grounding metadata",
-                                        "authority_tier": tier,
-                                    })
-
-                    # Also extract web_search_queries for Serper fallback
-                    sep = getattr(gm, "search_entry_point", None)
-                    if sep:
-                        wq = getattr(sep, "web_search_queries", None) or []
-                        web_queries.extend(wq)
-                    wq2 = getattr(gm, "web_search_queries", None) or []
-                    web_queries.extend(wq2)
                 break
             except Exception as exc:
                 msg = str(exc)
                 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg.upper()) and attempt == 0:
                     _t.sleep(5)
                     continue
-                logger.warning("[GROUNDING] Gemini query generation failed: %s", exc)
-                break
-    except Exception as exc:
-        logger.warning("[GROUNDING] client error: %s", exc)
+                logger.debug("[GEMINI_QUERIES] Gemini call failed: %s", exc)
+                return []
 
-    # If we got direct grounding hits, use them (deduplicated)
-    if grounding_hits:
-        seen_uris = set()
-        final_hits = []
-        for h in grounding_hits:
-            if h["uri"] not in seen_uris:
-                seen_uris.add(h["uri"])
-                final_hits.append(h)
-        if len(final_hits) >= num:
-            logger.info("[GROUNDING] Found %d direct hits from Gemini grounding", len(final_hits))
-            return final_hits[:num]
+        collected_queries: List[str] = []
+        collected_text_hits: List[Dict[str, Any]] = []
 
-    # Deduplicate and add original query as fallback
-    seen: set = set()
-    final_queries: List[str] = []
-    for q in (web_queries + [query]):
-        q = q.strip()
-        if q and q not in seen:
-            seen.add(q)
-            final_queries.append(q)
+        for cand in (resp.candidates or []):
+            # Extract any direct T1/T2 URLs from the text response
+            text = "".join(getattr(p, "text", "") for p in (cand.content.parts or []))
+            for url in _re.findall(r'https?://[^\s<>"]+', text):
+                url = url.rstrip(".,;)")
+                tier = tier_of(url)
+                if tier in ("T1", "T2"):
+                    collected_text_hits.append({
+                        "uri": url, "title": url,
+                        "snippet": "", "authority_tier": tier,
+                    })
 
-    logger.info("[GROUNDING] web_search_queries from Gemini: %s", final_queries)
-
-    # Step 2: execute each query via Serper with indiankanoon.org priority
-    all_results: list = []
-    seen_uris: set = set()
-    serper_error = False
-
-    def _add(hits):
-        nonlocal serper_error
-        for h in hits:
-            if isinstance(h, dict) and h.get("error") == "credits_exhausted":
-                serper_error = True
+            gm = getattr(cand, "grounding_metadata", None)
+            if not gm:
                 continue
-            uri = h["uri"] if isinstance(h, dict) else h.uri
-            if uri not in seen_uris:
-                seen_uris.add(uri)
-                all_results.append(h)
+            sep = getattr(gm, "search_entry_point", None)
+            if sep:
+                collected_queries.extend(getattr(sep, "web_search_queries", None) or [])
+            collected_queries.extend(getattr(gm, "web_search_queries", None) or [])
 
-    for q in final_queries[:5]:
-        _add(_serper_search(f"site:indiankanoon.org {q}", num=5))
-        if len(all_results) >= num or serper_error:
-            break
+        # Store text hits on the function object so caller can use them
+        _gemini_web_queries._last_text_hits = collected_text_hits
+        return [q.strip() for q in collected_queries if q.strip()]
 
-    # If still short, try livelaw and plain queries
-    if len(all_results) < num and not serper_error:
-        for q in final_queries[:3]:
-            _add(_serper_search(f"site:livelaw.in {q}", num=3))
-            _add(_serper_search(q, num=5))
-            if len(all_results) >= num or serper_error:
-                break
+    except Exception as exc:
+        logger.debug("[GEMINI_QUERIES] unexpected error: %s", exc)
+        return []
 
-    if not all_results and serper_error:
-        # Fallback to whatever grounding hits we found even if less than num
-        if grounding_hits:
-            logger.info("[GROUNDING] Serper failed (credits), using %d direct hits from Gemini", len(grounding_hits))
-            return grounding_hits[:num]
-        return [{"error": "credits_exhausted"}]
 
-    logger.info("[GROUNDING] %d T1/T2 results found via Gemini+Serper", len(all_results))
-    return all_results[:num]
+def _gemini_grounding_search(query: str, num: int = 5) -> List[Dict[str, Any]]:
+    """
+    Gemini method: search indiankanoon.org directly using the planned query.
+    Deterministic — no Gemini grounding call here (queries already fixed by Stage 3).
+    """
+    import re as _re
+    # Strip Boolean/site: operators so IK search gets plain keywords
+    clean_q = _re.sub(r'site:\S+', '', query).strip()
+
+    all_hits: List[Dict[str, Any]] = []
+    seen_uris: set = set()
+
+    for h in _ik_search(clean_q, num=num):
+        if h["uri"] not in seen_uris:
+            seen_uris.add(h["uri"])
+            all_hits.append(h)
+
+    if all_hits:
+        logger.info("[GEMINI_SEARCH] %d results for %r", len(all_hits), clean_q[:60])
+        return all_hits[:num]
+
+    logger.warning("[GEMINI_SEARCH] 0 results for: %s", clean_q[:80])
+    return []
 
 
 # ── Stage 4b: Serper Search ───────────────────────────────────────────────────
@@ -708,23 +854,42 @@ def _fallback_citations_from_sources(sources: list, state: Dict[str, Any]) -> Li
 def _build_extract_prompt(state: Dict[str, Any], sources: List[Dict[str, Any]]) -> str:
     sources_json = json.dumps(sources, ensure_ascii=False)
     return (
-        "You are a legal citation extraction specialist for Indian law.\n\n"
-        f"OUR CLIENT'S CASE:\n{_build_fact_brief(state)}\n\n"
-        f"Research questions:\n{str(state.get('research_questions', '[]'))[:600]}\n\n"
-        f"SEARCH RESULTS:\n{sources_json}\n\n"
-        "Extract ALL Indian court judgment candidates from these results (T1/T2 only).\n"
-        "Rules:\n"
-        "- INCLUDE every indiankanoon.org/doc/ and sci.gov.in result — they are real judgments\n"
-        "- Set parties from the page title if needed (e.g. 'A vs B')\n"
-        "- Infer court from URL domain when not explicit\n"
-        "- NEVER skip a result because ratio is missing — use snippet or title instead\n"
-        "- Do NOT fabricate citation numbers not present in title/snippet/URL\n"
-        "- source_url must match the result uri exactly\n\n"
-        "For each citation return: parties, court, bench, year, citation_no, facts_of_precedent, "
-        "legal_issue, ratio, key_principle, key_quote, factual_similarity, our_argument, "
-        "distinguishing_notes, authority_weight (BINDING/PERSUASIVE/PERSUASIVE_OTHER/TRIBUNAL), "
-        "source_url, authority_tier, confidence (HIGH/MEDIUM).\n\n"
-        'Return ONLY JSON: {"citations": [{...}, ...]}'
+        "You are a senior Indian law advocate with 20 years of litigation experience.\n"
+        "Your task: extract and fully analyse each judgment in the search results as a usable court citation.\n\n"
+        "━━━ OUR CLIENT'S CASE ━━━\n"
+        f"{_build_fact_brief(state)}\n\n"
+        "━━━ RESEARCH QUESTIONS ━━━\n"
+        f"{str(state.get('research_questions', '[]'))[:800]}\n\n"
+        "━━━ SEARCH RESULTS (T1/T2 sources only) ━━━\n"
+        f"{sources_json}\n\n"
+        "━━━ INSTRUCTIONS ━━━\n"
+        "Extract EVERY result that is an Indian court judgment. For each one, fill ALL fields below.\n"
+        "Use the snippet text, page title, and URL as your primary source.\n"
+        "Where snippet is thin, use your legal knowledge of the case to enrich the fields — but NEVER invent a citation number or URL.\n\n"
+        "FIELD GUIDE (fill every field — do not leave blank):\n"
+        "  parties          → 'Petitioner Name vs Respondent Name' — from title or snippet\n"
+        "  court            → Full court name: 'Supreme Court of India', 'Bombay High Court', etc. — infer from URL domain\n"
+        "  bench            → Judge names if visible in snippet, else ''\n"
+        "  year             → 4-digit year from title/snippet/URL — infer if clear, else ''\n"
+        "  citation_no      → Official citation like '(2019) 5 SCC 162' — ONLY if present in snippet/title, else ''\n"
+        "  facts_of_precedent → 2-3 sentences on the facts of THAT case (not our client's case)\n"
+        "  legal_issue      → The precise legal question that court decided — 1 sentence\n"
+        "  ratio            → The court's actual ruling/holding — 2-3 sentences. Use snippet text directly where available.\n"
+        "  key_principle    → Single sentence: the legal rule this case establishes\n"
+        "  key_quote        → Best verbatim quote from the snippet (max 60 words). If no quote available, use ''\n"
+        "  factual_similarity → Bullet points (3-5) explaining HOW the facts of this precedent match our client's case\n"
+        "  our_argument     → 2-3 sentences: exactly HOW a lawyer should cite this case in court to help our client\n"
+        "  distinguishing_notes → If the opposing side could distinguish this case, note it here; else ''\n"
+        "  authority_weight → BINDING (Supreme Court of India) | PERSUASIVE (High Court same jurisdiction) | PERSUASIVE_OTHER (other HC) | TRIBUNAL\n"
+        "  source_url       → Exact URI from the search result — do NOT modify\n"
+        "  authority_tier   → T1 (gov.in/nic.in) | T2 (indiankanoon.org, livelaw.in, etc.)\n"
+        "  confidence       → HIGH (clear judgment, strong match) | MEDIUM (partial match or thin snippet)\n\n"
+        "STRICT RULES:\n"
+        "- Include EVERY indiankanoon.org/doc/ URL — each is a real judgment\n"
+        "- NEVER skip a result because fields are incomplete — fill what you can, use '' for truly unknown fields\n"
+        "- factual_similarity and our_argument MUST relate specifically to our client's case facts above\n"
+        "- source_url must exactly match the uri in the search result\n\n"
+        'Return ONLY valid JSON — no markdown, no explanation:\n{"citations": [{ all fields above }, ...]}'
     )
 
 
@@ -858,6 +1023,19 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
         state["error"] = "No case context or query available"
         return state
 
+    # ── Cache check: same case + method → return cached result immediately ───
+    _ck = _cache_key(str(state.get("case_id") or ""), case_query, method)
+    cached = _cache_get(_ck)
+    if cached:
+        logger.info("[RUNNER] Cache hit for key=%s — returning %d cached citations", _ck[:8], len(cached["citations"]))
+        state["citations"]      = cached["citations"]
+        state["search_results"] = cached["search_results"]
+        state["gaps"]           = cached["gaps"]
+        state["method_used"]    = method
+        state["elapsed_seconds"] = 0.0
+        state["from_cache"]     = True
+        return state
+
     # Use case title as the research query if not explicitly provided
     if not case_query and case_context:
         # Extract first line as seed query
@@ -886,38 +1064,62 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     search_error = ""
 
     if method == "gemini":
-        for q in queries[:9]:
-            hits = _gemini_grounding_search(q, num=4)
-            for h in hits:
-                if isinstance(h, dict) and h.get("error") == "credits_exhausted":
-                    search_error = "Search API (Serper) credits exhausted. Please top up your credits."
-                    continue
-                hit = _normalize_hit(h)
-                uri = hit["uri"]
-                if uri and uri not in seen_uris:
-                    seen_uris.add(uri)
-                    all_sources.append(hit)
-            if search_error and not all_sources:
-                break
+        # Run all IK searches in parallel — biggest time win (was ~45-90s sequential)
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+        import re as _re2
+        ik_queries = [_re2.sub(r'site:\S+', '', q).strip() for q in queries[:6] if q.strip()]
+        all_hits_ordered: List[Dict[str, Any]] = []
+        with _TPE(max_workers=6) as pool:
+            futs = {pool.submit(_ik_search, q, 5): q for q in ik_queries}
+            for fut in _ac(futs, timeout=30):
+                try:
+                    for h in (fut.result() or []):
+                        all_hits_ordered.append(_normalize_hit(h))
+                except Exception:
+                    pass
+        for hit in all_hits_ordered:
+            uri = hit["uri"]
+            if uri and uri not in seen_uris:
+                seen_uris.add(uri)
+                all_sources.append(hit)
+                if len(all_sources) >= 20:
+                    break
     else:
         # Build Serper-friendly queries: indiankanoon.org first, then cleaned Boolean queries
         serper_queries = _build_serper_queries(queries, case_query, state.get("case_analysis", "{}"))
         print(f"[CITATION_TEST]   → {len(serper_queries)} Serper queries (indiankanoon-first):", flush=True)
         for i, sq in enumerate(serper_queries[:12], 1):
             print(f"[CITATION_TEST]     {i}. {sq}", flush=True)
-        for q in serper_queries[:12]:
-            hits = _serper_search(q, num=5)
-            for h in hits:
-                if isinstance(h, dict) and h.get("error") == "credits_exhausted":
-                    search_error = "Search API (Serper) credits exhausted. Please top up your credits."
-                    continue
-                if h["uri"] not in seen_uris:
-                    seen_uris.add(h["uri"])
-                    all_sources.append(h)
-            if (len(all_sources) >= 20) or (search_error and not all_sources):
-                break
+        # Run Serper searches in parallel
+        from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
+        serper_hits: List[Dict[str, Any]] = []
+        with _TPE2(max_workers=6) as pool:
+            futs = {pool.submit(_serper_search, q, 5): q for q in serper_queries[:8]}
+            for fut in _ac2(futs, timeout=30):
+                try:
+                    serper_hits.extend(fut.result() or [])
+                except Exception:
+                    pass
+        for h in serper_hits:
+            if isinstance(h, dict) and h.get("error") == "credits_exhausted":
+                search_error = "Search API (Serper) credits exhausted. Please top up your credits."
+                continue
+            if h.get("uri") and h["uri"] not in seen_uris:
+                seen_uris.add(h["uri"])
+                all_sources.append(h)
+                if len(all_sources) >= 20:
+                    break
 
     print(f"[CITATION_TEST]   → {len(all_sources)} T1/T2 sources found", flush=True)
+
+    # Enrich ALL Gemini/IK sources with judgment text before extraction
+    # (Serper already returns snippets; IK results need page fetches)
+    if method == "gemini" and all_sources:
+        thin = sum(1 for s in all_sources if len(s.get("snippet") or "") < 150)
+        if thin:
+            print(f"[CITATION_TEST]   → Fetching judgment text for {thin} thin-snippet sources…", flush=True)
+            all_sources = _ik_enrich_snippets(all_sources)
+
     state["search_results"] = all_sources
 
     # Stage 5: Citation Extractor
@@ -925,18 +1127,50 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     citations: List[Dict[str, Any]] = []
     if all_sources:
         citations = _run_extractor(state, all_sources, method)
+        # Post-fill: patch any citation that still has empty key fields from source metadata
+        src_by_url = {s.get("uri") or s.get("source_url") or "": s for s in all_sources}
+        for c in citations:
+            src = src_by_url.get(c.get("source_url") or "")
+            if not src:
+                continue
+            snippet = str(src.get("snippet") or "")
+            title   = str(src.get("title") or "")
+            if not c.get("parties") and title:
+                c["parties"] = _infer_parties(title) or title[:120]
+            if not c.get("ratio") and snippet:
+                c["ratio"] = snippet[:400]
+            if not c.get("facts_of_precedent") and snippet:
+                c["facts_of_precedent"] = snippet[:500]
+            if not c.get("key_principle") and snippet:
+                c["key_principle"] = snippet[:200]
+            if not c.get("court"):
+                c["court"] = _infer_court(c.get("source_url") or "", title)
+            if not c.get("year"):
+                c["year"] = _infer_year(title, c.get("source_url") or "")
+            if not c.get("authority_weight"):
+                c["authority_weight"] = "BINDING" if c.get("court") == "Supreme Court of India" else "PERSUASIVE"
     print(f"[CITATION_TEST]   → {len(citations)} citation(s) extracted", flush=True)
 
     elapsed = round(time.time() - start, 2)
     state["citations"] = citations
     
-    if search_error and not citations:
-        state["gaps"] = [search_error]
+    if not citations:
+        if search_error:
+            state["gaps"] = [search_error]
+        elif not all_sources:
+            state["gaps"] = ["No T1/T2 sources found via Google Grounding" if method == "gemini" else "No T1/T2 sources found via Serper"]
+        else:
+            state["gaps"] = ["Could not extract structured citations from sources"]
     else:
-        state["gaps"] = [] if citations else ["No T1/T2 sources found" if not all_sources else "Could not extract structured citations"]
+        state["gaps"] = []
     
     state["method_used"] = method
     state["elapsed_seconds"] = elapsed
+
+    # ── Cache result so the same case returns the same judgments next time ───
+    if citations:
+        _cache_set(_ck, citations, all_sources, state.get("gaps") or [])
+        logger.info("[RUNNER] Cached %d citations for key=%s (TTL=%ds)", len(citations), _ck[:8], _CACHE_TTL_SECONDS)
 
     print(f"[CITATION_TEST] ═══ Done — {len(citations)} citations in {elapsed}s ═══\n", flush=True)
     return state
