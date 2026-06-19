@@ -1011,7 +1011,9 @@ def _build_extract_prompt(state: Dict[str, Any], sources: List[Dict[str, Any]]) 
         "━━━ SEARCH RESULTS (T1/T2 sources only) ━━━\n"
         f"{sources_json}\n\n"
         "━━━ INSTRUCTIONS ━━━\n"
-        "Extract EVERY result that is an Indian court judgment. For each one, fill ALL fields below.\n"
+        "ONLY extract results that are actual Indian court judgments — judgments that a lawyer can cite in a court of law.\n"
+        "SKIP any result that is: a news article, legal commentary, academic paper, blog post, law firm alert, or statutory text.\n"
+        "A valid result must be: a Supreme Court / High Court / Tribunal JUDGMENT or ORDER with identifiable parties and a court.\n"
         "Use the snippet text, page title, and URL as your primary source.\n"
         "Where snippet is thin, use your legal knowledge of the case to enrich the fields — but NEVER invent a citation number or URL.\n\n"
         "FIELD GUIDE (fill every field — do not leave blank):\n"
@@ -1033,8 +1035,12 @@ def _build_extract_prompt(state: Dict[str, Any], sources: List[Dict[str, Any]]) 
         "  authority_tier   → T1 (gov.in/nic.in) | T2 (indiankanoon.org, livelaw.in, etc.)\n"
         "  confidence       → HIGH (clear judgment, strong match) | MEDIUM (partial match or thin snippet)\n\n"
         "STRICT RULES:\n"
-        "- Include EVERY indiankanoon.org/doc/ URL — each is a real judgment\n"
-        "- NEVER skip a result because fields are incomplete — fill what you can, use '' for truly unknown fields\n"
+        "- INCLUDE: every indiankanoon.org/doc/ URL — each is a real judgment\n"
+        "- INCLUDE: any source whose title contains 'vs', 'v.', court name, or case number\n"
+        "- SKIP: news articles (livelaw.in/news/, barandbench.com, etc.)\n"
+        "- SKIP: any source that is clearly not a court judgment (Wikipedia, blogs, commentaries)\n"
+        "- SKIP: sources with no identifiable parties AND no court name\n"
+        "- NEVER skip a valid judgment because fields are incomplete — fill what you can, use '' for unknown fields\n"
         "- factual_similarity and our_argument MUST relate specifically to our client's case facts above\n"
         "- source_url must exactly match the uri in the search result\n\n"
         'Return ONLY valid JSON — no markdown, no explanation:\n{"citations": [{ all fields above }, ...]}'
@@ -1085,8 +1091,131 @@ def _merge_citations(existing: List[Dict[str, Any]], new: List[Dict[str, Any]]) 
     return merged
 
 
+def _is_judgment_source(source: Dict[str, Any]) -> bool:
+    """
+    Return True only if this source is an actual court judgment — not a news article,
+    legal commentary, academic paper, or non-citable content.
+    Courts in India only accept: SC judgments, HC judgments, tribunal orders, and
+    gazette/statute URLs. News reporting ON judgments is NOT citable.
+    """
+    uri   = (source.get("uri")     or "").lower()
+    title = (source.get("title")   or "").lower()
+    snip  = (source.get("snippet") or "").lower()
+
+    # ── Always accept: official court / government portals ───────────────────
+    if any(d in uri for d in [
+        ".gov.in", ".nic.in", "sci.gov.in", "ecourts.gov.in",
+        "supremecourt.gov.in", "bombayhighcourt", "delhihighcourt",
+    ]):
+        return True
+
+    # ── Always accept: known judgment-only repositories ──────────────────────
+    if "indiankanoon.org" in uri:
+        return True
+    if any(d in uri for d in [
+        "casemine.com", "manupatra.com", "scconline.com",
+        "lawfinderlive.com", "app.bharatlaw.ai",
+    ]):
+        return True
+
+    # ── livelaw.in: accept judgment pages, reject news ───────────────────────
+    if "livelaw.in" in uri:
+        _NEWS_PATHS = ["/news/", "/top-stories/", "/columns/", "/interviews/",
+                       "/opinion/", "/feature/", "/know-the-law/", "/webinars/"]
+        if any(p in uri for p in _NEWS_PATHS):
+            return False
+        return True  # e.g. livelaw.in/sc-judgments/ or a case summary page
+
+    # ── barandbench.com: news site — never citable in court ─────────────────
+    if "barandbench.com" in uri:
+        return False
+
+    # ── vertexaisearch / unresolved redirect: judge by title / snippet ───────
+    _JUDGMENT_KW = {
+        " vs ", " v. ", " versus ", "appellant", "petitioner", "respondent",
+        "supreme court", "high court", "tribunal", "bench", "judgment",
+        "judgement", "order dated", "writ petition", "civil appeal",
+        "criminal appeal", "coram", "honourable", "hon'ble",
+    }
+    text = f"{title} {snip}"
+    if any(kw in text for kw in _JUDGMENT_KW):
+        return True
+
+    # ── Reject everything else: Wikipedia, news, blogs, academic papers ───────
+    _REJECT_DOMAINS = [
+        "wikipedia.org", "indiatoday.in", "hindustantimes.com",
+        "thehindu.com", "economictimes.com", "ndtv.com", "legalserviceindia.com",
+        "advocatekhoj.com", "lawyersclubindia.com", "taxguru.in",
+    ]
+    if any(d in uri for d in _REJECT_DOMAINS):
+        return False
+
+    return False  # unknown domain — don't include unrecognised sources
+
+
+_VALID_COURTS = {
+    "supreme court", "high court", "sessions court", "district court",
+    "magistrate", "tribunal", "nclt", "nclat", "drat", "itat", "cestat",
+    "cat", "appellate", "consumer forum", "national commission",
+    "state commission", "motor accident", "family court",
+}
+
+
+def _is_valid_court_citation(c: Dict[str, Any]) -> bool:
+    """
+    Return True only if the extracted citation is an actual Indian court judgment
+    usable as a precedent in a court of law. Filters out news articles, commentary,
+    statutory text, and anything without a recognisable court or case identity.
+    """
+    parties = (c.get("parties") or "").strip()
+    court   = (c.get("court")   or "").strip().lower()
+    ratio   = (c.get("ratio")   or "").strip()
+    issue   = (c.get("legal_issue") or "").strip()
+    url     = (c.get("source_url")  or "").lower()
+
+    # Must identify a case (parties OR citation number)
+    if not parties and not c.get("citation_no"):
+        return False
+
+    # Parties must look like a real case name (contains "vs", "v." etc.)
+    if parties:
+        p_lower = parties.lower()
+        if not any(sep in p_lower for sep in [" vs ", " v. ", " versus ", "/"]):
+            # Allow single-party names only if court is clearly set
+            if not court:
+                return False
+
+    # Court must be a recognised Indian court
+    if court and not any(kw in court for kw in _VALID_COURTS):
+        return False
+
+    # Must have at least one substantive legal field
+    has_substance = any([
+        ratio, issue,
+        c.get("key_principle"), c.get("citation_no"),
+        c.get("facts_of_precedent"),
+    ])
+    if not has_substance:
+        return False
+
+    # Reject if URL is clearly a news site
+    _NEWS_REJECT = ["barandbench.com", "/news/", "/top-stories/",
+                    "ndtv.com", "thehindu.com", "indiatoday.in"]
+    if any(n in url for n in _NEWS_REJECT):
+        return False
+
+    return True
+
+
 def _run_extractor(state: Dict[str, Any], sources: list, method: str) -> List[Dict[str, Any]]:
-    compact = _compact_sources(sources)
+    # Pre-filter: only feed actual court judgment sources to the LLM
+    judgment_sources = [s for s in sources if _is_judgment_source(s)]
+    dropped = len(sources) - len(judgment_sources)
+    if dropped:
+        print(f"[CITATION_TEST]   → Pre-filter: dropped {dropped} non-judgment source(s) "
+              f"(news/commentary/unknown) — {len(judgment_sources)} judgment source(s) remain", flush=True)
+
+    compact = _compact_sources(judgment_sources)
     if not compact:
         return []
 
@@ -1106,7 +1235,14 @@ def _run_extractor(state: Dict[str, Any], sources: list, method: str) -> List[Di
         if all_citations:
             print(f"[CITATION_TEST]   → Fallback extracted {len(all_citations)} citation(s) from titles/URLs", flush=True)
 
-    return all_citations
+    # Post-filter: only keep citations that are real court judgments
+    valid = [c for c in all_citations if _is_valid_court_citation(c)]
+    invalid = len(all_citations) - len(valid)
+    if invalid:
+        print(f"[CITATION_TEST]   → Post-filter: removed {invalid} non-citable result(s) "
+              f"(news articles / missing court / no legal content)", flush=True)
+
+    return valid
 
 
 def _parse_citations(raw: Optional[str]) -> List[Dict[str, Any]]:

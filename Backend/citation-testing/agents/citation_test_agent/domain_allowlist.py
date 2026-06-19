@@ -23,9 +23,11 @@ _T1 = [
 _T1_WILDCARDS = [".gov.in", ".nic.in", ".judiciary.gov.in"]
 
 _T2 = [
-    "indiankanoon.org", "livelaw.in", "barandbench.com",
+    "indiankanoon.org",
     "casemine.com", "app.bharatlaw.ai", "lawfinderlive.com",
     "scconline.com", "manupatra.com",
+    # livelaw.in and barandbench.com are news sites — accepted only for
+    # judgment-specific URL paths (checked separately in _is_judgment_source)
 ]
 
 _T3 = ["lawcommissionofindia.nic.in", "ssrn.com", "lawreview.co.in"]

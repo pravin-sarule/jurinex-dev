@@ -138,7 +138,7 @@ export const CITATION_V1_SERVICE_URL =
 // Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) in 1 iteration
 export const CITATION_TESTING_SERVICE_URL = ensureHttps(
   import.meta.env.VITE_APP_CITATION_TESTING_SERVICE_URL ||
-  'https://citation-testing-120280829617.asia-south1.run.app'
+  'http://localhost:8003'
 );
 
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
