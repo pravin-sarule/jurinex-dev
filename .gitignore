@@ -172,3 +172,6 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Cursor / Claude local worktrees (must not be committed as submodules)
+.claude/
