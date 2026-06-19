@@ -628,8 +628,12 @@ def _gemini_grounding_search(query: str, num: int = 6) -> List[Dict[str, Any]]:
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=(
-                f"Find relevant Indian court judgments for this legal research query. "
-                f"Focus on indiankanoon.org, sci.gov.in, and other authoritative Indian legal sources.\n\n"
+                f"Search indiankanoon.org and Indian legal databases for court judgments on this topic.\n\n"
+                f"IMPORTANT: Return judgments from ALL time periods — include:\n"
+                f"  • Landmark Supreme Court / Constitution Bench cases from 1960–2000\n"
+                f"  • Established High Court precedents from 2000–2010\n"
+                f"  • Recent judgments from 2010–2024\n"
+                f"Do NOT limit results to only recent judgments. Old landmark cases carry the most binding weight.\n\n"
                 f"Query: {clean_q}"
             ),
             config=_gtypes.GenerateContentConfig(
@@ -1202,27 +1206,41 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     search_error = ""
 
     if method == "gemini":
-        # Gemini Google Search grounding — run top 3 queries in parallel
-        # (grounding calls are ~3-6s each; 3 parallel → ~6s total, ~18 sources)
+        # Gemini Google Search grounding — 4 parallel calls for full coverage
+        # Slot 1-3: top planned queries (recent + any-era results)
+        # Slot 4:   explicit landmark query to pull pre-2006 Supreme Court cases
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
         top_queries = [q for q in queries[:3] if q.strip()]
-        print(f"[CITATION_TEST]   → {len(top_queries)} grounding queries (parallel)", flush=True)
+
+        # Build a landmark-targeted query from the case issue text
+        issue_text = state.get("issue") or case_query
+        # Extract key nouns (strip pronouns/filler) for the landmark query
+        import re as _re3
+        _kw = _re3.sub(r'\b(the|a|an|is|are|was|were|of|for|in|on|at|to|and|or|with|by)\b',
+                       ' ', issue_text.lower(), flags=_re3.IGNORECASE)
+        _kw = ' '.join(sorted(set(_re3.findall(r'[a-z]{4,}', _kw)), key=len, reverse=True)[:6])
+        landmark_query = f"Supreme Court landmark judgment {_kw} India 1980 1990 2000"
+
+        grounding_queries = top_queries + [landmark_query]
+        print(f"[CITATION_TEST]   → {len(grounding_queries)} grounding queries (parallel, inc. landmark)", flush=True)
+
         all_hits_ordered: List[Dict[str, Any]] = []
-        with _TPE(max_workers=3) as pool:
-            futs = {pool.submit(_gemini_grounding_search, q, 7): q for q in top_queries}
-            for fut in _ac(futs, timeout=50):
+        with _TPE(max_workers=4) as pool:
+            futs = {pool.submit(_gemini_grounding_search, q, 7): q for q in grounding_queries}
+            for fut in _ac(futs, timeout=55):
                 try:
-                    results = fut.result() or []
-                    for h in results:
+                    for h in (fut.result() or []):
                         all_hits_ordered.append(_normalize_hit(h))
                 except Exception as exc:
                     logger.warning("[RUNNER] Grounding query failed: %s", exc)
+
         for hit in all_hits_ordered:
             uri = hit["uri"]
             if uri and uri not in seen_uris:
                 seen_uris.add(uri)
                 all_sources.append(hit)
-                if len(all_sources) >= 20:
+                if len(all_sources) >= 24:
                     break
     else:
         # Build Serper-friendly queries: indiankanoon.org first, then cleaned Boolean queries

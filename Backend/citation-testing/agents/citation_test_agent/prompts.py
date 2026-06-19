@@ -102,7 +102,7 @@ Return ONLY valid JSON:
 
 
 QUERY_PLANNER_MODEL = os.environ.get("QUERY_PLANNER_MODEL", "gemini-2.5-flash")
-QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your job is to generate search queries that find REAL PAST COURT JUDGMENTS with the same facts as our client's case.
+QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your job is to generate search queries that find REAL PAST COURT JUDGMENTS — both LANDMARK OLD cases (1960–2005) AND RECENT cases (2006–2024) — with the same facts as our client's case.
 
 ## Legal Issues (from Case Analyzer)
 {issue}
@@ -117,34 +117,35 @@ QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your j
 
 ## YOUR TASK
 
-Generate search queries that will find SIMILAR-FACT PRECEDENT JUDGMENTS on indiankanoon.org and Indian court databases.
+Generate 9 search queries (3 per top-3 research question). CRITICALLY: you MUST cover ALL time eras — old landmark judgments are often the most binding.
 
-For each top-priority research question, generate 3 queries:
+For each research question, generate ALL THREE of the following:
 
-**Query 1 — INDIANKANOON FACT SEARCH** (for site:indiankanoon.org)
-Find cases with the same factual scenario. Use the specific party type + statute + outcome.
-Pattern: [party type] [specific statute/section] [court] [year range if relevant]
-Example: "infrastructure company" "stamp duty" exemption "High Court" Maharashtra
+**Query A — LANDMARK / OLDER CASES (pre-2006)**
+Target Supreme Court and Constitution Bench judgments from 1960–2005 that settled the law.
+Pattern: [legal principle] "Supreme Court" landmark judgment India [key statute]
+Example: stamp duty adjudication "Supreme Court" landmark India "Stamp Act"
 
-**Query 2 — SPECIFIC STATUTE + RELIEF** (plain Google, no site:)
-Target the exact statutory provision + type of relief that was granted/denied.
-Pattern: [Act name] [section] [relief type] [party type] judgment India
-Example: "Maharashtra Stamp Act" "Section 4" exemption "private limited" judgment
+**Query B — RECENT CASES (2006–2024)**
+Find recent High Court and Supreme Court judgments on the same statutory provision.
+Pattern: [statute section] [relief type] [party type] "High Court" judgment 2010 2015 2020
+Example: "Maharashtra Stamp Act" re-assessment "High Court" purchaser relief 2015 2020
 
-**Query 3 — FACT PATTERN + OUTCOME** (for site:indiankanoon.org)
-Find cases where the same thing happened and the court ruled.
-Pattern: [what happened] [who was affected] [what court decided] India
-Example: stamp duty "infrastructure company" "revenue authority" Maharashtra refund
+**Query C — FACT PATTERN (any era)**
+Find cases by factual scenario — use concrete nouns from the case, not legal jargon.
+Pattern: [what happened] [who was involved] [what court decided] India
+Example: stamp duty "auction purchaser" "Debts Recovery Tribunal" "revenue authority" India
 
 ---
 
 ## STRICT RULES
-- Each query must be SHORT and READABLE (8-15 words) — no complex Boolean operators
-- Use plain English phrases the way a lawyer would search Google
-- Use double quotes only around EXACT PHRASES (case names, statute names, specific terms)
-- Do NOT use AND / OR / site: in the queries (these are added automatically)
-- Every query must be directly aimed at finding a CASE that has the same facts as ours
-- Prioritise terms that will appear in indiankanoon.org page titles and snippets
-- Total: up to 9 queries (3 per top-3 research questions)
+- Each query must be SHORT and READABLE (8-15 words)
+- Use plain English — no complex Boolean operators
+- Use double quotes only around EXACT PHRASES (statute names, legal terms, party types)
+- Do NOT use AND / OR / NOT / site: (these are handled automatically)
+- MANDATORY: at least 3 of your 9 queries must target pre-2006 or "landmark" cases
+- MANDATORY: include the word "landmark" OR a year like "1980" "1990" "1995" "2000" in at least 3 queries
+- Every query must be directly aimed at finding a JUDGMENT on indiankanoon.org
+- Total: exactly 9 queries
 
 Output ONLY valid JSON: {"queries": ["...", "...", ...]}"""
