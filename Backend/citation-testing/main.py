@@ -39,7 +39,7 @@ _env_file = _project_root / ".env"
 if _env_file.is_file():
     load_dotenv(_env_file)
 
-_DEFAULT_CORS_ORIGINS = ",".join([
+_DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://localhost:5000",
@@ -53,9 +53,23 @@ _DEFAULT_CORS_ORIGINS = ",".join([
     "https://www.jurinex.ai",
     "https://ailearn.co.in",
     "https://www.ailearn.co.in",
-])
+]
 
-CORS_ORIGINS = os.environ.get("CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).strip().split(",")
+# Cloud Run may set CORS_ORIGINS to localhost-only; always merge with production defaults.
+_extra_cors = os.environ.get("CORS_ORIGINS", "").strip()
+CORS_ORIGINS = list(_DEFAULT_CORS_ORIGINS)
+if _extra_cors:
+    CORS_ORIGINS.extend(o.strip() for o in _extra_cors.split(",") if o.strip())
+_seen_cors: set[str] = set()
+CORS_ORIGINS = [o for o in CORS_ORIGINS if o not in _seen_cors and not _seen_cors.add(o)]
+
+# Safety net for Netlify previews and ailearn subdomains.
+CORS_ORIGIN_REGEX = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"https://([a-z0-9-]+\.)*(ailearn\.co\.in|netlify\.app|jurinex\.ai)(:\d+)?$",
+)
+
+logger.info("[CORS] allowed origins: %s", CORS_ORIGINS)
 
 AGENTIC_DOCUMENT_SERVICE_URL = (
     os.environ.get("AGENTIC_DOCUMENT_SERVICE_URL")
@@ -70,7 +84,8 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in CORS_ORIGINS if o.strip()],
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
