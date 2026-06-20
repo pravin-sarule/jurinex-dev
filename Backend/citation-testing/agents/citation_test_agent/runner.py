@@ -634,6 +634,7 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
     - Only T1/T2 domain sources are kept (no "accept all" — that caused news/blogs).
     """
     import re as _re
+    import time as _time_gs
     from agents.citation_test_agent.domain_allowlist import tier_of
 
     clean_q = _re.sub(r'\b(?:AND|OR|NOT)\b', ' ', query)
@@ -647,39 +648,64 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
     if not api_key:
         return []
 
-    try:
-        from google import genai
-        from google.genai import types as _gtypes
+    # Configurable grounding model — defaults to gemini-2.5-pro for higher
+    # grounding quality. Override with GEMINI_GROUNDING_MODEL env var
+    # (e.g. "gemini-3-pro" when available).
+    grounding_model = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-2.5-pro")
 
-        client = genai.Client(api_key=api_key)
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=(
-                f"Search indiankanoon.org for Indian court judgments on this legal topic.\n\n"
-                f"CRITICAL — find judgments across ALL of these dimensions:\n\n"
-                f"TIME PERIODS (must cover all eras):\n"
-                f"  • Constitution Bench / 5-judge SC judgments: 1950–1985\n"
-                f"  • Established SC precedents: 1985–2005\n"
-                f"  • Pre-digital High Court judgments: 1970–2005 (indexed on IndianKanoon)\n"
-                f"  • Recent judgments: 2006–2024\n\n"
-                f"COURTS (find from ALL of these, not just Supreme Court):\n"
-                f"  • Supreme Court of India\n"
-                f"  • Bombay HC · Delhi HC · Madras HC · Calcutta HC · Allahabad HC\n"
-                f"  • Karnataka HC · Gujarat HC · Kerala HC · Rajasthan HC\n"
-                f"  • Punjab & Haryana HC · Andhra Pradesh HC · Telangana HC\n"
-                f"  • Gauhati HC · Patna HC · Orissa HC · Madhya Pradesh HC\n\n"
-                f"Return as many DISTINCT judgments as possible — prioritise IndianKanoon.org results.\n"
-                f"Do NOT repeat the same judgment. Do NOT limit to only recent results.\n\n"
-                f"Query: {clean_q}"
-            ),
-            config=_gtypes.GenerateContentConfig(
-                tools=[_gtypes.Tool(google_search=_gtypes.GoogleSearch())],
-                temperature=0.0,
-                max_output_tokens=3000,
-            ),
-        )
-    except Exception as exc:
-        logger.warning("[GEMINI_GROUNDING] call failed for %r: %s", clean_q[:60], exc)
+    # ── Retry loop: retry once with 3s backoff if 0 chunks returned ──────────
+    # TOO_MANY_TOOL_CALLS or transient quota errors often resolve on retry.
+    resp = None
+    for _attempt in range(2):
+        try:
+            from google import genai
+            from google.genai import types as _gtypes
+
+            client = genai.Client(api_key=api_key)
+            resp = client.models.generate_content(
+                model=grounding_model,
+                contents=(
+                    f"Search indiankanoon.org for Indian court judgments on this legal topic.\n\n"
+                    f"CRITICAL — find judgments across ALL of these dimensions:\n\n"
+                    f"TIME PERIODS (must cover all eras):\n"
+                    f"  • Constitution Bench / 5-judge SC judgments: 1950–1985\n"
+                    f"  • Established SC precedents: 1985–2005\n"
+                    f"  • Pre-digital High Court judgments: 1970–2005 (indexed on IndianKanoon)\n"
+                    f"  • Recent judgments: 2006–2024\n\n"
+                    f"COURTS (find from ALL of these, not just Supreme Court):\n"
+                    f"  • Supreme Court of India\n"
+                    f"  • Bombay HC · Delhi HC · Madras HC · Calcutta HC · Allahabad HC\n"
+                    f"  • Karnataka HC · Gujarat HC · Kerala HC · Rajasthan HC\n"
+                    f"  • Punjab & Haryana HC · Andhra Pradesh HC · Telangana HC\n"
+                    f"  • Gauhati HC · Patna HC · Orissa HC · Madhya Pradesh HC\n\n"
+                    f"Return as many DISTINCT judgments as possible — prioritise IndianKanoon.org results.\n"
+                    f"Do NOT repeat the same judgment. Do NOT limit to only recent results.\n\n"
+                    f"Query: {clean_q}"
+                ),
+                config=_gtypes.GenerateContentConfig(
+                    tools=[_gtypes.Tool(google_search=_gtypes.GoogleSearch())],
+                    temperature=0.0,
+                    max_output_tokens=3000,
+                ),
+            )
+            # Check if we got chunks — if not and there's a retry left, wait and retry
+            _cands = resp.candidates or []
+            _gm_check = getattr((_cands[0] if _cands else None), "grounding_metadata", None)
+            _chunks_check = list(getattr(_gm_check, "grounding_chunks", None) or []) if _gm_check else []
+            if _chunks_check:
+                break   # got results — no need to retry
+            if _attempt == 0:
+                logger.info("[GEMINI_GROUNDING] 0 chunks on attempt 1, retrying in 3s for: %s", clean_q[:60])
+                _time_gs.sleep(3)
+        except Exception as exc:
+            if _attempt == 0:
+                logger.warning("[GEMINI_GROUNDING] attempt 1 failed for %r: %s — retrying", clean_q[:60], exc)
+                _time_gs.sleep(3)
+            else:
+                logger.warning("[GEMINI_GROUNDING] call failed for %r: %s", clean_q[:60], exc)
+                return []
+
+    if resp is None:
         return []
 
     candidate = (resp.candidates or [None])[0]
@@ -1534,15 +1560,36 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
             lbl = _bucket_labels.get(i, f"[S{i+1}]")
             print(f"[CITATION_TEST]     G{i+1}{lbl} {gq[:100]}", flush=True)
 
+        # ── Staggered parallel submission ──────────────────────────────────────
+        # 12 simultaneous google_search tool calls → TOO_MANY_TOOL_CALLS rate limit.
+        # Fix: submit in two waves of 6, 1s apart, so Gemini doesn't see a burst.
+        import time as _time
         all_hits_ordered: List[Dict[str, Any]] = []
-        with _TPE(max_workers=12) as pool:
-            futs = {pool.submit(_gemini_grounding_search, q, 12): q for q in grounding_queries}
-            for fut in _ac(futs, timeout=90):
-                try:
-                    for h in (fut.result() or []):
-                        all_hits_ordered.append(_normalize_hit(h))
-                except Exception as exc:
-                    logger.warning("[RUNNER] Grounding query failed: %s", exc)
+        _WAVE = 6   # max concurrent Gemini grounding calls per wave
+        with _TPE(max_workers=_WAVE) as pool:
+            futs: Dict[Any, str] = {}
+            for wi, q in enumerate(grounding_queries):
+                if wi > 0 and wi % _WAVE == 0:
+                    _time.sleep(1.5)   # brief pause between waves
+                futs[pool.submit(_gemini_grounding_search, q, 12)] = q
+
+            # ── TimeoutError MUST be caught outside the loop — it is raised by the
+            #    as_completed iterator itself, not by fut.result() inside the loop.
+            try:
+                for fut in _ac(futs, timeout=100):
+                    try:
+                        for h in (fut.result() or []):
+                            all_hits_ordered.append(_normalize_hit(h))
+                    except Exception as exc:
+                        logger.warning("[RUNNER] Grounding query failed: %s", exc)
+            except TimeoutError:
+                pending = sum(1 for f in futs if not f.done())
+                logger.warning(
+                    "[RUNNER] Grounding timeout (100s) — %d call(s) still running; "
+                    "continuing with %d hits collected so far", pending, len(all_hits_ordered)
+                )
+                for f in futs:
+                    f.cancel()
 
         # ── Domain prioritisation: T1 official sources (sci.gov.in, ecourts.gov.in)
         #    float to the front; T2 (IK, casemine) follow.
