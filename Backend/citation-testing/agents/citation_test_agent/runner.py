@@ -655,12 +655,21 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=(
-                f"Search indiankanoon.org and Indian legal databases for court judgments on this topic.\n\n"
-                f"Return judgments from ALL time periods — include:\n"
-                f"  • Landmark Supreme Court / Constitution Bench cases from 1960–2000\n"
-                f"  • Established High Court precedents from 2000–2010\n"
-                f"  • Recent judgments from 2010–2024\n"
-                f"Do NOT limit results to only recent judgments. Find as many distinct judgments as possible.\n\n"
+                f"Search indiankanoon.org for Indian court judgments on this legal topic.\n\n"
+                f"CRITICAL — find judgments across ALL of these dimensions:\n\n"
+                f"TIME PERIODS (must cover all eras):\n"
+                f"  • Constitution Bench / 5-judge SC judgments: 1950–1985\n"
+                f"  • Established SC precedents: 1985–2005\n"
+                f"  • Pre-digital High Court judgments: 1970–2005 (indexed on IndianKanoon)\n"
+                f"  • Recent judgments: 2006–2024\n\n"
+                f"COURTS (find from ALL of these, not just Supreme Court):\n"
+                f"  • Supreme Court of India\n"
+                f"  • Bombay HC · Delhi HC · Madras HC · Calcutta HC · Allahabad HC\n"
+                f"  • Karnataka HC · Gujarat HC · Kerala HC · Rajasthan HC\n"
+                f"  • Punjab & Haryana HC · Andhra Pradesh HC · Telangana HC\n"
+                f"  • Gauhati HC · Patna HC · Orissa HC · Madhya Pradesh HC\n\n"
+                f"Return as many DISTINCT judgments as possible — prioritise IndianKanoon.org results.\n"
+                f"Do NOT repeat the same judgment. Do NOT limit to only recent results.\n\n"
                 f"Query: {clean_q}"
             ),
             config=_gtypes.GenerateContentConfig(
@@ -1431,36 +1440,80 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     search_error = ""
 
     if method == "gemini":
-        # 5 parallel Gemini grounding calls for maximum citation coverage:
-        #   Slots 1-3 : top planned queries (mix of recent + any-era)
-        #   Slot 4    : landmark/pre-2006 Supreme Court query
-        #   Slot 5    : broad fact-pattern query with different vocabulary
+        # 10 parallel Gemini grounding calls for broad Indian court coverage:
+        #   Slots 1-5 : top 5 planned queries (A/B/C types from planner)
+        #   Slot  6   : landmark SC 1960-1990 (Constitution Bench era)
+        #   Slot  7   : landmark SC 1990-2005 (pre-digital era)
+        #   Slot  8   : all major High Courts — Bombay, Delhi, Madras, Calcutta, Allahabad
+        #   Slot  9   : state/jurisdiction-specific HC query
+        #   Slot  10  : remaining planned query OR recent multi-HC catch-all
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
         import re as _re3
 
-        top_queries = [q for q in queries[:3] if q.strip()]
+        # Use ALL 9 planned queries; take first 5 as top slots
+        planned = [q for q in queries if q.strip()]
+        top_queries = planned[:5]
 
-        # Landmark query — forces old SC/HC cases into results
+        # Keywords from the case issue (stop-word filtered, deduped)
         issue_text = state.get("issue") or case_query
-        _stop = {'the','a','an','is','are','was','were','of','for','in','on','at','to','and','or','with','by','that','this','have','had','has','been','its'}
+        _stop = {
+            'the','a','an','is','are','was','were','of','for','in','on','at','to',
+            'and','or','with','by','that','this','have','had','has','been','its','which'
+        }
         _kw_tokens = [w for w in _re3.findall(r'[a-zA-Z]{4,}', issue_text.lower()) if w not in _stop]
-        _kw = ' '.join(list(dict.fromkeys(_kw_tokens))[:5])  # first 5 unique keywords, order-preserved
-        landmark_query  = f"Supreme Court India landmark judgment {_kw} 1970 1980 1990 2000 2005"
+        _kw6 = ' '.join(list(dict.fromkeys(_kw_tokens))[:6])   # 6 keywords
+        _kw4 = ' '.join(list(dict.fromkeys(_kw_tokens))[:4])   # 4 keywords (shorter queries)
 
-        # Broad fact-pattern query using queries[3] or queries[4] for different vocabulary
-        broad_query = queries[3].strip() if len(queries) > 3 and queries[3].strip() else (
-            f"High Court India judgment {_kw} stamp duty revenue"
+        # Jurisdiction-specific keyword (Bombay / Delhi / Madras / etc.)
+        jur = (state.get("case_analysis") or "")
+        try:
+            import json as _jj
+            _jur_parsed = _jj.loads(jur)
+            _jur_str = str(_jur_parsed.get("jurisdiction") or "").lower()
+        except Exception:
+            _jur_str = ""
+        _jur_kw = next(
+            (h for h in ["bombay","delhi","madras","calcutta","allahabad","karnataka",
+                         "gujarat","rajasthan","kerala","punjab","andhra","telangana",
+                         "hyderabad","gauhati","patna","orissa","chhattisgarh","jharkhand"]
+             if h in _jur_str or h in case_query.lower()),
+            ""
         )
 
-        grounding_queries = top_queries + [landmark_query, broad_query]
+        # Supplemental hardcoded queries
+        # Slot 6: old SC landmark (Constitution Bench era)
+        q_old_sc    = f"Supreme Court India landmark judgment {_kw4} 1960 1970 1980 1985"
+        # Slot 7: SC 1990s-2000s (pre-digital but indexed on IK)
+        q_mid_sc    = f"Supreme Court India {_kw4} judgment 1990 1995 2000 2005"
+        # Slot 8: all major HCs — broad coverage
+        q_all_hc    = (
+            f"{_kw4} High Court judgment India "
+            f"Bombay Delhi Madras Calcutta Allahabad Karnataka Gujarat Kerala"
+        )
+        # Slot 9: jurisdiction-specific HC (if detected) OR recent multi-HC
+        q_jur_hc    = (
+            f"{_jur_kw} High Court India {_kw4} judgment" if _jur_kw
+            else f"{_kw4} High Court India Rajasthan Punjab Andhra Telangana judgment"
+        )
+        # Slot 10: any remaining planned query OR recent nationwide HC catch-all
+        q_remaining = (
+            planned[5].strip() if len(planned) > 5 and planned[5].strip()
+            else f"High Court India {_kw4} 2010 2015 2018 2020 2022"
+        )
+
+        grounding_queries = top_queries + [q_old_sc, q_mid_sc, q_all_hc, q_jur_hc, q_remaining]
+        # Deduplicate while preserving order
+        _seen_q: set = set()
+        grounding_queries = [q for q in grounding_queries if q not in _seen_q and not _seen_q.add(q)]
+
         print(f"[CITATION_TEST]   → {len(grounding_queries)} grounding queries (parallel)", flush=True)
         for i, gq in enumerate(grounding_queries, 1):
-            print(f"[CITATION_TEST]     G{i}. {gq[:90]}", flush=True)
+            print(f"[CITATION_TEST]     G{i}. {gq[:100]}", flush=True)
 
         all_hits_ordered: List[Dict[str, Any]] = []
-        with _TPE(max_workers=5) as pool:
-            futs = {pool.submit(_gemini_grounding_search, q, 10): q for q in grounding_queries}
-            for fut in _ac(futs, timeout=60):
+        with _TPE(max_workers=10) as pool:
+            futs = {pool.submit(_gemini_grounding_search, q, 12): q for q in grounding_queries}
+            for fut in _ac(futs, timeout=90):
                 try:
                     for h in (fut.result() or []):
                         all_hits_ordered.append(_normalize_hit(h))
@@ -1472,7 +1525,7 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
             if uri and uri not in seen_uris:
                 seen_uris.add(uri)
                 all_sources.append(hit)
-                if len(all_sources) >= 30:
+                if len(all_sources) >= 60:
                     break
     else:
         # Build Serper-friendly queries: indiankanoon.org first, then cleaned Boolean queries

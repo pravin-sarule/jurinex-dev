@@ -102,7 +102,7 @@ Return ONLY valid JSON:
 
 
 QUERY_PLANNER_MODEL = os.environ.get("QUERY_PLANNER_MODEL", "gemini-2.5-flash")
-QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your job is to generate search queries that find REAL PAST COURT JUDGMENTS — both LANDMARK OLD cases (1960–2005) AND RECENT cases (2006–2024) — with the same facts as our client's case.
+QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your job is to generate search queries that find REAL PAST COURT JUDGMENTS across ALL Indian courts and ALL time periods — from Constitution Bench cases (1950) to recent High Court judgments (2024).
 
 ## Legal Issues (from Case Analyzer)
 {issue}
@@ -117,35 +117,40 @@ QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your j
 
 ## YOUR TASK
 
-Generate 9 search queries (3 per top-3 research question). CRITICALLY: you MUST cover ALL time eras — old landmark judgments are often the most binding.
+Generate 12 search queries (4 per top-3 research question). You MUST cover ALL time eras AND ALL major Indian courts.
 
-For each research question, generate ALL THREE of the following:
+For each research question, generate ALL FOUR of the following:
 
-**Query A — LANDMARK / OLDER CASES (pre-2006)**
-Target Supreme Court and Constitution Bench judgments from 1960–2005 that settled the law.
-Pattern: [legal principle] "Supreme Court" landmark judgment India [key statute]
-Example: stamp duty adjudication "Supreme Court" landmark India "Stamp Act"
+**Query A — LANDMARK SC / Constitution Bench (1950–1990)**
+Target Supreme Court 5-judge bench and landmark judgments that settled Indian law.
+Pattern: [legal principle] "Supreme Court" India landmark [key statute] 1970 1980
+Example: stamp duty adjudication "Supreme Court" India landmark 1975 1980 1985
 
-**Query B — RECENT CASES (2006–2024)**
-Find recent High Court and Supreme Court judgments on the same statutory provision.
-Pattern: [statute section] [relief type] [party type] "High Court" judgment 2010 2015 2020
-Example: "Maharashtra Stamp Act" re-assessment "High Court" purchaser relief 2015 2020
+**Query B — SC and HC OLD CASES (1990–2006)**
+Established precedents before the digital era — still binding across all HCs.
+Pattern: [statute section] [party type] India judgment 1992 1997 2002
+Example: "Stamp Act" infrastructure company India court 1995 2000 2005
 
-**Query C — FACT PATTERN (any era)**
-Find cases by factual scenario — use concrete nouns from the case, not legal jargon.
-Pattern: [what happened] [who was involved] [what court decided] India
-Example: stamp duty "auction purchaser" "Debts Recovery Tribunal" "revenue authority" India
+**Query C — ALL HIGH COURTS RECENT (2006–2024)**
+Cover ALL 25 High Courts — Bombay, Delhi, Madras, Calcutta, Allahabad, Karnataka, Gujarat, Kerala, Rajasthan, Punjab & Haryana, AP, Telangana, Gauhati, Patna, Orissa.
+Pattern: [key terms] High Court India [relief] judgment 2010 2015 2020
+Example: stamp duty exemption "High Court" India infrastructure 2015 2020
+
+**Query D — FACT PATTERN (any court, any era)**
+Find by concrete facts and party types — bypasses legal jargon, finds cases by scenario.
+Pattern: [who] [did what] [which authority] [what outcome] India court
+Example: "auction purchaser" stamp duty "revenue authority" India court judgment
 
 ---
 
 ## STRICT RULES
-- Each query must be SHORT and READABLE (8-15 words)
-- Use plain English — no complex Boolean operators
-- Use double quotes only around EXACT PHRASES (statute names, legal terms, party types)
-- Do NOT use AND / OR / NOT / site: (these are handled automatically)
-- MANDATORY: at least 3 of your 9 queries must target pre-2006 or "landmark" cases
-- MANDATORY: include the word "landmark" OR a year like "1980" "1990" "1995" "2000" in at least 3 queries
-- Every query must be directly aimed at finding a JUDGMENT on indiankanoon.org
-- Total: exactly 9 queries
+- Each query must be SHORT and READABLE (8–15 words)
+- Use plain English — no complex Boolean operators (AND / OR / NOT / site: — auto-handled)
+- Double quotes only around EXACT PHRASES (statute names, recognised legal terms)
+- MANDATORY: at least 4 of your 12 queries must target pre-2006 or "landmark" cases
+- MANDATORY: at least 3 queries must include a year (1975, 1985, 1995, 2000, etc.)
+- MANDATORY: Query C for each question must mention multiple HC names OR just "High Court India"
+- Every query must target real court JUDGMENTS (not news, commentary, or legislation text)
+- Total: exactly 12 queries
 
 Output ONLY valid JSON: {"queries": ["...", "...", ...]}"""
