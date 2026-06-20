@@ -651,7 +651,7 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
     # Configurable grounding model — defaults to gemini-2.5-pro for higher
     # grounding quality. Override with GEMINI_GROUNDING_MODEL env var
     # (e.g. "gemini-3-pro" when available).
-    grounding_model = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-2.5-pro")
+    grounding_model = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-3-pro")
 
     # ── Retry loop: retry once with 3s backoff if 0 chunks returned ──────────
     # TOO_MANY_TOOL_CALLS or transient quota errors often resolve on retry.
