@@ -175,9 +175,24 @@ function CitationCard({ c, idx, sourceRef }) {
               )}
             </div>
 
+            {/* Overruled warning — shown above case name if flagged */}
+            {c.is_overruled && (
+              <div className="flex items-center gap-1.5 mb-1.5 px-2.5 py-1 rounded-lg bg-red-50 border border-red-200 w-fit">
+                <svg className="w-3.5 h-3.5 text-red-500 flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span className="text-xs font-bold text-red-700 uppercase tracking-wide">Overruled — Do Not Cite</span>
+                {c.overruled_by && (
+                  <span className="text-xs text-red-600 font-normal">· {c.overruled_by}</span>
+                )}
+              </div>
+            )}
             {/* Case name + inline source citation */}
             <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="font-bold text-gray-900 text-base leading-snug">{c.parties || 'Unknown Parties'}</span>
+              <span className={`font-bold text-base leading-snug ${c.is_overruled ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                {c.parties || 'Unknown Parties'}
+              </span>
               {sourceRef && (
                 <a
                   href={sourceRef.source.uri}

@@ -102,7 +102,7 @@ Return ONLY valid JSON:
 
 
 QUERY_PLANNER_MODEL = os.environ.get("QUERY_PLANNER_MODEL", "gemini-2.5-flash")
-QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your job is to generate search queries that find REAL PAST COURT JUDGMENTS across ALL Indian courts and ALL time periods — from Constitution Bench cases (1950) to recent High Court judgments (2024).
+QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher constructing a time-balanced, multi-jurisdictional precedent search across all Indian courts and all eras of Indian law.
 
 ## Legal Issues (from Case Analyzer)
 {issue}
@@ -117,40 +117,72 @@ QUERY_PLANNER_INSTRUCTION = """You are an expert Indian legal researcher. Your j
 
 ## YOUR TASK
 
-Generate 12 search queries (4 per top-3 research question). You MUST cover ALL time eras AND ALL major Indian courts.
+Generate exactly 9 search queries organised into THREE TIME-BUCKETS — 3 queries per bucket. Each bucket covers a distinct era of Indian legal development. Every query must follow the pattern:
 
-For each research question, generate ALL FOUR of the following:
+  [Act Name] + [Section Number] + "judgment" + [Court / Year] + "India"
 
-**Query A — LANDMARK SC / Constitution Bench (1950–1990)**
-Target Supreme Court 5-judge bench and landmark judgments that settled Indian law.
-Pattern: [legal principle] "Supreme Court" India landmark [key statute] 1970 1980
-Example: stamp duty adjudication "Supreme Court" India landmark 1975 1980 1985
+---
 
-**Query B — SC and HC OLD CASES (1990–2006)**
-Established precedents before the digital era — still binding across all HCs.
-Pattern: [statute section] [party type] India judgment 1992 1997 2002
-Example: "Stamp Act" infrastructure company India court 1995 2000 2005
+### BUCKET 1 — HISTORICAL FOUNDATION (1950–2000) · 3 queries
 
-**Query C — ALL HIGH COURTS RECENT (2006–2024)**
-Cover ALL 25 High Courts — Bombay, Delhi, Madras, Calcutta, Allahabad, Karnataka, Gujarat, Kerala, Rajasthan, Punjab & Haryana, AP, Telangana, Gauhati, Patna, Orissa.
-Pattern: [key terms] High Court India [relief] judgment 2010 2015 2020
-Example: stamp duty exemption "High Court" India infrastructure 2015 2020
+Target: Constitution Bench judgments, foundational SC 5-judge precedents, and early HC rulings that first settled the law on this issue.
 
-**Query D — FACT PATTERN (any court, any era)**
-Find by concrete facts and party types — bypasses legal jargon, finds cases by scenario.
-Pattern: [who] [did what] [which authority] [what outcome] India court
-Example: "auction purchaser" stamp duty "revenue authority" India court judgment
+  Q1-A · Supreme Court, with year:
+    Pattern → [key statute] [section] Supreme Court India landmark judgment [year in 1960–1985]
+    Example → "Stamp Act" section 4 Supreme Court India landmark judgment 1978
+
+  Q1-B · High Courts, with year:
+    Pattern → [legal principle] High Court India judgment [year in 1985–2000]
+    Example → stamp duty infrastructure company High Court India judgment 1994
+
+  Q1-C · Year-Agnostic (NO year) — let relevance surface the oldest top cases:
+    Pattern → [party type] [dispute nature] Supreme Court India judgment
+    Example → auction purchaser revenue authority stamp duty Supreme Court India judgment
+
+### BUCKET 2 — DEVELOPMENTAL ERA (2000–2015) · 3 queries
+
+Target: The period when IndianKanoon indexing began and HC judgments across all states were digitised. Capture diverging HC interpretations and SC clarifications.
+
+  Q2-A · Supreme Court, with year:
+    Pattern → [key statute] [relief type] Supreme Court India judgment [year in 2000–2010]
+    Example → "Maharashtra Stamp Act" re-assessment Supreme Court India judgment 2006
+
+  Q2-B · ALL High Courts, with year (must name multiple courts or "High Court India"):
+    Pattern → [key terms] High Court India Bombay Delhi Madras Calcutta Allahabad judgment [year 2005–2015]
+    Example → stamp duty exemption "High Court" India Bombay Delhi Karnataka judgment 2011
+
+  Q2-C · Year-Agnostic HC — broad fact pattern across all HCs, no year:
+    Pattern → [concrete facts] High Court India judgment
+    Example → infrastructure company stamp duty exemption "revenue authority" High Court India judgment
+
+### BUCKET 3 — CONTEMPORARY (2016–2026) · 3 queries
+
+Target: Latest SC and HC interpretations reflecting the current state of the law, including any overruling or distinguishing of older precedents.
+
+  Q3-A · Recent Supreme Court, with year:
+    Pattern → [key statute] [section] Supreme Court India judgment [year in 2018–2024]
+    Example → "Stamp Act" section 4 Supreme Court India judgment 2021
+
+  Q3-B · Recent All High Courts, with year (cover all 25 HCs):
+    Pattern → [key terms] High Court India judgment [year 2019–2024]
+    Example → stamp duty infrastructure High Court India judgment 2022
+
+  Q3-C · Year-Agnostic multi-court — broadest net, no year restriction:
+    Pattern → [exact statutory phrase] India court judgment
+    Example → "stamp duty" "infrastructure company" India court judgment
 
 ---
 
 ## STRICT RULES
-- Each query must be SHORT and READABLE (8–15 words)
-- Use plain English — no complex Boolean operators (AND / OR / NOT / site: — auto-handled)
-- Double quotes only around EXACT PHRASES (statute names, recognised legal terms)
-- MANDATORY: at least 4 of your 12 queries must target pre-2006 or "landmark" cases
-- MANDATORY: at least 3 queries must include a year (1975, 1985, 1995, 2000, etc.)
-- MANDATORY: Query C for each question must mention multiple HC names OR just "High Court India"
-- Every query must target real court JUDGMENTS (not news, commentary, or legislation text)
-- Total: exactly 12 queries
+1. Follow the query pattern: [Act/Section] + "judgment" + [court] + [year or nothing]
+2. Queries must be SHORT and READABLE — 8 to 15 words maximum
+3. Plain English — do NOT use AND / OR / NOT / site: (handled automatically)
+4. Double quotes only around EXACT PHRASES (statute names, party types, legal terms)
+5. Q1-C, Q2-C, and Q3-C must contain ZERO year numbers — they are year-agnostic
+6. Q1-A, Q1-B, Q2-A, Q2-B, Q3-A, Q3-B must each include at least one specific year
+7. Q2-B and Q3-B must mention multiple HC names OR just "High Court India" (never one state only)
+8. Every query targets real court JUDGMENTS — not news, commentary, or statutory text
+9. Output exactly 9 queries in order: [Q1-A, Q1-B, Q1-C, Q2-A, Q2-B, Q2-C, Q3-A, Q3-B, Q3-C]
 
-Output ONLY valid JSON: {"queries": ["...", "...", ...]}"""
+Output ONLY valid JSON — no explanation, no markdown:
+{"queries": ["Q1-A here", "Q1-B here", "Q1-C here", "Q2-A here", "Q2-B here", "Q2-C here", "Q3-A here", "Q3-B here", "Q3-C here"]}"""

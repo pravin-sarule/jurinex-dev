@@ -1097,48 +1097,71 @@ def _fallback_citations_from_sources(sources: list, state: Dict[str, Any]) -> Li
 def _build_extract_prompt(state: Dict[str, Any], sources: List[Dict[str, Any]]) -> str:
     sources_json = json.dumps(sources, ensure_ascii=False)
     return (
-        "You are a senior Indian law advocate with 20 years of litigation experience.\n"
-        "Your task: extract and fully analyse each judgment in the search results as a usable court citation.\n\n"
+        "As a senior Indian advocate with 20+ years of Supreme Court and High Court litigation experience,\n"
+        "your task is to (A) extract every court judgment from the search results as a fully-briefed citation,\n"
+        "and (B) perform AUTHORITY VALIDATION — determine whether each judgment's ratio is still GOOD LAW\n"
+        "or has been overruled, distinguished, or modified by a later Supreme Court judgment.\n\n"
         "━━━ OUR CLIENT'S CASE ━━━\n"
         f"{_build_fact_brief(state)}\n\n"
         "━━━ RESEARCH QUESTIONS ━━━\n"
         f"{str(state.get('research_questions', '[]'))[:800]}\n\n"
-        "━━━ SEARCH RESULTS (T1/T2 sources only) ━━━\n"
+        "━━━ SEARCH RESULTS (T1/T2 sources — historical to contemporary) ━━━\n"
         f"{sources_json}\n\n"
-        "━━━ INSTRUCTIONS ━━━\n"
-        "ONLY extract results that are actual Indian court judgments — judgments that a lawyer can cite in a court of law.\n"
-        "SKIP any result that is: a news article, legal commentary, academic paper, blog post, law firm alert, or statutory text.\n"
-        "A valid result must be: a Supreme Court / High Court / Tribunal JUDGMENT or ORDER with identifiable parties and a court.\n"
-        "Use the snippet text, page title, and URL as your primary source.\n"
-        "Where snippet is thin, use your legal knowledge of the case to enrich the fields — but NEVER invent a citation number or URL.\n\n"
-        "FIELD GUIDE (fill every field — do not leave blank):\n"
-        "  parties          → 'Petitioner Name vs Respondent Name' — from title or snippet\n"
-        "  court            → Full court name: 'Supreme Court of India', 'Bombay High Court', etc. — infer from URL domain\n"
-        "  bench            → Judge names if visible in snippet, else ''\n"
-        "  year             → 4-digit year from title/snippet/URL — infer if clear, else ''\n"
-        "  citation_no      → Official citation like '(2019) 5 SCC 162' — ONLY if present in snippet/title, else ''\n"
-        "  facts_of_precedent → 2-3 sentences on the facts of THAT case (not our client's case)\n"
-        "  legal_issue      → The precise legal question that court decided — 1 sentence\n"
-        "  ratio            → The court's actual ruling/holding — 2-3 sentences. Use snippet text directly where available.\n"
-        "  key_principle    → Single sentence: the legal rule this case establishes\n"
-        "  key_quote        → Best verbatim quote from the snippet (max 60 words). If no quote available, use ''\n"
-        "  factual_similarity → Bullet points (3-5) explaining HOW the facts of this precedent match our client's case\n"
-        "  our_argument     → 2-3 sentences: exactly HOW a lawyer should cite this case in court to help our client\n"
-        "  distinguishing_notes → If the opposing side could distinguish this case, note it here; else ''\n"
-        "  authority_weight → BINDING (Supreme Court of India) | PERSUASIVE (High Court same jurisdiction) | PERSUASIVE_OTHER (other HC) | TRIBUNAL\n"
-        "  source_url       → Exact URI from the search result — do NOT modify\n"
-        "  authority_tier   → T1 (gov.in/nic.in) | T2 (indiankanoon.org, livelaw.in, etc.)\n"
-        "  confidence       → HIGH (clear judgment, strong match) | MEDIUM (partial match or thin snippet)\n\n"
-        "STRICT RULES:\n"
-        "- INCLUDE: every indiankanoon.org/doc/ URL — each is a real judgment\n"
+        "━━━ EXTRACTION INSTRUCTIONS ━━━\n"
+        "ONLY extract actual Indian court JUDGMENTS — not news, commentary, blogs, or statutory text.\n"
+        "A valid result must be: a Supreme Court / High Court / Tribunal JUDGMENT or ORDER with identifiable parties and court.\n"
+        "Use the snippet text, title, and URL as primary source. Enrich with legal knowledge but NEVER invent citation numbers or URLs.\n\n"
+        "━━━ FIELD GUIDE (fill every field — '' for unknown) ━━━\n"
+        "  parties            → 'Petitioner vs Respondent' — from title or snippet\n"
+        "  court              → Full name: 'Supreme Court of India', 'Bombay High Court', etc.\n"
+        "  bench              → Judge names if visible in snippet, else ''\n"
+        "  year               → 4-digit year — infer from title/URL/snippet if clear, else ''\n"
+        "  citation_no        → e.g. '(2019) 5 SCC 162' — ONLY if present in snippet/title, else ''\n"
+        "  facts_of_precedent → 2-3 sentences on the PRECEDENT case's facts (not our client's)\n"
+        "  legal_issue        → The exact legal question that court decided — 1 sentence\n"
+        "  ratio              → Court's ruling/holding — 2-3 sentences. Use snippet text directly where available.\n"
+        "  key_principle      → Single sentence: the legal rule this case establishes\n"
+        "  key_quote          → Best verbatim quote from snippet (max 60 words), or '' if none\n"
+        "  factual_similarity → 3-5 bullet points: HOW this precedent's facts match our client's case\n"
+        "  our_argument       → 2-3 sentences: exactly how a lawyer should cite this in court for our client\n"
+        "  distinguishing_notes → How the opposing side could distinguish this case, or ''\n"
+        "  authority_weight   → BINDING (SC of India) | PERSUASIVE (HC same jurisdiction) | PERSUASIVE_OTHER (other HC) | TRIBUNAL\n"
+        "  source_url         → Exact URI from search result — do NOT modify\n"
+        "  authority_tier     → T1 (sci.gov.in, ecourts.gov.in, .gov.in) | T2 (indiankanoon.org, casemine.com, etc.)\n"
+        "  confidence         → HIGH (clear judgment, strong fact match) | MEDIUM (partial match or thin snippet)\n\n"
+        "━━━ AUTHORITY VALIDATION (Sub-step B) ━━━\n"
+        "For EACH extracted citation, you must also determine its current authority status:\n\n"
+        "  is_overruled  → boolean: true if you know (from the snippet, your legal knowledge, or a later case in\n"
+        "                  these same results) that the ratio of this judgment has been expressly overruled or\n"
+        "                  reversed by a later Supreme Court Constitution Bench or larger bench judgment.\n"
+        "                  Set false if the case is still good law or if you are uncertain.\n\n"
+        "  overruled_by  → string: if is_overruled is true, state the name and year of the SC judgment that\n"
+        "                  overruled it (e.g. 'State of Kerala vs Thomas (1976) — overruled by Indra Sawhney\n"
+        "                  vs Union of India (1992)'). If is_overruled is false, use ''.\n\n"
+        "AUTHORITY VALIDATION RULES:\n"
+        "- Only mark is_overruled = true when you have high confidence of an express overruling by SC\n"
+        "- Do NOT mark as overruled merely because a later case distinguished or limited the ratio\n"
+        "- If a case appears in BOTH historical and contemporary result sets with conflicting treatment, flag it\n"
+        "- A case overruled in part should note WHICH part in overruled_by and keep is_overruled = false\n\n"
+        "━━━ STRICT EXTRACTION RULES ━━━\n"
+        "- INCLUDE: every indiankanoon.org/doc/ and judgments.ecourts.gov.in URL — each is a real judgment\n"
+        "- INCLUDE: sci.gov.in and main.sci.gov.in sources — Supreme Court official portal\n"
         "- INCLUDE: any source whose title contains 'vs', 'v.', court name, or case number\n"
-        "- SKIP: news articles (livelaw.in/news/, barandbench.com, etc.)\n"
-        "- SKIP: any source that is clearly not a court judgment (Wikipedia, blogs, commentaries)\n"
+        "- SKIP: news articles (livelaw.in/news/, barandbench.com, ndtv.com, thehindu.com)\n"
+        "- SKIP: Wikipedia, blogs, law review articles, government circulars/notifications\n"
         "- SKIP: sources with no identifiable parties AND no court name\n"
-        "- NEVER skip a valid judgment because fields are incomplete — fill what you can, use '' for unknown fields\n"
-        "- factual_similarity and our_argument MUST relate specifically to our client's case facts above\n"
+        "- NEVER skip a valid judgment because fields are incomplete — fill what you can, use '' for unknown\n"
+        "- factual_similarity and our_argument MUST relate specifically to our client's case facts\n"
         "- source_url must exactly match the uri in the search result\n\n"
-        'Return ONLY valid JSON — no markdown, no explanation:\n{"citations": [{ all fields above }, ...]}'
+        "Return ONLY valid JSON — no markdown, no explanation:\n"
+        '{"citations": [{\n'
+        '  "parties": "", "court": "", "bench": "", "year": "",\n'
+        '  "citation_no": "", "facts_of_precedent": "", "legal_issue": "",\n'
+        '  "ratio": "", "key_principle": "", "key_quote": "",\n'
+        '  "factual_similarity": "", "our_argument": "", "distinguishing_notes": "",\n'
+        '  "authority_weight": "", "source_url": "", "authority_tier": "", "confidence": "",\n'
+        '  "is_overruled": false, "overruled_by": ""\n'
+        '}]}'
     )
 
 
@@ -1375,6 +1398,8 @@ def _parse_citations(raw: Optional[str]) -> List[Dict[str, Any]]:
             "authority_tier":        str(c.get("authority_tier") or "T2"),
             "authority_weight":      str(c.get("authority_weight") or "PERSUASIVE").upper(),
             "confidence":            str(c.get("confidence") or "MEDIUM").upper(),
+            "is_overruled":          bool(c.get("is_overruled") or False),
+            "overruled_by":          str(c.get("overruled_by") or ""),
         })
     return citations
 
@@ -1440,19 +1465,19 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
     search_error = ""
 
     if method == "gemini":
-        # 10 parallel Gemini grounding calls for broad Indian court coverage:
-        #   Slots 1-5 : top 5 planned queries (A/B/C types from planner)
-        #   Slot  6   : landmark SC 1960-1990 (Constitution Bench era)
-        #   Slot  7   : landmark SC 1990-2005 (pre-digital era)
-        #   Slot  8   : all major High Courts — Bombay, Delhi, Madras, Calcutta, Allahabad
-        #   Slot  9   : state/jurisdiction-specific HC query
-        #   Slot  10  : remaining planned query OR recent multi-HC catch-all
+        # 12 parallel Gemini grounding calls — time-balanced + domain-targeted:
+        #   Slots 1-9  : all 9 time-bucketed planned queries (Q1-A…Q3-C from planner)
+        #                 Bucket 1: Historical 1950-2000 (Q1-A, Q1-B, Q1-C)
+        #                 Bucket 2: Developmental 2000-2015 (Q2-A, Q2-B, Q2-C)
+        #                 Bucket 3: Contemporary 2016-2026 (Q3-A, Q3-B, Q3-C)
+        #   Slot  10   : main.sci.gov.in / Supreme Court official portal targeting
+        #   Slot  11   : judgments.ecourts.gov.in / e-Courts national portal targeting
+        #   Slot  12   : jurisdiction-specific HC OR multi-HC broadening query
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
         import re as _re3
 
-        # Use ALL 9 planned queries; take first 5 as top slots
+        # All 9 time-bucketed planned queries
         planned = [q for q in queries if q.strip()]
-        top_queries = planned[:5]
 
         # Keywords from the case issue (stop-word filtered, deduped)
         issue_text = state.get("issue") or case_query
@@ -1461,57 +1486,56 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
             'and','or','with','by','that','this','have','had','has','been','its','which'
         }
         _kw_tokens = [w for w in _re3.findall(r'[a-zA-Z]{4,}', issue_text.lower()) if w not in _stop]
-        _kw6 = ' '.join(list(dict.fromkeys(_kw_tokens))[:6])   # 6 keywords
-        _kw4 = ' '.join(list(dict.fromkeys(_kw_tokens))[:4])   # 4 keywords (shorter queries)
+        _kw4 = ' '.join(list(dict.fromkeys(_kw_tokens))[:4])
 
-        # Jurisdiction-specific keyword (Bombay / Delhi / Madras / etc.)
-        jur = (state.get("case_analysis") or "")
+        # Jurisdiction-specific keyword (auto-detected from case analysis)
         try:
             import json as _jj
-            _jur_parsed = _jj.loads(jur)
+            _jur_parsed = _jj.loads(state.get("case_analysis") or "{}")
             _jur_str = str(_jur_parsed.get("jurisdiction") or "").lower()
         except Exception:
             _jur_str = ""
         _jur_kw = next(
             (h for h in ["bombay","delhi","madras","calcutta","allahabad","karnataka",
                          "gujarat","rajasthan","kerala","punjab","andhra","telangana",
-                         "hyderabad","gauhati","patna","orissa","chhattisgarh","jharkhand"]
+                         "gauhati","patna","orissa","chhattisgarh","jharkhand","himachal"]
              if h in _jur_str or h in case_query.lower()),
             ""
         )
 
-        # Supplemental hardcoded queries
-        # Slot 6: old SC landmark (Constitution Bench era)
-        q_old_sc    = f"Supreme Court India landmark judgment {_kw4} 1960 1970 1980 1985"
-        # Slot 7: SC 1990s-2000s (pre-digital but indexed on IK)
-        q_mid_sc    = f"Supreme Court India {_kw4} judgment 1990 1995 2000 2005"
-        # Slot 8: all major HCs — broad coverage
-        q_all_hc    = (
-            f"{_kw4} High Court judgment India "
-            f"Bombay Delhi Madras Calcutta Allahabad Karnataka Gujarat Kerala"
-        )
-        # Slot 9: jurisdiction-specific HC (if detected) OR recent multi-HC
-        q_jur_hc    = (
+        # Slot 10: Supreme Court official portal (sci.gov.in / main.sci.gov.in)
+        q_sci = f"{_kw4} Supreme Court India official judgment site:sci.gov.in"
+
+        # Slot 11: e-Courts national portal (judgments.ecourts.gov.in) — HC judgments
+        q_ecourts = f"{_kw4} High Court India judgment site:judgments.ecourts.gov.in"
+
+        # Slot 12: jurisdiction HC OR broad multi-HC catch-all
+        q_jur_hc = (
             f"{_jur_kw} High Court India {_kw4} judgment" if _jur_kw
-            else f"{_kw4} High Court India Rajasthan Punjab Andhra Telangana judgment"
-        )
-        # Slot 10: any remaining planned query OR recent nationwide HC catch-all
-        q_remaining = (
-            planned[5].strip() if len(planned) > 5 and planned[5].strip()
-            else f"High Court India {_kw4} 2010 2015 2018 2020 2022"
+            else f"{_kw4} High Court India Rajasthan Punjab Andhra Telangana Gauhati judgment"
         )
 
-        grounding_queries = top_queries + [q_old_sc, q_mid_sc, q_all_hc, q_jur_hc, q_remaining]
-        # Deduplicate while preserving order
+        supplemental = [q_sci, q_ecourts, q_jur_hc]
+        grounding_queries = planned + supplemental
+
+        # Deduplicate while preserving order (planned queries take priority)
         _seen_q: set = set()
         grounding_queries = [q for q in grounding_queries if q not in _seen_q and not _seen_q.add(q)]
 
-        print(f"[CITATION_TEST]   → {len(grounding_queries)} grounding queries (parallel)", flush=True)
-        for i, gq in enumerate(grounding_queries, 1):
-            print(f"[CITATION_TEST]     G{i}. {gq[:100]}", flush=True)
+        print(f"[CITATION_TEST]   → {len(grounding_queries)} grounding queries "
+              f"(3 time-buckets + domain-targeted, parallel)", flush=True)
+        _bucket_labels = {
+            0:"[H1-A]",1:"[H1-B]",2:"[H1-C]",
+            3:"[D2-A]",4:"[D2-B]",5:"[D2-C]",
+            6:"[C3-A]",7:"[C3-B]",8:"[C3-C]",
+            9:"[SCI]",10:"[ECR]",11:"[JUR]",
+        }
+        for i, gq in enumerate(grounding_queries):
+            lbl = _bucket_labels.get(i, f"[S{i+1}]")
+            print(f"[CITATION_TEST]     G{i+1}{lbl} {gq[:100]}", flush=True)
 
         all_hits_ordered: List[Dict[str, Any]] = []
-        with _TPE(max_workers=10) as pool:
+        with _TPE(max_workers=12) as pool:
             futs = {pool.submit(_gemini_grounding_search, q, 12): q for q in grounding_queries}
             for fut in _ac(futs, timeout=90):
                 try:
@@ -1519,6 +1543,23 @@ def run_test_pipeline(state: Dict[str, Any]) -> Dict[str, Any]:
                         all_hits_ordered.append(_normalize_hit(h))
                 except Exception as exc:
                     logger.warning("[RUNNER] Grounding query failed: %s", exc)
+
+        # ── Domain prioritisation: T1 official sources (sci.gov.in, ecourts.gov.in)
+        #    float to the front; T2 (IK, casemine) follow.
+        from agents.citation_test_agent.domain_allowlist import tier_of as _tier_of
+        _T1_PRIORITY = ["sci.gov.in", "main.sci.gov.in", "ecourts.gov.in",
+                        "judgments.ecourts.gov.in", "supremecourt.gov.in"]
+        def _source_priority(hit: Dict[str, Any]) -> int:
+            u = (hit.get("uri") or "").lower()
+            if any(d in u for d in _T1_PRIORITY):
+                return 0          # highest priority
+            if _tier_of(u) == "T1":
+                return 1
+            if "indiankanoon.org" in u:
+                return 2          # IK is most comprehensive — just below official portals
+            return 3
+
+        all_hits_ordered.sort(key=_source_priority)
 
         for hit in all_hits_ordered:
             uri = hit["uri"]

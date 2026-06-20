@@ -12,13 +12,25 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 _T1 = [
+    # Supreme Court of India — official portals (highest priority)
     "sci.gov.in", "main.sci.gov.in", "supremecourt.gov.in",
-    "egazette.gov.in", "gazette.gov.in", "indiacode.nic.in",
-    "legislative.gov.in", "prsindia.org",
+    # e-Courts national portal — HC judgments, all states
     "ecourts.gov.in", "njdg.ecourts.gov.in", "judgments.ecourts.gov.in",
+    # State HC official portals
     "bombayhighcourt.nic.in", "delhihighcourt.nic.in", "mphc.gov.in",
     "highcourtofkerala.nic.in", "hcraj.nic.in", "allahabad.nic.in",
     "calcuttahighcourt.gov.in", "hcmadras.tn.nic.in", "karnatakajudiciary.gov.in",
+    "ghconline.gov.in",          # Gauhati HC
+    "patnahighcourt.gov.in",     # Patna HC
+    "orissahighcourt.nic.in",    # Orissa HC
+    "hcap.nic.in",               # Andhra Pradesh HC
+    "tshc.gov.in",               # Telangana HC
+    "hphc.nic.in",               # Himachal Pradesh HC
+    "cghighcourt.nic.in",        # Chhattisgarh HC
+    "jharkhandhighcourt.gov.in", # Jharkhand HC
+    # Legislation and gazette
+    "egazette.gov.in", "gazette.gov.in", "indiacode.nic.in",
+    "legislative.gov.in", "prsindia.org",
 ]
 _T1_WILDCARDS = [".gov.in", ".nic.in", ".judiciary.gov.in"]
 

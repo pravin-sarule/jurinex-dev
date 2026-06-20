@@ -26,6 +26,8 @@ class CitationDict(BaseModel):
     confidence: str = Field(default="MEDIUM")
     verification_status: str = Field(default="unverified")
     legal_issue: str = Field(default="")
+    is_overruled: bool = Field(default=False, description="True if the ratio has been overruled by a later SC judgment")
+    overruled_by: str = Field(default="", description="Name/citation of the SC judgment that overruled this case, if known")
 
 
 class CitationListOutput(BaseModel):
