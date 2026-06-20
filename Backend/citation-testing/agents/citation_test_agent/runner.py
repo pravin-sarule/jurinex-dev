@@ -591,6 +591,36 @@ def _gemini_web_queries(query: str) -> List[str]:
         return []
 
 
+def _parse_rendered_urls(rendered_content: str) -> List[str]:
+    """
+    Extract actual source URLs from Gemini grounding rendered_content HTML.
+    The rendered_content is a styled HTML block (Google Search snippet UI) containing
+    href/data-url attributes pointing to the real source pages — not vertexaisearch redirects.
+    Order matches the grounding_chunks order so index N → chunk N.
+    """
+    import re as _re
+    if not rendered_content:
+        return []
+    urls: List[str] = []
+    seen: set = set()
+    # Match href="..." and data-url="..." and data-href="..." attributes
+    for m in _re.finditer(r'(?:href|data-url|data-href)=["\']([^"\']+)["\']', rendered_content):
+        u = m.group(1).strip()
+        # Only real HTTP URLs, not CSS/JS/anchor/mailto refs
+        if not u.startswith("http"):
+            continue
+        # Never keep vertexaisearch redirects — we want the real destination
+        if "vertexaisearch.cloud.google.com" in u:
+            continue
+        # Skip Google's own service URLs
+        if "google.com" in u or "googleapis.com" in u:
+            continue
+        if u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
+
+
 def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
     """
     Gemini Google Search grounding — primary search for the Gemini pipeline.
@@ -598,12 +628,10 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
     Key design:
     - Cloud Run IPs are blocked by indiankanoon.org → no direct HTTP scraping.
     - Gemini grounding CAN read IK pages; actual judgment text is in
-      grounding_supports[i].segment.text — extracted and used as snippets.
-    - vertexaisearch redirect URIs cannot be resolved from Cloud Run (IK blocks
-      the redirect destination too), so we ACCEPT ALL grounding chunks that have
-      any content — Gemini's grounding already ensures relevance to the legal query.
-    - We try GET-based redirect resolution (not HEAD) for a cleaner final URL,
-      but a failure does NOT drop the result.
+      grounding_supports[i].segment.text — used as snippet.
+    - vertexaisearch redirect URIs → we try GET resolution, but also parse
+      rendered_content HTML which contains the actual source URLs directly.
+    - Only T1/T2 domain sources are kept (no "accept all" — that caused news/blogs).
     """
     import re as _re
     from agents.citation_test_agent.domain_allowlist import tier_of
@@ -661,7 +689,12 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
         logger.warning("[GEMINI_GROUNDING] 0 chunks for: %s", clean_q[:60])
         return []
 
-    # ── 1. Build chunk_index → snippet text from grounding_supports ──────────
+    # ── 1. Parse rendered_content for actual source URLs (index-aligned to chunks) ─
+    rendered = getattr(getattr(gm, "search_entry_point", None), "rendered_content", "") or ""
+    rendered_urls = _parse_rendered_urls(rendered)
+    logger.info("[GEMINI_GROUNDING] rendered_content: %d actual URLs extracted", len(rendered_urls))
+
+    # ── 2. Build chunk_index → snippet text from grounding_supports ──────────────
     chunk_texts: Dict[int, List[str]] = {}
     for sup in supports:
         txt = getattr(getattr(sup, "segment", None), "text", "") or ""
@@ -669,25 +702,11 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
             for idx in (getattr(sup, "grounding_chunk_indices", []) or []):
                 chunk_texts.setdefault(int(idx), []).append(txt)
 
-    # ── 2. Also harvest URLs Gemini cited inline in its text response ─────────
-    raw_text = "".join(
-        getattr(p, "text", "") for p in (
-            getattr(getattr(candidate, "content", None), "parts", []) or []
-        )
-    )
-    inline_urls: List[str] = []
-    for u in _re.findall(r'https?://[^\s<>\"\']+', raw_text):
-        u = u.rstrip(".,;)>")
-        if tier_of(u) in ("T1", "T2"):
-            inline_urls.append(u)
-
-    # ── 3. Try GET-based redirect resolution to get clean source URLs ─────────
-    #    Failure = keep redirect URI; never drop a result over this.
+    # ── 3. Try GET-based redirect resolution for cleaner URLs ─────────────────────
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
     import httpx as _hx
 
     def _get_follow(uri: str) -> str:
-        """Follow vertexaisearch redirect via GET to retrieve the actual source URL."""
         try:
             with _hx.Client(
                 timeout=5.0,
@@ -695,7 +714,11 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             ) as c:
                 r = c.get(uri)
-                return str(r.url)
+                final = str(r.url)
+                # IK blocks Cloud Run → redirect lands on a 403/blocked page; treat as failed
+                if "indiankanoon.org" in final and r.status_code in (403, 429, 503):
+                    return uri
+                return final
         except Exception:
             return uri
 
@@ -714,12 +737,30 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
                 except Exception:
                     pass
 
-    # ── 4. Assemble hits — ACCEPT ALL chunks that have a title or snippet ─────
-    #    Rationale: Gemini's grounding already filtered for relevance to the legal
-    #    query. Dropping by domain kills IK results whose redirects resolve to IK
-    #    pages blocked by Cloud Run. We keep everything and let the extractor judge.
+    # ── 4. Also harvest T1/T2 URLs Gemini cited inline in its text response ──────
+    raw_text = "".join(
+        getattr(p, "text", "") for p in (
+            getattr(getattr(candidate, "content", None), "parts", []) or []
+        )
+    )
+    inline_urls: List[str] = []
+    for u in _re.findall(r'https?://[^\s<>\"\']+', raw_text):
+        u = u.rstrip(".,;)>")
+        if tier_of(u) in ("T1", "T2"):
+            inline_urls.append(u)
+
+    # ── 5. Assemble hits — ONLY T1/T2 domain sources ─────────────────────────────
+    #
+    # URL resolution priority per chunk i:
+    #   a) GET-resolved redirect (if different from redirect URI and T1/T2)
+    #   b) rendered_content URL at index i (actual source URL from Google's HTML)
+    #   c) GET-resolved redirect (even if vertexaisearch, as last resort)
+    #
+    # A chunk is accepted ONLY IF we can confirm it's from a T1/T2 domain.
+    # This prevents news articles/blogs from appearing — their domains are never T1/T2.
     hits: List[Dict[str, Any]] = []
     seen: set = set()
+    dropped_non_legal = 0
 
     for i, chunk in enumerate(chunks):
         web = getattr(chunk, "web", None)
@@ -727,19 +768,60 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
             continue
 
         redirect_uri = (getattr(web, "uri", "") or "")
-        actual_uri   = redirect_map.get(i, redirect_uri)
+        resolved_uri = redirect_map.get(i, redirect_uri)
         title        = (getattr(web, "title", "") or "")
         snippet      = " ".join(chunk_texts.get(i, []))[:1500]
 
-        # Skip only truly empty results
         if not title and not snippet:
             continue
 
-        # Tier: use resolved URL first; fall back to redirect URL; default T2
-        tier = tier_of(actual_uri) or tier_of(redirect_uri) or "T2"
+        # Find the best actual URL for this chunk
+        use_uri = ""
+        tier    = ""
 
-        # Use the cleaner URL for display; prefer resolved if different from redirect
-        use_uri = actual_uri if (actual_uri and actual_uri != redirect_uri) else redirect_uri
+        # Priority a: GET-resolved redirect → T1/T2 domain
+        if resolved_uri and resolved_uri != redirect_uri:
+            t = tier_of(resolved_uri)
+            if t in ("T1", "T2"):
+                use_uri = resolved_uri
+                tier    = t
+
+        # Priority b: rendered_content URL at same index
+        if not use_uri and i < len(rendered_urls):
+            t = tier_of(rendered_urls[i])
+            if t in ("T1", "T2"):
+                use_uri = rendered_urls[i]
+                tier    = t
+
+        # Priority b-alt: scan ALL rendered URLs for one matching this chunk's title
+        if not use_uri and title:
+            title_lower = title.lower()[:60]
+            for ru in rendered_urls:
+                t = tier_of(ru)
+                if t not in ("T1", "T2"):
+                    continue
+                # Match by domain name appearing in title (e.g. "indiankanoon" in title)
+                from urllib.parse import urlparse as _up
+                domain_short = _up(ru).netloc.replace("www.", "")
+                if domain_short.split(".")[0] in title_lower:
+                    use_uri = ru
+                    tier    = t
+                    break
+
+        # If still no verified URL but title says "IndianKanoon" → construct IK search URL
+        if not use_uri:
+            title_lower = title.lower()
+            if "indiankanoon" in title_lower or "indian kanoon" in title_lower:
+                # Build an IK search URL from the title so the link is useful
+                search_term = _re.sub(r'\s*[-|].*$', '', title).strip()
+                use_uri = f"https://indiankanoon.org/search/?formInput={_re.sub(r'[^a-zA-Z0-9 ]', '', search_term)[:100].strip().replace(' ', '+')}"
+                tier    = "T2"
+
+        if not use_uri:
+            dropped_non_legal += 1
+            logger.debug("[GEMINI_GROUNDING] dropped non-legal source (chunk %d): %s | %s",
+                         i, title[:60], redirect_uri[:80])
+            continue
 
         if use_uri in seen:
             continue
@@ -754,13 +836,17 @@ def _gemini_grounding_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
         if len(hits) >= num:
             break
 
-    # Append inline-cited URLs not already in hits
+    # Append inline T1/T2 URLs not already captured
     for url in inline_urls:
         if url not in seen and len(hits) < num:
             seen.add(url)
-            hits.append({"uri": url, "title": url, "snippet": "", "authority_tier": tier_of(url) or "T2"})
+            hits.append({"uri": url, "title": url, "snippet": "",
+                         "authority_tier": tier_of(url) or "T2"})
 
-    logger.info("[GEMINI_GROUNDING] %d/%d chunks kept for %r", len(hits), len(chunks), clean_q[:60])
+    logger.info(
+        "[GEMINI_GROUNDING] %d/%d chunks kept, %d dropped (non-legal) for %r",
+        len(hits), len(chunks), dropped_non_legal, clean_q[:60],
+    )
     return hits
 
 
@@ -1130,27 +1216,24 @@ def _is_judgment_source(source: Dict[str, Any]) -> bool:
     if "barandbench.com" in uri:
         return False
 
-    # ── vertexaisearch / unresolved redirect: judge by title / snippet ───────
-    _JUDGMENT_KW = {
-        " vs ", " v. ", " versus ", "appellant", "petitioner", "respondent",
-        "supreme court", "high court", "tribunal", "bench", "judgment",
-        "judgement", "order dated", "writ petition", "civil appeal",
-        "criminal appeal", "coram", "honourable", "hon'ble",
+    # ── vertexaisearch / unresolved redirect: judge by title AND snippet ────────
+    # Must have BOTH a case-name pattern AND a court/judgment keyword to pass.
+    # A news headline like "XYZ vs ABC: HC rules..." has "vs" and "court" but NOT
+    # "order dated" / "writ petition" / "coram" — those are judgment-document markers.
+    _CASE_NAME_KW = {" vs ", " v. ", " versus ", "/"}
+    _COURT_DOC_KW = {
+        "supreme court", "high court", "tribunal", "order dated",
+        "writ petition", "civil appeal", "criminal appeal", "coram",
+        "hon'ble", "honourable", "bench", "judgment", "judgement",
+        "appellant", "petitioner", "respondent",
     }
     text = f"{title} {snip}"
-    if any(kw in text for kw in _JUDGMENT_KW):
+    has_case_name  = any(kw in text for kw in _CASE_NAME_KW)
+    has_court_doc  = any(kw in text for kw in _COURT_DOC_KW)
+    if has_case_name and has_court_doc:
         return True
 
-    # ── Reject everything else: Wikipedia, news, blogs, academic papers ───────
-    _REJECT_DOMAINS = [
-        "wikipedia.org", "indiatoday.in", "hindustantimes.com",
-        "thehindu.com", "economictimes.com", "ndtv.com", "legalserviceindia.com",
-        "advocatekhoj.com", "lawyersclubindia.com", "taxguru.in",
-    ]
-    if any(d in uri for d in _REJECT_DOMAINS):
-        return False
-
-    return False  # unknown domain — don't include unrecognised sources
+    return False  # unknown domain / insufficient signals — exclude
 
 
 _VALID_COURTS = {
