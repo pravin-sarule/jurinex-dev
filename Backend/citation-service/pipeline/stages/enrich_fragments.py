@@ -1,6 +1,7 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 
+from core.config import settings
 from core.exceptions import BudgetExceeded
 from integrations.indian_kanoon.client import IndianKanoonClient
 from pipeline.pipeline_context import PipelineContext
@@ -22,12 +23,16 @@ def run(context: PipelineContext, client: IndianKanoonClient):
     limit = min(context.budget.config.max_ik_fragment_calls, context.budget.config.max_ik_meta_calls)
     selected = _balanced(context.candidates, [issue.issue_id for issue in context.issues], limit)
     completed = {candidate.doc_id: set() for candidate in selected}
-    with ThreadPoolExecutor(max_workers=min(10, max(1, len(selected) * 2))) as pool:
-        futures = {}
-        for candidate in selected:
-            futures[pool.submit(client.fetch_fragment, candidate)] = (candidate, "fragment")
-            futures[pool.submit(client.fetch_meta, candidate)] = (candidate, "meta")
-        for future in as_completed(futures):
+    deadline = settings.ik_enrich_deadline_seconds
+    pool = ThreadPoolExecutor(max_workers=min(10, max(1, len(selected) * 2)))
+    futures = {}
+    for candidate in selected:
+        futures[pool.submit(client.fetch_fragment, candidate)] = (candidate, "fragment")
+        futures[pool.submit(client.fetch_meta, candidate)] = (candidate, "meta")
+    try:
+        # B2 — stop waiting on a hung fragment/meta call after the deadline; candidates that
+        # didn't get BOTH are routed to rejected by the post-loop check below (no silent loss).
+        for future in as_completed(futures, timeout=deadline):
             candidate, kind = futures[future]
             try:
                 future.result()
@@ -37,6 +42,10 @@ def run(context: PipelineContext, client: IndianKanoonClient):
             except Exception as exc:
                 candidate.rejection_reason = f"{kind} enrichment failed: {exc}"
                 logger.exception("Candidate enrichment failed", extra={"details": {"run_id": context.run_id, "doc_id": candidate.doc_id, "kind": kind}})
+    except FuturesTimeout:
+        logger.warning("[enrich_fragments] stage hit %ss deadline; proceeding with completed enrichments", deadline)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     enriched = []
     cache_hits = 0
     

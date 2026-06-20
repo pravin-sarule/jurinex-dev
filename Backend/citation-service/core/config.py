@@ -69,6 +69,11 @@ class Settings:
     max_raw_candidates: int = _int("CITATION_V2_MAX_RAW_CANDIDATES", 220)
     ik_search_maxpages: int = _int("CITATION_V2_IK_SEARCH_MAXPAGES", 2)
     per_query_doc_cap: int = _int("CITATION_V2_PER_QUERY_DOC_CAP", 40)
+    # Stage wall-clock ceilings (B2): stop waiting on a hung IK fan-out after this many
+    # seconds and proceed with whatever returned. Must sit ABOVE the per-call HTTP timeout
+    # (search ~12s x2 retries) so a normal slow-but-valid call is never clipped.
+    ik_retrieve_deadline_seconds: int = _int("CITATION_V2_IK_RETRIEVE_DEADLINE", 30)
+    ik_enrich_deadline_seconds: int = _int("CITATION_V2_IK_ENRICH_DEADLINE", 40)
     enable_final_ai_judge: bool = os.environ.get("CITATION_V2_ENABLE_FINAL_AI_JUDGE", "true").lower() == "true"
     # Outcome-aware adverse detection (disposition service).
     enable_disposition_check: bool = os.environ.get("CITATION_V2_ENABLE_DISPOSITION_CHECK", "true").lower() == "true"

@@ -5,10 +5,13 @@ Uses canonical_id across systems and stores report snapshots in PostgreSQL.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +31,19 @@ _qdrant_embed_client = None
 _qdrant_embed_available = None
 _EMBED_RETRY_ATTEMPTS = 3
 _EMBED_RETRY_BASE_DELAY_SECS = 0.75
+# B3 — embed in sub-batches so one bad item degrades to a small retry, not 100 serial calls.
+_EMBED_CHUNK_SIZE = int(os.environ.get("CITATION_EMBED_CHUNK_SIZE", "32"))
+_EMBED_FALLBACK_WORKERS = 8
+# A2 — in-process content-hash cache so identical text isn't re-embedded (same-case re-runs,
+# dual-perspective runs). Key MUST include task + dims: RETRIEVAL_QUERY vs RETRIEVAL_DOCUMENT
+# (and a different dims) produce different vectors for identical text.
+_EMBED_CACHE: Dict[str, List[float]] = {}
+_EMBED_CACHE_LOCK = threading.Lock()
+_EMBED_CACHE_MAX = int(os.environ.get("CITATION_EMBED_CACHE_MAX", "5000"))
+
+
+def _embed_cache_key(model: str, task: str, dims: Any, text: str) -> str:
+    return hashlib.sha256(f"{model}|{task}|{dims}|{text}".encode("utf-8")).hexdigest()
 _ADMIN_UPLOAD_TABLE_CACHE: Optional[str] = None
 _ADMIN_UPLOAD_COLS_CACHE: Dict[str, set] = {}
 
@@ -136,11 +152,53 @@ def _embed_with_retries(model: str, contents: List[str], config: Dict[str, Any],
     raise RuntimeError(f"{label} embed failed without an exception")
 
 
+def _vec_from_embeds(embeds, n: int) -> List[List[float]]:
+    """Extract n vectors from an embed_content response, padding/trimming to n."""
+    out: List[List[float]] = []
+    for emb in (embeds or []):
+        vals = getattr(emb, "values", None) or []
+        out.append([float(v) for v in vals] if vals else [])
+    if len(out) < n:
+        out.extend([[] for _ in range(n - len(out))])
+    return out[:n]
+
+
+def _embed_one_gemini(model: str, text: str, config: Dict[str, Any]) -> List[float]:
+    """Embed a single string (with retries); [] on failure. Used by the concurrent fallback."""
+    try:
+        resp_one = _embed_with_retries(model, [text], config, "single-string")
+        return _vec_from_embeds(getattr(resp_one, "embeddings", None), 1)[0]
+    except Exception as exc:
+        logger.warning("[QDRANT] single-string embed failed after retries: %s", exc)
+        return []
+
+
+def _embed_chunk_gemini(model: str, chunk: List[str], config: Dict[str, Any]) -> List[List[float]]:
+    """Embed one sub-batch. If the batch call fails, fall back to CONCURRENT per-string
+    embedding (order-preserving) so a single bad item can't serialise the whole chunk (B3)."""
+    try:
+        resp = _embed_with_retries(model, chunk, config, "batch")
+        return _vec_from_embeds(getattr(resp, "embeddings", None), len(chunk))
+    except Exception as exc:
+        logger.warning("[QDRANT] sub-batch embed failed (%d items): %s — concurrent per-string fallback",
+                       len(chunk), exc)
+        out: List[List[float]] = [[] for _ in chunk]
+        with ThreadPoolExecutor(max_workers=min(_EMBED_FALLBACK_WORKERS, max(1, len(chunk)))) as pool:
+            fut_to_idx = {pool.submit(_embed_one_gemini, model, s, config): i for i, s in enumerate(chunk)}
+            for fut in as_completed(fut_to_idx):
+                out[fut_to_idx[fut]] = fut.result()  # index-order preserved on reassembly
+        return out
+
+
 def _embed_strings_gemini(strings: List[str], task: str = "query") -> List[List[float]]:
     """Call Gemini embed_content for one or more non-empty strings; returns vectors (same length).
 
     task='query' uses RETRIEVAL_QUERY (search side); task='document' uses
     RETRIEVAL_DOCUMENT (corpus side). They must match Gemini's asymmetric scheme.
+
+    B3: embedded in sub-batches; a failing sub-batch degrades to a concurrent per-string
+    retry (not a 100-call serial loop), so the worst-case latency stays bounded. Vectors
+    are byte-identical to the old path — same model, config, scores.
     """
     if not strings:
         return []
@@ -148,40 +206,18 @@ def _embed_strings_gemini(strings: List[str], task: str = "query") -> List[List[
         return [[] for _ in strings]
     model = _resolve_query_embed_model()
     config = _document_embed_config(model) if task == "document" else _query_embed_config(model)
-    try:
-        resp = _embed_with_retries(model, strings, config, "batch")
-    except Exception as exc:
-        logger.warning("[QDRANT] batch embed_content failed: %s — retrying per string", exc)
-        out: List[List[float]] = []
-        for s in strings:
-            try:
-                resp_one = _embed_with_retries(model, [s], config, "single-string")
-                embeds = getattr(resp_one, "embeddings", None) or []
-                vals = getattr(embeds[0], "values", None) if embeds else None
-                if isinstance(vals, list) and vals:
-                    out.append([float(v) for v in vals])
-                else:
-                    out.append([])
-            except Exception as exc2:
-                logger.warning("[QDRANT] single-string embed failed after retries: %s", exc2)
-                out.append([])
-        return out
 
-    embeds = getattr(resp, "embeddings", None) or []
     out_full: List[List[float]] = []
-    for emb in embeds:
-        vals = getattr(emb, "values", None) or []
-        if vals:
-            out_full.append([float(v) for v in vals])
-        else:
-            out_full.append([])
+    for start in range(0, len(strings), _EMBED_CHUNK_SIZE):
+        out_full.extend(_embed_chunk_gemini(model, strings[start:start + _EMBED_CHUNK_SIZE], config))
+
     if len(out_full) < len(strings):
         out_full.extend([[] for _ in range(len(strings) - len(out_full))])
     elif len(out_full) > len(strings):
         out_full = out_full[: len(strings)]
     if any(out_full):
         sample = next((v for v in out_full if v), [])
-        logger.info("[QDRANT] Embedding batch OK: %d vector(s), dims=%d", len(out_full), len(sample))
+        logger.info("[QDRANT] Embedding OK: %d vector(s), dims=%d", len(out_full), len(sample))
     return out_full
 
 
@@ -189,14 +225,45 @@ def _embeddings_batch(texts: List[str], task: str) -> List[List[float]]:
     if not texts:
         return []
     out: List[List[float]] = [[] for _ in texts]
-    need_pairs: List[Tuple[int, str]] = [(i, (t or "").strip()) for i, t in enumerate(texts) if (t or "").strip()]
-    if not need_pairs:
-        return out
-    idxs = [p[0] for p in need_pairs]
-    batch = [p[1] for p in need_pairs]
-    vectors = _embed_strings_gemini(batch, task=task)
-    for j, i in enumerate(idxs):
-        out[i] = vectors[j] if j < len(vectors) else []
+    model = _resolve_query_embed_model()
+    config = _document_embed_config(model) if task == "document" else _query_embed_config(model)
+    dims = config.get("output_dimensionality")
+
+    # A2 — serve content-hash cache hits; embed only the misses (one batch). A cached vector
+    # is byte-identical to a fresh one, so cosine scores / rerank cull / top-K are unchanged.
+    miss: List[Tuple[int, str, str]] = []  # (index, text, cache_key)
+    for i, t in enumerate(texts):
+        t = (t or "").strip()
+        if not t:
+            continue
+        key = _embed_cache_key(model, task, dims, t)
+        with _EMBED_CACHE_LOCK:
+            cached = _EMBED_CACHE.get(key)
+        if cached is not None:
+            out[i] = cached
+        else:
+            miss.append((i, t, key))
+
+    if miss:
+        # Dedupe identical misses so a text repeated within one batch is embedded once.
+        uniq_keys: List[str] = []
+        uniq_texts: List[str] = []
+        seen: set = set()
+        for (_i, t, key) in miss:
+            if key not in seen:
+                seen.add(key)
+                uniq_keys.append(key)
+                uniq_texts.append(t)
+        vectors = _embed_strings_gemini(uniq_texts, task=task)
+        key_to_vec: Dict[str, List[float]] = {}
+        for k, vec in zip(uniq_keys, vectors):
+            key_to_vec[k] = vec
+            if vec:  # never cache an empty/failed vector — retry it next time
+                with _EMBED_CACHE_LOCK:
+                    if len(_EMBED_CACHE) < _EMBED_CACHE_MAX:
+                        _EMBED_CACHE[k] = vec
+        for (i, _t, key) in miss:
+            out[i] = key_to_vec.get(key, [])
     return out
 
 

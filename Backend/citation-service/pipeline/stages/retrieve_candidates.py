@@ -1,7 +1,7 @@
 import logging
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 
 from core.config import settings
 from integrations.indian_kanoon.client import IndianKanoonClient
@@ -202,12 +202,29 @@ def run(context: PipelineContext, client: IndianKanoonClient):
             query["error"] = str(e)
             return query, []
 
-    # Execute the budget-selected queries (already in priority order) concurrently.
-    with ThreadPoolExecutor(max_workers=min(10, max(1, len(selected)))) as pool:
-        futures = [pool.submit(_execute_query, q) for q in selected]
-        for future in as_completed(futures):
-            q, res = future.result()
-            found.extend(res)
+    # Execute the budget-selected queries (already in priority order) concurrently, with a
+    # stage deadline (B2): once the deadline passes we stop waiting and use whatever returned
+    # — a single hung connection can't stall the whole stage. Recall is protected because the
+    # pool is priority-sorted before truncation, so a dropped straggler never displaces a
+    # high-priority hit. The per-call 12s HTTP timeout (B1) is the primary guard; this is the
+    # ceiling.
+    deadline = settings.ik_retrieve_deadline_seconds
+    pool = ThreadPoolExecutor(max_workers=min(10, max(1, len(selected))))
+    futures = [pool.submit(_execute_query, q) for q in selected]
+    done = 0
+    try:
+        for future in as_completed(futures, timeout=deadline):
+            try:
+                _q, res = future.result()
+                found.extend(res)
+                done += 1
+            except Exception:
+                pass
+    except FuturesTimeout:
+        logger.warning("[JURINEX][%s][QUERY_DEADLINE] retrieve stage hit %ss deadline; used %d/%d queries",
+                       rid, deadline, done, len(futures))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     # FIX 2 — strip out the user's own uploaded/source documents so the system never
     # cites its own inputs (circular contamination).

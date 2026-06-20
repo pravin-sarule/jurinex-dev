@@ -64,30 +64,36 @@ def _get_token() -> Optional[str]:
     )
 
 
-def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str = "POST") -> Optional[Any]:
+def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str = "POST",
+                read_timeout: int = 30, max_retries: Optional[int] = None) -> Optional[Any]:
     """
     Make an authenticated request to the IK API.
     Always POSTs (IK API requires POST for all endpoints).
     Returns parsed JSON dict/list, or None on failure.
+
+    read_timeout / max_retries are per-endpoint (B1): /search, /docfragment, /docmeta use a
+    short 12s timeout (p95 ~8s) so one stalled connection fails fast and retries instead of
+    blocking a whole concurrent stage for ~60s; /doc keeps the longer default for big payloads.
     """
     token = _get_token()
     if not token:
         logger.warning("[IK] Token not configured — skipping request to %s", path)
         return None
 
+    retries = max_retries if max_retries is not None else _IK_MAX_RETRIES
     url = _IK_BASE + path
     if params:
         qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         if qs:
             url = url + ("&" if "?" in url else "?") + qs
 
-    for attempt in range(1, _IK_MAX_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
             req = urllib.request.Request(url, method=method)
             req.add_header("Authorization", f"Token {token}")
             req.add_header("Accept", "application/json")
             req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=read_timeout) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
                 body = resp.read().decode("utf-8", errors="replace")
                 logger.info(
@@ -104,11 +110,11 @@ def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str 
             logger.warning("[IK] HTTP %s for %s: %s", getattr(e, "code", "?"), path, body)
             return None
         except Exception as exc:
-            if attempt < _IK_MAX_RETRIES and _is_retryable_ik_error(exc):
+            if attempt < retries and _is_retryable_ik_error(exc):
                 delay = 0.6 * attempt
                 logger.warning(
                     "[IK] Request failed for %s on attempt %d/%d: %s — retrying in %.1fs",
-                    path, attempt, _IK_MAX_RETRIES, exc, delay,
+                    path, attempt, retries, exc, delay,
                 )
                 time.sleep(delay)
                 continue
@@ -221,7 +227,7 @@ def ik_search(
     if maxcites:
         params["maxcites"] = maxcites
 
-    result = _ik_request("/search/", params=params)
+    result = _ik_request("/search/", params=params, read_timeout=12, max_retries=2)
     if isinstance(result, dict):
         docs = result.get("docs") or []
         logger.info(
@@ -373,7 +379,7 @@ def ik_fetch_docfragment(doc_id: str, query: str) -> Optional[Dict[str, Any]]:
       - tid, title, formInput, headline (HTML fragment with relevant snippets)
     """
     params = {"formInput": query}
-    return _ik_request(f"/docfragment/{doc_id}/", params=params)
+    return _ik_request(f"/docfragment/{doc_id}/", params=params, read_timeout=12, max_retries=2)
 
 
 # ─── 5. Document Metadata ─────────────────────────────────────────────────────
@@ -384,7 +390,7 @@ def ik_fetch_docmeta(doc_id: str) -> Optional[Dict[str, Any]]:
 
     Returns dict with: tid, title, docsource, publishdate, numcites, etc.
     """
-    return _ik_request(f"/docmeta/{doc_id}/")
+    return _ik_request(f"/docmeta/{doc_id}/", read_timeout=12, max_retries=2)
 
 
 # ─── Composite: enrich one IK candidate fully ─────────────────────────────────
