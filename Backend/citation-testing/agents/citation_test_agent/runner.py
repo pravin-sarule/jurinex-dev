@@ -1133,9 +1133,26 @@ def _build_extract_prompt(state: Dict[str, Any], sources: List[Dict[str, Any]]) 
         f"{str(state.get('research_questions', '[]'))[:800]}\n\n"
         "━━━ SEARCH RESULTS (T1/T2 sources — historical to contemporary) ━━━\n"
         f"{sources_json}\n\n"
+        "━━━ WHAT IS CITABLE vs WHAT IS NOT — READ THIS FIRST ━━━\n"
+        "A CITABLE PRECEDENT is a FINAL JUDGMENT or ORDER where a court has DECIDED a legal question.\n"
+        "It must have: a court's ruling (held / dismissed / allowed / quashed / upheld / set aside).\n\n"
+        "✅ EXTRACT THESE (citable precedents):\n"
+        "   • Supreme Court / High Court / Tribunal FINAL JUDGMENT that decided the case\n"
+        "   • Order that disposes of a case: 'Appeal dismissed', 'Writ allowed', 'Order quashed'\n"
+        "   • Judgment with a ratio decidendi — a legal ruling usable in future cases\n"
+        "   • Example: 'The SC held that stamp duty is payable on the consideration amount and dismissed the SLP'\n\n"
+        "❌ SKIP THESE — NOT citable in court:\n"
+        "   • Writ Petition / SLP / Appeal FILED but NOT yet decided — this is a PLEADING, not a precedent\n"
+        "   • Plaint, complaint, FIR, charge sheet (documents filed BY parties)\n"
+        "   • Legal notice / demand notice\n"
+        "   • Interim stay order / admission order / notice order (court has not decided the merits)\n"
+        "   • ANY document that says 'petitioner has filed' / 'relief sought' / 'prayer for' WITHOUT a court ruling\n"
+        "   • OUR CLIENT'S OWN CASE — the case shown above is our current matter; DO NOT cite it as precedent\n"
+        "   • News articles, legal blogs, commentary, academic papers\n\n"
+        "CRITICAL TEST: Ask yourself — 'Did the court DECIDE something here?' "
+        "If yes → extract. If the document only ASKS the court to decide → SKIP.\n\n"
         "━━━ EXTRACTION INSTRUCTIONS ━━━\n"
-        "ONLY extract actual Indian court JUDGMENTS — not news, commentary, blogs, or statutory text.\n"
-        "A valid result must be: a Supreme Court / High Court / Tribunal JUDGMENT or ORDER with identifiable parties and court.\n"
+        "Extract only results that pass the CITABLE TEST above.\n"
         "Use the snippet text, title, and URL as primary source. Enrich with legal knowledge but NEVER invent citation numbers or URLs.\n\n"
         "━━━ FIELD GUIDE (fill every field — '' for unknown) ━━━\n"
         "  parties            → 'Petitioner vs Respondent' — from title or snippet\n"
@@ -1145,7 +1162,9 @@ def _build_extract_prompt(state: Dict[str, Any], sources: List[Dict[str, Any]]) 
         "  citation_no        → e.g. '(2019) 5 SCC 162' — ONLY if present in snippet/title, else ''\n"
         "  facts_of_precedent → 2-3 sentences on the PRECEDENT case's facts (not our client's)\n"
         "  legal_issue        → The exact legal question that court decided — 1 sentence\n"
-        "  ratio              → Court's ruling/holding — 2-3 sentences. Use snippet text directly where available.\n"
+        "  ratio              → Court's RULING/HOLDING in the decided case — 2-3 sentences.\n"
+        "                      Must contain decision language: held / dismissed / allowed / quashed / upheld.\n"
+        "                      If the snippet only describes a petition without a ruling, leave ratio = '' and SKIP the source.\n"
         "  key_principle      → Single sentence: the legal rule this case establishes\n"
         "  key_quote          → Best verbatim quote from snippet (max 60 words), or '' if none\n"
         "  factual_similarity → 3-5 bullet points: HOW this precedent's facts match our client's case\n"
@@ -1237,14 +1256,47 @@ def _merge_citations(existing: List[Dict[str, Any]], new: List[Dict[str, Any]]) 
 
 def _is_judgment_source(source: Dict[str, Any]) -> bool:
     """
-    Return True only if this source is an actual court judgment — not a news article,
-    legal commentary, academic paper, or non-citable content.
-    Courts in India only accept: SC judgments, HC judgments, tribunal orders, and
-    gazette/statute URLs. News reporting ON judgments is NOT citable.
+    Return True only if this source is a DECIDED court judgment — one that can be
+    cited as binding or persuasive precedent in an Indian court.
+
+    NOT citable (rejected here):
+    - Writ petitions / SLPs / civil suits FILED but not yet decided
+    - Plaints, complaints, legal notices, FIRs, charge sheets
+    - Interim stay / notice orders with no legal ruling
+    - The client's own case documents (pleadings)
+    - News articles, commentary, academic papers
+
+    IS citable (accepted here):
+    - Final SC / HC / Tribunal judgment that DECIDED a legal question
+    - Has ratio decidendi — a ruling usable in future cases
     """
     uri   = (source.get("uri")     or "").lower()
     title = (source.get("title")   or "").lower()
     snip  = (source.get("snippet") or "").lower()
+    text  = f"{title} {snip}"
+
+    # ── Reject known non-judgment patterns in title/snippet ──────────────────
+    # These signal a FILING, not a decided judgment.
+    _FILING_SIGNALS = [
+        "writ petition filed", "petition is filed", "has filed a writ",
+        "plaint filed", "complaint filed", "fir registered",
+        "legal notice", "demand notice", "prayer for relief",
+        "relief sought:", "in the matter of:", "cause title",
+        "this petition", "the petitioner has", "the petitioner filed",
+        "seeking a direction", "seeking directions",
+    ]
+    if any(sig in text for sig in _FILING_SIGNALS):
+        return False
+
+    # ── Reject news / commentary domains ─────────────────────────────────────
+    _REJECT_DOMAINS = [
+        "barandbench.com", "wikipedia.org", "indiatoday.in",
+        "hindustantimes.com", "thehindu.com", "economictimes.com",
+        "ndtv.com", "legalserviceindia.com", "taxguru.in",
+        "advocatekhoj.com", "lawyersclubindia.com",
+    ]
+    if any(d in uri for d in _REJECT_DOMAINS):
+        return False
 
     # ── Always accept: official court / government portals ───────────────────
     if any(d in uri for d in [
@@ -1253,7 +1305,7 @@ def _is_judgment_source(source: Dict[str, Any]) -> bool:
     ]):
         return True
 
-    # ── Always accept: known judgment-only repositories ──────────────────────
+    # ── Always accept: known judgment repositories ────────────────────────────
     if "indiankanoon.org" in uri:
         return True
     if any(d in uri for d in [
@@ -1262,33 +1314,25 @@ def _is_judgment_source(source: Dict[str, Any]) -> bool:
     ]):
         return True
 
-    # ── livelaw.in: accept judgment pages, reject news ───────────────────────
+    # ── livelaw.in: judgment summary pages only ───────────────────────────────
     if "livelaw.in" in uri:
         _NEWS_PATHS = ["/news/", "/top-stories/", "/columns/", "/interviews/",
                        "/opinion/", "/feature/", "/know-the-law/", "/webinars/"]
         if any(p in uri for p in _NEWS_PATHS):
             return False
-        return True  # e.g. livelaw.in/sc-judgments/ or a case summary page
+        return True
 
-    # ── barandbench.com: news site — never citable in court ─────────────────
-    if "barandbench.com" in uri:
-        return False
-
-    # ── vertexaisearch / unresolved redirect: judge by title AND snippet ────────
-    # Must have BOTH a case-name pattern AND a court/judgment keyword to pass.
-    # A news headline like "XYZ vs ABC: HC rules..." has "vs" and "court" but NOT
-    # "order dated" / "writ petition" / "coram" — those are judgment-document markers.
-    _CASE_NAME_KW = {" vs ", " v. ", " versus ", "/"}
-    _COURT_DOC_KW = {
-        "supreme court", "high court", "tribunal", "order dated",
-        "writ petition", "civil appeal", "criminal appeal", "coram",
-        "hon'ble", "honourable", "bench", "judgment", "judgement",
-        "appellant", "petitioner", "respondent",
+    # ── vertexaisearch / unresolved redirect: require BOTH case-name AND decision ─
+    # Must have a case-name pattern AND at least one word showing the court DECIDED.
+    _CASE_NAME_KW  = {" vs ", " v. ", " versus "}
+    _DECIDED_KW    = {
+        "held", "dismissed", "allowed", "quashed", "upheld", "set aside",
+        "reversed", "remanded", "affirmed", "disposed", "judgment", "judgement",
+        "order dated", "decided on", "coram", "hon'ble", "bench",
     }
-    text = f"{title} {snip}"
-    has_case_name  = any(kw in text for kw in _CASE_NAME_KW)
-    has_court_doc  = any(kw in text for kw in _COURT_DOC_KW)
-    if has_case_name and has_court_doc:
+    has_case_name = any(kw in text for kw in _CASE_NAME_KW)
+    has_decision  = any(kw in text for kw in _DECIDED_KW)
+    if has_case_name and has_decision:
         return True
 
     return False  # unknown domain / insufficient signals — exclude
@@ -1304,45 +1348,68 @@ _VALID_COURTS = {
 
 def _is_valid_court_citation(c: Dict[str, Any]) -> bool:
     """
-    Return True only if the extracted citation is an actual Indian court judgment
-    usable as a precedent in a court of law. Filters out news articles, commentary,
-    statutory text, and anything without a recognisable court or case identity.
+    Return True ONLY if the extracted citation is a DECIDED Indian court judgment
+    that can be cited as precedent. Rejects petitions, plaints, notices, interim
+    stay orders, news articles, and the client's own case documents.
     """
-    parties = (c.get("parties") or "").strip()
-    court   = (c.get("court")   or "").strip().lower()
-    ratio   = (c.get("ratio")   or "").strip()
-    issue   = (c.get("legal_issue") or "").strip()
-    url     = (c.get("source_url")  or "").lower()
+    parties  = (c.get("parties")      or "").strip()
+    court    = (c.get("court")        or "").strip().lower()
+    ratio    = (c.get("ratio")        or "").strip()
+    issue    = (c.get("legal_issue")  or "").strip()
+    url      = (c.get("source_url")   or "").lower()
+    principle = (c.get("key_principle") or "").strip()
 
     # Must identify a case (parties OR citation number)
     if not parties and not c.get("citation_no"):
         return False
 
-    # Parties must look like a real case name (contains "vs", "v." etc.)
+    # Parties must look like a real case: "X vs Y"
     if parties:
         p_lower = parties.lower()
         if not any(sep in p_lower for sep in [" vs ", " v. ", " versus ", "/"]):
-            # Allow single-party names only if court is clearly set
             if not court:
                 return False
 
-    # Court must be a recognised Indian court
+    # Court must be a recognised Indian forum
     if court and not any(kw in court for kw in _VALID_COURTS):
         return False
 
     # Must have at least one substantive legal field
-    has_substance = any([
-        ratio, issue,
-        c.get("key_principle"), c.get("citation_no"),
-        c.get("facts_of_precedent"),
-    ])
+    has_substance = any([ratio, issue, principle, c.get("citation_no"), c.get("facts_of_precedent")])
     if not has_substance:
         return False
 
-    # Reject if URL is clearly a news site
-    _NEWS_REJECT = ["barandbench.com", "/news/", "/top-stories/",
-                    "ndtv.com", "thehindu.com", "indiatoday.in"]
-    if any(n in url for n in _NEWS_REJECT):
+    # ── Reject if ratio/principle contains ONLY filing language (no ruling) ──
+    # Pleadings say "petitioner filed / submits / prays for" — judgments say
+    # "court held / dismissed / allowed / quashed".
+    combined = f"{ratio} {principle}".lower()
+
+    _FILING_ONLY = [
+        "writ petition filed", "petition filed", "has filed a",
+        "plaint filed", "complaint filed", "prayer for relief",
+        "relief sought", "the petitioner submits", "the petitioner contends",
+        "the petitioner prays", "seeking a direction", "in the matter of",
+        "this is a petition", "petitioner has approached",
+    ]
+    if any(sig in combined for sig in _FILING_ONLY):
+        return False
+
+    # ── Require decision language if ratio is present ─────────────────────────
+    _DECISION_KW = {
+        "held", "dismissed", "allowed", "quashed", "upheld", "set aside",
+        "reversed", "remanded", "affirmed", "disposed", "declared",
+        "awarded", "granted", "refused", "rejected", "restored",
+        "ruled", "ordered", "decided", "found that", "concluded",
+    }
+    if ratio and not any(kw in combined for kw in _DECISION_KW):
+        # Presence of a formal citation number is enough proof it was decided
+        if not c.get("citation_no"):
+            return False
+
+    # ── Reject known non-judgment URLs ───────────────────────────────────────
+    _REJECT_URL = ["barandbench.com", "/news/", "/top-stories/",
+                   "ndtv.com", "thehindu.com", "indiatoday.in", "wikipedia.org"]
+    if any(n in url for n in _REJECT_URL):
         return False
 
     return True
