@@ -138,7 +138,7 @@ function Spinner({ size = 4 }) {
   );
 }
 
-function CitationCard({ c, idx }) {
+function CitationCard({ c, idx, sourceRef }) {
   const [open, setOpen] = useState(false);
   const weightCfg = WEIGHT_CFG[c.authority_weight] || WEIGHT_CFG.PERSUASIVE;
   const tierCfg   = TIER_CFG[c.authority_tier]     || TIER_CFG.T2;
@@ -175,8 +175,23 @@ function CitationCard({ c, idx }) {
               )}
             </div>
 
-            {/* Case name */}
-            <div className="font-bold text-gray-900 text-base leading-snug">{c.parties || 'Unknown Parties'}</div>
+            {/* Case name + inline source citation */}
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="font-bold text-gray-900 text-base leading-snug">{c.parties || 'Unknown Parties'}</span>
+              {sourceRef && (
+                <a
+                  href={sourceRef.source.uri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`Source [${sourceRef.index}]: ${sourceRef.source.title || sourceRef.source.uri}`}
+                  onClick={e => e.stopPropagation()}
+                  className="inline-flex items-center justify-center font-bold rounded hover:opacity-75 transition-opacity flex-shrink-0"
+                  style={{ background: T, color: '#fff', fontSize: '10px', padding: '1px 5px', lineHeight: '16px', borderRadius: '4px' }}
+                >
+                  [{sourceRef.index}]
+                </a>
+              )}
+            </div>
 
             {/* Court + citation */}
             <div className="flex flex-wrap items-center gap-2 mt-1">
@@ -281,8 +296,35 @@ function CitationCard({ c, idx }) {
               </div>
             )}
 
-            {/* Source link */}
-            {c.source_url && (
+            {/* References block */}
+            {sourceRef ? (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                <div className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">Reference</div>
+                <div className="flex items-start gap-2">
+                  <a
+                    href={sourceRef.source.uri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center justify-center font-bold rounded flex-shrink-0 hover:opacity-75 transition-opacity"
+                    style={{ background: T, color: '#fff', fontSize: '10px', padding: '2px 6px', lineHeight: '16px', borderRadius: '4px' }}
+                  >
+                    [{sourceRef.index}]
+                  </a>
+                  <div className="min-w-0">
+                    <a href={sourceRef.source.uri} target="_blank" rel="noopener noreferrer"
+                      className="text-xs font-medium hover:underline block truncate" style={{ color: T }}>
+                      {sourceRef.source.title || sourceRef.source.uri}
+                    </a>
+                    <span className="text-xs text-gray-400 break-all">{sourceRef.source.uri}</span>
+                  </div>
+                </div>
+                {sourceRef.source.snippet && (
+                  <p className="text-xs text-gray-500 mt-2 leading-relaxed line-clamp-3 border-t border-gray-200 pt-2">
+                    {sourceRef.source.snippet}
+                  </p>
+                )}
+              </div>
+            ) : c.source_url ? (
               <div className="flex items-center gap-2 pt-1">
                 <svg className="w-4 h-4 text-gray-400 flex-shrink-0" viewBox="0 0 24 24" fill="none">
                   <path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
@@ -293,7 +335,7 @@ function CitationCard({ c, idx }) {
                   {c.source_url}
                 </a>
               </div>
-            )}
+            ) : null}
           </div>
         </div>
       )}
@@ -392,6 +434,27 @@ export default function CitationTestingPanel() {
   const binding    = sortedCitations.filter(c => c.authority_weight === 'BINDING');
   const persuasive = sortedCitations.filter(c => c.authority_weight !== 'BINDING');
   const costInfo   = result ? calcCost(result, result.method_used ?? method) : null;
+
+  /* Build source URL → index map for inline [N] citations.
+     Each citation.source_url is matched against search_results[i].uri.
+     sourceRefFor(c) returns { index: 1-based, source: search_results[i] } or null. */
+  const sourceUriToIdx = {};
+  (result?.search_results || []).forEach((s, i) => {
+    if (s.uri) sourceUriToIdx[s.uri] = i;
+  });
+  function sourceRefFor(citation) {
+    const url = citation?.source_url;
+    if (!url) return null;
+    const i = sourceUriToIdx[url];
+    if (i === undefined) return null;
+    return { index: i + 1, source: result.search_results[i] };
+  }
+  /* Set of source indices actually cited (for highlighting in Sources list) */
+  const citedSourceIndices = new Set(
+    sortedCitations
+      .map(c => sourceUriToIdx[c.source_url])
+      .filter(i => i !== undefined)
+  );
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -669,7 +732,7 @@ export default function CitationTestingPanel() {
                       </h3>
                     </div>
                     <div className="space-y-4">
-                      {binding.map((c, i) => <CitationCard key={i} c={c} idx={i} />)}
+                      {binding.map((c, i) => <CitationCard key={i} c={c} idx={i} sourceRef={sourceRefFor(c)} />)}
                     </div>
                   </div>
                 )}
@@ -685,7 +748,7 @@ export default function CitationTestingPanel() {
                       </h3>
                     </div>
                     <div className="space-y-4">
-                      {persuasive.map((c, i) => <CitationCard key={i} c={c} idx={binding.length + i} />)}
+                      {persuasive.map((c, i) => <CitationCard key={i} c={c} idx={binding.length + i} sourceRef={sourceRefFor(c)} />)}
                     </div>
                   </div>
                 )}
@@ -708,22 +771,48 @@ export default function CitationTestingPanel() {
             {/* Sources searched */}
             {result.search_results?.length > 0 && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-                <div className="text-sm font-semibold text-gray-700 mb-3">
-                  Sources Searched <span className="text-gray-400 font-normal">({result.search_results.length})</span>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-semibold text-gray-700">
+                    Sources Searched <span className="text-gray-400 font-normal">({result.search_results.length})</span>
+                  </div>
+                  {citedSourceIndices.size > 0 && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                      style={{ background: '#F0FDFA', color: T, border: `1px solid ${T}` }}>
+                      {citedSourceIndices.size} cited
+                    </span>
+                  )}
                 </div>
-                <div className="space-y-1.5">
+                <div className="space-y-1">
                   {result.search_results.map((s, i) => {
-                    const cfg = TIER_CFG[s.authority_tier] || TIER_CFG.T2;
+                    const cfg     = TIER_CFG[s.authority_tier] || TIER_CFG.T2;
+                    const isCited = citedSourceIndices.has(i);
                     return (
-                      <div key={i} className="flex items-center gap-2.5">
+                      <div key={i}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors"
+                        style={isCited ? { background: '#F0FDFA' } : {}}>
+                        {/* [N] index badge */}
+                        <span className="text-xs font-mono font-bold flex-shrink-0 w-8 text-right"
+                          style={{ color: isCited ? T : '#9CA3AF' }}>
+                          [{i + 1}]
+                        </span>
+                        {/* Tier badge */}
                         <span className="text-xs px-1.5 py-0.5 rounded font-semibold flex-shrink-0"
                           style={{ background: cfg.bg, color: cfg.text, border: `1px solid ${cfg.border}` }}>
                           {s.authority_tier}
                         </span>
+                        {/* Title / URL link */}
                         <a href={s.uri} target="_blank" rel="noopener noreferrer"
-                          className="text-xs text-gray-500 hover:text-gray-900 truncate hover:underline transition-colors">
+                          className="text-xs truncate hover:underline transition-colors flex-1 min-w-0"
+                          style={{ color: isCited ? '#374151' : '#6B7280' }}>
                           {s.title || s.uri}
                         </a>
+                        {/* "cited" pill for referenced sources */}
+                        {isCited && (
+                          <span className="text-xs font-semibold flex-shrink-0 px-1.5 py-0.5 rounded"
+                            style={{ background: T, color: '#fff', fontSize: '10px' }}>
+                            cited
+                          </span>
+                        )}
                       </div>
                     );
                   })}
