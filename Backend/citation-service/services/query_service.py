@@ -204,10 +204,16 @@ def _resolve_court_doctypes(preferred_courts) -> str | None:
 
 
 def _clean_term(term: str) -> str:
-    """Quote multi-word terms (phrase search); leave single words unquoted (broad)."""
+    """Quote multi-word terms (phrase search); leave single words unquoted (broad).
+    Caps a quoted phrase at 3 words: a 4-word quoted phrase ("bona fide industrial use",
+    "non-utilisation of land") is too rare and returns ~0 hits on IK, whereas <=3-word
+    phrases ("forfeiture of land", "without jurisdiction") hit reliably."""
     cleaned = (term or "").replace('"', '').strip()
     if not cleaned:
         return ""
+    words = cleaned.split()
+    if len(words) > 3:
+        cleaned = " ".join(words[:3])
     return f'"{cleaned}"' if ' ' in cleaned else cleaned
 
 
@@ -375,6 +381,13 @@ def _validate_recipe(raw: str) -> str:
     s = (raw or "").strip()
     if not s or "(" in s or ")" in s:
         return ""
+    # Normalize operator CASING: the model sometimes emits "ORr"/"orr"/"andd". IK only honors
+    # uppercase ANDD/ORR/NOTT as space-delimited tokens, so without this a mis-cased operator
+    # is read as a literal word and the whole recipe collapses to one 0-hit quoted phrase.
+    # Match a standalone token in ANY position (incl. start/end), then drop a dangling
+    # leading/trailing operator (e.g. "... non-user ORr" with nothing after it).
+    s = re.sub(r"(?<!\S)(ANDD|ORR|NOTT)(?!\S)", lambda m: m.group(1).upper(), s, flags=re.IGNORECASE)
+    s = re.sub(r"^(?:ANDD|ORR|NOTT)\s+|\s+(?:ANDD|ORR|NOTT)$", "", s).strip()
     has_and = " ANDD " in s
     has_or = " ORR " in s
     if has_and and has_or:
@@ -650,7 +663,15 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
                 _add("outcome", [outcome_anchor, _ow], expected=[outcome_anchor, _ow])
 
         # ── Tier 3 — SUPREME COURT (additive doctypes=supremecourt, priority 3).
-        _add("supreme_court", core_terms, doctypes=SUPREME_COURT_DOCTYPE)
+        # Skip when the multi-court court_filtered query already covers SC: its
+        # "<court>,supremecourt" doctype is a SUPERSET of "supremecourt" for the SAME core
+        # terms, so a standalone SC search would be a redundant duplicate (it fired 0-hit
+        # duplicates across doctypes before).
+        court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
+        _sc_covered = bool(settings.multi_court_doctypes and court_doctype
+                           and court_doctype != SUPREME_COURT_DOCTYPE)
+        if not _sc_covered:
+            _add("supreme_court", core_terms, doctypes=SUPREME_COURT_DOCTYPE)
 
         # ── Tier 3 — STATUTE-combined precision (priority 3): SHORT statute token + ONE
         # fact anchor (2 terms). A full citation ANDD'd with other terms returns ~0 hits.
@@ -668,7 +689,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         # P3 (Tier 1 B): when multi_court_doctypes is on, the court_filtered query searches
         # the local HC AND the Supreme Court in one call ("patna,supremecourt") so binding
         # apex precedent co-retrieves with the controlling HC line. Still one ik_search unit.
-        court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
+        # (court_doctype was computed above for the SC-redundancy check.)
         if court_doctype and court_doctype != SUPREME_COURT_DOCTYPE:
             court_filter = (_resolve_court_doctypes(getattr(issue, "preferred_courts", None))
                             if settings.multi_court_doctypes else court_doctype)

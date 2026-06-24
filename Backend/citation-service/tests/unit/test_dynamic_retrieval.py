@@ -125,6 +125,49 @@ class TestCommonOrderCollapse(unittest.TestCase):
         self.assertEqual(_respondent_sig("No split title"), "")
 
 
+class TestQueryHygiene(unittest.TestCase):
+    def test_operator_casing_normalized(self):
+        from services.query_service import _validate_recipe
+        # mis-cased + dangling trailing operator -> clean ORR query (was a 0-hit literal phrase)
+        self.assertEqual(_validate_recipe("non-utilisation ORr non-user ORr"),
+                         "non-utilisation ORR non-user")
+        self.assertEqual(_validate_recipe("forfeiture andd land"), "forfeiture ANDD land")
+        # mixed ANDD+ORR still rejected (flat engine)
+        self.assertEqual(_validate_recipe("a ANDD b ORR c"), "")
+
+    def test_quoted_phrase_capped_to_three_words(self):
+        from services.query_service import _clean_term
+        self.assertEqual(_clean_term("bona fide industrial use"), '"bona fide industrial"')
+        self.assertEqual(_clean_term("forfeiture of land"), '"forfeiture of land"')  # 3 words kept
+        self.assertEqual(_clean_term("tahsildar"), "tahsildar")  # single word unquoted
+
+    def test_no_four_word_quoted_phrase_emitted(self):
+        iss = _issue(
+            legal_issue="forfeiture for non-utilisation",
+            statutes=["Section 63-1A"], must_have_terms=["industrial", "forfeiture"],
+            phrase_terms=["bona fide industrial use", "principles of natural justice"],
+            doctrines=["bona fide industrial use"], fact_terms=["non utilisation"],
+        )
+        for q in generate_ik_queries([iss]):
+            for part in q["formInput"].split('"'):
+                self.assertLessEqual(len(part.split()), 3, f"4+ word quoted phrase: {q['formInput']}")
+
+    def test_redundant_supreme_court_skipped_under_multicourt(self):
+        # When a local court is named and multi_court_doctypes is on, the standalone SC query
+        # is skipped (court_filtered's "<court>,supremecourt" superset covers it).
+        iss = _issue(
+            legal_issue="forfeiture industrial", statutes=["Section 63"],
+            must_have_terms=["industrial", "forfeiture"], phrase_terms=["forfeiture of land"],
+            preferred_courts=["Bombay High Court", "Supreme Court"],
+        )
+        qs = generate_ik_queries([iss])
+        types = {q["query_type"] for q in qs}
+        all_tokens = {tok for q in qs for tok in q["doctypes"].split(",")}
+        self.assertNotIn("supreme_court", types)          # redundant SC query dropped
+        self.assertIn("supremecourt", all_tokens)         # ...but SC scope still covered
+        self.assertIn("bombay", all_tokens)
+
+
 class TestQueryRerank(unittest.TestCase):
     def test_statute_query_outranks_generic_and_runs_first(self):
         from pipeline.stages.retrieve_candidates import select_queries
