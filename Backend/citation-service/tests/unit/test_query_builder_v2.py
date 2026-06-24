@@ -40,9 +40,12 @@ class TestRicherQueryBuilder(unittest.TestCase):
         self.assertTrue(any("legitimate expectation" in f for f in self.forms))
 
     def test_supreme_court_targeting_is_additive(self):
-        self.assertIn(SUPREME_COURT_DOCTYPE, self.doctypes)
+        # Doctypes may now be comma-joined (P3 multi-court: "patna,supremecourt"), so assert
+        # on the doctype TOKENS, not the exact strings.
+        all_tokens = {tok for d in self.doctypes for tok in d.split(",")}
+        self.assertIn(SUPREME_COURT_DOCTYPE, all_tokens)
         # Local High Court is kept too (additive, not a replacement).
-        self.assertIn("patna", self.doctypes)
+        self.assertIn("patna", all_tokens)
 
     def test_opponent_query_present(self):
         self.assertIn("opponent", self.types)

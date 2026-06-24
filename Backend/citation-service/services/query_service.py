@@ -38,61 +38,6 @@ COURT_DOCTYPE_MAP = {
 # so the IK searches returned 0 hits. This mapping turns each doctrine into the
 # phrases courts actually use. Keys are matched leniently (see _doctrine_phrases).
 DOCTRINE_TO_PHRASES = {
-    "article 14 arbitrariness": [
-        "arbitrary and capricious",
-        "violates Article 14",
-        "arbitrary exercise of power",
-        "non-application of mind",
-        "unreasonable and arbitrary",
-    ],
-    "tata cellular / judicial review of tender": [
-        "Tata Cellular",
-        "scope of judicial review",
-        "limited scope of interference",
-        "commercial decision of tender",
-        "courts cannot sit in appeal",
-    ],
-    "wednesbury unreasonableness": [
-        "Wednesbury",
-        "so unreasonable that no reasonable authority",
-        "irrationality",
-        "unreasonableness",
-    ],
-    "substantial compliance": [
-        "substantial compliance",
-        "strict compliance",
-        "essential condition",
-        "ancillary condition",
-        "directory condition",
-        "mandatory condition",
-    ],
-    "legitimate expectation": [
-        "legitimate expectation",
-        "reasonable expectation",
-        "expectation created",
-        "representation acted upon",
-    ],
-    "promissory estoppel against state": [
-        "promissory estoppel",
-        "Motilal Padampat",
-        "cannot resile from",
-        "representation made",
-        "detrimental reliance",
-    ],
-    "authority cannot benefit from own wrong": [
-        "own wrong",
-        "advantage of its default",
-        "benefit from its failure",
-        "cannot take advantage",
-        "own default",
-    ],
-    "level playing field": [
-        "level playing field",
-        "equal treatment",
-        "discriminatory treatment",
-        "unequal treatment",
-        "selective compliance",
-    ],
     "natural justice": [
         "natural justice",
         "audi alteram partem",
@@ -107,54 +52,25 @@ DOCTRINE_TO_PHRASES = {
         "cryptic order",
         "without assigning reasons",
     ],
-    # ── Land / tenancy / property doctrines (Phase 2) — so a land case translates to
-    # real judgment phrases instead of borrowing tender doctrines.
-    "forfeiture of land for non-utilisation": [
-        "forfeiture of land",
-        "non-utilisation",
-        "breach of condition",
-        "resumption of land",
-        "non-user",
+    "legitimate expectation": [
+        "legitimate expectation",
+        "reasonable expectation",
+        "expectation created",
+        "representation acted upon",
     ],
-    "change of user": [
-        "change of user",
-        "conversion of land use",
-        "non-agricultural use",
-        "bona fide industrial use",
+    "promissory estoppel against state": [
+        "promissory estoppel",
+        "Motilal Padampat",
+        "cannot resile from",
+        "representation made",
+        "detrimental reliance",
     ],
-    "breach of condition of grant": [
-        "breach of condition",
-        "condition of grant",
-        "violation of grant",
-        "terms of the grant",
-    ],
-    "resumption of land": [
-        "resumption of land",
-        "re-entry",
-        "forfeiture",
-        "breach of condition",
+    "limitation": [
+        "barred by limitation",
+        "condonation of delay",
+        "limitation period",
     ],
 }
-
-# High-value landmark authorities to seed standalone landmark queries when the
-# extractor did not surface any (CHECK 3: at least 1 Tata Cellular + 1 Motilal
-# Padampat query for a tender case).
-_DEFAULT_TENDER_LANDMARKS = ["Tata Cellular", "Motilal Padampat", "Reliance Energy"]
-
-# Domain anchors — the most specific subject term is combined into precision
-# queries so they target the case's actual field, not all of India (FAILURE 2).
-# Ordered most-specific first. Land/tenancy/property terms lead (Phase 2) so a
-# non-tender case gets a real anchor instead of an empty domain.
-DOMAIN_ANCHORS = [
-    # Land / tenancy / property
-    "non-utilisation", "non-utilization", "change of user", "forfeiture",
-    "resumption", "nazarana", "bona fide industrial", "tenancy",
-    # Public-law / tender
-    "blacklisting", "e-tender", "tender", "procurement", "auction",
-    "allotment", "lease", "land acquisition", "promotion", "seniority",
-    "termination", "dismissal", "pension", "gratuity", "reservation",
-    "admission", "licence", "license",
-]
 
 _CONSTITUTION_SUFFIX_RX = re.compile(r"\s+of\s+the\s+constitution(\s+of\s+india)?\s*$", re.IGNORECASE)
 
@@ -222,45 +138,43 @@ def _resolve_phrase(phrase: str) -> str:
     return (phrase or "").strip()
 
 
-def _primary_domain(issue: IssueCard) -> str:
-    """The most specific domain term for this issue (drives precision narrowing)."""
-    haystack = " ".join([
-        (issue.legal_issue or ""),
-        " ".join(issue.must_have_terms or []),
-        " ".join(issue.phrase_terms or []),
-        " ".join(getattr(issue, "doctrines", None) or []),
-    ]).lower()
-    for anchor in DOMAIN_ANCHORS:
-        if anchor in haystack:
-            return anchor
-    return ""
+_STOP_ANCHOR = {'writ', 'petition', 'court', 'order', 'act', 'section', 'article',
+                'quashed', 'allowed', 'set', 'aside', 'the', 'of', 'and'}
 
 
-def get_narrowing_terms(issue: IssueCard) -> list[str]:
-    """Domain-specific narrowing terms (FAILURE 2) keyed off the issue's must-haves.
+def _domain_anchor(issue: IssueCard) -> str:
+    """The most salient SINGLE-WORD anchor term from THIS case (case-derived, never a
+    fixed vocabulary). Scans must_have_terms then fact_terms for the first token that is
+    long enough and not a stopword/relief word. Replaces the old DOMAIN_ANCHORS scan."""
+    sources = (issue.must_have_terms or []) + (getattr(issue, "fact_terms", None) or [])
+    # Prefer a term that is ITSELF a single distinctive word (e.g. "stamp", "reassessment")
+    # over the first token of a multi-word phrase, which can be a generic connective —
+    # "change" in "change of opinion" — that would re-introduce drift.
+    for src in sources:
+        t = (src or "").strip().lower()
+        if t and len(t.split()) == 1 and len(t) >= 4 and t not in _STOP_ANCHOR:
+            return t
+    # Else the LONGEST distinctive token across the multi-word terms — the most specific
+    # word ("industrial"/"agricultural" over "bona" in "bona fide industrial use").
+    best = ""
+    for src in sources:
+        for tok in (src or "").lower().split():
+            if len(tok) >= 4 and tok not in _STOP_ANCHOR and len(tok) > len(best):
+                best = tok
+    return best
 
-    Returned UNQUOTED — _clean_term quotes multi-word phrases when the query is built.
-    """
-    narrowing: list[str] = []
-    must_haves = " ".join(issue.must_have_terms or []).lower()
-    legal = (issue.legal_issue or "").lower()
-    blob = f"{must_haves} {legal}"
 
-    if "experience" in blob or "certificate" in blob:
-        narrowing += ["disqualification", "experience certificate", "work order"]
-    if "turnover" in blob:
-        narrowing += ["turnover certificate", "eligibility", "discrimination"]
-    if "estoppel" in blob or "assurance" in blob or "oral" in blob or "delay" in blob:
-        narrowing += ["oral assurance", "detrimental reliance", "cannot resile"]
-    if "rejection" in blob or "reasons" in blob or "hearing" in blob:
-        narrowing += ["opportunity of hearing", "speaking order", "reasoned order"]
-    # Land / tenancy / property narrowing (Phase 2).
-    if any(k in blob for k in ("forfeit", "non-utili", "non utili", "tenancy", "nazarana",
-                               "change of user", "resumption", "lease", "grant", " land")):
-        narrowing += ["forfeiture", "non-utilisation", "resumption", "breach of condition", "change of user"]
-    # Always-available relief narrowing.
-    narrowing += ["quashed", "writ"]
-    return list(dict.fromkeys(narrowing))[:6]
+def _core_anchor(issue: IssueCard) -> str:
+    """The case identity token: primary statute token (e.g. "section 53A"), else the
+    strongest single-word must_have/fact term, else the domain anchor."""
+    stt = [s for s in (issue.statutes or []) if s and s.strip()]
+    tok = _statute_token(stt[0]) if stt else ""
+    if tok:
+        return tok
+    sw = _single_word_anchor((issue.must_have_terms or []) + (_fact_terms(issue)), "")
+    if sw:
+        return sw
+    return _domain_anchor(issue)
 
 
 def _resolve_court_doctype(preferred_courts) -> str | None:
@@ -270,6 +184,23 @@ def _resolve_court_doctype(preferred_courts) -> str | None:
         if mapped:
             return mapped
     return None
+
+
+def _resolve_court_doctypes(preferred_courts) -> str | None:
+    """P3 (Tier 1 B) — comma-joined IK doctypes for the named local court + the Supreme
+    Court (e.g. "patna,supremecourt"), so ONE search co-retrieves the controlling High
+    Court line AND binding apex precedent. IK accepts comma-separated doctypes verbatim.
+
+    Returns None when no court is recognized. When the local court IS the Supreme Court,
+    returns just "supremecourt" (never "supremecourt,supremecourt"). Order is stable
+    (local first, SC second) so the emitted string is deterministic for tests.
+    """
+    local = _resolve_court_doctype(preferred_courts)
+    if not local:
+        return None
+    if local == SUPREME_COURT_DOCTYPE:
+        return local
+    return f"{local},{SUPREME_COURT_DOCTYPE}"
 
 
 def _clean_term(term: str) -> str:
@@ -295,19 +226,32 @@ _CORP_SUFFIX_RX = re.compile(
 )
 
 
+# C3 — bare single given/surnames that are too common to be a distinctive cause-title.
+# A title: lookup on one of these returns ~40 generic noise hits (run b9189966: "Ramesh",
+# "Sanjeevani"). Used by _clean_landmark_name's distinctiveness gate.
+GENERIC_COMMON_NAMES = {
+    "ramesh", "suresh", "sanjeevani", "kumar", "sharma", "singh", "rao", "devi",
+    "lal", "prasad", "reddy", "gupta", "das", "khan", "yadav", "patel", "shah",
+    "ram", "bose", "mehta", "verma", "nair", "menon", "pillai", "jain", "joshi",
+}
+
+
 def _clean_landmark_name(name: str) -> str:
     """Reduce a landmark cause-title to a short, distinctive name for a title: search.
 
       "State of Maharashtra v. Laxmanrao"    -> "Laxmanrao"
       "Tata Cellular Ltd. v. Union of India" -> "Tata Cellular"
       "Maneka Gandhi"                        -> "Maneka Gandhi"
-    Returns "" when nothing distinctive survives (caller then skips the landmark).
+      "Ramesh" / "Sanjeevani"                -> ""   (bare generic name — skipped)
+    Returns "" when nothing distinctive survives (caller then skips the landmark). C3:
+    a bare single generic given name is dropped so it never becomes a noise title lookup.
     """
     raw = (name or "").strip().strip('"')
     if not raw:
         return ""
     parts = [p for p in _CASE_SPLIT_RX.split(raw) if p.strip()]
-    if len(parts) >= 2:
+    had_split = len(parts) >= 2  # was a real "A v. B" cause-title
+    if had_split:
         # Prefer the side with the fewest government/generic tokens (the distinctive party).
         parts.sort(key=lambda s: (len(_GOV_PARTY_RX.findall(s)), len(s.split())))
         candidate = parts[0]
@@ -315,7 +259,19 @@ def _clean_landmark_name(name: str) -> str:
         candidate = raw
     candidate = _CORP_SUFFIX_RX.sub(" ", candidate)
     candidate = re.sub(r"\s+", " ", candidate).strip(" .,&")
-    return " ".join(candidate.split()[:4]).strip()
+    final = " ".join(candidate.split()[:4]).strip()
+    # ── C3 distinctiveness gate ──────────────────────────────────────────────────
+    toks = final.split()
+    if not toks:
+        return ""
+    if had_split:        # (a) reduced from a real cause-title → meaningful party name
+        return final
+    if len(toks) >= 2:   # (b) multi-token party (e.g. "Maneka Gandhi", "Tata Cellular")
+        return final
+    t = toks[0]          # (c) single token: keep only if long AND not a common name
+    if len(t) >= 6 and t.lower() not in GENERIC_COMMON_NAMES:
+        return final
+    return ""            # bare single generic name → skip (no noise title lookup)
 
 
 # Execution priority by query type (1 = highest = runs/protected first). FAILURE 1:
@@ -335,9 +291,34 @@ QUERY_PRIORITY = {
 }
 
 
+# ── Query-quality ranking ────────────────────────────────────────────────────────
+# Score each generated query by likely on-point-ness so the allocator runs the BEST ones
+# first — a tight budget then never skips a high-value query (e.g. the governing-statute
+# query) in favour of a generic fallback. Higher = better. Refines the coarse query_type
+# priority with content signals (statute-token presence, main-issue, well-formed precision).
+_TYPE_WEIGHT = {
+    "doctrine": 10, "statute_combined": 9, "strict": 8, "outcome": 7,
+    "supreme_court": 6, "landmark": 6, "court_filtered": 5, "custom": 4,
+    "opponent": 3, "broad_fallback": 2,
+}
+
+
+def _query_quality(query_type: str, form_input: str, is_main: bool, core_token: str) -> float:
+    score = float(_TYPE_WEIGHT.get(query_type, 4))
+    fi = (form_input or "").lower()
+    if core_token and core_token.lower() in fi:
+        score += 5.0   # contains the governing statute token — the most on-point queries
+    if is_main:
+        score += 3.0   # query for the gravamen (main) issue
+    if " andd " in fi and '"' in fi:
+        score += 1.0   # well-formed precision (a quoted phrase ANDD an anchor)
+    return round(score, 2)
+
+
 def _row(issue_id: str, query_id: str, query_type: str, form_input: str,
          expected: list[str], is_fallback: bool = False, doctypes: str = DEFAULT_DOCTYPE,
-         priority: int | None = None, case_name_search: bool = False) -> dict:
+         priority: int | None = None, case_name_search: bool = False,
+         is_main: bool = False, core_token: str = "") -> dict:
     prio = priority if priority is not None else QUERY_PRIORITY.get(query_type, 6)
     return {
         "issue_id": issue_id,
@@ -353,6 +334,9 @@ def _row(issue_id: str, query_id: str, query_type: str, form_input: str,
         "is_fallback": is_fallback,
         "priority": prio,
         "rank": prio,  # back-compat: retrieval previously sorted on rank
+        # Query-quality score — retrieve_candidates runs higher-quality queries first.
+        "quality": _query_quality(query_type, form_input, is_main, core_token),
+        "is_main": is_main,
         # When True, retrieve_candidates routes this through IK's title:"..." path
         # (a bare case-name lookup) instead of a full-text formInput search (R3).
         "case_name_search": case_name_search,
@@ -446,12 +430,15 @@ def _statute_token(statute: str) -> str:
     return _short(_CONSTITUTION_SUFFIX_RX.sub("", statute or ""), 3)
 
 
-def _precision_terms(phrase: str, must_haves: list[str], domain: str, fact_terms: list[str]) -> list[str]:
+def _precision_terms(phrase: str, must_haves: list[str], domain: str, fact_terms: list[str],
+                     core_anchor: str = "") -> list[str]:
     """Ground a doctrine/precision phrase with ONE short anchor — e.g.
     'bona fide industrial use' ANDD tenancy — NOT two rare phrases ANDD'd together
     (which returns ~0 hits). Prefers a single-word keyword; NEVER falls back to a bare
-    relief word like 'quashed' (the old ungrounded failure). Returns [phrase] (which the
-    caller drops) only when no usable anchor exists."""
+    relief word like 'quashed' (the old ungrounded failure). C2: when no case-specific
+    anchor exists, fall back to the case CORE anchor (statute token / salient keyword) so
+    the query is still tied to the matter and cannot drift. Returns [phrase] (which the
+    caller drops) only when no usable anchor exists at all."""
     low = phrase.lower()
     anchor = _single_word_anchor(list(must_haves) + ([domain] if domain else []) + list(fact_terms), low)
     if not anchor:
@@ -460,6 +447,9 @@ def _precision_terms(phrase: str, must_haves: list[str], domain: str, fact_terms
             if a and a.lower() != low:
                 anchor = a
                 break
+    # C2 — last resort: the case core anchor, so no precision query is ever ungrounded.
+    if not anchor and core_anchor and core_anchor.lower() != low:
+        anchor = core_anchor
     return [phrase, anchor] if anchor else [phrase]
 
 
@@ -479,9 +469,23 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         opponent_raw = [t for t in (getattr(issue, "opponent_phrase_terms", None) or []) if t and t.strip()]
         landmarks = [t for t in (getattr(issue, "landmark_cases", None) or []) if t and t.strip()]
 
-        domain = _primary_domain(issue)
+        domain = _domain_anchor(issue)
+        core_anchor = _core_anchor(issue)  # case identity token (C3 anchoring)
         fact_terms = _fact_terms(issue)  # this case's OWN facts — the grounding (Phase 2)
-        must_haves = [t for t in (issue.must_have_terms or []) if t and t.strip()]
+        # ANCHOR CENTRALITY — order must_have terms so words CENTRAL to the actual dispute
+        # (those appearing in the legal_issue / fact_terms) lead, ahead of peripheral words
+        # like "tenancy" that come only from a statute's TITLE. _single_word_anchor then picks
+        # a relevant anchor ("forfeiture"/"industrial"), not a generic one. Purely case-derived
+        # (no hardcoded vocabulary) — and stable so single-issue runs stay deterministic.
+        _central_blob = " ".join([(issue.legal_issue or "")] + fact_terms
+                                 + [p for p in (issue.phrase_terms or []) if p]).lower()
+        must_haves = sorted(
+            [t for t in (issue.must_have_terms or []) if t and t.strip()],
+            key=lambda t: (t.lower() not in _central_blob, len(t.split()) != 1),
+        )
+        # The generic-fallback anchor (used by opponent/outcome) follows centrality too, so a
+        # peripheral statute-name word ("tenancy") never becomes the default anchor.
+        domain = next((m for m in must_haves if len(m.split()) == 1 and len(m) >= 4), "") or domain
 
         def _add(qtype: str, terms: list[str], *, doctypes: str = DEFAULT_DOCTYPE,
                  is_fallback: bool = False, expected: list[str] | None = None,
@@ -501,7 +505,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
                 issue_queries.append(_row(
                     issue.issue_id, f"Q{counter}", qtype, name,
                     expected or [name], doctypes=doctypes, priority=priority,
-                    case_name_search=True,
+                    case_name_search=True, is_main=issue.is_main_issue, core_token=core_anchor,
                 ))
                 counter += 1
                 return True
@@ -522,6 +526,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             issue_queries.append(_row(
                 issue.issue_id, f"Q{counter}", qtype, form_input,
                 expected or cleaned, is_fallback=is_fallback, doctypes=doctypes, priority=priority,
+                is_main=issue.is_main_issue, core_token=core_anchor,
             ))
             counter += 1
             return True
@@ -535,7 +540,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             seen_inputs.add(key)
             issue_queries.append(_row(
                 issue.issue_id, f"Q{counter}", qtype, form_input, [form_input],
-                is_fallback=is_fallback,
+                is_fallback=is_fallback, is_main=issue.is_main_issue, core_token=core_anchor,
             ))
             counter += 1
             return True
@@ -569,11 +574,16 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
 
         # Core fact-pattern terms reused for the strict / SC / court / statute queries.
         if phrases_raw:
-            strict_terms = [_resolve_phrase(phrases_raw[0])] + (issue.must_have_terms[:1] or [])
-        elif len(issue.must_have_terms) >= 2:
-            strict_terms = issue.must_have_terms[:2]
-        elif issue.must_have_terms:
-            strict_terms = issue.must_have_terms[:1]
+            lead = _resolve_phrase(phrases_raw[0])
+            # Anchor with a CENTRAL must-have (centrality-sorted) that is NOT already inside the
+            # lead phrase — relevant, non-redundant (avoids '"bona fide industrial use" ANDD
+            # industrial'), and case-derived (not the peripheral "tenancy").
+            anchor = next((m for m in must_haves if m and m.lower() not in lead.lower()), "")
+            strict_terms = [lead] + ([anchor] if anchor else [])
+        elif len(must_haves) >= 2:
+            strict_terms = must_haves[:2]
+        elif must_haves:
+            strict_terms = must_haves[:1]
         else:
             strict_terms = [s for s in synonyms[:2]]
         strict_terms = [t for t in strict_terms if t]
@@ -585,7 +595,9 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         if len(core_terms) < 2:
             _ca = _single_word_anchor(must_haves + ([domain] if domain else []) + fact_terms,
                                       (core_terms[0].lower() if core_terms else ""))
-            if _ca:
+            if not _ca:
+                _ca = core_anchor  # C2 — guarantee a case-core 2nd term so strict/SC/court never drift
+            if _ca and _ca.lower() != (core_terms[0].lower() if core_terms else ""):
                 core_terms.append(_ca)
         core_terms = core_terms[:2]
 
@@ -608,7 +620,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
             seen_ph.add(ph.lower())
             if emitted_precision >= max(1, 3 - recipes_precision):  # 2-3 precision incl. AI recipes
                 break
-            terms = _precision_terms(ph, must_haves, domain, fact_terms)
+            terms = _precision_terms(ph, must_haves, domain, fact_terms, core_anchor)
             if _add("doctrine", terms, expected=[ph]):
                 emitted_precision += 1
                 rid_terms.append(ph)
@@ -619,7 +631,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         # ── Tier 2 — LANDMARK authority queries (priority 2), searched by TITLE (R3).
         # A landmark "A v. B" is matched against the case TITLE via its distinctive party
         # name, never as a verbatim full-text phrase (which returns 0 hits).
-        landmark_pool = landmarks[:2] or (_DEFAULT_TENDER_LANDMARKS[:2] if domain in {"tender", "e-tender", "procurement", "blacklisting", "auction"} else [])
+        landmark_pool = landmarks[:2]  # C3 — only the case's OWN landmark_cases; no domain seeds
         for name in landmark_pool:
             clean = _clean_landmark_name(name)
             if clean:
@@ -632,7 +644,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         # e.g. forfeiture ANDD "set aside". These retrieve cases the client-type actually
         # WON, so the Recommended bucket is not empty (the run that found only adverse
         # authority had NO outcome-oriented query). The reranker/scorer sort the result.
-        outcome_anchor = _single_word_anchor(must_haves + ([domain] if domain else []) + fact_terms, "") or domain
+        outcome_anchor = _single_word_anchor(must_haves + ([domain] if domain else []) + fact_terms, "") or core_anchor or domain
         if outcome_anchor:
             for _ow in _outcome_terms(issue)[:2]:
                 _add("outcome", [outcome_anchor, _ow], expected=[outcome_anchor, _ow])
@@ -646,20 +658,27 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
         if statutes:
             token = _statute_token(statutes[0])
             s_anchor = _single_word_anchor(must_haves + ([domain] if domain else []) + fact_terms,
-                                           token.lower()) or domain
-            if token and s_anchor:
+                                           token.lower()) or core_anchor or domain
+            # C2 — skip (don't silently dedup-drop) when the only anchor equals the token,
+            # which would build a useless '"section X" ANDD "section X"'.
+            if token and s_anchor and s_anchor.lower() != token.lower():
                 _add("statute_combined", [token, s_anchor], expected=[token, s_anchor])
 
         # ── Tier 4 — local HIGH COURT (or whichever court the issue names), priority 4.
+        # P3 (Tier 1 B): when multi_court_doctypes is on, the court_filtered query searches
+        # the local HC AND the Supreme Court in one call ("patna,supremecourt") so binding
+        # apex precedent co-retrieves with the controlling HC line. Still one ik_search unit.
         court_doctype = _resolve_court_doctype(getattr(issue, "preferred_courts", None))
         if court_doctype and court_doctype != SUPREME_COURT_DOCTYPE:
-            _add("court_filtered", core_terms, doctypes=court_doctype)
+            court_filter = (_resolve_court_doctypes(getattr(issue, "preferred_courts", None))
+                            if settings.multi_court_doctypes else court_doctype)
+            _add("court_filtered", core_terms, doctypes=court_filter or court_doctype)
 
         # ── Tier 4 — OPPONENT query (adverse authority for the opposition bundle), priority 5.
         if opponent_raw:
             opp = _resolve_phrase(opponent_raw[0])
             if opp:
-                _add("opponent", [opp] + ([domain] if domain else (issue.must_have_terms[:1] or [])),
+                _add("opponent", [opp] + ([domain] if domain else (must_haves[:1] or [])),
                      expected=[opp])
 
         # ── Tier 5 — BROAD FALLBACK = fact-grounded ORR recall query (R4): synonyms of the
@@ -673,7 +692,10 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
                 or [t for t in issue.must_have_terms if t and t.strip()]
             )
             fb_terms = [t for t in recall_src if t][:3]
-            _add("broad_fallback", fb_terms, is_fallback=True)
+            # C2 — only emit the ORR recall query when >=2 distinct terms exist; a single-term
+            # ORR is a driftable generic concept detached from the case core.
+            if len([t for t in fb_terms if t]) >= 2:
+                _add("broad_fallback", fb_terms, is_fallback=True)
 
         # Cap initial queries at max_per_issue. Preserve STRUCTURAL DIVERSITY first
         # (≤2 landmark + strict + SC + court + opponent — each a distinct retrieval

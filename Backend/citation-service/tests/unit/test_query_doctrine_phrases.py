@@ -6,7 +6,7 @@ import unittest
 
 from models.issue_models import IssueCard
 from services.query_service import (
-    DOCTRINE_TO_PHRASES, clean_doctrine_name, generate_ik_queries, is_doctrine_label,
+    clean_doctrine_name, generate_ik_queries, is_doctrine_label,
 )
 
 
@@ -66,11 +66,17 @@ class TestRealJudgmentQueries(unittest.TestCase):
             self.assertNotIn("oral/written", f)
 
     def test_doctrine_labels_translated_to_actual_phrases(self):
+        # De-overfit (C1): the domain-specific tender/land phrase tables were removed; only
+        # GENERIC, domain-neutral doctrines still translate to real judgment phrases, and a
+        # case's OWN doctrine wording is searched as a de-labelled clean phrase.
+        from services.query_service import _doctrine_phrases
+        self.assertIn("audi alteram partem", _doctrine_phrases("natural justice"))
+        self.assertIn("condonation of delay", _doctrine_phrases("limitation"))
+        # A label with parenthetical junk is de-labelled to a clean short phrase (no junk
+        # reaches IK — see test_check1) — the case's own doctrine wording is what's searched.
         joined = " || ".join(self.forms)
-        # The Article-14 label must have become a real judgment phrase.
-        self.assertIn("arbitrary and capricious", joined)
-        # The "advantage of its own wrong" label maps to a real phrase, not the label.
-        self.assertTrue(any(p in joined for p in DOCTRINE_TO_PHRASES["authority cannot benefit from own wrong"]))
+        self.assertIn("article 14 arbitrariness", joined)
+        self.assertNotIn("(", joined)
 
     def test_check2_at_least_three_multi_term_queries(self):
         # Multi-term = combines >= 2 terms with ANDD (>= 1 ANDD operator). Queries are now

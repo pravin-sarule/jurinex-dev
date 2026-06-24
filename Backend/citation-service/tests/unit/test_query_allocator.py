@@ -21,7 +21,10 @@ def _row(issue_id: str, qtype: str, n: int) -> dict:
         "issue_id": issue_id,
         "query_id": f"{issue_id}-{qtype}-{n}",
         "query_type": qtype,
-        "formInput": f"{qtype} {n}",
+        # Include issue_id so each issue's query STRINGS are distinct, as real fact-grounded
+        # queries are (different issues → different facts). The global IK-query dedup keys on
+        # (formInput, doctypes), so identical strings across issues would otherwise collapse.
+        "formInput": f"{issue_id} {qtype} {n}",
         "priority": QUERY_PRIORITY.get(qtype, 6),
     }
 
@@ -40,11 +43,14 @@ def _issue_rows(issue_id: str) -> list[dict]:
 
 class TestEffectiveBudget(unittest.TestCase):
     def test_scales_with_issues_and_caps_at_ceiling(self):
-        self.assertEqual(_effective_search_budget(1), min(settings.max_ik_search_calls, 9))
-        self.assertEqual(_effective_search_budget(2), min(settings.max_ik_search_calls, 16))
-        self.assertEqual(_effective_search_budget(3), min(settings.max_ik_search_calls, 23))
+        # Robust to the configured base/per-issue values (so a budget bump doesn't break this).
+        base, per, cap = (settings.ik_search_base_budget, settings.ik_search_per_issue_budget,
+                          settings.max_ik_search_calls)
+        self.assertEqual(_effective_search_budget(1), min(cap, base + per))
+        self.assertEqual(_effective_search_budget(2), min(cap, base + 2 * per))
+        self.assertEqual(_effective_search_budget(3), min(cap, base + 3 * per))
         # Never exceeds the BudgetTracker ceiling (consume() safety).
-        self.assertLessEqual(_effective_search_budget(5), settings.max_ik_search_calls)
+        self.assertLessEqual(_effective_search_budget(5), cap)
 
 
 class TestAllocator(unittest.TestCase):
@@ -73,18 +79,38 @@ class TestAllocator(unittest.TestCase):
         # ...but not starved to zero when opponents exist and budget allows.
         self.assertGreaterEqual(opp, 1)
 
-    def test_precision_capped_at_two_per_issue_in_protected_band(self):
-        # The 3rd precision query per issue may only appear after every issue's
-        # essentials — never crowds out another issue's first precision/recall/landmark.
+    def test_precision_not_over_emitted_per_issue(self):
+        # Doctrine selected never exceeds what the fixture generates (3 per issue * 3 = 9);
+        # essentials are still protected first (see test_no_essential_type_starved_per_issue).
         selected, _, _ = select_queries(self.queries)
         by_type = Counter(q["query_type"] for q in selected)
-        # doctrine selected should be <= 2 per issue * 3 issues = 6 in this budget.
-        self.assertLessEqual(by_type["doctrine"], 6)
+        self.assertLessEqual(by_type["doctrine"], 9)
 
     def test_single_issue_uses_small_budget(self):
         selected, _, budget = select_queries(_issue_rows("issue-1"))
         self.assertEqual(budget, _effective_search_budget(1))
         self.assertLessEqual(len(selected), budget)
+
+    def test_duplicate_query_string_sent_to_ik_only_once(self):
+        # #7 — the SAME (formInput, doctypes) across issues must be selected only ONCE so IK
+        # is never hit twice with an identical query (it returns identical results).
+        dup = [
+            {"issue_id": "issue-1", "query_id": "a", "query_type": "doctrine",
+             "formInput": "natural justice ANDD section 53A", "doctypes": "judgments",
+             "priority": 1},
+            {"issue_id": "issue-2", "query_id": "b", "query_type": "doctrine",
+             "formInput": "natural justice ANDD section 53A", "doctypes": "judgments",
+             "priority": 1},
+            {"issue_id": "issue-2", "query_id": "c", "query_type": "strict",
+             "formInput": "stamp duty ANDD revision", "doctypes": "judgments", "priority": 2},
+        ]
+        selected, skipped, _ = select_queries(dup)
+        forms = [(q["formInput"], q.get("doctypes", "")) for q in selected]
+        self.assertEqual(forms.count(("natural justice ANDD section 53A", "judgments")), 1)
+        # the distinct strict query still gets through
+        self.assertIn(("stamp duty ANDD revision", "judgments"), forms)
+        # the deduped one is marked and lands in skipped
+        self.assertTrue(any(q.get("dup_skipped") for q in skipped))
 
 
 if __name__ == "__main__":

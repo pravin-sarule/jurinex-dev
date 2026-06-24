@@ -33,12 +33,14 @@ class Settings:
     # >= the largest effective per-run budget (base + per_issue * issues), or consume()
     # raises mid-run. Raised 14 -> 30 so the fact-grounded precision/recall/SC/court/
     # opponent queries for a multi-issue case all run instead of being starved (R4).
-    max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 30)
+    max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 45)
     # Per-run search budget scales with issue count: effective = min(ceiling, base +
-    # per_issue * n_issues). 1 issue=9, 2=16, 3=23, 4=30, 5=30 (capped). Used by the
-    # round-robin allocator in retrieve_candidates (relevance over cost — Rs20 is not a cap).
+    # per_issue * n_issues). With base=2, per_issue=12: 1 issue=14, 2=26, 3=38, capped 45.
+    # Raised 7 -> 12 because at 7 a 3-issue case generated 36 queries but ran only 23 — the
+    # high-value statute queries ("section 63-1A" ANDD ...) were SKIPPED as "budget". The cap
+    # (max_ik_search_calls) must stay >= the largest effective budget so consume() never raises.
     ik_search_base_budget: int = _int("CITATION_V2_IK_SEARCH_BASE_BUDGET", 2)
-    ik_search_per_issue_budget: int = _int("CITATION_V2_IK_SEARCH_PER_ISSUE_BUDGET", 7)
+    ik_search_per_issue_budget: int = _int("CITATION_V2_IK_SEARCH_PER_ISSUE_BUDGET", 12)
     # Opponent (adverse-authority) queries always get this many guaranteed execution
     # slots so the Adverse bundle is never fully starved under a multi-issue load.
     max_opponent_search_calls: int = _int("CITATION_V2_MAX_OPPONENT_SEARCH_CALLS", 2)
@@ -49,8 +51,11 @@ class Settings:
     max_ik_fragment_calls: int = _int("CITATION_V2_MAX_IK_FRAGMENT_CALLS", 32)
     max_ik_meta_calls: int = _int("CITATION_V2_MAX_IK_META_CALLS", 32)
     # Up to this many judged candidates → the report can show up to this many citations
-    # (across all buckets). Raised 10 → 15 so a rich case surfaces 3-15 citations, not 1-4.
-    max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 15)
+    # (across all buckets). 15 -> 20: the AI judge now evaluates ALL full-doc'd candidates
+    # (final_ai_judge dropped its hardcoded [:7] throttle), so this is the real ceiling on
+    # how many citations a rich case can surface before the relevance gate trims to the
+    # genuinely on-point ones (relevance over cost).
+    max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 20)
     # Per-bucket caps on how many citations the final report shows.
     max_recommended_citations: int = _int("CITATION_V2_MAX_RECOMMENDED_CITATIONS", 10)
     max_adverse_citations: int = _int("CITATION_V2_MAX_ADVERSE_CITATIONS", 5)
@@ -62,13 +67,23 @@ class Settings:
     # full-doc fetch was rejected (BudgetExceeded) and the report collapsed to 0. This is
     # the hard wall-clock ceiling — relevance over speed.
     max_runtime_seconds: int = _int("CITATION_V2_MAX_RUNTIME_SECONDS", 600)
-    # Phase 3 — wider net. Page each search and lift the per-query doc cap so a recall
-    # query surfaces more candidates; the embedding reranker (below) then culls the pool
-    # to the strongest BEFORE any paid fragment/full-doc spend. Deeper paging is free
-    # (one budget unit per search regardless of pages).
-    max_raw_candidates: int = _int("CITATION_V2_MAX_RAW_CANDIDATES", 220)
-    ik_search_maxpages: int = _int("CITATION_V2_IK_SEARCH_MAXPAGES", 2)
-    per_query_doc_cap: int = _int("CITATION_V2_PER_QUERY_DOC_CAP", 40)
+    # Phase 3 — wider net. Page each search so a query fills the per-query doc cap; the
+    # embedding reranker (below) then culls the pool to the strongest BEFORE any paid
+    # fragment/full-doc spend.
+    max_raw_candidates: int = _int("CITATION_V2_MAX_RAW_CANDIDATES", 260)
+    # maxpages & per_query_doc_cap are TWINNED: IK bills per RETURNED page (~Rs0.5/page) and
+    # per_query_doc_cap truncates the docs kept per query, so any page beyond what fills the
+    # cap is paid-for-then-discarded. The efficient setting is maxpages just large enough to
+    # fill the cap (~10 results/page): cap 50 ≈ 5 pages, so maxpages 6 gives margin without
+    # waste. Cranking maxpages to its 1000 ceiling would only burn money (cap still truncates).
+    ik_search_maxpages: int = _int("CITATION_V2_IK_SEARCH_MAXPAGES", 6)
+    per_query_doc_cap: int = _int("CITATION_V2_PER_QUERY_DOC_CAP", 50)
+    # Tier 1 (B / P3) — co-retrieve the named local High Court AND the Supreme Court in ONE
+    # search via comma-separated IK doctypes (e.g. "bombay,supremecourt"), so binding apex
+    # precedent and the controlling HC line land in the SAME ranked result set. Still one
+    # search = one ik_search budget unit (strictly safer than emitting N court queries).
+    # Set CITATION_V2_MULTI_COURT_DOCTYPES=false to revert to single-court doctypes.
+    multi_court_doctypes: bool = os.environ.get("CITATION_V2_MULTI_COURT_DOCTYPES", "true").lower() == "true"
     # Stage wall-clock ceilings (B2): stop waiting on a hung IK fan-out after this many
     # seconds and proceed with whatever returned. Must sit ABOVE the per-call HTTP timeout
     # (search ~12s x2 retries) so a normal slow-but-valid call is never clipped.
@@ -90,7 +105,10 @@ class Settings:
     # keeps the top-K (>= min/issue) before paid enrichment. Falls back to priority order
     # if embeddings are unavailable, so it never crashes a run.
     enable_rerank_stage: bool = os.environ.get("CITATION_V2_ENABLE_RERANK_STAGE", "true").lower() == "true"
-    rerank_top_k: int = _int("CITATION_V2_RERANK_TOP_K", 20)
+    # 20 -> 30: enrich_fragments loses ~30-40% (candidates missing IK fragment/meta), so a
+    # top_k of 20 left only ~12 to shortlist/judge. 30 keeps ~18-20 through enrichment so the
+    # judge + buckets can actually reach 10-15 citations when the on-point cases exist.
+    rerank_top_k: int = _int("CITATION_V2_RERANK_TOP_K", 30)
     rerank_min_per_issue: int = _int("CITATION_V2_RERANK_MIN_PER_ISSUE", 3)
     # Cap how many candidates the reranker EMBEDS (highest query_priority first). Embedding
     # 150+ candidates was the slowest stage (~87s) and blew the runtime budget; 100 keeps

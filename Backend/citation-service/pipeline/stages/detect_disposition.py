@@ -47,7 +47,9 @@ def run(context: PipelineContext):
 
         old_label = candidate.classification.value
         overridden, new_label = apply_override(candidate, context.perspective)
-        if overridden:
+        # apply_override only returns overridden=True together with a non-None new_label
+        # (disposition_service.py:399-409); the explicit None check lets pyrefly narrow it.
+        if overridden and new_label is not None:
             flips += 1
             logger.info(
                 "[JURINEX][%s][DISPOSITION] FLIP %s: %s -> %s confidence=%.2f source=%s operative=\"%s\"",

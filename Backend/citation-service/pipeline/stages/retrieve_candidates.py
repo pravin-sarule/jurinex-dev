@@ -21,9 +21,12 @@ logger = logging.getLogger(__name__)
 # Each issue's queries are picked in this order (one per round, round-robin across issues).
 # Opponent sits in the first band so adverse-authority is RESERVED early (capped globally
 # at max_opponent_search_calls), keeping the Adverse bucket alive under a tight budget.
-_PICK_FIRST = ("doctrine", "outcome", "broad_fallback", "landmark", "opponent")  # precision, favourable-outcome, recall, landmark, opponent
-_PICK_SECOND = ("doctrine", "strict", "statute_combined", "supreme_court",
-                "court_filtered", "outcome", "landmark")  # precision #2 (caps precision at 2 early), then more angles
+# First band leads with the HIGHEST-value angles (precision + governing-statute + strict
+# fact-pattern + favourable-outcome) plus landmark & opponent for coverage, so the best,
+# most on-point queries are reserved first. The low-value ORR recall (broad_fallback) drops
+# to the second band. Within the leftover "rest", queries are ordered by quality score.
+_PICK_FIRST = ("doctrine", "statute_combined", "strict", "outcome", "landmark", "opponent")
+_PICK_SECOND = ("doctrine", "supreme_court", "court_filtered", "outcome", "broad_fallback", "landmark")
 
 
 def _effective_search_budget(n_issues: int) -> int:
@@ -53,7 +56,7 @@ def _issue_pick_order(issue_queries: list) -> list:
     for qtype in _PICK_SECOND:
         _take(qtype)
     rest = [q for q in issue_queries if id(q) not in used]
-    rest.sort(key=lambda q: q.get("priority", 6))
+    rest.sort(key=lambda q: (-float(q.get("quality", 0.0)), q.get("priority", 6)))
     order.extend(rest)
     return order
 
@@ -81,6 +84,7 @@ def select_queries(queries: list) -> tuple[list, list, int]:
 
     selected: list = []
     selected_ids: set = set()
+    seen_keys: set = set()  # (formInput, doctypes) — never hit IK with the SAME query twice
     opp_taken = 0
     max_rounds = max((len(lst) for lst in pick_lists.values()), default=0)
     for r in range(max_rounds):
@@ -91,14 +95,29 @@ def select_queries(queries: list) -> tuple[list, list, int]:
             if r >= len(lst) or len(selected) >= budget:
                 continue
             q = lst[r]
+            # Global IK-query dedup: the same query string (e.g. a doctrine emitted for two
+            # issues) must NOT be sent to IK twice — it returns identical results and wastes a
+            # search. Skip it so the freed budget slot goes to a DISTINCT query. doctypes is
+            # part of the key, so 'bombay,supremecourt' vs 'judgments' for the same text stay
+            # distinct (intentional — different court scopes).
+            _qkey = (str(q.get("formInput") or q.get("query_string") or "").strip().lower(),
+                     q.get("doctypes", ""))
+            if _qkey[0] and _qkey in seen_keys:
+                q["dup_skipped"] = True
+                continue  # duplicate IK query — falls through to skipped
             if q.get("query_type") == "opponent":
                 if opp_taken >= opp_cap:
                     continue  # opponent reserve reached — this one falls through to skipped
                 opp_taken += 1
             selected.append(q)
             selected_ids.add(id(q))
+            seen_keys.add(_qkey)
 
     skipped = [q for q in queries if id(q) not in selected_ids]
+    # Run the BEST queries first: order the selected pool by quality score (desc). The
+    # round-robin above already guaranteed per-issue coverage + the budget; this only sets
+    # execution order, so under the stage deadline the highest-value searches complete first.
+    selected.sort(key=lambda q: (-float(q.get("quality", 0.0)), q.get("priority", 6)))
     return selected, skipped, budget
 
 

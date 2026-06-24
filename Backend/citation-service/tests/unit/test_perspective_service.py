@@ -24,6 +24,18 @@ _COUNTER = (
 
 
 class TestPerspectiveDetection(unittest.TestCase):
+    def setUp(self):
+        # Pin autocorrect ON so these logic tests are deterministic regardless of the
+        # deployment .env (CITATION_V2_ENABLE_PERSPECTIVE_AUTOCORRECT may be set false).
+        # frozen dataclass → object.__setattr__ (same pattern as test_autocorrect_can_be_disabled).
+        from core import config
+        self._ac_original = config.settings.enable_perspective_autocorrect
+        object.__setattr__(config.settings, "enable_perspective_autocorrect", True)
+
+    def tearDown(self):
+        from core import config
+        object.__setattr__(config.settings, "enable_perspective_autocorrect", self._ac_original)
+
     def test_thin_document_keeps_user_perspective(self):
         # The test_pipeline_v2 contract: a thin doc must not flip the user's choice.
         self.assertEqual(detect_represented_side("respondent", "case facts", "q", "r1"), "respondent")
