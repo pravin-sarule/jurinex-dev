@@ -31,16 +31,16 @@ class Settings:
     pipeline_version: str = os.environ.get("CITATION_PIPELINE_VERSION", "v2").lower()
     # HARD ceiling for IK searches per run — also the BudgetTracker limit, so it MUST be
     # >= the largest effective per-run budget (base + per_issue * issues), or consume()
-    # raises mid-run. Raised 14 -> 30 so the fact-grounded precision/recall/SC/court/
-    # opponent queries for a multi-issue case all run instead of being starved (R4).
-    max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 45)
+    # raises mid-run.
+    max_ik_search_calls: int = _int("CITATION_V2_MAX_IK_SEARCH_CALLS", 20)
     # Per-run search budget scales with issue count: effective = min(ceiling, base +
-    # per_issue * n_issues). With base=2, per_issue=12: 1 issue=14, 2=26, 3=38, capped 45.
-    # Raised 7 -> 12 because at 7 a 3-issue case generated 36 queries but ran only 23 — the
-    # high-value statute queries ("section 63-1A" ANDD ...) were SKIPPED as "budget". The cap
-    # (max_ik_search_calls) must stay >= the largest effective budget so consume() never raises.
+    # per_issue * n_issues). With base=2, per_issue=6: 1 issue=8, 2=14, 3=20, capped 20.
+    # Tightened 12 -> 6: queries are now RERANKED best-first (statute/doctrine score highest,
+    # recall lowest), so only the top ~20 are worth running — citations come from the
+    # high-relevance queries; the low-quality tail (broad recall, redundant outcomes) added IK
+    # cost + latency for ~0 new citations. The reranker guarantees the BEST survive the cap.
     ik_search_base_budget: int = _int("CITATION_V2_IK_SEARCH_BASE_BUDGET", 2)
-    ik_search_per_issue_budget: int = _int("CITATION_V2_IK_SEARCH_PER_ISSUE_BUDGET", 12)
+    ik_search_per_issue_budget: int = _int("CITATION_V2_IK_SEARCH_PER_ISSUE_BUDGET", 6)
     # Opponent (adverse-authority) queries always get this many guaranteed execution
     # slots so the Adverse bundle is never fully starved under a multi-issue load.
     max_opponent_search_calls: int = _int("CITATION_V2_MAX_OPPONENT_SEARCH_CALLS", 2)
@@ -84,10 +84,12 @@ class Settings:
     # search = one ik_search budget unit (strictly safer than emitting N court queries).
     # Set CITATION_V2_MULTI_COURT_DOCTYPES=false to revert to single-court doctypes.
     multi_court_doctypes: bool = os.environ.get("CITATION_V2_MULTI_COURT_DOCTYPES", "true").lower() == "true"
-    # Stage wall-clock ceilings (B2): stop waiting on a hung IK fan-out after this many
-    # seconds and proceed with whatever returned. Must sit ABOVE the per-call HTTP timeout
-    # (search ~12s x2 retries) so a normal slow-but-valid call is never clipped.
-    ik_retrieve_deadline_seconds: int = _int("CITATION_V2_IK_RETRIEVE_DEADLINE", 30)
+    # Stage wall-clock ceiling (B2): stop waiting on a hung IK fan-out after this many seconds
+    # and proceed with whatever returned. Must sit ABOVE the per-call HTTP timeout so a slow-
+    # but-valid search completes — raised 30 -> 95 to match the 90s per-search read timeout
+    # (a slow query is waited on, not clipped). Queries run concurrently, so this is the
+    # worst-case stage time only when a single straggler is slow.
+    ik_retrieve_deadline_seconds: int = _int("CITATION_V2_IK_RETRIEVE_DEADLINE", 95)
     ik_enrich_deadline_seconds: int = _int("CITATION_V2_IK_ENRICH_DEADLINE", 40)
     enable_final_ai_judge: bool = os.environ.get("CITATION_V2_ENABLE_FINAL_AI_JUDGE", "true").lower() == "true"
     # Outcome-aware adverse detection (disposition service).

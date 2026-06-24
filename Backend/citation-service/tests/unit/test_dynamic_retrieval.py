@@ -152,6 +152,27 @@ class TestQueryHygiene(unittest.TestCase):
             for part in q["formInput"].split('"'):
                 self.assertLessEqual(len(part.split()), 3, f"4+ word quoted phrase: {q['formInput']}")
 
+    def test_no_repeated_keyword_in_any_query(self):
+        # No single keyword may repeat within one query (e.g. not '"bona fide industrial" ANDD
+        # industrial'). The anchor selection + _dedup_terms_by_word guarantee distinct words.
+        iss = _issue(
+            legal_issue="forfeiture for non-utilisation of land industrial use",
+            statutes=["Section 63-1A"], must_have_terms=["industrial", "forfeiture"],
+            phrase_terms=["bona fide industrial use", "forfeiture of land"],
+            doctrines=["bona fide industrial use"], fact_terms=["non utilisation"],
+        )
+        for q in generate_ik_queries([iss]):
+            words = (q["formInput"].replace('"', "").lower()
+                     .replace(" andd ", " ").replace(" orr ", " ").split())
+            self.assertEqual(len(words), len(set(words)), f"repeated keyword: {q['formInput']}")
+
+    def test_dedup_terms_by_word(self):
+        from services.query_service import _dedup_terms_by_word
+        self.assertEqual(_dedup_terms_by_word(['"bona fide industrial"', "industrial"]),
+                         ['"bona fide industrial"'])
+        self.assertEqual(_dedup_terms_by_word(['"forfeiture of land"', "industrial"]),
+                         ['"forfeiture of land"', "industrial"])
+
     def test_redundant_supreme_court_skipped_under_multicourt(self):
         # When a local court is named and multi_court_doctypes is on, the standalone SC query
         # is skipped (court_filtered's "<court>,supremecourt" superset covers it).
@@ -190,6 +211,37 @@ class TestQueryRerank(unittest.TestCase):
         with_token_main = _query_quality("statute_combined", '"x" ANDD "section 63"', True, "section 63")
         generic_fallback = _query_quality("broad_fallback", "a ORR b ORR c", False, "section 63")
         self.assertGreater(with_token_main, generic_fallback)
+
+
+class TestFragmentFallback(unittest.TestCase):
+    """IK's /docfragment/ boolean evaluator errors ('Error in evaluting the fragments') for docs
+    that ranked into search but don't strictly satisfy the ANDD/quoted query — even though each
+    operand alone evaluates fine. The fetcher must retry single operands so a relevant doc is
+    enriched (not dropped), which is what collapsed the funnel to ~8 candidates / 5 citations."""
+
+    def test_failed_detects_errmsg_empty_and_missing_headline(self):
+        from services.indian_kanoon import _fragment_failed
+        self.assertTrue(_fragment_failed(None))
+        self.assertTrue(_fragment_failed({}))
+        self.assertTrue(_fragment_failed({"errmsg": "Error in evaluting the fragments"}))
+        self.assertTrue(_fragment_failed({"headline": []}))
+        self.assertFalse(_fragment_failed({"headline": ["<p>snippet</p>"]}))
+
+    def test_boolean_query_splits_into_single_operands(self):
+        from services.indian_kanoon import _fragment_fallback_queries
+        fb = _fragment_fallback_queries('"promissory estoppel" ANDD tenancy')
+        # quoted phrase tried first (most specific), then its unquoted form, then the other operand
+        self.assertEqual(fb, ['"promissory estoppel"', "promissory estoppel", "tenancy"])
+
+    def test_plain_single_term_has_no_fallback(self):
+        from services.indian_kanoon import _fragment_fallback_queries
+        self.assertEqual(_fragment_fallback_queries("Laxmanrao"), [])
+        self.assertEqual(_fragment_fallback_queries("forfeiture industrial"), [])
+
+    def test_fallback_never_repeats_the_original_query(self):
+        from services.indian_kanoon import _fragment_fallback_queries
+        for q in ('"a b" ORR "c d"', "tahsildar ANDD \"without jurisdiction\""):
+            self.assertNotIn(q.strip().lower(), [f.lower() for f in _fragment_fallback_queries(q)])
 
 
 if __name__ == "__main__":

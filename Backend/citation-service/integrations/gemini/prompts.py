@@ -52,9 +52,9 @@ def issue_extraction_prompt(query: str, case_context: str, perspective: str) -> 
         "\"forfeiture of land\").\n"
         "  - 1 statute query      kind=\"statute\":   \"<statute token e.g. section 63>\" ANDD "
         "<single keyword> (ANDD only; a short token + one common word, never a full citation).\n"
-        "  - 1 recall query       kind=\"recall\":    \"<syn A>\" ORR \"<syn B>\" ORR \"<syn C>\" ORR "
-        "\"<syn D>\" ... (ORR only — 4 to 8 synonyms of ONE concept; ORR broadens recall safely, so "
-        "cast a WIDE net here).\n"
+        "  - 1 recall query       kind=\"recall\":    <syn A> ORR <syn B> ORR <syn C> (ORR only, AT "
+        "MOST 3 short synonyms of ONE concept — prefer SINGLE words; ORR-ing 4+ multi-word QUOTED "
+        "phrases makes the IK search time out and return 0).\n"
         "  - landmarks via landmark_cases (FULL cause-title 'X v. Y' — keep BOTH parties), NOT inside queries[].\n\n"
         "Return ONLY a JSON object of this exact shape:\n"
         "{\n"
@@ -76,7 +76,7 @@ def issue_extraction_prompt(query: str, case_context: str, perspective: str) -> 
         '      "landmark_cases": ["FULL cause-titles \'X v. Y\', e.g. \\"State of Maharashtra v. Laxmanrao\\", \\"Motilal Padampat Sugar Mills v. State of U.P.\\""],\n'
         '      "queries": [\n'
         '        {"kind": "precision", "q": "\\"forfeiture of land\\" ANDD non-utilisation"},\n'
-        '        {"kind": "recall", "q": "\\"non-utilisation\\" ORR \\"non-user\\" ORR \\"land not utilised\\" ORR \\"failure to utilise\\" ORR \\"not put to use\\""},\n'
+        '        {"kind": "recall", "q": "non-utilisation ORR non-user ORR \\"land not utilised\\""},\n'
         '        {"kind": "statute", "q": "\\"section 63\\" ANDD tenancy"}\n'
         "      ]\n"
         "    }\n"

@@ -65,11 +65,13 @@ class TestAllocator(unittest.TestCase):
         self.assertEqual(len(selected) + len(skipped), len(self.queries))
 
     def test_no_essential_type_starved_per_issue(self):
+        # Under the tightened ~20-search budget the HIGH-VALUE essentials (precision + landmark)
+        # must still survive for every issue; low-value recall (broad_fallback) is intentionally
+        # the first thing trimmed (it's reranked last), so it is no longer guaranteed.
         selected, _, _ = select_queries(self.queries)
         for iid in ("issue-1", "issue-2", "issue-3"):
             types = {q["query_type"] for q in selected if q["issue_id"] == iid}
             self.assertIn("doctrine", types, f"{iid} lost precision")
-            self.assertIn("broad_fallback", types, f"{iid} lost recall")
             self.assertIn("landmark", types, f"{iid} lost landmark")
 
     def test_opponent_capped_at_reserve(self):

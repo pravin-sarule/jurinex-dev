@@ -59,7 +59,10 @@ class IndianKanoonClient:
         from services.indian_kanoon import ik_fetch_docfragment
         self.budget.consume("ik_fragment")
         result = ik_fetch_docfragment(candidate.doc_id, candidate.matched_query) or {}
-        record_ik_call(self.run_id, self.user_id, "fragment", endpoint=f"/docfragment/{candidate.doc_id}/", candidate_doc_id=candidate.doc_id, issue_id=candidate.matched_issue_id, success=bool(result))
+        # ik_fetch_docfragment retries simplified queries when IK's boolean fragment evaluator
+        # errors; bill every real HTTP call it made (default 1) so cost tracking stays honest.
+        http_calls = result.pop("_ik_http_calls", 1) if isinstance(result, dict) else 1
+        record_ik_call(self.run_id, self.user_id, "fragment", endpoint=f"/docfragment/{candidate.doc_id}/", candidate_doc_id=candidate.doc_id, issue_id=candidate.matched_issue_id, success=bool(result), quantity=http_calls)
         logger.debug("IK fragment response", extra={"details": {"run_id": self.run_id, "doc_id": candidate.doc_id, "raw_response": result}})
         candidate.fragment = strip_html(_as_text(result.get("headline")))
         candidate.metadata["fragment_data"] = result

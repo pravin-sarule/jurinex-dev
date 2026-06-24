@@ -217,6 +217,22 @@ def _clean_term(term: str) -> str:
     return f'"{cleaned}"' if ' ' in cleaned else cleaned
 
 
+def _dedup_terms_by_word(terms: list[str]) -> list[str]:
+    """Drop any term whose words ALL already appear in an earlier kept term, so a single
+    keyword never repeats within ONE IK query (e.g. remove the 'industrial' anchor when the
+    lead phrase is '"bona fide industrial"', or a duplicate term in an AI recipe). Order-
+    preserving; the FIRST occurrence (usually the richer phrase) is kept."""
+    seen: set[str] = set()
+    kept: list[str] = []
+    for t in terms:
+        words = {w for w in (t or "").replace('"', "").lower().split() if w}
+        if words and words <= seen:
+            continue
+        kept.append(t)
+        seen |= words
+    return kept
+
+
 # ── FAILURE R3 — landmark "A v. B" cause-titles must be searched by TITLE, not as a
 # verbatim body phrase (which returns 0 hits). We reduce the title to its distinctive
 # party — the non-government side — and let ik_search wrap it in title:"...".
@@ -254,6 +270,10 @@ def _clean_landmark_name(name: str) -> str:
     """
     raw = (name or "").strip().strip('"')
     if not raw:
+        return ""
+    # An individual litigant's name (carries a relationship marker) is NOT a citable
+    # landmark — "Suresh s/o Deorao Bhoyar" returns only noise on a title search. Skip it.
+    if re.search(r"\b(s/o|d/o|w/o|son of|daughter of|wife of)\b", raw, re.IGNORECASE):
         return ""
     parts = [p for p in _CASE_SPLIT_RX.split(raw) if p.strip()]
     had_split = len(parts) >= 2  # was a real "A v. B" cause-title
@@ -405,20 +425,27 @@ def _validate_recipe(raw: str) -> str:
         if c:
             cleaned.append(c)
     cleaned = list(dict.fromkeys(cleaned))
+    cleaned = _dedup_terms_by_word(cleaned)  # no keyword repeats within a query
     if not cleaned:
         return ""
+    # Cap at 3 terms: an ORR of 4+ QUOTED phrases makes the IK search time out (~25s) and
+    # return 0 (it also eats the stage deadline); an ANDD of 4+ rare terms matches nothing.
+    cleaned = cleaned[:3]
     if len(cleaned) == 1:
         return cleaned[0]
     return (op or " ANDD ").join(cleaned)
 
 
-def _single_word_anchor(pool: list[str], exclude_low: str) -> str:
-    """First SINGLE-WORD term in pool. ANDD-ing two rare multi-word phrases returns ~0
-    hits on Indian Kanoon (a doc must contain BOTH), so a precision query pairs the rare
-    phrase with ONE common keyword instead. Returns '' if no single word is available."""
+def _single_word_anchor(pool: list[str], exclude) -> str:
+    """First SINGLE-WORD term in pool that is not already an excluded word. ANDD-ing two rare
+    multi-word phrases returns ~0 hits on Indian Kanoon (a doc must contain BOTH), so a
+    precision query pairs the rare phrase with ONE common keyword instead. `exclude` may be a
+    single lowercased word OR a set of words (the phrase's words) — so the anchor never repeats
+    a keyword already in the phrase. Returns '' if no usable single word is available."""
+    excl = exclude if isinstance(exclude, (set, frozenset)) else {(exclude or "").lower()}
     for t in pool:
         t = (t or "").strip()
-        if t and len(t.split()) == 1 and t.lower() != exclude_low:
+        if t and len(t.split()) == 1 and t.lower() not in excl:
             return t
     return ""
 
@@ -453,15 +480,23 @@ def _precision_terms(phrase: str, must_haves: list[str], domain: str, fact_terms
     the query is still tied to the matter and cannot drift. Returns [phrase] (which the
     caller drops) only when no usable anchor exists at all."""
     low = phrase.lower()
-    anchor = _single_word_anchor(list(must_haves) + ([domain] if domain else []) + list(fact_terms), low)
+    # Exclude the phrase's OWN words so the anchor never repeats a keyword already in it
+    # (no '"bona fide industrial" ANDD industrial').
+    pwords = {w for w in low.replace('"', "").split() if w}
+
+    def _new_word(term: str) -> bool:
+        tw = {w for w in (term or "").lower().replace('"', "").split() if w}
+        return bool(tw) and not (tw <= pwords)
+
+    anchor = _single_word_anchor(list(must_haves) + ([domain] if domain else []) + list(fact_terms), pwords)
     if not anchor:
-        # No single word — accept one short fact phrase / the domain (still just 2 terms).
+        # No single word — accept one short fact phrase / the domain that adds a NEW word.
         for a in (list(fact_terms) + ([domain] if domain else [])):
-            if a and a.lower() != low:
+            if a and _new_word(a):
                 anchor = a
                 break
     # C2 — last resort: the case core anchor, so no precision query is ever ungrounded.
-    if not anchor and core_anchor and core_anchor.lower() != low:
+    if not anchor and core_anchor and _new_word(core_anchor):
         anchor = core_anchor
     return [phrase, anchor] if anchor else [phrase]
 
@@ -524,6 +559,7 @@ def generate_ik_queries(issues: list[IssueCard], custom_keywords: list[str] | No
                 return True
             cleaned = list(dict.fromkeys([_clean_term(t) for t in terms if t and t.strip()]))
             cleaned = [c for c in cleaned if c]
+            cleaned = _dedup_terms_by_word(cleaned)  # no keyword repeats within a query
             # Non-fallback queries MUST combine >= 2 terms with ANDD (never a bare
             # single phrase across all of India — FAILURE 2 / existing test contract).
             if not is_fallback and len(cleaned) < 2:

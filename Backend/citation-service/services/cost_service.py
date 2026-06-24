@@ -74,16 +74,21 @@ def record_ik_call(
     candidate_doc_id: str = "",
     issue_id: str = "",
     success: bool = True,
+    quantity: int = 1,
 ) -> None:
     from utils.pricing import IK_DOCUMENT_INR, IK_FRAGMENT_INR, IK_META_INR, IK_SEARCH_INR
     from utils.usage_tracker import record
 
-    cost = {
+    quantity = max(1, quantity)
+    unit_cost = {
         "search": IK_SEARCH_INR,
         "fragment": IK_FRAGMENT_INR,
         "meta": IK_META_INR,
         "document": IK_DOCUMENT_INR,
     }.get(operation, 0.0)
+    # quantity > 1 when one logical enrichment made several real HTTP calls (e.g. docfragment
+    # boolean-query retries) — bill every real call so cost stays 100% real.
+    cost = unit_cost * quantity
     metadata = {
         "run_id": run_id,
         "provider": "indian_kanoon",
@@ -93,10 +98,11 @@ def record_ik_call(
         "output_tokens": 0,
         "estimated_cost": cost,
         "actual_cost": cost,
+        "call_count": quantity,
         "candidate_doc_id": candidate_doc_id,
         "issue_id": issue_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "success": success,
     }
-    record(run_id, user_id, "indian_kanoon", operation, quantity=1, unit="calls", cost_inr=cost, metadata=metadata)
+    record(run_id, user_id, "indian_kanoon", operation, quantity=quantity, unit="calls", cost_inr=cost, metadata=metadata)
     logger.info("Provider cost recorded", extra={"details": metadata})
