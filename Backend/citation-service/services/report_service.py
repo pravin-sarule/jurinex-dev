@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from core.config import settings
 from core.enums import CitationStatus, Classification
 from models.citation_models import Candidate
 
@@ -95,9 +96,13 @@ def citation_to_dict(candidate: Candidate) -> dict:
 
 
 def build_report(run_id: str, perspective: str, profile: dict, issues: list[dict], queries: list[dict], supporting: list[Candidate], adverse: list[Candidate], caution: list[Candidate], cost: dict, timings: dict, diagnostics: dict | None = None) -> dict:
-    recommended = [citation_to_dict(item) for item in supporting[:5]]
-    adverse_rows = [citation_to_dict(item) for item in adverse[:3]]
-    caution_rows = [citation_to_dict(item) for item in caution[:3]]
+    # Display caps honor the config (max_recommended=10, max_adverse=5, max_caution=5) instead
+    # of the old hardcoded 5/3/3, which silently throttled a rich run to <=11 citations — the
+    # same leftover-hardcode class as the removed [:7] judge throttle. The relevance gate
+    # upstream already trims to the genuinely on-point ones, so this just stops truncating them.
+    recommended = [citation_to_dict(item) for item in supporting[:settings.max_recommended_citations]]
+    adverse_rows = [citation_to_dict(item) for item in adverse[:settings.max_adverse_citations]]
+    caution_rows = [citation_to_dict(item) for item in caution[:settings.max_caution_citations]]
     for row in recommended:
         row["argumentParty"] = perspective
     for row in adverse_rows:

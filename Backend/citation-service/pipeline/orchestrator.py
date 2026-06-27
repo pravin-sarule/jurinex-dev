@@ -11,11 +11,11 @@ from integrations.indian_kanoon.client import IndianKanoonClient
 from models.run_models import PipelineResult
 from pipeline.pipeline_context import PipelineContext
 from pipeline.stages import (
-    build_report, cheap_filter, cheap_prescreen, classify_results, deduplicate_candidates,
-    detect_disposition, enrich_fragments, extract_case_profile, extract_issues,
-    fetch_full_documents, final_ai_judge, generate_queries, generate_usage_analysis,
-    normalize_perspective, rerank_candidates, retrieve_candidates, score_candidates,
-    shortlist_candidates,
+    build_report, cheap_filter, cheap_prescreen, cite_graph_expand, classify_results,
+    deduplicate_candidates, detect_disposition, enrich_fragments, extract_case_profile,
+    extract_issues, fetch_full_documents, final_ai_judge, generate_queries,
+    generate_usage_analysis, normalize_perspective, rerank_candidates, retrieve_candidates,
+    score_candidates, shortlist_candidates,
 )
 from repositories.cost_repository import summarize_cost
 from repositories.report_repository import save_report
@@ -139,6 +139,10 @@ def run_v2_pipeline(
         }})
         _stage(context, "shortlist_candidates", shortlist_candidates.run)
         _stage(context, "fetch_full_documents", fetch_full_documents.run, client)
+        # Tier 2 — follow the citation graph: harvest the seed judgments' cited/citing cases
+        # (already in doc_data) and promote the most co-cited as new candidates, so binding
+        # precedent that keyword search missed is full-doc'd + judged alongside the seeds.
+        _stage(context, "cite_graph_expand", cite_graph_expand.run, client)
         _stage(context, "detect_disposition", detect_disposition.run)
         _stage(context, "final_ai_judge", final_ai_judge.run)
         supporting, adverse, caution = _stage(context, "classify_results", classify_results.run)
@@ -193,6 +197,8 @@ def run_v2_pipeline(
             "scored_count": context.timings.get("_scored_count", 0),
             "shortlisted_count": len(context.shortlisted),
             "full_docs_fetched_count": context.timings.get("_full_docs_count", 0),
+            "cite_graph_harvested_count": context.timings.get("_cite_graph_harvested", 0),
+            "cite_graph_promoted_count": context.timings.get("_cite_graph_promoted", 0),
             "ai_judged_count": len(context.shortlisted),
             "recommended_count": len(supporting),
             "adverse_count": len(adverse),
@@ -212,12 +218,14 @@ def run_v2_pipeline(
         }
         logger.info(
             "[PIPELINE %s] FUNNEL ctx_chars=%s quality=%s | issues=%s queries=%s -> raw=%s deduped=%s "
-            "filtered=%s fragments=%s scored=%s shortlisted=%s fulldocs=%s | recommended=%s adverse=%s caution=%s rejected=%s%s",
+            "filtered=%s fragments=%s scored=%s shortlisted=%s fulldocs=%s citegraph=%s/+%s | "
+            "recommended=%s adverse=%s caution=%s rejected=%s%s",
             run_id[:8], diagnostics["case_context_chars"], ctx_quality["quality"],
             diagnostics["issues_count"], diagnostics["queries_count"], diagnostics["raw_candidates_count"],
             diagnostics["deduped_candidates_count"], diagnostics["cheap_filtered_count"],
             diagnostics["fragment_checked_count"], diagnostics["scored_count"], diagnostics["shortlisted_count"],
-            diagnostics["full_docs_fetched_count"], diagnostics["recommended_count"], diagnostics["adverse_count"],
+            diagnostics["full_docs_fetched_count"], diagnostics["cite_graph_harvested_count"],
+            diagnostics["cite_graph_promoted_count"], diagnostics["recommended_count"], diagnostics["adverse_count"],
             diagnostics["caution_count"], diagnostics["rejected_count"],
             f" | NO_RESULT_REASON: {diagnostics['no_result_reason']}" if diagnostics["no_result_reason"] else "",
         )

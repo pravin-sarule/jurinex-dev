@@ -51,11 +51,34 @@ class Settings:
     max_ik_fragment_calls: int = _int("CITATION_V2_MAX_IK_FRAGMENT_CALLS", 32)
     max_ik_meta_calls: int = _int("CITATION_V2_MAX_IK_META_CALLS", 32)
     # Up to this many judged candidates → the report can show up to this many citations
-    # (across all buckets). 15 -> 20: the AI judge now evaluates ALL full-doc'd candidates
-    # (final_ai_judge dropped its hardcoded [:7] throttle), so this is the real ceiling on
-    # how many citations a rich case can surface before the relevance gate trims to the
-    # genuinely on-point ones (relevance over cost).
-    max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 20)
+    # (across all buckets). This is the TOTAL /doc/ budget = seed shortlist (shortlist_cap)
+    # + cite-graph promotions (cite_graph_max_promote). 20 -> 32 so cite-graph expansion has
+    # full-doc headroom WITHOUT starving the original seed shortlist. The AI judge evaluates
+    # all full-doc'd candidates (no [:7] throttle), so this is the real ceiling on how many
+    # citations a rich case can surface before the relevance gate trims to the on-point ones.
+    max_ik_full_doc_calls: int = _int("CITATION_V2_MAX_IK_FULL_DOC_CALLS", 32)
+    # Seed shortlist cap — how many of the keyword-retrieved candidates get full-doc'd before
+    # cite-graph expansion. DECOUPLED from max_ik_full_doc_calls (the total budget) so promoted
+    # cites get their own /doc/ slots: seeds (<=20) + promotions (<=12) = 32 total.
+    shortlist_cap: int = _int("CITATION_V2_SHORTLIST_CAP", 20)
+    # ── Tier 2: cite-graph expansion ──────────────────────────────────────────────
+    # After the seed judgments are full-doc'd, harvest their citeList/citedbyList (the cases
+    # they cite + cases citing them) and promote the most-cited (co-citation frequency) as NEW
+    # candidates — recovering binding precedent that keyword search misses (different vocabulary,
+    # foundational landmarks). The cite rows are ALREADY fetched in doc_data, so harvesting is
+    # free; only PROMOTING a cite (one /doc/ fetch each) costs. Gated for easy A/B vs baseline.
+    enable_cite_graph_expansion: bool = os.environ.get("CITATION_V2_ENABLE_CITE_GRAPH", "true").lower() == "true"
+    # Max cites promoted to real candidates per run (each costs one ik_full_doc call). Bounded
+    # by remaining ik_full_doc budget at runtime, so this is the soft target.
+    cite_graph_max_promote: int = _int("CITATION_V2_CITE_GRAPH_MAX_PROMOTE", 12)
+    # Relevance floor for a promoted cite (slightly above the 0.25 scoring default — cites are
+    # noisier than keyword hits, so a promoted case must clear a higher bar to reach the judge).
+    cite_graph_min_relevance: float = _float("CITATION_V2_CITE_GRAPH_MIN_RELEVANCE", 0.30)
+    # How many cite/citedby rows to request per seed /doc/ fetch. Bumped 5 -> 20/10: it is the
+    # SAME /doc/ call (free), just a wider neighbourhood to rank promotions from. doc_data rows
+    # are {tid,title} only, so court/date are filled from the promoted doc's own /doc/ fetch.
+    ik_full_doc_maxcites: int = _int("CITATION_V2_IK_FULL_DOC_MAXCITES", 20)
+    ik_full_doc_maxcitedby: int = _int("CITATION_V2_IK_FULL_DOC_MAXCITEDBY", 10)
     # Per-bucket caps on how many citations the final report shows.
     max_recommended_citations: int = _int("CITATION_V2_MAX_RECOMMENDED_CITATIONS", 10)
     max_adverse_citations: int = _int("CITATION_V2_MAX_ADVERSE_CITATIONS", 5)

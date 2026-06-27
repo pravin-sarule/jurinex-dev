@@ -92,7 +92,8 @@ class IndianKanoonClient:
             candidate.metadata["doc_data"] = raw.get("doc_data") or {}
             candidate.metadata["_cache_hit"] = True
             return candidate
-        document = ik_fetch_doc(candidate.doc_id, maxcites=5, maxcitedby=5) or {}
+        document = ik_fetch_doc(candidate.doc_id, maxcites=settings.ik_full_doc_maxcites,
+                                maxcitedby=settings.ik_full_doc_maxcitedby) or {}
         record_ik_call(self.run_id, self.user_id, "document", endpoint=f"/doc/{candidate.doc_id}/", candidate_doc_id=candidate.doc_id, issue_id=candidate.matched_issue_id, success=bool(document))
         logger.debug("IK document response summary", extra={"details": {"run_id": self.run_id, "doc_id": candidate.doc_id, "chars": len(str(document.get("doc") or "")), "cite_count": len(document.get("cites") or document.get("citeList") or [])}})
         candidate.full_text = strip_html(_as_text(document.get("doc")))

@@ -71,9 +71,10 @@ def run(context: PipelineContext):
         logger.info("[JURINEX][%s][COMMON_ORDER] collapsed %d duplicate(s) into %d distinct judgment(s)",
                     context.run_id[:8], len(collapsed), len(candidates))
 
-    # Keep up to the full-doc budget (so the report can show many citations) — one per
-    # issue first for coverage, then fill by confidence. Was hard-capped at 7.
-    limit = context.budget.config.max_ik_full_doc_calls
+    # Keep up to the SEED shortlist cap (one per issue first for coverage, then fill by
+    # confidence). Decoupled from max_ik_full_doc_calls (the TOTAL /doc/ budget) so cite-graph
+    # expansion downstream has its own full-doc slots for promoted cites. Was hard-capped at 7.
+    limit = context.budget.config.shortlist_cap
     ranked = sorted(candidates, key=lambda item: (item.confidence, item.authority_score, item.relevance_score), reverse=True)
     selected = []
     for issue in context.issues:
