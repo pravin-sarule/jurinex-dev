@@ -121,6 +121,54 @@ def _is_comprehensive_query(query: str) -> bool:
     return breadth and content
 
 
+# Deep/extreme tier: a STRONGER signal than comprehensive. These route to the multi-pass
+# generator (outline -> per-section expansion) for an exhaustive, report-style answer.
+_DEEP_QUERY_KEYWORDS = (
+    "deep analysis", "deep-dive", "deep dive", "deeply analyze", "deeply analyse",
+    "extreme detail", "extremely detailed", "exhaustive analysis", "exhaustive report",
+    "in-depth analysis", "in depth analysis", "detailed report", "full report",
+    "comprehensive report", "complete report", "deep report", "thorough analysis",
+    "detailed analysis", "extensive analysis", "extensive report", "section by section",
+    "section-by-section", "as detailed as possible", "maximum detail", "leave no detail",
+    "everything in detail", "extreme depth", "extremely deep", "deep legal analysis",
+)
+
+
+def _find_numbered_headings(text: str) -> list:
+    """Match top-level numbered headings, newline- AND markdown-tolerant: '1. ', '2) ',
+    '**1. ...**', '### 1. ...', '> 1. ...', '- 1. ...', indented, up to 3-digit numbers.
+    Used by _is_deep_query to count a prompt's explicit numbered sections — a long, highly
+    structured prompt signals an extreme/exhaustive report ask."""
+    import re
+    return list(re.finditer(r"(?m)^[ \t>#*\-]*(\d{1,3})[.)]\s+(.+?)\*{0,2}\s*$", text or ""))
+
+
+def _is_deep_query(query: str) -> bool:
+    """True for EXTREME / exhaustive report asks (a strict escalation of comprehensive).
+    These route to a single full-document deep call with a no-ceiling, follow-the-user's-
+    structure prompt. Implies comprehensive (full document + temperature bump)."""
+    q = (query or "").lower()
+    if any(kw in q for kw in _DEEP_QUERY_KEYWORDS):
+        return True
+    # intensity word + an analysis/report noun, in ANY order.
+    intensity = any(w in q for w in ("deep", "extreme", "exhaustive", "extensive", "exhaustively"))
+    artefact = any(n in q for n in ("analysis", "analyse", "analyze", "report", "breakdown",
+                                    "study", "review", "assessment", "dossier", "brief"))
+    if intensity and artefact:
+        return True
+    # Long, explicitly-structured prompts (e.g. a multi-section court-ready brief with many
+    # tables) are extreme even without an intensity word — route them to the deep call too.
+    if len(query or "") > 1500:
+        n_sections = len(_find_numbered_headings(query or ""))
+        n_tables = q.count("| ---") + q.count("|---") + q.count("create a table") + q.count("table:")
+        cues = any(c in q for c in ("court-ready", "court ready", "litigation intelligence",
+                                    "stress test", "claim verification", "red-team", "red team",
+                                    "hallucination trap", "exact structure", "page reference"))
+        if n_sections >= 4 or n_tables >= 3 or cues:
+            return True
+    return False
+
+
 def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[str]:
     """Slice model output into small SSE chunks for incremental UI rendering.
 
@@ -2570,8 +2618,10 @@ async def intelligent_chat_stream(
             # Specific questions use focused semantic chunks (~6K tokens) for speed + cost.
             # On retrieval failure we keep the full documents (safe fallback).
             # Comprehensive/detailed asks keep full context AND get a forceful long-form prompt +
-            # higher temperature below; specific asks stay focused/terse. Computed once, reused.
-            is_comprehensive = bool(not learning_mode and doc_texts and _is_comprehensive_query(query_text))
+            # higher temperature below; specific asks stay focused/terse. Deep/extreme asks are a
+            # strict escalation that ALSO triggers the multi-pass report generator. Computed once.
+            is_deep = bool(not learning_mode and doc_texts and _is_deep_query(query_text))
+            is_comprehensive = bool(not learning_mode and doc_texts and _is_comprehensive_query(query_text)) or is_deep
             if is_comprehensive:
                 logger.info(
                     "[Route:intelligent_chat_stream] comprehensive query folder=%s — keeping full-document context",
@@ -2666,7 +2716,9 @@ async def intelligent_chat_stream(
                 if settings.gemini_api_key:
                     context_parts = []
                     running_chars = 0
-                    char_limit = 160000 if learning_mode else 80000
+                    # A: comprehensive/deep asks get the FULL document (gemma-4 input limit is
+                    # ~262K tokens) so deep analysis can cover the whole case, not just the head.
+                    char_limit = 160000 if learning_mode else (200000 if is_comprehensive else 80000)
                     for doc in doc_texts:
                         name = doc.get("name", "document")
                         text = (doc.get("text") or "").strip()
@@ -2711,6 +2763,41 @@ async def intelligent_chat_stream(
                             f"=== CASE MATERIALS ===\n{context}\n\n"
                             f"=== USER INPUT ===\n{effective_query_text}\n\n"
                             "=== JSON OUTPUT ==="
+                        )
+                    elif is_deep:
+                        # Deep/extreme asks (e.g. multi-section court-ready briefs): ONE single
+                        # streaming call with the FULL document and a no-ceiling, follow-the-user's-
+                        # structure prompt. This replaces the old per-section multi-pass — splitting
+                        # the report into grouped passes fragmented the context (per-group RAG snippets
+                        # instead of the whole case) and the output, making answers SHORTER, slower,
+                        # and more hallucination-prone. The user's own prompt carries the structure,
+                        # so we just tell the model to follow it exactly and exhaustively.
+                        prompt = (
+                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            "The user has requested an EXHAUSTIVE, deeply detailed report. Produce the "
+                            "COMPLETE report in this single response.\n\n"
+                            "FOLLOW THE USER'S REQUESTED STRUCTURE EXACTLY AND COMPLETELY: reproduce every "
+                            "section, heading, table, column, row count, and word limit they specify, in the "
+                            "order they specify. Do NOT drop, merge, summarise, or shorten any requested "
+                            "section. Be maximally thorough — cover every relevant fact, date, party, figure, "
+                            "argument, exhibit, and quotation the documents support. There is NO upper length "
+                            "limit; write as long as the material requires (a full multi-page report). Do not "
+                            "stop early; if you approach the end of your output budget, finish the current "
+                            "section cleanly rather than leaving a table half-written.\n\n"
+                            "GROUNDING (this is a legal RAG task — accuracy is critical): ground every factual "
+                            "statement ONLY in the documents below and add a page reference like [p.N]. Write "
+                            "'Not found in uploaded file' wherever the documents do not support a point. Do NOT "
+                            "invent facts, outcomes, case law, or numbers, and do NOT use outside knowledge. "
+                            "Treat allegations as allegations unless an exhibit or order proves them. If "
+                            "something is unclear, say 'Unclear from uploaded file.'\n\n"
+                            "FORMATTING: begin each section with a bold heading on its own line (for example "
+                            "'**1. Document Classification and Reliability**'). Do NOT use '#', '##', or '###' "
+                            "heading marks — they render as literal text. Write ALL math in plain text/Unicode "
+                            "(use ×, ÷, >, ≥, ≤, %), NEVER LaTeX or $...$. Use Markdown tables for any tabular "
+                            "or itemised data.\n\n"
+                            f"=== DOCUMENTS ===\n{context}\n\n"
+                            f"=== USER REQUEST ===\n{effective_query_text}\n\n"
+                            "=== FULL REPORT ==="
                         )
                     elif is_comprehensive:
                         # Forceful long-form prompt: a small model treats a bare "summary" ask as
@@ -2874,6 +2961,12 @@ async def intelligent_chat_stream(
                             else settings.gemini_api_key
                         )
                         client = genai.Client(api_key=_stream_key)
+                        # Deep/extreme asks use this SAME single streaming call — the full document +
+                        # the no-ceiling, follow-the-user's-structure prompt built above. The earlier
+                        # per-section multi-pass was removed: splitting the report into grouped passes
+                        # fed each pass only per-group RAG snippets (not the whole case), which made
+                        # deep answers SHORTER, slower (5+ throttle-prone calls), and more
+                        # hallucination-prone than one call over the complete document.
                         stream_iter = client.models.generate_content_stream(
                             model=resolved_model_name,
                             contents=prompt,
