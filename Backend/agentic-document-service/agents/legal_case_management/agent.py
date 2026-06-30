@@ -20,6 +20,15 @@ except ImportError:  # pragma: no cover
     LlmAgent = None
     SequentialAgent = None
 
+# Teach ADK how to resolve admin-selected Gemma 4 models (gemma-4-*) before any
+# LlmAgent is built. No-op when ADK is unavailable. Selection stays DB-driven.
+try:
+    from app.services.adk_gemma_support import register_gemma4
+
+    register_gemma4()
+except Exception:  # pragma: no cover
+    pass
+
 
 SERVICE = get_pipeline_service()
 FOLDER_SERVICE = get_folder_service()

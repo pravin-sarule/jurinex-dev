@@ -94,30 +94,59 @@ def _build_learning_citations_from_chunks(chunks: list[dict[str, Any]]) -> list[
     return citations
 
 
+_COMPREHENSIVE_QUERY_KEYWORDS = (
+    "summary", "summarize", "summarise", "summaries", "summarization", "summarisation",
+    "comprehensive", "detailed", "in detail", "in-depth", "in depth", "overview",
+    "elaborate", "thorough", "exhaustive", "everything", "entire case", "whole case",
+    "full summary", "full detail", "full details", "full overview", "full picture",
+    "complete summary", "complete overview", "list all", "all events", "all the events",
+    "all data", "all the data", "all facts", "all details", "all dates", "all documents",
+    "all information", "all the information", "all points", "key points",
+)
+
+
+def _is_comprehensive_query(query: str) -> bool:
+    """True when the question wants a broad / whole-case answer (summary, all events,
+    detailed overview, "list all data in a table", etc.). Such questions keep the FULL
+    document context instead of focused chunks, so the answer can cover the entire case."""
+    q = (query or "").lower()
+    if any(kw in q for kw in _COMPREHENSIVE_QUERY_KEYWORDS):
+        return True
+    # Breadth signal + a content noun, in ANY word order — catches phrasings the keyword
+    # list misses, e.g. "list of data and event all in tabular format".
+    breadth = any(w in q for w in ("all", "every", "each", "tabular", "table", "list of", "list the", "list out"))
+    content = any(n in q for n in ("data", "event", "detail", "fact", "point", "date",
+                                   "document", "information", "record", "proceeding",
+                                   "timeline", "chronolog", "history", "part"))
+    return breadth and content
+
+
 def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[str]:
-    """Break long model output into small SSE chunks so the UI can render incrementally."""
+    """Slice model output into small SSE chunks for incremental UI rendering.
+
+    The slices preserve the EXACT original content — every space and newline — so
+    the chunks, once concatenated by the client, equal the input verbatim. That is
+    what keeps Markdown structure intact, especially tables (whose header, ``|---|``
+    separator, and rows must each stay on their own line) when a table row is split
+    across several stream deltas. We break on a nearby space/newline for nicer
+    word-by-word streaming, but never add, drop, or collapse any character.
+    """
     text = text or ""
     if not text:
         return []
     chunks: list[str] = []
-    for para in text.split("\n"):
-        if para == "":
-            chunks.append("\n")
-            continue
-        current: list[str] = []
-        size = 0
-        for word in para.split():
-            add = len(word) + (1 if current else 0)
-            if current and size + add > max_chunk_chars:
-                chunks.append(" ".join(current) + " ")
-                current = [word]
-                size = len(word)
-            else:
-                current.append(word)
-                size += add
-        if current:
-            chunks.append(" ".join(current) + "\n")
-    return chunks if chunks else [text]
+    i, n = 0, len(text)
+    while i < n:
+        end = min(i + max_chunk_chars, n)
+        if end < n:
+            # Prefer to cut at the last space/newline in the window so words and
+            # table cells aren't split mid-token; fall back to a hard cut.
+            cut = max(text.rfind(" ", i, end), text.rfind("\n", i, end))
+            if cut > i:
+                end = cut + 1
+        chunks.append(text[i:end])
+        i = end
+    return chunks
 
 
 def _gemini_chunk_text(chunk: Any) -> str:
@@ -2305,39 +2334,15 @@ async def intelligent_chat_stream(
                 }
             )
         else:
-            def _run_vector_chat():
-                bind_token_usage_session(usage_session_key)
-                try:
-                    return answer_case_folder_chat(
-                        user_id=user_id,
-                        folder_name=folder_name,
-                        request=resolved_chat_request,
-                        authorization=authorization,
-                    )
-                finally:
-                    unbind_token_usage_session()
-
-            try:
-                vector_result = await asyncio.wait_for(
-                    loop.run_in_executor(None, _run_vector_chat),
-                    timeout=vector_timeout_s,
-                )
-            except asyncio.TimeoutError:
-                vector_error = f"vector path timed out after {vector_timeout_s:.1f}s"
-                logger.info(
-                    "[Route:intelligent_chat_stream] vector path timeout folder=%s timeout=%.1fs — falling back to DB+Gemini",
-                    folder_name,
-                    vector_timeout_s,
-                )
-                yield _sse({"type": "thinking", "text": "Vector search is slow, switching to direct generation for faster output...\n"})
-            except Exception as exc:
-                vector_error = str(exc)
-                logger.info(
-                    "[Route:intelligent_chat_stream] vector_store miss folder=%s error=%s — falling back to DB+Gemini",
-                    folder_name,
-                    exc,
-                )
-                yield _sse({"type": "thinking", "text": "Vector retrieval is unavailable, using direct document reasoning...\n"})
+            # Vector "fast path" disabled. answer_case_folder_chat() runs a FULL non-stream Gemma
+            # generation that can't finish within vector_timeout_s for a thinking model, so it
+            # always timed out — and since a worker thread can't be cancelled, that discarded
+            # generation kept running to completion, costing a SECOND Gemma call per answer
+            # (wasted tokens + rate-limit pressure). The DB+Gemini fallback below now performs the
+            # same focused retrieval and streams the answer, so this path is redundant. Skipping
+            # it removes the waste; behaviour is otherwise identical (the fallback always ran).
+            vector_result = None
+            yield _sse({"type": "thinking", "text": "Retrieving the most relevant passages...\n"})
 
         # ── Step 3: if vector path succeeded and has a real answer, stream it ──
         if vector_result is not None:
@@ -2559,6 +2564,79 @@ async def intelligent_chat_stream(
                         chunk_exc,
                     )
 
+            # ── Normal chat: DYNAMIC context per question. ──
+            # Comprehensive / summary asks ("summarize the case", "list all events", "detailed
+            # overview") keep the FULL document(s) so the answer can cover the whole case.
+            # Specific questions use focused semantic chunks (~6K tokens) for speed + cost.
+            # On retrieval failure we keep the full documents (safe fallback).
+            # Comprehensive/detailed asks keep full context AND get a forceful long-form prompt +
+            # higher temperature below; specific asks stay focused/terse. Computed once, reused.
+            is_comprehensive = bool(not learning_mode and doc_texts and _is_comprehensive_query(query_text))
+            if is_comprehensive:
+                logger.info(
+                    "[Route:intelligent_chat_stream] comprehensive query folder=%s — keeping full-document context",
+                    folder_name,
+                )
+                yield _sse({"type": "thinking", "text": "Comprehensive request — reading the full case for a complete answer...\n"})
+            elif not learning_mode and doc_texts:
+                try:
+                    from app.services.learning_document_retrieval import get_relevant_chunks
+
+                    _fids = [str(d.get("file_id")) for d in doc_texts if d.get("file_id")]
+                    _fids = [x for x in _fids if x][:48]
+                    if _fids:
+                        def _fetch_chat_chunks():
+                            return get_relevant_chunks(
+                                user_id=user_id,
+                                case_id=folder_name,
+                                query=query_text,
+                                file_ids=_fids,
+                                top_k=12,
+                                include_surrounding_chunks=True,
+                                similarity_floor=0.40,
+                            )
+
+                        _chat_chunks = await _run_blocking(
+                            _fetch_chat_chunks,
+                            timeout_s=15.0,
+                            timeout_message="chat_chunk_retrieval",
+                        )
+                        if _chat_chunks:
+                            # Regroup relevant chunks into {name, text, file_id} per document so
+                            # downstream context-building + citations keep working — most-relevant
+                            # first, capped to a focused budget.
+                            _by_file: dict = {}
+                            _budget, _used = 24000, 0
+                            for _ch in _chat_chunks:
+                                _content = str(_ch.get("content") or "").strip()
+                                if not _content:
+                                    continue
+                                if _used + len(_content) > _budget:
+                                    break
+                                _meta = _ch.get("metadata") or {}
+                                _fid = str(_meta.get("file_id") or "")
+                                _name = str(_meta.get("document_name") or "document")
+                                _page = _ch.get("page_number")
+                                _page_bit = f"[p.{_page}] " if _page is not None else ""
+                                _entry = _by_file.setdefault(_fid, {"name": _name, "text": "", "file_id": _fid or None})
+                                _entry["text"] += f"{_page_bit}{_content}\n\n"
+                                _used += len(_content)
+                            _focused = [v for v in _by_file.values() if v["text"].strip()]
+                            if _focused:
+                                doc_texts = _focused
+                                logger.info(
+                                    "[Route:intelligent_chat_stream] focused retrieval folder=%s chunks=%s docs=%s chars=%s "
+                                    "(replaced full-document context)",
+                                    folder_name, len(_chat_chunks), len(_focused), _used,
+                                )
+                                yield _sse({"type": "thinking", "text": f"Found {len(_chat_chunks)} relevant passage(s); answering from those.\n"})
+                except Exception as _chunk_exc:
+                    logger.warning(
+                        "[Route:intelligent_chat_stream] chat chunk retrieval failed folder=%s err=%s — using full documents",
+                        folder_name,
+                        _chunk_exc,
+                    )
+
             yield _sse({"type": "status", "status": "generating", "message": "Generating answer from documents..."})
             yield _sse({"type": "thinking", "text": f"Loaded {len(doc_texts)} document(s). Generating answer now...\n"})
 
@@ -2634,12 +2712,47 @@ async def intelligent_chat_stream(
                             f"=== USER INPUT ===\n{effective_query_text}\n\n"
                             "=== JSON OUTPUT ==="
                         )
+                    elif is_comprehensive:
+                        # Forceful long-form prompt: a small model treats a bare "summary" ask as
+                        # license to be brief. Give it an explicit structure + length floor and tell
+                        # it not to compress, so it produces a full multi-section case analysis.
+                        prompt = (
+                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            "The user has asked for a COMPREHENSIVE, DETAILED answer. Produce an exhaustive, "
+                            "well-structured, long-form response grounded ONLY in the legal documents below. "
+                            "Do NOT compress, abbreviate, or omit relevant detail — this is a full case "
+                            "analysis, not a short summary.\n\n"
+                            "FORMATTING: structure the answer with bold section titles, each on its OWN line "
+                            "(for example: **Background and Material Facts**). Do NOT use '#', '##', or '###' "
+                            "heading marks — they are not rendered and show up as literal '##' text. "
+                            "Cover every part the documents support:\n"
+                            "- Parties and their roles\n"
+                            "- Background and material facts\n"
+                            "- Full chronology of events and dates (render as a Markdown table)\n"
+                            "- Issues / questions for determination\n"
+                            "- Each side's arguments and contentions\n"
+                            "- Evidence, documents, and authorities relied on\n"
+                            "- Findings, reasoning, and analysis\n"
+                            "- Holding / decision / order, with any reliefs, directions, or costs\n"
+                            "- Current status / next steps, if stated\n\n"
+                            "Use Markdown tables for any list of events, dates, parties, or itemised data. "
+                            "Be thorough and complete — aim for a detailed multi-section answer (roughly "
+                            "1,200-2,500 words when the documents contain enough material); be shorter ONLY if "
+                            "the documents genuinely lack content. Do not stop early. Stay accurate and grounded; "
+                            "if something is not in the documents, say so rather than inventing it.\n\n"
+                            f"=== DOCUMENTS ===\n{context}\n\n"
+                            f"=== QUESTION ===\n{effective_query_text}\n\n"
+                            "=== DETAILED ANSWER ==="
+                        )
                     else:
                         prompt = (
                             f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
-                            "Answer the user's question based ONLY on the "
-                            "following legal documents. Be concise and factual. If the answer is not in the "
-                            "documents, say so clearly.\n\n"
+                            "Answer the user's question based ONLY on the following legal documents. "
+                            "Match the length and depth to what the user actually asked for: when they request "
+                            "a detailed, comprehensive, full, or in-depth summary/answer, produce a thorough, "
+                            "well-structured, multi-section response that covers all relevant material from the "
+                            "documents; when they ask something narrow, keep it focused. Always stay accurate and "
+                            "grounded. If the answer is not in the documents, say so clearly.\n\n"
                             f"=== DOCUMENTS ===\n{context}\n\n"
                             f"=== QUESTION ===\n{effective_query_text}\n\n"
                             "=== ANSWER ==="
@@ -2738,7 +2851,29 @@ async def intelligent_chat_stream(
                     else:
                         # ── Gemini streaming path ─────────────────────────────────────
                         gemini_config = stream_cfg
-                        client = genai.Client(api_key=settings.gemini_api_key)
+                        # Comprehensive asks: nudge temperature up so the model writes a fuller,
+                        # less terse answer. The agent_prompts row uses a low temp (~0.3) tuned for
+                        # precise specific-question answers, which suppresses long-form output.
+                        if is_comprehensive:
+                            try:
+                                if isinstance(gemini_config, dict):
+                                    if float(gemini_config.get("temperature") or 0.0) < 0.6:
+                                        gemini_config["temperature"] = 0.6
+                                else:
+                                    _cur_temp = getattr(gemini_config, "temperature", None)
+                                    if _cur_temp is None or float(_cur_temp) < 0.6:
+                                        gemini_config.temperature = 0.6
+                            except Exception:
+                                pass
+                        # Gemma models must use the dedicated Gemma key (consistent with
+                        # document_ai._gemini_client); other gemini models use GEMINI_API_KEY.
+                        _stream_tail = (resolved_model_name or "").split("/")[-1].lower()
+                        _stream_key = (
+                            (settings.gemma_api_key or "").strip()
+                            if _stream_tail.startswith("gemma") and (settings.gemma_api_key or "").strip()
+                            else settings.gemini_api_key
+                        )
+                        client = genai.Client(api_key=_stream_key)
                         stream_iter = client.models.generate_content_stream(
                             model=resolved_model_name,
                             contents=prompt,

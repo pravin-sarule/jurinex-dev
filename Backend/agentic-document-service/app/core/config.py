@@ -112,6 +112,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EMBEDDING_MODEL"),
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
+    # Dedicated key for Gemma models (gemma-*). Falls back to GEMINI_API_KEY when blank.
+    gemma_api_key: str = Field(default="", validation_alias=AliasChoices("GEMMA_API_KEY"))
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
     deepseek_api_key: str = Field(
         default="",

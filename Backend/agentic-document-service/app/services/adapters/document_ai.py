@@ -178,18 +178,58 @@ def _deepseek_model_id(model_name: str) -> str:
 
 # ── API clients ───────────────────────────────────────────────────────────────
 
-def _gemini_client():
-    """Return a configured google.genai Client, or None if unavailable."""
+def _is_gemma_model(model_name: str | None) -> bool:
+    """True when the model id (after any vendor/ prefix) is a Gemma model."""
+    return _model_tail_lower(model_name or "").startswith("gemma")
+
+
+def _gemini_api_key_for_model(model_name: str | None) -> str:
+    """
+    Pick the API key for a google.genai call.
+
+    Gemma models use the dedicated GEMMA_API_KEY when configured; everything else
+    (Gemini) uses GEMINI_API_KEY. Gemma falls back to GEMINI_API_KEY when its own
+    key is blank, so a single key can still serve both.
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if _is_gemma_model(model_name):
+        gemma_key = str(getattr(settings, "gemma_api_key", "") or "").strip()
+        if gemma_key:
+            return gemma_key
+    return str(settings.gemini_api_key or "").strip()
+
+
+def _gemini_client(model_name: str | None = None):
+    """Return a configured google.genai Client, or None if unavailable.
+
+    For Gemma models, authenticates with GEMMA_API_KEY when set (falls back to
+    GEMINI_API_KEY). Provider selection itself stays driven by the DB model name.
+    """
     try:
         from google import genai  # type: ignore
-        from app.core.config import get_settings
 
-        api_key = get_settings().gemini_api_key
+        api_key = _gemini_api_key_for_model(model_name)
         if not api_key:
             return None
         return genai.Client(api_key=api_key)
     except Exception:
         return None
+
+
+def _api_key_label_for_model(model_name: str | None, provider: str) -> str:
+    """Human-readable label of which credential a call uses (for logs/debugging)."""
+    if provider == "claude":
+        return "ANTHROPIC_API_KEY"
+    if provider == "deepseek":
+        return "DEEPSEEK_API_KEY"
+    if _is_gemma_model(model_name):
+        from app.core.config import get_settings
+
+        has_gemma = bool(str(getattr(get_settings(), "gemma_api_key", "") or "").strip())
+        return "GEMMA_API_KEY" if has_gemma else "GEMINI_API_KEY (gemma fallback)"
+    return "GEMINI_API_KEY"
 
 
 def _anthropic_client():
@@ -1029,8 +1069,8 @@ def _generate_text(
     provider = _detect_provider(model_name)
 
     logger.info(
-        "[DocumentAI] generate  provider=%s  model=%s  agent=%s",
-        provider, model_name, agent_name or "N/A",
+        "[DocumentAI] LLM IN USE  provider=%s  model=%s  api_key=%s  agent=%s",
+        provider, model_name, _api_key_label_for_model(model_name, provider), agent_name or "N/A",
     )
 
     if provider == "claude":
@@ -1050,7 +1090,7 @@ def _generate_text(
         )
 
     # ── Gemini ───────────────────────────────────────────────────────────────
-    client = _gemini_client()
+    client = _gemini_client(model_name)
     if client is None:
         logger.warning("[DocumentAI] Gemini client unavailable — check GEMINI_API_KEY")
         return ""

@@ -1,14 +1,14 @@
 """
-Tabular terminal logger for agentic-document-service.
+Clean tabular terminal logger for agentic-document-service.
 
-Every log line is rendered as a fixed-width table row so the console output
-looks like a live dashboard instead of an unreadable wall of text.
+Each log line is one row of an aligned ASCII table. The metadata columns are
+fixed-width so they line up; the MESSAGE column is shown IN FULL (never
+truncated) so nothing important is lost.
 
-  TIME      LEVEL    COMPONENT              FUNCTION               MODEL                  STATUS      MESSAGE
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  13:01:40  INFO     BatchService           create_batch_job       gemini-2.0-flash       processing  Creating JSONL for 3 queries
-  13:01:52  INFO     HTTP                   —                      —                      completed   POST /api/batch/jobs 200
-  13:02:05  WARNING  LLMModelsCatalog       _load                  —                      info        Could not reach model catalog DB
+ TIME     │ LEVEL │ COMPONENT        │ FUNCTION            │ MODEL           │ MESSAGE
+ ─────────┼───────┼──────────────────┼─────────────────────┼─────────────────┼──────────────
+ 11:43:35 │ INFO  │ DocumentAI       │ _generate_text      │ gemma-4-31b-it  │ LLM IN USE  provider=gemini  api_key=GEMMA_API_KEY
+ 11:43:35 │ WARN  │ Embeddings       │ _gemini_embed       │ —               │ text-embedding-004 returned 404 — blacklisting
 """
 from __future__ import annotations
 
@@ -28,50 +28,50 @@ _LEVEL_COLOR = {
     'ERROR':    '\x1b[31m',          # red
     'CRITICAL': '\x1b[1;31m',        # bold red
 }
+# Short, fixed-width level labels so the column stays tidy.
+_LEVEL_SHORT = {'DEBUG': 'DEBUG', 'INFO': 'INFO', 'WARNING': 'WARN', 'ERROR': 'ERROR', 'CRITICAL': 'CRIT'}
+
 _STATUS_COLOR = {
     'processing': '\x1b[38;5;214m',  # orange
     'completed':  '\x1b[32m',         # green
     'failed':     '\x1b[31m',         # red
-    'info':       '\x1b[38;5;244m',   # grey
+    'info':       '',                 # default (no recolor)
 }
 _MODEL_COLOR  = '\x1b[35m'           # magenta
 _COMP_COLOR   = '\x1b[34m'           # blue
 _DIM          = '\x1b[38;5;240m'     # dark grey
 _HEADER_COLOR = '\x1b[1;37m'         # bold white
 
-# ── Column widths ─────────────────────────────────────────────────────────────
+# ── Column widths (MESSAGE is unbounded / never truncated) ──────────────────────
 _W = {
     'time':      8,
-    'level':     8,
-    'component': 18,
-    'function':  20,
-    'api':       28,
-    'model':     18,
-    'status':    11,
-    # message takes the rest
+    'level':     5,
+    'component': 16,
+    'function':  19,
+    'model':     15,
 }
+_BAR = f'{_DIM}│{_R}'   # column separator
 
 # ── Regex extractors ─────────────────────────────────────────────────────────
 _COMPONENT_RE = re.compile(r'\[([A-Za-z][^\]]{1,35})\]')
-_MODEL_RE     = re.compile(r'\b(gemini[-\w.]+|claude[-\w.]+|gpt[-\w.]+)', re.IGNORECASE)
-_KV_MODEL_RE  = re.compile(r'(?:llm_model|raw_llm_model|model)=([^\s,;|]+)')
+# Now recognizes gemma + deepseek too (not only gemini/claude/gpt).
+_MODEL_RE     = re.compile(r'\b(gemini[-\w.]+|gemma[-\w.]+|claude[-\w.]+|deepseek[-\w.]+|gpt[-\w.]+)', re.IGNORECASE)
+_KV_MODEL_RE  = re.compile(r'(?:llm_model|raw_llm_model|model)=([A-Za-z][^\s,;|]+)')
 _HTTP_RE      = re.compile(r'"(GET|POST|PUT|DELETE|PATCH)\s+(\S+)\s+HTTP/\S+"\s+(\d+)')
 
-_DONE_KW  = ('complete', 'success', 'ready', 'done', 'loaded', 'finish', ' ok', 'mounted', 'repaired')
-_FAIL_KW  = ('fail', 'error', 'exception', 'traceback', 'abort', 'invalid', 'denied')
+_DONE_KW  = ('complete', 'success', 'ready', 'done', 'loaded', 'finish', ' ok', 'mounted', 'repaired', 'passed', 'allowed')
+_FAIL_KW  = ('fail', 'error', 'exception', 'traceback', 'abort', 'invalid', 'denied', 'timeout', '404', '403', '401', '500')
 _PROC_KW  = ('start', 'creat', 'submit', 'upload', 'process', 'running', 'fetch',
-             'download', 'detect', 'build', 'poll', 'scan', 'ocr', 'generat', 'connect')
+             'download', 'detect', 'build', 'poll', 'scan', 'ocr', 'generat', 'connect', 'received')
 
 
 def _cell(text: str, width: int, color: str = '', rpad: bool = True) -> str:
-    """Truncate / pad text to exactly `width` visible characters."""
-    t = str(text or '—')
+    """Truncate / pad text to exactly `width` visible characters (used for metadata columns only)."""
+    t = str(text if text not in (None, '') else '—')
     if len(t) > width:
         t = t[:width - 1] + '…'
     padded = t.ljust(width) if rpad else t.rjust(width)
-    if color:
-        return f'{color}{padded}{_R}'
-    return padded
+    return f'{color}{padded}{_R}' if color else padded
 
 
 def _extract(record: logging.LogRecord) -> dict[str, Any]:
@@ -87,7 +87,7 @@ def _extract(record: logging.LogRecord) -> dict[str, Any]:
         parts = record.name.split('.')
         out['component'] = parts[-1] if len(parts) > 1 else record.name
 
-    # Model — prefer explicit kv pair, then free-text match
+    # Model — prefer explicit kv pair, then free-text match (gemini/gemma/claude/deepseek/gpt)
     kv_m = _KV_MODEL_RE.search(msg)
     if kv_m:
         out['model'] = kv_m.group(1)
@@ -95,13 +95,12 @@ def _extract(record: logging.LogRecord) -> dict[str, Any]:
         m = _MODEL_RE.search(msg)
         out['model'] = m.group(1) if m else '—'
 
-    # HTTP request — override component
+    # HTTP request — surface "METHOD status" as the component
     http_m = _HTTP_RE.search(msg)
     if http_m:
         out['component'] = f"{http_m.group(1)} {http_m.group(3)}"
-        out['http_path'] = http_m.group(2)
 
-    # Status
+    # Status (drives the message colour)
     if any(w in lower for w in _FAIL_KW):
         out['status'] = 'failed'
     elif any(w in lower for w in _DONE_KW):
@@ -115,10 +114,7 @@ def _extract(record: logging.LogRecord) -> dict[str, Any]:
 
 
 class TabularFormatter(logging.Formatter):
-    """
-    Formats each log record as one fixed-width table row.
-    A header + divider is printed once at the start of the process.
-    """
+    """One aligned table row per record; full (untruncated) message; header printed once."""
     _header_printed = False
 
     @classmethod
@@ -126,20 +122,18 @@ class TabularFormatter(logging.Formatter):
         if cls._header_printed:
             return
         cls._header_printed = True
-        sep = '─'
-        total = sum(_W.values()) + (len(_W) - 1) * 2 + 60  # 60 for message
-        cols = [
+        head = [
             _cell('TIME',      _W['time'],      _HEADER_COLOR),
             _cell('LEVEL',     _W['level'],     _HEADER_COLOR),
             _cell('COMPONENT', _W['component'], _HEADER_COLOR),
             _cell('FUNCTION',  _W['function'],  _HEADER_COLOR),
-            _cell('API / PATH', _W['api'],      _HEADER_COLOR),
             _cell('MODEL',     _W['model'],     _HEADER_COLOR),
-            _cell('STATUS',    _W['status'],    _HEADER_COLOR),
             f'{_HEADER_COLOR}MESSAGE{_R}',
         ]
-        header = '  '.join(cols)
-        divider = _DIM + sep * total + _R
+        header = f' {_BAR} '.join(head)
+        # Divider with ┼ joints under each │ for a clean table look.
+        segs = [_W['time'], _W['level'], _W['component'], _W['function'], _W['model']]
+        divider = _DIM + '─┼─'.join('─' * w for w in segs) + '─┼─' + '─' * 12 + _R
         print(header, file=sys.stderr)
         print(divider, file=sys.stderr)
 
@@ -149,41 +143,30 @@ class TabularFormatter(logging.Formatter):
         fields = _extract(record)
         ts     = time.strftime('%H:%M:%S', time.localtime(record.created))
         level  = record.levelname
-        func   = record.funcName or '—'
-        comp   = fields.get('component', '—')
-        model  = fields.get('model', '—')
         status = fields.get('status', 'info')
-        msg    = record.getMessage()
+        model  = fields.get('model', '—')
 
-        # API column: show "METHOD /path" for HTTP access logs, else route tag from [Route:xxx]
-        api_col = '—'
-        if fields.get('http_path'):
-            method = fields.get('http_method', '')
-            api_col = f"{method} {fields['http_path']}" if method else fields['http_path']
-        else:
-            route_m = re.search(r'\[Route:([^\]]+)\]', msg)
-            if route_m:
-                api_col = f"/{route_m.group(1).replace('_', '-')}"
+        msg = record.getMessage()
+        # Drop leading [Bracket] tags — the COMPONENT column already shows them.
+        msg = re.sub(r'^\s*(?:\[[\w\s:/_\-\.]{1,50}\]\s*)+', '', msg).strip() or record.getMessage()
+        # Indent any continuation lines (multi-line messages like the token table) so they
+        # don't collide with the columns, keeping the block readable.
+        if '\n' in msg:
+            msg = msg.replace('\n', '\n' + ' ' * 12)
+        # Colour the message by outcome (only failed/completed, so INFO stays plain & legible).
+        scolor = _STATUS_COLOR.get(status, '')
+        if scolor and status in ('failed', 'completed'):
+            msg = f'{scolor}{msg}{_R}'
 
-        # Shorten noisy logger prefixes from message
-        msg = re.sub(r'\[[\w\s:/_\-\.]{1,50}\]\s*', '', msg).strip() or msg
-
-        # Truncate long messages
-        if len(msg) > 85:
-            msg = msg[:83] + '…'
-
-        _API_COLOR = '\x1b[38;5;75m'   # light blue for API paths
-        cols = [
-            _cell(ts,      _W['time'],      _DIM),
-            _cell(level,   _W['level'],     _LEVEL_COLOR.get(level, '')),
-            _cell(comp,    _W['component'], _COMP_COLOR),
-            _cell(func,    _W['function'],  _DIM),
-            _cell(api_col, _W['api'],       _API_COLOR if api_col != '—' else _DIM),
-            _cell(model,   _W['model'],     _MODEL_COLOR if model != '—' else _DIM),
-            _cell(status,  _W['status'],    _STATUS_COLOR.get(status, '')),
+        cells = [
+            _cell(ts,                _W['time'],      _DIM),
+            _cell(_LEVEL_SHORT.get(level, level), _W['level'], _LEVEL_COLOR.get(level, '')),
+            _cell(fields.get('component', '—'),   _W['component'], _COMP_COLOR),
+            _cell(record.funcName or '—',         _W['function'],  _DIM),
+            _cell(model,             _W['model'],     _MODEL_COLOR if model != '—' else _DIM),
             msg,
         ]
-        return '  '.join(cols)
+        return f' {_BAR} '.join(cells)
 
 
 def configure_logging(level: str) -> None:

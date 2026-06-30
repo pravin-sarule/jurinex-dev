@@ -28,6 +28,7 @@ _QUERIES = (
       AND COALESCE(is_active, true) = true
       AND (
         LOWER(TRIM(name::text)) LIKE 'gemini%'
+        OR LOWER(TRIM(name::text)) LIKE 'gemma%'
         OR LOWER(TRIM(name::text)) LIKE 'claude%'
         OR LOWER(TRIM(name::text)) LIKE 'deepseek%'
       )
@@ -39,6 +40,7 @@ _QUERIES = (
     WHERE name IS NOT NULL AND TRIM(name::text) <> ''
       AND (
         LOWER(TRIM(name::text)) LIKE 'gemini%'
+        OR LOWER(TRIM(name::text)) LIKE 'gemma%'
         OR LOWER(TRIM(name::text)) LIKE 'claude%'
         OR LOWER(TRIM(name::text)) LIKE 'deepseek%'
       )
@@ -130,7 +132,12 @@ def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
         return catalog[tail]
     if not catalog:
         return candidate
-    if tail.startswith("gemini") or tail.startswith("claude") or tail.startswith("deepseek"):
+    if (
+        tail.startswith("gemini")
+        or tail.startswith("gemma")
+        or tail.startswith("claude")
+        or tail.startswith("deepseek")
+    ):
         return candidate
     return fb if fb else candidate
 

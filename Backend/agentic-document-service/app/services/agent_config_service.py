@@ -237,7 +237,7 @@ def _model_name_from_llm_parameters(llm_params: dict[str, Any]) -> str | None:
         if not s:
             continue
         low = s.lower()
-        if low.startswith(("claude", "gemini", "deepseek")) or "/" in s:
+        if low.startswith(("claude", "gemini", "gemma", "deepseek")) or "/" in s:
             return s
     return None
 
