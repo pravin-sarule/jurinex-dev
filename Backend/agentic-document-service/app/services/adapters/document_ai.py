@@ -551,6 +551,26 @@ def _gemini_model_supports_thinking_config(model_name: str | None) -> bool:
     return False
 
 
+def _model_max_output_tokens(model_name: str | None) -> int | None:
+    """Known hard output-token ceiling per model, or None when unknown (no clamp).
+
+    Requesting MORE than a model's real limit is invalid: the Gemini API may silently fall
+    back to a low default (≈8192) instead of the true maximum, which truncates long answers.
+    Gemma-4 (gemma-4-31b-it) reports output_token_limit=32768 via models.get; gemini-2.5/3
+    support 65536; gemini-2.0/1.5 cap at 8192. Clamp the request to this so we always ask for
+    the model's real maximum, never above it."""
+    m = (model_name or "").strip().lower().rsplit("/", 1)[-1]
+    if not m:
+        return None
+    if m.startswith("gemma"):
+        return 32768
+    if "2.5" in m or "2-5" in m or "gemini-3" in m:
+        return 65536
+    if "gemini-2.0" in m or "gemini-1.5" in m or "gemini-1-5" in m:
+        return 8192
+    return None
+
+
 # ── Gemini config builder ─────────────────────────────────────────────────────
 
 def _build_gemini_config(
@@ -584,6 +604,15 @@ def _build_gemini_config(
         config_kwargs = dict(gen_kwargs)
         tools: list = []
         active_flags: list[str] = []
+
+        # ── Clamp max_output_tokens to the model's real ceiling ──────────────
+        # Requesting above a model's limit (e.g. 65536 on gemma-4, whose limit is 32768) is
+        # invalid and can make the API fall back to a low default. Always ask for the real max.
+        _mot = config_kwargs.get("max_output_tokens")
+        _lim = _model_max_output_tokens(model_name)
+        if _mot and _lim and int(_mot) > _lim:
+            config_kwargs["max_output_tokens"] = _lim
+            active_flags.append(f"max_output_tokens_clamped({_mot}->{_lim})")
 
         # ── Tools ────────────────────────────────────────────────────────────
         if llm_params.get("url_context"):

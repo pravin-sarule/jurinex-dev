@@ -204,6 +204,36 @@ def _gemini_chunk_text(chunk: Any) -> str:
     return ""
 
 
+def _gemini_chunk_parts(chunk: Any) -> tuple[str, str]:
+    """Split a streaming chunk into (answer_text, thought_text).
+
+    gemma-4 streams its reasoning as content parts flagged ``thought=True``; the SDK's
+    ``chunk.text`` EXCLUDES those, so a thought-only chunk looks empty and the stream loop would
+    skip every chunk (never setting ``streamed``) and fall back to a non-stream dump. We read the
+    parts directly: ``thought=True`` parts are surfaced as live 'thinking', the rest are the
+    answer. Falls back to ``chunk.text`` when no parts are exposed (older response shape)."""
+    answer: list[str] = []
+    thought: list[str] = []
+    try:
+        for cand in (getattr(chunk, "candidates", None) or []):
+            content = getattr(cand, "content", None)
+            for part in (getattr(content, "parts", None) or []):
+                t = getattr(part, "text", None)
+                if not t:
+                    continue
+                if getattr(part, "thought", False):
+                    thought.append(str(t))
+                else:
+                    answer.append(str(t))
+    except Exception:
+        pass
+    if not answer and not thought:
+        raw = getattr(chunk, "text", None)
+        if raw:
+            answer.append(str(raw))
+    return "".join(answer), "".join(thought)
+
+
 def _learning_case_excerpt_for_remediation(doc_texts: list[dict[str, Any]], *, max_chars: int = 48000) -> str:
     """Concatenate folder document text for the remediation agent (capped)."""
     parts: list[str] = []
@@ -2771,19 +2801,40 @@ async def intelligent_chat_stream(
                         # the report into grouped passes fragmented the context (per-group RAG snippets
                         # instead of the whole case) and the output, making answers SHORTER, slower,
                         # and more hallucination-prone. The user's own prompt carries the structure,
-                        # so we just tell the model to follow it exactly and exhaustively.
+                        # so we just tell the model to follow it exactly and exhaustively. Small
+                        # models (gemma-4) tend to emit an end-of-turn EARLY on long structured asks
+                        # (finish_reason=STOP well before the token limit) — e.g. 17 of 22 points. We
+                        # counter that with an explicit completion contract anchored to the user's own
+                        # number of requested points.
+                        _deep_n_points = len(_find_numbered_headings(query_text))
+                        if _deep_n_points >= 4:
+                            _deep_completion_clause = (
+                                f"COMPLETION CONTRACT: the user's request contains {_deep_n_points} numbered "
+                                f"points/sections. Your output MUST contain ALL {_deep_n_points} of them, "
+                                f"numbered 1 to {_deep_n_points}, each with its own bold heading. After you "
+                                "finish one point, IMMEDIATELY begin the next. Do NOT write any closing "
+                                "remarks, overall summary, or sign-off until the FINAL numbered point is "
+                                f"complete. If you feel you are 'done' before point {_deep_n_points}, you are "
+                                "NOT — keep writing until every numbered point exists.\n\n"
+                            )
+                        else:
+                            _deep_completion_clause = (
+                                "COMPLETION CONTRACT: write EVERY section the user requested, in order. Do "
+                                "NOT conclude, summarise, or stop until all requested sections are written.\n\n"
+                            )
                         prompt = (
                             f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
                             "The user has requested an EXHAUSTIVE, deeply detailed report. Produce the "
                             "COMPLETE report in this single response.\n\n"
+                            + _deep_completion_clause +
                             "FOLLOW THE USER'S REQUESTED STRUCTURE EXACTLY AND COMPLETELY: reproduce every "
                             "section, heading, table, column, row count, and word limit they specify, in the "
                             "order they specify. Do NOT drop, merge, summarise, or shorten any requested "
                             "section. Be maximally thorough — cover every relevant fact, date, party, figure, "
                             "argument, exhibit, and quotation the documents support. There is NO upper length "
-                            "limit; write as long as the material requires (a full multi-page report). Do not "
-                            "stop early; if you approach the end of your output budget, finish the current "
-                            "section cleanly rather than leaving a table half-written.\n\n"
+                            "limit; write as long as the material requires (a full multi-page report). Keep "
+                            "writing section after section — do NOT wind down or conclude until the last "
+                            "requested point is finished.\n\n"
                             "GROUNDING (this is a legal RAG task — accuracy is critical): ground every factual "
                             "statement ONLY in the documents below and add a page reference like [p.N]. Write "
                             "'Not found in uploaded file' wherever the documents do not support a point. Do NOT "
@@ -2796,7 +2847,10 @@ async def intelligent_chat_stream(
                             "(use ×, ÷, >, ≥, ≤, %), NEVER LaTeX or $...$. Use Markdown tables for any tabular "
                             "or itemised data.\n\n"
                             f"=== DOCUMENTS ===\n{context}\n\n"
-                            f"=== USER REQUEST ===\n{effective_query_text}\n\n"
+                            # RAW query_text, NOT effective_query_text: the latter prepends prior
+                            # conversation turns (e.g. an earlier 17-section benchmark), whose
+                            # structure the model then follows instead of THIS request's points.
+                            f"=== USER REQUEST ===\n{query_text}\n\n"
                             "=== FULL REPORT ==="
                         )
                     elif is_comprehensive:
@@ -2974,11 +3028,23 @@ async def intelligent_chat_stream(
                         )
                         # Generous limits: short per-chunk timeouts were stopping the stream mid-answer
                         # when the model paused between chunks, producing truncated UI responses.
-                        first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
+                        # Comprehensive/deep asks send a huge prompt (full doc + structure), so the
+                        # model needs much longer to emit the FIRST token. Give it room before falling
+                        # back to non-stream — a premature fallback both loses streaming AND (for deep)
+                        # routes through a path that truncates the prompt.
+                        if is_comprehensive:
+                            first_chunk_timeout_s = min(360.0, max(180.0, non_stream_timeout_s))
+                        else:
+                            first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
                         next_chunk_timeout_s = 600.0
                         agg_full = ""
+                        # _got_content tracks ANY streamed content (gemma-4's thought parts count too),
+                        # so the long first-chunk timeout only applies until the model STARTS emitting,
+                        # not between later chunks. `streamed` (which gates the non-stream fallback) is
+                        # still set only when real ANSWER text flows.
+                        _got_content = False
                         while True:
-                            chunk_timeout_s = first_chunk_timeout_s if not streamed else next_chunk_timeout_s
+                            chunk_timeout_s = first_chunk_timeout_s if not _got_content else next_chunk_timeout_s
                             try:
                                 chunk = await asyncio.wait_for(
                                     loop.run_in_executor(None, lambda it=stream_iter: next(it, None)),
@@ -3008,9 +3074,17 @@ async def intelligent_chat_stream(
                                     "outputTokens": completion_tokens,
                                     "totalTokens": total_tokens,
                                 }
-                            piece = _gemini_chunk_text(chunk)
+                            piece, thought_piece = _gemini_chunk_parts(chunk)
+                            # gemma-4 streams its reasoning as thought parts (chunk.text excludes
+                            # them). Surface them LIVE as "thinking" so the UI shows activity during a
+                            # long thinking phase instead of freezing — and so the loop never skips
+                            # every chunk and silently falls back to a non-stream dump.
+                            if thought_piece:
+                                _got_content = True
+                                yield _sse({"type": "thinking", "text": thought_piece})
                             if not piece:
                                 continue
+                            _got_content = True
                             if not agg_full:
                                 delta = piece
                                 agg_full = piece
@@ -3075,37 +3149,90 @@ async def intelligent_chat_stream(
                 except Exception:
                     pass
 
-                qa_result = await _run_blocking(
-                    lambda: _call_gemini_for_qa(
-                        _truncate_prompt(effective_query_text, max_chars=12000, label="non_stream_query"),
-                        doc_texts,
-                        query_intent="summary",
-                        output_format="structured",
-                        system_instruction=_truncate_prompt(
-                            non_stream_system_instruction,
-                            max_chars=64000,
-                            label="non_stream_system_instruction",
-                        ),
-                        summarization_llm_config=llm_config,
-                        agent_name=learning_agent_name,
-                        model_name_override=selected_model_name,
-                    ),
-                    timeout_s=non_stream_timeout_s,
-                    timeout_message="gemini_non_stream_generation",
-                )
-                answer = (qa_result.get("answer") or "").strip()
-                if not answer:
-                    yield _sse({"type": "error", "message": "Could not generate an answer. Please try rephrasing your question."})
-                    return
-                source_docs = qa_result.get("source_documents", "")
-                if source_docs:
-                    source_names = [item.strip() for item in source_docs.split(",") if item.strip()]
-                answer_parts = [answer]
-                async for sse_line in _yield_text_as_streaming_chunks(
-                    _sse, answer, delay_ms=stream_delay_ms
+                # ── Comprehensive/deep fallback: run the FULL prompt non-stream ──────────
+                # The generic QA path below truncates the user prompt to 12K chars and uses a
+                # summary template — fatal for a long, structured deep ask (it drops the later
+                # numbered points and ignores the completion contract). For comprehensive/deep
+                # gemini asks, run the SAME `prompt` (full doc + structure) non-stream instead.
+                # These were assigned inside the streaming try above; on an early failure they may
+                # be unbound, so read them defensively (locals().get never raises for unbound names).
+                _ns_provider = locals().get("stream_provider")
+                _ns_model = locals().get("resolved_model_name")
+                _ns_cfg = locals().get("gemini_config")
+                _ns_client = locals().get("client")
+                _ns_prompt = locals().get("prompt")
+                _deep_fallback_done = False
+                if (
+                    is_comprehensive and not learning_mode and _ns_provider == "gemini"
+                    and _ns_model and _ns_cfg is not None and _ns_client is not None and _ns_prompt
                 ):
-                    yield sse_line
-                yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
+                    try:
+                        _ns_resp = await _run_blocking(
+                            lambda: _ns_client.models.generate_content(
+                                model=_ns_model, contents=_ns_prompt, config=_ns_cfg,
+                            ),
+                            timeout_s=non_stream_timeout_s,
+                            timeout_message="gemini_non_stream_deep",
+                        )
+                        _ns_text = (getattr(_ns_resp, "text", "") or "").strip()
+                        if _ns_text:
+                            _ns_um = getattr(_ns_resp, "usage_metadata", None)
+                            if _ns_um is not None:
+                                _p = int(getattr(_ns_um, "prompt_token_count", 0) or 0)
+                                _c = int(getattr(_ns_um, "candidates_token_count", 0) or 0)
+                                stream_usage = {
+                                    "provider": "gemini",
+                                    "model": _ns_model,
+                                    "inputTokens": _p,
+                                    "outputTokens": _c,
+                                    "totalTokens": int(getattr(_ns_um, "total_token_count", 0) or 0) or (_p + _c),
+                                }
+                            answer_parts = [_ns_text]
+                            async for sse_line in _yield_text_as_streaming_chunks(
+                                _sse, _ns_text, delay_ms=stream_delay_ms
+                            ):
+                                yield sse_line
+                            yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
+                            _deep_fallback_done = True
+                    except Exception as _ns_deep_exc:
+                        logger.warning(
+                            "[Route:intelligent_chat_stream] folder=%s deep non-stream fallback failed (%s) — using generic QA",
+                            folder_name,
+                            _ns_deep_exc,
+                        )
+
+                if not _deep_fallback_done:
+                    qa_result = await _run_blocking(
+                        lambda: _call_gemini_for_qa(
+                            _truncate_prompt(effective_query_text, max_chars=12000, label="non_stream_query"),
+                            doc_texts,
+                            query_intent="summary",
+                            output_format="structured",
+                            system_instruction=_truncate_prompt(
+                                non_stream_system_instruction,
+                                max_chars=64000,
+                                label="non_stream_system_instruction",
+                            ),
+                            summarization_llm_config=llm_config,
+                            agent_name=learning_agent_name,
+                            model_name_override=selected_model_name,
+                        ),
+                        timeout_s=non_stream_timeout_s,
+                        timeout_message="gemini_non_stream_generation",
+                    )
+                    answer = (qa_result.get("answer") or "").strip()
+                    if not answer:
+                        yield _sse({"type": "error", "message": "Could not generate an answer. Please try rephrasing your question."})
+                        return
+                    source_docs = qa_result.get("source_documents", "")
+                    if source_docs:
+                        source_names = [item.strip() for item in source_docs.split(",") if item.strip()]
+                    answer_parts = [answer]
+                    async for sse_line in _yield_text_as_streaming_chunks(
+                        _sse, answer, delay_ms=stream_delay_ms
+                    ):
+                        yield sse_line
+                    yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
 
             raw_answer = normalize_markdown_render_output("".join(answer_parts))
             if not raw_answer:
