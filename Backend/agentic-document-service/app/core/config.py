@@ -78,6 +78,27 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DOCUMENT_AI_OCR_PROCESSOR_VERSION_ID"),
     )
+    # ── Document AI OCR quality levers (anti-fragmentation) ──────────────────
+    # Read the PDF's embedded Unicode text layer for born-digital PDFs instead of
+    # rasterizing + OCR. This is the single biggest fix for space-fragmented text
+    # ("Sug riv", "18 % p .a .") because it bypasses OCR word-segmentation entirely
+    # for digital PDFs. Harmless for scanned PDFs/images (Document AI ignores it).
+    document_ai_enable_native_pdf_parsing: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("DOCUMENT_AI_ENABLE_NATIVE_PDF_PARSING"),
+    )
+    # Premium math OCR — recovers "18% p.a.", "₹1,50,000", super/subscripts cleanly.
+    # Requires a processor version that supports premium features; default off so a
+    # basic OCR processor never rejects the request.
+    document_ai_enable_math_ocr: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DOCUMENT_AI_ENABLE_MATH_OCR"),
+    )
+    # Emit symbol-level detail (lets downstream code rebuild words from glyphs).
+    document_ai_enable_symbol: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DOCUMENT_AI_ENABLE_SYMBOL"),
+    )
     google_application_credentials: str = Field(
         default="",
         validation_alias=AliasChoices("GOOGLE_APPLICATION_CREDENTIALS"),
@@ -117,6 +138,16 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DEEPSEEK_API_KEY", "Deepseek_API_KEY"),
     )
+    # Concrete model ids used when the UI sends a bare provider label
+    # ("deepseek"/"claude") instead of a specific model name.
+    deepseek_model: str = Field(
+        default="deepseek-v4-flash",
+        validation_alias=AliasChoices("DEEPSEEK_MODEL"),
+    )
+    claude_model: str = Field(
+        default="claude-sonnet-4-6",
+        validation_alias=AliasChoices("CLAUDE_MODEL"),
+    )
     cloud_speech_to_text_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("CLOUD_SPEECH_TO_TEXT_API_KEY"),
@@ -140,7 +171,10 @@ class Settings(BaseSettings):
         default="http://localhost:8000",
         validation_alias=AliasChoices("AGENT_DRAFT_SERVICE_URL", "DRAFTING_SERVICE_URL"),
     )
-    retrieval_top_k: int = 8
+    retrieval_top_k: int = Field(
+        default=40,
+        validation_alias=AliasChoices("RETRIEVAL_TOP_K"),
+    )
     chunk_size: int = 750
     chunk_overlap: int = 160
     chunk_min_tokens: int = 500

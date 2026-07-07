@@ -52,6 +52,26 @@ class OcrResult:
     quality_score: float
 
 
+def _clean_extracted_text(text: str) -> str:
+    """
+    Repair deterministic PDF/OCR word-splits (e.g. "St amps" -> "Stamps",
+    "De ed" -> "Deed") at extraction time so the stored text, the embeddings,
+    and every downstream LLM call (DeepSeek/Claude/Gemini) receive clean input.
+
+    Reuses the shared, SAFE repair from document_ai (number-merge + curated
+    dictionary + dictionary-backed rejoiner) — it only joins KNOWN split forms,
+    never a blanket short-token merge, so normal prose ("in court", "to do") is
+    never corrupted. Best-effort: returns the input unchanged on any error.
+    """
+    if not text:
+        return text
+    try:
+        from app.services.adapters.document_ai import normalize_ocr_artifacts
+        return normalize_ocr_artifacts(text)
+    except Exception:
+        return text
+
+
 # ── PDF page-batch helpers ─────────────────────────────────────────────────────
 
 def _pdf_page_count(data: bytes) -> int:
@@ -100,15 +120,77 @@ def _merge_ocr_results(results: list[OcrResult]) -> OcrResult:
 
 # ── Document AI single-batch call ─────────────────────────────────────────────
 
-def _call_document_ai(batch_bytes: bytes, mime_type: str, client, processor_name: str) -> OcrResult:
+def _build_ocr_process_options():
+    """
+    Build Document AI ``ProcessOptions`` that suppress space-fragmentation.
+
+    The decisive lever is ``enable_native_pdf_parsing``: for born-digital PDFs
+    Document AI reads the embedded Unicode text layer directly instead of
+    rasterizing the page and running glyph-level OCR. That bypasses the OCR
+    word-segmenter entirely, so spurious intra-word spaces ("Sug riv",
+    "18 % p .a .") are never produced in the first place — no dictionary needed.
+
+    ``enable_math_ocr`` / ``enable_symbol`` are premium and only enabled when the
+    operator opts in (a basic OCR processor version would reject them otherwise).
+
+    Returns ``None`` on any error so the caller falls back to a plain request.
+    """
+    try:
+        from google.cloud import documentai  # type: ignore
+        from app.core.config import get_settings
+
+        s = get_settings()
+        native_pdf = bool(getattr(s, "document_ai_enable_native_pdf_parsing", True))
+        enable_math = bool(getattr(s, "document_ai_enable_math_ocr", False))
+        enable_symbol = bool(getattr(s, "document_ai_enable_symbol", False))
+
+        ocr_config_kwargs: dict = {"enable_native_pdf_parsing": native_pdf}
+        if enable_symbol:
+            ocr_config_kwargs["enable_symbol"] = True
+        if enable_math:
+            ocr_config_kwargs["premium_features"] = documentai.OcrConfig.PremiumFeatures(
+                enable_math_ocr=True,
+            )
+
+        return documentai.ProcessOptions(ocr_config=documentai.OcrConfig(**ocr_config_kwargs))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("[DocumentAI OCR] could not build ProcessOptions: %s", exc)
+        return None
+
+
+def _call_document_ai(
+    batch_bytes: bytes,
+    mime_type: str,
+    client,
+    processor_name: str,
+    process_options=None,
+) -> OcrResult:
     """Send a single batch to Document AI and return OcrResult."""
     from google.cloud import documentai  # type: ignore
 
     raw_doc = documentai.RawDocument(content=batch_bytes, mime_type=mime_type)
-    request = documentai.ProcessRequest(name=processor_name, raw_document=raw_doc)
-    result = client.process_document(request=request)
+    request = documentai.ProcessRequest(
+        name=processor_name,
+        raw_document=raw_doc,
+        process_options=process_options,
+    )
+    try:
+        result = client.process_document(request=request)
+    except Exception as exc:
+        # A processor version that doesn't support a chosen OCR option (e.g.
+        # premium math OCR) raises InvalidArgument. Never drop the batch over a
+        # config mismatch — retry once with a plain request.
+        if process_options is not None:
+            logger.warning(
+                "[DocumentAI OCR] process_options rejected (%s) — retrying without options",
+                exc,
+            )
+            plain = documentai.ProcessRequest(name=processor_name, raw_document=raw_doc)
+            result = client.process_document(request=plain)
+        else:
+            raise
     doc = result.document
-    text = doc.text or ""
+    text = _clean_extracted_text(doc.text or "")
     page_count = len(doc.pages)
     avg_chars = len(text) / max(page_count, 1)
     quality_score = min(1.0, avg_chars / 500.0)
@@ -159,8 +241,24 @@ def _load_google_credentials() -> object | None:
         return None
 
 
+def _get_ocr_processor_version_id() -> str:
+    """Return the pinned OCR processor *version* id, if configured."""
+    try:
+        from app.core.config import get_settings
+        return (getattr(get_settings(), "document_ai_ocr_processor_version_id", "") or "").strip()
+    except Exception:
+        return ""
+
+
 def _build_document_ai_client(location: str, project_id: str, processor_id: str):
-    """Build a Document AI client and return (client, processor_name)."""
+    """
+    Build a Document AI client and return (client, processor_name).
+
+    When ``document_ai_ocr_processor_version_id`` is set we target that specific
+    processor *version* (``processor_version_path``) so a stronger/newer OCR model
+    can be pinned. Otherwise we fall back to the processor's default version
+    (``processor_path``).
+    """
     from google.cloud import documentai  # type: ignore
 
     client_options = {"api_endpoint": f"{location}-documentai.googleapis.com"}
@@ -170,7 +268,17 @@ def _build_document_ai_client(location: str, project_id: str, processor_id: str)
         if creds is not None
         else documentai.DocumentProcessorServiceClient(client_options=client_options)
     )
-    processor_name = client.processor_path(project_id, location, processor_id)
+
+    version_id = _get_ocr_processor_version_id()
+    if version_id:
+        processor_name = client.processor_version_path(
+            project_id, location, processor_id, version_id
+        )
+        logger.info(
+            "[DocumentAI OCR] using pinned processor version: %s", processor_name
+        )
+    else:
+        processor_name = client.processor_path(project_id, location, processor_id)
     return client, processor_name
 
 
@@ -180,6 +288,7 @@ def _parallel_ocr_bytes(
     client,
     processor_name: str,
     *,
+    process_options=None,
     progress_callback: Callable[[float], None] | None = None,
     progress_start: float = 22.0,
     progress_end: float = 63.0,
@@ -218,7 +327,7 @@ def _parallel_ocr_bytes(
     if not is_pdf or page_count == 0 or page_count <= page_limit:
         _report(progress_start)
         t0 = time.monotonic()
-        result = _call_document_ai(data, mime_type, client, processor_name)
+        result = _call_document_ai(data, mime_type, client, processor_name, process_options)
         elapsed = time.monotonic() - t0
         logger.info(
             "[DocumentAI OCR] single-batch pages=%d chars=%d elapsed=%.2fs quality=%.2f",
@@ -242,7 +351,7 @@ def _parallel_ocr_bytes(
 
     with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="ocr-batch") as pool:
         future_to_index = {
-            pool.submit(_call_document_ai, batch, mime_type, client, processor_name): idx
+            pool.submit(_call_document_ai, batch, mime_type, client, processor_name, process_options): idx
             for idx, batch in enumerate(batches)
         }
 
@@ -419,11 +528,13 @@ def extract_text_from_gcs(
         from app.services.adapters.gcs import download_bytes
         raw_bytes = download_bytes(gs_uri)
         client, processor_name = _build_document_ai_client(location, project_id, processor_id)
+        process_options = _build_ocr_process_options()
         result = _parallel_ocr_bytes(
             raw_bytes,
             resolved_mime_type,
             client,
             processor_name,
+            process_options=process_options,
             progress_callback=progress_callback,
             progress_start=progress_start,
             progress_end=progress_end,
@@ -463,11 +574,13 @@ def extract_text_from_bytes(
     if project_id and processor_id:
         try:
             client, processor_name = _build_document_ai_client(location, project_id, processor_id)
+            process_options = _build_ocr_process_options()
             result = _parallel_ocr_bytes(
                 data,
                 mime_type,
                 client,
                 processor_name,
+                process_options=process_options,
                 progress_callback=progress_callback,
                 progress_start=progress_start,
                 progress_end=progress_end,
@@ -537,7 +650,7 @@ def _fallback_extract_from_bytes(
                 if total_pages > 0:
                     pct = progress_start + ((page_idx + 1) / total_pages) * (progress_end - progress_start)
                     _report(pct)
-            text = "\n\n".join(pages_text).strip()
+            text = _clean_extracted_text("\n\n".join(pages_text).strip())
             page_count = total_pages
             quality_score = min(1.0, len(text) / max(page_count * 500, 1))
             logger.info("[DocumentAI OCR] pypdf fallback pages=%d chars=%d", page_count, len(text))

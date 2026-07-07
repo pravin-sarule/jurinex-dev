@@ -2,8 +2,7 @@ import React, { useMemo } from 'react';
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import remarkMath from 'remark-math';
 import {
   formatChatResponseForDisplay,
   chatResponseLooksLikeHtml,
@@ -11,6 +10,8 @@ import {
 import {
   ensureTableSeparators,
   markdownTableComponents,
+  markdownRehypePlugins,
+  normalizeMarkdownFormatting,
   splitMarkdownIntoRenderChunks,
 } from '../../utils/markdownUtils';
 
@@ -23,9 +24,18 @@ import {
  */
 const FormattedAssistantContent = React.memo(
   function FormattedAssistantContent({ raw, markdownComponents, className = '' }) {
-    const content = useMemo(() => formatChatResponseForDisplay(raw), [raw]);
+    const content = useMemo(() => {
+      let cleaned = formatChatResponseForDisplay(raw);
+      if (!cleaned) return '';
+      // Clean thinking content before rendering
+      cleaned = cleaned.replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '');
+      if (/<(?:think|thinking)>/i.test(cleaned)) {
+        cleaned = cleaned.split(/<(?:think|thinking)>/i)[0];
+      }
+      return cleaned;
+    }, [raw]);
     const markdownChunks = useMemo(
-      () => splitMarkdownIntoRenderChunks(ensureTableSeparators(content)),
+      () => splitMarkdownIntoRenderChunks(ensureTableSeparators(normalizeMarkdownFormatting(content))),
       [content],
     );
 
@@ -45,8 +55,8 @@ const FormattedAssistantContent = React.memo(
         {markdownChunks.map((chunk, index) => (
           <ReactMarkdown
             key={`${index}-${chunk.length}`}
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+            remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+            rehypePlugins={markdownRehypePlugins}
             components={{ ...markdownTableComponents, ...markdownComponents }}
           >
             {chunk}

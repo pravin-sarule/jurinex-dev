@@ -1302,6 +1302,27 @@ def import_google_drive_documents(
     return queue_result
 
 
+@router.post("/{folder_name}/clean-chunks")
+def clean_case_chunk_text(
+    folder_name: str,
+    llm: bool = Query(default=True, description="Use LLM reconstruction for chunks still fragmented after the deterministic pass."),
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """
+    Re-clean the text of a case's ALREADY-stored chunks IN PLACE (no PDF re-OCR,
+    no re-embedding; embeddings and chat history are kept).
+
+    Two passes per chunk: a free deterministic OCR-artefact repair, then — when
+    `llm=true` (default) and the chunk still looks fragmented — an LLM
+    reconstruction pass that repairs arbitrary fragments (names/places, "p .a .",
+    "18 %") a dictionary cannot. Run once per case after the OCR-cleanup work.
+    Pass `?llm=false` for the deterministic-only (free) pass.
+    """
+    user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    return get_folder_service().clean_existing_chunk_text(user_id, folder_name, use_llm=llm)
+
+
 def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUploadUrlRequest, llm_config: dict[str, Any] | None = None) -> dict[str, Any]:
     safe_name = (request.filename or f"upload-{uuid.uuid4().hex[:8]}").replace("\\", "_").replace("/", "_")
     object_path = str(PurePosixPath(user_id) / "documents" / folder_name / f"{uuid.uuid4().hex[:10]}_{safe_name}")
@@ -2057,6 +2078,10 @@ async def intelligent_chat_stream(
             deepseek_stream_generator,
             normalize_markdown_render_output,
         )
+        from app.services.prompt_orchestration import (
+            PERMANENT_SYSTEM_PROMPT,
+            format_instruction_for_query,
+        )
 
         async def _run_blocking(func, *, timeout_s: float, timeout_message: str):
             try:
@@ -2132,8 +2157,18 @@ async def intelligent_chat_stream(
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
         requested_model_name = str(chat_request.llm_name or "").strip()
-        if requested_model_name.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+        # The UI may send a bare provider label instead of a concrete model id.
+        # Map "deepseek"/"claude" to their configured model so the request actually
+        # routes to that provider; "gemini"/"default"/"" fall back to the agent's
+        # own model (Gemini). Without this, "deepseek" was blanked and free-text
+        # questions silently fell back to the Gemini QA agent.
+        _provider_label = requested_model_name.lower()
+        if _provider_label in {"", "gemini", "default"}:
             requested_model_name = ""
+        elif _provider_label == "deepseek":
+            requested_model_name = get_settings().deepseek_model
+        elif _provider_label == "claude":
+            requested_model_name = get_settings().claude_model
         selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
         logger.info(
             "[Route:intelligent_chat_stream] model_resolution folder=%s secret_id=%s model=%s",
@@ -2260,10 +2295,14 @@ async def intelligent_chat_stream(
             )
             return
 
+        # question is already resolved here; clear secret_id so the vector path
+        # (answer_case_folder_chat → FolderService.answer_folder_chat) does NOT try
+        # to re-fetch the prompt body from GCP Secret Manager a second time.
         resolved_chat_request = chat_request.model_copy(
             update={
                 "question": query_text,
                 "prompt_label": display_question,
+                "secret_id": None,
             }
         )
 
@@ -2635,13 +2674,24 @@ async def intelligent_chat_stream(
                             "=== JSON OUTPUT ==="
                         )
                     else:
+                        # Prompt Orchestration Layer:
+                        #   Layer 1 (permanent system prompt) → SYSTEM INSTRUCTION block.
+                        #   Layer 3 (dynamic format instruction) → detected from the
+                        #     user's actual query and appended as the OUTPUT CONTRACT.
+                        #   The user's wording (effective_query_text) is never modified.
+                        orchestrated_format = format_instruction_for_query(effective_query_text)
+                        system_block = f"SYSTEM INSTRUCTION:\n{PERMANENT_SYSTEM_PROMPT}"
+                        if system_instruction:
+                            system_block = f"{system_block}\n\n{system_instruction}"
                         prompt = (
-                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            f"{system_block}\n\n"
                             "Answer the user's question based ONLY on the "
                             "following legal documents. Be concise and factual. If the answer is not in the "
                             "documents, say so clearly.\n\n"
                             f"=== DOCUMENTS ===\n{context}\n\n"
                             f"=== QUESTION ===\n{effective_query_text}\n\n"
+                            "=== OUTPUT CONTRACT — OVERRIDES ALL PRIOR INSTRUCTIONS ===\n"
+                            f"{orchestrated_format}\n\n"
                             "=== ANSWER ==="
                         )
                     prompt = _truncate_prompt(prompt, max_chars=220000, label="model_prompt")

@@ -1,0 +1,228 @@
+/* InteractiveTable — DeepSeek-style interactive data grid.
+   Palette intentionally mirrors markdownTableComponents (slate / warm-gray) so
+   interactive tables look identical to the existing static markdown tables. */
+
+.it-wrapper {
+  margin: 1.5em 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  background: #ffffff;
+  font-family: 'DM Sans', sans-serif;
+}
+
+/* ── Toolbar (search + actions) ─────────────────────────────────────────── */
+.it-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  flex-wrap: wrap;
+}
+
+.it-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.it-search-icon {
+  position: absolute;
+  left: 9px;
+  color: #94a3b8;
+  pointer-events: none;
+}
+
+.it-search-input {
+  width: 100%;
+  padding: 6px 10px 6px 30px;
+  font-size: 13px;
+  font-family: inherit;
+  color: #1e293b;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.it-search-input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.it-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.it-count {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.it-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: #334155;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.it-btn:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+.it-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Scroll container + table ───────────────────────────────────────────── */
+.it-scroll {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.it-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 13px;
+}
+
+.it-table thead {
+  background: #f8fafc;
+}
+
+.it-table th {
+  padding: 0;
+  text-align: left;
+  border-bottom: 2px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+  background: #f8fafc;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+
+.it-table th:last-child {
+  border-right: none;
+}
+
+.it-th-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #334155;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.it-th-btn:hover {
+  color: #1e293b;
+}
+
+.it-sort-icon {
+  flex-shrink: 0;
+  color: #6366f1;
+}
+
+.it-sort-icon.it-sort-idle {
+  color: #cbd5e1;
+}
+
+.it-table td {
+  padding: 10px 14px;
+  vertical-align: top;
+  color: #1e293b;
+  border-right: 1px solid #f1f5f9;
+  border-bottom: 1px solid #f1f5f9;
+  line-height: 1.6;
+  min-width: 120px;
+  word-break: normal;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.it-table td:last-child {
+  border-right: none;
+}
+
+.it-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.it-empty {
+  text-align: center;
+  color: #94a3b8;
+  font-style: italic;
+  padding: 18px;
+}
+
+/* ── Caption + pagination ───────────────────────────────────────────────── */
+.it-caption {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-style: italic;
+  color: #64748b;
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+}
+
+.it-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+  flex-wrap: wrap;
+}
+
+.it-page-info {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.it-page-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.it-page-num {
+  font-size: 12px;
+  color: #334155;
+  min-width: 48px;
+  text-align: center;
+}

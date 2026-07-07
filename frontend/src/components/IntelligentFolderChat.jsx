@@ -10,12 +10,13 @@ import LearningBubble from './LearningBubble';
 import LearningQuestionModal from './LearningQuestionModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import remarkMath from 'remark-math';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import {
   ensureTableSeparators,
   markdownTableComponents,
+  markdownRehypePlugins,
+  normalizeMarkdownFormatting,
   splitMarkdownIntoRenderChunks,
 } from '../utils/markdownUtils';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
@@ -894,12 +895,12 @@ export default function IntelligentFolderChat({
                         const formatted = isStructured
                           ? renderSecretPromptResponse(rawResponse)
                           : convertJsonToPlainText(rawResponse);
-                        const prepared = ensureTableSeparators(formatted);
+                        const prepared = ensureTableSeparators(normalizeMarkdownFormatting(formatted));
                         return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
                           <ReactMarkdown
                             key={`${index}-${chunk.length}`}
-                            remarkPlugins={[remarkGfm]}
-                            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                            remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+                            rehypePlugins={markdownRehypePlugins}
                             components={markdownTableComponents}
                           >
                             {chunk}

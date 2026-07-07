@@ -52,16 +52,19 @@ const PromptChipsBar = ({
       ? 'px-2 py-0.5 text-[11px] leading-tight'
       : 'px-2.5 py-1 text-xs leading-tight';
 
-  if (isLoading) {
-    return (
-      <div className={`flex items-center gap-1.5 py-0 text-gray-500 text-[11px] ${className}`}>
-        <Loader2 className="h-3 w-3 animate-spin" />
-        <span>Loading prompts…</span>
-      </div>
-    );
+  // Built-in modes (Citation Search, Drafting Mode) are always shown — never
+  // replaced by a loading spinner while additional secrets are fetched.
+  if (!secrets?.length) {
+    if (isLoading) {
+      return (
+        <div className={`flex items-center gap-1.5 py-0 text-gray-500 text-[11px] ${className}`}>
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>Loading prompts…</span>
+        </div>
+      );
+    }
+    return null;
   }
-
-  if (!secrets?.length) return null;
 
   return (
     <div className={`relative flex items-center gap-0.5 min-w-0 ${className}`}>
@@ -102,6 +105,11 @@ const PromptChipsBar = ({
             </button>
           );
         })}
+        {isLoading && (
+          <span className="flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 text-[11px] text-gray-400">
+            <Loader2 className="h-3 w-3 animate-spin" />
+          </span>
+        )}
       </div>
 
       {canScrollRight && (

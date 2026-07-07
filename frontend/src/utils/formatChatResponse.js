@@ -84,8 +84,9 @@ function normalizeAsterisks(text) {
 }
 
 /**
- * Convert **bold** markdown markers to <strong> so they never show as literal **.
- * Safe to run on mixed markdown/HTML (skips content that is already inside tags).
+ * Convert **bold** (and *italic*) markdown markers to HTML tags so they never show as
+ * literal asterisks during streaming, before the full markdown render pass runs.
+ * Safe to run on mixed markdown/HTML.
  */
 export function convertMarkdownBoldMarkers(text) {
   if (!text || typeof text !== 'string') return text;
@@ -93,20 +94,22 @@ export function convertMarkdownBoldMarkers(text) {
 
   let converted = normalizeAsterisks(text);
 
+  // Clean up empty markers
   converted = converted.replace(/\*\*\s*\*\*/g, '');
   converted = converted.replace(/\*\*📎\s*\*\*/g, '📎 ');
 
-  let previous = '';
-  let iterations = 0;
-  while (converted !== previous && iterations < 12) {
-    previous = converted;
-    converted = converted.replace(/\*\*([^\n]+?)\*\*(?!\*)/g, '<strong>$1</strong>');
-    iterations += 1;
-  }
+  // Tighten spaced bold/italic markers first so the conversion regexes match.
+  converted = converted
+    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)[ \t]+\*\*/g, '**$1**')
+    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)\*\*/g, '**$1**')
+    .replace(/(?<![A-Za-z0-9*])\*\*([^*\n]+?)[ \t]+\*\*/g, '**$1**')
+    .replace(/(?<![A-Za-z0-9*])\*[ \t]+([^*\n]+?)[ \t]+\*(?!\*)/g, '*$1*');
 
-  // Only remove stray double-asterisks if they are not part of a larger block
-  // but generally it's safer to leave them if we can't be sure.
-  // converted = converted.replace(/\*\*/g, ''); 
+  // Bold: **text** -> <strong>text</strong>
+  converted = converted.replace(/\*\*(?=\S)([^*]+?)(?<=\S)\*\*(?!\*)/g, '<strong>$1</strong>');
+
+  // Italic: *text* -> <em>text</em>
+  converted = converted.replace(/(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)/g, '<em>$1</em>');
 
   return converted;
 }
@@ -183,8 +186,6 @@ export function formatChatResponseForDisplay(raw) {
     text = convertAsciiLegalBoxes(text);
     text = cleanupBoxDebris(text);
   }
-
-  text = convertMarkdownBoldMarkers(text);
 
   if (looksLikeRawJsonString(text)) {
     // Strip code fences and try one more conversion pass before giving up

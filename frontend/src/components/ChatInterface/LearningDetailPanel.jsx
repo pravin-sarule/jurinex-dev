@@ -1,6 +1,5 @@
 import React from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import FormattedAssistantContent from './FormattedAssistantContent';
 import { X } from 'lucide-react';
 import LearningMcqBlock, { normalizeLearningUiMode } from './LearningMcqBlock';
 
@@ -19,99 +18,6 @@ export default function LearningDetailPanel({ data, onOptionClick, onClose, isSt
   const normalizedUi = normalizeLearningUiMode(uiType);
   const showMcq =
     (normalizedUi === 'options' || normalizedUi === 'options_multi') && optionList.length > 0;
-
-  const compactBase = {
-    fontSize: '15px',
-    lineHeight: '1.55',
-    color: '#111827',
-    fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
-  };
-
-  const mdComponentsCompact = {
-    p: ({ node, ...props }) => <p style={{ margin: '0 0 10px', ...compactBase }} {...props} />,
-    strong: ({ node, ...props }) => <strong style={{ fontWeight: 600, color: '#0f766e', fontSize: '15px' }} {...props} />,
-    em: ({ node, ...props }) => <em style={{ fontStyle: 'italic' }} {...props} />,
-    h1: ({ node, ...props }) => <h1 style={{ fontSize: '15px', lineHeight: 1.35, margin: '0 0 8px', fontWeight: 700, color: '#111', ...compactBase }} {...props} />,
-    h2: ({ node, ...props }) => <h2 style={{ fontSize: '14px', lineHeight: 1.35, margin: '0 0 8px', fontWeight: 700, color: '#111', ...compactBase }} {...props} />,
-    h3: ({ node, ...props }) => <h3 style={{ fontSize: '14px', lineHeight: 1.35, margin: '0 0 8px', fontWeight: 600, color: '#111', ...compactBase }} {...props} />,
-    ul: ({ node, ...props }) => <ul style={{ margin: '0 0 10px', paddingLeft: '18px', ...compactBase }} {...props} />,
-    ol: ({ node, ...props }) => <ol style={{ margin: '0 0 10px', paddingLeft: '18px', ...compactBase }} {...props} />,
-    li: ({ node, ...props }) => <li style={{ marginBottom: '4px', ...compactBase }} {...props} />,
-    blockquote: ({ node, ...props }) => (
-      <blockquote
-        style={{
-          margin: '8px 0',
-          padding: '4px 0 4px 12px',
-          borderLeft: '3px solid #cbd5e1',
-          color: '#64748b',
-          fontStyle: 'italic',
-          fontSize: '13px',
-          lineHeight: 1.5,
-        }}
-        {...props}
-      />
-    ),
-    code: ({ node, inline, children, ...props }) =>
-      inline ? (
-        <code
-          style={{
-            background: '#f8fafc',
-            border: '1px solid #e2e8f0',
-            borderRadius: '4px',
-            padding: '1px 4px',
-            fontSize: '12px',
-            fontFamily: '"IBM Plex Mono", "Courier New", monospace',
-          }}
-          {...props}
-        >
-          {children}
-        </code>
-      ) : (
-        <code {...props}>{children}</code>
-      ),
-    pre: ({ node, ...props }) => (
-      <pre
-        style={{
-          margin: '10px 0',
-          padding: '10px 12px',
-          background: '#f8fafc',
-          border: '1px solid #e2e8f0',
-          borderRadius: '8px',
-          overflowX: 'auto',
-          fontSize: '12px',
-          lineHeight: '1.5',
-          color: '#334155',
-          fontFamily: '"IBM Plex Mono", "Courier New", monospace',
-        }}
-        {...props}
-      />
-    ),
-    hr: ({ node, ...props }) => <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '10px 0' }} {...props} />,
-  };
-
-  const mdComponentsQuestion = {
-    p: ({ node, ...props }) => (
-      <p
-        style={{
-          margin: '0 0 8px',
-          fontSize: '15px',
-          lineHeight: '1.5',
-          color: '#1a1a1a',
-          fontFamily: 'Inter, system-ui, sans-serif',
-          fontWeight: 600,
-          textAlign: 'right',
-        }}
-        {...props}
-      />
-    ),
-    strong: ({ node, ...props }) => <strong style={{ fontWeight: 700, color: '#0f766e' }} {...props} />,
-    em: ({ node, ...props }) => <em style={{ fontStyle: 'italic' }} {...props} />,
-    ul: ({ node, ...props }) => <ul style={{ margin: '0 0 8px', paddingLeft: '18px', textAlign: 'right', listStylePosition: 'inside' }} {...props} />,
-    ol: ({ node, ...props }) => <ol style={{ margin: '0 0 8px', paddingLeft: '18px', textAlign: 'right', listStylePosition: 'inside' }} {...props} />,
-    li: ({ node, ...props }) => <li style={{ marginBottom: '4px', fontSize: '15px', textAlign: 'right', fontFamily: 'Inter, system-ui, sans-serif' }} {...props} />,
-    code: mdComponentsCompact.code,
-    hr: ({ node, ...props }) => <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '8px 0' }} {...props} />,
-  };
 
   const truncate = (t, max) => {
     const s = String(t || '').trim();
@@ -147,9 +53,7 @@ export default function LearningDetailPanel({ data, onOptionClick, onClose, isSt
         <div style={{ maxWidth: '560px', margin: '0 auto' }}>
           {feedback && feedback.trim() && (
             <div style={{ marginBottom: '14px' }}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponentsCompact}>
-                {truncate(feedback, 2000)}
-              </ReactMarkdown>
+              <FormattedAssistantContent raw={truncate(feedback, 2000)} />
             </div>
           )}
 
@@ -163,9 +67,7 @@ export default function LearningDetailPanel({ data, onOptionClick, onClose, isSt
                 borderRadius: '0 8px 8px 0',
               }}
             >
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponentsCompact}>
-                {truncate(contentHint, 900)}
-              </ReactMarkdown>
+              <FormattedAssistantContent raw={truncate(contentHint, 900)} />
             </div>
           )}
 
@@ -191,9 +93,7 @@ export default function LearningDetailPanel({ data, onOptionClick, onClose, isSt
                   boxShadow: '0 1px 3px rgba(33, 193, 182, 0.08)',
                 }}
               >
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponentsQuestion}>
-                  {truncate(question, 800)}
-                </ReactMarkdown>
+                <FormattedAssistantContent raw={truncate(question, 800)} />
               </div>
             </div>
           )}

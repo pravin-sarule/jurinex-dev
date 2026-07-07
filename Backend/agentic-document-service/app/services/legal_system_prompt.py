@@ -15,6 +15,21 @@ def _ns(value: Any) -> str:
     return text or "Not set"
 
 
+# Shared output-formatting contract appended to every system prompt so that
+# DeepSeek, Gemini and Claude all emit clean, render-ready GitHub-Flavored
+# Markdown. The frontend (<FormattedAssistantContent/>) renders GFM tables,
+# headings, lists and bold; raw HTML such as <br> is fragile across surfaces,
+# so the model is told to avoid it.
+MARKDOWN_FORMATTING_RULES = """
+OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
+- Use clean Markdown: ## / ### headings, bullet or numbered lists, and **bold** for key terms.
+- When the answer is naturally tabular (comparisons, chronologies/timelines, lists of parties, dates, amounts, or schedules), format it as a GitHub-Flavored Markdown table with a header row and a |---| separator row.
+- Keep one fact per table row; do not split a single word or value across multiple rows.
+- Prefer pure Markdown over raw HTML. Do NOT emit <br>, <div>, <span>, <table>, or other HTML tags. Inside a table cell, separate multiple values with a comma or semicolon (never a <br>).
+- Wrap code, file names, or identifiers in `backticks` and use fenced ```code blocks``` for multi-line code.
+- Do NOT wrap the whole answer in a code block, and do NOT show your reasoning or planning — output only the final formatted answer."""
+
+
 def fetch_full_profile(user_id: str | None, authorization_header: str | None) -> dict[str, Any]:
     if not user_id or not authorization_header:
         return {"basic": None, "professional": None}
@@ -87,7 +102,8 @@ RESPONSE QUALITY:
 - Provide accurate, well-reasoned legal information.
 - Responses are for informational purposes only and not a substitute for formal legal advice from a licensed attorney.
 - Cite relevant statutes, regulations, or case law where appropriate.
-- Address the user by name.{profile_section}"""
+- Address the user by name.
+{MARKDOWN_FORMATTING_RULES}{profile_section}"""
 
 
 def build_document_qa_system_prompt(user_profile: dict[str, Any] | None) -> str:
@@ -150,4 +166,5 @@ ABSOLUTELY FORBIDDEN IN YOUR REPLY (do not include any of these):
 - Do NOT repeat, quote, or summarise the "internal style" bullets below in your answer. Apply them silently.
 
 INTERNAL STYLE ONLY (never echo this block; apply silently):
-{personalization}"""
+{personalization}
+{MARKDOWN_FORMATTING_RULES}"""

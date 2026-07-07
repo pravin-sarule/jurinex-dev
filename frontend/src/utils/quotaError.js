@@ -58,16 +58,18 @@ export async function throwIfQuotaResponse(response, fallbackMessage = 'Request 
   if (quota) {
     throw createQuotaError(quota, response.status);
   }
-  const data = unwrapBody(body);
-  const msg =
-    (typeof data.message === 'string' && data.message.trim()) ||
-    (typeof data.error === 'string' && data.error.trim()) ||
-    (typeof data.detail === 'string' && data.detail.trim()) ||
-    fallbackMessage;
-  const err = new Error(msg);
-  err.status = response.status;
-  err.response = { status: response.status, data: body };
-  throw err;
+  if (!response.ok) {
+    const data = unwrapBody(body);
+    const msg =
+      (typeof data.message === 'string' && data.message.trim()) ||
+      (typeof data.error === 'string' && data.error.trim()) ||
+      (typeof data.detail === 'string' && data.detail.trim()) ||
+      fallbackMessage;
+    const err = new Error(msg);
+    err.status = response.status;
+    err.response = { status: response.status, data: body };
+    throw err;
+  }
 }
 
 export function normalizeQuotaErrorForModal(error) {

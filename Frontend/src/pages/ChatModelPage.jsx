@@ -14,6 +14,7 @@ import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
 import '../styles/ChatInterface.css';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
 import UploadOptionsMenu from '../components/UploadOptionsMenu';
+import DraftingModal from '../components/DraftingMode/DraftingModal';
 import googleDriveApi from '../services/googleDriveApi';
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
@@ -24,6 +25,8 @@ import {
   looksLikeRawJsonString,
   chatResponseLooksLikeHtml,
 } from '../utils/formatChatResponse';
+import { ensureTableSeparators, normalizeMarkdownFormatting, extractTableData } from '../utils/markdownUtils';
+import InteractiveTable from '../components/InteractiveTable';
 import { buildSuggestedQuestions } from '../utils/suggestedQuestions';
 
 import { formatFileSize } from '../utils/planUtils';
@@ -70,11 +73,71 @@ import {
   Sparkles,
   Settings2,
   ArrowUpRight,
+  Layers,
 } from 'lucide-react';
 import LearningBubble from '../components/LearningBubble';
 import TokenCostPopover from '../components/TokenCostPopover';
 import SessionTokenBadge from '../components/SessionTokenBadge';
 import FileTokenBadge from '../components/FileTokenBadge';
+/**
+ * Removes DeepSeek/AI thinking blocks and raw reasoning patterns from text.
+ * Also holds back incomplete Markdown tables during streaming to prevent gray bars (---).
+ */
+function getSafeMarkdown(text) {
+  if (!text) return '';
+  
+  // 1. Remove complete <think>...</think> or <thinking>...</thinking> blocks
+  let clean = text.replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '');
+  
+  // 2. Remove incomplete <think> block (still streaming)
+  if (/<(?:think|thinking)>/i.test(clean)) {
+    clean = clean.split(/<(?:think|thinking)>/i)[0];
+  }
+  
+  // 3. Remove raw reasoning patterns (lines that look like thinking)
+  // These are lines that start with "We need to", "We'll", "The user said", "So we"
+  const lines = clean.split('\n');
+  const filteredLines = [];
+  let tableStarted = false;
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Detect start of actual content (table or ##heading or **bold)
+    if (trimmed.startsWith('|') || trimmed.startsWith('#') || trimmed.startsWith('**')) {
+      tableStarted = true;
+    }
+    
+    // Skip reasoning-like lines before actual content starts
+    if (!tableStarted && (
+      line.match(/^(We need|We'll|We can|We will|The user|So we|The document|Let's|I'll|I will|Based on this|This is|The output contract|The instruction)/i)
+    )) {
+      continue; // Skip this reasoning line
+    }
+    
+    filteredLines.push(line);
+  }
+  
+  clean = filteredLines.join('\n');
+
+  // 4. Fix incomplete table rendering during streaming
+  // If table is not complete (no closing row after last |), 
+  // hold back incomplete table rows to prevent "---" gray bar glitches.
+  const tableRegex = /\|(.+)\|/;
+  if (tableRegex.test(clean)) {
+    const allLines = clean.split('\n');
+    const tableLines = allLines.filter(l => l.trim().startsWith('|'));
+    const lastTableLine = tableLines[tableLines.length - 1];
+    
+    // If last line looks incomplete (no ending |), remove it from the display
+    if (lastTableLine && !lastTableLine.trim().endsWith('|')) {
+      const lastIndex = clean.lastIndexOf(lastTableLine);
+      clean = clean.substring(0, lastIndex);
+    }
+  }
+  
+  return clean.trim();
+}
+
 // ─── Unified O(n) Markdown Parser ────────────────────────────────────────────
 // Rules guaranteed by this implementation:
 //   Rule 1: Never re-parse the whole string on every chunk — rAF throttle controls parse cadence
@@ -82,12 +145,37 @@ import FileTokenBadge from '../components/FileTokenBadge';
 //   Rule 3: ONE parser for both streaming and final — byte-identical HTML, no visual jump
 //   Rule 4: DOM writes capped to ~12/sec via rAF + 80ms throttle
 //
+// Fix PDF extraction artifacts: number fragments produced when a PDF stores digits
+// at absolute coordinates get spaces inserted between them by the extractor.
+// e.g. "201 6" → "2016", "100 72" → "10072", "200 3" → "2003".
+// Word-level fragmentation ("FACT UAL MAT RI X") is corrected upstream by DeepSeek
+// via the rendering contract instruction — we only handle numbers here since the
+// frontend cannot reconstruct correct word boundaries without language knowledge.
+// Skips fenced code blocks to avoid corrupting code samples.
+function normalizePdfText(text) {
+  if (!text) return text;
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, i) => {
+    if (i % 2 === 1) return part; // inside a fenced code block — leave verbatim
+    return part
+      // Merge a 2-4 digit prefix + 1-2 digit suffix into a single number.
+      // Catches year fragments ("201 6" → "2016") and case-number fragments ("100 72" → "10072").
+      // The right fragment must be ≤2 digits to stay conservative and avoid
+      // accidentally joining two genuinely separate numbers (e.g. "Section 10 20").
+      .replace(/\b(\d{2,4}) (\d{1,2})\b/g, (m, a, b) => {
+        const merged = a + b;
+        return merged.length <= 6 ? merged : m;
+      });
+  }).join('');
+}
+
 // Handles: headings, bold/italic/bold-italic, inline code, fenced code blocks,
 // links, blockquotes, HR, ordered/unordered lists, GFM tables (with escaped pipes).
 // Mid-stream incomplete table rows fall through to <p> and snap into the table
 // on the next parse — no broken markup ever emitted.
 function parseMarkdown(md) {
   if (!md || typeof md !== 'string') return '';
+  md = ensureTableSeparators(normalizeMarkdownFormatting(normalizePdfText(md)));
 
   const esc = (s) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -95,6 +183,7 @@ function parseMarkdown(md) {
   // inline() escapes first, then applies formatting so injected < > & are safe
   const inline = (s) =>
     esc(s)
+      .replace(/&lt;br\s*\/?&gt;/gi, '<br/>')
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
         '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;font-weight:600;background:#e6fbf9;padding:0 4px;border-radius:4px">$1</a>')
       .replace(/\*\*\*([^\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')
@@ -158,19 +247,25 @@ function parseMarkdown(md) {
       continue;
     }
 
-    // Table separator — triggers thead→tbody transition, then skipped
-    if (/^\|?[\s:|-]+\|?$/.test(t) && t.includes('-') && t.includes('|')) {
+    // Table separator — triggers thead→tbody transition, then skipped.
+    // Accepts both "|---|---|" (standard) and "---|---" (no wrapping pipes).
+    if (/^\|?[\s:|-]+\|?$/.test(t) && t.includes('-') && (t.includes('|') || inTable)) {
       if (inTable && !hasHead) { out.push('</thead><tbody>'); hasHead = true; }
       continue;
     }
 
-    // Table row — accepts rows with or without trailing | (LLMs often omit it)
-    // Requires at least two | characters: one at start + one elsewhere.
-    if (t.startsWith('|') && t.indexOf('|', 1) >= 0) {
+    // Table row — DeepSeek sometimes omits the leading/trailing |.
+    // Detect any line that contains ≥2 pipe characters, OR starts with | and has one more.
+    // Guard: must not be a heading, list item, or HR (already handled above).
+    const pipeCount = (t.match(/\|/g) || []).length;
+    const isTableRow = (t.startsWith('|') && pipeCount >= 2) || pipeCount >= 3;
+    if (isTableRow) {
       endList();
       if (!inTable) { out.push('<div class="md-table-scroll"><table><thead>'); inTable = true; hasHead = false; }
       const tag = hasHead ? 'td' : 'th';
-      out.push(`<tr>${splitRow(t).map((c) => `<${tag}>${inline(c)}</${tag}>`).join('')}</tr>`);
+      // Normalise: wrap in pipes if missing so splitRow works correctly
+      const normalised = t.startsWith('|') ? t : `|${t}|`;
+      out.push(`<tr>${splitRow(normalised).map((c) => `<${tag}>${inline(c)}</${tag}>`).join('')}</tr>`);
       continue;
     }
     if (inTable) endTable();
@@ -782,6 +877,19 @@ const RealTimeProgressPanel = ({ processingStatus }) => {
 const CHAT_INPUT_MIN_HEIGHT = 24;
 const CHAT_INPUT_MAX_HEIGHT = 200;
 
+const BUILTIN_PROMPT_CHIPS = [
+  { id: 'citation-search-chip', name: 'Citation Search', isCitation: true },
+  { id: 'drafting-mode-chip', name: 'Drafting Mode', isDrafting: true },
+];
+
+const BUILTIN_PROMPT_NAMES = new Set(
+  BUILTIN_PROMPT_CHIPS.map((c) => c.name.trim().toLowerCase()),
+);
+
+const isDraftingPromptChip = (secret) =>
+  Boolean(secret?.isDrafting) ||
+  String(secret?.name || '').trim().toLowerCase() === 'drafting mode';
+
 const ChatModelPage = () => {
   const location = useLocation();
   const { fileId: paramFileId, sessionId: paramSessionId } = useParams();
@@ -825,11 +933,33 @@ const ChatModelPage = () => {
   const [chatMode, setChatMode] = useState('chat');
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const citationMode = chatMode === 'citation';
+  // Drafting Mode — specialized template-driven drafting pipeline; opens a
+  // dedicated modal and only runs when the user explicitly triggers it here.
+  const [showDraftingModal, setShowDraftingModal] = useState(false);
+  const openDraftingMode = useCallback(() => {
+    setShowDraftingModal(true);
+    setChatMode('chat');
+    setLearningModeActive(false);
+    setIsSecretPromptSelected(false);
+    setActiveDropdown('Custom Query');
+    setSelectedSecretId(null);
+    setSelectedLlmName(null);
+    setShowStyleDropdown(false);
+  }, []);
   const [turnCount, setTurnCount] = useState(0);
   const [turnThreshold, setTurnThreshold] = useState(4);
 
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
+  const promptChips = useMemo(
+    () => [
+      ...BUILTIN_PROMPT_CHIPS,
+      ...secrets.filter(
+        (s) => !BUILTIN_PROMPT_NAMES.has(String(s?.name || '').trim().toLowerCase()),
+      ),
+    ],
+    [secrets],
+  );
   const [selectedSecretId, setSelectedSecretId] = useState(null);
   const [selectedLlmName, setSelectedLlmName] = useState(null);
 
@@ -2964,8 +3094,18 @@ const ChatModelPage = () => {
               console.log('Stream metadata:', parsed);
               newSessionId = parsed.session_id || newSessionId;
             } else if (parsed.type === 'chunk') {
-              appendStreamChunk(parsed.text || '');
-              setHasResponse(true);
+              const chunkText = parsed.text || '';
+              if (chunkText) {
+                // Append raw chunk to buffer ref
+                streamBufferRef.current += chunkText;
+                // Get safe version of the WHOLE accumulated buffer for display
+                const safeContent = getSafeMarkdown(streamBufferRef.current);
+                // Update current response with safe content
+                setCurrentResponse(safeContent);
+                setHasResponse(true);
+                // We still schedule the UI update but setCurrentResponse handles the immediate display
+                scheduleStreamUiUpdate();
+              }
             } else if (parsed.type === 'done') {
               finalMetadata = parsed;
               const fd = typeof parsed.answer === 'string' ? parsed.answer : '';
@@ -3958,6 +4098,19 @@ const ChatModelPage = () => {
     fetchChatSessions();
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('mode') === 'drafting') {
+      openDraftingMode();
+      params.delete('mode');
+      const next = params.toString();
+      navigate(
+        { pathname: location.pathname, search: next ? `?${next}` : '' },
+        { replace: true, state: location.state },
+      );
+    }
+  }, [location.pathname, location.search, location.state, navigate, openDraftingMode]);
+
   // Refresh sessions list when a new message is sent (so sessions panel stays current)
   useEffect(() => {
     if (sessionMessages.length > 0) {
@@ -4474,11 +4627,17 @@ const ChatModelPage = () => {
     pre: ({ node, ...props }) => (
       <pre className="bg-[#f3f4f6] text-[#243124] p-4 rounded my-4 overflow-x-auto text-[13px] border border-[#d8d1c5]" {...props} />
     ),
-    table: ({ node, ...props }) => (
-      <div className="my-6 rounded-lg border border-[#d6d0c4] block max-w-full overflow-hidden">
-        <table className="border-collapse text-[14px] w-full" {...props} />
-      </div>
-    ),
+    table: ({ node, ...props }) => {
+      const data = extractTableData(node);
+      if (data) {
+        return <InteractiveTable headers={data.headers} rows={data.rows} />;
+      }
+      return (
+        <div className="my-6 rounded-lg border border-[#d6d0c4] block max-w-full overflow-hidden">
+          <table className="border-collapse text-[14px] w-full" {...props} />
+        </div>
+      );
+    },
     thead: ({ node, ...props }) => <thead className="bg-gray-50" {...props} />,
     th: ({ node, ...props }) => (
       <th
@@ -4600,6 +4759,9 @@ const ChatModelPage = () => {
     setLearningModeActive(style === 'learning');
     setTurnCount(0);
     setShowStyleDropdown(false);
+    if (style !== 'learning') {
+      setShowDraftingModal(false);
+    }
   };
 
   const handleLearningOptionSelect = async (optionText) => {
@@ -4705,20 +4867,25 @@ const ChatModelPage = () => {
       <UpgradePlanBanner className="mb-2 w-full" />
 
       {/* ── Prompt chips ────────────────────────────────────────────── */}
-      {!isSecretPromptSelected && (isLoadingSecrets || secrets.length > 0) && (
+      {/* Always rendered: Citation Search + Drafting Mode are built-in modes
+          and must not disappear when the secrets list fails to load. */}
+      {!isSecretPromptSelected && (
         <PromptChipsBar
-          secrets={[
-            { id: 'citation-search-chip', name: 'Citation Search', isCitation: true },
-            ...secrets
-          ]}
+          secrets={promptChips}
           isLoading={isLoadingSecrets}
-          selectedSecretId={citationMode ? 'citation-search-chip' : selectedSecretId}
+          selectedSecretId={
+            showDraftingModal
+              ? 'drafting-mode-chip'
+              : citationMode
+                ? 'citation-search-chip'
+                : selectedSecretId
+          }
           activeLabel={null}
           onSelect={(s) => {
-            if (s.isCitation) {
+            if (isDraftingPromptChip(s)) {
+              openDraftingMode();
+            } else if (s.isCitation) {
               setChatMode('citation');
-              // If user clicks the chip, we treat it like a preset prompt:
-              // trigger a search immediately if we have enough context.
               void handleSend({ preventDefault: () => {} });
             } else {
               setChatMode('chat');
@@ -4827,13 +4994,13 @@ const ChatModelPage = () => {
                     : <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />}
                 </button>
                 {showStyleDropdown && (
-                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1">
+                  <div className="absolute bottom-full left-0 mb-2 w-52 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1">
                     <button type="button" onClick={() => handleSelectStyle('normal')}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50">
                       <span className="flex items-center gap-2">
                         <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" /> Normal
                       </span>
-                      {!learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                      {!learningModeActive && !showDraftingModal && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                     <button type="button" onClick={() => handleSelectStyle('learning')} disabled={!fileId}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40">
@@ -4841,6 +5008,16 @@ const ChatModelPage = () => {
                         <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" /> Learning
                       </span>
                       {learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openDraftingMode}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 border-t border-gray-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Layers className="h-3.5 w-3.5 text-[#21C1B6]" /> Drafting Mode
+                      </span>
+                      {showDraftingModal && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                   </div>
                 )}
@@ -4887,6 +5064,7 @@ const ChatModelPage = () => {
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
+      <DraftingModal open={showDraftingModal} onClose={() => setShowDraftingModal(false)} />
       <ChatQuotaErrorModal
         error={error}
         onDismiss={() => setError(null)}

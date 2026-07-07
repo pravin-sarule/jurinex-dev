@@ -1393,6 +1393,86 @@ class FolderWorkflowService:
             generated_at=query_response.generated_at,
         )
 
+    def clean_existing_chunk_text(self, user_id: str, folder_name: str, *, use_llm: bool = True) -> dict[str, Any]:
+        """
+        Re-clean the text of ALREADY-stored chunks for a case, IN PLACE.
+
+        No PDF re-OCR, no re-embedding — it rewrites only `file_chunks.content`, so
+        the existing embeddings and chat history are preserved. Two passes per chunk:
+          1. deterministic OCR-artefact repair (free) — dictionary + numbers + dates.
+          2. when `use_llm` and the chunk still LOOKS fragmented, an LLM reconstruction
+             pass repairs arbitrary fragments (names/places, "p .a .", "18 %") that no
+             dictionary can cover. The LLM never loses content (returns original on error).
+        Fixes documents indexed before the OCR work so garbled chunks render clean.
+        """
+        from app.services.adapters.document_ai import (
+            normalize_ocr_artifacts,
+            _looks_fragmented,
+            reconstruct_chunk_text,
+        )
+
+        if not is_db_available():
+            return {"success": False, "message": "Database unavailable.", "updated": 0}
+
+        # Resolve the case's file_ids the same way the chat path does.
+        file_ids: list[str] = []
+        try:
+            db_docs = self.get_documents_in_folder(folder_name, user_id)
+            records = db_docs.get("documents") or db_docs.get("files") or []
+            file_ids = [str(item.get("id")) for item in records if item.get("id")]
+        except Exception:
+            file_ids = []
+        if not file_ids:
+            file_ids = self._resolve_file_ids_for_folder_case(folder_name, user_id)
+        if not file_ids:
+            return {"success": False, "message": "No documents found for this case.", "updated": 0}
+
+        scanned = 0
+        updated = 0
+        llm_reconstructed = 0
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, content FROM file_chunks WHERE file_id::text = ANY(%s)",
+                [file_ids],
+            )
+            rows = cur.fetchall() or []
+            for row in rows:
+                scanned += 1
+                chunk_id = row.get("id")
+                content = row.get("content") or ""
+                # Pass 1: deterministic (free).
+                cleaned = normalize_ocr_artifacts(content)
+                # Pass 2: LLM reconstruction only for chunks still fragmented.
+                if use_llm and _looks_fragmented(cleaned):
+                    reconstructed = reconstruct_chunk_text(cleaned)
+                    if reconstructed and reconstructed != cleaned:
+                        cleaned = reconstructed
+                        llm_reconstructed += 1
+                if cleaned and cleaned != content:
+                    cur.execute(
+                        "UPDATE file_chunks SET content = %s, updated_at = NOW() WHERE id = %s",
+                        [cleaned, chunk_id],
+                    )
+                    updated += 1
+            conn.commit()
+
+        logger.info(
+            "[FolderService] task=clean_existing_chunk_text folder=%s files=%d scanned=%d updated=%d llm=%d use_llm=%s",
+            folder_name, len(file_ids), scanned, updated, llm_reconstructed, use_llm,
+        )
+        return {
+            "success": True,
+            "folderName": folder_name,
+            "file_count": len(file_ids),
+            "chunks_scanned": scanned,
+            "chunks_updated": updated,
+            "llm_reconstructed": llm_reconstructed,
+            "message": (
+                f"Cleaned {updated} of {scanned} chunk(s) in place "
+                f"({llm_reconstructed} via LLM reconstruction; embeddings kept)."
+            ),
+        }
+
     def _build_query_with_recent_history(
         self,
         *,

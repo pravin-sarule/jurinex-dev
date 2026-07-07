@@ -10,7 +10,7 @@ import math
 logger = logging.getLogger("ai_chatbot.embeddings")
 
 EMBEDDING_DIMS = 768
-_MODELS = ("models/gemini-embedding-001", "models/text-embedding-004")
+_MODELS = ("models/gemini-embedding-001",)
 
 
 def embed_query(text: str) -> list[float] | None:

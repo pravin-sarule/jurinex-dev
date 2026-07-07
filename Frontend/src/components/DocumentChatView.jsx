@@ -5,11 +5,14 @@ import ChatMessage from './ChatInterface/ChatMessage';
 import ChatInput from './ChatInterface/ChatInput';
 import { convertJsonToPlainText, stripAgenticCitations } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
+import { ensureTableSeparators, normalizeMarkdownFormatting } from '../utils/markdownUtils';
 import { getUserFriendlyApiErrorMessage } from '../utils/llmQuotaMessages';
 import ApiService from '../services/api';
 import { BookOpen, ChevronDown, MessageSquare, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import { markdownTableComponents, markdownRehypePlugins } from '../utils/markdownUtils';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
 import { fetchSecretsList, peekSecretsList, fetchSecretById } from '../services/secretsService';
 
@@ -433,7 +436,8 @@ const DocumentChatView = () => {
               </div>
               <div className="prose prose-gray max-w-none custom-markdown-renderer">
                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
+                  remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+                  rehypePlugins={markdownRehypePlugins}
                   children={(() => {
                     // Get the selected message and prioritize its stored response
                     const selectedMessage = currentChatHistory.find(msg => msg.id === selectedMessageId);
@@ -454,13 +458,13 @@ const DocumentChatView = () => {
                     if (!rawResponse) return '';
 
                     const isStructured = isStructuredJsonResponse(rawResponse);
-                    if (isStructured) {
-                      return stripAgenticCitations(renderSecretPromptResponse(rawResponse));
-                    }
-
-                    return stripAgenticCitations(convertJsonToPlainText(rawResponse));
+                    const formatted = isStructured
+                      ? stripAgenticCitations(renderSecretPromptResponse(rawResponse))
+                      : stripAgenticCitations(convertJsonToPlainText(rawResponse));
+                    return ensureTableSeparators(normalizeMarkdownFormatting(formatted));
                   })()}
                   components={{
+                    ...markdownTableComponents,
                     h1: ({node, ...props}) => <h1 className="text-2xl font-bold mb-6 mt-8 text-black border-b-2 border-gray-300 pb-2" {...props} />,
                     h2: ({node, ...props}) => <h2 className="text-xl font-bold mb-4 mt-6 text-black" {...props} />,
                     h3: ({node, ...props}) => <h3 className="text-lg font-bold mb-3 mt-4 text-black" {...props} />,
@@ -479,11 +483,16 @@ const DocumentChatView = () => {
                       const className = inline ? "bg-gray-100 px-1 py-0.5 rounded text-sm font-mono text-red-700" : "block bg-gray-100 p-4 rounded-md text-sm font-mono overflow-x-auto my-4 text-red-700";
                       return <code className={className} {...props} />;
                     },
-                    table: ({node, ...props}) => <div className="overflow-x-auto my-6"><table className="min-w-full border-collapse border border-gray-400" {...props} /></div>,
-                    thead: ({node, ...props}) => <thead className="bg-gray-100" {...props} />,
-                    th: ({node, ...props}) => <th className="border border-gray-400 px-4 py-3 text-left font-bold text-black" {...props} />,
+                    table: ({node, ...props}) => (
+                      <div style={{ width: '100%', overflowX: 'auto', WebkitOverflowScrolling: 'touch', margin: '1.5em 0', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: '13px' }} {...props} />
+                      </div>
+                    ),
+                    thead: ({node, ...props}) => <thead style={{ background: '#f1f5f9' }} {...props} />,
+                    th: ({node, ...props}) => <th style={{ border: '1px solid #d1d5db', padding: '8px 12px', textAlign: 'left', fontWeight: '600', fontSize: '12px', color: '#0f172a', whiteSpace: 'nowrap', verticalAlign: 'top' }} {...props} />,
                     tbody: ({node, ...props}) => <tbody {...props} />,
-                    td: ({node, ...props}) => <td className="border border-gray-400 px-4 py-3 text-black" {...props} />,
+                    tr: ({node, ...props}) => <tr style={{ borderBottom: '1px solid #e5e7eb' }} {...props} />,
+                    td: ({node, ...props}) => <td style={{ border: '1px solid #d1d5db', padding: '8px 12px', verticalAlign: 'top', color: '#1f2937', wordWrap: 'break-word', overflowWrap: 'break-word', whiteSpace: 'pre-wrap', lineHeight: '1.6' }} {...props} />,
                     hr: ({node, ...props}) => <hr className="my-6 border-gray-400" {...props} />,
                   }}
                 />
@@ -510,4 +519,3 @@ const DocumentChatView = () => {
 };
 
 export default DocumentChatView;
-

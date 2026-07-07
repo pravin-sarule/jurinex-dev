@@ -2,8 +2,7 @@ import React, { useRef, useEffect, useState } from 'react';
 import { Bot, MessageSquare, Copy, Download, FileText, ArrowRight, Printer, Code } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import remarkMath from 'remark-math';
 import {
   formatChatResponseForDisplay,
   chatResponseLooksLikeHtml,
@@ -12,6 +11,8 @@ import { getCleanText, downloadAsHtml, printResponse } from '../../utils/respons
 import {
   ensureTableSeparators,
   markdownTableComponents,
+  markdownRehypePlugins,
+  normalizeMarkdownFormatting,
   splitMarkdownIntoRenderChunks,
 } from '../../utils/markdownUtils';
 import BrandingDownloadModal from '../BrandingDownload/BrandingDownloadModal';
@@ -167,36 +168,39 @@ const ChatResponsePanel = ({
  h6: ({node, ...props}) => (
  <h6 className="text-sm font-semibold mb-2 mt-3 text-gray-700 analysis-page-ai-response" {...props} />
  ),
- p: ({node, ...props}) => (
- <p className="mb-5 leading-relaxed text-gray-800 text-[15px] analysis-page-ai-response" {...props} />
- ),
+ p: ({node, children, ...props}) => {
+   const text = String(children);
+   // Skip lines that are raw table rows (starts with |)
+   if (text.trim().startsWith('|')) return null;
+   return <p className="mb-5 leading-relaxed text-gray-800 text-[15px] analysis-page-ai-response" {...props}>{children}</p>;
+ },
  strong: ({node, ...props}) => (
- <strong className="font-bold text-gray-900" {...props} />
+   <strong className="font-bold text-gray-900" {...props} />
  ),
  em: ({node, ...props}) => (
- <em className="italic text-gray-800" {...props} />
+   <em className="italic text-gray-800" {...props} />
  ),
  ul: ({node, ...props}) => (
- <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />
+   <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />
  ),
  ol: ({node, ...props}) => (
- <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />
+   <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />
  ),
  li: ({node, ...props}) => (
- <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
+   <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
  ),
  a: ({node, children, ...props}) => (
- <a
- {...props}
- className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
- target="_blank"
- rel="noopener noreferrer"
- >
-   {children}
- </a>
+   <a
+   {...props}
+   className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
+   target="_blank"
+   rel="noopener noreferrer"
+   >
+     {children}
+   </a>
  ),
  blockquote: ({node, ...props}) => (
- <blockquote className="border-l-4 border-blue-500 pl-6 py-3 my-6 bg-blue-50 text-gray-800 italic rounded-r-lg analysis-page-ai-response shadow-sm" {...props} />
+   <blockquote className="border-l-4 border-blue-500 pl-6 py-3 my-6 bg-blue-50 text-gray-800 italic rounded-r-lg analysis-page-ai-response shadow-sm" {...props} />
  ),
  code: ({node, inline, className, children, ...props}) => {
  const match = /language-(\w+)/.exec(className || '');
@@ -232,27 +236,27 @@ const ChatResponsePanel = ({
  <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />
  ),
  table: ({node, ...props}) => (
- <div className="md-table-scroll">
-   <table {...props} />
+ <div className="md-table-scroll" style={{ width: '100%', overflowX: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0', margin: '1.5em 0' }}>
+   <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }} {...props} />
  </div>
  ),
  thead: ({node, ...props}) => (
- <thead {...props} />
+ <thead className="bg-gray-50" {...props} />
  ),
  th: ({node, ...props}) => (
- <th {...props} />
+ <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider border-b-2 border-gray-200 border-r border-gray-100" style={{ whiteSpace: 'nowrap', minWidth: '140px' }} {...props} />
  ),
  tbody: ({node, ...props}) => (
- <tbody {...props} />
+ <tbody className="bg-white divide-y divide-gray-100" {...props} />
  ),
  tr: ({node, ...props}) => (
- <tr {...props} />
+ <tr className="hover:bg-gray-50/50 transition-colors" {...props} />
  ),
  td: ({node, ...props}) => (
- <td {...props} />
+ <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-50" style={{ verticalAlign: 'top', minWidth: '180px', lineHeight: '1.6' }} {...props} />
  ),
  hr: ({node, ...props}) => (
- <hr className="my-6 border-t-2 border-gray-300" {...props} />
+ <hr className="content-divider" {...props} />
  ),
  img: ({node, ...props}) => (
  <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />
@@ -418,12 +422,12 @@ ref={horizontalScrollRef}
           }}
         />
       ) : (
-        splitMarkdownIntoRenderChunks(ensureTableSeparators(responseContent)).map((chunk, index) => (
+        splitMarkdownIntoRenderChunks(ensureTableSeparators(normalizeMarkdownFormatting(responseContent))).map((chunk, index) => (
           <ReactMarkdown
             key={`${index}-${chunk.length}`}
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeRaw, rehypeSanitize]}
-            components={markdownComponents}
+            remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+            rehypePlugins={markdownRehypePlugins}
+            components={markdownComponents || markdownTableComponents}
           >
             {chunk}
           </ReactMarkdown>

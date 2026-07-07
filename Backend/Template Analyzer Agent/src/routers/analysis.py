@@ -12,7 +12,6 @@ import logging
 import re
 import io
 import zipfile
-import asyncio
 from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree
 
@@ -331,6 +330,7 @@ async def _run_analysis_background(
             _sync_all_fields_into_sections(analysis_result)
 
             # Contextual legal typing/enrichment for extracted fields
+            # (deterministic in the redesigned agent — no extra LLM call)
             try:
                 field_context = await agent.contextualize_fields(template_text, analysis_result.get("all_fields", []))
                 if isinstance(field_context, dict):
@@ -365,18 +365,12 @@ async def _run_analysis_background(
 
             sections = analysis_result.get("sections", []) or []
 
-            # Generate section prompts concurrently to reduce end-to-end analysis time.
-            semaphore = asyncio.Semaphore(3)
-
-            async def _generate_prompt_for_section(section: Dict[str, Any]) -> Dict[str, Any]:
-                async with semaphore:
-                    return await agent.generate_section_prompts(section)
-
+            # Section prompts are built deterministically from the verbatim
+            # source segments (no LLM calls), so this loop is effectively free.
             prompt_payloads: List[Dict[str, Any]] = []
-            if sections:
-                prompt_payloads = await asyncio.gather(
-                    *[_generate_prompt_for_section(section) for section in sections]
-                )
+            for section in sections:
+                section_with_type = {**section, "document_type": analysis_result.get("document_type", "")}
+                prompt_payloads.append(await agent.generate_section_prompts(section_with_type))
 
             for index, section in enumerate(sections):
                 prompt_data = prompt_payloads[index] if index < len(prompt_payloads) else {}

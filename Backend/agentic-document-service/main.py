@@ -16,6 +16,7 @@ from app.api.routes.health import router as health_router
 from app.api.routes.rbac import router as rbac_router
 from app.api.routes.branding import router as branding_router
 from app.api.routes.summarization_config_admin import router as summarization_config_admin_router
+from app.api.routes.summarize import router as summarize_router
 from app.api.routes.batch import router as batch_router
 from app.core.config import BASE_DIR, get_settings
 from app.core.logging import configure_logging
@@ -93,6 +94,7 @@ def create_app() -> FastAPI:
     app.include_router(batch_router)
     app.include_router(branding_router)
     app.include_router(summarization_config_admin_router)
+    app.include_router(summarize_router)
     app.include_router(speech_router)
     app.include_router(cases_router)
     app.include_router(content_router)

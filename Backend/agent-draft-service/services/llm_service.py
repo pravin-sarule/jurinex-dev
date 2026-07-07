@@ -17,9 +17,12 @@ logger = logging.getLogger(__name__)
 
 _gemini_rate_lock = threading.Lock()
 _last_gemini_call_at = 0.0
+# Process-wide pacing for Gemini calls. The old default of 2 req/s serialized
+# every "parallel" worker to a crawl; 8 req/s is still conservative for paid
+# quotas and retries with backoff handle any 429s.
 _gemini_min_interval_seconds = max(
     0.0,
-    1.0 / max(1, int(os.environ.get("GEMINI_REQUESTS_PER_SECOND", "2"))),
+    1.0 / max(1, int(os.environ.get("GEMINI_REQUESTS_PER_SECOND", "8"))),
 )
 _gemini_max_retry_attempts = max(0, int(os.environ.get("GEMINI_MAX_RETRY_ATTEMPTS", "3")))
 _gemini_retry_backoff_seconds = max(1, int(os.environ.get("GEMINI_RETRY_INITIAL_BACKOFF_SECONDS", "2")))

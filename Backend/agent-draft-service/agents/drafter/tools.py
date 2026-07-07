@@ -133,7 +133,11 @@ def draft_section(
             "If it asks for a title page, output only the title page. "
             "Never add extra sections, preambles, conclusions, or unsolicited content. "
             "Follow the HTML template structure, fonts, and inline styles exactly. "
-            "Fill every placeholder from Field Data; court name, petitioner name, and respondent name must never be empty. "
+            "Fill every placeholder from Field Data. If a value is genuinely absent from Field Data "
+            "and the Source Context, keep the placeholder blank (e.g. ______) — NEVER invent names, "
+            "dates, amounts, case numbers, or facts that are not in the provided data. "
+            "When the Section Prompt contains a SOURCE TEMPLATE SEGMENT, reproduce its wording, "
+            "clause order, numbering, and headings exactly — do not paraphrase settled legal boilerplate. "
             "Do not include citation markers, source names, or [cite: ...] in output."
         ) + lang_directive
         prompt_source = "DEFAULT (no DB prompt configured)"
@@ -229,8 +233,12 @@ def draft_section(
                         else:
                             parts.append("☝️ Follow the template format from above.\n\n")
                     else:
-                        parts.append(types.Part.from_uri(file_uri=template_url, mime_type="text/html"))
-                        parts.append("☝️ Follow the template format (font, size, margin, padding, headings) from above.\n\n")
+                        # No fetchable template HTML — proceed without a structural
+                        # reference (types.Part.from_uri crashed here: not imported).
+                        logger.warning(
+                            "Template URL returned HTTP %s; drafting without template reference: %s",
+                            t_resp.status_code, template_url,
+                        )
             except Exception as e:
                 logger.warning("Could not load/fetch template_url: %s", e)
 
@@ -331,9 +339,13 @@ OUTPUT RULES:
   If it says "generate a title page", output only the title page content.
   Do NOT add preambles, introductions, extra sections, summaries, or any content not explicitly asked for.
 - Detail hint (only if Section Prompt does not already define scope): {length_instruction}
-- Fill EVERY placeholder: [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [CASE_NUMBER], [ADDRESS] etc.
-  • Use Field Data first → then RAG → then safe fallback ("the Petitioner", "the Hon'ble Court").
-  • Court name, petitioner name, and respondent name must NEVER be blank.
+- Fill placeholders like [PETITIONER_NAME], [RESPONDENT_NAME], [COURT_NAME], [DATE], [CASE_NUMBER], [ADDRESS]:
+  • Use Field Data first → then facts extracted from the Source Context.
+  • If a value exists in neither, use a neutral role reference ("the Petitioner", "the Hon'ble Court")
+    for party/court references, and keep a blank (______) for dates, amounts, case numbers, addresses.
+  • NEVER invent specific names, dates, amounts, case numbers, or facts not present in the inputs.
+- If the Section Prompt contains a SOURCE TEMPLATE SEGMENT, reproduce its wording, clause order,
+  numbering, and headings exactly — only placeholders change.
 - If final_address is provided, use that exact address string and do not reconstruct it from components.
 - Do NOT repeat any sentence, token, paragraph, heading, or address block.
 - Do NOT output slash-separated strings like "Village/Taluka/District" or "A / B / C".

@@ -1,8 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import FormattedAssistantContent from '../ChatInterface/FormattedAssistantContent';
 import { Bot, Copy, MessageSquare, FileDown } from 'lucide-react';
 import DownloadPdf from '../DownloadPdf/DownloadPdf';
 import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
@@ -243,73 +240,6 @@ async function downloadAsWord(markdownText, title) {
 }
 
 // Court-document markdown components — Times New Roman, proper legal formatting
-const COURT_DOC_MD_COMPONENTS = {
-  h1: ({ children }) => (
-    <h1 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '13pt', fontWeight: 700, textAlign: 'center', textTransform: 'uppercase', margin: '14pt 0 8pt', letterSpacing: '0.02em', color: '#000', lineHeight: 1.4 }}>
-      {children}
-    </h1>
-  ),
-  h2: ({ children }) => (
-    <h2 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', fontWeight: 700, textAlign: 'center', textTransform: 'uppercase', margin: '12pt 0 6pt', color: '#000', lineHeight: 1.4 }}>
-      {children}
-    </h2>
-  ),
-  h3: ({ children }) => (
-    <h3 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', fontWeight: 700, margin: '10pt 0 5pt', color: '#000', lineHeight: 1.4 }}>
-      {children}
-    </h3>
-  ),
-  h4: ({ children }) => (
-    <h4 style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', fontWeight: 700, margin: '8pt 0 4pt', color: '#000' }}>
-      {children}
-    </h4>
-  ),
-  p: ({ children }) => (
-    <p style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', lineHeight: 1.75, margin: '0 0 7pt', textAlign: 'justify', color: '#000', wordSpacing: 'normal' }}>
-      {children}
-    </p>
-  ),
-  strong: ({ children }) => <strong style={{ fontWeight: 700, color: '#000' }}>{children}</strong>,
-  em: ({ children }) => <em style={{ fontStyle: 'italic' }}>{children}</em>,
-  hr: () => <hr style={{ border: 0, borderTop: '1px solid #000', margin: '12pt 0' }} />,
-  ul: ({ children }) => <ul style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', paddingLeft: '1.5em', margin: '4pt 0 8pt', color: '#000' }}>{children}</ul>,
-  ol: ({ children }) => <ol style={{ fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', paddingLeft: '1.5em', margin: '4pt 0 8pt', color: '#000' }}>{children}</ol>,
-  li: ({ children }) => <li style={{ margin: '2pt 0', lineHeight: 1.75, fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt', color: '#000' }}>{children}</li>,
-  blockquote: ({ children }) => (
-    <blockquote style={{ borderLeft: '3px solid #555', paddingLeft: '12pt', margin: '8pt 0', fontStyle: 'italic', color: '#222', fontFamily: '"Times New Roman", Times, serif', fontSize: '12pt' }}>
-      {children}
-    </blockquote>
-  ),
-  table: ({ children }) => (
-    <div style={{ overflowX: 'auto', margin: '10pt 0 14pt' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11pt', fontFamily: '"Times New Roman", Times, serif' }}>{children}</table>
-    </div>
-  ),
-  thead: ({ children }) => <thead style={{ background: '#f0f0f0' }}>{children}</thead>,
-  th: ({ children }) => (
-    <th style={{ border: '1px solid #666', padding: '6px 10px', textAlign: 'left', fontWeight: 700, fontSize: '11pt', fontFamily: '"Times New Roman", Times, serif', background: '#f0f0f0', color: '#000' }}>
-      {children}
-    </th>
-  ),
-  tbody: ({ children }) => <tbody>{children}</tbody>,
-  tr: ({ children }) => <tr>{children}</tr>,
-  td: ({ children }) => (
-    <td style={{ border: '1px solid #999', padding: '6px 10px', textAlign: 'left', verticalAlign: 'top', fontSize: '11pt', fontFamily: '"Times New Roman", Times, serif', color: '#000' }}>
-      {children}
-    </td>
-  ),
-  code: ({ inline, children }) =>
-    inline ? (
-      <code style={{ fontFamily: '"Courier New", Courier, monospace', fontSize: '10pt', background: '#f5f5f5', padding: '1px 4px', borderRadius: '3px' }}>{children}</code>
-    ) : (
-      <pre style={{ fontFamily: '"Courier New", Courier, monospace', fontSize: '10pt', background: '#f5f5f5', border: '1px solid #ddd', padding: '10px', overflowX: 'auto', margin: '8pt 0' }}>
-        <code>{children}</code>
-      </pre>
-    ),
-  a: ({ href, children }) => <a href={href} style={{ color: '#1a56db', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer">{children}</a>,
-  img: ({ src, alt }) => <img src={src} alt={alt || ''} style={{ maxWidth: '100%', height: 'auto', margin: '8pt 0' }} />,
-};
-
 const DocumentViewer = ({
   selectedMessageId,
   currentResponse,
@@ -583,12 +513,7 @@ const DocumentViewer = ({
                         {pageContent}
                       </pre>
                     ) : (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={COURT_DOC_MD_COMPONENTS}
-                      >
-                        {pageContent}
-                      </ReactMarkdown>
+                      <FormattedAssistantContent raw={pageContent} />
                     )}
                     {index === pages.length - 1 && isLiveStream && (
                       <span style={{ display: 'inline-block', width: '2px', height: '16px', background: '#21C1B6', marginLeft: '2px', verticalAlign: 'middle', animation: 'pulse 1s infinite' }} />

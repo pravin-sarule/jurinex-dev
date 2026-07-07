@@ -50,7 +50,7 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'https://authservice-120280829617.asia-south1.run.app';
+  'http://localhost:5001';
 
 const IS_LOCAL_DEV_HOST =
   typeof window !== 'undefined' &&
@@ -98,7 +98,7 @@ export const VISUAL_SERVICE_URL =
  * Set VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL for a custom host.
  */
 const DEFAULT_AGENTIC_DOCUMENT_HOST =
-  'https://agentic-document-service-120280829617.asia-south1.run.app';
+  'http://localhost:8092';
 
 const rawAgenticDocs =
   import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
@@ -132,7 +132,7 @@ export const CITATION_SERVICE_URL =
 export const CITATION_V1_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_V1_SERVICE_URL ||
   (IS_LOCAL_DEV_HOST
-    ? 'http://localhost:8003'
+    ? 'http://localhost:8004'
     : 'https://citation-service-v1-120280829617.asia-south1.run.app');
 
 // Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) in 1 iteration
@@ -145,7 +145,7 @@ export const CITATION_TESTING_SERVICE_URL =
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
 export const DRAFTING_SERVICE_URL =
   import.meta.env.VITE_DRAFTING_SERVICE_URL ||
-  'https://drafting-service-120280829617.asia-south1.run.app';
+  'http://localhost:8003';
 
 // AI Chatbot support agent (port 8095)
 export const AI_CHATBOT_URL =
@@ -163,7 +163,7 @@ export const CHAT_DRAFT_BACKEND_URL =
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE = ensureLocalhostPort(
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-    'https://drafting-agents-120280829617.asia-south1.run.app',
+    'http://localhost:8002',
   5017
 );
 
