@@ -156,6 +156,11 @@ def _is_deep_query(query: str) -> bool:
                                     "study", "review", "assessment", "dossier", "brief"))
     if intensity and artefact:
         return True
+    # A prompt that enumerates many numbered sections IS a structured multi-part brief — treat it
+    # as deep regardless of length. A concise 14-point ask (<1500 chars) must still get the deep,
+    # no-ceiling, completion-contract path, not the comprehensive prompt's "1,200-2,500 word" cap.
+    if len(_find_numbered_headings(query or "")) >= 6:
+        return True
     # Long, explicitly-structured prompts (e.g. a multi-section court-ready brief with many
     # tables) are extreme even without an intensity word — route them to the deep call too.
     if len(query or "") > 1500:
@@ -167,6 +172,82 @@ def _is_deep_query(query: str) -> bool:
         if n_sections >= 4 or n_tables >= 3 or cues:
             return True
     return False
+
+
+# Pure social / greeting tokens — a message made ENTIRELY of these needs no document context.
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hey", "heya", "hello", "helo", "hlo", "yo", "sup", "hola",
+    "namaste", "namaskar", "gm", "gn", "good", "morning", "afternoon", "evening", "night",
+    "greetings", "thanks", "thank", "thankyou", "thx", "ty", "tysm", "welcome",
+    "ok", "okay", "okey", "cool", "nice", "great", "awesome", "fine", "alright",
+    "how", "are", "you", "u", "doing", "hru", "howdy", "there",
+    "yes", "no", "yeah", "yep", "nope", "hmm", "test", "testing", "ping",
+}
+
+
+def _is_trivial_query(query: str) -> bool:
+    """True for greetings / chit-chat that need NO document context (e.g. 'hi', 'hello',
+    'good morning', 'how are you', 'thanks'). Conservative: only fires when the message is short
+    AND every word is a known social token — so a real question is never starved of context."""
+    import re
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    words = re.findall(r"[a-z']+", q)
+    if not words or len(words) > 6:
+        return False
+    return all(w in _GREETING_WORDS for w in words)
+
+
+def _doc_context_char_budget(
+    query: str, *, learning_mode: bool, is_deep: bool, is_comprehensive: bool
+) -> int:
+    """Dynamically size the document context to the QUESTION (relevance/speed over blind cost):
+      - greeting / chit-chat   ->   8,000  (~3K tokens; barely any doc — 'hi' shouldn't load the case)
+      - normal specific ask    ->  90,000  (~33K tokens; a focused slice for a narrow question)
+      - comprehensive / broad  -> 260,000  (~95K tokens)
+      - extreme / deep         -> 550,000  (~200K tokens; the whole doc even for large PDFs)
+      - learning mode          -> 160,000  (unchanged)
+    gemma-4's input limit is ~262K tokens (~727K chars), so even the top tier leaves headroom."""
+    if learning_mode:
+        return 160000
+    if _is_trivial_query(query):
+        return 8000
+    if is_deep:
+        return 550000
+    if is_comprehensive:
+        return 260000
+    return 90000
+
+
+def _extract_template_text_sync(data: bytes, mime_type: str | None, filename: str | None) -> str:
+    """Extract an uploaded draft TEMPLATE as plain text for injection into the prompt.
+
+    gemma-4-31b-it does NOT accept PDF/image/file Parts on the Gemini Developer API
+    (inline PDF -> 500; rasterized images / Files-API -> empty output — verified live,
+    consistent with Google's own note that Gemma models are not served file/image input
+    on this API). So the template is fed as TEXT. Prefer fast local extraction; fall back
+    to the OCR adapter (Document AI) for scanned/empty PDFs.
+    """
+    from app.services.adapters.word import extract_word_text, is_word_filename, is_word_mime
+
+    if is_word_mime(mime_type) or is_word_filename(filename or ""):
+        return (extract_word_text(data, mime_type=mime_type, filename=filename) or "").strip()
+    # Digital PDF templates extract instantly and exactly via pypdf.
+    try:
+        import io as _io
+        from pypdf import PdfReader  # type: ignore
+        text = "\n".join((page.extract_text() or "") for page in PdfReader(_io.BytesIO(data)).pages).strip()
+        if len(text) > 40:
+            return text
+    except Exception:
+        pass
+    # Fallback (scanned template / non-PDF): full OCR adapter.
+    try:
+        from app.services.adapters import ocr as _ocr
+        return (_ocr.extract_text_from_bytes(data, mime_type or "application/pdf", filename or "template").text or "").strip()
+    except Exception:
+        return ""
 
 
 def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[str]:
@@ -2161,6 +2242,7 @@ async def intelligent_chat_stream(
             gemini_stream_config_for_folder_chat,
             stream_config_for_folder_chat,
             claude_stream_generator,
+            claude_draft_stream_generator,
             deepseek_stream_generator,
             normalize_markdown_render_output,
         )
@@ -2651,7 +2733,19 @@ async def intelligent_chat_stream(
             # higher temperature below; specific asks stay focused/terse. Deep/extreme asks are a
             # strict escalation that ALSO triggers the multi-pass report generator. Computed once.
             is_deep = bool(not learning_mode and doc_texts and _is_deep_query(query_text))
-            is_comprehensive = bool(not learning_mode and doc_texts and _is_comprehensive_query(query_text)) or is_deep
+            # Draft-from-template: explicit flag + an uploaded template (attached to the model as a
+            # file). Treated like comprehensive for context sizing + temperature so the case's
+            # supporting documents are fed as grounding evidence for filling the template.
+            is_draft = bool(
+                not learning_mode
+                and getattr(chat_request, "draft_mode", False)
+                and getattr(chat_request, "template_gcs_path", None)
+            )
+            is_comprehensive = (
+                bool(not learning_mode and doc_texts and _is_comprehensive_query(query_text))
+                or is_deep
+                or is_draft
+            )
             if is_comprehensive:
                 logger.info(
                     "[Route:intelligent_chat_stream] comprehensive query folder=%s — keeping full-document context",
@@ -2746,9 +2840,18 @@ async def intelligent_chat_stream(
                 if settings.gemini_api_key:
                     context_parts = []
                     running_chars = 0
-                    # A: comprehensive/deep asks get the FULL document (gemma-4 input limit is
-                    # ~262K tokens) so deep analysis can cover the whole case, not just the head.
-                    char_limit = 160000 if learning_mode else (200000 if is_comprehensive else 80000)
+                    # Dynamically size the document context to the question: a greeting loads
+                    # almost nothing, a narrow ask gets a focused slice, and comprehensive/deep asks
+                    # get the whole case (gemma-4 input limit ~262K tokens). Scales cost + latency to
+                    # what the question actually needs instead of a fixed tier.
+                    char_limit = _doc_context_char_budget(
+                        query_text,
+                        learning_mode=learning_mode,
+                        # Drafting needs maximal grounding (missing evidence => wrong "[NOT FOUND]"),
+                        # so give draft the full-document budget like deep, not the comprehensive tier.
+                        is_deep=(is_deep or is_draft),
+                        is_comprehensive=is_comprehensive,
+                    )
                     for doc in doc_texts:
                         name = doc.get("name", "document")
                         text = (doc.get("text") or "").strip()
@@ -2764,6 +2867,62 @@ async def intelligent_chat_stream(
                         running_chars += len(block)
 
                     context = "\n\n---\n\n".join(context_parts)
+                    # ── Draft-from-template setup ────────────────────────────────────────────────
+                    # A dedicated draft model (settings.draft_model_name, e.g. gemini-3.1-pro-preview)
+                    # reads the uploaded template PDF DIRECTLY and reproduces all pages with clean
+                    # formatting. gemma cannot accept PDF Parts (verified: 500) and truncates long
+                    # templates, so when the draft model is gemma / blank we fall back to injecting the
+                    # template as extracted TEXT. Blocking download+extract run in the executor so the
+                    # SSE event loop is never blocked.
+                    template_text = ""
+                    _draft_template_bytes = None
+                    # Draft engine: honour the frontend selector (chat_request.draft_model) when it is
+                    # one of the allowed engines; otherwise fall back to the .env default. Only these
+                    # are permitted so an arbitrary model string can't be injected via the request.
+                    _draft_model_name = ""
+                    if is_draft:
+                        _DRAFT_ALLOWED_MODELS = {
+                            "gemini-3.1-pro-preview", "claude-opus-4-8", "claude-sonnet-5",
+                        }
+                        _req_draft_model = (getattr(chat_request, "draft_model", None) or "").strip()
+                        _draft_model_name = (
+                            _req_draft_model if _req_draft_model in _DRAFT_ALLOWED_MODELS
+                            else (settings.draft_model_name or "").strip()
+                        )
+                    _tmpl_uri = str(getattr(chat_request, "template_gcs_path", "") or "") if is_draft else ""
+                    _tmpl_mime = (getattr(chat_request, "template_mimetype", None) or "") if is_draft else ""
+                    _tmpl_is_pdf = _tmpl_mime.lower() == "application/pdf" or _tmpl_uri.lower().endswith(".pdf")
+                    # Attach the template as a native PDF Part only for a PDF template on a non-gemma model.
+                    _draft_attach_pdf = bool(
+                        _draft_model_name and not _draft_model_name.lower().startswith("gemma") and _tmpl_is_pdf
+                    )
+                    if is_draft and _tmpl_uri:
+                        try:
+                            yield _sse({"type": "thinking", "text": "Reading the uploaded template...\n"})
+                            _draft_template_bytes = await loop.run_in_executor(
+                                None, lambda: gcs.download_bytes(_tmpl_uri)
+                            )
+                            if not _draft_attach_pdf:
+                                template_text = await loop.run_in_executor(
+                                    None,
+                                    lambda: _extract_template_text_sync(
+                                        _draft_template_bytes, _tmpl_mime or None, _tmpl_uri.rsplit("/", 1)[-1]
+                                    ),
+                                )
+                            logger.info(
+                                "[Route:intelligent_chat_stream] folder=%s draft model=%s attach_pdf=%s "
+                                "template_bytes=%d template_text_chars=%d",
+                                folder_name, _draft_model_name or "(admin)", _draft_attach_pdf,
+                                len(_draft_template_bytes or b""), len(template_text),
+                            )
+                        except Exception as _tmpl_exc:
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s draft template read failed: %s",
+                                folder_name, _tmpl_exc,
+                            )
+                            template_text = ""
+                            _draft_template_bytes = None
+                            _draft_attach_pdf = False
                     if learning_mode and learning_state is not None:
                         _lr_core = LearningAgentController.learning_system_prompt(
                             turn_count=learning_state.turn_count,
@@ -2793,6 +2952,154 @@ async def intelligent_chat_stream(
                             f"=== CASE MATERIALS ===\n{context}\n\n"
                             f"=== USER INPUT ===\n{effective_query_text}\n\n"
                             "=== JSON OUTPUT ==="
+                        )
+                    elif is_draft:
+                        # Draft-from-template. When the draft model can read the PDF (Pro models), the
+                        # template rides along as a PDF Part (see the streaming call) and we reference it;
+                        # otherwise it is injected here as extracted TEXT. Either way the model reproduces
+                        # the WHOLE template, filling placeholders ONLY from the supporting documents.
+                        if _draft_attach_pdf and _draft_template_bytes:
+                            _tmpl_section = (
+                                "The TEMPLATE is ATTACHED to this message as a PDF. Study it ONLY as your "
+                                "FORMAT & STRUCTURE REFERENCE — learn from it the document type, the set and "
+                                "order of clauses, the headings, the professional drafting style/tone, and the "
+                                "layout (recitals, signature/witness blocks, schedules). Do NOT copy its blanks "
+                                "or boilerplate placeholder text; draft fresh, real clauses in this style.\n\n"
+                            )
+                        else:
+                            _tmpl_block = (template_text or "").strip() or (
+                                "[The uploaded template could not be read. Ask the user to re-upload it as a "
+                                "text-based PDF or .docx.]"
+                            )
+                            _tmpl_section = (
+                                "=== TEMPLATE (FORMAT & STRUCTURE REFERENCE ONLY) ===\n"
+                                "Use this ONLY to learn the document type, clause set/order, headings, style "
+                                "and layout. Do NOT copy its blanks or boilerplate wording — draft fresh, real "
+                                f"clauses in this style.\n{_tmpl_block}\n\n"
+                            )
+                        prompt = (
+                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            "You are a SENIOR LEGAL DRAFTING ATTORNEY — an expert agreement / deed / pleading "
+                            "drafter in Indian practice. You are given a TEMPLATE and the case's SUPPORTING "
+                            "DOCUMENTS. Use the TEMPLATE ONLY as a FORMAT & STRUCTURE REFERENCE — it shows you the "
+                            "document type, the clauses such a document contains, their order, the headings, the "
+                            "professional drafting style, and the layout. Then DRAFT A FRESH, COMPLETE, "
+                            "EXECUTION-READY document of that type — composing the actual legal language YOURSELF "
+                            "and drawing every party-specific fact from the SUPPORTING DOCUMENTS.\n\n"
+                            "THIS IS INTELLIGENT EXPERT DRAFTING, NOT FILLING BLANKS. Do NOT merely copy the "
+                            "template and drop values into its gaps. Do NOT reproduce its placeholder text, blanks, "
+                            "or boilerplate wording verbatim. Write proper, self-composed operative clauses in "
+                            "clean professional legal prose, the way a senior advocate drafting from scratch (with "
+                            "this template as a style guide) would — with correct paragraphing, sensible clause "
+                            "wording, and sound legal judgement.\n\n"
+                            "═══ 1. INTELLIGENT DRAFTING (compose; do not fill-in-the-blank) ═══\n"
+                            "- Follow the template's STRUCTURE and clause set, but COMPOSE the content yourself in "
+                            "clean, professional legal prose. Where the template shows a blank or a generic "
+                            "placeholder, WRITE THE REAL, properly-worded clause — never echo the placeholder.\n"
+                            "- Produce a COMPLETE document of this type: every section such a document needs "
+                            "(title, parties, recitals/WHEREAS, definitions, operative clauses, schedules/"
+                            "annexures, testimonium and signature/witness blocks), in a sensible professional order "
+                            "guided by the template. Do not stop early; a substantial document needs substantial "
+                            "output.\n"
+                            "- Be SELF-AWARE: detect the document type and jurisdiction, and draft what a competent "
+                            "such document requires — choosing, ordering and wording clauses appropriately, and "
+                            "adapting to the facts (a franchise, partnership, sale deed or will each get their own "
+                            "proper clauses, not a rent agreement's).\n\n"
+                            "═══ 2. TWO-TIER CONTENT (facts vs. standard terms) ═══\n"
+                            "As you compose each clause, classify EVERY value you write into ONE tier and handle "
+                            "it accordingly:\n"
+                            "• TIER A — PARTY-SPECIFIC FACTS (identity & money belonging to THESE parties): names, "
+                            "parentage, ages, addresses, Aadhaar / PAN / ID numbers, the specific rent / price / "
+                            "deposit amounts, dates, property description, bank name / account number / IFSC / UPI "
+                            "ID, cheque or registration numbers.\n"
+                            "  → Fill ONLY from the supporting documents. NEVER invent or guess a party-specific "
+                            "fact. If a Tier-A value is genuinely absent from the documents, leave a CLEAN fill-in "
+                            "blank of underscores in the body (e.g. 'Account No.: ____________________') — do NOT "
+                            "write long '[NOT FOUND...]' tags inline — and record that blank in ITEMS REQUIRING "
+                            "COMPLETION (section 6) so nothing is missed.\n"
+                            "• TIER B — STANDARD CONTRACT TERMS (conventional, NOT identity/money-specific): notice "
+                            "period for inspection/entry, renewal duration and renewal-notice period, rent grace "
+                            "period, late-payment interest rate, lock-in period, refund window, and similar "
+                            "boilerplate values.\n"
+                            "  → An expert drafter does NOT leave these blank. Supply the STANDARD, market-"
+                            "conventional value for Indian practice, phrased in the template's own style (typical "
+                            "defaults: inspection/entry notice = 24 hours; renewal notice = 30 days before expiry; "
+                            "late-payment interest ≈ 18% p.a.; deposit-refund window = 30 days; lock-in = 6 "
+                            "months). MARK every value YOU supply (not taken from the documents) by appending "
+                            "' [standard — verify]' the FIRST time it appears. Do NOT tag Tier-A values that came "
+                            "from the documents.\n\n"
+                            "═══ 3. PROFESSIONAL COMPLETION (make it a proper agreement) ═══\n"
+                            "- After drafting the clauses the template shows, ADD any STANDARD PROTECTIVE CLAUSES "
+                            "that a competent agreement OF THIS SAME TYPE should contain but the template omits — "
+                            "and ONLY clauses appropriate to THIS detected document type (never import clauses from "
+                            "a different kind of document). Continue the numbering, group them under a bold heading "
+                            "'ADDITIONAL STANDARD CLAUSES', and mark each with ' [standard — verify]'. Decide the "
+                            "right set from the document type you detect — do NOT hardcode. (For a residential "
+                            "tenancy this typically means late-payment interest, alterations/fixtures, pets & "
+                            "nuisance, visitors/guests, quiet enjoyment, and notice for termination.)\n"
+                            "- Keep the settled legal meaning of standard clauses intact — draft them in their "
+                            "conventional protective form; do not water them down.\n\n"
+                            "═══ 4. JURISDICTION / LEGAL ADVISORY ═══\n"
+                            "- If the facts reveal a jurisdiction-specific concern about the INSTRUMENT itself, "
+                            "note it in DRAFTING & LEGAL NOTES (section 6) — do NOT silently change the instrument. "
+                            "Example: residential letting of a property in Maharashtra is conventionally executed "
+                            "as a 'Leave and License Agreement' under the Maharashtra Rent Control Act, 1999, "
+                            "rather than a generic 'Rent Agreement'. State such points as advisory notes for the "
+                            "attorney, never as unilateral changes.\n"
+                            "- Keep the document's TITLE and instrument name EXACTLY as the template's (do not "
+                            "prefix, rename, or blend instrument types in the title or body). Raise any instrument-"
+                            "type concern ONLY in DRAFTING & LEGAL NOTES.\n\n"
+                            "═══ 5. FORMATTING & PARAGRAPHING (court/registrar-ready) ═══\n"
+                            "- Bold section headings on their OWN line (NOT '#'/'##'). Each numbered clause STARTS "
+                            "ON ITS OWN NEW LINE with its own heading. The operative-words line (e.g. 'NOW THIS "
+                            "AGREEMENT WITNESSETH AS FOLLOWS:') MUST be on its own line, then a BLANK line, then "
+                            "'**1. TERM:**' on the next line. NEVER fuse a heading or preamble with the next clause "
+                            "on one line (NOT '...WITNESSETH AS FOLLOWS:1. TERM:').\n"
+                            "- PARAGRAPHING (important): write recitals/WHEREAS clauses and each operative clause as "
+                            "PROPER paragraphs of flowing legal prose. START a new paragraph for each distinct "
+                            "clause or point and END that paragraph when the point is complete; separate EVERY "
+                            "clause, recital and block with a BLANK line. Do NOT run several clauses together into "
+                            "one block, and do NOT fragment a single clause into many stubby one-line pieces. "
+                            "Sub-points take indented (a)/(b)/(c) or (i)/(ii)/(iii) numbering, each on its own "
+                            "line. Aim for the rhythm of a professionally typed agreement, not a bulleted list.\n"
+                            "- SIDE-BY-SIDE COLUMNS → Markdown TABLE. When the template lays content out in columns "
+                            "— signature blocks (LANDLORD | TENANT, LESSOR | LESSEE, FRANCHISOR | FRANCHISEE, PARTY "
+                            "1 | PARTY 2), witness blocks (Witness 1 | Witness 2), or any multi-column arrangement "
+                            "— reproduce it as a Markdown table with ONE COLUMN PER template column so the columns "
+                            "stay aligned. NEVER flatten columns into a run-on line. Example:\n"
+                            "  | LANDLORD / LESSOR | TENANT / LESSEE |\n"
+                            "  |---|---|\n"
+                            "  | Signature: __________ | Signature: __________ |\n"
+                            "  | Name: Ramesh K. Desai | Name: Priya S. Malhotra |\n"
+                            "  | Date: 01/07/2025 | Date: 01/07/2025 |\n"
+                            "- Put each labelled field on its OWN line (Signature / Name / Date are separate lines) "
+                            "and separate distinct blocks with a blank line. Reproduce existing tables / schedules "
+                            "/ inventories (e.g. an ANNEXURE inventory) as Markdown tables with the template's "
+                            "exact columns. Centre only what the template centres (its title / cause title); keep "
+                            "body clauses left-aligned. Math in plain Unicode (no LaTeX).\n"
+                            "- The AGREEMENT BODY must contain ONLY the clean legal document — no source tags, no "
+                            "'[source: ...]', no analysis prose. It must read like a finished, signable agreement.\n\n"
+                            "═══ 6. CLOSING SECTIONS (after the agreement, clearly separated) ═══\n"
+                            "After the signature/witness block, output a line containing only '---', then these "
+                            "two sections, each under a bold heading:\n"
+                            "- '**ITEMS REQUIRING COMPLETION**' — a short numbered list of every Tier-A blank you "
+                            "left (what to fill and where). If none, write 'None — all required facts were found "
+                            "in the case file.'\n"
+                            "- '**DRAFTING & LEGAL NOTES**' — brief bullets: the standard values/clauses you "
+                            "supplied ('[standard — verify]'), any jurisdiction/instrument advisory from section "
+                            "4, and a one-line reminder that a qualified advocate must review the draft before "
+                            "execution.\n\n"
+                            "COURT-PLEADING CONVENTIONS — apply ONLY IF this template is itself a court pleading "
+                            "(plaint / petition / application) and already contains these sections; SKIP ENTIRELY "
+                            "for agreements, deeds, wills and other non-litigation documents:\n"
+                            "- Each material fact in its own numbered paragraph; complete cause-of-action, "
+                            "jurisdiction, valuation & court-fee and limitation paragraphs; PRAYER reliefs as "
+                            "lettered clauses (a),(b),(c); reproduce the VERIFICATION, affidavit, Section 12A "
+                            "mediation and Section 65B BSA blocks that are present in the template.\n\n"
+                            f"{_tmpl_section}"
+                            f"=== SUPPORTING DOCUMENTS ===\n{context}\n\n"
+                            f"=== USER INSTRUCTION ===\n{query_text}\n\n"
+                            "=== COMPLETED DRAFT ==="
                         )
                     elif is_deep:
                         # Deep/extreme asks (e.g. multi-section court-ready briefs): ONE single
@@ -2909,6 +3216,26 @@ async def intelligent_chat_stream(
                     # Store for token-usage logging below
                     actual_model_name = resolved_model_name
 
+                    # Draft-from-template: force the selected draft engine (frontend dropdown, else the
+                    # .env default) instead of the admin-selected chat model. Both Gemini-3.x and Claude
+                    # read the template PDF directly and reproduce all pages. Route by provider:
+                    #   • claude-*  → Claude path; the PDF rides as a document block (see the claude
+                    #     branch below), which uses the dedicated claude_draft_stream_generator.
+                    #   • else (gemini-3.x) → Gemini path with a precise temperature + full output budget.
+                    if is_draft and _draft_model_name:
+                        resolved_model_name = _draft_model_name
+                        actual_model_name = _draft_model_name
+                        if _draft_model_name.lower().startswith("claude"):
+                            stream_provider = "claude"
+                            stream_cfg = ({}, {})  # Claude draft uses the dedicated generator; kwargs unused
+                        else:
+                            from google.genai import types as _draft_types
+                            stream_provider = "gemini"
+                            stream_cfg = _draft_types.GenerateContentConfig(
+                                temperature=0.2,
+                                max_output_tokens=int(getattr(settings, "draft_max_output_tokens", 0) or 65536),
+                            )
+
                     if stream_provider == "claude":
                         # ── Claude streaming path (true SSE via thread + queue) ────────
                         claude_gen_kwargs, claude_llm_params = stream_cfg
@@ -2918,12 +3245,24 @@ async def intelligent_chat_stream(
 
                         def _run_claude_stream():
                             try:
-                                for chunk_text in claude_stream_generator(
-                                    prompt,
-                                    model_name=resolved_model_name,
-                                    gen_kwargs=claude_gen_kwargs,
-                                    llm_params=claude_llm_params,
-                                ):
+                                # Draft mode on a Claude engine: attach the template PDF as a document
+                                # block via the dedicated generator (Claude reads PDFs natively).
+                                if is_draft and _draft_attach_pdf and _draft_template_bytes:
+                                    _claude_gen = claude_draft_stream_generator(
+                                        prompt,
+                                        model_name=resolved_model_name,
+                                        pdf_bytes=_draft_template_bytes,
+                                        pdf_mime=(_tmpl_mime or "application/pdf"),
+                                        max_tokens=int(getattr(settings, "draft_max_output_tokens", 0) or 32000),
+                                    )
+                                else:
+                                    _claude_gen = claude_stream_generator(
+                                        prompt,
+                                        model_name=resolved_model_name,
+                                        gen_kwargs=claude_gen_kwargs,
+                                        llm_params=claude_llm_params,
+                                    )
+                                for chunk_text in _claude_gen:
                                     loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk_text)
                             except Exception as exc:
                                 claude_stream_error.append(str(exc))
@@ -2995,7 +3334,8 @@ async def intelligent_chat_stream(
                         # Comprehensive asks: nudge temperature up so the model writes a fuller,
                         # less terse answer. The agent_prompts row uses a low temp (~0.3) tuned for
                         # precise specific-question answers, which suppresses long-form output.
-                        if is_comprehensive:
+                        # (Draft mode keeps its own precise temperature — do not nudge it.)
+                        if is_comprehensive and not is_draft:
                             try:
                                 if isinstance(gemini_config, dict):
                                     if float(gemini_config.get("temperature") or 0.0) < 0.6:
@@ -3021,9 +3361,20 @@ async def intelligent_chat_stream(
                         # fed each pass only per-group RAG snippets (not the whole case), which made
                         # deep answers SHORTER, slower (5+ throttle-prone calls), and more
                         # hallucination-prone than one call over the complete document.
+                        # Draft mode: a PDF-capable draft model (e.g. gemini-3.1-pro-preview) reads the
+                        # uploaded template PDF directly for full-fidelity reproduction, so attach it as
+                        # a file Part alongside the grounding prompt. gemma / non-PDF templates instead
+                        # carry the template as TEXT inside `prompt` (built above), so contents=prompt.
+                        _draft_contents = None
+                        if is_draft and _draft_attach_pdf and _draft_template_bytes:
+                            from google.genai import types as _gtypes
+                            _draft_contents = [
+                                _gtypes.Part.from_bytes(data=_draft_template_bytes, mime_type="application/pdf"),
+                                _gtypes.Part.from_text(text=prompt),
+                            ]
                         stream_iter = client.models.generate_content_stream(
                             model=resolved_model_name,
-                            contents=prompt,
+                            contents=(_draft_contents if _draft_contents is not None else prompt),
                             config=gemini_config,
                         )
                         # Generous limits: short per-chunk timeouts were stopping the stream mid-answer
@@ -3161,6 +3512,11 @@ async def intelligent_chat_stream(
                 _ns_cfg = locals().get("gemini_config")
                 _ns_client = locals().get("client")
                 _ns_prompt = locals().get("prompt")
+                # Draft mode: reuse the same [template PDF Part, prompt] contents built for streaming so
+                # the non-stream fallback also drafts from the attached template (not text-only). When no
+                # PDF Part was attached (gemma / text templates), `_ns_draft` is None and we send the
+                # prompt, which already carries the template text.
+                _ns_draft = locals().get("_draft_contents")
                 _deep_fallback_done = False
                 if (
                     is_comprehensive and not learning_mode and _ns_provider == "gemini"
@@ -3169,7 +3525,9 @@ async def intelligent_chat_stream(
                     try:
                         _ns_resp = await _run_blocking(
                             lambda: _ns_client.models.generate_content(
-                                model=_ns_model, contents=_ns_prompt, config=_ns_cfg,
+                                model=_ns_model,
+                                contents=(_ns_draft if _ns_draft is not None else _ns_prompt),
+                                config=_ns_cfg,
                             ),
                             timeout_s=non_stream_timeout_s,
                             timeout_message="gemini_non_stream_deep",
@@ -3426,7 +3784,7 @@ async def intelligent_chat_stream(
             yield _sse({
                 "type": "metadata",
                 "session_id": session_id,
-                "method": "gemini_direct",
+                "method": ("template_draft" if is_draft else "gemini_direct"),
                 "routing_decision": "db_text_fallback",
                 "prompt_label": display_question if (chat_request.secret_id or "").strip() else None,
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
@@ -3491,10 +3849,46 @@ async def intelligent_chat_stream(
                 request_id=request_id,
                 session_id=session_id or "",
             )
+            # Draft-from-template: render the finished draft into a downloadable, court-styled DOCX
+            # (Times New Roman, A4, 1" margins, 1.5 spacing) and return a signed download URL — a
+            # Markdown chat bubble cannot be filed. Failure is non-fatal (the streamed draft still shows).
+            _draft_download_url = None
+            _draft_filename = None
+            if is_draft and (answer or "").strip():
+                try:
+                    import re as _re_docx
+                    from app.services.docx_export import markdown_to_court_docx
+                    _docx_bytes = await loop.run_in_executor(
+                        None, lambda: markdown_to_court_docx(answer, title=(display_question or "Draft"))
+                    )
+                    _safe_name = (_re_docx.sub(r"[^A-Za-z0-9._-]+", "_", folder_name or "draft").strip("_") or "draft")[:60]
+                    _docx_dest = f"{user_id}/drafts/{_safe_name}_{request_id}.docx"
+                    _docx_uri = await loop.run_in_executor(
+                        None,
+                        lambda: gcs.upload_bytes(
+                            _docx_bytes,
+                            _docx_dest,
+                            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            bucket_type="output",
+                        ),
+                    )
+                    _draft_download_url = await loop.run_in_executor(
+                        None, lambda: gcs.signed_read_url(_docx_uri, expiration_minutes=1440)
+                    )
+                    _draft_filename = f"{_safe_name}_draft.docx"
+                    logger.info(
+                        "[Route:intelligent_chat_stream] folder=%s draft DOCX exported bytes=%d uri=%s",
+                        folder_name, len(_docx_bytes), _docx_uri,
+                    )
+                except Exception as _docx_exc:
+                    logger.warning(
+                        "[Route:intelligent_chat_stream] folder=%s draft DOCX export failed: %s",
+                        folder_name, _docx_exc,
+                    )
             yield _sse({
                 "type": "done",
                 "session_id": session_id,
-                "method": "gemini_direct",
+                "method": ("template_draft" if is_draft else "gemini_direct"),
                 "routing_decision": "db_text_fallback",
                 "answer": answer,
                 "learning_mode": learning_mode,
@@ -3506,6 +3900,8 @@ async def intelligent_chat_stream(
                 "used_chunk_ids": [],
                 "prompt_label": display_question if (chat_request.secret_id or "").strip() else None,
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
+                "draft_download_url": _draft_download_url,
+                "draft_filename": _draft_filename,
             })
 
         except Exception as exc:

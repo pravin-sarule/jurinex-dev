@@ -833,6 +833,78 @@ def claude_stream_generator(
         )
 
 
+def claude_draft_stream_generator(
+    prompt: str,
+    *,
+    model_name: str,
+    pdf_bytes: bytes | None = None,
+    pdf_mime: str = "application/pdf",
+    max_tokens: int = 32000,
+):
+    """Stream a court-ready draft from Claude, attaching the uploaded template as a PDF
+    document block (Claude reads PDFs natively — verified live).
+
+    Used for draft-from-template when the selected draft engine is a Claude model
+    (claude-opus-4-8 / claude-sonnet-5). Enables ADAPTIVE THINKING ({"type":"adaptive"},
+    the modern 4.6+ form — the deprecated budget_tokens form 400s on these models): the
+    model reasons about document type, structure, clause selection and grounding before
+    it writes, which is exactly the drafting "self-intelligence" this feature needs.
+    `text_stream` yields only the answer text (not thinking deltas), so the streamed draft
+    stays clean; thinking trades a little first-token latency for a much better draft
+    (aligned with "relevance/quality over cost"). temperature is left unset (required when
+    thinking is on; setting it 400s anyway).
+    """
+    import base64 as _b64
+
+    client = _anthropic_client()
+    if client is None:
+        logger.warning("[DocumentAI] Claude draft stream skipped — Anthropic client unavailable")
+        return
+
+    api_model = _anthropic_messages_model_id(model_name)
+    content: list = []
+    if pdf_bytes:
+        content.append({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": pdf_mime or "application/pdf",
+                "data": _b64.standard_b64encode(pdf_bytes).decode("ascii"),
+            },
+        })
+    content.append({"type": "text", "text": prompt})
+
+    create_kwargs = {
+        "model": api_model,
+        "max_tokens": max(1024, min(int(max_tokens or 32000), 64000)),
+        "messages": [{"role": "user", "content": content}],
+        "thinking": {"type": "adaptive"},
+    }
+    logger.info(
+        "[DocumentAI] ▶ Claude DRAFT stream  model_id=%s (raw=%s)  max_tokens=%d  pdf_bytes=%d",
+        api_model, model_name, create_kwargs["max_tokens"], len(pdf_bytes or b""),
+    )
+    with client.messages.stream(**create_kwargs) as stream:
+        for text_chunk in stream.text_stream:
+            yield text_chunk
+        final_msg = stream.get_final_message()
+        usage = getattr(final_msg, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        log_token_usage_table(
+            context="claude_draft_stream",
+            usage={
+                "provider": "claude",
+                "model": api_model,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": input_tokens + output_tokens,
+            },
+            provider="claude",
+            model_name=api_model,
+        )
+
+
 # ── Claude (Anthropic) generation ─────────────────────────────────────────────
 
 def _generate_text_claude(

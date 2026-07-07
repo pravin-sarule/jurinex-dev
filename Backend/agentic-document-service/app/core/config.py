@@ -114,6 +114,19 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
     # Dedicated key for Gemma models (gemma-*). Falls back to GEMINI_API_KEY when blank.
     gemma_api_key: str = Field(default="", validation_alias=AliasChoices("GEMMA_API_KEY"))
+    # Dedicated model for draft-from-template mode. A stronger model (e.g. gemini-3.1-pro-preview)
+    # reads the uploaded template PDF directly and reproduces all pages with clean formatting — gemma
+    # cannot (PDF Parts 500 and it truncates long templates). Uses GEMINI_API_KEY. Blank -> reuse the
+    # admin-selected chat model (template injected as text).
+    draft_model_name: str = Field(
+        default="gemini-3.1-pro-preview",
+        validation_alias=AliasChoices("DRAFT_MODEL_NAME"),
+    )
+    # Output-token ceiling for drafts (full-length templates need room; clamped to the model's real max).
+    draft_max_output_tokens: int = Field(
+        default=65536,
+        validation_alias=AliasChoices("DRAFT_MAX_OUTPUT_TOKENS"),
+    )
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
     deepseek_api_key: str = Field(
         default="",

@@ -613,6 +613,45 @@ class FolderWorkflowService:
                 exc,
             )
 
+    def _insert_case_row(self, cur: Any, insert_payload: dict[str, Any]) -> dict[str, Any]:
+        """Insert one row into `cases`, guarding against a legacy CHECK constraint on
+        `category_type` (which historically restricted it to Civil/Criminal/Commercial).
+
+        The canonical schema drops that constraint so the free-text classifier value
+        (e.g. "Revenue") persists like its sibling columns. This retry is defence-in-depth:
+        if the constraint is still present on a given database, we roll back to a savepoint
+        and retry once with `category_type` nulled, so case creation can never hard-fail on it.
+        """
+        def _execute(payload: dict[str, Any]) -> dict[str, Any]:
+            columns = list(payload.keys())
+            placeholders = ", ".join(["%s"] * len(columns))
+            cur.execute(
+                f"""
+                INSERT INTO cases ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING *
+                """,
+                [payload[column] for column in columns],
+            )
+            return cur.fetchone()
+
+        cur.execute("SAVEPOINT before_case_insert")
+        try:
+            row = _execute(insert_payload)
+        except Exception as exc:
+            constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
+            if constraint != "cases_category_type_check":
+                raise
+            cur.execute("ROLLBACK TO SAVEPOINT before_case_insert")
+            logger.warning(
+                "[FolderService] cases.category_type=%r rejected by legacy CHECK %s; "
+                "retrying with category_type=NULL (drop this constraint to persist the value)",
+                insert_payload.get("category_type"), constraint,
+            )
+            row = _execute({**insert_payload, "category_type": None})
+        cur.execute("RELEASE SAVEPOINT before_case_insert")
+        return row
+
     def create_case(self, user_id: str, case_data: dict[str, Any]) -> dict[str, Any]:
         """Create a case record + linked user_files folder using document-service-compatible storage."""
         int_user_id: int | None = None
@@ -638,17 +677,7 @@ class FolderWorkflowService:
             case_columns = self._get_table_columns(cur, "cases")
             insert_payload = {"user_id": int_user_id}
             insert_payload.update({key: value for key, value in case_payload.items() if key in case_columns})
-            insert_columns = list(insert_payload.keys())
-            placeholders = ", ".join(["%s"] * len(insert_columns))
-            cur.execute(
-                f"""
-                INSERT INTO cases ({", ".join(insert_columns)})
-                VALUES ({placeholders})
-                RETURNING *
-                """,
-                [insert_payload[column] for column in insert_columns],
-            )
-            new_case = cur.fetchone()
+            new_case = self._insert_case_row(cur, insert_payload)
             case_id = str(new_case["id"])
 
             safe_case_name = re.sub(r"[^a-zA-Z0-9._-]", "_", (case_title or "Untitled_Case").strip())

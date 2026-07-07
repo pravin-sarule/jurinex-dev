@@ -48,6 +48,32 @@ class OcrResult:
     quality_score: float
 
 
+def _word_ocr_result(
+    data: bytes, *, mime_type: str | None, filename: str | None, source: str = ""
+) -> OcrResult:
+    """Extract text from a Word (.docx/.doc) document via the XML adapter.
+
+    Document AI does not accept Word MIME types, so these files must be handled
+    here rather than being sent to OCR (which throws) and dropping through to the
+    pypdf / raw-UTF-8 fallback that yields empty or garbage text.
+    """
+    from app.services.adapters.word import extract_word_text
+    try:
+        text = (extract_word_text(data, mime_type=mime_type, filename=filename) or "").strip()
+    except Exception as exc:
+        logger.warning("[Extractor] route=word extraction failed source=%s error=%s", source, exc)
+        text = ""
+    # DOCX carries no intrinsic page count; estimate ~1800 chars/page for
+    # progress/quality reporting only (not used for chunking).
+    page_count = max(1, round(len(text) / 1800)) if text else 0
+    quality_score = 0.9 if len(text) > 100 else (0.5 if text else 0.0)
+    logger.info(
+        "[Extractor] route=word method=docx_xml source=%s chars=%d pages~%d",
+        source, len(text), page_count,
+    )
+    return OcrResult(text=text, page_count=page_count, quality_score=quality_score)
+
+
 # ── PDF page-batch helpers ─────────────────────────────────────────────────────
 
 def _pdf_page_count(data: bytes) -> int:
@@ -349,6 +375,16 @@ def extract_text_from_gcs(
             progress_callback=progress_callback,
         )
 
+    # Route Word documents (.docx/.doc) to the XML text extractor. Document AI
+    # rejects Word MIME types, so without this they fall through to the pypdf /
+    # UTF-8 fallback and yield empty/garbage text.
+    from app.services.adapters.word import is_word_filename, is_word_mime
+    if is_word_mime(resolved_mime_type) or is_word_filename(filename or ""):
+        from app.services.adapters.gcs import download_bytes
+        return _word_ocr_result(
+            download_bytes(gs_uri), mime_type=resolved_mime_type, filename=filename, source=gs_uri,
+        )
+
     from app.core.config import get_settings
     settings = get_settings()
 
@@ -397,6 +433,11 @@ def extract_text_from_bytes(
     Large PDFs are split into page batches and processed in parallel.
     Falls back to pypdf → UTF-8 if Document AI is unavailable.
     """
+    # Word documents (.docx/.doc) are not accepted by Document AI — extract via XML.
+    from app.services.adapters.word import is_word_filename, is_word_mime
+    if is_word_mime(mime_type) or is_word_filename(filename or ""):
+        return _word_ocr_result(data, mime_type=mime_type, filename=filename, source=filename or "bytes")
+
     from app.core.config import get_settings
     settings = get_settings()
 
