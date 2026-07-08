@@ -100,7 +100,13 @@ export function sanitizeLegalDraftMarkdown(text) {
     }
     i = j;
   }
-  return out.join('\n');
+  // Legal paragraph numbers must stay LITERAL TEXT ("29. The Plaintiff…"), never become
+  // markdown ordered lists — GFM renumbers list items (29. → 1.) and the app's global
+  // list-style reset hides the markers entirely (the "numbering disappeared" bug).
+  // Escaping the dot keeps the exact number in the justified paragraph, as filed.
+  return out
+    .map((l) => (_isPipeRow(l) || _isSep(l) ? l : l.replace(/^(\s*)(\d{1,3})\.(\s+)/, '$1$2\\.$3')))
+    .join('\n');
 }
 
 // ── court-styled ReactMarkdown component set (serif, isolated from chat) ──────
@@ -143,8 +149,8 @@ export const legalDraftComponents = {
     <h3 style={{ fontFamily: SERIF, fontSize: '15px', fontWeight: 700, margin: '14px 0 6px', textAlign: draftLineAlign(_extract(children)) || 'left', color: 'var(--draft-fg, #222)' }} {...props}>{children}</h3>
   ),
   strong: ({ node, ...props }) => <strong style={{ fontWeight: 700 }} {...props} />,
-  ol: ({ node, ...props }) => <ol style={{ margin: '0 0 12px', paddingLeft: '26px', fontFamily: SERIF, fontSize: '15px', lineHeight: 1.7 }} {...props} />,
-  ul: ({ node, ...props }) => <ul style={{ margin: '0 0 12px', paddingLeft: '24px', fontFamily: SERIF, fontSize: '15px', lineHeight: 1.7 }} {...props} />,
+  ol: ({ node, ...props }) => <ol style={{ margin: '0 0 12px', paddingLeft: '26px', fontFamily: SERIF, fontSize: '15px', lineHeight: 1.7, listStyle: 'decimal', listStylePosition: 'outside' }} {...props} />,
+  ul: ({ node, ...props }) => <ul style={{ margin: '0 0 12px', paddingLeft: '24px', fontFamily: SERIF, fontSize: '15px', lineHeight: 1.7, listStyle: 'disc', listStylePosition: 'outside' }} {...props} />,
   li: ({ node, ...props }) => <li style={{ margin: '4px 0' }} {...props} />,
   hr: () => <hr style={{ border: 0, borderTop: '1px solid var(--draft-line, #d8d8d8)', margin: '18px 0' }} />,
 };

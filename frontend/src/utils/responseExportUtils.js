@@ -139,9 +139,11 @@ function cloneForExport(element, forPdf = false) {
       while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
       wrapper.remove();
     });
-    // Also remove any inline min-width / width: max-content that would push table beyond page
+    // Also remove inline styles that would push the layout beyond the A4 page:
+    // table width/max-content AND th/td white-space:nowrap (inline styles override the
+    // PDF stylesheet's white-space:normal, widening the layout and shifting the canvas).
+    cloned.querySelectorAll('table, th, td').forEach(el => el.removeAttribute('style'));
     cloned.querySelectorAll('table').forEach(tbl => {
-      tbl.removeAttribute('style');
       tbl.style.width = '100%';
     });
   }
@@ -162,7 +164,10 @@ function cloneForExport(element, forPdf = false) {
 function buildExportHtmlString(cloned, forPdf = false) {
   const dateStr = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
   const bodyStyle = forPdf
-    ? 'font-family:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12pt;line-height:1.75;color:#1f1f1f;background:#fff;text-rendering:optimizeLegibility;padding:0;max-width:100%;overflow:hidden;'
+    // Explicit A4 pixel width (not max-width:100% + overflow:hidden): the string source
+    // renders in a container sized to the REAL browser window, so percentage widths +
+    // windowWidth:794 disagree and html2canvas captures a shifted/clipped strip.
+    ? `font-family:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12pt;line-height:1.75;color:#1f1f1f;background:#fff;text-rendering:optimizeLegibility;padding:0;margin:0;width:${A4_WIDTH_PX}px;`
     : 'font-family:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12pt;line-height:1.75;color:#1f1f1f;background:#fff;text-rendering:optimizeLegibility;padding:24pt 32pt;';
   const tableStyles = forPdf ? TABLE_STYLES_PDF : TABLE_STYLES_HTML;
   return `<!DOCTYPE html>
@@ -213,6 +218,11 @@ export async function downloadAsPdf(element, filename = 'AI_Response.pdf') {
       backgroundColor: '#ffffff',
       logging: false,
       windowWidth: A4_WIDTH_PX,   // render at A4 width so tables lay out correctly
+      width: A4_WIDTH_PX,         // capture exactly the A4-wide layout, not the real window
+      x: 0,
+      y: 0,
+      scrollX: 0,                 // ignore the host page's scroll offsets — a scrolled
+      scrollY: 0,                 // parent shifts the capture and clips the content
     },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'], avoid: ['h1', 'h2', 'h3', 'h4', 'tr', 'li', 'blockquote', 'pre'] },

@@ -65,20 +65,26 @@ def _emit_marker_runs(paragraph, text: str, *, bold: bool, italic: bool) -> None
     if not text:
         return
     # Split keeping NOT_FOUND markers and red blanks as their own tokens.
-    for part in _MARKER_SPLIT_RE.split(text):
-        if not part:
+    for fragment in re.split(r"(<br\s*/?>)", text, flags=re.IGNORECASE):
+        if not fragment:
             continue
-        if part == NOT_FOUND_MARKER:
-            run = paragraph.add_run(part)
-            run.bold = True
-        elif _RED_BLANK_RE.fullmatch(part):
-            run = paragraph.add_run(part)
-            run.bold = True
-            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)  # red — a field to fill
-        else:
-            run = paragraph.add_run(part)
-            run.bold = bold
-            run.italic = italic
+        if re.fullmatch(r"<br\s*/?>", fragment, flags=re.IGNORECASE):
+            paragraph.add_run().add_break()
+            continue
+        for part in _MARKER_SPLIT_RE.split(fragment):
+            if not part:
+                continue
+            if part == NOT_FOUND_MARKER:
+                run = paragraph.add_run(part)
+                run.bold = True
+            elif _RED_BLANK_RE.fullmatch(part):
+                run = paragraph.add_run(part)
+                run.bold = True
+                run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)  # red — a field to fill
+            else:
+                run = paragraph.add_run(part)
+                run.bold = bold
+                run.italic = italic
 
 
 def _emit_inline(paragraph, text: str, *, base_bold: bool = False) -> None:
@@ -139,20 +145,60 @@ def _add_hr(doc) -> None:
     p_pr.append(borders)
 
 
-def _add_table(doc, rows: list[list[str]]) -> None:
+def _looks_like_layout_table(rows: list[list[str]]) -> bool:
+    if not rows or max((len(r) for r in rows), default=0) != 2:
+        return False
+    header = " ".join(rows[0]).lower()
+    body = " ".join(" ".join(r) for r in rows[:4]).lower()
+    if "witness 1" in header and "witness 2" in header:
+        return True
+    if "signature" in body and any(a in body for a in ("landlord", "lessor", "licensor", "vendor")) and any(
+        b in body for b in ("tenant", "lessee", "licensee", "purchaser")
+    ):
+        return True
+    return False
+
+
+def _remove_table_borders(table) -> None:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tbl_pr = table._tbl.tblPr
+    for child in list(tbl_pr):
+        if child.tag == qn("w:tblBorders"):
+            tbl_pr.remove(child)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "nil")
+        borders.append(el)
+    tbl_pr.append(borders)
+
+
+def _add_table(doc, rows: list[list[str]], *, layout: bool = False) -> None:
     if not rows:
         return
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.shared import Pt
+
     n_cols = max(len(r) for r in rows)
     table = doc.add_table(rows=len(rows), cols=n_cols)
-    try:
-        table.style = "Table Grid"  # built-in bordered style
-    except Exception:
-        pass
+    if layout:
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = True
+        _remove_table_borders(table)
+    else:
+        try:
+            table.style = "Table Grid"  # built-in bordered style
+        except Exception:
+            pass
     for r_idx, row_cells in enumerate(rows):
         for c_idx in range(n_cols):
             cell = table.cell(r_idx, c_idx)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
             para = cell.paragraphs[0]
             para.text = ""
+            para.paragraph_format.space_after = Pt(2 if layout else 6)
             _emit_inline(para, row_cells[c_idx] if c_idx < len(row_cells) else "",
                          base_bold=(r_idx == 0))
     doc.add_paragraph()  # spacer after table
@@ -287,7 +333,7 @@ def markdown_to_court_docx(
                 while j < len(lines) and _is_table_row(lines[j]):
                     block_rows.append(_split_cells(lines[j]))
                     j += 1
-                _add_table(doc, block_rows)
+                _add_table(doc, block_rows, layout=_looks_like_layout_table(block_rows))
                 in_title_block = False
                 i = j
                 continue
