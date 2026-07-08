@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 
@@ -248,6 +250,88 @@ def _extract_template_text_sync(data: bytes, mime_type: str | None, filename: st
         return (_ocr.extract_text_from_bytes(data, mime_type or "application/pdf", filename or "template").text or "").strip()
     except Exception:
         return ""
+
+
+# Section-heading keywords that mark a template's structure (recitals, schedules,
+# signature/witness blocks, pleading blocks, etc.).
+_SKELETON_KEYWORDS = re.compile(
+    r"^(RECITALS?|WHEREAS|NOW\s+TH(IS|E)|DEFINITIONS?|SCHEDULE|ANNEXURE|APPENDIX|EXHIBIT|"
+    r"IN\s+WITNESS\s+WHEREOF|SIGNATURE|SIGNED|WITNESS|VERIFICATION|AFFIDAVIT|PRAYER|"
+    r"TESTIMONIUM|ARTICLE|CLAUSE|SECTION|PART)\b",
+    re.IGNORECASE,
+)
+# A numbered / lettered clause line ("1. TERM", "(a) ...", "2) RENT").
+_SKELETON_NUM_RE = re.compile(r"^\(?([0-9]{1,2}|[a-zA-Z])[.)]\s+(.+)$")
+
+
+def _extract_template_skeleton(template_text: str, *, max_items: int = 45) -> list[str]:
+    """Parse an ordered list of the template's own section/heading labels.
+
+    Structure-first drafting (mirrors how a human drafter works): rather than hoping the
+    model loosely imitates the template's layout, we hand it the template's explicit
+    skeleton and require the draft to expand EVERY section, in order. Heuristic and
+    lossless-optional — the model still has the full template (attached PDF or injected
+    text); the skeleton is a completeness/ordering aid, so an imperfect parse cannot make
+    the draft worse.
+    """
+    if not template_text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in template_text.replace("\r", "\n").split("\n"):
+        line = raw.strip().strip("*").strip()
+        if not line:
+            continue
+        label = ""
+        m = _SKELETON_NUM_RE.match(line)
+        if m:
+            num, rest = m.group(1), m.group(2)
+            head = re.split(r"[:.]", rest, 1)[0].strip()
+            head = " ".join(head.split()[:8])
+            label = f"{num}. {head}".strip() if head else f"{num}."
+        elif len(line) <= 60:
+            letters = [c for c in line if c.isalpha()]
+            is_caps = bool(letters) and (sum(c.isupper() for c in letters) / len(letters)) > 0.8
+            if (is_caps and len(line) > 2) or _SKELETON_KEYWORDS.match(line):
+                label = " ".join(line.split()[:10])
+        if not label:
+            continue
+        key = re.sub(r"\s+", " ", label.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+# ── Draft pipeline: session-scoped fact-inventory cache ──────────────────────
+# The Stage-B fact inventory depends only on the case's supporting documents, which
+# don't change within a drafting session — so re-drafts / "make it longer" follow-ups
+# reuse it and skip the single most expensive pipeline call. Keyed by a hash of the
+# doc-set (ids + text lengths) so a NEW upload invalidates the entry automatically.
+_DRAFT_FACTINV_CACHE: dict[str, str] = {}
+_DRAFT_FACTINV_CACHE_MAX = 40
+
+
+def _draft_factinv_key(folder_name: str, user_id: Any, doc_texts: list[dict]) -> str:
+    sig = "|".join(sorted(
+        f"{d.get('file_id')}:{len(str(d.get('text') or ''))}" for d in (doc_texts or [])
+    ))
+    raw = f"{folder_name}::{user_id}::{sig}"
+    return hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+
+
+def _draft_factinv_cache_put(key: str, value: str) -> None:
+    if not key or not value:
+        return
+    _DRAFT_FACTINV_CACHE[key] = value
+    while len(_DRAFT_FACTINV_CACHE) > _DRAFT_FACTINV_CACHE_MAX:
+        try:
+            del _DRAFT_FACTINV_CACHE[next(iter(_DRAFT_FACTINV_CACHE))]
+        except StopIteration:
+            break
 
 
 def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[str]:
@@ -2665,9 +2749,14 @@ async def intelligent_chat_stream(
                 for d in documents
                 if d.get("full_text_content") or d.get("summary")
             ]
-            default_cap = 24 if learning_mode else 8
+            # Draft-from-template must see ALL supporting documents (the fact inventory is
+            # built once over the whole set) — an 8-doc cap silently drops evidence and
+            # forces later sections to blank/hallucinate. Give drafts the same generous cap
+            # as learning mode.
+            _draft_req = bool(getattr(chat_request, "draft_mode", False))
+            default_cap = 24 if (learning_mode or _draft_req) else 8
             max_context_documents = max(1, int(llm_config.get("max_context_documents") or default_cap))
-            if learning_mode:
+            if learning_mode or _draft_req:
                 max_context_documents = min(len(eligible_docs), max(max_context_documents, 24))
             doc_texts = [
                 {
@@ -2902,13 +2991,15 @@ async def intelligent_chat_stream(
                             _draft_template_bytes = await loop.run_in_executor(
                                 None, lambda: gcs.download_bytes(_tmpl_uri)
                             )
-                            if not _draft_attach_pdf:
-                                template_text = await loop.run_in_executor(
-                                    None,
-                                    lambda: _extract_template_text_sync(
-                                        _draft_template_bytes, _tmpl_mime or None, _tmpl_uri.rsplit("/", 1)[-1]
-                                    ),
-                                )
+                            # Always extract the template TEXT (cheap) — even when we ALSO attach the PDF —
+                            # so we can parse its explicit section skeleton (structure-first drafting). When
+                            # the PDF is attached, this text feeds ONLY the skeleton, not a second full copy.
+                            template_text = await loop.run_in_executor(
+                                None,
+                                lambda: _extract_template_text_sync(
+                                    _draft_template_bytes, _tmpl_mime or None, _tmpl_uri.rsplit("/", 1)[-1]
+                                ),
+                            )
                             logger.info(
                                 "[Route:intelligent_chat_stream] folder=%s draft model=%s attach_pdf=%s "
                                 "template_bytes=%d template_text_chars=%d",
@@ -2956,8 +3047,11 @@ async def intelligent_chat_stream(
                     elif is_draft:
                         # Draft-from-template. When the draft model can read the PDF (Pro models), the
                         # template rides along as a PDF Part (see the streaming call) and we reference it;
-                        # otherwise it is injected here as extracted TEXT. Either way the model reproduces
-                        # the WHOLE template, filling placeholders ONLY from the supporting documents.
+                        # otherwise it is injected here as extracted TEXT. Either way the model uses the
+                        # template as a FORMAT/STRUCTURE reference and drafts a COMPLETE document of the same
+                        # type and comparable LENGTH, grounding every fact ONLY in the supporting documents.
+                        # NOTE: this single-call branch is the current live path; the multi-stage pipeline
+                        # (analyze -> fact inventory -> per-section draft -> audit) is the planned successor.
                         if _draft_attach_pdf and _draft_template_bytes:
                             _tmpl_section = (
                                 "The TEMPLATE is ATTACHED to this message as a PDF. Study it ONLY as your "
@@ -2977,6 +3071,21 @@ async def intelligent_chat_stream(
                                 "and layout. Do NOT copy its blanks or boilerplate wording — draft fresh, real "
                                 f"clauses in this style.\n{_tmpl_block}\n\n"
                             )
+                        # Structure-first drafting: hand the model the template's OWN section skeleton so the
+                        # draft expands every section in order (a completeness/ordering contract), rather than
+                        # loosely imitating the layout. The model still has the full template too.
+                        _draft_skeleton = _extract_template_skeleton(template_text)
+                        if _draft_skeleton:
+                            _skeleton_block = (
+                                "═══ TEMPLATE SKELETON (the template's OWN sections, in order) ═══\n"
+                                "Your draft MUST contain EVERY section below, in THIS order, each expanded into "
+                                "properly drafted clause(s) — not the bare label. Do not skip, merge, or reorder "
+                                "them. Place the ADDITIONAL STANDARD CLAUSES (section 3) AFTER these:\n"
+                                + "\n".join(f"  • {s}" for s in _draft_skeleton)
+                                + "\n\n"
+                            )
+                        else:
+                            _skeleton_block = ""
                         prompt = (
                             f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
                             "You are a SENIOR LEGAL DRAFTING ATTORNEY — an expert agreement / deed / pleading "
@@ -2999,8 +3108,16 @@ async def intelligent_chat_stream(
                             "- Produce a COMPLETE document of this type: every section such a document needs "
                             "(title, parties, recitals/WHEREAS, definitions, operative clauses, schedules/"
                             "annexures, testimonium and signature/witness blocks), in a sensible professional order "
-                            "guided by the template. Do not stop early; a substantial document needs substantial "
-                            "output.\n"
+                            "guided by the template.\n"
+                            "- LENGTH & COMPLETENESS CONTRACT (critical — do NOT violate): your draft MUST be as "
+                            "long and as complete as the source template. EVERY section, clause, sub-clause, "
+                            "recital, proviso, schedule and annexure that the template contains MUST appear in your "
+                            "draft — EXPANDED into full professional legal prose, NEVER compressed, summarized, "
+                            "sampled, or dropped. A ~20-page template MUST produce a comparably long (~15-20+ page) "
+                            "draft matching its section count and depth; a short template stays short. Do NOT "
+                            "conclude, sign off, or write the closing sections until EVERY template section has been "
+                            "fully drafted. If you feel 'done' while any template section is still undrafted, you "
+                            "are NOT done — keep writing section after section until all are complete.\n"
                             "- Be SELF-AWARE: detect the document type and jurisdiction, and draft what a competent "
                             "such document requires — choosing, ordering and wording clauses appropriately, and "
                             "adapting to the facts (a franchise, partnership, sale deed or will each get their own "
@@ -3096,6 +3213,7 @@ async def intelligent_chat_stream(
                             "jurisdiction, valuation & court-fee and limitation paragraphs; PRAYER reliefs as "
                             "lettered clauses (a),(b),(c); reproduce the VERIFICATION, affidavit, Section 12A "
                             "mediation and Section 65B BSA blocks that are present in the template.\n\n"
+                            f"{_skeleton_block}"
                             f"{_tmpl_section}"
                             f"=== SUPPORTING DOCUMENTS ===\n{context}\n\n"
                             f"=== USER INSTRUCTION ===\n{query_text}\n\n"
@@ -3236,7 +3354,114 @@ async def intelligent_chat_stream(
                                 max_output_tokens=int(getattr(settings, "draft_max_output_tokens", 0) or 65536),
                             )
 
-                    if stream_provider == "claude":
+                    # ── DRAFT PIPELINE (4-stage: analyze → fact inventory → per-section draft → audit) ──
+                    # Structure-first successor to the single-call draft; scales to long templates without
+                    # the single-call output-token ceiling and preserves the template's own section order.
+                    # On ANY failure we fall through to the single-call draft (the `prompt` built above) so
+                    # the user always gets a draft. Progress streams live; the finished document streams once
+                    # at the end (buffered internally through audit+repair — never appended twice).
+                    _draft_pipeline_done = False
+                    _draft_typography = None
+                    if is_draft and (template_text or "").strip():
+                        _fi_key = _draft_factinv_key(folder_name, user_id, doc_texts)
+                        _pipe_final = None
+                        # RAG: the pipeline retrieves top-chunks from THIS case's vector store
+                        # (per-facet for the fact matrix, per-section for drafting) instead of
+                        # dumping the whole corpus. Build a retrieve callback scoped to the
+                        # supporting file_ids; disable via llm_config draft_use_rag=false.
+                        _draft_retrieve = None
+                        try:
+                            _use_rag = bool(llm_config.get("draft_use_rag", True))
+                        except Exception:
+                            _use_rag = True
+                        _rag_fids = [str(d.get("file_id")) for d in doc_texts if d.get("file_id")]
+                        _rag_fids = [x for x in _rag_fids if x][:64]
+                        if _use_rag and _rag_fids:
+                            from app.services.learning_document_retrieval import get_relevant_chunks as _grc_draft
+
+                            def _draft_retrieve(_q: str, _k: int):
+                                try:
+                                    _raw = _grc_draft(
+                                        user_id=user_id,
+                                        case_id=folder_name,
+                                        query=_q,
+                                        file_ids=_rag_fids,
+                                        top_k=int(_k),
+                                        include_surrounding_chunks=True,
+                                        similarity_floor=0.30,
+                                    ) or []
+                                except Exception as _rex:
+                                    logger.warning("[Route:intelligent_chat_stream] draft RAG retrieval error: %s", _rex)
+                                    return []
+                                _norm = []
+                                for _ch in _raw:
+                                    _m = _ch.get("metadata") or {}
+                                    _norm.append({
+                                        "text": str(_ch.get("content") or "").strip(),
+                                        "name": str(_m.get("document_name") or "document"),
+                                        "page": _ch.get("page_number"),
+                                    })
+                                return _norm
+                        # Guardian model for the audit + repair pass: a strong model (Opus)
+                        # catches and rewrites a weaker draft engine's hallucinations. If the
+                        # engine is already Opus, reuse it; otherwise prefer Opus when an
+                        # Anthropic key is configured, else the capable analysis model.
+                        _draft_engine_lc = (resolved_model_name or "").lower()
+                        if _draft_engine_lc.startswith("claude-opus"):
+                            _guardian_model = resolved_model_name
+                        elif getattr(settings, "anthropic_api_key", "") or getattr(settings, "ANTHROPIC_API_KEY", ""):
+                            _guardian_model = "claude-opus-4-8"
+                        else:
+                            _guardian_model = "gemini-3.1-pro-preview"
+                        logger.info(
+                            "[Route:intelligent_chat_stream] folder=%s draft engine=%s guardian(audit)=%s",
+                            folder_name, resolved_model_name, _guardian_model,
+                        )
+                        try:
+                            from app.services import template_drafting as _tpl
+                            async for _pkind, _pdata in _tpl.run_template_drafting_pipeline(
+                                template_text=template_text,
+                                doc_texts=doc_texts,
+                                query_text=query_text,
+                                draft_engine=resolved_model_name,
+                                analysis_model="gemini-3.1-pro-preview",
+                                user_id=user_id,
+                                run_blocking=_run_blocking,
+                                doc_title=None,
+                                cached_fact_inventory=_DRAFT_FACTINV_CACHE.get(_fi_key),
+                                enable_audit=True,
+                                retrieve_fn=_draft_retrieve,
+                                audit_model=_guardian_model,
+                            ):
+                                if _pkind == "progress":
+                                    yield _sse(_pdata)
+                                elif _pkind == "section":
+                                    # Per-section content for a section-by-section draft UI.
+                                    yield _sse({"type": "draft_section", **_pdata})
+                                elif _pkind == "final":
+                                    _pipe_final = _pdata
+                        except Exception as _pipe_exc:
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s draft pipeline failed (%s); "
+                                "falling back to single-call draft", folder_name, _pipe_exc,
+                            )
+                            _pipe_final = None
+                        if _pipe_final and (_pipe_final.get("answer") or "").strip():
+                            _final_md = _pipe_final["answer"]
+                            _draft_typography = _pipe_final.get("typography")
+                            if _pipe_final.get("fact_inventory"):
+                                _draft_factinv_cache_put(_fi_key, _pipe_final["fact_inventory"])
+                            answer_parts.append(_final_md)
+                            streamed = True
+                            _draft_pipeline_done = True
+                            async for _sl in _yield_text_as_streaming_chunks(
+                                _sse, _final_md, delay_ms=stream_delay_ms
+                            ):
+                                yield _sl
+
+                    if _draft_pipeline_done:
+                        pass  # draft already produced + streamed by the 4-stage pipeline above
+                    elif stream_provider == "claude":
                         # ── Claude streaming path (true SSE via thread + queue) ────────
                         claude_gen_kwargs, claude_llm_params = stream_cfg
                         _SENTINEL = object()
@@ -3858,8 +4083,13 @@ async def intelligent_chat_stream(
                 try:
                     import re as _re_docx
                     from app.services.docx_export import markdown_to_court_docx
+                    # Typography captured by the drafting pipeline's Stage-A structural analysis
+                    # (base font / title alignment from the template); None on the single-call path.
+                    _typo = locals().get("_draft_typography")
                     _docx_bytes = await loop.run_in_executor(
-                        None, lambda: markdown_to_court_docx(answer, title=(display_question or "Draft"))
+                        None, lambda: markdown_to_court_docx(
+                            answer, title=(display_question or "Draft"), typography=_typo
+                        )
                     )
                     _safe_name = (_re_docx.sub(r"[^A-Za-z0-9._-]+", "_", folder_name or "draft").strip("_") or "draft")[:60]
                     _docx_dest = f"{user_id}/drafts/{_safe_name}_{request_id}.docx"

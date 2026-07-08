@@ -29,6 +29,15 @@ MARGIN_CM = 2.54        # 1 inch (SCI spec)
 LINE_SPACING = 1.5
 NOT_FOUND_MARKER = "[NOT FOUND IN CASE FILE - provide manually]"
 
+# Red "missing field" placeholders the drafter emits:
+#   <span style="color:red;font-weight:bold;">[________ FIELD NAME ________]</span>
+# Unwrap the span to its inner text, drop any stray span tags, and colour the
+# [________ … ________] blank red + bold so missing fields stand out in the Word file.
+_RED_SPAN_RE = re.compile(r"<span[^>]*color:\s*red[^>]*>(.*?)</span>", re.IGNORECASE | re.DOTALL)
+_ANY_SPAN_RE = re.compile(r"</?span[^>]*>", re.IGNORECASE)
+_RED_BLANK_RE = re.compile(r"\[_{2,}[^\]]*_{2,}\]")
+_MARKER_SPLIT_RE = re.compile(rf"({re.escape(NOT_FOUND_MARKER)}|\[_{{2,}}[^\]]*_{{2,}}\])")
+
 
 def _is_table_row(line: str) -> bool:
     s = line.strip()
@@ -47,21 +56,29 @@ def _split_cells(row: str) -> list[str]:
 
 
 def _emit_marker_runs(paragraph, text: str, *, bold: bool, italic: bool) -> None:
-    """Add runs for `text`, bolding any NOT_FOUND markers so blanks stand out."""
-    if NOT_FOUND_MARKER in text:
-        parts = text.split(NOT_FOUND_MARKER)
-        for idx, part in enumerate(parts):
-            if part:
-                run = paragraph.add_run(part)
-                run.bold = bold
-                run.italic = italic
-            if idx < len(parts) - 1:
-                run = paragraph.add_run(NOT_FOUND_MARKER)
-                run.bold = True
-    elif text:
-        run = paragraph.add_run(text)
-        run.bold = bold
-        run.italic = italic
+    """Add runs for `text`. NOT_FOUND markers → bold; red [____ FIELD ____] placeholders
+    (with or without the <span> wrapper) → bold red so missing fields stand out."""
+    from docx.shared import RGBColor
+    # Unwrap red placeholder spans to their inner [____ FIELD ____] text; drop any stray tags.
+    text = _RED_SPAN_RE.sub(lambda m: m.group(1), text)
+    text = _ANY_SPAN_RE.sub("", text)
+    if not text:
+        return
+    # Split keeping NOT_FOUND markers and red blanks as their own tokens.
+    for part in _MARKER_SPLIT_RE.split(text):
+        if not part:
+            continue
+        if part == NOT_FOUND_MARKER:
+            run = paragraph.add_run(part)
+            run.bold = True
+        elif _RED_BLANK_RE.fullmatch(part):
+            run = paragraph.add_run(part)
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)  # red — a field to fill
+        else:
+            run = paragraph.add_run(part)
+            run.bold = bold
+            run.italic = italic
 
 
 def _emit_inline(paragraph, text: str, *, base_bold: bool = False) -> None:
@@ -167,8 +184,16 @@ def _add_draft_header(doc) -> None:
     run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
 
 
-def markdown_to_court_docx(markdown_text: str, *, title: str | None = None) -> bytes:
-    """Render draft Markdown into a court-styled DOCX and return its bytes."""
+def markdown_to_court_docx(
+    markdown_text: str, *, title: str | None = None, typography: dict | None = None
+) -> bytes:
+    """Render draft Markdown into a court-styled DOCX and return its bytes.
+
+    typography (optional): the drafting pipeline's Stage-A structural analysis, e.g.
+    ``{"base_font": {"font": "Arial", "size_pt": 11}, "title_format": {...}}``. When
+    given, the document's base font/size follow the template instead of the court
+    defaults. None (the single-call path) keeps the Times New Roman 12 court style.
+    """
     from docx import Document
     from docx.shared import Pt, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
@@ -199,10 +224,22 @@ def markdown_to_court_docx(markdown_text: str, *, title: str | None = None) -> b
     section.top_margin = Cm(MARGIN_CM)
     section.bottom_margin = Cm(MARGIN_CM)
 
-    # Normal style: Times New Roman 12, 1.5 spacing, justified.
+    # Normal style: Times New Roman 12, 1.5 spacing, justified — unless the template's
+    # own base font/size was captured by the drafting pipeline (typography.base_font).
+    _font_name, _font_size = FONT_NAME, FONT_SIZE_PT
+    _base = (typography or {}).get("base_font") if isinstance(typography, dict) else None
+    if isinstance(_base, dict):
+        if str(_base.get("font") or "").strip():
+            _font_name = str(_base["font"]).strip()
+        try:
+            _sz = float(_base.get("size_pt") or 0)
+            if 8.0 <= _sz <= 20.0:  # ignore nonsense values, keep it readable/filable
+                _font_size = _sz
+        except (TypeError, ValueError):
+            pass
     normal = doc.styles["Normal"]
-    normal.font.name = FONT_NAME
-    normal.font.size = Pt(FONT_SIZE_PT)
+    normal.font.name = _font_name
+    normal.font.size = Pt(_font_size)
     pf = normal.paragraph_format
     pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
     pf.line_spacing = LINE_SPACING

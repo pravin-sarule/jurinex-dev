@@ -56,6 +56,7 @@ import LearningDetailPanel from "./LearningDetailPanel";
 import AgentStepsPanel from "./AgentStepsPanel";
 import ChatSessionList from "./ChatSessionList";
 import FormattedAssistantContent from "./FormattedAssistantContent";
+import DraftStudioModal from "./DraftStudioModal";
 import {
   formatChatResponseForDisplay,
   convertMarkdownBoldMarkers,
@@ -930,6 +931,7 @@ const ChatInterface = () => {
   // Draft-from-template: an uploaded template file (attached to the model on the next message) + its
   // upload state. The template is NOT ingested into the case RAG — it only rides the chat request.
   const [draftTemplate, setDraftTemplate] = useState(null); // { gcsPath, mimetype, filename }
+  const [draftStudio, setDraftStudio] = useState(null); // { question, template, model, folderName, sessionId } | null
   const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
   // Draft engine selector (shown only when a template is attached). '' = default (Gemini).
   const [draftModel, setDraftModel] = useState('');
@@ -2320,6 +2322,26 @@ const ChatInterface = () => {
       const questionText = String(forcedQuestion ?? chatInput).trim();
       if (!questionText) return;
 
+      // Draft-from-template → open the dedicated Draft Studio popup (section-by-section
+      // generation + a Create button that merges into the final court-styled draft),
+      // instead of streaming the draft into the shared chat panel.
+      if (draftTemplate) {
+        const dfName = typeof selectedFolder === 'string'
+          ? selectedFolder
+          : (selectedFolder?.originalname || selectedFolder?.name || null);
+        if (dfName) {
+          setDraftStudio({
+            question: questionText,
+            template: draftTemplate,
+            model: draftModel,
+            folderName: dfName,
+            sessionId: selectedChatSessionId || null,
+          });
+          setChatInput('');
+          return;
+        }
+      }
+
       setAnimatedResponseContent('');
       setThinkingContent('');
       streamBufferRef.current = '';
@@ -3684,7 +3706,7 @@ const ChatInterface = () => {
                                 {(loadingChat || isGenerating) && idx === currentChatHistory.length - 1 && !resolvedPayload && !pendingQuestion ? (
                                   <div className="flex items-center gap-2 text-gray-500 text-sm">
                                     <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                    <span>Thinking...</span>
+                                    <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
                                   </div>
                                 ) : resolvedPayload ? (
                                   <LearningChatBubble
@@ -3705,7 +3727,7 @@ const ChatInterface = () => {
                               {!chat.response ? (
                                 <div className="flex items-center gap-2 text-gray-500 text-sm py-4 px-5">
                                   <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                  <span>Thinking...</span>
+                                  <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
                                 </div>
                               ) : (
                                 <>
@@ -3826,7 +3848,7 @@ const ChatInterface = () => {
                                 return (
                                   <div className="flex items-center gap-2 text-gray-500 text-sm">
                                     <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                    <span>Thinking...</span>
+                                    <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
                                   </div>
                                 );
                               }
@@ -3838,7 +3860,7 @@ const ChatInterface = () => {
                               return (
                                 <div className="flex items-center gap-2 text-gray-500 text-sm">
                                   <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                  <span>Thinking...</span>
+                                  <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
                                 </div>
                               );
                             })()}
@@ -3850,7 +3872,7 @@ const ChatInterface = () => {
                             ) : (
                               <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                 <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                <span>Thinking...</span>
+                                <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
                               </div>
                             )}
                             {isGenerating && <span className="inline-block w-0.5 h-4 bg-gray-500 ml-1 animate-pulse" />}
@@ -4416,6 +4438,25 @@ const ChatInterface = () => {
         format="word"
         module="chat"
       />
+      {draftStudio && (
+        <DraftStudioModal
+          open={!!draftStudio}
+          onClose={() => setDraftStudio(null)}
+          baseUrl={DOCS_BASE_URL}
+          folderName={draftStudio.folderName}
+          question={draftStudio.question}
+          template={draftStudio.template}
+          draftModel={draftStudio.model}
+          sessionId={draftStudio.sessionId}
+          authToken={getAuthToken()}
+          onSaved={(sid) => {
+            // The draft was persisted server-side — refresh the chat thread so it shows
+            // up in this session's history (the backend may have created a new session).
+            const resolved = sid || draftStudio.sessionId;
+            if (resolved) fetchChatHistory(resolved, draftStudio.folderName);
+          }}
+        />
+      )}
     </div>
   );
 };

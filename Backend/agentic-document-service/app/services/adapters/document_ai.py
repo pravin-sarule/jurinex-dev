@@ -907,6 +907,18 @@ def claude_draft_stream_generator(
 
 # ── Claude (Anthropic) generation ─────────────────────────────────────────────
 
+def _claude_accepts_temperature(api_model: str) -> bool:
+    """Modern Claude models (Opus 4.6+, Sonnet 5/4.6, Fable/Mythos 5) reject the
+    `temperature` parameter outright (400 'temperature is deprecated for this model').
+    Older models still accept it. Default True so unknown/older ids keep working."""
+    m = (api_model or "").lower()
+    for tag in ("opus-4-8", "opus-4-7", "opus-4-6", "sonnet-5", "sonnet-4-6",
+                "fable-5", "mythos-5", "mythos-preview"):
+        if tag in m:
+            return False
+    return True
+
+
 def _generate_text_claude(
     prompt: str,
     *,
@@ -950,27 +962,45 @@ def _generate_text_claude(
         active_flags.append("system_instructions")
 
     # ── Extended thinking ────────────────────────────────────────────────────
-    if llm_params.get("thinking_mode"):
+    thinking_on = bool(llm_params.get("thinking_mode"))
+    if thinking_on:
         budget = _resolve_thinking_budget(llm_params, "claude")
         create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # Anthropic requires temperature=1 when extended thinking is on
+        # Anthropic requires temperature unset (=1) when extended thinking is on
         temperature = 1.0
         active_flags.append(f"thinking(budget={budget})")
 
-    create_kwargs["temperature"] = temperature
+    # Temperature: modern Claude models (Opus 4.6+, Sonnet 5, Fable 5) reject `temperature`
+    # entirely, and it must be unset when extended thinking is on. Only send it where the
+    # model accepts it and thinking is off.
+    if not thinking_on and _claude_accepts_temperature(api_model):
+        create_kwargs["temperature"] = temperature
 
     if active_flags:
         logger.info("[DocumentAI] Claude flags active: %s", ", ".join(active_flags))
 
+    # The Anthropic SDK REFUSES a non-streaming request whose max_tokens is large enough
+    # that it estimates the response could take >10 minutes ("Streaming is required for
+    # operations that may take longer than 10 minutes"). The drafting pipeline stages use
+    # 16K–32K max_tokens, which trips this — so stream and collect the final message for
+    # any high-max_tokens call. Streaming + get_final_message returns the identical Message
+    # (same .content / .usage), just without the timeout guard.
+    use_stream = max_tokens > 8000
+
     logger.info(
-        "[DocumentAI] ▶ Claude generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
+        "[DocumentAI] ▶ Claude generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  stream=%s",
         api_model,
         model_name,
         temperature,
         max_tokens,
+        use_stream,
     )
 
-    response = client.messages.create(**create_kwargs)
+    if use_stream:
+        with client.messages.stream(**create_kwargs) as stream:
+            response = stream.get_final_message()
+    else:
+        response = client.messages.create(**create_kwargs)
 
     usage = getattr(response, "usage", None)
     logger.info(
@@ -1151,6 +1181,7 @@ def _generate_text(
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
     model_name_override: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> str:
     """
     Generate text using either Gemini or Claude depending on the model name
@@ -1159,6 +1190,10 @@ def _generate_text(
     Routing:
       model id tail starts with "claude" (after any vendor/ path prefix) → Anthropic API
       everything else → Gemini API
+
+    max_output_tokens: optional per-call override of the configured output budget
+    (used by the multi-stage template drafting pipeline, whose fact-inventory and
+    section stages need a large budget). It is clamped to the model ceiling downstream.
     """
     model_name, gen_kwargs, llm_params = _generation_config(
         for_summary=for_summary,
@@ -1167,6 +1202,8 @@ def _generate_text(
         summarization_llm_config=summarization_llm_config,
         model_name_override=model_name_override,
     )
+    if max_output_tokens:
+        gen_kwargs = {**gen_kwargs, "max_output_tokens": int(max_output_tokens)}
     provider = _detect_provider(model_name)
 
     logger.info(
