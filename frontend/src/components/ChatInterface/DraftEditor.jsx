@@ -8,6 +8,7 @@ import { FieldPill } from './FieldPill';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
+import { draftLineAlign } from '../../utils/legalDraftRender';
 import {
   Bold, Italic, Underline as UnderlineIcon, Strikethrough,
   AlignLeft, AlignCenter, AlignRight, AlignJustify,
@@ -51,8 +52,29 @@ const COLOR_OPTIONS = [
 ];
 
 // ── markdown ⇄ html ──────────────────────────────────────────────────────────
+// The saved markdown carries no alignment (kept clean for the .docx export), so the editor
+// applies the SAME content-driven alignment the read-only view uses on load: centre the
+// document title / court lines / VERSUS, right-align trailing party-role labels. TipTap's
+// TextAlign extension parses `text-align` from the loaded HTML, so the editor shows the
+// heading centred. (On save, Turndown drops it again — the renderer + docx re-centre by the
+// same heuristic, so the round-trip stays clean.)
+function applyEditorAlignment(html) {
+  if (typeof window === 'undefined' || !window.DOMParser) return String(html || '');
+  const root = new DOMParser().parseFromString(`<body>${String(html || '')}</body>`, 'text/html').body;
+  root.querySelectorAll('p, h1, h2, h3, h4').forEach((el) => {
+    if (/text-align/i.test(el.getAttribute('style') || '')) return;   // respect explicit alignment
+    const align = draftLineAlign(el.textContent || '');
+    if (align && align !== 'left') {
+      const style = (el.getAttribute('style') || '').trim();
+      el.setAttribute('style', (style ? style.replace(/;?$/, ';') : '') + `text-align:${align}`);
+    }
+  });
+  return root.innerHTML;
+}
+
 export function markdownToHtml(md) {
-  return marked.parse(String(md || ''), { gfm: true, breaks: false, async: false });
+  const html = marked.parse(String(md || ''), { gfm: true, breaks: false, async: false });
+  return applyEditorAlignment(html);
 }
 
 /**

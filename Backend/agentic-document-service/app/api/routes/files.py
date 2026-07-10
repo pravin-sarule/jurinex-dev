@@ -3869,8 +3869,10 @@ async def intelligent_chat_stream(
                     and _ns_model and _ns_cfg is not None and _ns_client is not None and _ns_prompt
                 ):
                     try:
+                        from app.services.adapters.document_ai import _gemini_generate_content_retrying
                         _ns_resp = await _run_blocking(
-                            lambda: _ns_client.models.generate_content(
+                            lambda: _gemini_generate_content_retrying(
+                                _ns_client,
                                 model=_ns_model,
                                 contents=(_ns_draft if _ns_draft is not None else _ns_prompt),
                                 config=_ns_cfg,

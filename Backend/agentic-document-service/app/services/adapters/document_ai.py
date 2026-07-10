@@ -1173,6 +1173,39 @@ def deepseek_stream_generator(
 
 # ── Unified text generation (routes Gemini ↔ Claude) ─────────────────────────
 
+def _is_transient_gemini_error(exc: BaseException) -> bool:
+    """Retryable Gemini/Gemma error. The free-tier Gemma endpoints intermittently return
+    500 INTERNAL / 503 UNAVAILABLE that succeed on a plain retry (verified in prod logs:
+    a 500 followed by a 200 on the very next call). Rate limits are NOT the cause — Gemma
+    free tier is RPM 15 / TPM unlimited — so retrying is safe."""
+    msg = str(exc).upper()
+    return any(tok in msg for tok in ("500", "INTERNAL", "503", "UNAVAILABLE", "OVERLOADED", "DEADLINE EXCEEDED"))
+
+
+def _gemini_generate_content_retrying(client, *, model, contents, config, retries: int = 3, base_delay: float = 2.0):
+    """`client.models.generate_content` with automatic retry on transient 5xx errors. Turns
+    Gemma's intermittent 500 INTERNAL failures into successful calls. Retries only transient
+    server errors (never 400/401/403); backs off 2s, 4s. Raises the last error if all fail."""
+    import time
+    last_exc: BaseException | None = None
+    for attempt in range(max(1, retries)):
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as exc:  # inspect + selectively retry
+            last_exc = exc
+            if attempt >= retries - 1 or not _is_transient_gemini_error(exc):
+                raise
+            delay = base_delay * (2 ** attempt)
+            logger.warning(
+                "[DocumentAI] %s transient error (attempt %d/%d) — retrying in %.1fs: %s",
+                model, attempt + 1, retries, delay, str(exc)[:160],
+            )
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("gemini generate_content produced no result")
+
+
 def _generate_text(
     prompt: str,
     *,
@@ -1233,7 +1266,8 @@ def _generate_text(
         logger.warning("[DocumentAI] Gemini client unavailable — check GEMINI_API_KEY")
         return ""
     gemini_config = _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
-    response = client.models.generate_content(
+    response = _gemini_generate_content_retrying(
+        client,
         model=model_name,
         contents=prompt,
         config=gemini_config,
