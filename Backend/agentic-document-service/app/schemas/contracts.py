@@ -259,6 +259,10 @@ class FolderChatRequest(BaseModel):
     # Allowed: gemini-3.1-pro-preview (default), claude-opus-4-8, claude-sonnet-5. Anything else
     # falls back to the .env default. Only affects the DRAFT task.
     draft_model: str | None = None
+    # Per-draft STRUCTURE model selector (Stage A: template layout analysis). Allowed:
+    # gemini-3.1-pro-preview (default), gemini-2.5-flash, claude-opus-4-8, claude-sonnet-5,
+    # gemma-4-31b-it, gemma-4-26b-a4b-it. Anything else falls back to gemini-3.1-pro-preview.
+    analysis_model: str | None = None
     document_context: str | None = None
     context_page: int | None = None
     context_selection: str | None = None

@@ -226,6 +226,117 @@ def flush_aggregated_token_usage_table(
     return totals
 
 
+def usage_entry_count(session_key: str | None) -> int:
+    """Number of usage entries currently accumulated for a session (0 if none) — used to
+    mark the start of a sub-phase (e.g. one draft) so its slice can be reported later."""
+    if not session_key:
+        return 0
+    return len(_accumulators.get(session_key, []))
+
+
+def _multicol_table(headers: list[str], rows: list[list[str]], *, title: str,
+                    subtitle_lines: list[str] | None = None, right_align_from: int = 2) -> str:
+    widths = [
+        max(len(str(headers[i])), *( [len(str(r[i])) for r in rows] or [0] ))
+        for i in range(len(headers))
+    ]
+    def _row(cells: list[Any]) -> str:
+        parts = [
+            (str(c).rjust(widths[i]) if i >= right_align_from else str(c).ljust(widths[i]))
+            for i, c in enumerate(cells)
+        ]
+        return "| " + " | ".join(parts) + " |"
+    border = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+    out = ["", "=" * len(border), f" {title}", "=" * len(border)]
+    for s in (subtitle_lines or []):
+        out.append(f" {s}")
+    out += [border, _row(headers), border, *[_row(r) for r in rows], border, ""]
+    return "\n".join(out)
+
+
+def log_draft_token_usage(
+    session_key: str | None,
+    start_index: int = 0,
+    *,
+    draft_model: str | None = None,
+    guardian_model: str | None = None,
+    session_id: str | None = None,
+    user_id: str | int | None = None,
+    request_id: str | None = None,
+    answer_length: int | None = None,
+) -> dict[str, int] | None:
+    """Log a PER-MODEL token-burn table for ONE draft — the exact cost of a single draft,
+    broken down by the model that did each part (a draft legitimately uses several: Gemini
+    for template structure, the selected engine for drafting, Opus as guardian; on a
+    pipeline failure a single-call fallback runs). Reports only the accumulator slice
+    [start_index:] so it counts exactly this draft. Only models that ACTUALLY ran appear
+    (a configured guardian that never fired is NOT listed).
+
+    Token accounting is made consistent and cost‑accurate: a model's reported total token
+    count can exceed input+output because of hidden thinking/reasoning tokens (Gemini bills
+    those at the output rate), so Output is reconciled to (Total − Input). Thus every row
+    satisfies Total = Input + Output, and the grand total is the true billed cost."""
+    if not session_key:
+        return None
+    entries = _accumulators.get(session_key, [])[start_index:]
+    if not entries:
+        return None
+    order: list[str] = []
+    by_model: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        m = str(e.get("model") or "-")
+        if m not in by_model:
+            by_model[m] = {"provider": str(e.get("provider") or "-"), "in": 0, "out": 0, "calls": 0}
+            order.append(m)
+        agg = by_model[m]
+        i_tok = int(e.get("inputTokens") or 0)
+        o_tok = int(e.get("outputTokens") or 0)
+        t_tok = int(e.get("totalTokens") or 0)
+        if t_tok < i_tok + o_tok:            # missing / inconsistent → derive
+            t_tok = i_tok + o_tok
+        agg["in"] += i_tok
+        agg["out"] += (t_tok - i_tok)         # fold thinking tokens into output; Total = In + Out
+        agg["calls"] += 1
+
+    t_in = sum(int(a["in"]) for a in by_model.values())
+    t_out = sum(int(a["out"]) for a in by_model.values())
+    t_calls = sum(int(a["calls"]) for a in by_model.values())
+
+    headers = ["Model", "Provider", "Calls", "Input", "Output", "Total"]
+    rows: list[list[str]] = [
+        [m, str(by_model[m]["provider"]), _fmt_int(by_model[m]["calls"]),
+         _fmt_int(by_model[m]["in"]), _fmt_int(by_model[m]["out"]),
+         _fmt_int(int(by_model[m]["in"]) + int(by_model[m]["out"]))]
+        for m in order
+    ]
+    rows.append(["TOTAL (1 draft)", "", _fmt_int(t_calls), _fmt_int(t_in), _fmt_int(t_out), _fmt_int(t_in + t_out)])
+
+    subtitle: list[str] = []
+    if draft_model:
+        subtitle.append(f"Selected draft engine: {draft_model}")
+    meta = []
+    if answer_length is not None:
+        meta.append(f"Draft length: {_fmt_int(answer_length)} chars")
+    if session_id:
+        meta.append(f"Session: {session_id}")
+    if request_id:
+        meta.append(f"Request: {request_id}")
+    if user_id is not None:
+        meta.append(f"User: {user_id}")
+    if meta:
+        subtitle.append("   ".join(meta))
+
+    table = _multicol_table(
+        headers, rows,
+        title="TOKEN USAGE - DRAFT COMPLETE (per model, one draft)",
+        subtitle_lines=subtitle,
+        right_align_from=2,
+    )
+    print(table, flush=True)
+    logger.info(table)
+    return {"inputTokens": t_in, "outputTokens": t_out, "totalTokens": t_in + t_out}
+
+
 def format_token_usage_table(
     usage: dict[str, Any] | None,
     *,

@@ -68,8 +68,10 @@ from app.services.token_usage_log import (
     begin_token_usage_session,
     bind_token_usage_session,
     flush_aggregated_token_usage_table,
+    log_draft_token_usage,
     record_token_usage,
     unbind_token_usage_session,
+    usage_entry_count,
 )
 
 
@@ -621,6 +623,17 @@ class InternalAnalyticsRequest(BaseModel):
     userIds: list[int | str] = []
     startDate: str | None = None
     endDate: str | None = None
+
+
+class DraftExportDocxRequest(BaseModel):
+    markdown: str
+    title: str | None = None
+    filename: str | None = None
+
+
+class DraftUpdateRequest(BaseModel):
+    session_id: str
+    markdown: str
 
 
 def _user_id_as_int(user_id: str | None) -> int | None:
@@ -1635,6 +1648,73 @@ def generate_upload_url_for_folder(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/{folder_name}/draft/export-docx")
+async def export_edited_draft_docx(
+    folder_name: str,
+    request: DraftExportDocxRequest,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Render EDITED draft markdown (from Draft Studio's editor) into a court-styled .docx
+    and return a signed download URL. Same pipeline as the live draft's DOCX export, but
+    driven by the user's edited markdown so the download always reflects their changes."""
+    user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    md = (request.markdown or "").strip()
+    if not md:
+        raise HTTPException(status_code=400, detail="markdown is required")
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        from app.services.docx_export import markdown_to_court_docx
+        docx_bytes = await loop.run_in_executor(
+            None, lambda: markdown_to_court_docx(md, title=(request.title or "Draft"), typography=None)
+        )
+        safe_name = (re.sub(r"[^A-Za-z0-9._-]+", "_", request.filename or folder_name or "draft").strip("_") or "draft")[:60]
+        safe_name = re.sub(r"\.docx?$", "", safe_name, flags=re.IGNORECASE)
+        dest = f"{user_id}/drafts/{safe_name}_{uuid.uuid4().hex[:12]}.docx"
+        uri = await loop.run_in_executor(
+            None,
+            lambda: gcs.upload_bytes(
+                docx_bytes, dest,
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                bucket_type="output",
+            ),
+        )
+        url = await loop.run_in_executor(None, lambda: gcs.signed_read_url(uri, expiration_minutes=1440))
+        return {"download_url": url, "filename": f"{safe_name}.docx"}
+    except Exception as exc:
+        logger.exception("[Route:export_edited_draft_docx] folder=%s error=%s", folder_name, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{folder_name}/draft/update")
+async def update_draft_message(
+    folder_name: str,
+    request: DraftUpdateRequest,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Persist an edited draft (MARKDOWN) back onto its saved chat row, so history reopens
+    the edited version. Targets the newest row for this session."""
+    user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    if not (request.session_id or "").strip():
+        raise HTTPException(status_code=400, detail="session_id is required")
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        updated = await loop.run_in_executor(
+            None,
+            lambda: get_folder_service().update_latest_chat_answer(
+                user_id=user_id, folder_name=folder_name,
+                session_id=request.session_id, answer=request.markdown or "",
+            ),
+        )
+        return {"updated": bool(updated)}
+    except Exception as exc:
+        logger.exception("[Route:update_draft_message] folder=%s error=%s", folder_name, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/{folder_name}/complete-upload")
 def complete_upload_for_folder(
     folder_name: str,
@@ -2346,6 +2426,29 @@ async def intelligent_chat_stream(
                 )
                 raise TimeoutError(timeout_message) from exc
 
+        async def _draft_run_blocking(func, *, timeout_s: float, timeout_message: str):
+            # Same as _run_blocking, but BINDS the request's token-usage session inside the
+            # executor thread. The draft pipeline runs every model call here; without the
+            # bind those calls (on pool threads) miss the accumulator and only log per-call.
+            # Binding makes them aggregate, so we can report the draft's per-model token burn.
+            def _wrapped():
+                bind_token_usage_session(usage_session_key)
+                try:
+                    return func()
+                finally:
+                    unbind_token_usage_session()
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(None, _wrapped),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError as exc:
+                logger.warning(
+                    "[Route:intelligent_chat_stream] folder=%s timeout=%ss step=%s",
+                    folder_name, timeout_s, timeout_message,
+                )
+                raise TimeoutError(timeout_message) from exc
+
         def _truncate_prompt(text: str, *, max_chars: int, label: str) -> str:
             raw = text or ""
             if len(raw) <= max_chars:
@@ -2969,14 +3072,24 @@ async def intelligent_chat_stream(
                     # one of the allowed engines; otherwise fall back to the .env default. Only these
                     # are permitted so an arbitrary model string can't be injected via the request.
                     _draft_model_name = ""
+                    _analysis_model = "gemini-3.1-pro-preview"
                     if is_draft:
                         _DRAFT_ALLOWED_MODELS = {
                             "gemini-3.1-pro-preview", "claude-opus-4-8", "claude-sonnet-5",
+                            "gemma-4-31b-it", "gemma-4-26b-a4b-it",
                         }
                         _req_draft_model = (getattr(chat_request, "draft_model", None) or "").strip()
                         _draft_model_name = (
                             _req_draft_model if _req_draft_model in _DRAFT_ALLOWED_MODELS
                             else (settings.draft_model_name or "").strip()
+                        )
+                        # Stage-A structure model selector (frontend dropdown). Same allowlist
+                        # plus gemini flash; anything else → the reliable pro default.
+                        _STRUCTURE_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS | {"gemini-3.5-flash", "gemini-2.5-flash"}
+                        _req_structure_model = (getattr(chat_request, "analysis_model", None) or "").strip()
+                        _analysis_model = (
+                            _req_structure_model if _req_structure_model in _STRUCTURE_ALLOWED_MODELS
+                            else "gemini-3.1-pro-preview"
                         )
                     _tmpl_uri = str(getattr(chat_request, "template_gcs_path", "") or "") if is_draft else ""
                     _tmpl_mime = (getattr(chat_request, "template_mimetype", None) or "") if is_draft else ""
@@ -3417,6 +3530,9 @@ async def intelligent_chat_stream(
                             "[Route:intelligent_chat_stream] folder=%s draft engine=%s guardian(audit)=%s",
                             folder_name, resolved_model_name, _guardian_model,
                         )
+                        # Mark where this draft's token entries begin so we can report the
+                        # per-model burn for JUST this draft after the pipeline finishes.
+                        _draft_usage_start = usage_entry_count(usage_session_key)
                         try:
                             from app.services import template_drafting as _tpl
                             async for _pkind, _pdata in _tpl.run_template_drafting_pipeline(
@@ -3424,9 +3540,9 @@ async def intelligent_chat_stream(
                                 doc_texts=doc_texts,
                                 query_text=query_text,
                                 draft_engine=resolved_model_name,
-                                analysis_model="gemini-3.1-pro-preview",
+                                analysis_model=_analysis_model,
                                 user_id=user_id,
-                                run_blocking=_run_blocking,
+                                run_blocking=_draft_run_blocking,
                                 doc_title=None,
                                 cached_fact_inventory=_DRAFT_FACTINV_CACHE.get(_fi_key),
                                 enable_audit=True,
@@ -3446,6 +3562,11 @@ async def intelligent_chat_stream(
                                 "falling back to single-call draft", folder_name, _pipe_exc,
                             )
                             _pipe_final = None
+                        # NOTE: the per-draft token table is logged LATER (after the whole
+                        # draft finishes, incl. the single-call fallback below when the
+                        # pipeline fails) so it captures the FULL cost, not just the part
+                        # that ran before a failure. `_draft_usage_start` marks the slice.
+                        _draft_model_for_log = resolved_model_name
                         if _pipe_final and (_pipe_final.get("answer") or "").strip():
                             _final_md = _pipe_final["answer"]
                             _draft_typography = _pipe_final.get("typography")
@@ -4051,6 +4172,22 @@ async def intelligent_chat_stream(
                     provider="estimated",
                     model_name=actual_model_name,
                 )
+            # Per-draft, per-model token burn — logged HERE (after the whole draft,
+            # including any single-call fallback) so it reflects the COMPLETE cost of the
+            # draft, not just the part before a pipeline failure. Only fires for drafts.
+            _ds_start = locals().get("_draft_usage_start")
+            if bool(locals().get("is_draft")) and _ds_start is not None:
+                try:
+                    log_draft_token_usage(
+                        usage_session_key, _ds_start,
+                        draft_model=locals().get("_draft_model_for_log") or actual_model_name,
+                        session_id=session_id or "",
+                        user_id=uid_int,
+                        request_id=request_id,
+                        answer_length=len(answer or ""),
+                    )
+                except Exception as _tok_exc:
+                    logger.debug("[Route:intelligent_chat_stream] draft token log skipped: %s", _tok_exc)
             usage_totals = flush_aggregated_token_usage_table(
                 usage_session_key,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",

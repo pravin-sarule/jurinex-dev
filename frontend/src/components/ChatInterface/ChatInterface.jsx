@@ -27,6 +27,7 @@ import {
   ChevronLeft,
   Printer,
   Code,
+  Pencil,
 } from "lucide-react";
 import { getCleanText, stripMarkdown, downloadAsPdf, downloadAsHtml, printResponse } from "../../utils/responseExportUtils";
 import ReactMarkdown from "react-markdown";
@@ -57,6 +58,7 @@ import AgentStepsPanel from "./AgentStepsPanel";
 import ChatSessionList from "./ChatSessionList";
 import FormattedAssistantContent from "./FormattedAssistantContent";
 import DraftStudioModal from "./DraftStudioModal";
+import DraftEditModal from "./DraftEditModal";
 import {
   formatChatResponseForDisplay,
   convertMarkdownBoldMarkers,
@@ -932,9 +934,11 @@ const ChatInterface = () => {
   // upload state. The template is NOT ingested into the case RAG — it only rides the chat request.
   const [draftTemplate, setDraftTemplate] = useState(null); // { gcsPath, mimetype, filename }
   const [draftStudio, setDraftStudio] = useState(null); // { question, template, model, folderName, sessionId } | null
+  const [editModal, setEditModal] = useState(null);     // { markdown, title, downloadUrl, downloadName } | null
   const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
   // Draft engine selector (shown only when a template is attached). '' = default (Gemini).
   const [draftModel, setDraftModel] = useState('');
+  const [structureModel, setStructureModel] = useState(''); // Stage-A template structure model ('' = default)
   const [animatedResponseContent, setAnimatedResponseContent] = useState("");
   const [thinkingContent, setThinkingContent] = useState("");
   const [currentStatus, setCurrentStatus] = useState(null);
@@ -2334,6 +2338,7 @@ const ChatInterface = () => {
             question: questionText,
             template: draftTemplate,
             model: draftModel,
+            structureModel: structureModel,
             folderName: dfName,
             sessionId: selectedChatSessionId || null,
           });
@@ -3791,6 +3796,19 @@ const ChatInterface = () => {
                                       <Printer className="h-3 w-3" />
                                       Print
                                     </button>
+                                    <button
+                                      onClick={() => setEditModal({
+                                        markdown: chat.response || '',
+                                        title: (chat.draftFilename ? chat.draftFilename.replace(/\.[^.]+$/, '') : 'Draft'),
+                                        downloadUrl: chat.draftDownloadUrl || null,
+                                        downloadName: chat.draftFilename || null,
+                                      })}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-semibold text-[#0d9488] border border-[#9fe6df] bg-[#f0fdfa] rounded hover:bg-[#ccfbf1] transition-colors cursor-pointer"
+                                      title="Edit this response in the rich editor"
+                                    >
+                                      <Pencil className="h-3 w-3" />
+                                      Edit
+                                    </button>
                                   </div>
                                 </>
                               )}
@@ -4011,6 +4029,22 @@ const ChatInterface = () => {
                     <option value="">Gemini (default)</option>
                     <option value="claude-opus-4-8">Claude Opus</option>
                     <option value="claude-sonnet-5">Claude Sonnet</option>
+                    <option value="gemma-4-31b-it">Gemma 4 31B</option>
+                    <option value="gemma-4-26b-a4b-it">Gemma 4 26B</option>
+                  </select>
+                  <select
+                    value={structureModel}
+                    onChange={(e) => setStructureModel(e.target.value)}
+                    title="Structure model (Stage A) — analyses the template layout into sections"
+                    className="flex-shrink-0 text-xs rounded-lg border border-gray-200 bg-white text-gray-700 px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-[#21C1B6] cursor-pointer"
+                  >
+                    <option value="">Structure: Gemini 3.1 Pro (default)</option>
+                    <option value="gemini-3.5-flash">Structure: Gemini 3.5 Flash</option>
+                    <option value="gemini-2.5-flash">Structure: Gemini 2.5 Flash</option>
+                    <option value="claude-opus-4-8">Structure: Claude Opus</option>
+                    <option value="claude-sonnet-5">Structure: Claude Sonnet</option>
+                    <option value="gemma-4-31b-it">Structure: Gemma 4 31B</option>
+                    <option value="gemma-4-26b-a4b-it">Structure: Gemma 4 26B</option>
                   </select>
                 </>
               ) : (
@@ -4447,6 +4481,7 @@ const ChatInterface = () => {
           question={draftStudio.question}
           template={draftStudio.template}
           draftModel={draftStudio.model}
+          structureModel={draftStudio.structureModel}
           sessionId={draftStudio.sessionId}
           authToken={getAuthToken()}
           onSaved={(sid) => {
@@ -4454,6 +4489,25 @@ const ChatInterface = () => {
             // up in this session's history (the backend may have created a new session).
             const resolved = sid || draftStudio.sessionId;
             if (resolved) fetchChatHistory(resolved, draftStudio.folderName);
+          }}
+        />
+      )}
+
+      {editModal && (
+        <DraftEditModal
+          open
+          onClose={() => setEditModal(null)}
+          initialMarkdown={editModal.markdown}
+          title={editModal.title}
+          baseUrl={DOCS_BASE_URL}
+          folderName={_normalizeFolderName(selectedFolder)}
+          sessionId={selectedChatSessionId}
+          authToken={getAuthToken()}
+          downloadUrl={editModal.downloadUrl}
+          downloadName={editModal.downloadName}
+          onSaved={(sid) => {
+            const resolved = sid || selectedChatSessionId;
+            if (resolved) fetchChatHistory(resolved, _normalizeFolderName(selectedFolder));
           }}
         />
       )}

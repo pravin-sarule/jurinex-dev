@@ -2560,6 +2560,45 @@ class FolderWorkflowService:
                 exc,
             )
 
+    def update_latest_chat_answer(
+        self,
+        *,
+        user_id: str,
+        folder_name: str,
+        session_id: str,
+        answer: str,
+    ) -> bool:
+        """Overwrite the `answer` of the most-recent chat row for this session — used to
+        persist edits made in Draft Studio's editor (saved as MARKDOWN). Targets the newest
+        row for (user_id, folder_name, session_id) since the client has no row id. Returns
+        True when a row was updated."""
+        if not is_db_available():
+            return False
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE folder_chats
+                       SET answer = %s
+                     WHERE id = (
+                         SELECT id FROM folder_chats
+                          WHERE user_id = %s AND folder_name = %s AND session_id = %s::uuid
+                          ORDER BY created_at DESC
+                          LIMIT 1
+                     )
+                    """,
+                    (answer, str(user_id), folder_name, normalize_folder_chat_session_uuid(session_id)),
+                )
+                updated = cur.rowcount > 0
+                conn.commit()
+                return updated
+        except Exception as exc:
+            logger.exception(
+                "[FolderService] task=update_chat_answer status=error folder=%s session_id=%s error=%s",
+                folder_name, session_id, exc,
+            )
+            return False
+
     def _append_message(self, session: ChatSessionRecord, role: str, content: str) -> None:
         with self._lock:
             session.messages.append(

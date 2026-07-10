@@ -6,15 +6,21 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { ensureTableSeparators, markdownTableComponents } from '../../utils/markdownUtils';
 import { sanitizeLegalDraftMarkdown, legalDraftComponents } from '../../utils/legalDraftRender';
 
-// The drafter marks every missing field with a red placeholder span
-// (<span style="color:red;font-weight:bold;">[____ FIELD ____]</span>). rehype-sanitize
-// strips inline styles by default, so extend its schema to keep span + style on drafts.
+// The drafter (and now the TipTap editor) emit inline styles the user can set — red
+// placeholder spans (<span style="color:red;font-weight:bold;">[____ FIELD ____]</span>),
+// per-block alignment (text-align on p / h1-h6 / td / th) and font family/size/colour
+// spans. rehype-sanitize strips inline styles by default, so allow `style` on the
+// elements that legitimately carry draft styling.
+const _STYLED_TAGS = ['span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'td', 'th', 'div'];
 const DRAFT_SANITIZE_SCHEMA = {
   ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames || []), 'span'],
+  tagNames: [...new Set([...(defaultSchema.tagNames || []), 'span'])],
   attributes: {
     ...defaultSchema.attributes,
-    span: [...((defaultSchema.attributes && defaultSchema.attributes.span) || []), 'style'],
+    ..._STYLED_TAGS.reduce((acc, tag) => {
+      acc[tag] = [...new Set([...((defaultSchema.attributes && defaultSchema.attributes[tag]) || []), 'style'])];
+      return acc;
+    }, {}),
   },
 };
 

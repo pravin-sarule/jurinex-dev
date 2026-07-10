@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, FileText, Loader2, CheckCircle2, Download, ArrowLeft, Sparkles, AlertTriangle, Copy, Printer, Code, Check } from 'lucide-react';
 import DraftDocumentView from './DraftDocumentView';
+import DraftEditor from './DraftEditor';
 import { downloadAsPdf, downloadAsWord, downloadAsHtml, printResponse, getCleanText } from '../../utils/responseExportUtils';
 
 /**
@@ -21,6 +22,7 @@ export default function DraftStudioModal({
   question,
   template,        // { gcsPath, mimetype, filename }
   draftModel,      // '' | 'claude-opus-4-8' | 'claude-sonnet-5' | 'gemini-3.1-pro-preview'
+  structureModel,  // '' (default gemini-3.1-pro) | any allowed model for Stage-A analysis
   sessionId,
   authToken,
   onSaved,
@@ -36,9 +38,16 @@ export default function DraftStudioModal({
   const [errorText, setErrorText] = useState('');
   const [copied, setCopied] = useState(false);
   const [exportMsg, setExportMsg] = useState('');
+  const [editedMarkdown, setEditedMarkdown] = useState(null); // null = untouched by the editor
+  const [savedSessionId, setSavedSessionId] = useState(sessionId || null);
+  const [saveState, setSaveState] = useState('idle');  // idle | saving | saved | error
+  const [docxBusy, setDocxBusy] = useState(false);
   const abortRef = useRef(null);
   const chunkBufRef = useRef('');
-  const finalRef = useRef(null);                       // rendered final draft (for export)
+  const finalRef = useRef(null);                       // read-only fallback container
+  const editorRef = useRef(null);                      // DraftEditor imperative handle
+  const saveSeqRef = useRef(0);
+  const closeRef = useRef(null);                       // latest handleClose (for Escape)
 
   const engineLabel =
     draftModel === 'claude-opus-4-8' ? 'Claude Opus'
@@ -64,6 +73,7 @@ export default function DraftStudioModal({
           template_gcs_path: template?.gcsPath,
           template_mimetype: template?.mimetype,
           ...(draftModel ? { draft_model: draftModel } : {}),
+          ...(structureModel ? { analysis_model: structureModel } : {}),
         }),
         signal: controller.signal,
       });
@@ -101,7 +111,7 @@ export default function DraftStudioModal({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, folderName, question, sessionId, template, draftModel, authToken]);
+  }, [baseUrl, folderName, question, sessionId, template, draftModel, structureModel, authToken]);
 
   const handleEvent = (evt) => {
     const type = evt?.type;
@@ -124,9 +134,12 @@ export default function DraftStudioModal({
       if (evt.draft_filename) setDownloadName(evt.draft_filename);
       setStatus('ready');
       setStatusText('Draft ready.');
-      // Tell the parent the draft is persisted (so it can refresh the chat history);
-      // pass the resolved session id in case the backend created a new session.
-      if (typeof onSaved === 'function') onSaved(evt.session_id || sessionId || null);
+      // Remember the resolved session id (the backend may have created a new session) so
+      // editor auto-saves can target the correct chat row.
+      const resolvedSid = evt.session_id || sessionId || null;
+      setSavedSessionId(resolvedSid);
+      // Tell the parent the draft is persisted (so it can refresh the chat history).
+      if (typeof onSaved === 'function') onSaved(resolvedSid);
     } else if (type === 'error') {
       setStatus('error');
       setErrorText(evt.message || 'The draft could not be generated.');
@@ -141,9 +154,9 @@ export default function DraftStudioModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Close on Escape.
+  // Close on Escape — via a ref so the latest flush-and-save close logic is used.
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
+    const onKey = (e) => { if (e.key === 'Escape') (closeRef.current || onClose)?.(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
@@ -157,48 +170,114 @@ export default function DraftStudioModal({
   const finalDoc = finalAnswer || mergedFromSections;
   const canCreate = status === 'ready' || (total > 0 && doneCount >= total);
 
-  // ── export options (Copy / PDF / Word / HTML / Print) — operate on the rendered draft ──
+  // ── export options (Copy / PDF / Word / HTML / Print) — operate on the EDITED draft ──
   const baseName = (
     (template?.filename ? template.filename.replace(/\.[^.]+$/, '') : (folderName || 'draft')) + '_draft'
   ).replace(/[^A-Za-z0-9._-]+/g, '_');
+  const currentDoc = editedMarkdown != null ? editedMarkdown : finalDoc;
+  // Count remaining unfilled fields (red placeholders) so the user knows what's left.
+  const remainingFields = (currentDoc.match(/\[\s*_{2,}[^\]]*\]|\[[^\]]*_{2,}\s*\]/g) || []).length;
+  // Exports capture the live edited editor DOM (falls back to the read-only container).
+  const exportEl = () => (editorRef.current?.getContentEl?.() || finalRef.current);
   const flashExportError = (e) => {
     setExportMsg(e?.message || 'Export failed. Please try again.');
     setTimeout(() => setExportMsg(''), 4500);
   };
-  const runExport = async (fn) => { try { await fn(); } catch (e) { flashExportError(e); } };
+
+  // Persist the edited draft (MARKDOWN) back onto its saved chat row. Latest-write-wins.
+  // Plain function (declared after the early `return null`, so it must NOT be a hook).
+  const saveDraft = async (md) => {
+    const sid = savedSessionId || sessionId;
+    if (!sid || !md || !md.trim()) return;
+    const seq = ++saveSeqRef.current;
+    setSaveState('saving');
+    try {
+      const resp = await fetch(`${baseUrl}/${encodeURIComponent(folderName)}/draft/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: authToken ? `Bearer ${authToken}` : '' },
+        body: JSON.stringify({ session_id: sid, markdown: md }),
+      });
+      if (seq !== saveSeqRef.current) return;               // a newer save superseded this one
+      setSaveState(resp.ok ? 'saved' : 'error');
+    } catch {
+      if (seq === saveSeqRef.current) setSaveState('error');
+    }
+  };
+
+  // Auto-save fires from the editor's onChange (already debounced in DraftEditor).
+  const handleEditChange = (md) => {
+    setEditedMarkdown(md);
+    saveDraft(md);
+  };
+
+  // Flush + save the newest edits before any export/download (auto-save on download).
+  const persistBeforeExport = async () => {
+    if (!editorRef.current?.flush) return currentDoc;
+    const md = editorRef.current.flush();
+    setEditedMarkdown(md);
+    await saveDraft(md);
+    return md;
+  };
+  const runExport = async (fn) => { try { await persistBeforeExport(); await fn(); } catch (e) { flashExportError(e); } };
   const onCopy = async () => {
     try {
-      const text = getCleanText(finalRef.current, finalDoc).trim();
+      await persistBeforeExport();
+      const text = getCleanText(exportEl(), currentDoc).trim();
       await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (e) { flashExportError(e); }
   };
-  const onWord = () => {
-    // Prefer the backend court-styled .docx (Times New Roman, A4, 1" margins) when available;
-    // otherwise fall back to a client-side Word export of the rendered draft.
-    if (downloadUrl) {
+
+  // Court-styled .docx: regenerate from the EDITED markdown so the download reflects edits
+  // (the pre-generated URL is only valid for the untouched original).
+  const downloadCourtDocx = async () => {
+    try {
+      const md = await persistBeforeExport();
+      // Regenerate from the current (cleaned) editor markdown so the .docx always matches
+      // what is on screen — the pipeline's original downloadUrl predates any edits.
+      setDocxBusy(true);
+      const resp = await fetch(`${baseUrl}/${encodeURIComponent(folderName)}/draft/export-docx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: authToken ? `Bearer ${authToken}` : '' },
+        body: JSON.stringify({ markdown: md || currentDoc, title: question || 'Draft', filename: baseName }),
+      });
+      setDocxBusy(false);
+      if (!resp.ok) throw new Error(`Word export failed (${resp.status}).`);
+      const data = await resp.json();
+      const url = data.download_url;
+      const name = data.filename || `${baseName}.docx`;
+      if (!url) throw new Error('No document available to download yet.');
       const a = document.createElement('a');
-      a.href = downloadUrl; a.download = downloadName || `${baseName}.docx`;
-      a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.href = url; a.download = name; a.target = '_blank'; a.rel = 'noopener noreferrer';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    } else {
-      runExport(() => downloadAsWord(finalRef.current, `${baseName}.doc`));
-    }
+    } catch (e) { setDocxBusy(false); flashExportError(e); }
   };
+
   const exportTools = [
     { key: 'copy', label: copied ? 'Copied!' : 'Copy', icon: copied ? Check : Copy, onClick: onCopy },
-    { key: 'pdf', label: 'PDF', icon: Download, onClick: () => runExport(() => downloadAsPdf(finalRef.current, `${baseName}.pdf`)) },
-    { key: 'word', label: 'Word', icon: FileText, onClick: onWord },
-    { key: 'html', label: 'HTML', icon: Code, onClick: () => runExport(() => downloadAsHtml(finalRef.current, `${baseName}.html`)) },
-    { key: 'print', label: 'Print', icon: Printer, onClick: () => runExport(() => printResponse(finalRef.current)) },
+    { key: 'pdf', label: 'PDF', icon: Download, onClick: () => runExport(() => downloadAsPdf(exportEl(), `${baseName}.pdf`)) },
+    { key: 'word', label: 'Word (.doc)', icon: FileText, onClick: () => runExport(() => downloadAsWord(exportEl(), `${baseName}.doc`)) },
+    { key: 'html', label: 'HTML', icon: Code, onClick: () => runExport(() => downloadAsHtml(exportEl(), `${baseName}.html`)) },
+    { key: 'print', label: 'Print', icon: Printer, onClick: () => runExport(() => printResponse(exportEl())) },
   ];
+
+  // Final flush + save + history refresh when the modal closes (captures the last edit).
+  const handleClose = async () => {
+    if (editedMarkdown != null && editorRef.current?.flush) {
+      const md = editorRef.current.flush();
+      await saveDraft(md);
+      if (typeof onSaved === 'function') onSaved(savedSessionId || sessionId || null);
+    }
+    onClose?.();
+  };
+  closeRef.current = handleClose;
 
   const overlay = (
     <div
       role="dialog"
       aria-modal="true"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) handleClose(); }}
       style={{
         position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(17,24,39,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px',
@@ -223,7 +302,7 @@ export default function DraftStudioModal({
               {template?.filename ? `${template.filename} · ` : ''}{engineLabel} · section-by-section
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close" style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 6, borderRadius: 8, color: '#64748b' }}>
+          <button onClick={handleClose} aria-label="Close" style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 6, borderRadius: 8, color: '#64748b' }}>
             <X size={20} />
           </button>
         </div>
@@ -284,12 +363,28 @@ export default function DraftStudioModal({
               </div>
             </>
           ) : (
-            <div ref={finalRef} style={{
-              background: '#fff', border: '1px solid #e6e6e6', borderRadius: 12,
-              padding: '32px 40px', boxShadow: 'inset 0 0 0 1px #fafafa',
-            }}>
-              <DraftDocumentView raw={finalDoc} />
-            </div>
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10, fontSize: 12, color: '#64748b' }}>
+                <span style={{ fontWeight: 600, color: '#0f172a' }}>Editable draft</span>
+                <span>— click a red field to fill it, restyle text, edit freely; changes auto-save.</span>
+                {remainingFields > 0 && (
+                  <span style={{ marginLeft: 'auto', fontWeight: 600, color: '#c00000', background: '#fdecec', border: '1px solid #f3c9c9', borderRadius: 999, padding: '2px 10px' }}>
+                    {remainingFields} field{remainingFields === 1 ? '' : 's'} to fill
+                  </span>
+                )}
+              </div>
+              <div style={{ height: '68vh', minHeight: 380 }}>
+                <DraftEditor
+                  ref={editorRef}
+                  initialMarkdown={finalDoc}
+                  onChange={handleEditChange}
+                />
+              </div>
+              {/* Hidden read-only copy so exports still have a fallback element if needed. */}
+              <div ref={finalRef} style={{ display: 'none' }} aria-hidden="true">
+                <DraftDocumentView raw={currentDoc} />
+              </div>
+            </>
           )}
         </div>
 
@@ -347,20 +442,21 @@ export default function DraftStudioModal({
 
               <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
                 {exportMsg && <span style={{ fontSize: 11, color: '#dc2626' }}>{exportMsg}</span>}
-                {downloadUrl && (
-                  <a
-                    href={downloadUrl}
-                    download={downloadName}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Court-formatted Word (.docx) — Times New Roman, A4, 1 inch margins"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#0d9488', color: '#fff', fontWeight: 600, fontSize: 13, padding: '9px 16px', borderRadius: 10, textDecoration: 'none' }}
+                {saveState === 'saving' && <span style={{ fontSize: 11, color: '#64748b', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Loader2 size={12} className="animate-spin" /> Saving…</span>}
+                {saveState === 'saved' && <span style={{ fontSize: 11, color: '#0d9488', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={12} /> Saved</span>}
+                {saveState === 'error' && <span style={{ fontSize: 11, color: '#dc2626' }}>Save failed</span>}
+                {(downloadUrl || finalDoc) && (
+                  <button
+                    onClick={downloadCourtDocx}
+                    disabled={docxBusy}
+                    title="Court-formatted Word (.docx) — Times New Roman, A4, 1 inch margins (includes your edits)"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: docxBusy ? '#5eafa8' : '#0d9488', color: '#fff', fontWeight: 600, fontSize: 13, padding: '9px 16px', borderRadius: 10, border: 'none', cursor: docxBusy ? 'wait' : 'pointer' }}
                   >
-                    <Download size={15} /> Download .docx
-                  </a>
+                    {docxBusy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Download .docx
+                  </button>
                 )}
                 <button
-                  onClick={onClose}
+                  onClick={handleClose}
                   style={{ border: '1px solid #d4d4d8', background: '#fff', color: '#475569', fontSize: 13, padding: '9px 16px', borderRadius: 10, cursor: 'pointer' }}
                 >
                   Close
