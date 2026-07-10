@@ -297,22 +297,31 @@ export function convertMarkdownMarkers(text) {
   t = t.replace(/^(\s*)-(\*+)(?=\S)/gm, '$1- $2');
 
   // 1. Tighten spaced bold: "** text **" -> "**text**"
-  // Handles multiple spaces and newlines inside the markers
-  t = t.replace(/\*\*[ \t\n]+([\s\S]+?)[ \t\n]+\*\*/g, '**$1**');
-  t = t.replace(/\*\*[ \t\n]+([\s\S]+?)\*\*/g, '**$1**');
-  t = t.replace(/\*\*([\s\S]+?)[ \t\n]+\*\*/g, '**$1**');
+  //    SINGLE LINE ONLY. Crossing newlines here pairs the CLOSING ** of one
+  //    phrase with the OPENING ** of the next list item ("**Bold**\n\n*   **Next"),
+  //    which deletes the newlines between blocks and shifts every following
+  //    emphasis pair — the whole document then renders as fused bold text.
+  //    A potential OPENER must not be preceded by a word character (that would be
+  //    the CLOSER of an earlier phrase, e.g. "Khune* (…) in *Complaint"), and a
+  //    potential CLOSER must not be followed by one — otherwise the closer of one
+  //    emphasis and the opener of the next get "tightened" together, eating the
+  //    text between them.
+  t = t.replace(/(?<![\w*])\*\*[ \t]+([^\n*][^\n]*?)[ \t]+\*\*(?![\w*])/g, '**$1**');
+  t = t.replace(/(?<![\w*])\*\*[ \t]+([^\n*][^\n]*?)\*\*(?![\w*])/g, '**$1**');
+  t = t.replace(/(?<![\w*])\*\*([^\n*][^\n]*?)[ \t]+\*\*(?![\w*])/g, '**$1**');
 
-  // 2. Tighten spaced italics: "* text *" -> "*text*"
-  t = t.replace(/(?<!\*)\*[ \t\n]+([^ *\n][^*]*?)[ \t\n]+\*(?!\*)/g, '*$1*');
-  t = t.replace(/(?<!\*)\*[ \t\n]+([^ *\n][^*]*?)\*(?!\*)/g, '*$1*');
-  t = t.replace(/(?<!\*)\*([^ *\n][^*]*?)[ \t\n]+\*(?!\*)/g, '*$1*');
+  // 2. Tighten spaced italics: "* text *" -> "*text*" (single line only)
+  t = t.replace(/(?<![\w*])\*[ \t]+([^ *\n][^*\n]*?)[ \t]+\*(?![\w*])/g, '*$1*');
+  t = t.replace(/(?<![\w*])\*[ \t]+([^ *\n][^*\n]*?)\*(?![\w*])/g, '*$1*');
+  t = t.replace(/(?<![\w*])\*([^ *\n][^*\n]*?)[ \t]+\*(?![\w*])/g, '*$1*');
 
   // 3. Convert to HTML tags as a safety net for "broken" markdown (e.g. *text*word)
-  // Bold: **text** -> <strong>text</strong>
-  t = t.replace(/\*\*(?=\S)([\s\S]+?)(?<=\S)\*\*(?!\*)/g, '<strong>$1</strong>');
+  // Bold: **text** -> <strong>text</strong>. May wrap a single newline but must
+  // never cross a blank line (paragraph/list boundary).
+  t = t.replace(/\*\*(?=\S)((?:(?!\n\n)[\s\S])+?)(?<=\S)\*\*(?!\*)/g, '<strong>$1</strong>');
 
-  // Italics: *text* -> <em>text</em>
-  t = t.replace(/(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)/g, '<em>$1</em>');
+  // Italics: *text* -> <em>text</em> (never across lines)
+  t = t.replace(/(?<!\*)\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)/g, '<em>$1</em>');
 
   // 4. Strip stray UNPAIRED ** that survived (e.g. "-Petitioner :**" from OCR).
   //    All valid bold is already <strong> above, so any remaining ** is junk and

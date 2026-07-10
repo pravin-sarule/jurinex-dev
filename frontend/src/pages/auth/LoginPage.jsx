@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link, useLocation } from "react-router-dom";
 import { Eye, EyeOff, CheckCircle, ArrowLeft } from "lucide-react";
-import { auth, googleProvider } from '../../config/firebase';
+import { auth, googleProvider, isFirebaseConfigured } from '../../config/firebase';
 import { AUTH_SERVICE_URL } from '../../config/apiConfig';
 import { signInWithPopup } from 'firebase/auth';
 import { useAuth } from '../../context';
@@ -111,6 +111,11 @@ const LoginPage = () => {
  };
 
  const handleGoogleSignIn = async () => {
+ if (!isFirebaseConfigured || !auth || !googleProvider) {
+ setServerMessage('Google Sign-In is not configured. Add VITE_FIREBASE_* values to frontend/.env and restart the dev server.');
+ return;
+ }
+
  try {
  setIsLoading(true);
  setServerMessage('');
@@ -348,6 +353,8 @@ const handleBackToLogin = () => {
  </button>
  </form>
 
+ {isFirebaseConfigured && (
+ <>
  <div className="mt-6">
  <div className="relative">
  <div className="absolute inset-0 flex items-center">
@@ -375,6 +382,8 @@ const handleBackToLogin = () => {
  Sign in with Google
  </button>
  </div>
+ </>
+ )}
 
  <div className="mt-6 space-y-4">
  <div className="text-center">
