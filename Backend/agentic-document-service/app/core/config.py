@@ -127,6 +127,21 @@ class Settings(BaseSettings):
         default=65536,
         validation_alias=AliasChoices("DRAFT_MAX_OUTPUT_TOKENS"),
     )
+    # How many independent template sections to draft in parallel (clamped 1–4 downstream).
+    # Set to 1 for low-quota engines like gemma (paid-tier ~16k input tokens/min → 429s on
+    # bursts); raise toward 4 for high-quota engines (gemini/opus) to speed up drafting.
+    draft_section_concurrency: int = Field(
+        default=3,
+        validation_alias=AliasChoices("DRAFT_SECTION_CONCURRENCY"),
+    )
+    # Minimum seconds between successive Gemma API requests (GLOBAL across threads, retries
+    # included). Free Google AI Studio keys allow only 15 requests/min on gemma models, and
+    # the gemma endpoint 500s far more under rapid-fire calls — 9s spacing ≈ 6-7 RPM keeps
+    # well under the cap and gives the flaky endpoint room to recover. 0 disables pacing.
+    gemma_min_call_interval_s: float = Field(
+        default=9.0,
+        validation_alias=AliasChoices("GEMMA_MIN_CALL_INTERVAL_S"),
+    )
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
     deepseek_api_key: str = Field(
         default="",

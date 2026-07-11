@@ -4,6 +4,7 @@ import { X, FileText, Loader2, CheckCircle2, Download, ArrowLeft, Sparkles, Aler
 import DraftDocumentView from './DraftDocumentView';
 import DraftEditor from './DraftEditor';
 import { downloadAsPdf, downloadAsWord, downloadAsHtml, printResponse, getCleanText } from '../../utils/responseExportUtils';
+import { canonicalizeFieldPlaceholders, fixInlineEmphasis } from '../../utils/legalDraftRender';
 
 /**
  * Draft Studio — a dedicated popup for draft-from-template generation.
@@ -167,7 +168,11 @@ export default function DraftStudioModal({
   const doneCount = filled.length;
   const pct = total > 0 ? Math.min(100, Math.round((doneCount / total) * 100)) : (status === 'ready' ? 100 : 8);
   const mergedFromSections = filled.map((s) => s.markdown).join('\n\n');
-  const finalDoc = finalAnswer || mergedFromSections;
+  // Canonicalise bare "[ BANK NAME ]" placeholders into the red span at the SOURCE so every
+  // consumer of the draft — the read-only view, the editor, the .docx/PDF export, and the
+  // remaining-fields counter below — sees the same red, fillable placeholders. Idempotent:
+  // an already-canonical span is protected, never wrapped twice.
+  const finalDoc = canonicalizeFieldPlaceholders(fixInlineEmphasis(finalAnswer || mergedFromSections));
   const canCreate = status === 'ready' || (total > 0 && doneCount >= total);
 
   // ── export options (Copy / PDF / Word / HTML / Print) — operate on the EDITED draft ──
@@ -339,7 +344,9 @@ export default function DraftStudioModal({
               )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {filled.map((s) => (
+                {/* Skip sections emptied by cross-section table dedup (e.g. a duplicate
+                    inventory table removed) so they don't render as a blank card. */}
+                {filled.filter((s) => (s.markdown || '').trim()).map((s) => (
                   <div key={s.index} style={{
                     border: '1px solid #e6e6e6', borderRadius: 12, background: '#fff', overflow: 'hidden',
                   }}>

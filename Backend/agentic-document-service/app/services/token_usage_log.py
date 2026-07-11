@@ -13,6 +13,86 @@ _thread_local = threading.local()
 _accumulators: dict[str, list[dict[str, Any]]] = {}
 _flushed_session_keys: set[str] = set()
 
+# ── Pricing ──────────────────────────────────────────────────────────────────
+# USD per 1,000,000 tokens as (input, output). Matched by LONGEST model-id prefix,
+# so "claude-opus-4-8" resolves via "claude-opus-4". Unknown models cost 0 (shown as
+# "-"). EDIT THESE when rates change; preview/estimate rates are flagged.
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-4":     (5.00, 25.00),
+    "claude-sonnet-5":   (3.00, 15.00),
+    "claude-sonnet-4":   (3.00, 15.00),
+    "claude-haiku-4":    (1.00, 5.00),
+    "claude-fable-5":    (10.00, 50.00),
+    "claude-mythos":     (10.00, 50.00),
+    "gemini-3.1-pro":    (2.50, 15.00),   # preview — estimate, update on GA
+    "gemini-3-pro":      (2.50, 15.00),   # estimate
+    "gemini-3.5-flash":  (1.50, 9.00),
+    "gemini-2.5-pro":    (1.25, 10.00),
+    "gemini-2.5-flash":  (0.30, 2.50),
+    "gemini-2.0-flash":  (0.10, 0.40),
+    "gemini-embedding":  (0.15, 0.00),
+    "text-embedding":    (0.15, 0.00),
+    "embedding":         (0.15, 0.00),
+    "gemma-4":           (0.00, 0.00),    # free developer tier
+    "gemma-3":           (0.00, 0.00),
+    "gemma":             (0.00, 0.00),
+}
+_USD_TO_INR = 96.0  # display-only FX for the ₹ line; edit to taste
+
+
+def _price_for_model(model: str | None) -> tuple[float, float] | None:
+    """(input, output) USD per 1M for a model id, matched by the longest key prefix."""
+    m = (model or "").strip().lower()
+    if not m:
+        return None
+    best: tuple[float, float] | None = None
+    best_len = -1
+    for prefix, rate in _MODEL_PRICING.items():
+        if m.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = rate, len(prefix)
+    return best
+
+
+def _model_cost_usd(model: str | None, input_tokens: int, output_tokens: int) -> float | None:
+    """Billed USD for a model's token counts, or None when the rate is unknown."""
+    rate = _price_for_model(model)
+    if rate is None:
+        return None
+    in_rate, out_rate = rate
+    return (input_tokens / 1_000_000.0) * in_rate + (output_tokens / 1_000_000.0) * out_rate
+
+
+def _fmt_usd(value: float | None) -> str:
+    if value is None:
+        return "-"
+    if value == 0:
+        return "$0.00"
+    if value < 0.01:
+        return f"${value:.4f}"
+    return f"${value:,.4f}"
+
+
+def record_embedding_usage(*, model_name: str, input_tokens: int, provider: str = "gemini") -> None:
+    """Record RAG/query embedding tokens into the ACTIVE draft session ONLY.
+
+    Silent when no session is bound — this keeps bulk ingestion (thousands of embed calls)
+    from spamming the log, while a draft's per-section retrieval embeds ARE folded into the
+    one per-draft token table. Embeddings are input-only (output = 0)."""
+    key = _active_session_key()
+    if not key or key in _flushed_session_keys or key not in _accumulators:
+        return
+    toks = input_tokens or 0
+    if toks <= 0:
+        return
+    _accumulators[key].append(_normalize_usage({
+        "provider": provider,
+        "model": model_name or "embedding",
+        "context": "rag_embedding",
+        "inputTokens": toks,
+        "outputTokens": 0,
+        "totalTokens": toks,
+    }))
+
 
 def _fmt_int(value: Any) -> str:
     try:
@@ -258,24 +338,27 @@ def log_draft_token_usage(
     session_key: str | None,
     start_index: int = 0,
     *,
+    draft_id: str | None = None,
     draft_model: str | None = None,
     guardian_model: str | None = None,
     session_id: str | None = None,
     user_id: str | int | None = None,
     request_id: str | None = None,
     answer_length: int | None = None,
-) -> dict[str, int] | None:
-    """Log a PER-MODEL token-burn table for ONE draft — the exact cost of a single draft,
-    broken down by the model that did each part (a draft legitimately uses several: Gemini
-    for template structure, the selected engine for drafting, Opus as guardian; on a
-    pipeline failure a single-call fallback runs). Reports only the accumulator slice
-    [start_index:] so it counts exactly this draft. Only models that ACTUALLY ran appear
-    (a configured guardian that never fired is NOT listed).
+) -> dict[str, Any] | None:
+    """Log a PER-MODEL token-burn table for ONE draft — the exact end-to-end cost of a single
+    draft, broken down by the model that did each part. A draft legitimately uses several:
+    Gemini for template structure, the selected engine for drafting, Opus as guardian, the
+    Gemini EMBEDDING model for every RAG retrieval, and (on a pipeline failure) a single-call
+    fallback. Reports only the accumulator slice [start_index:] so it counts exactly this
+    draft. Only models that ACTUALLY ran appear (a configured guardian that never fired is
+    NOT listed).
 
     Token accounting is made consistent and cost‑accurate: a model's reported total token
-    count can exceed input+output because of hidden thinking/reasoning tokens (Gemini bills
-    those at the output rate), so Output is reconciled to (Total − Input). Thus every row
-    satisfies Total = Input + Output, and the grand total is the true billed cost."""
+    count can exceed input+output because of hidden thinking/reasoning tokens (billed at the
+    output rate), so Output is reconciled to (Total − Input). Thus every row satisfies
+    Total = Input + Output. Cost is Input×in_rate + Output×out_rate from _MODEL_PRICING; a
+    model with no known rate shows "-" and the TOTAL is flagged with "+" (a lower bound)."""
     if not session_key:
         return None
     entries = _accumulators.get(session_key, [])[start_index:]
@@ -302,18 +385,34 @@ def log_draft_token_usage(
     t_out = sum(int(a["out"]) for a in by_model.values())
     t_calls = sum(int(a["calls"]) for a in by_model.values())
 
-    headers = ["Model", "Provider", "Calls", "Input", "Output", "Total"]
+    # Per-model billed cost (USD); None when the model's rate is unknown.
+    model_cost: dict[str, float | None] = {
+        m: _model_cost_usd(m, int(by_model[m]["in"]), int(by_model[m]["out"])) for m in order
+    }
+    total_cost = sum(c for c in model_cost.values() if c is not None)
+    any_unknown = any(c is None for c in model_cost.values())
+
+    headers = ["Model", "Provider", "Calls", "Input", "Output", "Total", "Cost (USD)"]
     rows: list[list[str]] = [
         [m, str(by_model[m]["provider"]), _fmt_int(by_model[m]["calls"]),
          _fmt_int(by_model[m]["in"]), _fmt_int(by_model[m]["out"]),
-         _fmt_int(int(by_model[m]["in"]) + int(by_model[m]["out"]))]
+         _fmt_int(int(by_model[m]["in"]) + int(by_model[m]["out"])),
+         _fmt_usd(model_cost[m])]
         for m in order
     ]
-    rows.append(["TOTAL (1 draft)", "", _fmt_int(t_calls), _fmt_int(t_in), _fmt_int(t_out), _fmt_int(t_in + t_out)])
+    rows.append(["TOTAL (1 draft)", "", _fmt_int(t_calls), _fmt_int(t_in), _fmt_int(t_out),
+                 _fmt_int(t_in + t_out), _fmt_usd(total_cost) + ("+" if any_unknown else "")])
 
     subtitle: list[str] = []
+    if draft_id:
+        subtitle.append(f"Draft ID: {draft_id}")
     if draft_model:
         subtitle.append(f"Selected draft engine: {draft_model}")
+    cost_line = f"End-to-end cost: {_fmt_usd(total_cost)}"
+    if any_unknown:
+        cost_line += " + unpriced model(s)"
+    cost_line += f"   ≈ ₹{total_cost * _USD_TO_INR:,.2f}"
+    subtitle.append(cost_line)
     meta = []
     if answer_length is not None:
         meta.append(f"Draft length: {_fmt_int(answer_length)} chars")
@@ -334,7 +433,8 @@ def log_draft_token_usage(
     )
     print(table, flush=True)
     logger.info(table)
-    return {"inputTokens": t_in, "outputTokens": t_out, "totalTokens": t_in + t_out}
+    return {"inputTokens": t_in, "outputTokens": t_out, "totalTokens": t_in + t_out,
+            "costUsd": round(total_cost, 6), "draftId": draft_id}
 
 
 def format_token_usage_table(

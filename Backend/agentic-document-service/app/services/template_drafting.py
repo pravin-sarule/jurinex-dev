@@ -51,11 +51,14 @@ from app.services.docx_export import NOT_FOUND_MARKER
 logger = logging.getLogger("agentic_document_service.template_drafting")
 
 # Output-token budgets per stage (overrides the small agent default; clamped to the
-# model ceiling inside _generate_text). Analysis/audit are compact; inventory/section
-# need room.
-_ANALYSIS_MAX_TOKENS = 16384
+# model ceiling inside _generate_text). We request up to gemma-4's hard output ceiling
+# (32768 tokens — the same value _model_max_output_tokens clamps gemma to); on a big template
+# this gives the structure JSON and each section the full 32k so they can't truncate mid-JSON
+# and abort the pipeline to the section-less single-call fallback. Higher-ceiling engines
+# (gemini/claude) stay clamped to their own real limits, not to these numbers.
+_ANALYSIS_MAX_TOKENS = 32768
 _INVENTORY_MAX_TOKENS = 32768
-_SECTION_MAX_TOKENS = 16384
+_SECTION_MAX_TOKENS = 32768
 _AUDIT_MAX_TOKENS = 8192
 
 # Guards.
@@ -87,6 +90,7 @@ _INV_RETRIEVAL_CHAR_CAP = 130_000  # budget for the retrieved corpus fed to Stag
 _SECTION_TOP_K = 20              # top-k chunks retrieved per section for drafting
 _SECTION_EVIDENCE_CHAR_CAP = 30_000  # budget for a section's own retrieved evidence
 _PRIOR_DRAFTS_CHAR_CAP = 60_000  # how much already-drafted text to show each section (anti-repeat)
+_MAX_SECTION_CONCURRENCY = 4     # hard cap for parallel section drafts (DRAFT_SECTION_CONCURRENCY knob)
 # RECALL over precision for the fact matrix: if the whole corpus fits this window, the ONE
 # distillation pass reads the FULL documents. Top-k retrieval reliably drops short/tabular
 # facts (a "Bedrooms: 2" cell, a "01-Jul-2025" date) that embed poorly — proven in review —
@@ -152,11 +156,14 @@ Return STRICT JSON (no prose, no code fences) matching:
 }
 
 RULES:
+0. DETECT THE DOCUMENT FAMILY FIRST — court pleading (plaint / petition / application / appeal / complaint), agreement / contract / deed, affidavit / declaration, notice / reply / formal letter, corporate or personal instrument (resolution / power of attorney / MOU / will), or fill-in form — and segment by THAT family's own conventions. Rules 1b-1d below are a convention LIBRARY, not a fixed target: apply the one matching what THIS template actually shows, and never force another family's layout onto it.
 1. Segment FINE-GRAINED and COMPLETE: every heading, recital, numbered clause, sub-clause, schedule, annexure and the signature/witness block is its own section, in document order. Cover the template from first line to last — do not merge distinct clauses and do not drop trailing sections.
-1b. A DOCUMENT HEADER / CAUSE TITLE must be split into its component lines as SEPARATE sections, in order: the court-name line; the case / suit number line; "IN THE MATTER OF:"; each party's description; each role label ("…Plaintiff", "…Defendant"); "VERSUS"; and the document-type heading. Never lump the whole header into one section. Give centered lines (court, case number, "VERSUS", the main heading) typography alignment "center", and role labels ("…Plaintiff"/"…Defendant") alignment "right".
+1b. COURT PLEADINGS ONLY — the document header / cause title must be split into its component lines as SEPARATE sections, in order: the court-name line; the case / suit number line; "IN THE MATTER OF:"; each party's description; each role label ("…Plaintiff", "…Defendant"); "VERSUS"; and the document-type heading. Never lump the whole header into one section. Give centered lines (court, case number, "VERSUS", the main heading) typography alignment "center", and role labels ("…Plaintiff"/"…Defendant") alignment "right".
+1c. AGREEMENTS / DEEDS / MOUs — the title; the execution date/place line; EACH party's description in the parties block; the recitals ("WHEREAS …"); each numbered operative clause; the testimonium ("IN WITNESS WHEREOF …"); each schedule / annexure; and the signature & witness blocks are each their own section.
+1d. NOTICES / LETTERS / AFFIDAVITS / FORMS — the letterhead or sender block; date and reference lines; the addressee block; the subject line; the salutation; each numbered paragraph, demand or deposition; and the closing / signature / verification block are each their own section. In a fill-in form, a run of "Label: ____" lines is one section per labelled group.
 2. "anchor" MUST be copied character-for-character from the template (the first several words of the section). Do NOT paraphrase it — it is used to locate the section in the source text. Keep it short (6-12 words).
 3. Detect every placeholder: bracketed tokens, blank runs (____), "insert here" hints, obviously variable values.
-4. TYPOGRAPHY: fill each section's alignment/font/size/bold/level with what the template actually shows. Body prose is "justify" unless it is a signature/address/date/cause-title block (then as shown). Titles/cause-titles are usually "center". Court drafts default to Times New Roman 12pt body, 14pt bold centered title.
+4. TYPOGRAPHY: fill each section's alignment/font/size/bold/level with what the template actually shows FOR ITS FAMILY. Body prose is "justify" unless it is a signature/address/date/cause-title block (then as shown). Titles are usually "center" in pleadings, agreements, deeds and affidavits; letters/notices are usually left-aligned with a bold subject line; forms follow their label layout. Only when the template gives no signal, default to Times New Roman 12pt body with a 14pt bold title.
 5. Determinism: the same template must always yield the same sections.
 Return ONLY the JSON object."""
 
@@ -297,8 +304,27 @@ If the draft has no concrete format defects, return {"violations": []}."""
 
 
 # ─────────────────────────────── JSON helpers ───────────────────────────────
+def _repair_json(s: str) -> str:
+    """Repair the JSON defects LLMs most often emit, so a single stray character can't
+    collapse the whole draft pipeline into the section-less single-call fallback:
+      • a trailing comma before a closer ( ",}" -> "}" , ",]" -> "]" )
+      • a missing comma between sibling objects/arrays ( "}{" -> "},{" )
+    Structural only — it never invents or alters a field value. An unescaped quote inside a
+    string, or a truncated reply, is not safely repairable here and is left for the caller's
+    one-shot strict-JSON re-ask (analyze_template_structure)."""
+    if not s:
+        return s
+    out = re.sub(r",(\s*[}\]])", r"\1", s)     # trailing comma:  ,}  ->  }
+    out = re.sub(r"}(\s*)\{", r"},\1{", out)   # missing comma:   }{  ->  },{
+    out = re.sub(r"](\s*)\[", r"],\1[", out)   # missing comma:   ][  ->  ],[
+    return out
+
+
 def _parse_json_blob(raw: str) -> Any:
-    """Parse a JSON object/array from a model response (tolerates code fences / prose)."""
+    """Parse a JSON object/array from a model response (tolerates code fences / prose).
+    Retries once through _repair_json so a stray trailing/missing comma can't abort the
+    pipeline; genuinely malformed output (unescaped quote, truncation) still raises so the
+    caller can re-ask the model for strict JSON."""
     if not raw:
         raise ValueError("empty response")
     m = re.search(r"```(?:json)?\s*([\[{][\s\S]*?[\]}])\s*```", raw)
@@ -306,7 +332,10 @@ def _parse_json_blob(raw: str) -> Any:
     if candidate is None:
         m2 = re.search(r"[\[{][\s\S]*[\]}]", raw)
         candidate = m2.group(0) if m2 else raw
-    return json.loads(candidate)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return json.loads(_repair_json(candidate))
 
 
 def _norm_ws(s: str) -> str:
@@ -334,45 +363,129 @@ def analyze_template_structure(
         model_name_override=model_name,
         max_output_tokens=_ANALYSIS_MAX_TOKENS,
     )
-    data = _parse_json_blob(raw)
+    try:
+        data = _parse_json_blob(raw)
+    except (ValueError, json.JSONDecodeError) as _je:
+        # The tolerant parser couldn't recover it (typically an unescaped double-quote inside
+        # a string value, or a truncated reply). Re-ask the SAME model ONCE with an explicit
+        # strict-JSON reminder before the whole pipeline drops to the section-less single-call
+        # fallback (which loses the per-section red-placeholder rules).
+        logger.warning(
+            "[template_drafting] structure JSON parse failed (%s) — re-asking %s for strict JSON",
+            _je, model_name,
+        )
+        raw = _generate_text(
+            f"{prompt}\n\n=== FIX ===\nYour previous reply was NOT valid JSON: {_je}. "
+            "Return ONLY strict, valid JSON for the schema above — no prose, no code fences. "
+            'Escape every double-quote inside a string value as \\", and do not truncate.',
+            agent_name="template_structure_agent",
+            user_id=user_id,
+            model_name_override=model_name,
+            max_output_tokens=_ANALYSIS_MAX_TOKENS,
+        )
+        data = _parse_json_blob(raw)
     if not isinstance(data, dict) or not isinstance(data.get("sections"), list) or not data["sections"]:
         raise ValueError("structural analysis returned no sections")
 
-    raw_sections = data["sections"]
-    # Locate each section's start offset in template_text via its anchor (fallback heading).
-    located: list[tuple[int, dict]] = []
-    for s in raw_sections:
-        if not isinstance(s, dict):
-            continue
-        anchor = _norm_ws(str(s.get("anchor") or ""))
-        heading = _norm_ws(str(s.get("heading") or ""))
-        pos = _find_anchor(template_text, anchor) if anchor else -1
-        if pos < 0 and heading:
-            pos = _find_anchor(template_text, heading)
-        located.append((pos, s))
+    def _locate_and_slice(payload: dict) -> tuple[list[TemplateSection], float]:
+        """Locate each section's anchor, slice contiguous verbatim spans, and return the
+        sections plus the fraction of anchors that actually located — the structure-accuracy
+        signal (an unlocated anchor means that boundary was inherited, not measured)."""
+        base_font = payload.get("base_font") if isinstance(payload.get("base_font"), dict) else {}
+        located: list[tuple[int, dict]] = []
+        for s in payload["sections"]:
+            if not isinstance(s, dict):
+                continue
+            anchor = _norm_ws(str(s.get("anchor") or ""))
+            heading = _norm_ws(str(s.get("heading") or ""))
+            pos = _find_anchor(template_text, anchor) if anchor else -1
+            if pos < 0 and heading:
+                pos = _find_anchor(template_text, heading)
+            located.append((pos, s))
+        frac = (sum(1 for p, _ in located if p >= 0) / len(located)) if located else 0.0
 
-    # Order sections by located position (unlocated keep model order, interleaved after
-    # the last located boundary) and slice verbatim spans between consecutive starts.
-    ordered = _order_sections(located, len(template_text))
-    sections: list[TemplateSection] = []
-    for idx, (start, end, s) in enumerate(ordered):
-        original = template_text[start:end].strip() if 0 <= start < end else ""
-        typo = s.get("typography") if isinstance(s.get("typography"), dict) else {}
-        sections.append(TemplateSection(
-            index=idx,
-            heading=str(s.get("heading") or f"Section {idx + 1}").strip(),
-            original_text=original,
-            placeholders=[str(p) for p in (s.get("placeholders") or []) if p],
-            typography={
-                "alignment": str(typo.get("alignment") or "justify"),
-                "font": str(typo.get("font") or (data.get("base_font") or {}).get("font") or "Times New Roman"),
-                "size_pt": float(typo.get("size_pt") or (data.get("base_font") or {}).get("size_pt") or 12),
-                "bold": bool(typo.get("bold") or False),
-                "level": int(typo.get("level") or 0),
-            },
-            contains_table=bool(s.get("contains_table")),
-            table_header=[str(c) for c in (s.get("table_header") or []) if c],
-        ))
+        # Order sections by located position (unlocated keep model order, interleaved after
+        # the last located boundary) and slice verbatim spans between consecutive starts.
+        ordered = _order_sections(located, len(template_text))
+        built: list[TemplateSection] = []
+        for idx, (start, end, s) in enumerate(ordered):
+            original = template_text[start:end].strip() if 0 <= start < end else ""
+            typo = s.get("typography") if isinstance(s.get("typography"), dict) else {}
+            built.append(TemplateSection(
+                index=idx,
+                heading=str(s.get("heading") or f"Section {idx + 1}").strip(),
+                original_text=original,
+                placeholders=[str(p) for p in (s.get("placeholders") or []) if p],
+                typography={
+                    "alignment": str(typo.get("alignment") or "justify"),
+                    "font": str(typo.get("font") or base_font.get("font") or "Times New Roman"),
+                    "size_pt": float(typo.get("size_pt") or base_font.get("size_pt") or 12),
+                    "bold": bool(typo.get("bold") or False),
+                    "level": int(typo.get("level") or 0),
+                },
+                contains_table=bool(s.get("contains_table")),
+                table_header=[str(c) for c in (s.get("table_header") or []) if c],
+            ))
+
+        # Head recovery: template text BEFORE the first located anchor (a letterhead, court
+        # name or title whose own section failed to locate) would otherwise silently vanish
+        # from the format authority. Surface it as its own leading section.
+        lead_end = ordered[0][0] if ordered else 0
+        lead = template_text[:lead_end].strip() if lead_end > 0 else ""
+        # Any real content counts — the most common lost head is a SHORT centered title line
+        # ("RENT AGREEMENT", "AFFIDAVIT") whose own section the model forgot to emit.
+        if len(lead) >= 4:
+            first_line = next((ln.strip() for ln in lead.splitlines() if ln.strip()), "Preamble")
+            title_like = first_line.isupper() and len(first_line) <= 60
+            built.insert(0, TemplateSection(
+                index=0,
+                heading=first_line[:80],
+                original_text=lead,
+                typography={
+                    "alignment": "center" if title_like else "left",
+                    "font": str(base_font.get("font") or "Times New Roman"),
+                    "size_pt": float(base_font.get("size_pt") or 12),
+                    "bold": title_like,
+                    "level": 1 if title_like else 0,
+                },
+            ))
+            for i, sec in enumerate(built):
+                sec.index = i
+        return built, frac
+
+    sections, located_frac = _locate_and_slice(data)
+
+    # Anchor-quality gate: located_frac measures how much of the section map was MEASURED
+    # (anchor found verbatim in the template) versus guessed. Below 70%, re-ask the SAME
+    # model once with an explicit copy-verbatim reminder; still below 50% after that, raise —
+    # the caller's escalation chain then retries this stage on a stronger model instead of
+    # drafting from a mislocated map.
+    if located_frac < 0.7 and len(template_text) > 400:
+        logger.warning(
+            "[template_drafting] only %.0f%% of structure anchors located — re-asking %s for verbatim anchors",
+            located_frac * 100, model_name,
+        )
+        try:
+            raw2 = _generate_text(
+                f"{prompt}\n\n=== FIX ===\nYour previous JSON was parseable but its \"anchor\" values "
+                f"did NOT match the template (only {located_frac:.0%} could be found by string search). "
+                "Regenerate the SAME JSON, copying every \"anchor\" CHARACTER-FOR-CHARACTER from the "
+                "template text above — the exact first 6-12 words of that section as they appear, no "
+                "paraphrase, no re-spacing, no case changes.",
+                agent_name="template_structure_agent",
+                user_id=user_id,
+                model_name_override=model_name,
+                max_output_tokens=_ANALYSIS_MAX_TOKENS,
+            )
+            data2 = _parse_json_blob(raw2)
+            if isinstance(data2, dict) and isinstance(data2.get("sections"), list) and data2["sections"]:
+                sections2, frac2 = _locate_and_slice(data2)
+                if frac2 > located_frac:
+                    sections, located_frac, data = sections2, frac2, data2
+        except Exception as _re_exc:
+            logger.warning("[template_drafting] anchor re-ask failed (%s) — keeping first pass", _re_exc)
+    if located_frac < 0.5 and len(template_text) > 400:
+        raise ValueError(f"structural analysis anchors unreliable ({located_frac:.0%} located)")
 
     # Coverage guard: if we located almost nothing, the anchors were unreliable — signal
     # the caller to fall back rather than draft from empty format authority.
@@ -380,6 +493,10 @@ def analyze_template_structure(
     coverage = located_chars / max(1, len(template_text))
     if coverage < 0.35 and len(template_text) > 400:
         raise ValueError(f"structural analysis coverage too low ({coverage:.0%})")
+    logger.info(
+        "[template_drafting] structure map: %d fine-grained section(s), %.0f%% anchors located, %.0f%% text coverage",
+        len(sections), located_frac * 100, coverage * 100,
+    )
 
     # Re-split spans where a failed anchor buried a major part heading (PRAYER,
     # VERIFICATION …) inside the previous section's verbatim text.
@@ -421,13 +538,28 @@ def _find_anchor(haystack: str, needle: str) -> int:
     pos = haystack.find(needle)
     if pos >= 0:
         return pos
-    # Whitespace-insensitive: build a regex from the first ~8 words.
-    words = needle.split()[:8]
+    # Case-insensitive exact (regex, so returned offsets stay valid for any Unicode).
+    m0 = re.search(re.escape(needle), haystack, re.IGNORECASE)
+    if m0:
+        return m0.start()
+    words = needle.split()
     if not words:
         return -1
-    pattern = r"\s+".join(re.escape(w) for w in words)
-    m = re.search(pattern, haystack, re.IGNORECASE)
-    return m.start() if m else -1
+    # Progressive whitespace-insensitive search: models copy the HEAD of a section verbatim
+    # but drift near the tail (normalised spacing, dropped punctuation, OCR noise), so retry
+    # with progressively shorter word prefixes before giving up. Floor of 3 consecutive
+    # words keeps false positives unlikely.
+    tried: set[int] = set()
+    for k in (8, 6, 4, 3):
+        kk = min(k, len(words))
+        if kk < 3 or kk in tried:
+            continue
+        tried.add(kk)
+        pattern = r"\s+".join(re.escape(w) for w in words[:kk])
+        m = re.search(pattern, haystack, re.IGNORECASE)
+        if m:
+            return m.start()
+    return -1
 
 
 def _order_sections(located: list[tuple[int, dict]], text_len: int) -> list[tuple[int, int, dict]]:
@@ -469,7 +601,7 @@ def _merge_overflow(sections: list[TemplateSection], cap: int) -> list[TemplateS
             heading=a.heading,
             original_text=(a.original_text + "\n\n" + b.original_text).strip(),
             placeholders=a.placeholders + b.placeholders,
-            typography=a.typography,
+            typography=_merged_typography([a, b]),
             contains_table=a.contains_table or b.contains_table,
             table_header=a.table_header or b.table_header,
         )
@@ -480,7 +612,14 @@ def _merge_overflow(sections: list[TemplateSection], cap: int) -> list[TemplateS
 
 
 
-_SLOT_HEAVY_RE = re.compile(r"_{4,}|\[[^\]]{2,}\]|\b(?:Bank|A/c|Account|IFSC|UPI|Aadhaar|PAN|Address|Signature|Witness|Date|Place)\b", re.IGNORECASE)
+# Slot-density signals: blank runs, bracketed tokens, a GENERIC "Label: ____/[…]" line
+# (family-agnostic — matches Employee Code:, GSTIN:, Passport No:, … in ANY document, not
+# just rent-agreement vocabulary), plus common Indian identity/execution keywords.
+_SLOT_HEAVY_RE = re.compile(
+    r"_{4,}|\[[^\]]{2,}\]|[A-Za-z][\w /.&()-]{1,28}:\s*(?:_{2,}|\[)"
+    r"|\b(?:Bank|A/c|Account|IFSC|UPI|Aadhaar|PAN|Address|Signature|Witness|Date|Place)\b",
+    re.IGNORECASE,
+)
 
 
 def _should_keep_section_standalone(section: TemplateSection) -> bool:
@@ -503,7 +642,8 @@ def _should_keep_section_standalone(section: TemplateSection) -> bool:
 # what fused "PRAYER" into the tail of the last numbered clause.
 _MAJOR_PART_RE = re.compile(
     r"^(?:PRAYER|VERIFICATION|SCHEDULE|ANNEXURE(?:\s*-?\s*[A-Z0-9])?|WITNESSES|SIGNATURES?|"
-    r"STATEMENT\s+OF\s+TRUTH|AFFIDAVIT|DECLARATION|IN\s+WITNESS\s+WHEREOF|MEMO\s+OF\s+PARTIES)\b",
+    r"STATEMENT\s+OF\s+TRUTH|AFFIDAVIT|DECLARATION|IN\s+WITNESS\s+WHEREOF|MEMO\s+OF\s+PARTIES|"
+    r"APPENDIX(?:\s*-?\s*[A-Z0-9])?|EXHIBIT(?:\s*-?\s*[A-Z0-9])?|ENCLOSURES?|TESTIMONIUM)\b",
     re.IGNORECASE,
 )
 
@@ -521,6 +661,29 @@ def _section_first_line(s: TemplateSection) -> str:
         if raw.strip():
             return raw
     return s.heading or ""
+
+
+# Major structural parts that are SELF-CONTAINED — their content comes from the fact
+# inventory, not from earlier drafted prose — so they can be drafted in parallel. PRAYER /
+# VERIFICATION / affidavits reference the plaint body, so they are NOT listed here (they
+# stay in the sequential chain).
+_INDEPENDENT_PART_RE = re.compile(
+    r"^(?:SCHEDULE|ANNEXURE|SIGNATURES?|WITNESSES|MEMO\s+OF\s+PARTIES|APPENDIX|EXHIBIT|ENCLOSURES?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_independent_section(section: TemplateSection) -> bool:
+    """True when a section can be drafted WITHOUT seeing the earlier sections' text: a genuine
+    data table/schedule, a slot-dense standalone block (party/execution/witness/bank details),
+    or a self-contained structural part (SCHEDULE/ANNEXURE/SIGNATURES/WITNESSES). These carry
+    no cross-section dependency, so they draft CONCURRENTLY. Narrative recitals and operative
+    clauses cross-reference earlier clauses and restate parties, so they are NOT independent —
+    they stay in the sequential chain that feeds each one the already-drafted prior sections."""
+    if _should_keep_section_standalone(section):
+        return True
+    plain = _boundary_plain(_section_first_line(section)) or ""
+    return bool(_INDEPENDENT_PART_RE.match(plain))
 
 
 def _resplit_at_major_parts(sections: list[TemplateSection]) -> list[TemplateSection]:
@@ -556,6 +719,33 @@ def _resplit_at_major_parts(sections: list[TemplateSection]) -> list[TemplateSec
     for i, s in enumerate(out):
         s.index = i
     return out
+
+
+def _merged_typography(subs: list[TemplateSection]) -> dict:
+    """Typography for a merged drafting unit: the head section's typography plus a compact
+    per-part layout map, so packing does NOT flatten every sub-section's measured
+    alignment/bold down to the first one's — the drafter is told each packed part's own
+    layout (a centered title, a right-aligned role label and a justified clause can share
+    one unit without losing their individual alignment)."""
+    head = dict(subs[0].typography or {})
+    parts: list[dict] = []
+    for b in subs:
+        t = b.typography or {}
+        nested = t.get("parts")
+        if isinstance(nested, list) and nested:
+            parts.extend(p for p in nested if isinstance(p, dict))
+            continue
+        if not (b.heading or "").strip():
+            continue
+        parts.append({
+            "heading": b.heading[:60],
+            "alignment": str(t.get("alignment") or "justify"),
+            "bold": bool(t.get("bold")),
+        })
+    head.pop("parts", None)
+    if len(parts) > 1:
+        head["parts"] = parts[:10]
+    return head
 
 
 def _pack_sections(sections: list[TemplateSection], *, template_len: int = 0) -> list[TemplateSection]:
@@ -598,7 +788,7 @@ def _pack_sections(sections: list[TemplateSection], *, template_len: int = 0) ->
                 heading=head.heading,
                 original_text=combined,
                 placeholders=placeholders,
-                typography=head.typography,
+                typography=_merged_typography(bucket),
                 contains_table=False,
                 table_header=[],
             ))
@@ -666,7 +856,7 @@ def _section_query(section: TemplateSection) -> str:
     """Build a focused retrieval query for a section from its heading + placeholders + text."""
     parts = [section.heading or ""]
     if section.placeholders:
-        parts.append(" ".join(str(p) for p in section.placeholders[:12]))
+        parts.append(" ".join(section.placeholders[:12]))
     body = _norm_ws(section.original_text)[:360]
     if body:
         parts.append(body)
@@ -938,11 +1128,25 @@ def draft_section(
     typo = section.typography or {}
     layout_hint = ""
     if typo:
+        # A packed drafting unit carries each merged part's own measured layout — render the
+        # map so a centered title, a right-aligned label and a justified clause sharing one
+        # unit each keep their individual alignment/bold in the draft.
+        _tparts = [p for p in (typo.get("parts") or []) if isinstance(p, dict)]
+        _part_lines = "".join(
+            f"  • '{p.get('heading', '')}' → alignment={p.get('alignment', 'justify')}, "
+            f"bold={'yes' if p.get('bold') else 'no'}\n"
+            for p in _tparts[:10]
+        )
         layout_hint = (
             f"\nMEASURED LAYOUT (from the template itself): alignment={typo.get('alignment', 'justify')}, "
             f"bold={'yes' if typo.get('bold') else 'no'}, heading_level={typo.get('level', 0)}. "
             "Honour it: keep centered lines centered on their OWN line, right-aligned labels on "
             "their own line, and bold ONLY what the template bolds.\n"
+            + (
+                "This block packs several template parts — each keeps ITS OWN measured layout:\n"
+                + _part_lines
+                if _part_lines else ""
+            )
         )
     correction_hint = ""
     if correction:
@@ -1305,6 +1509,32 @@ def _table_body_overlap(rows_a: list[str], rows_b: list[str]) -> float:
     return len(a & b) / max(1, min(len(a), len(b)))
 
 
+def _table_key_overlap(rows_a: list[str], rows_b: list[str]) -> float:
+    """Overlap of just the KEY column (first content cell after the serial — the item /
+    description identifier). This catches the SAME data re-tabulated with DIFFERENT columns
+    or cell formatting — e.g. an inventory drafted once as `Item | Quantity/Details` and
+    again as `Item Description | Quantity | Condition`. `_table_body_overlap` misses that
+    (the full-row keys differ: `ceiling fan|4 (good)` vs `ceiling fan|4|good`), so it is
+    used with a HIGH threshold to avoid collapsing genuinely different tables that merely
+    share a few first-column values."""
+    def key_set(rows: list[str]) -> set[str]:
+        data_rows = [r for r in rows if _is_markdown_table_row(r) and not _is_markdown_table_separator(r)]
+        out: set[str] = set()
+        for row in data_rows[1:]:   # skip header
+            cells = [re.sub(r"\s+", " ", c).strip().lower() for c in _table_row_cells(row)]
+            if cells and re.fullmatch(r"\d+\.?", cells[0]):
+                cells = cells[1:]
+            if cells and cells[0]:
+                out.add(cells[0])
+        return out
+
+    a = key_set(rows_a)
+    b = key_set(rows_b)
+    if len(a) < 4 or len(b) < 4:
+        return 0.0
+    return len(a & b) / max(1, min(len(a), len(b)))
+
+
 def _looks_like_table_caption(line: str) -> bool:
     plain = _boundary_plain(line)
     low = plain.lower()
@@ -1332,7 +1562,10 @@ def _dedupe_repeated_markdown_tables(markdown: str) -> str:
             block.append(lines[j])
             j += 1
         fp = _table_fingerprint(block)
-        overlaps_seen = any(_table_body_overlap(block, prior) >= 0.82 for prior in seen_blocks)
+        overlaps_seen = any(
+            _table_body_overlap(block, prior) >= 0.82 or _table_key_overlap(block, prior) >= 0.9
+            for prior in seen_blocks
+        )
         if (fp and fp in seen) or overlaps_seen:
             while out and not out[-1].strip():
                 out.pop()
@@ -1396,7 +1629,10 @@ def dedupe_tables_against_prior(markdown: str, prior_markdowns: list[str]) -> st
             block.append(lines[j])
             j += 1
         fp = _table_fingerprint(block)
-        dup = (fp and fp in prior_fps) or any(_table_body_overlap(block, p) >= 0.82 for p in prior_blocks)
+        dup = (fp and fp in prior_fps) or any(
+            _table_body_overlap(block, p) >= 0.82 or _table_key_overlap(block, p) >= 0.9
+            for p in prior_blocks
+        )
         if dup:
             while out and not out[-1].strip():
                 out.pop()
@@ -1674,6 +1910,27 @@ def normalize_drafted_markdown(markdown: str, *, section_heading: str | None = N
     return rendered.strip()
 
 
+def reconcile_assembled_sections(drafted: list[str]) -> list[str]:
+    """Global coherence pass over ALL drafted sections. When independent blocks draft in
+    PARALLEL each is blind to its siblings, so the same data table can be emitted in two
+    sections at once — a duplication the per-section, against-prior dedupe cannot catch.
+    Re-dedupe every section's tables against ALL earlier sections (keep the first occurrence
+    in document order). Per-section STRUCTURE is untouched; this only removes cross-section
+    table duplication. Returns a new list (the input is not mutated)."""
+    out = list(drafted)
+    for i in range(1, len(out)):
+        if not (out[i] and out[i].strip()):
+            continue
+        prior = [out[j] for j in range(i) if out[j] and out[j].strip()]
+        if not prior:
+            continue
+        deduped = dedupe_tables_against_prior(out[i], prior)
+        if deduped != out[i]:
+            logger.info("[template_drafting] global reconcile: removed duplicate table from section %d", i)
+            out[i] = deduped
+    return out
+
+
 # ───────────────────────── Stage D: grounding + format audit ─────────────────
 def grounding_audit(
     sections_md: list[str],
@@ -1854,6 +2111,37 @@ def recover_section_slots(
     return cleaned if cleaned else drafted_md
 
 
+def _reliable_alt_chain(model: str) -> list[str]:
+    """Ordered fallback models to retry a FAILED pipeline stage on, most-preferred first.
+
+    gemma-4-26b-a4b-it (the MoE variant) intermittently 500s / hangs on the Gemini Developer
+    API — a single flaky structure/fact-matrix call otherwise aborts the WHOLE pipeline to a
+    section-less single-call draft. The dense gemma-4-31b-it is usually more stable (same free
+    GEMMA_API_KEY), so try it first — BUT gemma sometimes has a FAMILY-WIDE 500 outage where
+    BOTH variants are down. So every gemma chain ends at the reliable (paid) gemini backstop:
+    when all free gemma options fail, gemini still gets the draft through instead of collapsing
+    to a section-less single-call. Non-gemma engines (gemini/claude) are already reliable → []."""
+    m = (model or "").strip().lower()
+    if not m:
+        return []
+    if m.startswith("gemma-4-31b"):
+        return ["gemini-3.1-pro-preview"]
+    if m.startswith("gemma"):
+        return ["gemma-4-31b-it", "gemini-3.1-pro-preview"]
+    return []
+
+
+def _stage_timeout(model: str, *, fast: float = 180.0) -> float:
+    """Blocking timeout for a pipeline stage, sized to the model's throughput.
+
+    Free-tier gemma on Google AI Studio runs at only ~16 tokens/sec, so a structure or
+    fact-matrix call legitimately takes minutes — give gemma a generous 300s window before
+    declaring a hang and escalating. Cutting it short just forces a needless jump to a paid
+    model (gemini) when free gemma would have finished. Faster paid models don't need it, so
+    they keep the shorter `fast` window (a stall on them really is a problem)."""
+    return 300.0 if (model or "").strip().lower().startswith("gemma") else fast
+
+
 # ─────────────────────────────── orchestrator ───────────────────────────────
 async def run_template_drafting_pipeline(
     *,
@@ -1885,11 +2173,42 @@ async def run_template_drafting_pipeline(
         return ("progress", {"type": "thinking", "text": text})
 
     # ---- Stage A: structure ----
+    # Timeout is throughput-aware (_stage_timeout): free-tier gemma (~16 tps) gets a generous
+    # 300s so a slow-but-working structure call finishes on the free engine instead of being
+    # cut short and bounced to a paid model; gemini/claude keep the shorter 180s. On a genuine
+    # failure (500s exhausted, or a true hang past the window) we escalate to a reliable model
+    # rather than aborting the whole pipeline to a section-less single-call draft.
+    _alts_a = _reliable_alt_chain(analysis_model)
     yield _prog("Analyzing the template's structure…\n")
-    analysis: TemplateAnalysis = await run_blocking(
-        lambda: analyze_template_structure(template_text, model_name=analysis_model, user_id=user_id),
-        timeout_s=180.0, timeout_message="template_structure_timeout",
-    )
+    analysis: TemplateAnalysis | None = None
+    try:
+        analysis = await run_blocking(
+            lambda: analyze_template_structure(template_text, model_name=analysis_model, user_id=user_id),
+            timeout_s=_stage_timeout(analysis_model), timeout_message="template_structure_timeout",
+        )
+    except Exception as _exc_a:
+        # Walk the fallback chain (free gemma sibling → reliable gemini) until one succeeds, so a
+        # family-wide gemma 500 outage still yields a real structure instead of collapsing the
+        # whole pipeline to a section-less single-call draft.
+        analysis = None
+        _last_a = _exc_a
+        for _alt in _alts_a:
+            logger.warning("[template_drafting] structure model %s failed (%s) — escalating to %s",
+                           analysis_model, _last_a, _alt)
+            yield _prog(
+                f"Structure model '{analysis_model}' is unavailable ({type(_last_a).__name__}); "
+                f"retrying structure on {_alt}…\n"
+            )
+            try:
+                analysis = await run_blocking(
+                    lambda a=_alt: analyze_template_structure(template_text, model_name=a, user_id=user_id),
+                    timeout_s=_stage_timeout(_alt), timeout_message="template_structure_timeout_alt",
+                )
+                break
+            except Exception as _e:
+                _last_a = _e
+        if analysis is None:
+            raise _last_a
     sections = analysis.sections
     n = len(sections)
     if n == 0:
@@ -1897,8 +2216,11 @@ async def run_template_drafting_pipeline(
     yield _prog(f"Template mapped into {n} section(s).\n")
 
     # ---- Stage B: fact inventory (cached per session by the caller) ----
+    # `fact_inventory` is bound exactly once, always as a non-empty str (the escalation uses a
+    # local `_fi` sentinel and narrows it before binding) — so the many draft_section closures
+    # below capture a definite str, never Optional.
     if cached_fact_inventory:
-        fact_inventory = cached_fact_inventory
+        fact_inventory: str = cached_fact_inventory
         yield _prog("Reusing the extracted case facts…\n")
     else:
         if retrieve_fn is not None:
@@ -1906,23 +2228,124 @@ async def run_template_drafting_pipeline(
         else:
             yield _prog(f"Extracting the case fact matrix from {len(doc_texts)} document(s)…\n")
         _extra_q = [query_text] if (query_text or "").strip() else None
-        fact_inventory = await run_blocking(
-            lambda: extract_fact_inventory(
-                doc_texts, model_name=draft_engine, user_id=user_id,
-                retrieve_fn=retrieve_fn, extra_queries=_extra_q,
-            ),
-            timeout_s=300.0, timeout_message="fact_inventory_timeout",
-        )
-    if not (fact_inventory or "").strip():
+        _alts_b = _reliable_alt_chain(draft_engine)
+        _fi: str | None = None
+        try:
+            _fi = await run_blocking(
+                lambda: extract_fact_inventory(
+                    doc_texts, model_name=draft_engine, user_id=user_id,
+                    retrieve_fn=retrieve_fn, extra_queries=_extra_q,
+                ),
+                timeout_s=_stage_timeout(draft_engine, fast=300.0), timeout_message="fact_inventory_timeout",
+            )
+        except Exception as _exc_b:
+            # Walk the fallback chain (free gemma sibling → reliable gemini) until one succeeds,
+            # so a family-wide gemma 500 outage still produces a fact matrix rather than aborting
+            # the pipeline to a section-less single-call draft.
+            _last_b = _exc_b
+            for _alt in _alts_b:
+                logger.warning("[template_drafting] fact-matrix model %s failed (%s) — escalating to %s",
+                               draft_engine, _last_b, _alt)
+                yield _prog(
+                    f"Fact-matrix model '{draft_engine}' is unavailable ({type(_last_b).__name__}); "
+                    f"retrying on {_alt}…\n"
+                )
+                try:
+                    _fi = await run_blocking(
+                        lambda a=_alt: extract_fact_inventory(
+                            doc_texts, model_name=a, user_id=user_id,
+                            retrieve_fn=retrieve_fn, extra_queries=_extra_q,
+                        ),
+                        timeout_s=_stage_timeout(_alt, fast=300.0), timeout_message="fact_inventory_timeout_alt",
+                    )
+                    break
+                except Exception as _e:
+                    _last_b = _e
+            if _fi is None:
+                raise _last_b
+        if not _fi or not _fi.strip():
+            raise ValueError("fact inventory extraction produced nothing")
+        fact_inventory = _fi
+    if not fact_inventory.strip():
         raise ValueError("fact inventory extraction produced nothing")
 
-    # ---- Stage C: draft sections SEQUENTIALLY, feeding each the already-drafted earlier
-    # sections so it does NOT repeat content (restating parties/dates across clauses). Each
-    # finished section streams live; a section that errors becomes a flagged placeholder so
-    # one bad section can't sink the whole draft. Sequential (not parallel) is required so a
-    # later section can see what earlier ones already said.
+    # ---- Stage C: draft sections. Blocks that carry NO cross-section dependency — genuine
+    # data tables/schedules, slot-dense party/execution/witness blocks, self-contained
+    # structural parts — draft CONCURRENTLY (bounded to _MAX_SECTION_CONCURRENCY) for speed.
+    # Narrative recitals and operative clauses cross-reference earlier text and restate
+    # parties, so they stay SEQUENTIAL and still receive every already-committed section as
+    # context — no coherence regression. A global reconciliation pass afterwards removes any
+    # cross-section table duplication the parallel blocks (blind to each other) may produce.
+    # Each finished section streams live; the UI keys sections by index, so out-of-order
+    # arrival is fine. A section that errors becomes a flagged placeholder so one bad section
+    # can't sink the whole draft.
     drafted: list[str] = [""] * n
-    for idx in range(n):
+
+    def _commit_section(i: int, res) -> None:
+        _norm = (
+            normalize_section_draft(res, sections, i, source_text=fact_inventory)
+            if (isinstance(res, str) and res.strip()) else ""
+        )
+        if not _norm.strip() and len((sections[i].original_text or "").strip()) >= 80:
+            # Nothing usable came back for a non-trivial template span — make the gap
+            # VISIBLE instead of silently dropping template content (the empty
+            # "Verification" card failure).
+            _norm = f"**{sections[i].heading}**\n\n{NOT_FOUND_MARKER}"
+        drafted[i] = _norm
+
+    indep_set = {i for i in range(n) if _is_independent_section(sections[i])}
+    indep_idx = [i for i in range(n) if i in indep_set]
+    chained_idx = [i for i in range(n) if i not in indep_set]
+
+    # Phase 1 — independent blocks in parallel (each drafted without prior context).
+    if indep_idx:
+        # Section fan-out is user-controlled via DRAFT_SECTION_CONCURRENCY (.env), clamped 1–4.
+        # Use 1 for low-quota engines like gemma (paid-tier ~16k input tokens/min → 429s on
+        # bursts; the 429-retry helper still paces any over-quota call gracefully) and raise
+        # toward 4 for high-quota engines (gemini/opus) to draft independent sections faster.
+        _sec_conc = max(1, min(concurrency or 1, _MAX_SECTION_CONCURRENCY))
+        _sem = asyncio.Semaphore(_sec_conc)
+        yield _prog(
+            f"Drafting {len(indep_idx)} independent block(s) of {n}, {_sec_conc} at a time…\n"
+        )
+
+        async def _draft_independent(i: int):
+            async with _sem:
+                try:
+                    return i, await run_blocking(
+                        lambda ii=i: draft_section(
+                            sections[ii], fact_inventory, model_name=draft_engine,
+                            user_id=user_id, doc_title=doc_title, retrieve_fn=retrieve_fn,
+                            prior_drafts="",
+                        ),
+                        timeout_s=180.0, timeout_message=f"section_{i}_timeout",
+                    )
+                except Exception as exc:
+                    logger.warning("[template_drafting] section %s failed: %s", i, exc)
+                    return i, None
+
+        _tasks = [asyncio.ensure_future(_draft_independent(i)) for i in indep_idx]
+        try:
+            for _fut in asyncio.as_completed(_tasks):
+                i, res = await _fut
+                _commit_section(i, res)
+                yield ("section", {
+                    "index": i, "total": n,
+                    "heading": sections[i].heading, "markdown": drafted[i],
+                })
+        finally:
+            # If the consumer aborts (client disconnect → generator aclose, or a downstream
+            # error), cancel any still-pending parallel drafts. Without this, the detached
+            # ensure_future tasks keep running after the request is gone — burning model
+            # calls/quota and starting sections a cancelled request should never draft.
+            for _t in _tasks:
+                if not _t.done():
+                    _t.cancel()
+
+    # Phase 2 — chained (narrative) sections SEQUENTIALLY, each seeing every already-committed
+    # section (independent blocks from phase 1 + earlier chained sections) so it does NOT
+    # repeat content (restating parties/dates across clauses).
+    for idx in chained_idx:
         yield _prog(f"Drafting section {idx + 1}/{n}: {sections[idx].heading[:80]}…\n")
         prior = "\n\n".join(drafted[j] for j in range(idx) if drafted[j] and drafted[j].strip())
         try:
@@ -1936,20 +2359,14 @@ async def run_template_drafting_pipeline(
         except Exception as exc:
             logger.warning("[template_drafting] section %s failed: %s", idx, exc)
             res = None
-        _norm_res = (
-            normalize_section_draft(res, sections, idx, source_text=fact_inventory)
-            if (isinstance(res, str) and res.strip()) else ""
-        )
-        if not _norm_res.strip() and len((sections[idx].original_text or "").strip()) >= 80:
-            # Nothing usable came back for a non-trivial template span — make the gap
-            # VISIBLE instead of silently dropping template content (the empty
-            # "Verification" card failure).
-            _norm_res = f"**{sections[idx].heading}**\n\n{NOT_FOUND_MARKER}"
-        drafted[idx] = _norm_res
-        # Cross-section table dedupe BEFORE streaming: a table already drafted in an
-        # earlier section must not appear again (the duplicated Annexure-A inventory).
-        if idx > 0 and drafted[idx]:
-            _dd = dedupe_tables_against_prior(drafted[idx], drafted[:idx])
+        _commit_section(idx, res)
+        # Cross-section table dedupe BEFORE streaming: a table already drafted in an earlier
+        # (independent or chained) section must not appear again.
+        if drafted[idx]:
+            _dd = dedupe_tables_against_prior(
+                drafted[idx],
+                [drafted[j] for j in range(idx) if drafted[j] and drafted[j].strip()],
+            )
             if _dd != drafted[idx]:
                 logger.info("[template_drafting] removed duplicate table from section %d", idx)
                 drafted[idx] = _dd
@@ -1958,6 +2375,19 @@ async def run_template_drafting_pipeline(
             "index": idx, "total": n,
             "heading": sections[idx].heading, "markdown": drafted[idx],
         })
+
+    # ---- Global reconciliation: independent blocks drafted in parallel were blind to each
+    # other, so a data table can appear in two of them. Re-dedupe every section against ALL
+    # earlier sections (keep the first occurrence). Re-emit any section the pass changed so
+    # the live UI matches the final draft.
+    _before_reconcile = list(drafted)
+    drafted = reconcile_assembled_sections(drafted)
+    for i in range(n):
+        if drafted[i] != _before_reconcile[i]:
+            yield ("section", {
+                "index": i, "total": n,
+                "heading": sections[i].heading, "markdown": drafted[i],
+            })
 
     # ---- Stage D: grounding audit + repair (buffer internally; never append copies) ----
     # Run the audit + repair on a GUARDIAN model (audit_model, e.g. Opus) even when a weaker
@@ -2048,6 +2478,19 @@ async def run_template_drafting_pipeline(
             except Exception as exc:
                 logger.warning("[template_drafting] slot recovery of section %s failed: %s", idx, exc)
 
+    # Reconcile once more: Stage D repairs / Stage E slot recovery may have re-introduced a
+    # cross-section duplicate table. Idempotent when nothing changed. Re-emit any section this
+    # pass changes so the live section cards match the final assembled answer (symmetric with
+    # the post-Phase-2 reconcile above — otherwise a table deduped only here would linger on
+    # the streamed card while being absent from the saved draft).
+    _before_final_reconcile = list(drafted)
+    drafted = reconcile_assembled_sections(drafted)
+    for i in range(n):
+        if drafted[i] != _before_final_reconcile[i]:
+            yield ("section", {
+                "index": i, "total": n,
+                "heading": sections[i].heading, "markdown": drafted[i],
+            })
     assembled = normalize_drafted_markdown(
         "\n\n".join(md for md in drafted if md and md.strip()),
         source_text=fact_inventory,

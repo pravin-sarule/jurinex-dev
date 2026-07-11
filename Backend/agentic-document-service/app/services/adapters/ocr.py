@@ -15,6 +15,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger("agentic_document_service.document_ai_ocr")
 
@@ -46,6 +47,7 @@ class OcrResult:
     text: str
     page_count: int
     quality_score: float
+    structured_json: dict[str, Any] | None = None
 
 
 def _word_ocr_result(
@@ -67,11 +69,17 @@ def _word_ocr_result(
     # progress/quality reporting only (not used for chunking).
     page_count = max(1, round(len(text) / 1800)) if text else 0
     quality_score = 0.9 if len(text) > 100 else (0.5 if text else 0.0)
+    structured_json = _structured_from_page_texts([text] if text else [], source="docx_xml")
     logger.info(
         "[Extractor] route=word method=docx_xml source=%s chars=%d pages~%d",
         source, len(text), page_count,
     )
-    return OcrResult(text=text, page_count=page_count, quality_score=quality_score)
+    return OcrResult(
+        text=text,
+        page_count=page_count,
+        quality_score=quality_score,
+        structured_json=structured_json,
+    )
 
 
 # ── PDF page-batch helpers ─────────────────────────────────────────────────────
@@ -108,6 +116,29 @@ def _split_pdf_into_page_batches(data: bytes, max_pages: int) -> list[bytes]:
     return batches
 
 
+def _merge_structured_json(results: list[OcrResult], merged_text: str) -> dict[str, Any] | None:
+    structured_results = [r.structured_json for r in results if isinstance(r.structured_json, dict)]
+    if not structured_results:
+        return None
+
+    pages: list[dict[str, Any]] = []
+    for payload in structured_results:
+        payload_pages = payload.get("pages")
+        if isinstance(payload_pages, list):
+            pages.extend(page for page in payload_pages if isinstance(page, dict))
+
+    first = structured_results[0]
+    return {
+        "schemaVersion": 1,
+        "source": first.get("source") or "document_ai_ocr",
+        "provider": first.get("provider") or "google_document_ai",
+        "text": merged_text,
+        "pageCount": len(pages) or sum(r.page_count for r in results),
+        "pages": pages,
+        "batchCount": len(structured_results),
+    }
+
+
 def _merge_ocr_results(results: list[OcrResult]) -> OcrResult:
     """Merge an ordered list of OcrResult objects (one per batch) into a single result."""
     if not results:
@@ -117,12 +148,277 @@ def _merge_ocr_results(results: list[OcrResult]) -> OcrResult:
     merged_text = "\n\n".join(r.text for r in results if r.text)
     total_pages = sum(r.page_count for r in results)
     avg_quality = sum(r.quality_score for r in results) / len(results)
-    return OcrResult(text=merged_text, page_count=total_pages, quality_score=avg_quality)
+    return OcrResult(
+        text=merged_text,
+        page_count=total_pages,
+        quality_score=avg_quality,
+        structured_json=_merge_structured_json(results, merged_text),
+    )
+
+
+def _text_from_anchor(document_text: str, text_anchor: Any) -> str:
+    segments = getattr(text_anchor, "text_segments", None) or []
+    parts: list[str] = []
+    for segment in segments:
+        try:
+            start = int(getattr(segment, "start_index", 0) or 0)
+            end = int(getattr(segment, "end_index", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            parts.append(document_text[start:end])
+    return "".join(parts)
+
+
+def _layout_text(element: Any, document_text: str) -> str:
+    layout = getattr(element, "layout", None)
+    if not layout:
+        return ""
+    anchor = getattr(layout, "text_anchor", None)
+    if anchor:
+        text = _text_from_anchor(document_text, anchor)
+        if text:
+            return text
+    return str(getattr(layout, "content", "") or "")
+
+
+def _page_dimension(page: Any) -> dict[str, Any]:
+    dimension = getattr(page, "dimension", None)
+    if not dimension:
+        return {"width": None, "height": None, "unit": ""}
+    width = getattr(dimension, "width", None)
+    height = getattr(dimension, "height", None)
+    return {
+        "width": float(width) if width is not None else None,
+        "height": float(height) if height is not None else None,
+        "unit": str(getattr(dimension, "unit", "") or ""),
+    }
+
+
+def _layout_bbox(layout: Any, page_width: float | None = None, page_height: float | None = None) -> dict[str, float] | None:
+    poly = getattr(layout, "bounding_poly", None)
+    if not poly:
+        return None
+    vertices = list(getattr(poly, "normalized_vertices", None) or [])
+    normalized = True
+    if not vertices:
+        vertices = list(getattr(poly, "vertices", None) or [])
+        normalized = False
+    if not vertices:
+        return None
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for vertex in vertices:
+        try:
+            x = float(getattr(vertex, "x", 0) or 0)
+            y = float(getattr(vertex, "y", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not normalized:
+            if page_width and page_width > 0:
+                x = x / page_width
+            if page_height and page_height > 0:
+                y = y / page_height
+        xs.append(max(0.0, min(1.0, x)))
+        ys.append(max(0.0, min(1.0, y)))
+
+    if not xs or not ys:
+        return None
+
+    left = min(xs)
+    top = min(ys)
+    right = max(xs)
+    bottom = max(ys)
+    return {
+        "left": round(left, 6),
+        "top": round(top, 6),
+        "width": round(max(0.0, right - left), 6),
+        "height": round(max(0.0, bottom - top), 6),
+    }
+
+
+def _layout_confidence(layout: Any) -> float | None:
+    value = getattr(layout, "confidence", None)
+    if value is None:
+        return None
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _layout_item(
+    element: Any,
+    document_text: str,
+    *,
+    item_type: str,
+    page_width: float | None,
+    page_height: float | None,
+) -> dict[str, Any] | None:
+    text = _layout_text(element, document_text).strip()
+    if not text:
+        return None
+
+    layout = getattr(element, "layout", None)
+    item: dict[str, Any] = {"type": item_type, "text": text}
+    if layout:
+        bbox = _layout_bbox(layout, page_width, page_height)
+        if bbox:
+            item["boundingBox"] = bbox
+        confidence = _layout_confidence(layout)
+        if confidence is not None:
+            item["confidence"] = confidence
+        orientation = str(getattr(layout, "orientation", "") or "")
+        if orientation:
+            item["orientation"] = orientation
+    return item
+
+
+def _layout_items(
+    page: Any,
+    attr: str,
+    document_text: str,
+    *,
+    page_width: float | None,
+    page_height: float | None,
+) -> list[dict[str, Any]]:
+    elements = getattr(page, attr, None) or []
+    singular = attr[:-1] if attr.endswith("s") else attr
+    items: list[dict[str, Any]] = []
+    for element in elements:
+        item = _layout_item(
+            element,
+            document_text,
+            item_type=singular,
+            page_width=page_width,
+            page_height=page_height,
+        )
+        if item:
+            items.append(item)
+    return items
+
+
+def _table_cell_to_dict(cell: Any, document_text: str, page_width: float | None, page_height: float | None) -> dict[str, Any]:
+    layout = getattr(cell, "layout", None)
+    out: dict[str, Any] = {
+        "text": _layout_text(cell, document_text).strip(),
+        "rowSpan": int(getattr(cell, "row_span", 1) or 1),
+        "colSpan": int(getattr(cell, "col_span", 1) or 1),
+    }
+    if layout:
+        bbox = _layout_bbox(layout, page_width, page_height)
+        if bbox:
+            out["boundingBox"] = bbox
+        confidence = _layout_confidence(layout)
+        if confidence is not None:
+            out["confidence"] = confidence
+    return out
+
+
+def _table_rows_to_list(rows: Any, document_text: str, page_width: float | None, page_height: float | None) -> list[list[dict[str, Any]]]:
+    result: list[list[dict[str, Any]]] = []
+    for row in rows or []:
+        result.append([
+            _table_cell_to_dict(cell, document_text, page_width, page_height)
+            for cell in (getattr(row, "cells", None) or [])
+        ])
+    return result
+
+
+def _tables_to_dicts(page: Any, document_text: str, page_width: float | None, page_height: float | None) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    for table in getattr(page, "tables", None) or []:
+        layout = getattr(table, "layout", None)
+        item: dict[str, Any] = {
+            "text": _layout_text(table, document_text).strip(),
+            "headerRows": _table_rows_to_list(getattr(table, "header_rows", None), document_text, page_width, page_height),
+            "bodyRows": _table_rows_to_list(getattr(table, "body_rows", None), document_text, page_width, page_height),
+        }
+        if layout:
+            bbox = _layout_bbox(layout, page_width, page_height)
+            if bbox:
+                item["boundingBox"] = bbox
+        tables.append(item)
+    return tables
+
+
+def _document_to_structured_json(doc: Any, *, page_offset: int = 0, processor_name: str = "") -> dict[str, Any]:
+    document_text = str(getattr(doc, "text", "") or "")
+    pages: list[dict[str, Any]] = []
+    for index, page in enumerate(getattr(doc, "pages", None) or []):
+        dimension = _page_dimension(page)
+        page_width = dimension.get("width")
+        page_height = dimension.get("height")
+        page_text = _layout_text(page, document_text).strip()
+        blocks = _layout_items(page, "blocks", document_text, page_width=page_width, page_height=page_height)
+        paragraphs = _layout_items(page, "paragraphs", document_text, page_width=page_width, page_height=page_height)
+        lines = _layout_items(page, "lines", document_text, page_width=page_width, page_height=page_height)
+        if not page_text:
+            preferred = lines or paragraphs or blocks
+            page_text = "\n".join(item.get("text", "") for item in preferred if item.get("text")).strip()
+        pages.append(
+            {
+                "pageNumber": page_offset + index + 1,
+                "dimension": dimension,
+                "text": page_text,
+                "blocks": blocks,
+                "paragraphs": paragraphs,
+                "lines": lines,
+                "tables": _tables_to_dicts(page, document_text, page_width, page_height),
+            }
+        )
+
+    return {
+        "schemaVersion": 1,
+        "source": "document_ai_ocr",
+        "provider": "google_document_ai",
+        "processorName": processor_name,
+        "text": document_text,
+        "pageCount": len(pages),
+        "pages": pages,
+    }
+
+
+def _structured_from_page_texts(page_texts: list[str], *, source: str) -> dict[str, Any]:
+    pages: list[dict[str, Any]] = []
+    for index, text in enumerate(page_texts):
+        lines = [
+            {"type": "line", "text": line.strip()}
+            for line in str(text or "").splitlines()
+            if line.strip()
+        ]
+        pages.append(
+            {
+                "pageNumber": index + 1,
+                "dimension": {"width": None, "height": None, "unit": ""},
+                "text": str(text or "").strip(),
+                "blocks": [],
+                "paragraphs": [],
+                "lines": lines,
+                "tables": [],
+            }
+        )
+    full_text = "\n\n".join(page.get("text", "") for page in pages if page.get("text")).strip()
+    return {
+        "schemaVersion": 1,
+        "source": source,
+        "provider": source,
+        "text": full_text,
+        "pageCount": len(pages),
+        "pages": pages,
+    }
 
 
 # ── Document AI single-batch call ─────────────────────────────────────────────
 
-def _call_document_ai(batch_bytes: bytes, mime_type: str, client, processor_name: str) -> OcrResult:
+def _call_document_ai(
+    batch_bytes: bytes,
+    mime_type: str,
+    client,
+    processor_name: str,
+    page_offset: int = 0,
+) -> OcrResult:
     """Send a single batch to Document AI and return OcrResult."""
     from google.cloud import documentai  # type: ignore
 
@@ -134,7 +430,17 @@ def _call_document_ai(batch_bytes: bytes, mime_type: str, client, processor_name
     page_count = len(doc.pages)
     avg_chars = len(text) / max(page_count, 1)
     quality_score = min(1.0, avg_chars / 500.0)
-    return OcrResult(text=text, page_count=page_count, quality_score=quality_score)
+    structured_json = _document_to_structured_json(
+        doc,
+        page_offset=page_offset,
+        processor_name=processor_name,
+    )
+    return OcrResult(
+        text=text,
+        page_count=page_count,
+        quality_score=quality_score,
+        structured_json=structured_json,
+    )
 
 
 def _load_google_credentials() -> object | None:
@@ -237,7 +543,7 @@ def _parallel_ocr_bytes(
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="ocr-batch") as pool:
             future_to_index = {
-                pool.submit(_call_document_ai, batch, mime_type, client, processor_name): idx
+                pool.submit(_call_document_ai, batch, mime_type, client, processor_name, idx * page_limit): idx
                 for idx, batch in enumerate(batches)
             }
             for future in as_completed(future_to_index):
@@ -336,8 +642,9 @@ def extract_text_from_audio_gcs(
         logger.warning("[SpeechToText] empty transcript — stored placeholder for %s", gs_uri)
 
     quality = min(1.0, len(text) / 1000.0)
+    structured_json = _structured_from_page_texts([text], source="speech_to_text")
     logger.info("[SpeechToText] done — chars=%d quality=%.2f uri=%s", len(text), quality, gs_uri)
-    return OcrResult(text=text, page_count=1, quality_score=quality)
+    return OcrResult(text=text, page_count=1, quality_score=quality, structured_json=structured_json)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -481,19 +788,28 @@ def _fallback_extract_from_bytes(data: bytes, mime_type: str) -> OcrResult:
             pages_text = []
             for page in reader.pages:
                 t = page.extract_text() or ""
-                if t.strip():
-                    pages_text.append(t)
-            text = "\n\n".join(pages_text).strip()
+                pages_text.append(t)
+            text = "\n\n".join(t for t in pages_text if t.strip()).strip()
             page_count = len(reader.pages)
             quality_score = min(1.0, len(text) / max(page_count * 500, 1))
             logger.info("[DocumentAI OCR] pypdf fallback pages=%d chars=%d", page_count, len(text))
-            return OcrResult(text=text, page_count=page_count, quality_score=quality_score)
+            return OcrResult(
+                text=text,
+                page_count=page_count,
+                quality_score=quality_score,
+                structured_json=_structured_from_page_texts(pages_text, source="pypdf"),
+            )
         except Exception as exc:
             logger.warning("[DocumentAI OCR] pypdf failed: %s", exc)
 
     # Last resort: decode bytes as UTF-8
     try:
         text = data.decode("utf-8", errors="ignore").strip()
-        return OcrResult(text=text, page_count=1, quality_score=0.5 if text else 0.0)
+        return OcrResult(
+            text=text,
+            page_count=1 if text else 0,
+            quality_score=0.5 if text else 0.0,
+            structured_json=_structured_from_page_texts([text] if text else [], source="utf8_decode"),
+        )
     except Exception:
         return OcrResult(text="", page_count=0, quality_score=0.0)

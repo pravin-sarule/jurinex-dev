@@ -927,7 +927,8 @@ def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | No
     with get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, user_id, originalname, mimetype, size, gcs_path, status, created_at
+            SELECT id, user_id, originalname, mimetype, size, gcs_path, status, created_at,
+                   full_text_content, processed_at, updated_at
             FROM user_files
             WHERE id::text = %s
               AND is_folder = false
@@ -937,6 +938,154 @@ def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | No
             [file_id, accessible_user_ids],
         )
         return cur.fetchone()
+
+
+def _get_public_table_columns(cur: Any, table_name: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        [table_name],
+    )
+    return {row["column_name"] for row in cur.fetchall()}
+
+
+def _parse_jsonish(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _fallback_structured_ocr_from_text(text: str, *, source: str = "processed_text") -> dict[str, Any] | None:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return None
+    # Keep the fallback compact: the real Document AI structure is preferred when present,
+    # but processed uploads still get a reconstructed OCR panel from stored extracted text.
+    pages: list[dict[str, Any]] = []
+    page_chunks = re.split(r"\n\s*(?:-{3,}|={3,}|Page\s+\d+\s*(?:of\s*\d+)?)\s*\n", cleaned, flags=re.IGNORECASE)
+    page_texts = [chunk.strip() for chunk in page_chunks if chunk.strip()] or [cleaned]
+    for index, page_text in enumerate(page_texts):
+        lines = [
+            {"type": "line", "text": line.strip()}
+            for line in page_text.splitlines()
+            if line.strip()
+        ]
+        pages.append({
+            "pageNumber": index + 1,
+            "dimension": {"width": None, "height": None, "unit": ""},
+            "text": page_text,
+            "blocks": [],
+            "paragraphs": [],
+            "lines": lines,
+            "tables": [],
+        })
+    return {
+        "schemaVersion": 1,
+        "source": source,
+        "provider": source,
+        "text": cleaned,
+        "pageCount": len(pages),
+        "pages": pages,
+    }
+
+
+def _fallback_file_ocr_payload(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    text = str(record.get("full_text_content") or "").strip()
+    if not text:
+        return None
+    structured = _fallback_structured_ocr_from_text(text, source="processed_file_text")
+    timestamp = record.get("processed_at") or record.get("updated_at") or record.get("created_at")
+    processed_at = timestamp.isoformat() if hasattr(timestamp, "isoformat") else timestamp
+    return {
+        "available": True,
+        "pageCount": (structured or {}).get("pageCount") or 1,
+        "confidence": None,
+        "status": "processed",
+        "processedAt": processed_at,
+        "structuredJson": structured,
+        "extractedText": text,
+        "metadata": {
+            "source": "user_files.full_text_content",
+            "fallback": True,
+        },
+    }
+
+
+def _get_file_ocr_extraction(file_id: str, *, include_structure: bool = False) -> dict[str, Any] | None:
+    if not is_db_available():
+        return None
+    try:
+        with get_db_connection() as conn, conn.cursor() as cur:
+            columns = _get_public_table_columns(cur, "document_ai_extractions")
+            if not columns or "file_id" not in columns:
+                return None
+
+            wanted = [
+                "page_count",
+                "confidence_score",
+                "average_confidence",
+                "processing_status",
+                "processed_at",
+                "updated_at",
+                "created_at",
+            ]
+            if include_structure:
+                wanted.extend(["extracted_text", "metadata", "structured_schema", "raw_response"])
+            select_columns = [column for column in wanted if column in columns]
+            if not select_columns:
+                return None
+
+            order_columns = [column for column in ("processed_at", "updated_at", "created_at") if column in columns]
+            order_expr = ", ".join(f"{column} DESC NULLS LAST" for column in order_columns) or "file_id"
+            cur.execute(
+                f"""
+                SELECT {", ".join(select_columns)}
+                FROM document_ai_extractions
+                WHERE file_id::text = %s
+                ORDER BY {order_expr}
+                LIMIT 1
+                """,
+                [file_id],
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        logger.debug("[files.ocr] file_id=%s lookup skipped: %s", file_id, exc)
+        return None
+
+    if not row:
+        return None
+
+    processed_at = row.get("processed_at") or row.get("updated_at") or row.get("created_at")
+    out: dict[str, Any] = {
+        "available": True,
+        "pageCount": row.get("page_count"),
+        "confidence": row.get("average_confidence") if row.get("average_confidence") is not None else row.get("confidence_score"),
+        "status": row.get("processing_status") or "processed",
+        "processedAt": processed_at.isoformat() if hasattr(processed_at, "isoformat") else processed_at,
+    }
+    if include_structure:
+        structured = _parse_jsonish(row.get("structured_schema")) or _parse_jsonish(row.get("raw_response"))
+        out.update({
+            "structuredJson": structured,
+            "extractedText": row.get("extracted_text") or "",
+            "metadata": _parse_jsonish(row.get("metadata")) or {},
+        })
+    return out
 
 
 def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str, Any] | None:
@@ -1015,6 +1164,21 @@ def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str,
     ftc = row.get("full_text_content")
     if ftc:
         out["full_text_content"] = ftc
+
+    ocr_summary = _get_file_ocr_extraction(fid, include_structure=False)
+    if ocr_summary:
+        out["ocr_available"] = True
+        out["ocr_page_count"] = ocr_summary.get("pageCount")
+        out["ocr_confidence"] = ocr_summary.get("confidence")
+        out["ocr_processed_at"] = ocr_summary.get("processedAt")
+    elif ftc:
+        out["ocr_available"] = True
+        out["ocr_page_count"] = None
+        out["ocr_confidence"] = None
+        out["ocr_processed_at"] = processed_at
+        out["ocr_source"] = "full_text_content"
+    else:
+        out["ocr_available"] = False
     return out
 
 
@@ -1122,6 +1286,7 @@ async def view_file(
         raise HTTPException(status_code=500, detail="Could not generate document view URL") from exc
 
     page_number = max(1, page or 1)
+    ocr_payload = _get_file_ocr_extraction(file_id, include_structure=True) or _fallback_file_ocr_payload(record)
     return {
         "success": True,
         "document": {
@@ -1135,6 +1300,7 @@ async def view_file(
         "viewUrl": signed_url,
         "viewUrlWithPage": f"{signed_url}#page={page_number}",
         "page": page_number,
+        "ocr": ocr_payload,
     }
 
 
@@ -3243,9 +3409,17 @@ async def intelligent_chat_stream(
                             "deposit amounts, dates, property description, bank name / account number / IFSC / UPI "
                             "ID, cheque or registration numbers.\n"
                             "  → Fill ONLY from the supporting documents. NEVER invent or guess a party-specific "
-                            "fact. If a Tier-A value is genuinely absent from the documents, leave a CLEAN fill-in "
-                            "blank of underscores in the body (e.g. 'Account No.: ____________________') — do NOT "
-                            "write long '[NOT FOUND...]' tags inline — and record that blank in ITEMS REQUIRING "
+                            "fact. If a Tier-A value is genuinely absent from the documents, insert EXACTLY this "
+                            "RED PLACEHOLDER in the body, unchanged: "
+                            '<span style="color:red;font-weight:bold;">[________ FIELD NAME ________]</span> — where '
+                            "FIELD NAME is a short CAPS label of what the user must fill, e.g. "
+                            '<span style="color:red;font-weight:bold;">[________ ACCOUNT NUMBER ________]</span>. '
+                            "Use this SAME red span for EVERY missing field (bank name, account number, IFSC, UPI "
+                            "ID, payment mode, dates, amounts) so they ALL render red and consistent — NEVER a plain "
+                            "'[BANK NAME]' bracket and NEVER a bare underscore blank. Put nothing else inside it — no "
+                            "guess, no 'e.g.'. EXCEPTION: fields the template leaves blank at execution (signatures, "
+                            "thumb impressions, notary/seal, witness signatures, stamp/registration number) stay as "
+                            "ordinary blanks, not red. Also record each red placeholder in ITEMS REQUIRING "
                             "COMPLETION (section 6) so nothing is missed.\n"
                             "• TIER B — STANDARD CONTRACT TERMS (conventional, NOT identity/money-specific): notice "
                             "period for inspection/entry, renewal duration and renewal-notice period, rent grace "
@@ -3533,6 +3707,9 @@ async def intelligent_chat_stream(
                         # Mark where this draft's token entries begin so we can report the
                         # per-model burn for JUST this draft after the pipeline finishes.
                         _draft_usage_start = usage_entry_count(usage_session_key)
+                        # Stable short id for THIS draft — shown in the per-draft token table
+                        # and surfaced to the client so a draft's cost can be correlated.
+                        _draft_id = f"drf_{uuid.uuid4().hex[:12]}"
                         try:
                             from app.services import template_drafting as _tpl
                             async for _pkind, _pdata in _tpl.run_template_drafting_pipeline(
@@ -3548,6 +3725,7 @@ async def intelligent_chat_stream(
                                 enable_audit=True,
                                 retrieve_fn=_draft_retrieve,
                                 audit_model=_guardian_model,
+                                concurrency=int(getattr(settings, "draft_section_concurrency", 3) or 3),
                             ):
                                 if _pkind == "progress":
                                     yield _sse(_pdata)
@@ -3908,7 +4086,13 @@ async def intelligent_chat_stream(
                         )
 
                 if not _deep_fallback_done:
-                    qa_result = await _run_blocking(
+                    # Run via the SESSION-BINDING wrapper so the fallback model's REAL token
+                    # usage is accumulated into the request's token session (instead of being
+                    # logged immediately and lost, which forced a bogus "estimated" record with
+                    # input≈2 tokens derived from the short query text). _qa_fallback_ran then
+                    # suppresses the estimate below since we now have the real numbers.
+                    _qa_fallback_ran = True
+                    qa_result = await _draft_run_blocking(
                         lambda: _call_gemini_for_qa(
                             _truncate_prompt(effective_query_text, max_chars=12000, label="non_stream_query"),
                             doc_texts,
@@ -4161,7 +4345,10 @@ async def intelligent_chat_stream(
                     provider=stream_usage.get("provider"),
                     model_name=actual_model_name,
                 )
-            elif not streamed:
+            elif not streamed and not locals().get("_qa_fallback_ran"):
+                # Only estimate when NOTHING recorded real usage. When the non-stream QA
+                # fallback ran, its real token usage was already accumulated into the session
+                # (session-bound), so a rough estimate here would double-count and misreport.
                 record_token_usage(
                     context="gemini_direct_estimated",
                     usage={
@@ -4182,6 +4369,7 @@ async def intelligent_chat_stream(
                 try:
                     log_draft_token_usage(
                         usage_session_key, _ds_start,
+                        draft_id=locals().get("_draft_id"),
                         draft_model=locals().get("_draft_model_for_log") or actual_model_name,
                         session_id=session_id or "",
                         user_id=uid_int,

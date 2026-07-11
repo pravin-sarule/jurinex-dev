@@ -39,6 +39,29 @@ EMBEDDING_MODELS = ("gemini-embedding-001", "text-embedding-004")
 _bad_models: set[str] = set()
 
 
+def _record_embedding_tokens(result: object, model_name: str) -> None:
+    """Fold this embed call's tokens into the active draft's token table (silent otherwise).
+
+    Uses the real per-embedding statistics.token_count when the SDK provides it, else derives
+    an estimate from metadata.billable_character_count (~4 chars/token). Best-effort — never
+    raises into the embedding path."""
+    try:
+        from app.services.token_usage_log import record_embedding_usage
+
+        toks = 0
+        for emb in (getattr(result, "embeddings", None) or []):
+            st = getattr(emb, "statistics", None)
+            toks += int(getattr(st, "token_count", 0) or 0)
+        if toks <= 0:
+            md = getattr(result, "metadata", None)
+            chars = int(getattr(md, "billable_character_count", 0) or 0)
+            toks = (chars + 3) // 4 if chars > 0 else 0
+        if toks > 0:
+            record_embedding_usage(model_name=model_name, input_tokens=toks, provider="gemini")
+    except Exception:  # instrumentation must never break embedding
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
@@ -303,6 +326,7 @@ def _gemini_embed_batch_with_retry(texts: list[str], dims: int) -> list[list[flo
                             "output_dimensionality": dims,
                         },
                     )
+                    _record_embedding_tokens(result, model_name)
                     payload = getattr(result, "embeddings", None) or []
                     parsed: list[list[float]] = []
                     for item in payload:
@@ -380,6 +404,7 @@ def _gemini_embed(text: str, *, dims: int | None = None) -> list[float] | None:
                         "output_dimensionality": target_dims,
                     },
                 )
+                _record_embedding_tokens(result, model_name)
                 embeddings_payload = getattr(result, "embeddings", None)
                 if embeddings_payload and len(embeddings_payload) > 0:
                     vec = list(getattr(embeddings_payload[0], "values", []) or [])

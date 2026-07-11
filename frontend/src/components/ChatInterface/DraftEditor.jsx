@@ -8,7 +8,7 @@ import { FieldPill } from './FieldPill';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
-import { draftLineAlign } from '../../utils/legalDraftRender';
+import { draftLineAlign, canonicalizeFieldPlaceholders, fixInlineEmphasis } from '../../utils/legalDraftRender';
 import {
   Bold, Italic, Underline as UnderlineIcon, Strikethrough,
   AlignLeft, AlignCenter, AlignRight, AlignJustify,
@@ -73,7 +73,10 @@ function applyEditorAlignment(html) {
 }
 
 export function markdownToHtml(md) {
-  const html = marked.parse(String(md || ''), { gfm: true, breaks: false, async: false });
+  // Repair space-padded bold ("** RENT AGREEMENT **" → "**RENT AGREEMENT**") so titles bold,
+  // then canonicalise bare "[ BANK NAME ]" placeholders into the red span BEFORE parsing so the
+  // FieldPill node turns every unfilled field into a clickable red pill (not black text).
+  const html = marked.parse(canonicalizeFieldPlaceholders(fixInlineEmphasis(String(md || ''))), { gfm: true, breaks: false, async: false });
   return applyEditorAlignment(html);
 }
 

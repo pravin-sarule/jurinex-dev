@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -60,6 +62,49 @@ def _normalize_user_role(raw_role: str | None) -> str | None:
     if not normalized:
         return None
     return _DOMAIN_ROLE_ALIASES.get(normalized, normalized)
+
+
+_JSONB_COLUMNS = {"entities", "form_fields", "tables", "metadata", "raw_response", "structured_schema"}
+
+
+def _get_public_table_columns(cur: Any, table_name: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        [table_name],
+    )
+    return {row["column_name"] for row in cur.fetchall()}
+
+
+def _json_for_db(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _count_structured_paragraphs(structured_json: dict[str, Any] | None, fallback_text: str) -> int:
+    if isinstance(structured_json, dict):
+        pages = structured_json.get("pages")
+        if isinstance(pages, list):
+            total = 0
+            for page in pages:
+                if not isinstance(page, dict):
+                    continue
+                paragraphs = page.get("paragraphs")
+                if isinstance(paragraphs, list) and paragraphs:
+                    total += len(paragraphs)
+            if total:
+                return total
+    return len([part for part in re.split(r"\n\s*\n", fallback_text or "") if part.strip()])
+
+
+def _json_placeholder(column: str) -> str:
+    if column == "file_id":
+        return "%s::uuid"
+    if column in _JSONB_COLUMNS:
+        return "%s::jsonb"
+    return "%s"
 
 
 def _get_user_role_from_db(uid: int) -> str | None:
@@ -390,6 +435,7 @@ class LegalCasePipelineService:
         text = (document.inline_text or "").strip()
         quality_score = 0.0
         page_count = 0
+        structured_ocr_json: dict[str, Any] | None = None
         if not text:
             if document.document_uri and document.document_uri.startswith("gs://"):
                 logger.info(
@@ -409,6 +455,8 @@ class LegalCasePipelineService:
             text = (ocr_result.text or "").strip()
             quality_score = float(ocr_result.quality_score or 0.0)
             page_count = int(ocr_result.page_count or 0)
+            if isinstance(getattr(ocr_result, "structured_json", None), dict):
+                structured_ocr_json = ocr_result.structured_json
             logger.info(
                 "[Pipeline] Step 1/4: done — chars=%d pages=%d quality=%.2f",
                 len(text),
@@ -444,6 +492,16 @@ class LegalCasePipelineService:
                     document.document_name,
                     exc,
                 )
+
+        self._persist_ocr_extraction(
+            file_id=db_file_id,
+            document=document,
+            text=text,
+            structured_json=structured_ocr_json,
+            page_count=page_count,
+            quality_score=quality_score,
+            extracted_text_uri=extracted_text_uri,
+        )
 
         doc_type = self._document_ai.classify(document, text)
         logger.info("[Pipeline] Document classified as %s", doc_type.value)
@@ -530,6 +588,7 @@ class LegalCasePipelineService:
 
         logger.info("[Pipeline] Step 3/4: done — %d vectors stored in bundle", len(chunk_rows))
 
+        structured_ocr_available = isinstance(structured_ocr_json, dict)
         stored_document = StoredDocument(
             document_id=document_id,
             document_name=document.document_name,
@@ -541,6 +600,7 @@ class LegalCasePipelineService:
             metadata={
                 **dict(document.metadata),
                 **({"extracted_text_uri": extracted_text_uri} if extracted_text_uri else {}),
+                **({"structured_ocr_available": True, "ocr_page_count": page_count} if structured_ocr_available else {}),
             },
         )
         pr_meta: dict[str, Any] = {
@@ -549,6 +609,7 @@ class LegalCasePipelineService:
             "page_count": page_count,
             "heading_count": len([s for _, s in non_empty_sections if s.heading]),
             **({"extracted_text_uri": extracted_text_uri} if extracted_text_uri else {}),
+            **({"structured_ocr_available": True, "ocr_page_count": page_count} if structured_ocr_available else {}),
         }
         if is_audio:
             pr_meta["source_type"] = "audio"
@@ -565,6 +626,93 @@ class LegalCasePipelineService:
             metadata=pr_meta,
         )
         return ProcessedDocumentBundle(process_result=process_result, stored_document=stored_document, chunks=chunk_rows)
+
+    def _persist_ocr_extraction(
+        self,
+        *,
+        file_id: str | None,
+        document: DocumentReference,
+        text: str,
+        structured_json: dict[str, Any] | None,
+        page_count: int,
+        quality_score: float,
+        extracted_text_uri: str | None = None,
+    ) -> None:
+        if not file_id or not is_db_available():
+            return
+        structured_payload = structured_json if isinstance(structured_json, dict) else None
+        extracted_text = text or ""
+        if not structured_payload and not extracted_text:
+            return
+
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                columns = _get_public_table_columns(cur, "document_ai_extractions")
+                if not columns or "file_id" not in columns:
+                    return
+
+                cur.execute("DELETE FROM document_ai_extractions WHERE file_id::text = %s", [file_id])
+
+                word_count = len(extracted_text.split())
+                paragraph_count = _count_structured_paragraphs(structured_payload, extracted_text)
+                metadata = {
+                    "document_name": document.document_name,
+                    "document_uri": document.document_uri,
+                    "mime_type": document.mime_type,
+                    "extracted_text_uri": extracted_text_uri or "",
+                    "source": (structured_payload or {}).get("source") if structured_payload else "text_extraction",
+                }
+                payload: dict[str, Any] = {
+                    "file_id": file_id,
+                    "file_type": document.mime_type or "application/octet-stream",
+                    "document_ai_processor_id": getattr(self._settings, "document_ai_processor_id", "") or None,
+                    "document_ai_processor_version": getattr(self._settings, "document_ai_ocr_processor_version_id", "") or None,
+                    "extracted_text": extracted_text,
+                    "extracted_text_hash": hashlib.sha256(extracted_text.encode("utf-8")).hexdigest() if extracted_text else None,
+                    "page_count": int(page_count or 0),
+                    "total_characters": len(extracted_text),
+                    "total_words": word_count,
+                    "total_paragraphs": paragraph_count,
+                    "confidence_score": float(quality_score or 0.0),
+                    "average_confidence": float(quality_score or 0.0),
+                    "min_confidence": float(quality_score or 0.0),
+                    "max_confidence": float(quality_score or 0.0),
+                    "processing_status": "processed",
+                    "metadata": metadata,
+                    "raw_response": structured_payload,
+                    "structured_schema": structured_payload,
+                    "processed_at": "__NOW__",
+                    "updated_at": "__NOW__",
+                }
+
+                insert_columns = [column for column in payload if column in columns]
+                if not insert_columns:
+                    return
+
+                placeholders: list[str] = []
+                values: list[Any] = []
+                for column in insert_columns:
+                    value = payload[column]
+                    if value == "__NOW__":
+                        placeholders.append("NOW()")
+                        continue
+                    placeholders.append(_json_placeholder(column))
+                    values.append(_json_for_db(value) if column in _JSONB_COLUMNS else value)
+
+                cur.execute(
+                    f"""
+                    INSERT INTO document_ai_extractions ({", ".join(insert_columns)})
+                    VALUES ({", ".join(placeholders)})
+                    """,
+                    values,
+                )
+                conn.commit()
+                logger.info(
+                    "[Pipeline] OCR structure persisted file_id=%s pages=%d chars=%d",
+                    file_id, page_count, len(extracted_text),
+                )
+        except Exception as exc:
+            logger.warning("[Pipeline] OCR structure persistence skipped file_id=%s error=%s", file_id, exc)
 
     def _build_output_text_path(self, document: DocumentReference) -> str:
         source_uri = str(document.document_uri or "").strip()

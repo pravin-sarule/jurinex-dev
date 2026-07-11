@@ -65,7 +65,26 @@ import {
 } from "../../utils/formatChatResponse";
 import { useDocumentMicTranscribe } from "../../hooks/useDocumentMicTranscribe";
 import PromptChipsBar from "../PromptChipsBar";
+import OcrViewer from "../OcrViewer";
 import { fetchSecretsList, peekSecretsList, fetchSecretById } from "../../services/secretsService";
+
+const VIEWER_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+const detectViewerFileType = (url = "", mime = "") => {
+  const normalizedMime = String(mime || "").toLowerCase();
+  if (normalizedMime.includes("pdf")) return "pdf";
+  if (normalizedMime.startsWith("image/")) return "image";
+  if (normalizedMime.startsWith("text/") || normalizedMime.includes("json")) return "text";
+
+  const cleanUrl = String(url || "").split("?")[0].split("#")[0];
+  const extension = cleanUrl.split(".").pop()?.toLowerCase();
+  if (extension) {
+    if (VIEWER_IMAGE_EXTENSIONS.includes(extension)) return "image";
+    if (extension === "pdf") return "pdf";
+    if (["txt", "md", "json", "csv", "log"].includes(extension)) return "text";
+  }
+  return "other";
+};
 
 /** Full plain text for chat list preview (not a single 120-char line). */
 function plainTextPreviewFromResponse(raw) {
@@ -1283,12 +1302,16 @@ const ChatInterface = () => {
         throw new Error('No view URL available in response');
       }
 
+      const mimeType = documentData.document?.mimetype || documentData.document?.mimeType || '';
       setDocumentViewer({
         open: true,
         url: urlToOpen,
         filename: filename || documentData.document?.name || 'Document',
         page: pageNumber,
-        loading: false
+        loading: false,
+        mimeType,
+        fileType: detectViewerFileType(urlToOpen, mimeType),
+        ocr: documentData.ocr || null
       });
     } catch (error) {
       console.error('[Document] Error opening document:', error);
@@ -4180,11 +4203,14 @@ const ChatInterface = () => {
                     </button>
                   </div>
                 ) : documentViewer.url ? (
-                  <iframe
-                    src={documentViewer.url}
-                    className="w-full h-full border-0"
-                    title={documentViewer.filename}
-                    style={{ backgroundColor: 'white' }}
+                  <OcrViewer
+                    fileType={documentViewer.fileType || detectViewerFileType(documentViewer.url, documentViewer.mimeType)}
+                    fileUrl={documentViewer.url}
+                    ocrStructure={documentViewer.ocr}
+                    ocrText={documentViewer.ocr?.extractedText}
+                    filename={documentViewer.filename || 'Document'}
+                    className="h-full"
+                    onError={(message) => setDocumentViewer((prev) => ({ ...prev, error: message || 'Failed to load document' }))}
                   />
                 ) : (
                   <div className="flex flex-col items-center justify-center h-full">

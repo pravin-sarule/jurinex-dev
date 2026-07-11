@@ -30,13 +30,29 @@ const _CENTER_RE = [
 // A trailing party-role label line: "…Plaintiff", "...Defendant", "… Petitioner".
 const _ROLE_RE = /^[.…\s]*[.…]\s*(the\s+)?(first|second|third)?\s*(plaintiff|defendant|petitioner|respondent|appellant|applicant|complainant|landlord|tenant|lessor|lessee|licensor|licensee|vendor|purchaser|party)s?\b/i;
 
+// Collapse whitespace INSIDE a bold/italic span — "** RENT AGREEMENT **" → "**RENT AGREEMENT**".
+// A drafting model sometimes pads the emphasis markers with spaces; CommonMark then refuses to
+// parse it (a space right after "**" is not a valid opening delimiter), so the title renders as
+// LITERAL "**…**" instead of bold — and the trailing "**" also defeats the centered-title match
+// in draftLineAlign. Trimming the inner spaces fixes both. Valid "**text**" is left unchanged.
+export function fixInlineEmphasis(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\*\*[ \t]*([^*\n]+?)[ \t]*\*\*/g, '**$1**')
+    .replace(/__[ \t]*([^_\n]+?)[ \t]*__/g, '__$1__');
+}
+
 export function draftLineAlign(text) {
   const t = String(text || '').trim();
   if (!t) return null;
-  if (_ROLE_RE.test(t)) return 'right';
-  const isAllCaps = t.length > 3 && t === t.toUpperCase() && /[A-Z]/.test(t);
+  // Strip surrounding markdown emphasis / heading markers so a title still carrying a literal
+  // "**" or "#" (a bold marker the renderer didn't parse) is recognised the same as clean text.
+  const probe = (t.replace(/^[#>\s]+/, '').replace(/^(?:\*\*|\*|__|_|`)+/, '')
+    .replace(/(?:\*\*|\*|__|_|`)+$/, '').trim()) || t;
+  if (_ROLE_RE.test(probe)) return 'right';
+  const isAllCaps = probe.length > 3 && probe === probe.toUpperCase() && /[A-Z]/.test(probe);
   for (const re of _CENTER_RE) {
-    if (re.test(t)) {
+    if (re.test(probe)) {
       // Only treat the ALL-CAPS doc-title rule as centered when the line is actually all-caps.
       if (re === _CENTER_RE[_CENTER_RE.length - 1] && !isAllCaps) continue;
       return 'center';
@@ -107,6 +123,55 @@ export function sanitizeLegalDraftMarkdown(text) {
   return out
     .map((l) => (_isPipeRow(l) || _isSep(l) ? l : l.replace(/^(\s*)(\d{1,3})\.(\s+)/, '$1$2\\.$3')))
     .join('\n');
+}
+
+// ── unfilled-field placeholder canonicaliser ─────────────────────────────────
+// A drafter (and especially the single-call fallback path) often copies a template's bare
+// bracket placeholders verbatim — "[ BANK NAME ]", "[ ACCOUNT NUMBER ]", "[ IFSC CODE ]",
+// "[ UPI ID ____ ]" — instead of the canonical red span. Those render as ordinary black text
+// and are NOT clickable fields. This normalises every ALL-CAPS field-label bracket to the
+// SAME canonical red placeholder span the FieldPill node + .docx renderer already understand,
+// so every unfilled field is red and fillable regardless of which draft path produced it.
+//
+// Deliberately conservative: it fires only on ALL-CAPS labels with ≥2 uppercase letters, so
+// ordinary bracketed prose ("[sic]", "[2024]", "[Exhibit A]") and markdown links "[t](url)"
+// are left alone; anything already inside a <span> (an existing red/styled placeholder) is
+// protected so it is never wrapped twice.
+const _FIELD_LABEL_RE = /^[A-Z0-9 ./&()%,'’-]+$/;
+// Private-use sentinel: cannot occur in draft text and carries no "[", so the bracket pass
+// can never touch a protected span. Fully restored before the function returns.
+const _SPAN_OPEN = String.fromCharCode(0xE000);
+const _SPAN_CLOSE = String.fromCharCode(0xE001);
+
+function _normalizeFieldLabel(inner) {
+  return String(inner).replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function _isFieldLabel(inner) {
+  const label = _normalizeFieldLabel(inner);
+  if (label.length < 2) return false;
+  if (!_FIELD_LABEL_RE.test(label)) return false;
+  return (label.match(/[A-Z]/g) || []).length >= 2; // excludes [2024], [A], [i], and links
+}
+
+export function canonicalizeFieldPlaceholders(text) {
+  if (!text) return text;
+  // 1) protect existing spans so an already-red (or otherwise styled) placeholder is never
+  //    wrapped twice.
+  const spans = [];
+  let s = String(text).replace(/<span\b[^>]*>[\s\S]*?<\/span>/gi, (m) => {
+    spans.push(m);
+    return `${_SPAN_OPEN}${spans.length - 1}${_SPAN_CLOSE}`;
+  });
+  // 2) wrap every bare ALL-CAPS field-label bracket in the canonical red placeholder span
+  //    (skip markdown links — a "[" immediately followed by "](").
+  s = s.replace(/\[([^\]\n]{1,60})\](?!\()/g, (full, inner) =>
+    _isFieldLabel(inner)
+      ? `<span style="color:red;font-weight:bold;">[________ ${_normalizeFieldLabel(inner)} ________]</span>`
+      : full,
+  );
+  // 3) restore the protected spans
+  return s.replace(new RegExp(`${_SPAN_OPEN}(\\d+)${_SPAN_CLOSE}`, 'g'), (_m, i) => spans[Number(i)]);
 }
 
 // ── court-styled ReactMarkdown component set (serif, isolated from chat) ──────

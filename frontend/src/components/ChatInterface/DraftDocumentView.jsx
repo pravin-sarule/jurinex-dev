@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { ensureTableSeparators, markdownTableComponents } from '../../utils/markdownUtils';
-import { sanitizeLegalDraftMarkdown, legalDraftComponents } from '../../utils/legalDraftRender';
+import { sanitizeLegalDraftMarkdown, legalDraftComponents, canonicalizeFieldPlaceholders, fixInlineEmphasis } from '../../utils/legalDraftRender';
 
 // The drafter (and now the TipTap editor) emit inline styles the user can set — red
 // placeholder spans (<span style="color:red;font-weight:bold;">[____ FIELD ____]</span>),
@@ -36,7 +36,11 @@ const DraftDocumentView = React.memo(function DraftDocumentView({ raw, className
     //    separator so they survive; 2) then sanitize — flattens leftover orphan/
     //    signature pipe rows into clean lines instead of literal "|" text.
     const withSeps = ensureTableSeparators(String(raw || ''));
-    return sanitizeLegalDraftMarkdown(withSeps).replace(/[ \t]*\[source:[^\]]*\]/gi, '').trim();
+    const cleaned = sanitizeLegalDraftMarkdown(withSeps).replace(/[ \t]*\[source:[^\]]*\]/gi, '').trim();
+    // Repair space-padded bold ("** RENT AGREEMENT **" → "**RENT AGREEMENT**") so titles render
+    // bold and get centered, then turn any bare "[ BANK NAME ]" placeholders the model left
+    // behind into the canonical red span so EVERY unfilled field renders red.
+    return canonicalizeFieldPlaceholders(fixInlineEmphasis(cleaned));
   }, [raw]);
 
   if (!md) return null;

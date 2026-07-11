@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -800,16 +802,21 @@ def claude_stream_generator(
     if sys_instr:
         create_kwargs["system"] = sys_instr
 
-    if llm_params.get("thinking_mode"):
-        budget = _resolve_thinking_budget(llm_params, "claude")
-        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    thinking_on = bool(llm_params.get("thinking_mode"))
+    if thinking_on:
+        create_kwargs["thinking"] = _claude_thinking_config(api_model, llm_params)
         temperature = 1.0
 
-    create_kwargs["temperature"] = temperature
+    # Only send `temperature` where the model accepts it AND thinking is off. Opus 4.6+,
+    # Sonnet 5 and Fable 5 REJECT `temperature` outright (400) — sending it unconditionally
+    # here 400'd every Opus/Sonnet-5 draft and silently dropped it to the gemma fallback.
+    if not thinking_on and _claude_accepts_temperature(api_model):
+        create_kwargs["temperature"] = temperature
 
     logger.info(
-        "[DocumentAI] ▶ Claude stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
-        api_model, model_name, temperature, max_tokens,
+        "[DocumentAI] ▶ Claude stream  model_id=%s (raw=%s)  temperature=%s  max_tokens=%d  thinking=%s",
+        api_model, model_name, create_kwargs.get("temperature", "unset"), max_tokens,
+        (create_kwargs.get("thinking") or {}).get("type", "off"),
     )
 
     with client.messages.stream(**create_kwargs) as stream:
@@ -919,6 +926,17 @@ def _claude_accepts_temperature(api_model: str) -> bool:
     return True
 
 
+def _claude_thinking_config(api_model: str, llm_params: dict) -> dict:
+    """Correct extended-thinking config per model generation. Claude 4.6+ (Opus 4.6/4.7/4.8,
+    Sonnet 4.6/5, Fable/Mythos 5) use {"type":"adaptive"} — the OLD {"type":"enabled",
+    "budget_tokens":N} form is REJECTED with a 400 on Opus 4.7/4.8, Sonnet 5 and Fable 5,
+    which silently sank Claude drafts into the gemma fallback. Older models keep the budget
+    form. (The 4.6+ set is the same one that rejects `temperature`.)"""
+    if not _claude_accepts_temperature(api_model):
+        return {"type": "adaptive"}
+    return {"type": "enabled", "budget_tokens": _resolve_thinking_budget(llm_params, "claude")}
+
+
 def _generate_text_claude(
     prompt: str,
     *,
@@ -964,11 +982,10 @@ def _generate_text_claude(
     # ── Extended thinking ────────────────────────────────────────────────────
     thinking_on = bool(llm_params.get("thinking_mode"))
     if thinking_on:
-        budget = _resolve_thinking_budget(llm_params, "claude")
-        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        create_kwargs["thinking"] = _claude_thinking_config(api_model, llm_params)
         # Anthropic requires temperature unset (=1) when extended thinking is on
         temperature = 1.0
-        active_flags.append(f"thinking(budget={budget})")
+        active_flags.append(f"thinking({create_kwargs['thinking'].get('type')})")
 
     # Temperature: modern Claude models (Opus 4.6+, Sonnet 5, Fable 5) reject `temperature`
     # entirely, and it must be unset when extended thinking is on. Only send it where the
@@ -1174,31 +1191,99 @@ def deepseek_stream_generator(
 # ── Unified text generation (routes Gemini ↔ Claude) ─────────────────────────
 
 def _is_transient_gemini_error(exc: BaseException) -> bool:
-    """Retryable Gemini/Gemma error. The free-tier Gemma endpoints intermittently return
-    500 INTERNAL / 503 UNAVAILABLE that succeed on a plain retry (verified in prod logs:
-    a 500 followed by a 200 on the very next call). Rate limits are NOT the cause — Gemma
-    free tier is RPM 15 / TPM unlimited — so retrying is safe."""
+    """Retryable Gemini/Gemma error. Two families are safe to retry:
+    - 500 INTERNAL / 503 UNAVAILABLE / OVERLOADED — Gemma intermittently returns these and the
+      very next call succeeds (verified in prod logs).
+    - 429 RESOURCE_EXHAUSTED — the PAID tier caps Gemma at a low input-TPM (e.g. gemma-4-31b =
+      16,000 input tokens/min); a burst of section drafts trips it, but Google returns a
+      `retryDelay` and the request succeeds once the per-minute window refills. (This was NOT
+      retried before — the old note "Gemma free tier is TPM unlimited" only held on the free
+      tier.) 429 retries MUST honour the server's retryDelay — see `_gemini_retry_delay`."""
     msg = str(exc).upper()
-    return any(tok in msg for tok in ("500", "INTERNAL", "503", "UNAVAILABLE", "OVERLOADED", "DEADLINE EXCEEDED"))
+    return any(tok in msg for tok in (
+        "500", "INTERNAL", "503", "UNAVAILABLE", "OVERLOADED", "DEADLINE EXCEEDED",
+        "429", "RESOURCE_EXHAUSTED", "QUOTA",
+    ))
 
 
-def _gemini_generate_content_retrying(client, *, model, contents, config, retries: int = 3, base_delay: float = 2.0):
-    """`client.models.generate_content` with automatic retry on transient 5xx errors. Turns
-    Gemma's intermittent 500 INTERNAL failures into successful calls. Retries only transient
-    server errors (never 400/401/403); backs off 2s, 4s. Raises the last error if all fail."""
-    import time
+_RETRY_DELAY_RES = (
+    re.compile(r"retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE),
+    re.compile(r"retryDelay['\"]?\s*[:=]\s*['\"]?([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE),
+)
+
+
+def _gemini_retry_delay(exc: BaseException, fallback: float, *, cap: float = 60.0) -> float:
+    """Seconds to wait before retrying a rate-limited (429) call. Prefers the server's own
+    `retryDelay` ("Please retry in 17.78s" / "retryDelay: 17s"), +1s cushion, capped; falls
+    back to the caller's backoff when the message has no delay."""
+    msg = str(exc)
+    for rx in _RETRY_DELAY_RES:
+        m = rx.search(msg)
+        if m:
+            try:
+                return min(cap, float(m.group(1)) + 1.0)
+            except ValueError:
+                pass
+    return fallback
+
+
+_GEMMA_PACE_LOCK = threading.Lock()
+_gemma_last_request_ts = 0.0
+
+
+def _pace_gemma_call(model_name: str | None) -> None:
+    """Enforce a minimum wall-clock interval between successive Gemma requests — GLOBAL across
+    threads and INCLUDING retries. Free Google AI Studio keys allow only 15 requests/min on
+    gemma models (RPM-bound; TPM is unlimited), and the gemma endpoint returns far more 500s
+    under rapid-fire calls; spacing requests (default 9s ≈ 6-7 RPM, GEMMA_MIN_CALL_INTERVAL_S
+    in .env, 0 disables) stays well under the cap and gives the flaky endpoint room to recover
+    between attempts. Sleeping under the lock is deliberate: it serialises concurrent gemma
+    callers so the spacing holds even when sections draft in parallel. Only ever runs in
+    executor threads (never on the event loop). Non-gemma models pass straight through."""
+    global _gemma_last_request_ts
+    if not _is_gemma_model(model_name):
+        return
+    try:
+        from app.core.config import get_settings
+        interval = float(getattr(get_settings(), "gemma_min_call_interval_s", 9.0) or 0.0)
+    except Exception:
+        interval = 9.0
+    if interval <= 0:
+        return
+    with _GEMMA_PACE_LOCK:
+        wait = _gemma_last_request_ts + interval - time.monotonic()
+        if wait > 0:
+            logger.info("[DocumentAI] pacing gemma request %.1fs (free-tier 15 RPM guard)", wait)
+            time.sleep(wait)
+        _gemma_last_request_ts = time.monotonic()
+
+
+def _gemini_generate_content_retrying(client, *, model, contents, config, retries: int = 4, base_delay: float = 2.0):
+    """`client.models.generate_content` with automatic retry on transient errors. Turns Gemma's
+    intermittent 500s AND paid-tier 429 rate limits into successful calls. On a 429 it waits the
+    server-provided `retryDelay` (the per-minute quota refills); on a 5xx it backs off 2s/4s/8s
+    (gemma calls are additionally paced to GEMMA_MIN_CALL_INTERVAL_S apart — see
+    `_pace_gemma_call` — so a retry burst can never hammer the 15 RPM free-tier window).
+    Never retries 400/401/403. Raises the last error if all attempts fail."""
     last_exc: BaseException | None = None
     for attempt in range(max(1, retries)):
+        _pace_gemma_call(model)
         try:
             return client.models.generate_content(model=model, contents=contents, config=config)
         except Exception as exc:  # inspect + selectively retry
             last_exc = exc
             if attempt >= retries - 1 or not _is_transient_gemini_error(exc):
                 raise
-            delay = base_delay * (2 ** attempt)
+            msg_u = str(exc).upper()
+            if "429" in msg_u or "RESOURCE_EXHAUSTED" in msg_u or "QUOTA" in msg_u:
+                delay = _gemini_retry_delay(exc, base_delay * (2 ** attempt))
+                reason = "rate-limited (429)"
+            else:
+                delay = base_delay * (2 ** attempt)
+                reason = "transient error"
             logger.warning(
-                "[DocumentAI] %s transient error (attempt %d/%d) — retrying in %.1fs: %s",
-                model, attempt + 1, retries, delay, str(exc)[:160],
+                "[DocumentAI] %s %s (attempt %d/%d) — retrying in %.1fs: %s",
+                model, reason, attempt + 1, retries, delay, str(exc)[:160],
             )
             time.sleep(delay)
     if last_exc is not None:
