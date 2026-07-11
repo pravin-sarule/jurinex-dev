@@ -313,15 +313,26 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
     [triggerBlobDownload],
   );
 
+  const wordMatchesConfidence = useCallback(
+    (confidence: number, variant: 'plain' | 'high' | 'medium' | 'low') => {
+      if (variant === 'plain') return false;
+      if (variant === 'high') return confidence >= 0.95;
+      if (variant === 'medium') return confidence >= 0.85 && confidence < 0.95;
+      return confidence < 0.85;
+    },
+    [],
+  );
+
+  const confidenceStrokeColor = useCallback((variant: 'plain' | 'high' | 'medium' | 'low') => {
+    if (variant === 'high') return [16, 185, 129] as const;
+    if (variant === 'medium') return [245, 158, 11] as const;
+    if (variant === 'low') return [239, 68, 68] as const;
+    return [17, 24, 39] as const;
+  }, []);
+
   const sortedWordsForPage = useCallback(
-    (page: NonNullable<typeof ocrData>['pages'][number], filter?: 'high' | 'medium' | 'low') => {
-      const words = [...(page.words || [])].filter((word) => {
-        const confidence = Number(word.confidence ?? 1);
-        if (filter === 'high') return confidence >= 0.95;
-        if (filter === 'medium') return confidence >= 0.85 && confidence < 0.95;
-        if (filter === 'low') return confidence < 0.85;
-        return true;
-      });
+    (page: NonNullable<typeof ocrData>['pages'][number]) => {
+      const words = [...(page.words || [])];
       words.sort((a, b) => {
         const dy = (a.bbox?.y || 0) - (b.bbox?.y || 0);
         if (Math.abs(dy) > 8) return dy;
@@ -332,73 +343,79 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
     [],
   );
 
-  const buildOcrDownloadText = useCallback(
-    (filter?: 'high' | 'medium' | 'low') => {
-      if (!ocrData?.pages?.length) return '';
-      return ocrData.pages
-        .map((page) => {
-          const words = sortedWordsForPage(page, filter);
-          const lines: string[] = [];
-          let currentLine: string[] = [];
-          let currentY: number | null = null;
-          for (const word of words) {
-            const y = Number(word.bbox?.y || 0);
-            if (currentY === null || Math.abs(y - currentY) <= 10) {
-              currentLine.push(word.text);
-              currentY = currentY === null ? y : currentY;
-            } else {
-              if (currentLine.length) lines.push(currentLine.join(' '));
-              currentLine = [word.text];
-              currentY = y;
-            }
-          }
-          if (currentLine.length) lines.push(currentLine.join(' '));
-          return `Page ${page.page}\n${lines.join('\n')}`.trim();
-        })
-        .filter(Boolean)
-        .join('\n\n');
-    },
-    [ocrData, sortedWordsForPage],
-  );
-
   const downloadOcrPdf = useCallback(
     async (variant: 'plain' | 'high' | 'medium' | 'low') => {
-      const filter = variant === 'plain' ? undefined : variant;
-      const text = buildOcrDownloadText(filter);
-      if (!text.trim()) {
-        alert('OCR text is not available for download.');
+      if (!ocrData?.pages?.length) {
+        alert('OCR reconstruction is not available for download.');
         return;
       }
+
       const { jsPDF } = await import('jspdf');
-      const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
-      const margin = 42;
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = pdf.internal.pageSize.getHeight();
-      const usableWidth = pageWidth - margin * 2;
-      const title = `${document?.name || 'Document'} - OCR ${variant.toUpperCase()}`;
-      let y = margin;
+      const pdf = new jsPDF({ unit: 'pt', format: 'a4', compress: true });
+      const pageWidthPt = pdf.internal.pageSize.getWidth();
+      const pageHeightPt = pdf.internal.pageSize.getHeight();
+      const margin = 24;
+      const usableWidth = pageWidthPt - margin * 2;
+      const usableHeight = pageHeightPt - margin * 2;
+      const drawBoxes = variant !== 'plain';
 
-      pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(12);
-      pdf.text(title, margin, y);
-      y += 24;
-      pdf.setFont('helvetica', 'normal');
-      pdf.setFontSize(10);
+      ocrData.pages.forEach((page, pageIndex) => {
+        if (pageIndex > 0) pdf.addPage('a4', 'portrait');
 
-      const lines = pdf.splitTextToSize(text, usableWidth) as string[];
-      for (const line of lines) {
-        if (y > pageHeight - margin) {
-          pdf.addPage();
-          y = margin;
-        }
-        pdf.text(line, margin, y);
-        y += 14;
-      }
+        const sourceWidth = Math.max(1, Number(page.width || 1000));
+        const sourceHeight = Math.max(1, Number(page.height || 1414));
+        const scale = Math.min(usableWidth / sourceWidth, usableHeight / sourceHeight);
+        const renderedWidth = sourceWidth * scale;
+        const renderedHeight = sourceHeight * scale;
+        const offsetX = (pageWidthPt - renderedWidth) / 2;
+        const offsetY = (pageHeightPt - renderedHeight) / 2;
 
-      pdf.save(`${safeBaseFilename()}-ocr-${variant}.pdf`);
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, pageWidthPt, pageHeightPt, 'F');
+        pdf.setDrawColor(229, 231, 235);
+        pdf.setLineWidth(0.5);
+        pdf.rect(offsetX, offsetY, renderedWidth, renderedHeight, 'S');
+
+        const strokeColor = confidenceStrokeColor(variant);
+        const words = sortedWordsForPage(page);
+
+        words.forEach((word) => {
+          const bbox = word.bbox || { x: 0, y: 0, w: 0, h: 0 };
+          const x = offsetX + Number(bbox.x || 0) * scale;
+          const y = offsetY + Number(bbox.y || 0) * scale;
+          const w = Math.max(1, Number(bbox.w || 1) * scale);
+          const h = Math.max(1, Number(bbox.h || 1) * scale);
+          const confidence = Number(word.confidence ?? 1);
+          const fontSize = Math.max(3.5, Math.min(11, h * 0.72));
+
+          if (drawBoxes && wordMatchesConfidence(confidence, variant)) {
+            pdf.setDrawColor(strokeColor[0], strokeColor[1], strokeColor[2]);
+            pdf.setLineWidth(0.6);
+            pdf.rect(x, y, w, h, 'S');
+          }
+
+          pdf.setTextColor(17, 24, 39);
+          pdf.setFont('times', 'normal');
+          pdf.setFontSize(fontSize);
+          pdf.text(String(word.text || ''), x + w / 2, y + h * 0.72, {
+            align: 'center',
+            maxWidth: Math.max(1, w),
+            baseline: 'alphabetic',
+          });
+        });
+
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(7);
+        pdf.setTextColor(107, 114, 128);
+        pdf.text(`Page ${page.page || pageIndex + 1}`, margin, pageHeightPt - 10);
+      });
+
+      const suffix = variant === 'plain' ? 'reconstructed' : `confidence-${variant}`;
+      pdf.save(`${safeBaseFilename()}-ocr-${suffix}.pdf`);
     },
-    [buildOcrDownloadText, document?.name, safeBaseFilename],
+    [confidenceStrokeColor, ocrData, safeBaseFilename, sortedWordsForPage, wordMatchesConfidence],
   );
+
 
   // When currentPage changes (e.g. toolbar page dropdown), scroll both panels to that page if they're not already there.
   // Guards: (1) never scroll to page 1 when both panels are already scrolled down; (2) if panels disagree by >1 page, don't scroll (let sync fix it).
