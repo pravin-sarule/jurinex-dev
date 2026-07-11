@@ -275,7 +275,24 @@ export const AuthProvider = ({ children }) => {
       return { success: false, message: response.message || 'Login failed: No token received.' };
     } catch (error) {
       console.error('AuthContext: Login failed:', error);
-      return { success: false, message: error.message || 'Login failed.' };
+      const code = error.code || error.response?.data?.code;
+      const status = error.response?.status;
+      if (code === 'FIRM_DISABLED' || code === 'USER_DISABLED' || code === 'FIRM_NOT_APPROVED' || status === 403) {
+        let message = error.message || 'Login failed.';
+        if (code === 'FIRM_DISABLED') {
+          message = 'Your firm is blocked by Jurinex. Please contact your firm admin.';
+        } else if (code === 'FIRM_NOT_APPROVED') {
+          message = error.message || 'Your firm is not approved yet.';
+        } else if (code === 'USER_DISABLED' || status === 403) {
+          message = error.message || 'Your account is disabled. Contact your firm admin or support.';
+        }
+        return {
+          success: false,
+          code: code || 'USER_DISABLED',
+          message,
+        };
+      }
+      return { success: false, message: error.message || 'Login failed.', code };
     }
   };
 
@@ -305,7 +322,24 @@ export const AuthProvider = ({ children }) => {
       return { success: false, message: response.message || 'OTP verification failed.' };
     } catch (error) {
       console.error('AuthContext: OTP verification failed:', error);
-      return { success: false, message: error.message || 'OTP verification failed.' };
+      const code = error.code || error.response?.data?.code;
+      const status = error.response?.status;
+      if (code === 'FIRM_DISABLED' || code === 'USER_DISABLED' || code === 'FIRM_NOT_APPROVED' || status === 403) {
+        let message = error.message || 'OTP verification failed.';
+        if (code === 'FIRM_DISABLED') {
+          message = 'Your firm is blocked by Jurinex. Please contact your firm admin.';
+        } else if (code === 'FIRM_NOT_APPROVED') {
+          message = error.message || 'Your firm is not approved yet.';
+        } else {
+          message = error.message || 'Your account is disabled. Contact your firm admin or support.';
+        }
+        return {
+          success: false,
+          code: code || 'USER_DISABLED',
+          message,
+        };
+      }
+      return { success: false, message: error.message || 'OTP verification failed.', code };
     }
   };
 

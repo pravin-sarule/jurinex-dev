@@ -57,6 +57,7 @@ def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
         "template_structure": session.get("template_structure"),
         "supporting_docs": session.get("supporting_docs") or [],
         "draft_sections": session.get("draft_sections") or [],
+        "draft_metadata": session.get("draft_metadata"),
         "error": session.get("error"),
     }
 
@@ -129,6 +130,20 @@ async def upload_template(
         },
     )
     # Async worker — the response returns immediately; frontend polls GET /{sid}.
+    svc.schedule_template_analysis(session_id, user["id"], session.get("model"))
+    return {"success": True, "session_id": session_id, "status": "analyzing"}
+
+
+@router.post("/{session_id}/template/retry")
+async def retry_template_analysis(
+    session_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Re-run async analysis on the already-uploaded template (no re-upload needed)."""
+    session = _get_owned_session(session_id, user)
+    if not session.get("template_file"):
+        raise HTTPException(status_code=400, detail="No template uploaded for this session")
+    repo.update_session(session_id, status="analyzing", template_structure=None, error=None)
     svc.schedule_template_analysis(session_id, user["id"], session.get("model"))
     return {"success": True, "session_id": session_id, "status": "analyzing"}
 
@@ -207,10 +222,16 @@ async def generate_stream(
     markers inside the chunk stream. Terminates with `data: [DONE]`.
     """
     _get_owned_session(session_id, user)
+    raw_body: dict[str, Any] = {}
     try:
-        body = DraftGenerateRequest.model_validate(await request.json())
-    except Exception:
+        raw_body = await request.json()
+        body = DraftGenerateRequest.model_validate(raw_body)
+    except Exception as exc:
+        logger.warning("Draft generate body parse failed (%s) — using defaults", exc)
         body = DraftGenerateRequest()
+    # Honour strategy even if other fields failed validation.
+    strategy_override = (raw_body or {}).get("drafting_strategy")
+    drafting_strategy = strategy_override or body.drafting_strategy
 
     origin = request.headers.get("origin")
 
@@ -222,7 +243,9 @@ async def generate_stream(
                 selected_model=body.llm_name,
                 section_ids=body.section_ids,
                 user_instructions=body.user_instructions,
+                confirmed_facts=body.confirmed_facts,
                 max_output_tokens_per_section=body.max_output_tokens_per_section,
+                drafting_strategy=drafting_strategy,
             ):
                 yield _sse(event)
         except Exception as exc:  # never let the stream die silently

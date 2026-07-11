@@ -33,6 +33,17 @@ _MODEL_ALIASES: dict[str, str] = {
 }
 
 MODEL_FALLBACKS: dict[str, list[str]] = {
+    # Claude (Anthropic API) — drafting mode only; degrade within the family,
+    # then to Gemini flagships (covers a missing/invalid ANTHROPIC_API_KEY).
+    "claude-sonnet-5": ["claude-sonnet-5", "claude-sonnet-4-6", "gemini-3.1-pro-preview", "gemini-2.5-pro"],
+    "claude-sonnet-4-6": ["claude-sonnet-4-6", "claude-sonnet-5", "gemini-3.1-pro-preview", "gemini-2.5-pro"],
+    "claude-opus-4-8": ["claude-opus-4-8", "claude-sonnet-5", "gemini-3.1-pro-preview", "gemini-2.5-pro"],
+    "claude-opus-4-7": ["claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-5", "gemini-3.1-pro-preview"],
+    "claude-opus-4-6": ["claude-opus-4-6", "claude-opus-4-8", "claude-sonnet-5", "gemini-3.1-pro-preview"],
+    # Gemini 3.x — degrade within the family, then to the 2.5 tier on failure
+    "gemini-3.5-flash": ["gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash"],
+    "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+    "gemini-3-flash-preview": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
     "gemini-flash-lite-latest": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash-lite"],
     "gemini-flash-lite": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash-lite"],
     "gemini-pro-latest": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],

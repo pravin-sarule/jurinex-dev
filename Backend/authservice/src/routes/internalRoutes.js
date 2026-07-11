@@ -321,6 +321,7 @@ router.get('/user/:userId/firm-members', async (req, res) => {
           role: accountType,
           account_type: accountType,
           is_blocked: user.is_blocked,
+          is_active: user.is_active !== false,
           first_login: user.first_login,
           created_at: user.created_at,
           last_login_at: user.last_login_at,
@@ -338,6 +339,7 @@ router.get('/user/:userId/firm-members', async (req, res) => {
       role: r.account_type || r.role || 'STAFF',
       account_type: normalizeAccountType(r),
       is_blocked: r.is_blocked,
+      is_active: r.is_active !== false,
       first_login: r.first_login,
       created_at: r.created_at,
       last_login_at: r.last_login_at,
@@ -355,6 +357,7 @@ router.get('/user/:userId/firm-members', async (req, res) => {
           role: 'ADMIN',
           account_type: normalizeAccountType(admin),
           is_blocked: admin.is_blocked,
+          is_active: admin.is_active !== false,
           first_login: admin.first_login,
           created_at: admin.created_at,
           last_login_at: admin.last_login_at,
@@ -366,6 +369,44 @@ router.get('/user/:userId/firm-members', async (req, res) => {
   } catch (error) {
     console.error('[Internal] Error fetching firm members:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * PATCH /api/auth/internal/firms/:firmId/status
+ * Enable/disable an entire firm. When disabled, all firm users are disabled and cannot log in.
+ * Body: { is_active: true | false }
+ */
+router.patch('/firms/:firmId/status', async (req, res) => {
+  try {
+    const { firmId } = req.params;
+    const { is_active } = req.body;
+    if (typeof is_active !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'is_active must be a boolean (true = enable, false = disable).',
+      });
+    }
+    const firm = await Firm.setActive(firmId, is_active);
+    if (!firm) {
+      return res.status(404).json({ success: false, message: 'Firm not found.' });
+    }
+    return res.status(200).json({
+      success: true,
+      message: is_active
+        ? 'Firm enabled. All members can log in again (subject to individual status).'
+        : 'Firm disabled. All members are disabled and cannot log in.',
+      firm: {
+        id: firm.id,
+        firm_name: firm.firm_name,
+        email: firm.email,
+        is_active: firm.is_active,
+        approval_status: firm.approval_status,
+      },
+    });
+  } catch (error) {
+    console.error('[Internal] Error updating firm status:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 

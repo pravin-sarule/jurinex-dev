@@ -68,7 +68,7 @@ const rawAgenticChat =
 function agenticChatHost() {
   const s = ensureHttps(String(rawAgenticChat || '').trim().replace(/\/$/, ''));
   if (s) return s;
-  if (IS_LOCAL_DEV_HOST) return '';
+  if (IS_LOCAL_DEV_HOST) return 'http://localhost:8096';
   return DEFAULT_AGENTIC_CHAT_HOST;
 }
 

@@ -108,13 +108,13 @@ const getInitials = (value) =>
     .map((part) => part.charAt(0).toUpperCase())
     .join('');
 
-const getPresenceMeta = (lastSeenAt, firstLogin = false, isBlocked = false) => {
-  if (isBlocked) {
+const getPresenceMeta = (lastSeenAt, firstLogin = false, isActive = true) => {
+  if (isActive === false) {
     return {
-      state: 'blocked',
+      state: 'disabled',
       live: false,
-      label: 'Blocked',
-      helper: 'Access disabled',
+      label: 'Disabled',
+      helper: 'Account disabled',
       dotClass: 'bg-red-500',
       pillClass: 'border-red-200 bg-red-50 text-red-700',
     };
@@ -471,7 +471,7 @@ const TrendChart = ({ items = [] }) => {
 
 const LiveUsersPanel = ({ rows, onView }) => {
   const liveMembers = rows
-    .filter((row) => getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isBlocked).live)
+    .filter((row) => getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isActive !== false).live)
     .sort((a, b) => new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0));
 
   return (
@@ -490,7 +490,7 @@ const LiveUsersPanel = ({ rows, onView }) => {
 
       <div className="mt-5 space-y-3">
         {liveMembers.length ? liveMembers.slice(0, 6).map((member) => {
-          const presence = getPresenceMeta(member.lastSeenAt, member.firstLogin, member.isBlocked);
+          const presence = getPresenceMeta(member.lastSeenAt, member.firstLogin, member.isActive !== false);
           return (
             <button
               key={member.userId}
@@ -540,7 +540,7 @@ const TopUsagePanel = ({ rows }) => {
         {topRows.length ? topRows.map((row) => {
           const tokens = Number(row?.usage?.totalTokens || 0);
           const width = Math.max(8, Math.round((tokens / peak) * 100));
-          const presence = getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isBlocked);
+          const presence = getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isActive !== false);
           return (
             <div key={row.userId} className="rounded-3xl border border-slate-200 bg-slate-50/70 px-4 py-4">
               <div className="flex items-center justify-between gap-3">
@@ -595,7 +595,7 @@ const DetailModal = ({
   if (!detailLoading && !selectedUser) return null;
 
   const detailUser = selectedUser?.user || {};
-  const presence = getPresenceMeta(detailUser.lastSeenAt, detailUser.firstLogin, detailUser.isBlocked);
+  const presence = getPresenceMeta(detailUser.lastSeenAt, detailUser.firstLogin, detailUser.isActive !== false);
   const tokenCap = detailUser.tokenCap || {
     usedThisMonth: 0,
     remainingThisMonth: null,
@@ -1091,7 +1091,7 @@ const FirmAnalyticsTab = () => {
 
   const summaryMetrics = summary?.summary || {};
   const liveUsers = useMemo(
-    () => rows.filter((row) => getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isBlocked).live),
+    () => rows.filter((row) => getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isActive !== false).live),
     [rows]
   );
 
@@ -1100,11 +1100,11 @@ const FirmAnalyticsTab = () => {
       live: 0,
       recent: 0,
       pending: 0,
-      blocked: 0,
+      disabled: 0,
     };
 
     rows.forEach((row) => {
-      const presence = getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isBlocked);
+      const presence = getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isActive !== false);
       counters[presence.state] = (counters[presence.state] || 0) + 1;
     });
 
@@ -1112,7 +1112,7 @@ const FirmAnalyticsTab = () => {
       { label: 'Live now', totalUsers: counters.live },
       { label: 'Recently active', totalUsers: counters.recent },
       { label: 'Invite pending', totalUsers: counters.pending },
-      { label: 'Blocked', totalUsers: counters.blocked },
+      { label: 'Disabled', totalUsers: counters.disabled },
     ];
   }, [rows]);
 
@@ -1250,7 +1250,7 @@ const FirmAnalyticsTab = () => {
 
         <RingChartCard
           title="Presence overview"
-          subtitle="A quick split of live users, recent activity, pending invites, and blocked accounts."
+          subtitle="A quick split of live users, recent activity, pending invites, and disabled accounts."
           data={{ items: presenceSegments, labelKey: 'label', valueKey: 'totalUsers' }}
           emptyMessage="No member presence data available yet."
           centerLabel="Members"
@@ -1314,7 +1314,7 @@ const FirmAnalyticsTab = () => {
                 </tr>
               ) : (
                 rows.map((row) => {
-                  const presence = getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isBlocked);
+                  const presence = getPresenceMeta(row.lastSeenAt, row.firstLogin, row.isActive !== false);
                   return (
                     <tr key={row.userId} className="transition hover:bg-slate-50/70">
                       <td className="px-6 py-4">

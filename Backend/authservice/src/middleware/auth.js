@@ -1,17 +1,6 @@
-//     if (!token) {
-
-//     if (!decoded) {
-
-//     if (!userId) {
-
-
-//     if (!user) {
-
-
-//     if (!req.user || (roles.length > 0 && !roles.includes(req.user.role))) {
-
 const { verifyToken, verifyTokenLenient } = require('../utils/jwt');
 const User = require('../models/User');
+const { getAuthDenial } = require('../utils/authAccess');
 
 const authenticateToken = async (req, res, next) => {
   try {
@@ -49,6 +38,15 @@ const authenticateToken = async (req, res, next) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    const denial = await getAuthDenial(user);
+    if (denial) {
+      return res.status(403).json({
+        code: denial.code || 'USER_DISABLED',
+        message: denial.message || 'Your account has been disabled.',
+        success: false,
+      });
+    }
+
     req.user = user;
     req.userId = user.id;
     console.log("✅ User authenticated:", user.email);
@@ -81,7 +79,13 @@ const softProtect = async (req, res, next) => {
       return next();
     }
     const user = await User.findById(userId);
-    req.user = user || null;
+    if (!user) {
+      req.user = null;
+      return next();
+    }
+    // Soft protect: drop the session quietly if the account/firm was disabled
+    const denial = await getAuthDenial(user);
+    req.user = denial ? null : user;
     next();
   } catch (error) {
     console.error('❌ softProtect error:', error.message);

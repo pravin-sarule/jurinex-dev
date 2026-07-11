@@ -10,6 +10,143 @@ DEFAULT_CACHE_MODEL = "gemini-2.5-pro"
 
 # Gemini context cache + generation rates (paid tier, <=200k unless noted)
 MODEL_PRICING: dict[str, dict[str, float | str]] = {
+    # Claude Sonnet 5 (Anthropic API) — sticker $3.00/M in, $15.00/M out
+    # (intro $2/$10 through 2026-08-31); prompt-cache read 0.1x, write 1.25x.
+    # Drafting mode uses Claude uncached (digest inlined into the prompt).
+    "claude-sonnet-5": {
+        "model": "claude-sonnet-5",
+        "creationRate": 3.75,
+        "storageRate": 0.0,
+        "cachedInputRate": 0.30,
+        "newInputRate": 3.00,
+        "outputRate": 15.00,
+        "creationRateLong": 3.75,
+        "cachedInputRateLong": 0.30,
+        "newInputRateLong": 3.00,
+        "outputRateLong": 15.00,
+    },
+    # Claude Sonnet 4.6 — $3.00/M in, $15.00/M out.
+    "claude-sonnet-4-6": {
+        "model": "claude-sonnet-4-6",
+        "creationRate": 3.75,
+        "storageRate": 0.0,
+        "cachedInputRate": 0.30,
+        "newInputRate": 3.00,
+        "outputRate": 15.00,
+        "creationRateLong": 3.75,
+        "cachedInputRateLong": 0.30,
+        "newInputRateLong": 3.00,
+        "outputRateLong": 15.00,
+    },
+    # Claude Opus 4.8 / 4.7 / 4.6 — $5.00/M in, $25.00/M out;
+    # cache read 0.1x ($0.50), write 1.25x ($6.25).
+    "claude-opus-4-8": {
+        "model": "claude-opus-4-8",
+        "creationRate": 6.25,
+        "storageRate": 0.0,
+        "cachedInputRate": 0.50,
+        "newInputRate": 5.00,
+        "outputRate": 25.00,
+        "creationRateLong": 6.25,
+        "cachedInputRateLong": 0.50,
+        "newInputRateLong": 5.00,
+        "outputRateLong": 25.00,
+    },
+    "claude-opus-4-7": {
+        "model": "claude-opus-4-7",
+        "creationRate": 6.25,
+        "storageRate": 0.0,
+        "cachedInputRate": 0.50,
+        "newInputRate": 5.00,
+        "outputRate": 25.00,
+        "creationRateLong": 6.25,
+        "cachedInputRateLong": 0.50,
+        "newInputRateLong": 5.00,
+        "outputRateLong": 25.00,
+    },
+    "claude-opus-4-6": {
+        "model": "claude-opus-4-6",
+        "creationRate": 6.25,
+        "storageRate": 0.0,
+        "cachedInputRate": 0.50,
+        "newInputRate": 5.00,
+        "outputRate": 25.00,
+        "creationRateLong": 6.25,
+        "cachedInputRateLong": 0.50,
+        "newInputRateLong": 5.00,
+        "outputRateLong": 25.00,
+    },
+    # Gemini 3.5 Flash — official: in $1.50, out $9.00 (incl. thinking),
+    # cache read $0.15, storage $1.00/1M/hour. Flat pricing (no >200k tier).
+    "gemini-3.5-flash": {
+        "model": "gemini-3.5-flash",
+        "creationRate": 1.50,
+        "storageRate": 1.00,
+        "cachedInputRate": 0.15,
+        "newInputRate": 1.50,
+        "outputRate": 9.00,
+        "creationRateLong": 1.50,
+        "cachedInputRateLong": 0.15,
+        "newInputRateLong": 1.50,
+        "outputRateLong": 9.00,
+    },
+    # Gemini 3.1 Pro Preview — official ai.google.dev pricing:
+    # in $2.00/$4.00 (<=200k/>200k), out $12.00/$18.00,
+    # cache read $0.20/$0.40, storage $4.50/1M/hour.
+    "gemini-3.1-pro-preview": {
+        "model": "gemini-3.1-pro-preview",
+        "creationRate": 2.00,
+        "storageRate": 4.50,
+        "cachedInputRate": 0.20,
+        "newInputRate": 2.00,
+        "outputRate": 12.00,
+        "creationRateLong": 4.00,
+        "cachedInputRateLong": 0.40,
+        "newInputRateLong": 4.00,
+        "outputRateLong": 18.00,
+    },
+    # Gemini 3 Pro — official: same base-tier rate as 3.1 Pro Preview
+    # ($2.00/$12.00); no separate long-context tier published, so >200k
+    # reuses the 3.1 Pro Preview long-context numbers as the closest match.
+    "gemini-3-pro": {
+        "model": "gemini-3-pro",
+        "creationRate": 2.00,
+        "storageRate": 4.50,
+        "cachedInputRate": 0.20,
+        "newInputRate": 2.00,
+        "outputRate": 12.00,
+        "creationRateLong": 4.00,
+        "cachedInputRateLong": 0.40,
+        "newInputRateLong": 4.00,
+        "outputRateLong": 18.00,
+    },
+    # Gemini 3.1 Flash-Lite — official: in $0.25, out $1.50.
+    "gemini-3.1-flash-lite": {
+        "model": "gemini-3.1-flash-lite",
+        "creationRate": 0.25,
+        "storageRate": 1.00,
+        "cachedInputRate": 0.025,
+        "newInputRate": 0.25,
+        "outputRate": 1.50,
+        "creationRateLong": 0.25,
+        "cachedInputRateLong": 0.025,
+        "newInputRateLong": 0.25,
+        "outputRateLong": 1.50,
+    },
+    # Gemini 3 Flash Preview — official: in $0.50 (text), out $3.00,
+    # cache read $0.05, storage $1.00/1M/hour (all context lengths).
+    "gemini-3-flash-preview": {
+        "model": "gemini-3-flash-preview",
+        "creationRate": 0.50,
+        "storageRate": 1.00,
+        "cachedInputRate": 0.05,
+        "newInputRate": 0.50,
+        "outputRate": 3.00,
+        "creationRateLong": 0.50,
+        "cachedInputRateLong": 0.05,
+        "newInputRateLong": 0.50,
+        "outputRateLong": 3.00,
+    },
     "gemini-2.5-pro": {
         "model": "gemini-2.5-pro",
         "creationRate": 1.25,
@@ -55,6 +192,26 @@ def normalize_model_name(model: str | None) -> str:
         return DEFAULT_CACHE_MODEL
     if raw in MODEL_PRICING:
         return raw
+    if "claude" in raw and "sonnet" in raw:
+        return "claude-sonnet-4-6" if ("4-6" in raw or "4.6" in raw) else "claude-sonnet-5"
+    if "claude" in raw and "opus" in raw:
+        if "4-7" in raw or "4.7" in raw:
+            return "claude-opus-4-7"
+        if "4-6" in raw or "4.6" in raw:
+            return "claude-opus-4-6"
+        return "claude-opus-4-8"
+    # Gemini 3.x families first — the generic "flash"/"pro" checks below would
+    # otherwise misprice them at 2.5 rates.
+    if "3.5" in raw and "flash" in raw:
+        return "gemini-3.5-flash"
+    if "3.1" in raw and "pro" in raw:
+        return "gemini-3.1-pro-preview"
+    if "3.1" in raw and "flash-lite" in raw:
+        return "gemini-3.1-flash-lite"
+    if ("gemini-3" in raw or raw.startswith("3-") or "3.0" in raw) and "flash" in raw:
+        return "gemini-3-flash-preview"
+    if ("gemini-3" in raw or raw.startswith("3-")) and "pro" in raw:
+        return "gemini-3-pro"
     if "pro" in raw and "2.5" in raw:
         return "gemini-2.5-pro"
     if "flash-lite" in raw or "flash_lite" in raw:

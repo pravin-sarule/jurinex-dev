@@ -61,6 +61,15 @@ class SectionSchema(BaseModel):
     section_id: str = Field(description="Stable id, e.g. 'section_1'")
     index: int = Field(description="0-based position in document order")
     heading: str = Field(description="Section heading exactly as written in the template")
+    heading_verbatim: bool = Field(
+        default=True,
+        description=(
+            "True ONLY if `heading` appears character-for-character in the template. "
+            "False when the heading is a derived/descriptive label for an unlabeled block "
+            "(cause title, preamble, signature block) — derived labels are used for UI "
+            "navigation only and must NEVER be printed into the drafted document."
+        ),
+    )
     heading_level: int = Field(
         default=1, description="1 = top-level heading, 2 = sub-heading, etc."
     )
@@ -137,6 +146,34 @@ class GroundingViolation(BaseModel):
     )
 
 
+class InterimReliefConsistency(BaseModel):
+    """Named, required check — freeform scanning proved unreliable for this."""
+
+    necessity_paragraph_stance: Literal["sought", "not_sought", "absent"] = Field(
+        default="absent",
+        description="What the draft's necessity/urgency paragraph says about interim relief",
+    )
+    interim_argument_present: bool = Field(
+        default=False,
+        description="True if any paragraph ARGUES for interim relief (injunction, attachment, receiver)",
+    )
+    prayer_interim_clause_present: bool = Field(
+        default=False,
+        description="True if the Prayer contains an interim-relief clause",
+    )
+    contradiction: bool = Field(
+        default=False,
+        description="True when stance / argument paragraphs / prayer disagree with each other",
+    )
+    argument_section_id: str = Field(
+        default="", description="section_id containing the interim-relief argument paragraphs"
+    )
+    argument_quote: str = Field(
+        default="",
+        description="EXACT first sentence of the offending interim-relief argument paragraph",
+    )
+
+
 class GroundingAuditReport(BaseModel):
     """Structured output of the post-draft zero-hallucination audit."""
 
@@ -144,6 +181,26 @@ class GroundingAuditReport(BaseModel):
         default_factory=list,
         description="Every specific factual assertion in the draft not supported by the fact inventory",
     )
+    interim_relief: InterimReliefConsistency = Field(
+        default_factory=InterimReliefConsistency,
+        description="ALWAYS filled: the interim-relief coherence check (TASK 3a)",
+    )
+
+
+class SectionEvents(BaseModel):
+    """Events from the chronological factual matrix owned by one section."""
+
+    section_id: str = Field(description="section_id that will narrate these events")
+    event_numbers: list[int] = Field(
+        default_factory=list,
+        description="S.No values from the factual matrix this section narrates",
+    )
+
+
+class EventOwnershipPlan(BaseModel):
+    """Each matrix event assigned to exactly ONE section (no repetition)."""
+
+    assignments: list[SectionEvents] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -162,9 +219,26 @@ class DraftGenerateRequest(BaseModel):
     user_instructions: Optional[str] = Field(
         default=None, description="Free-form drafting guidance typed by the user"
     )
+    confirmed_facts: Optional[str] = Field(
+        default=None,
+        description=(
+            "User-confirmed facts/decisions (e.g. 'defendant's business = not stated, "
+            "do not infer'). Persisted on the session and injected into every future "
+            "generation as a FACT INVENTORY ADDENDUM with the same authority as the "
+            "digest — unlike user_instructions, these can never be overridden."
+        ),
+    )
     # Long-form output: Gemini 2.5 models support up to 65,536 output tokens —
     # default to the full budget so large sections are never truncated.
     max_output_tokens_per_section: int = Field(default=65536, ge=256, le=65536)
+    drafting_strategy: Literal["monolithic", "sectionwise"] = Field(
+        default="sectionwise",
+        description=(
+            "Stage-2 drafting mode: 'sectionwise' (one call per template section — "
+            "current default) or 'monolithic' (single one-shot draft, faster for "
+            "shorter documents)."
+        ),
+    )
 
 
 class DraftSessionInfo(BaseModel):
@@ -177,4 +251,5 @@ class DraftSessionInfo(BaseModel):
     template_structure: Optional[dict[str, Any]] = None
     supporting_docs: list[dict[str, Any]] = Field(default_factory=list)
     draft_sections: list[dict[str, Any]] = Field(default_factory=list)
+    draft_metadata: Optional[dict[str, Any]] = None
     error: Optional[str] = None

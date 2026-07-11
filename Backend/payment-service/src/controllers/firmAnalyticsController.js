@@ -316,7 +316,8 @@ async function buildFirmUserAnalyticsRows({ members, firmId, rangeWindow }) {
       email: member.email,
       accountType: member.account_type || member.role || 'SOLO',
       membershipRole: member.role || member.account_type || 'STAFF',
-      isBlocked: !!member.is_blocked,
+      isActive: member.is_active !== false,
+      isBlocked: member.is_active === false, // legacy alias: disabled users
       firstLogin: !!member.first_login,
       createdAt: member.created_at || null,
       lastLoginAt: member.last_login_at || null,
@@ -386,7 +387,8 @@ exports.getFirmAnalyticsSummary = async (req, res) => {
     const summary = rows.reduce(
       (acc, row) => {
         acc.totalUsers += 1;
-        acc.blockedUsers += row.isBlocked ? 1 : 0;
+        acc.disabledUsers += row.isActive === false ? 1 : 0;
+        acc.blockedUsers += row.isActive === false ? 1 : 0; // legacy alias
         acc.pendingInvites += row.firstLogin ? 1 : 0;
         acc.totalInputTokens += row.usage.inputTokens;
         acc.totalOutputTokens += row.usage.outputTokens;
@@ -400,6 +402,7 @@ exports.getFirmAnalyticsSummary = async (req, res) => {
       },
       {
         totalUsers: 0,
+        disabledUsers: 0,
         blockedUsers: 0,
         pendingInvites: 0,
         totalInputTokens: 0,

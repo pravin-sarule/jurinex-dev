@@ -40,6 +40,10 @@ CREATE INDEX IF NOT EXISTS idx_drafting_sessions_user
     ON drafting_sessions (user_id, created_at DESC);
 -- Migration for tables created before the facts-digest feature.
 ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS facts_digest text;
+-- Session fact memory: user-confirmed facts persisted across regenerations.
+ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS facts_addendum text;
+-- Stage-2 strategy traceability (monolithic vs section-wise, per-section stats).
+ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS draft_metadata jsonb;
 """
 
 # status lifecycle:
@@ -91,9 +95,10 @@ def update_session(session_id: str, **fields: Any) -> None:
     _ensure_schema()
     allowed = {
         "status", "model", "template_file", "template_structure",
-        "supporting_docs", "cache_name", "draft_sections", "facts_digest", "error",
+        "supporting_docs", "cache_name", "draft_sections", "facts_digest",
+        "facts_addendum", "draft_metadata", "error",
     }
-    jsonb_cols = {"template_file", "template_structure", "supporting_docs", "draft_sections"}
+    jsonb_cols = {"template_file", "template_structure", "supporting_docs", "draft_sections", "draft_metadata"}
     sets, params = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -157,3 +162,15 @@ def delete_session(session_id: str, user_id: str) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def list_sessions_by_status(status: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Sessions in a given status — used to resume analysis after server reload."""
+    _ensure_schema()
+    with doc_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, user_id, model, updated_at FROM drafting_sessions "
+            "WHERE status = %s ORDER BY updated_at DESC LIMIT %s",
+            (status, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]

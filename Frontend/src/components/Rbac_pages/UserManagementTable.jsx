@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { deleteFirmUser, fetchFirmUsers, resendFirmUserPasswordSetupEmail } from './rbacApi';
+import { deleteFirmUser, fetchFirmUsers, resendFirmUserPasswordSetupEmail, updateFirmUserActiveStatus } from './rbacApi';
 import AddUserModal from './AddUserModal';
 import PermissionsModal from './PermissionsModal';
 import { useAuth } from '../../context';
@@ -62,6 +62,7 @@ const UserManagementTable = () => {
   const canViewRoles = capabilities.canViewRoles ?? canUsePermission(currentUser, PERMISSION_KEYS.VIEW_ROLES);
   const canDeleteFirmUsers = capabilities.canDeleteFirmUsers ?? false;
   const canResendPasswordSetupEmail = capabilities.canResendPasswordSetupEmail ?? false;
+  const canUpdateUserInformation = capabilities.canUpdateUserInformation ?? canUsePermission(currentUser, PERMISSION_KEYS.UPDATE_USER_INFORMATION);
   const canManageCaseAssignments =
     capabilities.canManageCaseAssignments
     ?? (
@@ -74,12 +75,14 @@ const UserManagementTable = () => {
     || canManagePermissions
     || canViewRoles
     || canDeleteFirmUsers
-    || canResendPasswordSetupEmail;
+    || canResendPasswordSetupEmail
+    || canUpdateUserInformation;
   const hasMutatingUserActions =
     canCreateUsers
     || canManagePermissions
     || canDeleteFirmUsers
-    || canResendPasswordSetupEmail;
+    || canResendPasswordSetupEmail
+    || canUpdateUserInformation;
   const isReadOnly = !hasMutatingUserActions || viewerMode === 'read_only';
   const modalReadOnly = !canManagePermissions || (!!selectedUser?.is_firm_admin && !isFirmAdminActor);
   const totalUsersCount = users.length;
@@ -111,6 +114,27 @@ const UserManagementTable = () => {
     } catch (err) {
       console.error('[UserManagementTable] Failed to delete firm user:', err);
       toast.error(err.response?.data?.message || 'Failed to delete firm user.');
+    }
+  };
+
+  const handleToggleUserActive = async (user) => {
+    const currentlyActive = user.is_active !== false;
+    const nextActive = !currentlyActive;
+    const actionLabel = nextActive ? 'enable' : 'disable';
+    const confirmed = window.confirm(
+      nextActive
+        ? `Enable ${user.username || user.email}? They will be able to log in again.`
+        : `Disable ${user.username || user.email}? They will not be able to log in.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const response = await updateFirmUserActiveStatus(user.id, nextActive);
+      toast.success(response.message || `User ${actionLabel}d successfully.`);
+      loadUsers();
+    } catch (err) {
+      console.error('[UserManagementTable] Failed to update user status:', err);
+      toast.error(err.response?.data?.message || `Failed to ${actionLabel} user.`);
     }
   };
 
@@ -254,6 +278,11 @@ const UserManagementTable = () => {
                                 Invite Pending
                               </span>
                             )}
+                            {user.is_active === false && (
+                              <span className="rounded-full bg-red-50 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-red-700">
+                                Disabled
+                              </span>
+                            )}
                           </div>
                           <div className="mt-1 text-xs text-slate-500">{user.email}</div>
                         </div>
@@ -291,6 +320,20 @@ const UserManagementTable = () => {
                             <svg className="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 8l7.89 4.26a2 2 0 002.22 0L21 8m-2 10H5a2 2 0 01-2-2V8a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2z" />
                             </svg>
+                          </button>
+                        )}
+
+                        {canUpdateUserInformation && !user.is_firm_admin && !user.is_self && (
+                          <button
+                            onClick={() => handleToggleUserActive(user)}
+                            className={`rounded-xl border bg-white px-3 py-1.5 text-xs font-semibold transition ${
+                              user.is_active === false
+                                ? 'border-emerald-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50'
+                                : 'border-amber-200 text-amber-700 hover:border-amber-300 hover:bg-amber-50'
+                            }`}
+                            title={user.is_active === false ? 'Enable user (allow login)' : 'Disable user (block login)'}
+                          >
+                            {user.is_active === false ? 'Enable' : 'Disable'}
                           </button>
                         )}
 

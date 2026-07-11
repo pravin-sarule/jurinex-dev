@@ -10,6 +10,7 @@ import {
 } from 'docx';
 import {
   documentDefaults, normalizeFormat, parseContentBlocks, splitHeadingFromContent,
+  parseInlineBold,
 } from './draftFormatUtils';
 
 const ALIGN = {
@@ -19,20 +20,24 @@ const ALIGN = {
   justify: AlignmentType.JUSTIFIED,
 };
 
-const run = (text, fmt, fontFamily) =>
+const run = (text, fmt, fontFamily, boldOverride = false) =>
   new TextRun({
     text: fmt.allCaps ? String(text).toUpperCase() : String(text),
     font: fontFamily,
     size: Math.round(fmt.fontSizePt * 2), // docx sizes are half-points
-    bold: fmt.bold,
+    bold: fmt.bold || boldOverride,
     underline: fmt.underline ? {} : undefined,
   });
+
+// **markers** in drafted text become real bold runs in the Word file.
+const inlineRuns = (text, fmt, fontFamily) =>
+  parseInlineBold(text).map((seg) => run(seg.text, fmt, fontFamily, seg.bold));
 
 const para = (text, fmt, fontFamily, opts = {}) =>
   new Paragraph({
     alignment: ALIGN[fmt.alignment] || AlignmentType.LEFT,
     spacing: { after: opts.after ?? 120, line: 300 }, // 1.25 line spacing (court style)
-    children: [run(text, fmt, fontFamily)],
+    children: inlineRuns(text, fmt, fontFamily),
   });
 
 const CELL_BORDER = { style: BorderStyle.SINGLE, size: 4, color: '000000' };
@@ -52,7 +57,7 @@ const tableFromBlock = (block, bodyFmt, fontFamily) => {
           },
           children: [new Paragraph({
             alignment: AlignmentType.LEFT,
-            children: [run(c, { ...bodyFmt, bold }, fontFamily)],
+            children: inlineRuns(c, { ...bodyFmt, bold }, fontFamily),
           })],
         })),
     });
@@ -77,9 +82,8 @@ export const downloadDraftDocx = async (structure, sections, textStore, filename
   const font = defaults.fontFamily;
   const children = [];
 
-  // Document title, centered/bold per the template's title typography.
-  const title = structure?.document_title || 'Draft Document';
-  children.push(para(title, defaults.titleFormat, font, { after: 360 }));
+  // Do not inject structure.document_title — that is analyzer metadata, not
+  // printed template text. Titles appear only when present in drafted content.
 
   for (const s of sections) {
     const raw = (textStore.get(s.sectionId) || '').trim();
@@ -91,10 +95,17 @@ export const downloadDraftDocx = async (structure, sections, textStore, filename
       alignment: 'justify', fontSizePt: defaults.baseFontSizePt,
     });
     const { headingText, body } = splitHeadingFromContent(raw, s.heading);
+    // Derived UI labels (headingVerbatim === false) never print — only real
+    // template headings (or a heading the drafted content itself restated).
+    const printableHeading =
+      s.headingVerbatim === false
+        ? (headingText !== s.heading ? headingText : '')
+        : headingText;
+    const printableBody = s.headingVerbatim === false && printableHeading === '' ? raw : body;
 
-    if (headingText) children.push(para(headingText, headingFmt, font, { after: 160 }));
+    if (printableHeading) children.push(para(printableHeading, headingFmt, font, { after: 160 }));
 
-    for (const block of parseContentBlocks(body)) {
+    for (const block of parseContentBlocks(printableBody)) {
       if (block.type === 'table') {
         children.push(tableFromBlock(block, bodyFmt, font));
         children.push(new Paragraph({ spacing: { after: 120 }, children: [] }));

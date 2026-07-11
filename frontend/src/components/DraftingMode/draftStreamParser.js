@@ -9,6 +9,7 @@
 const START_RE = /\[START_SECTION[_ ]?(\w+)\]/;
 const END_RE = /\[END_SECTION[_ ]?(\w+)\]/;
 const ANY_MARKER_RE = /\[(?:START|END)_SECTION[_ ]?\w*\]/g;
+export const MONOLITHIC_DOCUMENT_ID = '__document__';
 
 export class DraftStreamParser {
   /**
@@ -31,6 +32,27 @@ export class DraftStreamParser {
 
   handleEvent(evt) {
     switch (evt?.type) {
+      case 'draft_start':
+        if (evt.mode === 'monolithic' || evt.drafting_strategy === 'monolithic') {
+          this.buffers.set(MONOLITHIC_DOCUMENT_ID, '');
+          this.currentSectionId = MONOLITHIC_DOCUMENT_ID;
+          this.h.onDraftStart?.(evt);
+        }
+        break;
+      case 'document_chunk':
+        this._append(MONOLITHIC_DOCUMENT_ID, (evt.text || '').replace(ANY_MARKER_RE, ''));
+        break;
+      case 'document_end':
+        if (evt.text) this.buffers.set(MONOLITHIC_DOCUMENT_ID, evt.text);
+        this.h.onDocumentEnd?.(evt);
+        break;
+      case 'document_replace':
+        // Backend revised the whole monolithic document in one pass:
+        // replace the single document buffer wholesale.
+        this.buffers.set(MONOLITHIC_DOCUMENT_ID, evt.text || '');
+        this.h.onSectionText?.(MONOLITHIC_DOCUMENT_ID, evt.text || '');
+        this.h.onDocumentReplace?.(evt);
+        break;
       case 'status':
         this.h.onStatus?.(evt);
         break;
@@ -75,6 +97,12 @@ export class DraftStreamParser {
         break;
       case 'grounding_report':
         this.h.onGroundingReport?.(evt);
+        break;
+      case 'cost':
+        this.h.onCost?.(evt);
+        break;
+      case 'scorecard':
+        this.h.onScorecard?.(evt);
         break;
       case 'chat_saved':
         this.h.onChatSaved?.(evt);

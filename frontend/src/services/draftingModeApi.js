@@ -32,14 +32,28 @@ const parseError = async (res) => {
   return err;
 };
 
+const friendlyFetchError = (err) => {
+  if (err?.name === 'TypeError' && /fetch/i.test(String(err.message))) {
+    return (
+      'Cannot reach the drafting service. Ensure agentic-chat-service is running '
+      `(expected ${CHAT_MODEL_BASE_URL || 'http://localhost:8096'}).`
+    );
+  }
+  return err?.message || 'Request failed';
+};
+
 export const createDraftingSession = async (llmName) => {
-  const res = await fetch(`${BASE}/session`, {
-    method: 'POST',
-    headers: authHeaders(true),
-    body: JSON.stringify({ llm_name: llmName || undefined }),
-  });
-  if (!res.ok) throw await parseError(res);
-  return res.json();
+  try {
+    const res = await fetch(`${BASE}/session`, {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({ llm_name: llmName || undefined }),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  } catch (err) {
+    throw new Error(friendlyFetchError(err));
+  }
 };
 
 export const uploadDraftTemplate = async (sessionId, file) => {
@@ -51,6 +65,15 @@ export const uploadDraftTemplate = async (sessionId, file) => {
     body: form,
   });
   if (!res.ok) await throwIfQuotaResponse(res);
+  if (!res.ok) throw await parseError(res);
+  return res.json();
+};
+
+export const retryTemplateAnalysis = async (sessionId) => {
+  const res = await fetch(`${BASE}/${sessionId}/template/retry`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
   if (!res.ok) throw await parseError(res);
   return res.json();
 };
@@ -68,16 +91,20 @@ export const uploadSupportingDocuments = async (sessionId, files) => {
 };
 
 export const getDraftingSession = async (sessionId) => {
-  const res = await fetch(`${BASE}/${sessionId}`, { headers: authHeaders() });
-  if (!res.ok) throw await parseError(res);
-  return res.json();
+  try {
+    const res = await fetch(`${BASE}/${sessionId}`, { headers: authHeaders() });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  } catch (err) {
+    throw new Error(friendlyFetchError(err));
+  }
 };
 
 /**
  * Poll template analysis until it leaves the 'analyzing' state.
  * Resolves with the session payload once status is 'ready' (or throws on failure).
  */
-export const waitForTemplateAnalysis = async (sessionId, { signal, onTick, intervalMs = 2500, timeoutMs = 300000 } = {}) => {
+export const waitForTemplateAnalysis = async (sessionId, { signal, onTick, intervalMs = 1000, timeoutMs = 600000 } = {}) => {
   const started = Date.now();
   for (;;) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -101,7 +128,7 @@ export const waitForTemplateAnalysis = async (sessionId, { signal, onTick, inter
  */
 export const streamDraftGeneration = async (
   sessionId,
-  { llmName, sectionIds, userInstructions, maxOutputTokensPerSection } = {},
+  { llmName, draftingStrategy, sectionIds, userInstructions, confirmedFacts, maxOutputTokensPerSection } = {},
   onEvent,
   signal,
 ) => {
@@ -110,8 +137,10 @@ export const streamDraftGeneration = async (
     headers: { ...authHeaders(true), Accept: 'text/event-stream' },
     body: JSON.stringify({
       llm_name: llmName || undefined,
+      drafting_strategy: draftingStrategy || 'sectionwise',
       section_ids: sectionIds || undefined,
       user_instructions: userInstructions || undefined,
+      confirmed_facts: confirmedFacts || undefined,
       ...(maxOutputTokensPerSection ? { max_output_tokens_per_section: maxOutputTokensPerSection } : {}),
     }),
     signal,

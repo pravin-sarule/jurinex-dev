@@ -33,6 +33,13 @@ async def lifespan(app: FastAPI):
         settings.port,
         settings.adk_model,
     )
+    try:
+        from app.services.drafting_service import resume_interrupted_analyses
+        n = await resume_interrupted_analyses()
+        if n:
+            logger.info("Resumed %d interrupted template analyses", n)
+    except Exception as exc:
+        logger.warning("Drafting analysis resume skipped: %s", exc)
     yield
     close_pools()
 
