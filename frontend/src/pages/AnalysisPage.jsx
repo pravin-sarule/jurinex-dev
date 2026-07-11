@@ -25,6 +25,7 @@ import {
 import ChatQuotaErrorModal from '../components/ChatQuotaErrorModal';
 import { useTokenQuota } from '../context/TokenQuotaContext';
 import UpgradePlanBanner from '../components/UpgradePlanBanner';
+import MergeAnswersModal from '../components/MergeAnswers/MergeAnswersModal';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
 import { formatUploadLimitExceededMessage } from '../services/llmChatLimitsService';
 import {
@@ -331,6 +332,7 @@ const AnalysisPage = () => {
   const [currentResponse, setCurrentResponse] = useState('');
   const [animatedResponseContent, setAnimatedResponseContent] = useState('');
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
+  const [showMergeModal, setShowMergeModal] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [showSplitView, setShowSplitView] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -421,6 +423,7 @@ const AnalysisPage = () => {
   const streamBufferRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
   const streamReaderRef = useRef(null);
+  const streamPaintFrameRef = useRef(null);
   const [isStopped, setIsStopped] = useState(false);
   const currentRequestIdRef = useRef(null);
   
@@ -1249,9 +1252,30 @@ const AnalysisPage = () => {
     }
   };
 
-  const animateResponse = (text = '', isAlreadyFormatted = false) => {
-    console.log('[animateResponse] Starting ChatGPT-style word-by-word animation. Length:', text.length);
+  // Paint the live SSE stream buffer at most once per animation frame.
+  // ChatResponsePanel renders it block-by-block with memoized blocks, so each
+  // paint only re-parses the growing tail block — no whole-document work.
+  const paintStreamingResponse = () => {
+    if (streamPaintFrameRef.current) return;
+    streamPaintFrameRef.current = requestAnimationFrame(() => {
+      streamPaintFrameRef.current = null;
+      setIsAnimatingResponse(true);
+      setShowSplitView(true);
+      setAnimatedResponseContent(streamBufferRef.current);
+    });
+  };
 
+  const cancelStreamPaint = () => {
+    if (streamPaintFrameRef.current) {
+      cancelAnimationFrame(streamPaintFrameRef.current);
+      streamPaintFrameRef.current = null;
+    }
+  };
+
+  // Final display: the answer streamed live already, so show the complete
+  // formatted text in a single paint (no replay animation).
+  const animateResponse = (text = '', isAlreadyFormatted = false) => {
+    cancelStreamPaint();
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       clearTimeout(animationFrameRef.current);
@@ -1259,68 +1283,20 @@ const AnalysisPage = () => {
     }
 
     const plainText = isAlreadyFormatted ? text : convertJsonToPlainText(text);
-    
-    if (!plainText || typeof plainText !== 'string') {
-      setIsAnimatingResponse(false);
-      setAnimatedResponseContent(plainText || '');
-      return;
-    }
-
-    setAnimatedResponseContent('');
-    setIsAnimatingResponse(true);
+    setAnimatedResponseContent(typeof plainText === 'string' ? plainText : plainText || '');
+    setIsAnimatingResponse(false);
     setShowSplitView(true);
-
-    const words = plainText.split(/(\s+)/);
-    let currentIndex = 0;
-    let displayedText = '';
-
-    if (words.length <= 3) {
-        setIsAnimatingResponse(false);
-      setAnimatedResponseContent(plainText);
-        return;
+    requestAnimationFrame(() => {
+      if (responseRef.current) {
+        responseRef.current.scrollTop = responseRef.current.scrollHeight;
       }
-
-    const animateWord = () => {
-      if (currentIndex < words.length) {
-        displayedText += words[currentIndex];
-        setAnimatedResponseContent(displayedText);
-        currentIndex++;
-
-        if (responseRef.current) {
-          responseRef.current.scrollTop = responseRef.current.scrollHeight;
-        }
-
-        const word = words[currentIndex - 1];
-        let delay = 15;
-        
-        if (word.trim().length === 0) {
-          delay = 3;
-        } else if (word.length > 15) {
-          delay = 25;
-        } else if (word.length > 10) {
-          delay = 20;
-        } else if (/[.!?]\s*$/.test(word)) {
-          delay = 40;
-        } else if (/[,;:]\s*$/.test(word)) {
-          delay = 20;
-        } else if (/^[#*`\-]/.test(word)) {
-          delay = 8;
-        }
-
-        animationFrameRef.current = setTimeout(animateWord, delay);
-      } else {
-        setIsAnimatingResponse(false);
-        setAnimatedResponseContent(plainText);
-        animationFrameRef.current = null;
-      }
-    };
-
-    animationFrameRef.current = setTimeout(animateWord, 20);
+    });
   };
 
   const showResponseImmediately = (text = '') => {
     const plainText = convertJsonToPlainText(text);
-    
+
+    cancelStreamPaint();
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       clearTimeout(animationFrameRef.current);
@@ -1647,8 +1623,12 @@ const AnalysisPage = () => {
               if (!isStopped) {
                 localStreamBuffer += parsed.text || '';
                 streamBufferRef.current = localStreamBuffer; // Keep ref updated for compatibility
+                // Live paint (rAF-throttled). The panel prefers a message's stored
+                // answer, so this only shows for the in-flight message the user
+                // was just switched to.
+                paintStreamingResponse();
               }
-              
+
               if (isStopped) {
                 break;
               }
@@ -1710,6 +1690,8 @@ const AnalysisPage = () => {
                     ? errMsg
                     : errMsg?.message || errMsg?.detail || JSON.stringify(errMsg) || 'An error occurred')
               );
+              cancelStreamPaint();
+              setIsAnimatingResponse(false);
               setIsLoading(false);
             }
           } catch (e) {
@@ -1738,6 +1720,7 @@ const AnalysisPage = () => {
       setIsLoading(false);
       throw error;
     } finally {
+      cancelStreamPaint();
       setIsLoading(false);
       streamReaderRef.current = null;
     }
@@ -2158,9 +2141,12 @@ const AnalysisPage = () => {
               newSessionId = finalMetadata.session_id || newSessionId;
             }
             
-            const isStructured = isStructuredJsonResponse(finalResponse);
-            const responseToStore = isStructured ? finalResponse : convertJsonToPlainText(finalResponse);
-            const responseToDisplay = isStructured ? renderSecretPromptResponse(finalResponse) : convertJsonToPlainText(finalResponse);
+            // Prefer the backend's normalized done.answer (clean GFM). Local
+            // re-conversion of raw JSON emits HTML+markdown that renders flattened.
+            const backendAnswer = typeof finalMetadata?.answer === 'string' ? finalMetadata.answer.trim() : '';
+            const isStructured = !backendAnswer && isStructuredJsonResponse(finalResponse);
+            const responseToStore = backendAnswer || (isStructured ? finalResponse : convertJsonToPlainText(finalResponse));
+            const responseToDisplay = backendAnswer || (isStructured ? renderSecretPromptResponse(finalResponse) : convertJsonToPlainText(finalResponse));
             
             // Update the specific message with this ID instead of creating a new one
             setMessages((prev) => prev.map(msg => 
@@ -2250,9 +2236,10 @@ const AnalysisPage = () => {
                 newSessionId = finalMetadata.session_id || newSessionId;
               }
               
-              const isStructured = isStructuredJsonResponse(finalResponse);
-              const responseToStore = isStructured ? finalResponse : convertJsonToPlainText(finalResponse);
-              const responseToDisplay = isStructured ? renderSecretPromptResponse(finalResponse) : convertJsonToPlainText(finalResponse);
+              const backendAnswer = typeof finalMetadata?.answer === 'string' ? finalMetadata.answer.trim() : '';
+              const isStructured = !backendAnswer && isStructuredJsonResponse(finalResponse);
+              const responseToStore = backendAnswer || (isStructured ? finalResponse : convertJsonToPlainText(finalResponse));
+              const responseToDisplay = backendAnswer || (isStructured ? renderSecretPromptResponse(finalResponse) : convertJsonToPlainText(finalResponse));
               
               // Update the specific message with this ID instead of creating a new one
               setMessages((prev) => prev.map(msg => 
@@ -2303,8 +2290,9 @@ const AnalysisPage = () => {
               if (!isStopped && currentRequestIdRef.current === requestId) {
                 localStreamBuffer += parsed.text || '';
                 streamBufferRef.current = localStreamBuffer; // Keep ref updated for compatibility
+                paintStreamingResponse();
               }
-              
+
               if (isStopped) {
                 break;
               }
@@ -2320,11 +2308,12 @@ const AnalysisPage = () => {
                 }
                 
                 finalMetadata = parsed;
-                const finalResponse = streamBufferRef.current;
-                const isStructured = isStructuredJsonResponse(finalResponse);
-                const responseToDisplay = isStructured
+                const backendAnswer = typeof parsed.answer === 'string' ? parsed.answer.trim() : '';
+                const finalResponse = backendAnswer || streamBufferRef.current;
+                const isStructured = !backendAnswer && isStructuredJsonResponse(finalResponse);
+                const responseToDisplay = backendAnswer || (isStructured
                   ? renderSecretPromptResponse(finalResponse)
-                  : convertJsonToPlainText(finalResponse);
+                  : convertJsonToPlainText(finalResponse));
                 setCurrentResponse(responseToDisplay);
                 animateResponse(responseToDisplay, true);
                 setIsGeneratingInsights(false);
@@ -2344,6 +2333,8 @@ const AnalysisPage = () => {
                       ? errMsg
                       : errMsg?.message || errMsg?.detail || JSON.stringify(errMsg) || 'An error occurred')
                 );
+                cancelStreamPaint();
+                setIsAnimatingResponse(false);
                 setIsGeneratingInsights(false);
               }
             } catch (e) {
@@ -2367,6 +2358,7 @@ const AnalysisPage = () => {
           setError(`Analysis failed: ${error.message}`);
         }
       } finally {
+        cancelStreamPaint();
         setIsGeneratingInsights(false);
         streamReaderRef.current = null;
       }
@@ -3555,12 +3547,22 @@ const AnalysisPage = () => {
             <div className="p-2 sm:p-3 border-b border-black border-opacity-20">
               <div className="flex items-center justify-between mb-2 sm:mb-3">
                 <h2 className="text-sm sm:text-base font-semibold text-gray-900">Questions</h2>
-                <button
-                  onClick={startNewChat}
-                  className="px-3 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-                >
-                  New Chat
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setShowMergeModal(true)}
+                    disabled={!messages.some((m) => String(m.answer || '').trim())}
+                    className="px-3 py-1 text-xs font-medium text-[#21C1B6] hover:text-[#1AA49B] hover:bg-[#E0F7F6] rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Select answers and merge them into a single document"
+                  >
+                    Merge & Export
+                  </button>
+                  <button
+                    onClick={startNewChat}
+                    className="px-3 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
+                  >
+                    New Chat
+                  </button>
+                </div>
               </div>
               <div className="relative mb-3">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400" />
@@ -3794,6 +3796,20 @@ const AnalysisPage = () => {
           </div>
         </>
       )}
+
+      <MergeAnswersModal
+        isOpen={showMergeModal}
+        onClose={() => setShowMergeModal(false)}
+        messages={messages}
+        defaultTitle={
+          documentData?.originalName
+            ? `${documentData.originalName.replace(/\.[^.]+$/, '')} — Merged Analysis`
+            : activeFolderName
+              ? `${activeFolderName.replace(/_/g, ' ')} — Merged Analysis`
+              : 'Merged Legal Analysis'
+        }
+        sourceName={documentData?.originalName || (activeFolderName ? activeFolderName.replace(/_/g, ' ') : null)}
+      />
     </div>
   );
 };

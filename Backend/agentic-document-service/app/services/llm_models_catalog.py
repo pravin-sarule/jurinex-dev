@@ -107,6 +107,28 @@ def _api_model_tail(raw: str) -> str:
     return s
 
 
+# Common dashboard typos / inverted Gemini names that return 404 from the API.
+_GEMINI_MODEL_ALIASES: dict[str, str] = {
+    "gemini-pro-2.5": "gemini-2.5-pro",
+    "gemini-flash-2.5": "gemini-2.5-flash",
+    "gemini-pro-2.0": "gemini-2.0-pro",
+    "gemini-flash-2.0": "gemini-2.0-flash",
+}
+
+
+def normalize_model_alias(raw: Any) -> str:
+    """Fix known invalid model ids before provider routing."""
+    candidate = str(raw or "").strip()
+    if not candidate:
+        return candidate
+    tail = _api_model_tail(candidate).lower()
+    fixed = _GEMINI_MODEL_ALIASES.get(tail)
+    if fixed and fixed != tail:
+        logger.info("[LLMModelsCatalog] normalized model alias %s -> %s", candidate, fixed)
+        return fixed
+    return candidate
+
+
 def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
     """
     Align config model strings with llm_models when present; otherwise keep sensible behavior.
@@ -116,8 +138,8 @@ def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
     - Catalog empty (DB down / no rows) -> trust the raw string from config/env.
     - Catalog loaded but name not listed: still allow typical Gemini/Claude API ids; else fallback.
     """
-    candidate = str(raw or "").strip()
-    fb = str(fallback or "").strip()
+    candidate = normalize_model_alias(str(raw or "").strip())
+    fb = normalize_model_alias(str(fallback or "").strip())
     if not candidate:
         return fb
 

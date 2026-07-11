@@ -1657,17 +1657,59 @@ class FolderWorkflowService:
         return {"success": True, "deleted": file_id, "name": file_name}
 
     def delete_session(self, folder_name: str, session_id: str) -> dict[str, Any]:
+        """
+        Delete a chat session from memory AND from folder_chats in the DB.
+
+        Sessions are listed from the DB, so an in-memory-only delete made every
+        session from a previous server process undeletable (404 → "Failed to
+        delete session." in the UI).
+        """
         with self._lock:
             session = self._sessions.get(folder_name, {}).pop(session_id, None)
-        if not session:
+
+        db_deleted = 0
+        raw = (session_id or "").strip()
+        is_uuid_like = bool(_UUID_DASHED.match(raw) or _UUID_HEX32.match(raw))
+        if is_db_available() and is_uuid_like:
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM folder_chats WHERE folder_name = %s AND session_id = %s::uuid",
+                        [folder_name, normalize_folder_chat_session_uuid(raw)],
+                    )
+                    db_deleted = cur.rowcount or 0
+                    conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] delete_session DB delete failed folder=%s session=%s error=%s",
+                    folder_name,
+                    session_id,
+                    exc,
+                )
+
+        if not session and db_deleted == 0:
             raise ValueError(f"Session '{session_id}' was not found for folder '{folder_name}'.")
-        return {"success": True, "deleted": session_id}
+        return {"success": True, "deleted": session_id, "db_rows_deleted": db_deleted}
 
     def delete_all_sessions(self, folder_name: str) -> dict[str, Any]:
         with self._lock:
             deleted_count = len(self._sessions.get(folder_name, {}))
             self._sessions[folder_name] = {}
-        return {"success": True, "deleted_count": deleted_count}
+
+        db_deleted = 0
+        if is_db_available():
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute("DELETE FROM folder_chats WHERE folder_name = %s", [folder_name])
+                    db_deleted = cur.rowcount or 0
+                    conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] delete_all_sessions DB delete failed folder=%s error=%s",
+                    folder_name,
+                    exc,
+                )
+        return {"success": True, "deleted_count": deleted_count, "db_rows_deleted": db_deleted}
 
     def list_prompt_audit(self, case_id: str) -> list[PromptAuditRecord]:
         return [record for record in self._prompt_audit if record.case_id == case_id]

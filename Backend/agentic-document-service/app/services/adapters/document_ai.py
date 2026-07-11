@@ -20,6 +20,8 @@ from app.services.token_usage_log import log_token_usage_table
 logger = logging.getLogger("agentic_document_service.document_ai")
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 DEEPSEEK_MAX_OUTPUT_TOKENS = 384000
+# Anthropic Messages API rejects max_tokens above the model's real output ceiling.
+CLAUDE_MAX_OUTPUT_TOKENS = 64000
 # Minimum output budget for DeepSeek so multi-section / 4000-word legal analyses
 # never truncate even when an agent_prompts row sets a small max_output_tokens.
 _DEEPSEEK_MIN_OUTPUT_TOKENS = 16384
@@ -862,17 +864,41 @@ def _deepseek_messages(
     return messages
 
 
+_BANNER_BOX_CHARS = "┌┐└┘├┤┬┴┼│"
+
+
+def _strip_ascii_banner_lines(text: str) -> str:
+    """
+    Remove decorative ASCII banner blocks (e.g. the "LEXIS LEGAL FINDING" box
+    some legacy preset templates instruct the model to draw). Drops every line
+    containing box-drawing characters and standalone ─ divider lines; real
+    content never uses these characters.
+    """
+    raw = str(text or "")
+    if not any(ch in raw for ch in _BANNER_BOX_CHARS) and "─" not in raw:
+        return raw
+    kept = []
+    for line in raw.splitlines():
+        if any(ch in line for ch in _BANNER_BOX_CHARS):
+            continue
+        if line.strip() and not line.strip().strip("─ "):
+            continue  # pure ─ divider line
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def normalize_markdown_render_output(text: str) -> str:
     """
     Post-process raw model output into clean, valid GitHub-Flavored Markdown.
 
     Pipeline (order matters):
       1. strip a single outer ```markdown fence (inner code blocks preserved)
-      2. repair deterministic OCR artefacts (split numbers + known terms)
-      3. preprocess LaTeX delimiters (round-bracket -> $, square-bracket -> $$)
-      4. strip HTML <br> tags (to space inside table rows, newline elsewhere)
-      5. convert numbered date chronologies into GFM pipe tables
-      6. collapse 3+ consecutive newlines down to a single blank line
+      2. remove ASCII banner boxes (legacy preset templates draw them)
+      3. repair deterministic OCR artefacts (split numbers + known terms)
+      4. preprocess LaTeX delimiters (round-bracket -> $, square-bracket -> $$)
+      5. strip HTML <br> tags (to space inside table rows, newline elsewhere)
+      6. convert numbered date chronologies into GFM pipe tables
+      7. collapse 3+ consecutive newlines down to a single blank line
     Never emits HTML. Safe to call on any provider's output.
     """
     cleaned = str(text or "").strip()
@@ -883,6 +909,7 @@ def normalize_markdown_render_output(text: str) -> str:
     # reasoning never reaches the user (ChatGPT/Claude-style clean output).
     unfenced = _strip_model_reasoning(unfenced)
 
+    unfenced = _strip_ascii_banner_lines(unfenced)
     unfenced = normalize_ocr_artifacts(unfenced)
     unfenced = preprocess_latex(unfenced)
     unfenced = _strip_html_breaks(unfenced)
@@ -1232,7 +1259,13 @@ def _generation_config(
                 llm_params.get("grounding_google_search", False),
                 llm_params.get("code_execution", False),
             )
-            resolved_model_name = str(model_name_override or cfg.model_name).strip()
+            from app.services.llm_models_catalog import normalize_model_alias, resolve_chat_llm_model
+
+            raw_model = str(model_name_override or cfg.model_name).strip()
+            resolved_model_name = resolve_chat_llm_model(
+                normalize_model_alias(raw_model),
+                normalize_model_alias(str(cfg.model_name)),
+            )
             return resolved_model_name, gen_kwargs, llm_params
         except Exception as exc:
             logger.warning(
@@ -1244,8 +1277,13 @@ def _generation_config(
 
     # ── Fallback: summarization_chat_config (no agent_name or agent load error) ──
     config = summarization_llm_config or get_summarization_chat_config(user_id=user_id)
+    from app.services.llm_models_catalog import normalize_model_alias, resolve_chat_llm_model
+
     model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
-    model_name = str(model_name_override or model_name).strip()
+    model_name = resolve_chat_llm_model(
+        normalize_model_alias(str(model_name_override or model_name).strip()),
+        normalize_model_alias(model_name),
+    )
     max_tokens = _max_tokens_from_summarization_config(config, for_summary=for_summary)
     temperature = float(config.get("model_temperature") or 0.7)
     temperature = min(
@@ -1271,15 +1309,21 @@ def _generation_config(
 
 _THINKING_BUDGET_GEMINI = {"low": 1024,  "medium": 8192,  "high": 16384}
 _THINKING_BUDGET_CLAUDE = {"low": 5000,  "medium": 10000, "high": 16000}
+# Providers reject out-of-range budgets with 400 INVALID_ARGUMENT, which kills
+# the whole request (Gemini 2.5: 128–32768; Anthropic: >= 1024).
+_THINKING_BUDGET_RANGE = {"gemini": (128, 32768), "claude": (1024, 32000)}
 
 
 def _resolve_thinking_budget(llm_params: dict, provider: str) -> int:
     budget_map = _THINKING_BUDGET_GEMINI if provider == "gemini" else _THINKING_BUDGET_CLAUDE
+    lo, hi = _THINKING_BUDGET_RANGE.get(provider, (128, 32768))
     raw = llm_params.get("thinking_budget")
-    if raw and isinstance(raw, (int, float)) and float(raw) > 0:
-        return int(raw)
+    # NOTE: bool is a subclass of int — an admin-UI toggle stored as
+    # thinking_budget=true must not become budget_tokens=1 (Gemini 400s on it).
+    if raw is not None and not isinstance(raw, bool) and isinstance(raw, (int, float)) and float(raw) > 0:
+        return max(lo, min(hi, int(raw)))
     level = str(llm_params.get("thinking_level") or "low").lower()
-    return budget_map.get(level, list(budget_map.values())[0])
+    return max(lo, min(hi, budget_map.get(level, list(budget_map.values())[0])))
 
 
 def _gemini_model_supports_thinking_config(model_name: str | None) -> bool:
@@ -1504,7 +1548,7 @@ def claude_stream_generator(
         return
 
     max_tokens = min(
-        DEEPSEEK_MAX_OUTPUT_TOKENS,
+        CLAUDE_MAX_OUTPUT_TOKENS,
         int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
     )
     temperature = float(gen_kwargs.get("temperature") or 1.0)
@@ -1580,7 +1624,10 @@ def _generate_text_claude(
         return ""
 
     # Never fall back to a tiny 8192 — that truncates multi-point legal answers.
-    max_tokens = int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS)
+    max_tokens = min(
+        CLAUDE_MAX_OUTPUT_TOKENS,
+        int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
+    )
     temperature = float(gen_kwargs.get("temperature") or 1.0)
 
     api_model = _anthropic_messages_model_id(model_name)
@@ -2135,10 +2182,12 @@ def _call_gemini_for_qa(
         context_parts = []
         source_names = []
         running_chars = 0
-        # Large budget so the full top-k (up to 40) retrieved chunks fit in context.
-        # DeepSeek/Gemini/Claude all accept large inputs; truncating at 80k would
-        # silently drop most of a 40-chunk retrieval.
-        char_limit = 200000
+        # Large budget so full case files and top-k retrieved chunks fit in
+        # context — 380k chars ≈ 95k tokens, safe for DeepSeek (smallest window)
+        # and far below Gemini/Claude limits. Truncating at 80-200k silently
+        # dropped most of a large case file and produced
+        # "Not mentioned in the document." answers.
+        char_limit = 380_000
         for doc in document_texts:
             name = doc.get("name", "document")
             # Repair deterministic OCR artefacts (split numbers + known terms) before
@@ -2250,14 +2299,32 @@ def _call_gemini_for_qa(
         if system_instruction:
             system_block = f"{system_block}\n\n{system_instruction}"
         prompt = f"{system_block}\n\n{prompt}"
-        answer = _generate_text(
-            prompt,
-            for_summary=intent_hint == "summary",
-            agent_name=agent_name or _AGENT_QA,
-            user_id=user_id,
-            summarization_llm_config=summarization_llm_config,
-            model_name_override=model_name_override,
-        )
+        override = str(model_name_override or "").strip() or None
+        try:
+            answer = _generate_text(
+                prompt,
+                for_summary=intent_hint == "summary",
+                agent_name=agent_name or _AGENT_QA,
+                user_id=user_id,
+                summarization_llm_config=summarization_llm_config,
+                model_name_override=override,
+            )
+        except Exception as exc:
+            if not override:
+                raise
+            logger.warning(
+                "[DocumentAI] Q&A failed with override model=%s (%s) — retrying with agent default",
+                override,
+                exc,
+            )
+            answer = _generate_text(
+                prompt,
+                for_summary=intent_hint == "summary",
+                agent_name=agent_name or _AGENT_QA,
+                user_id=user_id,
+                summarization_llm_config=summarization_llm_config,
+                model_name_override=None,
+            )
         if require_speaker_diarization:
             diarization_suffix = _build_speaker_diarization_suffix(document_texts)
             if diarization_suffix and "speaker diarization" not in (answer or "").lower():

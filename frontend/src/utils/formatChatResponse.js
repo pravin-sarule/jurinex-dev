@@ -1,7 +1,7 @@
 import { convertJsonToPlainText } from './jsonToPlainText';
 import { isStructuredJsonResponse, renderSecretPromptResponse } from './renderSecretPromptResponse';
 
-const BOX_CHARS = /[┌└├┤┬┴┼│─]/;
+const BOX_CHARS = /[┌┐└┘├┤┬┴┼│─]/;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -15,7 +15,7 @@ function extractBoxInnerLines(block) {
   const lines = [];
   const parts = String(block).split('│');
   parts.forEach((part) => {
-    const cleaned = part.replace(/[┌└├┤┬┴┼─]/g, ' ').replace(/\s+/g, ' ').trim();
+    const cleaned = part.replace(/[┌┐└┘├┤┬┴┼─]/g, ' ').replace(/\s+/g, ' ').trim();
     if (cleaned && !/^[-─\s]+$/.test(cleaned)) {
       lines.push(cleaned);
     }
@@ -25,7 +25,7 @@ function extractBoxInnerLines(block) {
   String(block)
     .split(/\n/)
     .forEach((line) => {
-      const cleaned = line.replace(/[┌└├┤┬┴┼│─]/g, '').trim();
+      const cleaned = line.replace(/[┌┐└┘├┤┬┴┼│─]/g, '').trim();
       if (cleaned) lines.push(cleaned);
     });
   return lines;
@@ -70,7 +70,7 @@ function cleanupBoxDebris(text) {
   return String(text)
     .split('\n')
     .filter((line) => {
-      const stripped = line.replace(/[┌└├┤┬┴┼│─\s]/g, '');
+      const stripped = line.replace(/[┌┐└┘├┤┬┴┼│─\s]/g, '');
       return stripped.length > 0 || !BOX_CHARS.test(line);
     })
     .join('\n')

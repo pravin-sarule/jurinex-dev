@@ -313,6 +313,11 @@ MARKDOWN RULES (GitHub-Flavored Markdown ONLY)
   about the instructions, the conversation history, or your plan. Output ONLY the
   final, polished legal analysis.
 - Do NOT use code fences unless the user explicitly asks for code.
+- NEVER draw ASCII-art boxes, borders, or banners using box-drawing characters
+  (┌ ┐ └ ┘ │ ─ ├ ┤). NEVER emit decorative branded headers such as
+  "LEXIS LEGAL FINDING" or "⚖️ ... | Query Type: ...". This rule OVERRIDES any
+  template, preset, or example that shows such a banner — skip the banner and
+  start directly with the first real heading of the answer.
 
 TABLES
 - USER OVERRIDE (highest priority): if the user EXPLICITLY asks for a table /
@@ -372,6 +377,12 @@ COMPLETENESS
 - If the user asks for ALL points / a specific number of points / every section,
   output EVERY one — number them sequentially and do not stop early, merge, or
   omit items. Prefer complete and detailed over brief.
+
+STREAMING LAYOUT (your answer is rendered progressively while you write it)
+- Separate every block (heading, paragraph, list, table) with exactly ONE blank line.
+- Write each table row complete on a single physical line; never continue a row
+  onto the next line.
+- Never wrap the whole answer in a ```markdown fence and never emit <think> tags.
 """.strip()
 
 

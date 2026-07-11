@@ -27,7 +27,14 @@ OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
 - Keep one fact per table row; do not split a single word or value across multiple rows.
 - Prefer pure Markdown over raw HTML. Do NOT emit <br>, <div>, <span>, <table>, or other HTML tags. Inside a table cell, separate multiple values with a comma or semicolon (never a <br>).
 - Wrap code, file names, or identifiers in `backticks` and use fenced ```code blocks``` for multi-line code.
-- Do NOT wrap the whole answer in a code block, and do NOT show your reasoning or planning — output only the final formatted answer."""
+- Do NOT wrap the whole answer in a code block, and do NOT show your reasoning or planning — output only the final formatted answer.
+- STREAMING LAYOUT (the answer renders progressively as you write it):
+  - Separate every block (heading, paragraph, list, table) with ONE blank line.
+  - Keep each table row complete on a single physical line, starting and ending with |.
+  - Never emit <think> tags, a leading ```markdown fence, or partial/abandoned tables.
+- NEVER draw ASCII-art boxes/banners with box-drawing characters (┌ ┐ └ ┘ │ ─) and
+  NEVER emit decorative branded headers like "LEXIS LEGAL FINDING" — even if a
+  template or preset shows one. Start directly with the answer's first heading."""
 
 
 def fetch_full_profile(user_id: str | None, authorization_header: str | None) -> dict[str, Any]:
