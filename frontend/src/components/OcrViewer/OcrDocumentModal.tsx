@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { OcrJson } from '../../types/ocr';
 import useOcrDocumentViewer from '../../hooks/useOcrDocumentViewer';
-import ocrApi from '../../services/ocrApi';
 import OcrToolbar from './OcrToolbar';
 import OcrStats from './OcrStats';
 import PdfPanel from './PdfPanel';
@@ -273,6 +272,134 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
     [setCurrentPage],
   );
 
+  const safeBaseFilename = useCallback(() => {
+    const rawName = document?.name || 'document';
+    return rawName
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^a-zA-Z0-9._-]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'document';
+  }, [document?.name]);
+
+  const triggerBlobDownload = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = window.document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    window.document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, []);
+
+  const downloadUrl = useCallback(
+    async (url: string | null, filename: string) => {
+      if (!url) {
+        alert('Download URL is not available yet.');
+        return;
+      }
+      const cleanUrl = url.split('#')[0];
+      try {
+        const response = await fetch(cleanUrl);
+        if (!response.ok) {
+          throw new Error(`Download failed with HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        triggerBlobDownload(blob, filename);
+      } catch (err) {
+        console.warn('[OCR PREVIEW] Direct blob download failed; opening signed URL instead:', err);
+        window.open(cleanUrl, '_blank', 'noopener,noreferrer');
+      }
+    },
+    [triggerBlobDownload],
+  );
+
+  const sortedWordsForPage = useCallback(
+    (page: NonNullable<typeof ocrData>['pages'][number], filter?: 'high' | 'medium' | 'low') => {
+      const words = [...(page.words || [])].filter((word) => {
+        const confidence = Number(word.confidence ?? 1);
+        if (filter === 'high') return confidence >= 0.95;
+        if (filter === 'medium') return confidence >= 0.85 && confidence < 0.95;
+        if (filter === 'low') return confidence < 0.85;
+        return true;
+      });
+      words.sort((a, b) => {
+        const dy = (a.bbox?.y || 0) - (b.bbox?.y || 0);
+        if (Math.abs(dy) > 8) return dy;
+        return (a.bbox?.x || 0) - (b.bbox?.x || 0);
+      });
+      return words;
+    },
+    [],
+  );
+
+  const buildOcrDownloadText = useCallback(
+    (filter?: 'high' | 'medium' | 'low') => {
+      if (!ocrData?.pages?.length) return '';
+      return ocrData.pages
+        .map((page) => {
+          const words = sortedWordsForPage(page, filter);
+          const lines: string[] = [];
+          let currentLine: string[] = [];
+          let currentY: number | null = null;
+          for (const word of words) {
+            const y = Number(word.bbox?.y || 0);
+            if (currentY === null || Math.abs(y - currentY) <= 10) {
+              currentLine.push(word.text);
+              currentY = currentY === null ? y : currentY;
+            } else {
+              if (currentLine.length) lines.push(currentLine.join(' '));
+              currentLine = [word.text];
+              currentY = y;
+            }
+          }
+          if (currentLine.length) lines.push(currentLine.join(' '));
+          return `Page ${page.page}\n${lines.join('\n')}`.trim();
+        })
+        .filter(Boolean)
+        .join('\n\n');
+    },
+    [ocrData, sortedWordsForPage],
+  );
+
+  const downloadOcrPdf = useCallback(
+    async (variant: 'plain' | 'high' | 'medium' | 'low') => {
+      const filter = variant === 'plain' ? undefined : variant;
+      const text = buildOcrDownloadText(filter);
+      if (!text.trim()) {
+        alert('OCR text is not available for download.');
+        return;
+      }
+      const { jsPDF } = await import('jspdf');
+      const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+      const margin = 42;
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const usableWidth = pageWidth - margin * 2;
+      const title = `${document?.name || 'Document'} - OCR ${variant.toUpperCase()}`;
+      let y = margin;
+
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(12);
+      pdf.text(title, margin, y);
+      y += 24;
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(10);
+
+      const lines = pdf.splitTextToSize(text, usableWidth) as string[];
+      for (const line of lines) {
+        if (y > pageHeight - margin) {
+          pdf.addPage();
+          y = margin;
+        }
+        pdf.text(line, margin, y);
+        y += 14;
+      }
+
+      pdf.save(`${safeBaseFilename()}-ocr-${variant}.pdf`);
+    },
+    [buildOcrDownloadText, document?.name, safeBaseFilename],
+  );
+
   // When currentPage changes (e.g. toolbar page dropdown), scroll both panels to that page if they're not already there.
   // Guards: (1) never scroll to page 1 when both panels are already scrolled down; (2) if panels disagree by >1 page, don't scroll (let sync fix it).
   useEffect(() => {
@@ -375,44 +502,19 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
           isFullSize={isFullSize}
           onToggleFullSize={() => setIsFullSize((prev) => !prev)}
           onDownloadOriginalPdf={() => {
-            if (!document?.id) {
-              alert('Missing document id for download.');
-              return;
-            }
-            const url = ocrApi.getOriginalPdfDownloadUrl(document.id);
-            window.open(url, '_blank', 'noopener,noreferrer');
+            downloadUrl(pdfUrlResolved, `${safeBaseFilename()}.pdf`);
           }}
           onDownloadOcrPlainPdf={() => {
-            if (!document?.id) {
-              alert('Missing document id for download.');
-              return;
-            }
-            const url = ocrApi.getOcrPlainPdfDownloadUrl(document.id);
-            window.open(url, '_blank', 'noopener,noreferrer');
+            downloadOcrPdf('plain');
           }}
           onDownloadOcrWithBoxesPdf={() => {
-            if (!document?.id) {
-              alert('Missing document id for download.');
-              return;
-            }
-            const url = ocrApi.getOcrBoxesPdfDownloadUrl(document.id);
-            window.open(url, '_blank', 'noopener,noreferrer');
+            downloadOcrPdf('high');
           }}
           onDownloadOcrBoxesMediumPdf={() => {
-            if (!document?.id) {
-              alert('Missing document id for download.');
-              return;
-            }
-            const url = ocrApi.getOcrBoxesPdfDownloadUrl(document.id, 'medium');
-            window.open(url, '_blank', 'noopener,noreferrer');
+            downloadOcrPdf('medium');
           }}
           onDownloadOcrBoxesLowPdf={() => {
-            if (!document?.id) {
-              alert('Missing document id for download.');
-              return;
-            }
-            const url = ocrApi.getOcrBoxesPdfDownloadUrl(document.id, 'low');
-            window.open(url, '_blank', 'noopener,noreferrer');
+            downloadOcrPdf('low');
           }}
           isOcrVisible={isOcrVisible}
           onToggleOcr={() => setIsOcrVisible(!isOcrVisible)}

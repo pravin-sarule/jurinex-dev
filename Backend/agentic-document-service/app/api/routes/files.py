@@ -968,25 +968,88 @@ def _parse_jsonish(value: Any) -> Any:
     return value
 
 
-def _fallback_structured_ocr_from_text(text: str, *, source: str = "processed_text") -> dict[str, Any] | None:
+def _split_text_evenly_by_pages(text: str, page_count: int) -> list[str]:
     cleaned = str(text or "").strip()
+    if not cleaned or page_count <= 1:
+        return [cleaned] if cleaned else []
+    lines = [line for line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    nonempty_chars = sum(len(line) for line in lines if line.strip()) or len(cleaned)
+    target = max(1, nonempty_chars // page_count)
+    pages: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for line in lines:
+        current.append(line)
+        current_chars += len(line)
+        remaining_lines = len(lines) - (sum(len(page.splitlines()) for page in pages) + len(current))
+        remaining_pages = page_count - len(pages) - 1
+        if remaining_pages > 0 and current_chars >= target and remaining_lines >= remaining_pages:
+            page_text = "\n".join(current).strip()
+            if page_text:
+                pages.append(page_text)
+            current = []
+            current_chars = 0
+    tail = "\n".join(current).strip()
+    if tail:
+        pages.append(tail)
+    while len(pages) < page_count:
+        pages.append("")
+    return pages[:page_count]
+
+
+def _pdf_page_texts_from_record(record: dict[str, Any] | None) -> list[str]:
+    if not record:
+        return []
+    mime = str(record.get("mimetype") or "").lower()
+    name = str(record.get("originalname") or "").lower()
+    if "pdf" not in mime and not name.endswith(".pdf"):
+        return []
+    gs_uri = _normalize_gs_uri_from_record(record.get("gcs_path"))
+    if not gs_uri:
+        return []
+    try:
+        import io
+        from pypdf import PdfReader  # type: ignore
+
+        pdf_bytes = gcs.download_bytes(gs_uri)
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        return [(page.extract_text() or "").strip() for page in reader.pages]
+    except Exception as exc:
+        logger.debug("[files.ocr] PDF page-text fallback skipped file_id=%s error=%s", record.get("id"), exc)
+        return []
+
+
+def _fallback_structured_ocr_from_text(
+    text: str,
+    *,
+    source: str = "processed_text",
+    page_texts: list[str] | None = None,
+) -> dict[str, Any] | None:
+    cleaned = str(text or "").strip()
+    supplied_pages = [str(part or "").strip() for part in (page_texts or [])]
+    supplied_pages = supplied_pages if any(supplied_pages) else []
+    if not cleaned and supplied_pages:
+        cleaned = "\n\n".join(part for part in supplied_pages if part).strip()
     if not cleaned:
         return None
     # Keep the fallback compact: the real Document AI structure is preferred when present,
     # but processed uploads still get a reconstructed OCR panel from stored extracted text.
     pages: list[dict[str, Any]] = []
-    page_chunks = re.split(r"\n\s*(?:-{3,}|={3,}|Page\s+\d+\s*(?:of\s*\d+)?)\s*\n", cleaned, flags=re.IGNORECASE)
-    page_texts = [chunk.strip() for chunk in page_chunks if chunk.strip()] or [cleaned]
-    for index, page_text in enumerate(page_texts):
+    if supplied_pages:
+        resolved_page_texts = supplied_pages
+    else:
+        page_chunks = re.split(r"\n\s*(?:-{3,}|={3,}|Page\s+\d+\s*(?:of\s*\d+)?)\s*\n", cleaned, flags=re.IGNORECASE)
+        resolved_page_texts = [chunk.strip() for chunk in page_chunks if chunk.strip()] or [cleaned]
+    for index, page_text in enumerate(resolved_page_texts):
         lines = [
             {"type": "line", "text": line.strip()}
-            for line in page_text.splitlines()
+            for line in str(page_text or "").splitlines()
             if line.strip()
         ]
         pages.append({
             "pageNumber": index + 1,
             "dimension": {"width": None, "height": None, "unit": ""},
-            "text": page_text,
+            "text": str(page_text or "").strip(),
             "blocks": [],
             "paragraphs": [],
             "lines": lines,
@@ -1006,14 +1069,24 @@ def _fallback_file_ocr_payload(record: dict[str, Any] | None) -> dict[str, Any] 
     if not record:
         return None
     text = str(record.get("full_text_content") or "").strip()
+    pdf_page_texts = _pdf_page_texts_from_record(record)
+    page_count = len(pdf_page_texts)
+    if not any(pdf_page_texts) and text and page_count > 1:
+        pdf_page_texts = _split_text_evenly_by_pages(text, page_count)
+    if not text and any(pdf_page_texts):
+        text = "\n\n".join(part for part in pdf_page_texts if part).strip()
     if not text:
         return None
-    structured = _fallback_structured_ocr_from_text(text, source="processed_file_text")
+    structured = _fallback_structured_ocr_from_text(
+        text,
+        source="processed_file_text",
+        page_texts=pdf_page_texts or None,
+    )
     timestamp = record.get("processed_at") or record.get("updated_at") or record.get("created_at")
     processed_at = timestamp.isoformat() if hasattr(timestamp, "isoformat") else timestamp
     return {
         "available": True,
-        "pageCount": (structured or {}).get("pageCount") or 1,
+        "pageCount": (structured or {}).get("pageCount") or page_count or 1,
         "confidence": None,
         "status": "processed",
         "processedAt": processed_at,
@@ -1022,8 +1095,51 @@ def _fallback_file_ocr_payload(record: dict[str, Any] | None) -> dict[str, Any] 
         "metadata": {
             "source": "user_files.full_text_content",
             "fallback": True,
+            "pageSource": "original_pdf" if pdf_page_texts else "full_text_content",
         },
     }
+
+
+def _ocr_payload_page_count(payload: dict[str, Any] | None) -> int:
+    if not payload:
+        return 0
+    structured = _parse_jsonish(payload.get("structuredJson") or payload.get("structured_json"))
+    pages = structured.get("pages") if isinstance(structured, dict) else None
+    if isinstance(pages, list) and pages:
+        return len(pages)
+    try:
+        return int(payload.get("pageCount") or payload.get("page_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _choose_ocr_payload(
+    stored: dict[str, Any] | None,
+    fallback: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not stored:
+        return fallback
+    if not fallback:
+        return stored
+    stored_pages = _ocr_payload_page_count(stored)
+    fallback_pages = _ocr_payload_page_count(fallback)
+    stored_structured = _parse_jsonish(stored.get("structuredJson") or stored.get("structured_json"))
+    stored_has_structured_pages = bool(
+        isinstance(stored_structured, dict)
+        and isinstance(stored_structured.get("pages"), list)
+        and stored_structured.get("pages")
+    )
+    if not stored_has_structured_pages or fallback_pages > stored_pages:
+        merged = dict(fallback)
+        if stored.get("confidence") is not None:
+            merged["confidence"] = stored.get("confidence")
+        if stored.get("processedAt"):
+            merged["processedAt"] = stored.get("processedAt")
+        metadata = dict(merged.get("metadata") or {})
+        metadata["replacedIncompleteStoredOcr"] = True
+        merged["metadata"] = metadata
+        return merged
+    return stored
 
 
 def _get_file_ocr_extraction(file_id: str, *, include_structure: bool = False) -> dict[str, Any] | None:
@@ -1286,7 +1402,9 @@ async def view_file(
         raise HTTPException(status_code=500, detail="Could not generate document view URL") from exc
 
     page_number = max(1, page or 1)
-    ocr_payload = _get_file_ocr_extraction(file_id, include_structure=True) or _fallback_file_ocr_payload(record)
+    stored_ocr_payload = _get_file_ocr_extraction(file_id, include_structure=True)
+    fallback_ocr_payload = _fallback_file_ocr_payload(record)
+    ocr_payload = _choose_ocr_payload(stored_ocr_payload, fallback_ocr_payload)
     return {
         "success": True,
         "document": {

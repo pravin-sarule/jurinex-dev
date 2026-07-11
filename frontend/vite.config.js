@@ -8,5 +8,14 @@ export default defineConfig({
   server: {
     strictPort: false,
     hmr: { overlay: false },
+    watch: {
+      ignored: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/dist/**',
+        '**/.vite/**',
+        '**/coverage/**',
+      ],
+    },
   },
 })
