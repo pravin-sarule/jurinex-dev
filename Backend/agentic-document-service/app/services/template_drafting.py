@@ -90,7 +90,6 @@ _INV_RETRIEVAL_CHAR_CAP = 130_000  # budget for the retrieved corpus fed to Stag
 _SECTION_TOP_K = 20              # top-k chunks retrieved per section for drafting
 _SECTION_EVIDENCE_CHAR_CAP = 30_000  # budget for a section's own retrieved evidence
 _PRIOR_DRAFTS_CHAR_CAP = 60_000  # how much already-drafted text to show each section (anti-repeat)
-_MAX_SECTION_CONCURRENCY = 4     # hard cap for parallel section drafts (DRAFT_SECTION_CONCURRENCY knob)
 # RECALL over precision for the fact matrix: if the whole corpus fits this window, the ONE
 # distillation pass reads the FULL documents. Top-k retrieval reliably drops short/tabular
 # facts (a "Bedrooms: 2" cell, a "01-Jul-2025" date) that embed poorly — proven in review —
@@ -661,29 +660,6 @@ def _section_first_line(s: TemplateSection) -> str:
         if raw.strip():
             return raw
     return s.heading or ""
-
-
-# Major structural parts that are SELF-CONTAINED — their content comes from the fact
-# inventory, not from earlier drafted prose — so they can be drafted in parallel. PRAYER /
-# VERIFICATION / affidavits reference the plaint body, so they are NOT listed here (they
-# stay in the sequential chain).
-_INDEPENDENT_PART_RE = re.compile(
-    r"^(?:SCHEDULE|ANNEXURE|SIGNATURES?|WITNESSES|MEMO\s+OF\s+PARTIES|APPENDIX|EXHIBIT|ENCLOSURES?)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_independent_section(section: TemplateSection) -> bool:
-    """True when a section can be drafted WITHOUT seeing the earlier sections' text: a genuine
-    data table/schedule, a slot-dense standalone block (party/execution/witness/bank details),
-    or a self-contained structural part (SCHEDULE/ANNEXURE/SIGNATURES/WITNESSES). These carry
-    no cross-section dependency, so they draft CONCURRENTLY. Narrative recitals and operative
-    clauses cross-reference earlier clauses and restate parties, so they are NOT independent —
-    they stay in the sequential chain that feeds each one the already-drafted prior sections."""
-    if _should_keep_section_standalone(section):
-        return True
-    plain = _boundary_plain(_section_first_line(section)) or ""
-    return bool(_INDEPENDENT_PART_RE.match(plain))
 
 
 def _resplit_at_major_parts(sections: list[TemplateSection]) -> list[TemplateSection]:
@@ -1911,9 +1887,9 @@ def normalize_drafted_markdown(markdown: str, *, section_heading: str | None = N
 
 
 def reconcile_assembled_sections(drafted: list[str]) -> list[str]:
-    """Global coherence pass over ALL drafted sections. When independent blocks draft in
-    PARALLEL each is blind to its siblings, so the same data table can be emitted in two
-    sections at once — a duplication the per-section, against-prior dedupe cannot catch.
+    """Global coherence pass over ALL drafted sections. Sections are drafted in document order
+    and deduped against their predecessors as they go, but the later audit-repair and
+    slot-recovery passes REWRITE sections after that point, so a duplicate table can reappear.
     Re-dedupe every section's tables against ALL earlier sections (keep the first occurrence
     in document order). Per-section STRUCTURE is untouched; this only removes cross-section
     table duplication. Returns a new list (the input is not mutated)."""
@@ -2155,7 +2131,6 @@ async def run_template_drafting_pipeline(
     doc_title: str | None = None,
     cached_fact_inventory: str | None = None,
     enable_audit: bool = True,
-    concurrency: int = 4,
     retrieve_fn: Callable[[str, int], list[dict]] | None = None,
     audit_model: str | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
@@ -2223,10 +2198,25 @@ async def run_template_drafting_pipeline(
         fact_inventory: str = cached_fact_inventory
         yield _prog("Reusing the extracted case facts…\n")
     else:
-        if retrieve_fn is not None:
-            yield _prog("Retrieving the most relevant evidence (RAG) and building the case fact matrix…\n")
+        # Say what this stage ACTUALLY does. extract_fact_inventory only falls back to RAG
+        # retrieval when the corpus is too big to read whole (> _INV_FULL_CONTEXT_MAX_CHARS);
+        # for a normal case it reads every document in full. The old label claimed "Retrieving
+        # … (RAG)" purely because a retrieve_fn existed, so users watched a "retrieving chunks"
+        # message for minutes while nothing was being retrieved — the wait is the single
+        # fact-matrix model call, which is the slowest step of the whole draft on a free-tier
+        # engine (it can emit up to _INVENTORY_MAX_TOKENS).
+        _corpus_len = len(_corpus_from_docs(doc_texts))
+        _matrix_uses_rag = retrieve_fn is not None and _corpus_len > _INV_FULL_CONTEXT_MAX_CHARS
+        if _matrix_uses_rag:
+            yield _prog(
+                f"Case is large ({_corpus_len:,} chars) — retrieving the most relevant evidence (RAG) "
+                f"and building the case fact matrix…\n"
+            )
         else:
-            yield _prog(f"Extracting the case fact matrix from {len(doc_texts)} document(s)…\n")
+            yield _prog(
+                f"Reading all {len(doc_texts)} document(s) in full and building the case fact matrix "
+                f"(the slowest step — one pass over every fact)…\n"
+            )
         _extra_q = [query_text] if (query_text or "").strip() else None
         _alts_b = _reliable_alt_chain(draft_engine)
         _fi: str | None = None
@@ -2269,16 +2259,24 @@ async def run_template_drafting_pipeline(
     if not fact_inventory.strip():
         raise ValueError("fact inventory extraction produced nothing")
 
-    # ---- Stage C: draft sections. Blocks that carry NO cross-section dependency — genuine
-    # data tables/schedules, slot-dense party/execution/witness blocks, self-contained
-    # structural parts — draft CONCURRENTLY (bounded to _MAX_SECTION_CONCURRENCY) for speed.
-    # Narrative recitals and operative clauses cross-reference earlier text and restate
-    # parties, so they stay SEQUENTIAL and still receive every already-committed section as
-    # context — no coherence regression. A global reconciliation pass afterwards removes any
-    # cross-section table duplication the parallel blocks (blind to each other) may produce.
-    # Each finished section streams live; the UI keys sections by index, so out-of-order
-    # arrival is fine. A section that errors becomes a flagged placeholder so one bad section
-    # can't sink the whole draft.
+    # ---- Stage C: draft sections STRICTLY SEQUENTIALLY, in the template's own order
+    # (0, 1, 2 … n-1). Every section is drafted with `prior_drafts` = every section already
+    # committed before it, so no section is ever drafted blind.
+    #
+    # This used to run a two-phase schedule: "independent" blocks (schedules, annexures,
+    # signature/witness blocks) fanned out first with prior_drafts="", then the narrative
+    # clauses ran sequentially. That was wrong on both axes:
+    #   • It bought NO speed — the fan-out was bounded by a semaphore that the free-tier
+    #     engines had to set to 1 anyway, so it was already one-call-at-a-time.
+    #   • It cost accuracy — the fanned-out blocks were blind to each other AND arrived out
+    #     of template order, which is what forced the cross-section table dedupe and the
+    #     global reconciliation pass to exist as cleanup for damage the schedule itself
+    #     caused (the same inventory table emitted twice, sections landing out of order).
+    # Drafting in document order with full prior context is both the accurate and the
+    # structurally faithful thing to do, so that is now the only path.
+    #
+    # A section that errors becomes a flagged placeholder, so one bad section can't sink the
+    # whole draft. Each finished section streams live, in order.
     drafted: list[str] = [""] * n
 
     def _commit_section(i: int, res) -> None:
@@ -2293,59 +2291,7 @@ async def run_template_drafting_pipeline(
             _norm = f"**{sections[i].heading}**\n\n{NOT_FOUND_MARKER}"
         drafted[i] = _norm
 
-    indep_set = {i for i in range(n) if _is_independent_section(sections[i])}
-    indep_idx = [i for i in range(n) if i in indep_set]
-    chained_idx = [i for i in range(n) if i not in indep_set]
-
-    # Phase 1 — independent blocks in parallel (each drafted without prior context).
-    if indep_idx:
-        # Section fan-out is user-controlled via DRAFT_SECTION_CONCURRENCY (.env), clamped 1–4.
-        # Use 1 for low-quota engines like gemma (paid-tier ~16k input tokens/min → 429s on
-        # bursts; the 429-retry helper still paces any over-quota call gracefully) and raise
-        # toward 4 for high-quota engines (gemini/opus) to draft independent sections faster.
-        _sec_conc = max(1, min(concurrency or 1, _MAX_SECTION_CONCURRENCY))
-        _sem = asyncio.Semaphore(_sec_conc)
-        yield _prog(
-            f"Drafting {len(indep_idx)} independent block(s) of {n}, {_sec_conc} at a time…\n"
-        )
-
-        async def _draft_independent(i: int):
-            async with _sem:
-                try:
-                    return i, await run_blocking(
-                        lambda ii=i: draft_section(
-                            sections[ii], fact_inventory, model_name=draft_engine,
-                            user_id=user_id, doc_title=doc_title, retrieve_fn=retrieve_fn,
-                            prior_drafts="",
-                        ),
-                        timeout_s=180.0, timeout_message=f"section_{i}_timeout",
-                    )
-                except Exception as exc:
-                    logger.warning("[template_drafting] section %s failed: %s", i, exc)
-                    return i, None
-
-        _tasks = [asyncio.ensure_future(_draft_independent(i)) for i in indep_idx]
-        try:
-            for _fut in asyncio.as_completed(_tasks):
-                i, res = await _fut
-                _commit_section(i, res)
-                yield ("section", {
-                    "index": i, "total": n,
-                    "heading": sections[i].heading, "markdown": drafted[i],
-                })
-        finally:
-            # If the consumer aborts (client disconnect → generator aclose, or a downstream
-            # error), cancel any still-pending parallel drafts. Without this, the detached
-            # ensure_future tasks keep running after the request is gone — burning model
-            # calls/quota and starting sections a cancelled request should never draft.
-            for _t in _tasks:
-                if not _t.done():
-                    _t.cancel()
-
-    # Phase 2 — chained (narrative) sections SEQUENTIALLY, each seeing every already-committed
-    # section (independent blocks from phase 1 + earlier chained sections) so it does NOT
-    # repeat content (restating parties/dates across clauses).
-    for idx in chained_idx:
+    for idx in range(n):
         yield _prog(f"Drafting section {idx + 1}/{n}: {sections[idx].heading[:80]}…\n")
         prior = "\n\n".join(drafted[j] for j in range(idx) if drafted[j] and drafted[j].strip())
         try:
@@ -2360,8 +2306,8 @@ async def run_template_drafting_pipeline(
             logger.warning("[template_drafting] section %s failed: %s", idx, exc)
             res = None
         _commit_section(idx, res)
-        # Cross-section table dedupe BEFORE streaming: a table already drafted in an earlier
-        # (independent or chained) section must not appear again.
+        # Belt-and-braces: every section already sees all prior text, so it should not restate
+        # an earlier table. Keep the check anyway — a weak engine can still re-emit one.
         if drafted[idx]:
             _dd = dedupe_tables_against_prior(
                 drafted[idx],
@@ -2370,24 +2316,11 @@ async def run_template_drafting_pipeline(
             if _dd != drafted[idx]:
                 logger.info("[template_drafting] removed duplicate table from section %d", idx)
                 drafted[idx] = _dd
-        # Emit each finished section so a section-by-section UI can show it live.
+        # Emit each finished section so the section-by-section UI fills in document order.
         yield ("section", {
             "index": idx, "total": n,
             "heading": sections[idx].heading, "markdown": drafted[idx],
         })
-
-    # ---- Global reconciliation: independent blocks drafted in parallel were blind to each
-    # other, so a data table can appear in two of them. Re-dedupe every section against ALL
-    # earlier sections (keep the first occurrence). Re-emit any section the pass changed so
-    # the live UI matches the final draft.
-    _before_reconcile = list(drafted)
-    drafted = reconcile_assembled_sections(drafted)
-    for i in range(n):
-        if drafted[i] != _before_reconcile[i]:
-            yield ("section", {
-                "index": i, "total": n,
-                "heading": sections[i].heading, "markdown": drafted[i],
-            })
 
     # ---- Stage D: grounding audit + repair (buffer internally; never append copies) ----
     # Run the audit + repair on a GUARDIAN model (audit_model, e.g. Opus) even when a weaker
@@ -2478,11 +2411,11 @@ async def run_template_drafting_pipeline(
             except Exception as exc:
                 logger.warning("[template_drafting] slot recovery of section %s failed: %s", idx, exc)
 
-    # Reconcile once more: Stage D repairs / Stage E slot recovery may have re-introduced a
-    # cross-section duplicate table. Idempotent when nothing changed. Re-emit any section this
-    # pass changes so the live section cards match the final assembled answer (symmetric with
-    # the post-Phase-2 reconcile above — otherwise a table deduped only here would linger on
-    # the streamed card while being absent from the saved draft).
+    # Reconcile: Stage D repairs / Stage E slot recovery rewrite sections AFTER the in-order
+    # dedupe in Stage C, so they can re-introduce a cross-section duplicate table. Idempotent
+    # when nothing changed. Re-emit any section this pass changes so the live section cards
+    # match the final assembled answer — otherwise a table deduped only here would linger on
+    # the streamed card while being absent from the saved draft.
     _before_final_reconcile = list(drafted)
     drafted = reconcile_assembled_sections(drafted)
     for i in range(n):

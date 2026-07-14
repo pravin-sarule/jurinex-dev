@@ -3843,7 +3843,6 @@ async def intelligent_chat_stream(
                                 enable_audit=True,
                                 retrieve_fn=_draft_retrieve,
                                 audit_model=_guardian_model,
-                                concurrency=int(getattr(settings, "draft_section_concurrency", 3) or 3),
                             ):
                                 if _pkind == "progress":
                                     yield _sse(_pdata)
