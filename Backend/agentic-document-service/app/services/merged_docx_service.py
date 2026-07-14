@@ -20,6 +20,9 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 _BOX_CHARS_RE = re.compile(r"[┌└├┤┬┴┼│─┐┘]")
+# Whole decorative banner boxes (e.g. "⚖️ LEXIS ..." headers) are dropped
+# entirely — their inner text is branding noise, not answer content.
+_BOX_BLOCK_RE = re.compile(r"┌[\s─]*┐[\s\S]*?└[\s─]*┘")
 _HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
 _INLINE_TOKEN_RE = re.compile(
     r"(\*\*[^*\n]+\*\*"      # **bold**
@@ -36,6 +39,7 @@ _HR_RE = re.compile(r"^\s*([-*_]\s*){3,}$")
 
 def _clean_answer_markdown(text: str) -> str:
     """Strip UI-only artifacts (ASCII banners, raw HTML tags) from an answer."""
+    text = _BOX_BLOCK_RE.sub("", str(text or ""))
     lines = []
     for line in str(text or "").splitlines():
         stripped = _BOX_CHARS_RE.sub(" ", line) if _BOX_CHARS_RE.search(line) else line

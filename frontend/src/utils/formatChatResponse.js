@@ -3,49 +3,10 @@ import { isStructuredJsonResponse, renderSecretPromptResponse } from './renderSe
 
 const BOX_CHARS = /[┌┐└┘├┤┬┴┼│─]/;
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function extractBoxInnerLines(block) {
-  const lines = [];
-  const parts = String(block).split('│');
-  parts.forEach((part) => {
-    const cleaned = part.replace(/[┌┐└┘├┤┬┴┼─]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (cleaned && !/^[-─\s]+$/.test(cleaned)) {
-      lines.push(cleaned);
-    }
-  });
-  if (lines.length > 0) return lines;
-
-  String(block)
-    .split(/\n/)
-    .forEach((line) => {
-      const cleaned = line.replace(/[┌┐└┘├┤┬┴┼│─]/g, '').trim();
-      if (cleaned) lines.push(cleaned);
-    });
-  return lines;
-}
-
-function renderLegalBannerHtml(innerLines) {
-  if (!innerLines.length) return '';
-  const title = innerLines[0];
-  const meta = innerLines.slice(1).join(' · ');
-  const metaHtml = meta
-    ? `<div class="legal-response-banner__meta">${escapeHtml(meta)}</div>`
-    : '';
-  return (
-    `<div class="legal-response-banner">` +
-    `<div class="legal-response-banner__title">${escapeHtml(title)}</div>` +
-    metaHtml +
-    `</div>`
-  );
-}
-
+// Decorative model-emitted banners ("⚖️ LEXIS ...", "खटला: ... प्रश्नाचा प्रकार: ...")
+// are pure branding noise — drop the whole box instead of rendering it. The
+// system prompt forbids them, but old sessions and occasional slips still
+// contain boxes, so the formatter removes them defensively.
 function convertAsciiLegalBoxes(text) {
   if (!text || typeof text !== 'string' || !BOX_CHARS.test(text)) {
     return text;
@@ -53,15 +14,8 @@ function convertAsciiLegalBoxes(text) {
 
   let result = text;
 
-  result = result.replace(/┌[\s─]+┐[\s\S]*?└[\s─]+┘/g, (block) => {
-    const inner = extractBoxInnerLines(block);
-    return inner.length ? renderLegalBannerHtml(inner) : block;
-  });
-
-  result = result.replace(/┌[\s─]+┐\s*((?:│[^┌└]+│\s*)+)\s*└[\s─]+┘/g, (block) => {
-    const inner = extractBoxInnerLines(block);
-    return inner.length ? renderLegalBannerHtml(inner) : block;
-  });
+  result = result.replace(/┌[\s─]+┐[\s\S]*?└[\s─]+┘/g, '');
+  result = result.replace(/┌[\s─]+┐\s*((?:│[^┌└]+│\s*)+)\s*└[\s─]+┘/g, '');
 
   return result;
 }

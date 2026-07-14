@@ -119,8 +119,10 @@ def create_profile(user_id: str, data: dict[str, Any]) -> dict[str, Any]:
     profile_id = str(uuid.uuid4())
     now = datetime.now(tz=UTC)
 
-    cols = ["id", "user_id"] + _PROFILE_FIELDS + ["created_at", "updated_at"]
-    vals = [profile_id, user_id] + [snake.get(f) for f in _PROFILE_FIELDS] + [now, now]
+    # Skip absent/None fields so column defaults apply (several are NOT NULL).
+    fields = [f for f in _PROFILE_FIELDS if snake.get(f) is not None]
+    cols = ["id", "user_id"] + fields + ["created_at", "updated_at"]
+    vals = [profile_id, user_id] + [snake[f] for f in fields] + [now, now]
     placeholders = ", ".join(["%s"] * len(cols))
     col_list = ", ".join(cols)
 
@@ -144,9 +146,9 @@ def update_profile(user_id: str, profile_id: str, data: dict[str, Any]) -> dict[
     snake = _to_snake(data)
     now = datetime.now(tz=UTC)
 
-    # Only update fields that were provided
+    # Only update fields that were provided (None would violate NOT NULL defaults)
     allowed = set(_PROFILE_FIELDS)
-    updates = {k: v for k, v in snake.items() if k in allowed}
+    updates = {k: v for k, v in snake.items() if k in allowed and v is not None}
     updates["updated_at"] = now
 
     set_clause = ", ".join(f"{k} = %s" for k in updates)

@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Edit2, Trash2, Star, Palette, CheckCircle } from 'lucide-react';
-import { getProfiles, deleteProfile, saveProfile } from '../utils/brandingStorage';
+import { getProfiles, deleteProfile, saveProfile, refreshProfiles } from '../utils/brandingStorage';
 
 export default function BrandingProfilesPage() {
   const navigate = useNavigate();
   const [profiles, setProfiles] = useState([]);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
 
-  useEffect(() => { setProfiles(getProfiles()); }, []);
+  useEffect(() => {
+    setProfiles(getProfiles()); // instant render from cache
+    refreshProfiles().then(setProfiles); // then server truth (survives logout)
+  }, []);
 
   const handleSetDefault = (profile) => {
     saveProfile({ ...profile, isDefault: true });

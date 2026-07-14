@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Palette, CheckCircle, Plus, X, FileText, FileDown } from 'lucide-react';
-import { getProfiles } from '../utils/brandingStorage';
+import { getProfiles, refreshProfiles } from '../utils/brandingStorage';
 
 /**
  * Modal shown before PDF/Word download.
@@ -22,6 +22,12 @@ export default function BrandingSelectModal({ open, onClose, onSelect, format = 
       setProfiles(all);
       const def = all.find(p => p.isDefault);
       setSelected(def ? def.id : 'none');
+      refreshProfiles().then((fresh) => {
+        setProfiles(fresh);
+        setSelected((prev) => (prev !== 'none' && fresh.some(p => p.id === prev))
+          ? prev
+          : (fresh.find(p => p.isDefault)?.id ?? 'none'));
+      });
     }
   }, [open]);
 

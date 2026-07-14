@@ -8,6 +8,8 @@ import { formatChatResponseForDisplay } from '../../utils/formatChatResponse';
 import { markdownTableComponents } from '../../utils/markdownUtils';
 import StreamingMarkdown from '../AnalysisPage/StreamingMarkdown';
 import documentApi from '../../services/documentApi';
+import BrandingDownloadModal from '../BrandingDownload/BrandingDownloadModal';
+import { markdownToExportHtml, escapeHtml } from '../../utils/markdownToExportHtml';
 
 // A Q&A is preset-triggered when the row carries the secret-prompt flag OR a
 // prompt_label (older API responses only returned the label, not the flag).
@@ -59,8 +61,8 @@ const PreviewSection = memo(function PreviewSection({ index, question, answer, s
 const MergeAnswersModal = ({ isOpen, onClose, messages, defaultTitle, sourceName }) => {
   const [assembly, setAssembly] = useState([]); // ordered message ids
   const [title, setTitle] = useState(defaultTitle || 'Merged Legal Analysis');
-  const [exporting, setExporting] = useState(null); // 'docx' | 'pdf' | null
   const [includeQuestions, setIncludeQuestions] = useState(true);
+  const [brandingExport, setBrandingExport] = useState(null); // {format:'pdf'|'word', contentHtml} | null
   const dragIndexRef = useRef(null);
 
   const answered = useMemo(
@@ -149,22 +151,41 @@ const MergeAnswersModal = ({ isOpen, onClose, messages, defaultTitle, sourceName
       source: sourceName || null,
     }));
 
-  const handleDownload = async (format) => {
-    if (!assembledMessages.length || exporting) return;
-    setExporting(format);
-    try {
-      if (format === 'pdf') {
-        await documentApi.exportMergedPdf(title, buildSections(), includeQuestions);
-      } else {
-        await documentApi.exportMergedDocx(title, buildSections(), includeQuestions);
-      }
-      toast.success('Document downloaded.');
-    } catch (err) {
-      console.error('[MergeAnswers] export failed:', err);
-      toast.error(err?.response?.data?.detail || 'Failed to export document.');
-    } finally {
-      setExporting(null);
+  // Direct (unbranded) export via the backend merged-document builders.
+  const handleDirectExport = async (format) => {
+    if (format === 'pdf') {
+      await documentApi.exportMergedPdf(title, buildSections(), includeQuestions);
+    } else {
+      await documentApi.exportMergedDocx(title, buildSections(), includeQuestions);
     }
+  };
+
+  // Merged document as HTML for the branded export path, built from the raw
+  // markdown — NOT the preview DOM: InteractiveTable paginates rows (only the
+  // current page exists in the DOM) and keeps header text inside sort buttons
+  // that the export pipeline strips, so cloned previews lose table content.
+  const buildMergedContentHtml = () => {
+    const parts = [
+      `<h1 style="text-align:center;">${escapeHtml((title || 'Merged Legal Analysis').trim())}</h1>`,
+    ];
+    buildSections().forEach((section, index) => {
+      if (includeQuestions) {
+        parts.push(`<h2>${index + 1}. ${escapeHtml(section.question || `Question ${index + 1}`)}</h2>`);
+      }
+      parts.push(markdownToExportHtml(formatChatResponseForDisplay(section.answer), { headingOffset: 1 }));
+      if (section.source) {
+        parts.push(`<p><em>Source: ${escapeHtml(section.source)}</em></p>`);
+      }
+    });
+    return parts.join('\n');
+  };
+
+  const safeFilename = (ext) =>
+    `${String(title || 'Merged_Legal_Analysis').replace(/[^\w\- ]+/g, '').trim().replace(/ /g, '_') || 'Merged_Legal_Analysis'}.${ext}`;
+
+  const openExportModal = (format) => {
+    if (!assembledMessages.length) return;
+    setBrandingExport({ format, contentHtml: buildMergedContentHtml() });
   };
 
   const handleCopyPlainText = async () => {
@@ -381,24 +402,36 @@ const MergeAnswersModal = ({ isOpen, onClose, messages, defaultTitle, sourceName
               <Copy className="h-4 w-4" /> Copy as plain text
             </button>
             <button
-              onClick={() => handleDownload('pdf')}
-              disabled={!assembledMessages.length || Boolean(exporting)}
+              onClick={() => openExportModal('pdf')}
+              disabled={!assembledMessages.length}
               className="flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium text-[#21C1B6] border border-[#21C1B6] hover:bg-[#E0F7F6] rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Download className="h-4 w-4" />
-              {exporting === 'pdf' ? 'Generating…' : 'Download .pdf'}
+              Download .pdf
             </button>
             <button
-              onClick={() => handleDownload('docx')}
-              disabled={!assembledMessages.length || Boolean(exporting)}
+              onClick={() => openExportModal('word')}
+              disabled={!assembledMessages.length}
               className="flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium text-white bg-[#21C1B6] hover:bg-[#1AA49B] rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Download className="h-4 w-4" />
-              {exporting === 'docx' ? 'Generating…' : 'Download .docx'}
+              Download .docx
             </button>
           </div>
         </div>
       </div>
+
+      {brandingExport && (
+        <BrandingDownloadModal
+          isOpen
+          onClose={() => setBrandingExport(null)}
+          contentHtml={brandingExport.contentHtml}
+          filename={safeFilename(brandingExport.format === 'word' ? 'docx' : 'pdf')}
+          format={brandingExport.format}
+          module="merge-answers"
+          onDirect={() => handleDirectExport(brandingExport.format === 'word' ? 'docx' : 'pdf')}
+        />
+      )}
     </div>
   );
 };

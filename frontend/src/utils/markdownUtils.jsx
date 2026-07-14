@@ -408,6 +408,13 @@ export function normalizeMarkdownFormatting(text) {
   // Strip chain-of-thought / <think> blocks first so reasoning never renders.
   let t = stripReasoning(text);
 
+  // Convert model-emitted inline HTML to markdown — renderers escape HTML, so
+  // <strong>…</strong> would otherwise display as literal tag text.
+  t = t
+    .replace(/<\s*(strong|b)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, '**$2**')
+    .replace(/<\s*(em|i)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, '*$2*')
+    .replace(/&nbsp;/gi, ' ');
+
   // 0a. Collapse degenerate single-column "fragment tables" (one syllable per
   //     row) back into prose BEFORE the chronology/table converters run — they
   //     bail out when a pipe table is present, so this must come first.

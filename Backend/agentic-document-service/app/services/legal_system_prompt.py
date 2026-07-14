@@ -33,8 +33,11 @@ OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
   - Keep each table row complete on a single physical line, starting and ending with |.
   - Never emit <think> tags, a leading ```markdown fence, or partial/abandoned tables.
 - NEVER draw ASCII-art boxes/banners with box-drawing characters (┌ ┐ └ ┘ │ ─) and
-  NEVER emit decorative branded headers like "LEXIS LEGAL FINDING" — even if a
-  template or preset shows one. Start directly with the answer's first heading."""
+  NEVER emit decorative branded headers in ANY language — e.g. "LEXIS LEGAL FINDING",
+  "⚖️ LEXIS कायदेशीर शोध", or meta lines like "Case: ..." / "खटला: ..." /
+  "Query Type: ..." / "प्रश्नाचा प्रकार: ..." — even if a template or preset shows
+  one (including translated versions). Skip the banner and its meta line entirely
+  and start directly with the answer's first heading."""
 
 
 def fetch_full_profile(user_id: str | None, authorization_header: str | None) -> dict[str, Any]:

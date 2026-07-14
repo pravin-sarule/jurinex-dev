@@ -180,10 +180,15 @@ function parseMarkdown(md) {
   const esc = (s) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  // inline() escapes first, then applies formatting so injected < > & are safe
+  // inline() escapes first, then applies formatting so injected < > & are safe.
+  // Attribute-free formatting tags are then re-allowed: convertMarkdownMarkers
+  // (inside normalizeMarkdownFormatting) intentionally emits <strong>/<em>, and
+  // models occasionally emit them too — without this they render as literal tags.
   const inline = (s) =>
     esc(s)
       .replace(/&lt;br\s*\/?&gt;/gi, '<br/>')
+      .replace(/&lt;(?:strong|b)&gt;([\s\S]*?)&lt;\/(?:strong|b)&gt;/gi, '<strong>$1</strong>')
+      .replace(/&lt;(?:em|i)&gt;([\s\S]*?)&lt;\/(?:em|i)&gt;/gi, '<em>$1</em>')
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
         '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;font-weight:600;background:#e6fbf9;padding:0 4px;border-radius:4px">$1</a>')
       .replace(/\*\*\*([^\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')

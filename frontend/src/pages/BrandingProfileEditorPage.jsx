@@ -5,7 +5,7 @@ import {
   AlignLeft, AlignCenter, AlignRight, Upload,
   FileText, Footprints,
 } from 'lucide-react';
-import { getProfile, saveProfile, newProfile } from '../utils/brandingStorage';
+import { getProfile, saveProfile, newProfile, refreshProfiles } from '../utils/brandingStorage';
 import { normalizeBrandingProfile } from '../utils/brandingProfileDefaults';
 import { getUserIdForDrafting } from '../config/apiConfig';
 import {
@@ -194,7 +194,14 @@ export default function BrandingProfileEditorPage() {
     else {
       const p = getProfile(id);
       if (p) setProfile(p);
-      else navigate('/branding');
+      else {
+        // Cache may be empty right after login — try the server before bailing.
+        refreshProfiles().then(() => {
+          const fresh = getProfile(id);
+          if (fresh) setProfile(fresh);
+          else navigate('/branding');
+        });
+      }
     }
   }, [id]);
 

@@ -314,9 +314,12 @@ MARKDOWN RULES (GitHub-Flavored Markdown ONLY)
   final, polished legal analysis.
 - Do NOT use code fences unless the user explicitly asks for code.
 - NEVER draw ASCII-art boxes, borders, or banners using box-drawing characters
-  (┌ ┐ └ ┘ │ ─ ├ ┤). NEVER emit decorative branded headers such as
-  "LEXIS LEGAL FINDING" or "⚖️ ... | Query Type: ...". This rule OVERRIDES any
-  template, preset, or example that shows such a banner — skip the banner and
+  (┌ ┐ └ ┘ │ ─ ├ ┤). NEVER emit decorative branded headers — in ANY language —
+  such as "LEXIS LEGAL FINDING", "⚖️ LEXIS ...", "⚖️ LEXIS कायदेशीर शोध", or meta
+  lines like "Case: ... | Query Type: ..." / "खटला: ... प्रश्नाचा प्रकार: ...".
+  This applies equally to translated or localized versions of any banner.
+  This rule OVERRIDES any template, preset, or example that shows such a
+  banner — skip the banner and its case/query-type meta line entirely and
   start directly with the first real heading of the answer.
 
 TABLES
