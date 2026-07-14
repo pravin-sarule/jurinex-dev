@@ -19,6 +19,7 @@ from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.platypus import (
     ListFlowable,
     ListItem,
@@ -85,6 +86,31 @@ for level in range(1, 7):
         spaceAfter=4,
         textColor=colors.HexColor("#111827"),
     )
+
+
+class _NumberedCanvas(pdf_canvas.Canvas):
+    """Two-pass canvas that stamps 'Page X of Y' centred in the bottom margin."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_states: list[dict] = []
+
+    def showPage(self):
+        self._saved_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total = len(self._saved_states)
+        for state in self._saved_states:
+            self.__dict__.update(state)
+            self._draw_page_number(total)
+            super().showPage()
+        super().save()
+
+    def _draw_page_number(self, total: int) -> None:
+        self.setFont("Helvetica", 8.5)
+        self.setFillColor(colors.HexColor("#6B7280"))
+        self.drawCentredString(A4[0] / 2, 10 * mm, f"Page {self._pageNumber} of {total}")
 
 
 def _inline_markup(text: str) -> str:
@@ -271,5 +297,195 @@ def build_merged_pdf(
         if source:
             story.append(Paragraph(f"<i>Source: {escape(source)}</i>", _STYLES["source"]))
 
-    doc.build(story)
+    doc.build(story, canvasmaker=_NumberedCanvas)
     return buffer.getvalue()
+
+
+# ── HTML rendering (Chromium path) ────────────────────────────────────────────
+# reportlab's Helvetica has no Devanagari/Indic glyphs and reportlab cannot do
+# complex-script shaping, so Marathi/Hindi answers render as boxes. When
+# Playwright is available the endpoint renders this HTML with Chromium instead,
+# which shapes every script correctly via system fonts (Noto). The CSS mirrors
+# the reportlab layout so both paths look the same for Latin text.
+
+import html as _html
+
+_MERGED_HTML_CSS = """
+body{font-family:Helvetica,Arial,'Noto Sans','Noto Sans Devanagari',sans-serif;font-size:11pt;line-height:1.4;color:#000;margin:0;}
+.doc-title{font-size:20pt;font-weight:700;text-align:center;margin:0 0 2pt;}
+.doc-meta{text-align:center;font-size:8pt;color:#6B7280;margin:0 0 14pt;}
+h1{font-size:17pt;font-weight:700;color:#111827;margin:10pt 0 4pt;page-break-after:avoid;}
+h2{font-size:15.5pt;font-weight:700;color:#111827;margin:10pt 0 4pt;page-break-after:avoid;}
+h3{font-size:14pt;font-weight:700;color:#111827;margin:8pt 0 4pt;page-break-after:avoid;}
+h4{font-size:12.5pt;font-weight:700;color:#111827;margin:8pt 0 4pt;page-break-after:avoid;}
+h5{font-size:11pt;font-weight:700;color:#111827;margin:8pt 0 4pt;page-break-after:avoid;}
+h6{font-size:10.5pt;font-weight:700;color:#111827;margin:8pt 0 4pt;page-break-after:avoid;}
+p{margin:0 0 7pt;text-align:justify;}
+ul,ol{margin:0 0 7pt;padding-left:18pt;}
+li{margin-bottom:3pt;text-align:justify;}
+table{width:100%;border-collapse:collapse;margin:0 0 8pt;font-size:9.5pt;page-break-inside:auto;}
+thead{display:table-header-group;}
+tr{page-break-inside:avoid;}
+th{border:.5pt solid #9CA3AF;background:#F3F4F6;font-weight:700;padding:3pt 4pt;text-align:left;vertical-align:top;}
+td{border:.5pt solid #D1D5DB;padding:3pt 4pt;vertical-align:top;}
+pre{background:#F3F4F6;font-family:'Courier New',monospace;font-size:9pt;padding:4pt 6pt;white-space:pre-wrap;word-break:break-word;margin:0 0 8pt;}
+code{font-family:'Courier New',monospace;font-size:9.5pt;}
+.origin{font-size:8.5pt;color:#9CA3AF;font-style:italic;margin:0 0 6pt;}
+.source{font-size:8.5pt;color:#6B7280;font-style:italic;margin:4pt 0 10pt;}
+.section-gap{margin-top:14pt;}
+"""
+
+# Margins + centred "Page X of Y" footer for branding_pdf_service.html_to_pdf,
+# matching the reportlab layout (A4, ~20 mm margins, small grey footer).
+MERGED_PDF_PRINT_PROFILE = {
+    "pageSize": "a4",
+    "marginTop": 18,
+    "marginRight": 20,
+    "marginBottom": 10,
+    "marginLeft": 20,
+    "footerEnabled": True,
+    "footerPattern": "Page {n} of {total}",
+    "footerFontSize": 8.5,
+    "footerColor": "#6B7280",
+    "footerPosition": "bottom-center",
+}
+
+
+def _inline_html(text: str) -> str:
+    """Convert inline **bold** / *italic* / `code` to HTML (escaping everything else)."""
+    parts: list[str] = []
+    for token in _INLINE_TOKEN_RE.split(text):
+        if not token:
+            continue
+        if token.startswith("**") and token.endswith("**") and len(token) > 4:
+            parts.append(f"<strong>{_html.escape(token[2:-2])}</strong>")
+        elif token.startswith("*") and token.endswith("*") and len(token) > 2:
+            parts.append(f"<em>{_html.escape(token[1:-1])}</em>")
+        elif token.startswith("`") and token.endswith("`") and len(token) > 2:
+            parts.append(f"<code>{_html.escape(token[1:-1])}</code>")
+        else:
+            parts.append(_html.escape(token))
+    return "".join(parts)
+
+
+def _markdown_to_html(markdown: str, *, heading_offset: int = 1) -> str:
+    """Render the same GFM subset as _render_markdown, emitting HTML."""
+    out: list[str] = []
+    lines = markdown.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if not line.strip():
+            i += 1
+            continue
+
+        if line.lstrip().startswith("```"):
+            code_lines: list[str] = []
+            i += 1
+            while i < len(lines) and not lines[i].lstrip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1
+            out.append(f"<pre>{_html.escape(chr(10).join(code_lines))}</pre>")
+            continue
+
+        if _TABLE_ROW_RE.match(line) and i + 1 < len(lines) and _TABLE_SEPARATOR_RE.match(lines[i + 1]):
+            table_rows = []
+            while i < len(lines) and _TABLE_ROW_RE.match(lines[i]):
+                table_rows.append(lines[i])
+                i += 1
+            header = _split_table_row(table_rows[0])
+            body_lines = [r for r in table_rows[1:] if not _TABLE_SEPARATOR_RE.match(r)]
+            html_rows = ["<table><thead><tr>" + "".join(f"<th>{_inline_html(c)}</th>" for c in header) + "</tr></thead><tbody>"]
+            for row in body_lines:
+                html_rows.append("<tr>" + "".join(f"<td>{_inline_html(c)}</td>" for c in _split_table_row(row)) + "</tr>")
+            html_rows.append("</tbody></table>")
+            out.append("".join(html_rows))
+            continue
+
+        heading = _HEADING_RE.match(line)
+        if heading:
+            level = min(6, len(heading.group(1)) + heading_offset)
+            text = heading.group(2).strip().strip("*").strip()
+            out.append(f"<h{level}>{_inline_html(text)}</h{level}>")
+            i += 1
+            continue
+
+        if _HR_RE.match(line):
+            i += 1
+            continue
+
+        if _BULLET_RE.match(line) or _NUMBERED_RE.match(line):
+            numbered = bool(_NUMBERED_RE.match(line))
+            pattern = _NUMBERED_RE if numbered else _BULLET_RE
+            items = []
+            while i < len(lines) and pattern.match(lines[i]):
+                items.append(f"<li>{_inline_html(pattern.match(lines[i]).group(1))}</li>")
+                i += 1
+            tag = "ol" if numbered else "ul"
+            out.append(f"<{tag}>{''.join(items)}</{tag}>")
+            continue
+
+        para_lines = [line.strip()]
+        i += 1
+        while (
+            i < len(lines)
+            and lines[i].strip()
+            and not _HEADING_RE.match(lines[i])
+            and not _BULLET_RE.match(lines[i])
+            and not _NUMBERED_RE.match(lines[i])
+            and not _TABLE_ROW_RE.match(lines[i])
+            and not lines[i].lstrip().startswith("```")
+        ):
+            para_lines.append(lines[i].strip())
+            i += 1
+        out.append(f"<p>{_inline_html(' '.join(para_lines))}</p>")
+
+    return "".join(out)
+
+
+def build_merged_html(
+    title: str,
+    sections: list[dict[str, Any]],
+    *,
+    include_questions: bool = True,
+) -> str:
+    """Full HTML document for Chromium printing — same contract as build_merged_pdf."""
+    doc_title = (title or "").strip() or "Merged Legal Analysis"
+    meta = f"Generated on {datetime.now(timezone.utc).strftime('%d %B %Y')}"
+    if len(sections) > 1:
+        meta += f" · {len(sections)} section(s)"
+
+    body: list[str] = [
+        f'<div class="doc-title">{_html.escape(doc_title)}</div>',
+        f'<div class="doc-meta">{_html.escape(meta)}</div>',
+    ]
+
+    for index, section in enumerate(sections, start=1):
+        if include_questions:
+            question = str(section.get("question") or "").strip() or f"Question {index}"
+            body.append(f"<h1>{index}. {_inline_html(question)}</h1>")
+        elif index > 1:
+            body.append('<div class="section-gap"></div>')
+
+        origin_label = str(section.get("origin_label") or "").strip()
+        if origin_label:
+            body.append(f'<div class="origin">{_html.escape(origin_label)}</div>')
+
+        answer = _clean_answer_markdown(str(section.get("answer") or ""))
+        if answer:
+            body.append(_markdown_to_html(answer, heading_offset=1))
+        else:
+            body.append("<p>(No answer content)</p>")
+
+        source = str(section.get("source") or "").strip()
+        if source:
+            body.append(f'<div class="source">Source: {_html.escape(source)}</div>')
+
+    return (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        f"<style>{_MERGED_HTML_CSS}</style></head><body>"
+        + "".join(body)
+        + "</body></html>"
+    )

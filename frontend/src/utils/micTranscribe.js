@@ -1,3 +1,5 @@
+import { getUserIdForDrafting } from '../config/apiConfig';
+
 /**
  * Transcribe a short microphone recording via agentic-document-service
  * (Google Cloud Speech-to-Text — not LLM transcription).
@@ -10,8 +12,17 @@ export async function transcribeMicAudio(blob, mimeType, serviceBaseUrl) {
   const form = new FormData();
   form.append('file', blob, `recording.${ext}`);
 
+  // The backend's token guard requires the caller's identity on /transcribe.
+  const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
+  const userId = getUserIdForDrafting();
+  const headers = {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(userId ? { 'X-User-Id': userId } : {}),
+  };
+
   const res = await fetch(`${base}/api/v1/speech/transcribe`, {
     method: 'POST',
+    headers,
     body: form,
   });
 

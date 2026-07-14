@@ -15,6 +15,8 @@ from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 _BOX_CHARS_RE = re.compile(r"[┌└├┤┬┴┼│─┐┘]")
@@ -176,6 +178,34 @@ def _render_markdown(document, markdown: str, *, heading_offset: int = 1) -> Non
         _add_inline_runs(para, " ".join(para_lines))
 
 
+def _append_field(run, instruction: str) -> None:
+    """Append a Word field (e.g. PAGE / NUMPAGES) to a run."""
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = instruction
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run._r.append(begin)
+    run._r.append(instr)
+    run._r.append(end)
+
+
+def _add_page_number_footer(document) -> None:
+    """Centred 'Page X of Y' footer on every page."""
+    footer_para = document.sections[0].footer.paragraphs[0]
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for text, field in (("Page ", "PAGE"), (" of ", "NUMPAGES")):
+        run = footer_para.add_run(text)
+        run.font.size = Pt(8.5)
+        run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+        field_run = footer_para.add_run()
+        field_run.font.size = Pt(8.5)
+        field_run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+        _append_field(field_run, field)
+
+
 def build_merged_docx(
     title: str,
     sections: list[dict[str, Any]],
@@ -190,6 +220,7 @@ def build_merged_docx(
     document reads as a continuous set of answers.
     """
     document = Document()
+    _add_page_number_footer(document)
 
     doc_title = (title or "").strip() or "Merged Legal Analysis"
     heading = document.add_heading(doc_title, level=0)

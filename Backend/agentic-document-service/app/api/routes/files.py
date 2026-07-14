@@ -3360,21 +3360,38 @@ def export_merged_pdf(request: MergedDocxRequest):
     """Assemble selected Q&A answers into a single downloadable .pdf."""
     from fastapi.responses import Response as FastAPIResponse
 
-    from app.services.merged_pdf_service import build_merged_pdf
+    from app.services import branding_pdf_service
+    from app.services.merged_pdf_service import (
+        MERGED_PDF_PRINT_PROFILE,
+        build_merged_html,
+        build_merged_pdf,
+    )
 
     if not request.sections:
         raise HTTPException(status_code=400, detail="Select at least one answer to export.")
     if len(request.sections) > 200:
         raise HTTPException(status_code=400, detail="Too many sections (max 200).")
-    try:
-        data = build_merged_pdf(
-            request.title,
-            [section.model_dump() for section in request.sections],
-            include_questions=request.include_questions,
-        )
-    except Exception as exc:
-        logger.exception("[Route:export_merged_pdf] build failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to build the document.") from exc
+    sections = [section.model_dump() for section in request.sections]
+
+    # Prefer Chromium: it shapes complex scripts (Marathi/Hindi Devanagari) that
+    # reportlab's Helvetica cannot render. reportlab remains the fallback.
+    data = None
+    if branding_pdf_service.is_pdf_renderer_available():
+        try:
+            html = build_merged_html(
+                request.title, sections, include_questions=request.include_questions
+            )
+            data = branding_pdf_service.html_to_pdf(html, MERGED_PDF_PRINT_PROFILE)
+        except Exception as exc:
+            logger.warning("[Route:export_merged_pdf] chromium render failed, falling back to reportlab: %s", exc)
+    if data is None:
+        try:
+            data = build_merged_pdf(
+                request.title, sections, include_questions=request.include_questions
+            )
+        except Exception as exc:
+            logger.exception("[Route:export_merged_pdf] build failed: %s", exc)
+            raise HTTPException(status_code=500, detail="Failed to build the document.") from exc
     safe_title = re.sub(r"[^\w\- ]+", "", request.title).strip().replace(" ", "_") or "Merged_Legal_Analysis"
     return FastAPIResponse(
         content=data,

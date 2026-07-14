@@ -32,6 +32,7 @@ import {
   Table,
   TableBorders,
   TableCell,
+  TableLayoutType,
   TableRow,
   TextRun,
   UnderlineType,
@@ -118,93 +119,73 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-// Returns an ImportedXmlComponent for a diagonal DrawingML watermark.
-// Namespaces are declared inline on the <w:p> so the fragment is self-contained.
+// Returns an ImportedXmlComponent for a diagonal watermark using Word's native
+// VML WordArt format (v:shape + v:textpath) — the same markup Word itself
+// writes for Design → Watermark. DrawingML shape rotation is ignored by several
+// viewers; the VML form renders rotated everywhere (Word, LibreOffice, Google Docs).
 function buildWatermarkComponent(p) {
   const wmText = String(p.watermarkText || '').trim();
   if (!wmText) return null;
-
-  // Match the SVG preview exactly: font-family="sans-serif", font-weight="900", font-size from profile
-  const ff = 'Arial';
-  const wmFontSizePt = p.watermarkFontSize ?? 72; // same fallback as the SVG preview
-  const wmSz = Math.round(wmFontSizePt * 2); // half-points (OOXML w:sz unit)
 
   // SVG preview uses fill="black" fill-opacity=X on white background.
   // Equivalent solid color on white: gray = 255 * (1 - opacity)
   const opacity = p.watermarkOpacity ?? 0.12;
   const grayVal = Math.max(10, Math.min(254, Math.round(255 * (1 - opacity))));
-  const gHex = grayVal.toString(16).padStart(2, '0').toUpperCase();
-  const wmColor = `${gHex}${gHex}${gHex}`;
+  const gHex = grayVal.toString(16).padStart(2, '0');
+  const wmColor = `#${gHex}${gHex}${gHex}`;
 
-  // OOXML a:xfrm rot: 1/60000 of a degree, positive = clockwise.
-  // Profile default watermarkRotation = -45 (top-left → bottom-right diagonal).
-  // ooXmlRot = -(-45) * 60000 = 2700000 (45° CW).
-  const rotation = Number(p.watermarkRotation ?? -45);
-  const ooXmlRot = Math.round(-rotation * 60000);
+  // VML rotation: degrees clockwise in [0, 360). Profile -45 (up-to-the-right
+  // diagonal, same as the SVG preview) maps to Word's classic rotation:315.
+  const rotation = Number(p.watermarkAngle ?? p.watermarkRotation ?? -45);
+  const vmlRot = ((Math.round(rotation) % 360) + 360) % 360;
 
-  // Shape: ~528pt × ~220pt in EMU (1pt = 12700 EMU)
-  const cx = 6706050;
-  const cy = 2793300;
+  // v:textpath scales text to fill the shape, so the shape box must be derived
+  // from the profile font size for parity with the PDF/preview watermark:
+  // width ≈ chars × fontSize × 0.62 (Arial bold), height ≈ fontSize × 1.4.
+  const wmFontSizePt = Number(p.watermarkFontSize) || 72;
+  const shapeW = Math.round(Math.max(60, wmText.length * wmFontSizePt * 0.62) * 100) / 100;
+  const shapeH = Math.round(wmFontSizePt * 1.4 * 100) / 100;
 
-  const ffSafe = escapeXml(ff);
   const wmSafe = escapeXml(wmText);
 
   const xml = `<w:p
     xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-    xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-    xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+    xmlns:v="urn:schemas-microsoft-com:vml"
+    xmlns:o="urn:schemas-microsoft-com:office:office">
     <w:pPr><w:jc w:val="center"/></w:pPr>
     <w:r>
       <w:rPr><w:noProof/></w:rPr>
-      <w:drawing>
-        <wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0"
-          relativeHeight="251659264" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1">
-          <wp:simplePos x="0" y="0"/>
-          <wp:positionH relativeFrom="margin"><wp:align>center</wp:align></wp:positionH>
-          <wp:positionV relativeFrom="margin"><wp:align>center</wp:align></wp:positionV>
-          <wp:extent cx="${cx}" cy="${cy}"/>
-          <wp:effectExtent l="0" t="0" r="0" b="0"/>
-          <wp:wrapNone/>
-          <wp:docPr id="1001" name="JuriNexWatermark"/>
-          <wp:cNvGraphicFramePr/>
-          <a:graphic>
-            <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
-              <wps:wsp>
-                <wps:cNvSpPr><a:spLocks noChangeArrowheads="1"/></wps:cNvSpPr>
-                <wps:spPr>
-                  <a:xfrm rot="${ooXmlRot}">
-                    <a:off x="0" y="0"/>
-                    <a:ext cx="${cx}" cy="${cy}"/>
-                  </a:xfrm>
-                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
-                  <a:noFill/>
-                </wps:spPr>
-                <wps:txbx>
-                  <w:txbxContent>
-                    <w:p>
-                      <w:pPr><w:jc w:val="center"/></w:pPr>
-                      <w:r>
-                        <w:rPr>
-                          <w:rFonts w:ascii="${ffSafe}" w:hAnsi="${ffSafe}" w:cs="${ffSafe}"/>
-                          <w:b/>
-                          <w:bCs/>
-                          <w:sz w:val="${wmSz}"/>
-                          <w:szCs w:val="${wmSz}"/>
-                          <w:color w:val="${wmColor}"/>
-                        </w:rPr>
-                        <w:t>${wmSafe}</w:t>
-                      </w:r>
-                    </w:p>
-                  </w:txbxContent>
-                </wps:txbx>
-                <wps:bodyPr rot="0" vert="horz" wrap="square"
-                  lIns="0" tIns="0" rIns="0" bIns="0" anchor="ctr" anchorCtr="0"/>
-              </wps:wsp>
-            </a:graphicData>
-          </a:graphic>
-        </wp:anchor>
-      </w:drawing>
+      <w:pict>
+        <v:shapetype id="_x0000_t136" coordsize="21600,21600" o:spt="136" adj="10800" path="m@7,l@8,m@5,21600l@6,21600e">
+          <v:formulas>
+            <v:f eqn="sum #0 0 10800"/>
+            <v:f eqn="prod #0 2 1"/>
+            <v:f eqn="sum 21600 0 @1"/>
+            <v:f eqn="sum 0 0 @2"/>
+            <v:f eqn="sum 21600 0 @3"/>
+            <v:f eqn="if @0 @3 0"/>
+            <v:f eqn="if @0 21600 @1"/>
+            <v:f eqn="if @0 0 @2"/>
+            <v:f eqn="if @0 @4 21600"/>
+            <v:f eqn="mid @5 @6"/>
+            <v:f eqn="mid @8 @5"/>
+            <v:f eqn="mid @7 @8"/>
+            <v:f eqn="mid @6 @7"/>
+            <v:f eqn="sum @6 0 @5"/>
+          </v:formulas>
+          <v:path textpathok="t" o:connecttype="custom" o:connectlocs="@9,0;@10,10800;@11,21600;@12,10800" o:connectangles="270,180,90,0"/>
+          <v:textpath on="t" fitshape="t"/>
+          <v:handles>
+            <v:h position="#0,bottomRight" xrange="6629,14971"/>
+          </v:handles>
+          <o:lock v:ext="edit" text="t" shapetype="t"/>
+        </v:shapetype>
+        <v:shape id="JuriNexWatermark" o:spid="_x0000_s2049" type="#_x0000_t136"
+          style="position:absolute;margin-left:0;margin-top:0;width:${shapeW}pt;height:${shapeH}pt;rotation:${vmlRot};z-index:-251656192;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin"
+          o:allowincell="f" fillcolor="${wmColor}" stroked="f">
+          <v:textpath style="font-family:&quot;Arial&quot;;font-size:1pt" string="${wmSafe}"/>
+        </v:shape>
+      </w:pict>
     </w:r>
   </w:p>`;
 
@@ -219,7 +200,10 @@ function buildWatermarkComponent(p) {
 
 // ── Word Header builder ───────────────────────────────────────────────────────
 
-function buildHeader(p, logoBuffer, { forPdf = false } = {}) {
+// Default printable width: A4 minus 20 mm margins each side.
+const DEFAULT_CONTENT_TWIP = 11906 - 2 * mmToTwip(20);
+
+function buildHeader(p, logoBuffer, { forPdf = false, contentWidthTwip = DEFAULT_CONTENT_TWIP } = {}) {
   const ff = p.fontFamily || 'Times New Roman';
   const logoPos = p.logoPosition || 'right';
   const align = docxAlign(p.letterheadAlignment);
@@ -267,38 +251,49 @@ function buildHeader(p, logoBuffer, { forPdf = false } = {}) {
       })
     : new Paragraph({ children: [] });
 
-  const makeCell = (widthPct, children, vAlign = VerticalAlign.TOP) =>
-    new TableCell({ width: { size: widthPct, type: WidthType.PERCENTAGE }, borders: noBorders(), verticalAlign: vAlign, children });
+  // Explicit twip (DXA) widths + fixed layout: percentage cell widths serialize
+  // as non-conformant `w:w="25%"` with a 100-twip fallback grid, which collapses
+  // the letterhead columns in LibreOffice / Google Docs / docx viewers.
+  const logoColTwip = Math.round(contentWidthTwip * 0.25);
+  const textColTwip = contentWidthTwip - logoColTwip;
+  const makeCell = (widthTwip, children, vAlign = VerticalAlign.TOP) =>
+    new TableCell({ width: { size: widthTwip, type: WidthType.DXA }, borders: noBorders(), verticalAlign: vAlign, children });
 
   let rows;
+  let columnWidths;
 
   if (logoPos === 'center') {
     // Logo above firm details, all centered in one wide cell
+    columnWidths = [contentWidthTwip];
     rows = [new TableRow({
-      children: [makeCell(100, [
+      children: [makeCell(contentWidthTwip, [
         ...(logoBuffer ? [new Paragraph({ alignment: AlignmentType.CENTER, children: [new ImageRun({ data: logoBuffer, transformation: { width: logoW, height: logoH }, type: imgType })] })] : []),
         ...detailParas,
       ])],
     })];
   } else if (logoPos === 'left') {
+    columnWidths = [logoColTwip, textColTwip];
     rows = [new TableRow({
       children: [
-        makeCell(25, [makeLogoPara(AlignmentType.LEFT)]),
-        makeCell(75, detailParas),
+        makeCell(logoColTwip, [makeLogoPara(AlignmentType.LEFT)]),
+        makeCell(textColTwip, detailParas),
       ],
     })];
   } else {
     // right (default)
+    columnWidths = [textColTwip, logoColTwip];
     rows = [new TableRow({
       children: [
-        makeCell(75, detailParas),
-        makeCell(25, [makeLogoPara(AlignmentType.RIGHT)]),
+        makeCell(textColTwip, detailParas),
+        makeCell(logoColTwip, [makeLogoPara(AlignmentType.RIGHT)]),
       ],
     })];
   }
 
   const headerTable = new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
+    width: { size: contentWidthTwip, type: WidthType.DXA },
+    columnWidths,
+    layout: TableLayoutType.FIXED,
     borders: noBorders(),
     rows,
   });
@@ -472,10 +467,12 @@ function nodeToDocxItems(node, items, ff, fontSize, listTrackers) {
       if (li.tagName.toLowerCase() !== 'li') continue;
       const runs = [];
       for (const child of li.childNodes) {
-        if (child.nodeType === 1 && /^(ul|ol|p|div|h[1-6])$/.test(child.tagName.toLowerCase())) {
-          // nested block inside li — flush runs first then recurse
-          continue;
-        }
+        // Nested lists are emitted as their own paragraphs below.
+        if (child.nodeType === 1 && /^(ul|ol)$/.test(child.tagName.toLowerCase())) continue;
+        // Loose list items wrap their text in <p> (ReactMarkdown) — inline it,
+        // separating successive blocks with a line break.
+        const isBlock = child.nodeType === 1 && /^(p|div|h[1-6])$/.test(child.tagName.toLowerCase());
+        if (isBlock && runs.length) runs.push(new TextRun({ text: '', break: 1, ...baseRun }));
         runs.push(...collectInlineRuns(child, { ...baseRun }));
       }
       const bullet = isOrdered ? `${idx++}.  ` : '•  ';
@@ -533,6 +530,10 @@ function nodeToDocxItems(node, items, ff, fontSize, listTrackers) {
   if (tag === 'table') {
     const docxRows = [];
     const trs = Array.from(node.querySelectorAll(':scope > thead > tr, :scope > tbody > tr, :scope > tr'));
+    const tableWidthTwip = listTrackers?.contentWidthTwip || DEFAULT_CONTENT_TWIP;
+    const nCols = Math.max(1, ...trs.map((tr) =>
+      Array.from(tr.children).filter((c) => /^(td|th)$/i.test(c.tagName)).length));
+    const colTwip = Math.floor(tableWidthTwip / nCols);
     for (const tr of trs) {
       const docxCells = [];
       for (const cell of tr.children) {
@@ -549,6 +550,7 @@ function nodeToDocxItems(node, items, ff, fontSize, listTrackers) {
           }));
         }
         docxCells.push(new TableCell({
+          width: { size: colTwip, type: WidthType.DXA },
           shading: isHeader ? { type: 'clear', fill: 'F3F4F6' } : undefined,
           borders: cellBorder('D1D5DB'),
           verticalAlign: VerticalAlign.TOP,
@@ -562,7 +564,9 @@ function nodeToDocxItems(node, items, ff, fontSize, listTrackers) {
     }
     if (docxRows.length) {
       items.push(new Table({
-        width: { size: 100, type: WidthType.PERCENTAGE },
+        width: { size: tableWidthTwip, type: WidthType.DXA },
+        columnWidths: Array(nCols).fill(colTwip),
+        layout: TableLayoutType.FIXED,
         rows: docxRows,
       }));
       items.push(new Paragraph({ spacing: { after: 120 }, children: [] }));
@@ -598,7 +602,7 @@ function nodeToDocxItems(node, items, ff, fontSize, listTrackers) {
   }));
 }
 
-function htmlToDocxParagraphs(html, profile) {
+function htmlToDocxParagraphs(html, profile, contentWidthTwip = DEFAULT_CONTENT_TWIP) {
   if (!html || !html.trim()) return [new Paragraph({ children: [] })];
 
   const p = normalizeBrandingProfile(profile);
@@ -611,7 +615,7 @@ function htmlToDocxParagraphs(html, profile) {
   div.innerHTML = html;
 
   const items = [];
-  const trackers = { bodyColor: bodyC, lineSpacing, headingPt };
+  const trackers = { bodyColor: bodyC, lineSpacing, headingPt, contentWidthTwip };
   for (const child of div.childNodes) {
     nodeToDocxItems(child, items, ff, fontSize, trackers);
   }
@@ -666,7 +670,8 @@ export async function buildBrandedDocxBlob(profile, contentHtml, { forPdf = fals
   const pageWidth  = isLandscape ? pageSize.height : pageSize.width;
   const pageHeight = isLandscape ? pageSize.width  : pageSize.height;
 
-  const contentItems = htmlToDocxParagraphs(contentHtml || '', p);
+  const contentWidthTwip = pageWidth - mmToTwip(p.marginLeft ?? 20) - mmToTwip(p.marginRight ?? 20);
+  const contentItems = htmlToDocxParagraphs(contentHtml || '', p, contentWidthTwip);
   const bodyTopMm = computeBodyTopMm(p);
 
   const doc = new Document({
@@ -685,7 +690,7 @@ export async function buildBrandedDocxBlob(profile, contentHtml, { forPdf = fals
           },
         },
       },
-      headers: { default: buildHeader(p, logoBuffer, { forPdf }) },
+      headers: { default: buildHeader(p, logoBuffer, { forPdf, contentWidthTwip }) },
       footers: { default: buildFooter(p) },
       children: contentItems,
     }],
