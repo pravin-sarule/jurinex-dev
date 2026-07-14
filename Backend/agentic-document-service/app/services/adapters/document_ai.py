@@ -1020,12 +1020,24 @@ def _generate_text_claude(
         response = client.messages.create(**create_kwargs)
 
     usage = getattr(response, "usage", None)
-    logger.info(
-        "[TokenUsage] provider=claude  model=%s  prompt_tokens=%s  completion_tokens=%s  total_tokens=%s",
-        api_model,
-        getattr(usage, "input_tokens", "?"),
-        getattr(usage, "output_tokens", "?"),
-        (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0),
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    # RECORD, don't just print. This path is what every non-streaming Claude agent uses —
+    # including the draft guardian (grounding/format audit, section repair, slot recovery).
+    # It used to emit a bare logger.info, so its tokens never reached the per-request
+    # accumulator: the guardian's Opus calls were invisible to the DRAFT COMPLETE cost table
+    # and their (real, billed) cost was silently omitted from the end-to-end total.
+    log_token_usage_table(
+        context="claude_generate",
+        usage={
+            "provider": "claude",
+            "model": api_model,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens,
+        },
+        provider="claude",
+        model_name=api_model,
     )
 
     # Extract text from content blocks (thinking blocks are skipped)
@@ -1093,12 +1105,21 @@ def _generate_text_deepseek(
         )
         raise
     usage = getattr(response, "usage", None)
-    logger.info(
-        "[TokenUsage] provider=deepseek  model=%s  prompt_tokens=%s  completion_tokens=%s  total_tokens=%s",
-        api_model,
-        getattr(usage, "prompt_tokens", "?"),
-        getattr(usage, "completion_tokens", "?"),
-        getattr(usage, "total_tokens", "?"),
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    # Record (not just print) — same accumulator bug as the non-streaming Claude path.
+    log_token_usage_table(
+        context="deepseek_generate",
+        usage={
+            "provider": "deepseek",
+            "model": api_model,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": total_tokens,
+        },
+        provider="deepseek",
+        model_name=api_model,
     )
     return normalize_markdown_render_output(response.choices[0].message.content or "") if response.choices else ""
 

@@ -127,6 +127,15 @@ class Settings(BaseSettings):
         default=65536,
         validation_alias=AliasChoices("DRAFT_MAX_OUTPUT_TOKENS"),
     )
+    # GUARDIAN model for the draft audit passes (Stage D grounding + format audit, section repair;
+    # Stage E slot recovery). This is the model that CHECKS and REWRITES what the draft engine
+    # produced, so it is billed on every draft — Opus is the strongest backstop but the most
+    # expensive. Blank -> auto (claude-opus-4-8 when ANTHROPIC_API_KEY is set, else
+    # gemini-3.1-pro-preview). The frontend guardian dropdown overrides this per draft.
+    draft_guardian_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DRAFT_GUARDIAN_MODEL"),
+    )
     # Minimum seconds between successive Gemma API requests (GLOBAL across threads, retries
     # included). Free Google AI Studio keys allow only 15 requests/min on gemma models, and
     # the gemma endpoint 500s far more under rapid-fire calls — 9s spacing ≈ 6-7 RPM keeps

@@ -316,6 +316,19 @@ def _extract_template_skeleton(template_text: str, *, max_items: int = 45) -> li
 _DRAFT_FACTINV_CACHE: dict[str, str] = {}
 _DRAFT_FACTINV_CACHE_MAX = 40
 
+# Models a draft request may select, per role. Allowlisted so an arbitrary model string can
+# never be injected through the request body. The DRAFT engine writes the sections; the
+# STRUCTURE model maps the template (Stage A); the GUARDIAN audits/repairs the result
+# (Stage D/E) — guardian and structure share the wider list (they are read/critique tasks,
+# so the cheap flash models are legitimate choices there).
+_DRAFT_ALLOWED_MODELS = {
+    "gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-2.5-flash",
+    "claude-opus-4-8", "claude-sonnet-5",
+    "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+}
+_STRUCTURE_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS
+_GUARDIAN_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS
+
 
 def _draft_factinv_key(folder_name: str, user_id: Any, doc_texts: list[dict]) -> str:
     sig = "|".join(sorted(
@@ -3358,10 +3371,6 @@ async def intelligent_chat_stream(
                     _draft_model_name = ""
                     _analysis_model = "gemini-3.1-pro-preview"
                     if is_draft:
-                        _DRAFT_ALLOWED_MODELS = {
-                            "gemini-3.1-pro-preview", "claude-opus-4-8", "claude-sonnet-5",
-                            "gemma-4-31b-it", "gemma-4-26b-a4b-it",
-                        }
                         _req_draft_model = (getattr(chat_request, "draft_model", None) or "").strip()
                         _draft_model_name = (
                             _req_draft_model if _req_draft_model in _DRAFT_ALLOWED_MODELS
@@ -3369,7 +3378,6 @@ async def intelligent_chat_stream(
                         )
                         # Stage-A structure model selector (frontend dropdown). Same allowlist
                         # plus gemini flash; anything else → the reliable pro default.
-                        _STRUCTURE_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS | {"gemini-3.5-flash", "gemini-2.5-flash"}
                         _req_structure_model = (getattr(chat_request, "analysis_model", None) or "").strip()
                         _analysis_model = (
                             _req_structure_model if _req_structure_model in _STRUCTURE_ALLOWED_MODELS
@@ -3807,20 +3815,38 @@ async def intelligent_chat_stream(
                                         "page": _ch.get("page_number"),
                                     })
                                 return _norm
-                        # Guardian model for the audit + repair pass: a strong model (Opus)
-                        # catches and rewrites a weaker draft engine's hallucinations. If the
-                        # engine is already Opus, reuse it; otherwise prefer Opus when an
-                        # Anthropic key is configured, else the capable analysis model.
+                        # Guardian model for the audit + repair passes (Stage D grounding/format
+                        # audit + section repair, Stage E slot recovery). This is the model that
+                        # CHECKS the draft, and it is billed on every draft — so it is explicitly
+                        # selectable rather than silently forced.
+                        #   1) frontend guardian dropdown (chat_request.guardian_model)
+                        #   2) DRAFT_GUARDIAN_MODEL in .env
+                        #   3) auto: Opus when an Anthropic key exists, else gemini-3.1-pro
+                        # Same allowlist as the structure model, so an arbitrary model string
+                        # cannot be injected through the request.
                         _draft_engine_lc = (resolved_model_name or "").lower()
-                        if _draft_engine_lc.startswith("claude-opus"):
+                        _req_guardian = (getattr(chat_request, "guardian_model", None) or "").strip()
+                        _env_guardian = (getattr(settings, "draft_guardian_model", "") or "").strip()
+                        if _req_guardian in _GUARDIAN_ALLOWED_MODELS:
+                            _guardian_model = _req_guardian
+                            _guardian_src = "request"
+                        elif _env_guardian in _GUARDIAN_ALLOWED_MODELS:
+                            _guardian_model = _env_guardian
+                            _guardian_src = "env"
+                        elif _draft_engine_lc.startswith("claude-opus"):
                             _guardian_model = resolved_model_name
+                            _guardian_src = "auto(engine-is-opus)"
                         elif getattr(settings, "anthropic_api_key", "") or getattr(settings, "ANTHROPIC_API_KEY", ""):
                             _guardian_model = "claude-opus-4-8"
+                            _guardian_src = "auto(anthropic-key)"
                         else:
                             _guardian_model = "gemini-3.1-pro-preview"
+                            _guardian_src = "auto(no-anthropic-key)"
                         logger.info(
-                            "[Route:intelligent_chat_stream] folder=%s draft engine=%s guardian(audit)=%s",
-                            folder_name, resolved_model_name, _guardian_model,
+                            "[Route:intelligent_chat_stream] folder=%s draft engine=%s structure=%s "
+                            "guardian(audit)=%s via=%s",
+                            folder_name, resolved_model_name, _analysis_model,
+                            _guardian_model, _guardian_src,
                         )
                         # Mark where this draft's token entries begin so we can report the
                         # per-model burn for JUST this draft after the pipeline finishes.

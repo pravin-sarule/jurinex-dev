@@ -958,6 +958,9 @@ const ChatInterface = () => {
   // Draft engine selector (shown only when a template is attached). '' = default (Gemini).
   const [draftModel, setDraftModel] = useState('');
   const [structureModel, setStructureModel] = useState(''); // Stage-A template structure model ('' = default)
+  // Stage-D/E guardian: the model that AUDITS and repairs the draft the engine produced.
+  // '' = server default (Opus when an Anthropic key is set, else Gemini 3.1 Pro).
+  const [guardianModel, setGuardianModel] = useState('');
   const [animatedResponseContent, setAnimatedResponseContent] = useState("");
   const [thinkingContent, setThinkingContent] = useState("");
   const [currentStatus, setCurrentStatus] = useState(null);
@@ -2362,6 +2365,7 @@ const ChatInterface = () => {
             template: draftTemplate,
             model: draftModel,
             structureModel: structureModel,
+            guardianModel: guardianModel,
             folderName: dfName,
             sessionId: selectedChatSessionId || null,
           });
@@ -4050,6 +4054,8 @@ const ChatInterface = () => {
                     className="flex-shrink-0 text-xs rounded-lg border border-gray-200 bg-white text-gray-700 px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-[#21C1B6] cursor-pointer"
                   >
                     <option value="">Gemini (default)</option>
+                    <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                     <option value="claude-opus-4-8">Claude Opus</option>
                     <option value="claude-sonnet-5">Claude Sonnet</option>
                     <option value="gemma-4-31b-it">Gemma 4 31B</option>
@@ -4068,6 +4074,20 @@ const ChatInterface = () => {
                     <option value="claude-sonnet-5">Structure: Claude Sonnet</option>
                     <option value="gemma-4-31b-it">Structure: Gemma 4 31B</option>
                     <option value="gemma-4-26b-a4b-it">Structure: Gemma 4 26B</option>
+                  </select>
+                  <select
+                    value={guardianModel}
+                    onChange={(e) => setGuardianModel(e.target.value)}
+                    title="Guardian (Stage D/E) — audits the finished draft against the case facts, repairs flagged sections and recovers unfilled slots. This model is billed on every draft."
+                    className="flex-shrink-0 text-xs rounded-lg border border-gray-200 bg-white text-gray-700 px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-[#21C1B6] cursor-pointer"
+                  >
+                    <option value="">Guardian: auto (default)</option>
+                    <option value="claude-opus-4-8">Guardian: Claude Opus</option>
+                    <option value="claude-sonnet-5">Guardian: Claude Sonnet</option>
+                    <option value="gemini-3.1-pro-preview">Guardian: Gemini 3.1 Pro</option>
+                    <option value="gemini-2.5-flash">Guardian: Gemini 2.5 Flash</option>
+                    <option value="gemma-4-31b-it">Guardian: Gemma 4 31B</option>
+                    <option value="gemma-4-26b-a4b-it">Guardian: Gemma 4 26B</option>
                   </select>
                 </>
               ) : (
@@ -4508,6 +4528,7 @@ const ChatInterface = () => {
           template={draftStudio.template}
           draftModel={draftStudio.model}
           structureModel={draftStudio.structureModel}
+          guardianModel={draftStudio.guardianModel}
           sessionId={draftStudio.sessionId}
           authToken={getAuthToken()}
           onSaved={(sid) => {

@@ -24,6 +24,7 @@ export default function DraftStudioModal({
   template,        // { gcsPath, mimetype, filename }
   draftModel,      // '' | 'claude-opus-4-8' | 'claude-sonnet-5' | 'gemini-3.1-pro-preview'
   structureModel,  // '' (default gemini-3.1-pro) | any allowed model for Stage-A analysis
+  guardianModel,   // '' (server default) | the model that AUDITS/repairs the draft (Stage D/E)
   sessionId,
   authToken,
   onSaved,
@@ -75,6 +76,7 @@ export default function DraftStudioModal({
           template_mimetype: template?.mimetype,
           ...(draftModel ? { draft_model: draftModel } : {}),
           ...(structureModel ? { analysis_model: structureModel } : {}),
+          ...(guardianModel ? { guardian_model: guardianModel } : {}),
         }),
         signal: controller.signal,
       });
@@ -112,7 +114,7 @@ export default function DraftStudioModal({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, folderName, question, sessionId, template, draftModel, structureModel, authToken]);
+  }, [baseUrl, folderName, question, sessionId, template, draftModel, structureModel, guardianModel, authToken]);
 
   const handleEvent = (evt) => {
     const type = evt?.type;
