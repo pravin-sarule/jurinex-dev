@@ -1,10 +1,48 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, FileText, Loader2, CheckCircle2, Download, ArrowLeft, Sparkles, AlertTriangle, Copy, Printer, Code, Check } from 'lucide-react';
-import DraftDocumentView from './DraftDocumentView';
+import DraftDocumentView, { DraftTiptapDocumentView } from './DraftDocumentView';
 import DraftEditor from './DraftEditor';
 import { downloadAsPdf, downloadAsWord, downloadAsHtml, printResponse, getCleanText } from '../../utils/responseExportUtils';
-import { canonicalizeFieldPlaceholders, fixInlineEmphasis } from '../../utils/legalDraftRender';
+import { canonicalizeFieldPlaceholders, fixInlineEmphasis, normalizeLegalDraftMarkdownForRender } from '../../utils/legalDraftRender';
+
+function isTiptapDoc(value) {
+  return !!(
+    value
+    && typeof value === 'object'
+    && value.type === 'doc'
+    && Array.isArray(value.content)
+  );
+}
+
+function normalizeTiptapDoc(value) {
+  if (!isTiptapDoc(value)) return null;
+  return {
+    type: 'doc',
+    content: value.content.length ? value.content : [{ type: 'paragraph' }],
+  };
+}
+
+function mergeSectionTiptapDoc(sectionList) {
+  const content = [];
+  (sectionList || []).forEach((section) => {
+    if (!section) return;
+    if (Array.isArray(section.tiptapContent)) {
+      content.push(...section.tiptapContent);
+      return;
+    }
+    if (isTiptapDoc(section.tiptapJson)) {
+      content.push(...section.tiptapJson.content);
+    }
+  });
+  return content.length ? { type: 'doc', content } : null;
+}
+
+function prepareSectionMarkdown(markdown) {
+  return canonicalizeFieldPlaceholders(
+    normalizeLegalDraftMarkdownForRender(fixInlineEmphasis(String(markdown || ''))),
+  );
+}
 
 /**
  * Draft Studio — a dedicated popup for draft-from-template generation.
@@ -30,10 +68,12 @@ export default function DraftStudioModal({
   onSaved,
 }) {
   const [sections, setSections] = useState([]);       // array indexed by section index
+  const [outlineSections, setOutlineSections] = useState([]);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState('generating'); // 'generating' | 'ready' | 'error'
   const [statusText, setStatusText] = useState('Starting…');
   const [finalAnswer, setFinalAnswer] = useState('');
+  const [finalTiptapJson, setFinalTiptapJson] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [downloadName, setDownloadName] = useState('draft.docx');
   const [phase, setPhase] = useState('sections');     // 'sections' | 'final'
@@ -118,11 +158,25 @@ export default function DraftStudioModal({
 
   const handleEvent = (evt) => {
     const type = evt?.type;
-    if (type === 'draft_section') {
+    if (type === 'draft_outline') {
+      if (typeof evt.total === 'number') setTotal(evt.total);
+      setOutlineSections(Array.isArray(evt.sections) ? evt.sections : []);
+    } else if (type === 'draft_section') {
       if (typeof evt.total === 'number') setTotal(evt.total);
       setSections((prev) => {
         const next = prev.slice();
-        next[evt.index] = { index: evt.index, heading: evt.heading || `Section ${evt.index + 1}`, markdown: evt.markdown || '' };
+        const markdown = evt.markdown || '';
+        next[evt.index] = {
+          index: evt.index,
+          heading: evt.heading || `Section ${evt.index + 1}`,
+          markdown,
+          renderMarkdown: prepareSectionMarkdown(markdown),
+          sectionId: evt.section_id || evt.sectionId || null,
+          tiptapJson: normalizeTiptapDoc(evt.tiptap_json),
+          tiptapContent: Array.isArray(evt.tiptap_content) ? evt.tiptap_content : null,
+          legalSection: evt.legal_section || null,
+          templateLayout: evt.template_layout || null,
+        };
         return next;
       });
     } else if (type === 'thinking') {
@@ -133,6 +187,8 @@ export default function DraftStudioModal({
     } else if (type === 'done') {
       const ans = evt.answer || chunkBufRef.current || '';
       if (ans) setFinalAnswer(ans);
+      const docJson = normalizeTiptapDoc(evt.draft_tiptap_json);
+      if (docJson) setFinalTiptapJson(docJson);
       if (evt.draft_download_url) setDownloadUrl(evt.draft_download_url);
       if (evt.draft_filename) setDownloadName(evt.draft_filename);
       setStatus('ready');
@@ -169,7 +225,8 @@ export default function DraftStudioModal({
   const filled = sections.filter(Boolean);
   const doneCount = filled.length;
   const pct = total > 0 ? Math.min(100, Math.round((doneCount / total) * 100)) : (status === 'ready' ? 100 : 8);
-  const mergedFromSections = filled.map((s) => s.markdown).join('\n\n');
+  const mergedFromSections = filled.map((s) => s.renderMarkdown || prepareSectionMarkdown(s.markdown)).join('\n\n');
+  const mergedTiptapDoc = normalizeTiptapDoc(finalTiptapJson) || mergeSectionTiptapDoc(filled);
   // Canonicalise bare "[ BANK NAME ]" placeholders into the red span at the SOURCE so every
   // consumer of the draft — the read-only view, the editor, the .docx/PDF export, and the
   // remaining-fields counter below — sees the same red, fillable placeholders. Idempotent:
@@ -341,7 +398,17 @@ export default function DraftStudioModal({
 
               {filled.length === 0 && status !== 'error' && (
                 <div style={{ padding: '28px 0', textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
-                  Analyzing the template and extracting the case facts…
+                  {outlineSections.length ? 'Template outline ready. Drafting the first section…' : 'Analyzing the template and extracting the case facts…'}
+                </div>
+              )}
+
+              {filled.length === 0 && outlineSections.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                  {outlineSections.slice(0, 8).map((s) => (
+                    <div key={s.section_id || s.index} style={{ border: '1px dashed #dbe3e1', borderRadius: 10, background: '#fff', padding: '9px 12px', color: '#78908b', fontSize: 12 }}>
+                      {Number(s.index) + 1}. {s.heading || `Section ${Number(s.index) + 1}`}
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -365,7 +432,11 @@ export default function DraftStudioModal({
                       </span>
                     </div>
                     <div style={{ padding: '10px 16px' }}>
-                      <DraftDocumentView raw={s.markdown} />
+                      {Array.isArray(s.tiptapContent) && s.tiptapContent.length ? (
+                        <DraftTiptapDocumentView content={s.tiptapContent} />
+                      ) : (
+                        <DraftDocumentView raw={s.renderMarkdown || s.markdown} />
+                      )}
                     </div>
                   </div>
                 ))}
@@ -386,6 +457,7 @@ export default function DraftStudioModal({
                 <DraftEditor
                   ref={editorRef}
                   initialMarkdown={finalDoc}
+                  initialTiptapJson={mergedTiptapDoc}
                   onChange={handleEditChange}
                 />
               </div>

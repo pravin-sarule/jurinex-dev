@@ -8,7 +8,7 @@ import { FieldPill } from './FieldPill';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
-import { draftLineAlign, canonicalizeFieldPlaceholders, fixInlineEmphasis } from '../../utils/legalDraftRender';
+import { draftLineAlign, canonicalizeFieldPlaceholders, fixInlineEmphasis, normalizeLegalDraftMarkdownForRender } from '../../utils/legalDraftRender';
 import {
   Bold, Italic, Underline as UnderlineIcon, Strikethrough,
   AlignLeft, AlignCenter, AlignRight, AlignJustify,
@@ -76,7 +76,8 @@ export function markdownToHtml(md) {
   // Repair space-padded bold ("** RENT AGREEMENT **" → "**RENT AGREEMENT**") so titles bold,
   // then canonicalise bare "[ BANK NAME ]" placeholders into the red span BEFORE parsing so the
   // FieldPill node turns every unfilled field into a clickable red pill (not black text).
-  const html = marked.parse(canonicalizeFieldPlaceholders(fixInlineEmphasis(String(md || ''))), { gfm: true, breaks: false, async: false });
+  const normalized = normalizeLegalDraftMarkdownForRender(fixInlineEmphasis(String(md || '')));
+  const html = marked.parse(canonicalizeFieldPlaceholders(normalized), { gfm: true, breaks: false, async: false });
   return applyEditorAlignment(html);
 }
 
@@ -284,7 +285,28 @@ function Toolbar({ editor }) {
 }
 
 // ── editor ───────────────────────────────────────────────────────────────────
-const DraftEditor = forwardRef(function DraftEditor({ initialMarkdown, onChange, debounceMs = 900 }, ref) {
+function isTiptapDoc(value) {
+  return !!(
+    value
+    && typeof value === 'object'
+    && value.type === 'doc'
+    && Array.isArray(value.content)
+  );
+}
+
+function normalizeTiptapDoc(value) {
+  if (!isTiptapDoc(value)) return null;
+  return {
+    type: 'doc',
+    content: value.content.length ? value.content : [{ type: 'paragraph' }],
+  };
+}
+
+function stableJson(value) {
+  try { return JSON.stringify(value || null); } catch { return ''; }
+}
+
+const DraftEditor = forwardRef(function DraftEditor({ initialMarkdown, initialTiptapJson, onChange, debounceMs = 900 }, ref) {
   const contentElRef = useRef(null);
   const debounceRef = useRef(null);
   const latestMdRef = useRef(String(initialMarkdown || ''));
@@ -293,7 +315,13 @@ const DraftEditor = forwardRef(function DraftEditor({ initialMarkdown, onChange,
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
-  const initialHtml = useMemo(() => markdownToHtml(initialMarkdown), [initialMarkdown]);
+  const initialJson = useMemo(() => normalizeTiptapDoc(initialTiptapJson), [initialTiptapJson]);
+  const initialHtml = useMemo(() => (initialJson ? null : markdownToHtml(initialMarkdown)), [initialJson, initialMarkdown]);
+  const initialContent = initialJson || initialHtml;
+  const initialContentKey = useMemo(
+    () => (initialJson ? stableJson(initialJson) : String(initialHtml || '')),
+    [initialJson, initialHtml],
+  );
 
   const editor = useEditor({
     extensions: [
@@ -309,7 +337,7 @@ const DraftEditor = forwardRef(function DraftEditor({ initialMarkdown, onChange,
       TableCell,
       FieldPill,
     ],
-    content: initialHtml,
+    content: initialContent,
     editorProps: {
       attributes: {
         style: `font-family:${SERIF}; font-size:15px; line-height:1.7; color:#1a1a1a; outline:none; min-height:320px;`,
@@ -333,16 +361,20 @@ const DraftEditor = forwardRef(function DraftEditor({ initialMarkdown, onChange,
 
   // Reset content if the incoming draft changes identity (e.g. re-generated).
   useEffect(() => {
-    if (editor && initialHtml && editor.getHTML() !== initialHtml) {
-      // only reset when the editor is empty-ish or the source truly changed
-      const cur = htmlToMarkdown(editor.getHTML());
-      if (!cur.trim() || cur === latestMdRef.current) {
-        editor.commands.setContent(initialHtml, { emitUpdate: false });
-        latestMdRef.current = String(initialMarkdown || '');
-      }
+    if (!editor || !initialContent) return;
+    const unchanged = initialJson
+      ? stableJson(editor.getJSON()) === initialContentKey
+      : editor.getHTML() === initialContentKey;
+    if (unchanged) return;
+    // Only reset when the editor is empty-ish or still matches the last saved value.
+    // Once the user edits, incoming section/final events must not clobber their work.
+    const cur = htmlToMarkdown(editor.getHTML());
+    if (!cur.trim() || cur === latestMdRef.current) {
+      editor.commands.setContent(initialContent, { emitUpdate: false });
+      latestMdRef.current = String(initialMarkdown || '');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialHtml, editor]);
+  }, [initialContentKey, editor]);
 
   useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
 

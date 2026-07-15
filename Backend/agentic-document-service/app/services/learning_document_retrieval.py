@@ -157,10 +157,15 @@ def get_relevant_chunks(
 
     pipeline = get_pipeline_service()
     req = QueryRequest(user_id=user_id, case_id=case_id, query=q)
+    # Ceiling was 12, which silently clamped every caller — a broad/comprehensive chat asks for
+    # top_k=30 to fill the model's context budget, but got only 12 primary chunks (~a sliver of a
+    # 1,600-chunk case), starving input and answers. Honour the caller's top_k up to 48 (narrow
+    # asks and learning mode pass <=12, so they are unchanged). The underlying hybrid retriever
+    # respects top_k; the downstream char budget + rerank still cap what reaches the prompt.
     hits = pipeline.retrieve_learning_chunk_hits(
         req,
         file_ids,
-        top_k=max(3, min(top_k or 5, 12)),
+        top_k=max(3, min(top_k or 5, 48)),
         similarity_floor=similarity_floor or 0.0,
     )
 

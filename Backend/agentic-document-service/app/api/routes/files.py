@@ -204,7 +204,8 @@ def _is_trivial_query(query: str) -> bool:
 
 
 def _doc_context_char_budget(
-    query: str, *, learning_mode: bool, is_deep: bool, is_comprehensive: bool
+    query: str, *, learning_mode: bool, is_deep: bool, is_comprehensive: bool,
+    model_name: str | None = None,
 ) -> int:
     """Dynamically size the document context to the QUESTION (relevance/speed over blind cost):
       - greeting / chit-chat   ->   8,000  (~3K tokens; barely any doc — 'hi' shouldn't load the case)
@@ -212,16 +213,31 @@ def _doc_context_char_budget(
       - comprehensive / broad  -> 260,000  (~95K tokens)
       - extreme / deep         -> 550,000  (~200K tokens; the whole doc even for large PDFs)
       - learning mode          -> 160,000  (unchanged)
-    gemma-4's input limit is ~262K tokens (~727K chars), so even the top tier leaves headroom."""
+    gemma-4's context WINDOW is ~262K tokens, but a free-tier key is rate-limited to only
+    16,000 INPUT tokens/minute — so any tier above ~13K tokens 429s on Gemma no matter the
+    window. When the answering model is Gemma, the budget is hard-capped to
+    settings.gemma_max_context_chars (default 48K chars ≈ 12K tokens) so a single request stays
+    under the per-minute quota. Raise GEMMA_MAX_CONTEXT_CHARS once billing lifts the ceiling."""
     if learning_mode:
-        return 160000
-    if _is_trivial_query(query):
-        return 8000
-    if is_deep:
-        return 550000
-    if is_comprehensive:
-        return 260000
-    return 90000
+        budget = 160000
+    elif _is_trivial_query(query):
+        budget = 8000
+    elif is_deep:
+        budget = 550000
+    elif is_comprehensive:
+        budget = 260000
+    else:
+        budget = 90000
+    try:
+        from app.services.adapters.document_ai import _is_gemma_model
+        if _is_gemma_model(model_name):
+            from app.core.config import get_settings
+            cap = int(getattr(get_settings(), "gemma_max_context_chars", 48000) or 48000)
+            if cap > 0:
+                budget = min(budget, cap)
+    except Exception:
+        pass
+    return budget
 
 
 def _extract_template_text_sync(data: bytes, mime_type: str | None, filename: str | None) -> str:
@@ -237,11 +253,31 @@ def _extract_template_text_sync(data: bytes, mime_type: str | None, filename: st
 
     if is_word_mime(mime_type) or is_word_filename(filename or ""):
         return (extract_word_text(data, mime_type=mime_type, filename=filename) or "").strip()
-    # Digital PDF templates extract instantly and exactly via pypdf.
+    # Digital PDF templates extract instantly via pypdf. Prefer layout-mode extraction:
+    # normal extract_text() can collapse a pleading cause title into one huge line and
+    # then emit wrapped words one-per-line, which destroys section mapping. Layout mode
+    # preserves the visible PDF line breaks the template actually uses.
     try:
         import io as _io
+        import re as _re
         from pypdf import PdfReader  # type: ignore
-        text = "\n".join((page.extract_text() or "") for page in PdfReader(_io.BytesIO(data)).pages).strip()
+        pages = PdfReader(_io.BytesIO(data)).pages
+        layout_pages = []
+        for page in pages:
+            try:
+                raw = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                raw = ""
+            if raw.strip():
+                cleaned_lines = []
+                for line in raw.replace("\r", "\n").split("\n"):
+                    stripped = _re.sub(r"[ \t]+", " ", line).strip()
+                    cleaned_lines.append(stripped)
+                layout_pages.append("\n".join(cleaned_lines).strip())
+        layout_text = "\n\n".join(p for p in layout_pages if p).strip()
+        if len(layout_text) > 40:
+            return layout_text
+        text = "\n".join((page.extract_text() or "") for page in pages).strip()
         if len(text) > 40:
             return text
     except Exception:
@@ -328,6 +364,25 @@ _DRAFT_ALLOWED_MODELS = {
 }
 _STRUCTURE_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS
 _GUARDIAN_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS
+
+# Shown when a free-tier Gemma chat exhausts its per-minute input-token quota and the request
+# can't be satisfied by waiting (see GemmaInputTPMExceeded). Actionable, not a raw 429 dump.
+_GEMMA_INPUT_TPM_USER_MESSAGE = (
+    "This question needs more of the case than the current free-tier model allows per minute "
+    "(16,000 input tokens/min on Gemma). Try a narrower question, ask again in about a minute, "
+    "switch the chat model, or enable billing to lift the limit."
+)
+
+# Shown when a Gemma comprehensive/deep NON-STREAM call runs past its (already generous) timeout.
+# We deliberately do NOT chain a second generic-QA call after this: the timed-out call's executor
+# thread cannot be cancelled and is still consuming the 16K/min input budget, so a second call would
+# just stack on top and 429. A clean retry message is both honest and cheaper.
+_GEMMA_SLOW_TIMEOUT_USER_MESSAGE = (
+    "The free-tier model is responding slowly right now and this detailed answer ran past the time "
+    "limit. Please try again in a minute (the free tier is throttled and can be temporarily "
+    "overloaded), ask a narrower question, switch the chat model, or enable billing for faster, "
+    "higher-priority responses."
+)
 
 
 def _draft_factinv_key(folder_name: str, user_id: Any, doc_texts: list[dict]) -> str:
@@ -2808,11 +2863,26 @@ async def intelligent_chat_stream(
         if requested_model_name.lower() in {"", "gemini", "claude", "deepseek", "default"}:
             requested_model_name = ""
         selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
+        # ── Admin-panel model control ────────────────────────────────────────────────
+        # When the user did NOT explicitly pick a model in chat (no secret-prompt model, no dropdown),
+        # use the model configured in the LLM Management → Summarization Chat panel
+        # (summarization_chat_config.llm_model). That table IS live-synced to this service's DB, unlike
+        # the agent_prompts row the model previously resolved from (a separate super-admin store the
+        # panel never writes to — model changes there never reached us). Passing it as
+        # selected_model_name flows it through as model_name_override everywhere, so it wins over the
+        # stale agent_prompts row and an admin's panel choice takes effect with NO DB edits.
+        # Precedence kept: secret-prompt model > in-chat dropdown > LLM Management panel > agent_prompts.
+        _panel_model = str((llm_config or {}).get("llm_model") or "").strip()
+        _model_source = "in_chat" if selected_model_name else None
+        if not selected_model_name and _panel_model:
+            selected_model_name = _panel_model
+            _model_source = "llm_management_panel(summarization_chat_config)"
         logger.info(
-            "[Route:intelligent_chat_stream] model_resolution folder=%s secret_id=%s model=%s",
+            "[Route:intelligent_chat_stream] model_resolution folder=%s secret_id=%s model=%s source=%s",
             folder_name,
             (chat_request.secret_id or "").strip() or None,
             selected_model_name,
+            _model_source or "agent_prompts_fallback",
         )
 
         folder_service = get_folder_service()
@@ -2954,6 +3024,45 @@ async def intelligent_chat_stream(
             )
         except Exception:
             effective_query_text = query_text
+
+        # Free-tier Gemma: cap the system prompt + conversation history + question at
+        # gemma_history_system_max_chars (~5K tokens) so document chunks always get their full ~9K
+        # budget and total input stays ~14K. If the history block is too long, drop the OLDEST
+        # turns — the "Current question:" tail is always preserved. (Only trims for a Gemma chat;
+        # other models keep full history.)
+        try:
+            from app.services.adapters.document_ai import _is_gemma_model as _is_gemma_hist
+            _eff_settings = get_settings()
+            # Resolve the effective chat model (selected override, else the admin grounded model).
+            _hist_model = selected_model_name
+            if not _hist_model:
+                try:
+                    from app.services.agent_config_service import get_agent_config as _gac_hist
+                    _hist_model = (_gac_hist("grounded_retrieval_agent").model_name or "").strip()
+                except Exception:
+                    _hist_model = ""
+            if (not learning_mode) and _is_gemma_hist(_hist_model) and effective_query_text:
+                _hist_cap = int(getattr(_eff_settings, "gemma_history_system_max_chars", 20000) or 20000)
+                # system prompt is built below (build_document_qa_system_prompt ~3.2K chars); reserve for it
+                _room = max(2000, _hist_cap - 3200)
+                if len(effective_query_text) > _room:
+                    _marker = "Current question:\n"
+                    _mi = effective_query_text.rfind(_marker)
+                    if _mi != -1:
+                        _q_tail = effective_query_text[_mi:]
+                        _hist_room = max(0, _room - len(_q_tail))
+                        _hist_head = effective_query_text[:_mi]
+                        if _hist_room < len(_hist_head):
+                            _hist_head = _hist_head[-_hist_room:] if _hist_room > 0 else ""
+                        effective_query_text = _hist_head + _q_tail
+                    else:
+                        effective_query_text = effective_query_text[-_room:]
+                    logger.info(
+                        "[Route:intelligent_chat_stream] gemma history+system clamp folder=%s -> %d chars",
+                        folder_name, len(effective_query_text),
+                    )
+        except Exception:
+            pass
 
         # ── Step 1: emit status so the frontend shows "Analyzing..." ──
         yield _sse({"type": "status", "status": "analyzing", "message": "Analyzing query intent..."})
@@ -3235,13 +3344,67 @@ async def intelligent_chat_stream(
                 or is_deep
                 or is_draft
             )
-            if is_comprehensive:
+            # Which model will actually ANSWER this chat? Draft uses a dedicated big-context engine
+            # (gemini/claude), so only a Gemma *chat* model needs the free-tier input cap. Resolve
+            # cheaply — get_agent_config is cached and reused when the model is resolved for real
+            # below. A free-tier Gemma can't take the full-document dump a comprehensive/deep ask
+            # normally keeps (60K–130K tokens >> its 16K input-tokens/min quota → guaranteed 429),
+            # so for Gemma we send the most-relevant passages within a bounded budget instead.
+            _effective_chat_model = selected_model_name or ""
+            if not _effective_chat_model and not is_draft:
+                try:
+                    from app.services.agent_config_service import get_agent_config as _get_agent_cfg
+                    _effective_chat_model = (
+                        _get_agent_cfg(learning_agent_name or "grounded_retrieval_agent").model_name or ""
+                    ).strip()
+                except Exception:
+                    _effective_chat_model = ""
+            try:
+                from app.services.adapters.document_ai import _is_gemma_model as _is_gemma
+                _gemma_capped_chat = (not is_draft) and _is_gemma(_effective_chat_model)
+            except Exception:
+                _gemma_capped_chat = False
+            # Set when a FIXED chunk count is used for Gemma (predictable, no dynamic sizing) — the
+            # dynamic context clamp is then skipped (fixed count + history cap already bound input).
+            _gemma_fixed_active = False
+            if is_comprehensive and not _gemma_capped_chat:
                 logger.info(
                     "[Route:intelligent_chat_stream] comprehensive query folder=%s — keeping full-document context",
                     folder_name,
                 )
                 yield _sse({"type": "thinking", "text": "Comprehensive request — reading the full case for a complete answer...\n"})
             elif not learning_mode and doc_texts:
+                if _gemma_capped_chat and is_comprehensive:
+                    logger.info(
+                        "[Route:intelligent_chat_stream] comprehensive query folder=%s on Gemma — using focused "
+                        "retrieval within the free-tier input budget (full dump would exceed 16K tokens/min)",
+                        folder_name,
+                    )
+                    yield _sse({"type": "thinking", "text": "Broad request on a free-tier model — retrieving the most relevant passages to stay within the per-minute limit...\n"})
+                # A broad ask on a capped Gemma pulls MORE passages into a bigger (but still
+                # free-tier-safe) budget so the answer draws on the whole case, not just the top few
+                # chunks; a normal narrow ask keeps the tight focused slice.
+                _broad_gemma = _gemma_capped_chat and is_comprehensive
+                # GEMMA ONLY: a fixed chunk count gives predictable input (no dynamic char sizing).
+                # Other models never reach here for comprehensive (they keep full-document context),
+                # and a narrow non-gemma ask keeps the dynamic char-budget slice below.
+                _fixed_chunks = 0
+                try:
+                    from app.core.config import get_settings as _fs_settings
+                    _fs = _fs_settings()
+                    _gemma_cap_chars = int(getattr(_fs, "gemma_max_context_chars", 40000) or 40000)
+                    if _broad_gemma:
+                        _fixed_chunks = int(getattr(_fs, "gemma_chat_chunk_count", 0) or 0)
+                except Exception:
+                    _gemma_cap_chars = 40000
+                if _fixed_chunks > 0:
+                    # Feed exactly _fixed_chunks passages (top by relevance). Retrieval ceiling is 48.
+                    _focus_top_k = min(48, _fixed_chunks)
+                    _focus_budget = 10 ** 9  # count controls the feed, not chars
+                else:
+                    _focus_top_k = 30 if _broad_gemma else 12
+                    # Leave ~4K chars of headroom under the cap for the system prompt + question.
+                    _focus_budget = max(24000, _gemma_cap_chars - 4000) if _broad_gemma else 24000
                 try:
                     from app.services.learning_document_retrieval import get_relevant_chunks
 
@@ -3254,7 +3417,7 @@ async def intelligent_chat_stream(
                                 case_id=folder_name,
                                 query=query_text,
                                 file_ids=_fids,
-                                top_k=12,
+                                top_k=_focus_top_k,
                                 include_surrounding_chunks=True,
                                 similarity_floor=0.40,
                             )
@@ -3269,12 +3432,16 @@ async def intelligent_chat_stream(
                             # downstream context-building + citations keep working — most-relevant
                             # first, capped to a focused budget.
                             _by_file: dict = {}
-                            _budget, _used = 24000, 0
+                            _budget, _used, _added = _focus_budget, 0, 0
                             for _ch in _chat_chunks:
                                 _content = str(_ch.get("content") or "").strip()
                                 if not _content:
                                     continue
-                                if _used + len(_content) > _budget:
+                                if _fixed_chunks > 0:
+                                    # Fixed count (Gemma): stop after N chunks, ignore char budget.
+                                    if _added >= _fixed_chunks:
+                                        break
+                                elif _used + len(_content) > _budget:
                                     break
                                 _meta = _ch.get("metadata") or {}
                                 _fid = str(_meta.get("file_id") or "")
@@ -3284,13 +3451,17 @@ async def intelligent_chat_stream(
                                 _entry = _by_file.setdefault(_fid, {"name": _name, "text": "", "file_id": _fid or None})
                                 _entry["text"] += f"{_page_bit}{_content}\n\n"
                                 _used += len(_content)
+                                _added += 1
                             _focused = [v for v in _by_file.values() if v["text"].strip()]
                             if _focused:
                                 doc_texts = _focused
+                                if _fixed_chunks > 0:
+                                    _gemma_fixed_active = True
                                 logger.info(
-                                    "[Route:intelligent_chat_stream] focused retrieval folder=%s chunks=%s docs=%s chars=%s "
-                                    "(replaced full-document context)",
-                                    folder_name, len(_chat_chunks), len(_focused), _used,
+                                    "[Route:intelligent_chat_stream] focused retrieval folder=%s fed_chunks=%s docs=%s chars=%s "
+                                    "mode=%s (replaced full-document context)",
+                                    folder_name, _added, len(_focused), _used,
+                                    ("fixed=%d" % _fixed_chunks) if _fixed_chunks > 0 else "char_budget",
                                 )
                                 yield _sse({"type": "thinking", "text": f"Found {len(_chat_chunks)} relevant passage(s); answering from those.\n"})
                 except Exception as _chunk_exc:
@@ -3312,6 +3483,18 @@ async def intelligent_chat_stream(
                     + (float(llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 65536) / 200.0),
                 ),
             )
+            # Free-tier gemma is a slow, throttled thinking model: a SINGLE non-stream call
+            # measured 51-88s just to return 200 OK (see the Green_Eye comprehensive run — the
+            # deep call was killed at 88s while the very next call succeeded in 51s). The generic
+            # formula above ties the timeout to the OUTPUT budget (10K/200=50s -> ~88s total),
+            # which has nothing to do with how slow the free tier actually is, so it prematurely
+            # kills calls that would have succeeded. Give gemma a generous floor so one honest
+            # call has room to finish instead of timing out and stacking a second concurrent call.
+            if _gemma_capped_chat:
+                non_stream_timeout_s = min(
+                    600.0,
+                    max(non_stream_timeout_s, float(getattr(get_settings(), "gemma_non_stream_timeout_s", 220.0))),
+                )
 
             # Real-time streaming: emit chunk events as text is generated.
             answer_parts: list[str] = []
@@ -3340,7 +3523,32 @@ async def intelligent_chat_stream(
                         # so give draft the full-document budget like deep, not the comprehensive tier.
                         is_deep=(is_deep or is_draft),
                         is_comprehensive=is_comprehensive,
+                        # Hard-caps the budget for a free-tier Gemma chat (input-TPM safety); draft
+                        # passes no model here (uses a big-context engine) so it keeps the full tier.
+                        model_name=(None if is_draft else _effective_chat_model),
                     )
+                    # Free-tier Gemma safety: the 16K/min limit is on TOTAL input — the system
+                    # prompt + conversation history (both inside effective_query_text) + question +
+                    # doc context. History is VARIABLE (grows with the chat), so a fixed context cap
+                    # can still blow the limit once retrieval fills it. Dynamically reserve room for
+                    # the measured system prompt + history + question and give the rest to context,
+                    # keeping TOTAL input under ~85% of the TPM budget no matter how long the chat is.
+                    # Skipped when a FIXED Gemma chunk count is active — the fixed count + the ~5K
+                    # history/system cap already bound total input, so no dynamic trimming is needed
+                    # (keeps the chunk count predictable, as requested).
+                    if _gemma_capped_chat and not is_draft and not _gemma_fixed_active:
+                        _tpm = int(getattr(settings, "gemma_free_tier_input_tpm", 16000) or 16000)
+                        _target_input_tok = int(_tpm * 0.85) if _tpm > 0 else 13600
+                        _overhead_chars = len(system_instruction or "") + len(effective_query_text or "") + 800
+                        _ctx_room_tok = max(2000, _target_input_tok - (_overhead_chars // 4))
+                        _dyn_cap = _ctx_room_tok * 4
+                        if _dyn_cap < char_limit:
+                            logger.info(
+                                "[Route:intelligent_chat_stream] gemma dynamic context clamp %d->%d chars "
+                                "(reserved ~%d tok for system+history+question)",
+                                char_limit, _dyn_cap, _overhead_chars // 4,
+                            )
+                            char_limit = _dyn_cap
                     for doc in doc_texts:
                         name = doc.get("name", "document")
                         text = (doc.get("text") or "").strip()
@@ -3365,6 +3573,7 @@ async def intelligent_chat_stream(
                     # SSE event loop is never blocked.
                     template_text = ""
                     _draft_template_bytes = None
+                    _draft_template_layout = {}
                     # Draft engine: honour the frontend selector (chat_request.draft_model) when it is
                     # one of the allowed engines; otherwise fall back to the .env default. Only these
                     # are permitted so an arbitrary model string can't be injected via the request.
@@ -3405,11 +3614,28 @@ async def intelligent_chat_stream(
                                     _draft_template_bytes, _tmpl_mime or None, _tmpl_uri.rsplit("/", 1)[-1]
                                 ),
                             )
+                            try:
+                                from app.services.template_layout import extract_template_layout as _extract_template_layout
+                                _draft_template_layout = await loop.run_in_executor(
+                                    None,
+                                    lambda: _extract_template_layout(
+                                        _draft_template_bytes or b"",
+                                        mime_type=_tmpl_mime or None,
+                                        filename=_tmpl_uri.rsplit("/", 1)[-1],
+                                    ),
+                                )
+                            except Exception as _layout_exc:
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s draft template layout extraction failed: %s",
+                                    folder_name, _layout_exc,
+                                )
+                                _draft_template_layout = {}
                             logger.info(
                                 "[Route:intelligent_chat_stream] folder=%s draft model=%s attach_pdf=%s "
-                                "template_bytes=%d template_text_chars=%d",
+                                "template_bytes=%d template_text_chars=%d template_layout_lines=%d",
                                 folder_name, _draft_model_name or "(admin)", _draft_attach_pdf,
                                 len(_draft_template_bytes or b""), len(template_text),
+                                len((_draft_template_layout or {}).get("lines") or []),
                             )
                         except Exception as _tmpl_exc:
                             logger.warning(
@@ -3418,6 +3644,7 @@ async def intelligent_chat_stream(
                             )
                             template_text = ""
                             _draft_template_bytes = None
+                            _draft_template_layout = {}
                             _draft_attach_pdf = False
                     if learning_mode and learning_state is not None:
                         _lr_core = LearningAgentController.learning_system_prompt(
@@ -3715,10 +3942,14 @@ async def intelligent_chat_stream(
                             "- Holding / decision / order, with any reliefs, directions, or costs\n"
                             "- Current status / next steps, if stated\n\n"
                             "Use Markdown tables for any list of events, dates, parties, or itemised data. "
-                            "Be thorough and complete — aim for a detailed multi-section answer (roughly "
-                            "1,200-2,500 words when the documents contain enough material); be shorter ONLY if "
-                            "the documents genuinely lack content. Do not stop early. Stay accurate and grounded; "
-                            "if something is not in the documents, say so rather than inventing it.\n\n"
+                            "LENGTH: write an EXHAUSTIVE response of AT LEAST 3,500-4,500 words "
+                            "(≈4,000-5,000 tokens) when the documents contain enough material. Each section "
+                            "above must be SEVERAL fully-developed paragraphs of prose — never a single line or "
+                            "a bare bullet. Explain every fact, date, party, argument, and finding in depth and "
+                            "quote or reference the record. Do NOT stop early, do NOT compress, and do NOT end "
+                            "with a short conclusion until every section is covered thoroughly. Be shorter ONLY "
+                            "if the documents genuinely lack content. Stay accurate and grounded; if something is "
+                            "not in the documents, say so rather than inventing it.\n\n"
                             f"=== DOCUMENTS ===\n{context}\n\n"
                             f"=== QUESTION ===\n{effective_query_text}\n\n"
                             "=== DETAILED ANSWER ==="
@@ -3775,6 +4006,9 @@ async def intelligent_chat_stream(
                     # at the end (buffered internally through audit+repair — never appended twice).
                     _draft_pipeline_done = False
                     _draft_typography = None
+                    _draft_tiptap_json = None
+                    _draft_tiptap_sections = None
+                    _draft_legal_section_doc = None
                     if is_draft and (template_text or "").strip():
                         _fi_key = _draft_factinv_key(folder_name, user_id, doc_texts)
                         _pipe_final = None
@@ -3792,6 +4026,63 @@ async def intelligent_chat_stream(
                         if _use_rag and _rag_fids:
                             from app.services.learning_document_retrieval import get_relevant_chunks as _grc_draft
 
+                            def _draft_rerank_chunks(_query: str, _chunks: list[dict], _k: int) -> list[dict]:
+                                # Dependency-free rerank + diversity for drafting. The DB already does
+                                # hybrid vector/full-text RRF; this second pass makes the final prompt
+                                # less redundant: 5 best relevant chunks, 2 corroborating chunks from
+                                # different documents where possible, and 1 neighbour context chunk.
+                                _limit = 8 if int(_k or 0) >= 20 else max(1, min(int(_k or 8), 12))
+                                _tokens = {
+                                    t for t in re.findall(r"[A-Za-z0-9]{3,}", (_query or "").lower())
+                                    if t not in {"the", "and", "for", "with", "this", "that", "section", "exact"}
+                                }
+
+                                def _score(_ch: dict) -> float:
+                                    _text = str(_ch.get("content") or "").lower()
+                                    _sim = float(_ch.get("similarity_score") or 0.0)
+                                    _overlap = sum(1 for t in _tokens if t in _text)
+                                    return (_sim * 3.0) + min(_overlap, 12)
+
+                                _ranked = sorted(_chunks or [], key=_score, reverse=True)
+                                _selected: list[dict] = []
+                                _seen_ids: set[str] = set()
+
+                                def _add(_ch: dict) -> bool:
+                                    _cid = str(_ch.get("chunk_id") or _ch.get("source_id") or id(_ch))
+                                    if _cid in _seen_ids:
+                                        return False
+                                    _seen_ids.add(_cid)
+                                    _selected.append(_ch)
+                                    return True
+
+                                _primary = [c for c in _ranked if not ((c.get("metadata") or {}).get("neighbor"))]
+                                for _ch in _primary:
+                                    if len(_selected) >= min(5, _limit):
+                                        break
+                                    _add(_ch)
+
+                                _used_docs = {str((c.get("metadata") or {}).get("document_name") or "") for c in _selected}
+                                _corroborating = 0
+                                for _ch in _primary:
+                                    if len(_selected) >= _limit or _corroborating >= 2:
+                                        break
+                                    _doc = str((_ch.get("metadata") or {}).get("document_name") or "")
+                                    if _doc and _doc not in _used_docs and _add(_ch):
+                                        _used_docs.add(_doc)
+                                        _corroborating += 1
+
+                                for _ch in _ranked:
+                                    if len(_selected) >= _limit:
+                                        break
+                                    if (_ch.get("metadata") or {}).get("neighbor") and _add(_ch):
+                                        break
+
+                                for _ch in _ranked:
+                                    if len(_selected) >= _limit:
+                                        break
+                                    _add(_ch)
+                                return _selected[:_limit]
+
                             def _draft_retrieve(_q: str, _k: int):
                                 try:
                                     _raw = _grc_draft(
@@ -3801,11 +4092,16 @@ async def intelligent_chat_stream(
                                         file_ids=_rag_fids,
                                         top_k=int(_k),
                                         include_surrounding_chunks=True,
-                                        similarity_floor=0.30,
+                                        # 0.30 was below the semantic similarity floor (~0.333),
+                                        # so it could not filter weak semantic hits. 0.42 screens
+                                        # obvious misses while retrieve_learning_chunk_hits still
+                                        # falls back to top rows if everything is below floor.
+                                        similarity_floor=0.42,
                                     ) or []
                                 except Exception as _rex:
                                     logger.warning("[Route:intelligent_chat_stream] draft RAG retrieval error: %s", _rex)
                                     return []
+                                _raw = _draft_rerank_chunks(_q, _raw, int(_k or 8))
                                 _norm = []
                                 for _ch in _raw:
                                     _m = _ch.get("metadata") or {}
@@ -3813,6 +4109,8 @@ async def intelligent_chat_stream(
                                         "text": str(_ch.get("content") or "").strip(),
                                         "name": str(_m.get("document_name") or "document"),
                                         "page": _ch.get("page_number"),
+                                        "score": float(_ch.get("similarity_score") or 0.0),
+                                        "neighbor": bool(_m.get("neighbor")),
                                     })
                                 return _norm
                         # Guardian model for the audit + repair passes (Stage D grounding/format
@@ -3858,6 +4156,7 @@ async def intelligent_chat_stream(
                             from app.services import template_drafting as _tpl
                             async for _pkind, _pdata in _tpl.run_template_drafting_pipeline(
                                 template_text=template_text,
+                                template_layout=_draft_template_layout,
                                 doc_texts=doc_texts,
                                 query_text=query_text,
                                 draft_engine=resolved_model_name,
@@ -3872,6 +4171,8 @@ async def intelligent_chat_stream(
                             ):
                                 if _pkind == "progress":
                                     yield _sse(_pdata)
+                                elif _pkind == "outline":
+                                    yield _sse({"type": "draft_outline", **_pdata})
                                 elif _pkind == "section":
                                     # Per-section content for a section-by-section draft UI.
                                     yield _sse({"type": "draft_section", **_pdata})
@@ -3891,6 +4192,9 @@ async def intelligent_chat_stream(
                         if _pipe_final and (_pipe_final.get("answer") or "").strip():
                             _final_md = _pipe_final["answer"]
                             _draft_typography = _pipe_final.get("typography")
+                            _draft_tiptap_json = _pipe_final.get("tiptap_json")
+                            _draft_tiptap_sections = _pipe_final.get("tiptap_sections")
+                            _draft_legal_section_doc = _pipe_final.get("legal_section_doc")
                             if _pipe_final.get("fact_inventory"):
                                 _draft_factinv_cache_put(_fi_key, _pipe_final["fact_inventory"])
                             answer_parts.append(_final_md)
@@ -3998,19 +4302,55 @@ async def intelligent_chat_stream(
                     else:
                         # ── Gemini streaming path ─────────────────────────────────────
                         gemini_config = stream_cfg
-                        # Comprehensive asks: nudge temperature up so the model writes a fuller,
-                        # less terse answer. The agent_prompts row uses a low temp (~0.3) tuned for
-                        # precise specific-question answers, which suppresses long-form output.
+                        # Admin-panel temperature control for PAID (non-Gemma) models: apply the
+                        # temperature from the LLM Management → Summarization Chat panel
+                        # (summarization_chat_config.model_temperature), which is synced, instead of the
+                        # unsynced agent_prompts temp — matching "gemini → paid + admin config". Gemma
+                        # keeps its hardcoded temperature (set in _build_gemini_config), so it is NOT
+                        # touched here (guarded by `not _gemma_capped_chat`).
+                        if not is_draft and not _gemma_capped_chat:
+                            _panel_temp = (llm_config or {}).get("model_temperature")
+                            if _panel_temp is not None:
+                                try:
+                                    _pt = float(_panel_temp)
+                                    if isinstance(gemini_config, dict):
+                                        gemini_config["temperature"] = _pt
+                                    else:
+                                        gemini_config.temperature = _pt
+                                    logger.info(
+                                        "[Route:intelligent_chat_stream] non-gemma temperature from LLM Management panel -> %.2f",
+                                        _pt,
+                                    )
+                                except Exception:
+                                    pass
+                        # Comprehensive asks: OPTIONALLY nudge temperature up so the model writes a
+                        # fuller, less terse answer. The agent_prompts row uses a low temp (~0.3-0.7)
+                        # tuned for precise specific-question answers, which suppresses long-form output.
+                        # Gemma supports up to 2.0; 1.0 gives markedly fuller output while the
+                        # "grounded ONLY in the documents / do not invent" prompt keeps it accurate.
+                        # GATED behind COMPREHENSIVE_TEMP_NUDGE (default False) so the admin-configured
+                        # temperature is honored verbatim by default — per the contract "model +
+                        # temperature come from admin config; only thinking is hardcoded minimal". This
+                        # object is shared with the non-stream deep fallback (files.py ~_ns_cfg), so
+                        # leaving it unmutated means the admin temp reaches BOTH paths.
                         # (Draft mode keeps its own precise temperature — do not nudge it.)
-                        if is_comprehensive and not is_draft:
+                        if is_comprehensive and not is_draft and bool(getattr(settings, "comprehensive_temp_nudge", False)):
                             try:
+                                _nudged = None
                                 if isinstance(gemini_config, dict):
-                                    if float(gemini_config.get("temperature") or 0.0) < 0.6:
-                                        gemini_config["temperature"] = 0.6
+                                    if float(gemini_config.get("temperature") or 0.0) < 1.0:
+                                        gemini_config["temperature"] = 1.0
+                                        _nudged = 1.0
                                 else:
                                     _cur_temp = getattr(gemini_config, "temperature", None)
-                                    if _cur_temp is None or float(_cur_temp) < 0.6:
-                                        gemini_config.temperature = 0.6
+                                    if _cur_temp is None or float(_cur_temp) < 1.0:
+                                        gemini_config.temperature = 1.0
+                                        _nudged = 1.0
+                                if _nudged is not None:
+                                    logger.info(
+                                        "[Route:intelligent_chat_stream] comprehensive temperature nudged -> %.2f "
+                                        "(used for streaming AND the non-stream deep fallback)", _nudged,
+                                    )
                             except Exception:
                                 pass
                         # Gemma models must use the dedicated Gemma key (consistent with
@@ -4039,6 +4379,46 @@ async def intelligent_chat_stream(
                                 _gtypes.Part.from_bytes(data=_draft_template_bytes, mime_type="application/pdf"),
                                 _gtypes.Part.from_text(text=prompt),
                             ]
+                        # Free-tier Gemma: skip the streaming attempt entirely and use the single
+                        # non-stream call below. Streaming + the non-stream fallback each send the
+                        # full ~13K input (~26K/min → 429s the 16K/min budget); one non-stream send
+                        # fits. Raising drops into the `except` → the deep non-stream fallback, which
+                        # runs the SAME prompt with the 20K budget + temperature nudge. Trade-off: no
+                        # token-by-token streaming. Disable via GEMMA_DISABLE_STREAMING=false.
+                        if not is_draft:
+                            _gemma_skip = False
+                            try:
+                                from app.services.adapters.document_ai import _is_gemma_model as _is_gemma_skip_fn
+                                _gemma_skip = _is_gemma_skip_fn(resolved_model_name) and bool(
+                                    getattr(settings, "gemma_disable_streaming", True)
+                                )
+                            except Exception:
+                                _gemma_skip = False
+                            if _gemma_skip:
+                                logger.info(
+                                    "[Route:intelligent_chat_stream] gemma streaming disabled — single "
+                                    "non-stream call (avoids the stream+fallback double-send that 429s "
+                                    "the free-tier 16K/min input budget)"
+                                )
+                                raise RuntimeError("gemma_stream_disabled")
+                        # Pace the STREAMING gemma call too (the retry wrapper only paces the
+                        # non-stream path). Runs in the executor so the blocking sleep never stalls
+                        # the event loop; feeds the same rolling RPM + input-TPM window.
+                        try:
+                            from app.services.adapters.document_ai import (
+                                _is_gemma_model as _is_gemma_stream,
+                                _estimate_input_tokens as _est_tokens_stream,
+                                _pace_gemma_call as _pace_stream,
+                            )
+                            if _is_gemma_stream(resolved_model_name):
+                                _pre_contents = _draft_contents if _draft_contents is not None else prompt
+                                _pre_est = _est_tokens_stream(_pre_contents)
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda: _pace_stream(resolved_model_name, est_input_tokens=_pre_est),
+                                )
+                        except Exception:
+                            pass
                         stream_iter = client.models.generate_content_stream(
                             model=resolved_model_name,
                             contents=(_draft_contents if _draft_contents is not None else prompt),
@@ -4054,6 +4434,17 @@ async def intelligent_chat_stream(
                             first_chunk_timeout_s = min(360.0, max(180.0, non_stream_timeout_s))
                         else:
                             first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
+                        # Gemma with minimal thinking emits its first token in ~1-2s when healthy; a
+                        # long silence means the free-tier input-TPM quota is SATURATED and the
+                        # request is being throttled (it keeps hanging, it does not recover). Cap the
+                        # first-chunk wait so a throttled Gemma call falls back in ~45s instead of
+                        # freezing the UI for 3 minutes.
+                        try:
+                            from app.services.adapters.document_ai import _is_gemma_model as _is_gemma_to
+                            if _is_gemma_to(resolved_model_name):
+                                first_chunk_timeout_s = min(first_chunk_timeout_s, 45.0)
+                        except Exception:
+                            pass
                         next_chunk_timeout_s = 600.0
                         agg_full = ""
                         # _got_content tracks ANY streamed content (gemma-4's thought parts count too),
@@ -4155,17 +4546,13 @@ async def intelligent_chat_stream(
                         if learning_chunk_addon
                         else _lr_core_ns
                     )
-                # Resolve the actual model from agent_prompts for non-stream fallback
-                try:
-                    _fb_provider, _fb_model, _ = stream_config_for_folder_chat(
-                        for_summary=True,
-                        summarization_llm_config=llm_config,
-                        agent_name=learning_agent_name,
-                        model_name_override=selected_model_name,
-                    )
-                    actual_model_name = _fb_model
-                except Exception:
-                    pass
+                # The model was already resolved for the streaming attempt — reuse it. (Re-resolving
+                # here via stream_config_for_folder_chat just re-ran _generation_config and logged the
+                # agent's raw temperature=0.70, which looked like the generation temp but was a
+                # discarded lookup. The real generation config, _ns_cfg below, carries the nudged 1.0.)
+                _reused_model = locals().get("resolved_model_name")
+                if _reused_model:
+                    actual_model_name = _reused_model
 
                 # ── Comprehensive/deep fallback: run the FULL prompt non-stream ──────────
                 # The generic QA path below truncates the user prompt to 12K chars and uses a
@@ -4222,6 +4609,36 @@ async def intelligent_chat_stream(
                             yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
                             _deep_fallback_done = True
                     except Exception as _ns_deep_exc:
+                        # Free-tier Gemma input-tokens-per-minute quota is unrecoverable by retrying
+                        # (see GemmaInputTPMExceeded) — surface a clear, actionable message instead
+                        # of falling through to the generic QA path (which would 429 the same way,
+                        # then hang until the step timeout and show "Something went wrong").
+                        try:
+                            from app.services.adapters.document_ai import GemmaInputTPMExceeded as _TPMExc
+                        except Exception:
+                            _TPMExc = ()  # type: ignore[assignment]
+                        if _TPMExc and isinstance(_ns_deep_exc, _TPMExc):
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s Gemma input-TPM quota exhausted — clean message",
+                                folder_name,
+                            )
+                            yield _sse({"type": "error", "message": _GEMMA_INPUT_TPM_USER_MESSAGE})
+                            return
+                        # For gemma, DO NOT chain the generic-QA fallback: the deep call ran via
+                        # run_in_executor, so on a timeout the thread is NOT cancelled — it keeps
+                        # running and holding part of the 16K/min input budget. Firing generic QA now
+                        # stacks a SECOND concurrent gemma call → ~2-3x input tokens/min → the 429 we
+                        # just fixed, then another long hang. One honest deep call (now with the
+                        # generous gemma_non_stream_timeout_s) is authoritative; on failure, a clean
+                        # retry message beats stacking. Non-gemma models keep the generic-QA fallback.
+                        if _gemma_capped_chat:
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s gemma deep non-stream fallback failed (%s) — clean message (NOT stacking generic QA, avoids a 2nd concurrent free-tier call)",
+                                folder_name,
+                                _ns_deep_exc,
+                            )
+                            yield _sse({"type": "error", "message": _GEMMA_SLOW_TIMEOUT_USER_MESSAGE})
+                            return
                         logger.warning(
                             "[Route:intelligent_chat_stream] folder=%s deep non-stream fallback failed (%s) — using generic QA",
                             folder_name,
@@ -4235,12 +4652,26 @@ async def intelligent_chat_stream(
                     # input≈2 tokens derived from the short query text). _qa_fallback_ran then
                     # suppresses the estimate below since we now have the real numbers.
                     _qa_fallback_ran = True
+                    # Comprehensive/deep asks that land HERE (streaming + deep fallback failed, e.g.
+                    # under a 503 / saturated free tier) must NOT be answered with the terse "summary"
+                    # template — that is what made a "detailed summary" come back as ~1 page. Use a
+                    # non-summary intent (so for_summary=False keeps the full output budget) and force
+                    # an exhaustive, multi-section answer. Narrow asks keep the concise summary.
+                    _qa_intent = "detailed" if is_comprehensive else "summary"
+                    _qa_extra = (
+                        "Write a THOROUGH, exhaustive, multi-section answer covering ALL material "
+                        "facts, issues, dates, parties, amounts, and reasoning from the record — do "
+                        "not condense into a brief summary. When a chronology/timeline is asked for, "
+                        "include a detailed Markdown table (Date | Event | Reference). Favor "
+                        "completeness over brevity."
+                    ) if is_comprehensive else None
                     qa_result = await _draft_run_blocking(
                         lambda: _call_gemini_for_qa(
                             _truncate_prompt(effective_query_text, max_chars=12000, label="non_stream_query"),
                             doc_texts,
-                            query_intent="summary",
+                            query_intent=_qa_intent,
                             output_format="structured",
+                            extra_instructions=_qa_extra,
                             system_instruction=_truncate_prompt(
                                 non_stream_system_instruction,
                                 max_chars=64000,
@@ -4585,6 +5016,15 @@ async def intelligent_chat_stream(
                         "[Route:intelligent_chat_stream] folder=%s draft DOCX export failed: %s",
                         folder_name, _docx_exc,
                     )
+            if is_draft and (answer or "").strip() and locals().get("_draft_tiptap_json") is None:
+                try:
+                    from app.services.tiptap_render import markdown_to_tiptap_content
+                    _draft_tiptap_json = {"type": "doc", "content": markdown_to_tiptap_content(answer)}
+                    _draft_tiptap_sections = []
+                    _draft_legal_section_doc = None
+                except Exception as _tiptap_exc:
+                    logger.debug("[Route:intelligent_chat_stream] fallback TipTap render skipped: %s", _tiptap_exc)
+
             yield _sse({
                 "type": "done",
                 "session_id": session_id,
@@ -4602,6 +5042,9 @@ async def intelligent_chat_stream(
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
                 "draft_download_url": _draft_download_url,
                 "draft_filename": _draft_filename,
+                "draft_tiptap_json": locals().get("_draft_tiptap_json"),
+                "draft_tiptap_sections": locals().get("_draft_tiptap_sections"),
+                "draft_legal_section_doc": locals().get("_draft_legal_section_doc"),
             })
 
         except Exception as exc:

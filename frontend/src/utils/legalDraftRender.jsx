@@ -29,6 +29,7 @@ const _CENTER_RE = [
 ];
 // A trailing party-role label line: "…Plaintiff", "...Defendant", "… Petitioner".
 const _ROLE_RE = /^[.…\s]*[.…]\s*(the\s+)?(first|second|third)?\s*(plaintiff|defendant|petitioner|respondent|appellant|applicant|complainant|landlord|tenant|lessor|lessee|licensor|licensee|vendor|purchaser|party)s?\b/i;
+const _LEFT_LEADIN_RE = /^(BY AND BETWEEN|BETWEEN|AND|WHEREAS|RECITALS?|NOW\s+(?:THIS|THE)\b.*|THIS\s+AGREEMENT\s+WITNESSETH|WITNESSETH\b)/i;
 
 // Collapse whitespace INSIDE a bold/italic span — "** RENT AGREEMENT **" → "**RENT AGREEMENT**".
 // A drafting model sometimes pads the emphasis markers with spaces; CommonMark then refuses to
@@ -38,6 +39,8 @@ const _ROLE_RE = /^[.…\s]*[.…]\s*(the\s+)?(first|second|third)?\s*(plaintiff
 export function fixInlineEmphasis(text) {
   if (!text) return text;
   return String(text)
+    .replace(/\\\*\\\*[ \t]*([^*\n]+?)[ \t]*\\\*\\\*/g, '**$1**')
+    .replace(/\\_\\_[ \t]*([^_\n]+?)[ \t]*\\_\\_/g, '__$1__')
     .replace(/\*\*[ \t]*([^*\n]+?)[ \t]*\*\*/g, '**$1**')
     .replace(/__[ \t]*([^_\n]+?)[ \t]*__/g, '__$1__');
 }
@@ -50,6 +53,7 @@ export function draftLineAlign(text) {
   const probe = (t.replace(/^[#>\s]+/, '').replace(/^(?:\*\*|\*|__|_|`)+/, '')
     .replace(/(?:\*\*|\*|__|_|`)+$/, '').trim()) || t;
   if (_ROLE_RE.test(probe)) return 'right';
+  if (_LEFT_LEADIN_RE.test(probe)) return 'left';
   const isAllCaps = probe.length > 3 && probe === probe.toUpperCase() && /[A-Z]/.test(probe);
   for (const re of _CENTER_RE) {
     if (re.test(probe)) {
@@ -59,6 +63,67 @@ export function draftLineAlign(text) {
     }
   }
   return null;
+}
+
+
+const _STRUCTURAL_BOLD_RE = /^\s*\*\*\s*([^*\n]{2,140}?)\s*\*\*\s*(.*)$/;
+const _LEGAL_LABEL_RUN_RE = /\s+(?=(?:\d+\.\s*)?(?:Witness\s+Name|Address|ID\s+Proof\s+No\.?|PAN\s+No\.?|Aadhaar\s+No\.?|Signature|Name|Date|Place)\s*:)/gi;
+
+function _isStructuralHeadingText(text) {
+  const cleaned = String(text || '').trim().replace(/[:\-–—]+$/, '').trim();
+  if (cleaned.length < 3 || cleaned.length > 140) return false;
+  const letters = cleaned.match(/[A-Za-z]/g) || [];
+  if (!letters.length) return false;
+  const upperRatio = letters.filter((ch) => ch === ch.toUpperCase()).length / letters.length;
+  return upperRatio >= 0.78 || draftLineAlign(cleaned) === 'center';
+}
+
+function _isStandaloneStructuralHeading(text, trailing) {
+  const heading = String(text || '').trim();
+  if (!_isStructuralHeadingText(heading)) return false;
+  // Only true document titles / court-title lines become heading nodes. Lead-in labels
+  // such as BY AND BETWEEN, WHEREAS, SIGNATURES, ANNEXURE, etc. stay as bold left text
+  // unless the content-driven alignment rules identify them as centered for this template.
+  return draftLineAlign(heading) === 'center';
+}
+
+function _splitLegalLabelRuns(line) {
+  const raw = String(line || '');
+  if (/^\s*\|.*\|\s*$/.test(raw)) return [raw];
+  if (!/(Witness\s+Name|Address|ID\s+Proof\s+No\.?|PAN\s+No\.?|Aadhaar\s+No\.?|Signature|Name|Date|Place)\s*:/i.test(raw)) {
+    return [raw];
+  }
+  return raw
+    .replace(_LEGAL_LABEL_RUN_RE, '\n')
+    .split('\n')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+export function normalizeLegalDraftMarkdownForRender(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const out = [];
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const structural = _STRUCTURAL_BOLD_RE.exec(line);
+    if (structural) {
+      const heading = structural[1].trim();
+      const trailing = structural[2].trim();
+      if (_isStandaloneStructuralHeading(heading, trailing)) {
+        out.push(`## ${heading}`);
+        if (trailing) {
+          if (/^\(/.test(trailing)) out.push('', trailing);
+          else out.push(..._splitLegalLabelRuns(trailing));
+        }
+        continue;
+      }
+      const rebuilt = `**${heading}**${trailing ? ` ${trailing}` : ''}`;
+      out.push(..._splitLegalLabelRuns(rebuilt));
+      continue;
+    }
+    out.push(..._splitLegalLabelRuns(line));
+  }
+  return out.join('\n');
 }
 
 // ── markdown sanitizer ───────────────────────────────────────────────────────
@@ -205,10 +270,10 @@ export const legalDraftComponents = {
     );
   },
   h1: ({ node, children, ...props }) => (
-    <h1 style={{ fontFamily: SERIF, fontSize: '18px', fontWeight: 700, margin: '18px 0 10px', textAlign: draftLineAlign(_extract(children)) || 'center', color: 'var(--draft-fg, #111)' }} {...props}>{children}</h1>
+    <h1 style={{ fontFamily: SERIF, fontSize: '18px', fontWeight: 700, margin: '18px 0 10px', textAlign: draftLineAlign(_extract(children)) || 'left', color: 'var(--draft-fg, #111)' }} {...props}>{children}</h1>
   ),
   h2: ({ node, children, ...props }) => (
-    <h2 style={{ fontFamily: SERIF, fontSize: '16px', fontWeight: 700, margin: '16px 0 8px', textAlign: draftLineAlign(_extract(children)) || 'center', color: 'var(--draft-fg, #111)' }} {...props}>{children}</h2>
+    <h2 style={{ fontFamily: SERIF, fontSize: '16px', fontWeight: 700, margin: '16px 0 8px', textAlign: draftLineAlign(_extract(children)) || 'left', color: 'var(--draft-fg, #111)' }} {...props}>{children}</h2>
   ),
   h3: ({ node, children, ...props }) => (
     <h3 style={{ fontFamily: SERIF, fontSize: '15px', fontWeight: 700, margin: '14px 0 6px', textAlign: draftLineAlign(_extract(children)) || 'left', color: 'var(--draft-fg, #222)' }} {...props}>{children}</h3>

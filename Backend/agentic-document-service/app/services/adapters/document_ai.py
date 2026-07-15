@@ -580,6 +580,7 @@ def _build_gemini_config(
     llm_params: dict,
     *,
     model_name: str | None = None,
+    gemma_chat_budget: bool = False,
 ):
     """
     Build a GenerateContentConfig from gen_kwargs + every flag in llm_parameters.
@@ -615,6 +616,45 @@ def _build_gemini_config(
         if _mot and _lim and int(_mot) > _lim:
             config_kwargs["max_output_tokens"] = _lim
             active_flags.append(f"max_output_tokens_clamped({_mot}->{_lim})")
+
+        # ── Gemma: thinking level (ALL calls) + chat output budget (CHAT only) ───
+        # Gemma-4 is a thinking model whose thinking + answer SHARE max_output_tokens, and it
+        # REJECTS numeric thinking_budget — only thinking_level "minimal" | "high" (400 otherwise,
+        # verified live). "minimal" emits ZERO thinking tokens so the whole output budget becomes
+        # the answer (never cut by thinking) AND it is ~2x faster.
+        # thinking_level is applied to EVERY Gemma call (chat, non-stream fallback, draft) so nothing
+        # silently reverts to Gemma's slower default thinking — driven by GEMMA_THINKING_LEVEL.
+        # The output-token CAP stays CHAT-only (gemma_chat_budget): the draft pipeline passes a large
+        # explicit budget and must keep it so sections aren't truncated.
+        if _is_gemma_model(model_name):
+            from app.core.config import get_settings as _gemma_settings
+            _gs = _gemma_settings()
+            _lvl = str(getattr(_gs, "gemma_thinking_level", "minimal") or "minimal").strip().lower()
+            if _lvl in ("minimal", "high"):
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=_lvl)
+                    active_flags.append(f"gemma_thinking_level={_lvl}")
+                except Exception as _tl_exc:
+                    logger.info("[DocumentAI] gemma thinking_level=%s not applied: %s", _lvl, _tl_exc)
+            # Gemma (free tier) uses a FIXED, hardcoded temperature on EVERY Gemma call — the admin
+            # agent_prompts temperature is honored only for paid Gemini models. Applied to ALL gemma
+            # calls (NOT just gemma_chat_budget), so it also covers the narrow-question path
+            # (_generate_text / _call_gemini_for_qa at line ~1536, gemma_chat_budget=False) — that was
+            # the gap: narrow chats used the admin temp while only comprehensive got the override. A
+            # low temp also suits grounded drafting. The main chat-draft path builds its OWN config in
+            # files.py (temp 0.2, bypassing this function), so it's unaffected; Gemini models never
+            # enter this `if _is_gemma_model(...)` block, so they keep the admin temperature.
+            _gemma_temp = getattr(_gs, "gemma_chat_temperature", None)
+            if _gemma_temp is not None:
+                config_kwargs["temperature"] = float(_gemma_temp)
+                active_flags.append(f"gemma_temperature={float(_gemma_temp):.2f}")
+            if gemma_chat_budget:
+                _gemma_out = int(getattr(_gs, "gemma_chat_max_output_tokens", 0) or 0)
+                if _gemma_out > 0:
+                    _cur = int(config_kwargs.get("max_output_tokens") or 0)
+                    if _cur <= 0 or _gemma_out < _cur:
+                        config_kwargs["max_output_tokens"] = _gemma_out
+                        active_flags.append(f"gemma_output_budget={_gemma_out}")
 
         # ── Tools ────────────────────────────────────────────────────────────
         if llm_params.get("url_context"):
@@ -727,7 +767,9 @@ def gemini_stream_config_for_folder_chat(
     )
     if _detect_provider(model_name) != "gemini":
         return None
-    return model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
+    return model_name, _build_gemini_config(
+        gen_kwargs, llm_params, model_name=model_name, gemma_chat_budget=True
+    )
 
 
 def stream_config_for_folder_chat(
@@ -762,7 +804,9 @@ def stream_config_for_folder_chat(
         return "claude", model_name, (gen_kwargs, llm_params)
     if provider == "deepseek":
         return "deepseek", model_name, (gen_kwargs, llm_params)
-    return "gemini", model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
+    return "gemini", model_name, _build_gemini_config(
+        gen_kwargs, llm_params, model_name=model_name, gemma_chat_budget=True
+    )
 
 
 def claude_stream_generator(
@@ -1248,35 +1292,135 @@ def _gemini_retry_delay(exc: BaseException, fallback: float, *, cap: float = 60.
     return fallback
 
 
+class GemmaInputTPMExceeded(RuntimeError):
+    """Free-tier Gemma input-tokens-per-minute quota is exhausted and could not be satisfied in
+    time (a single request larger than the per-minute budget, or the window stayed full through a
+    retry). Raised so the caller can surface a plain-language message instead of hanging on retries
+    or bubbling a raw 429. Enable billing / raise GEMMA_FREE_TIER_INPUT_TPM to lift the ceiling."""
+
+
+def _estimate_input_tokens(contents: Any) -> int:
+    """Rough input-token estimate (~4 chars/token) for a google.genai `contents` value — a plain
+    prompt string or a list of Parts. Used only for client-side rate pacing, so an approximation
+    is fine; non-text Parts (an attached PDF) count as a coarse floor."""
+    try:
+        if isinstance(contents, str):
+            n = len(contents)
+        elif isinstance(contents, (list, tuple)):
+            n = 0
+            for part in contents:
+                t = getattr(part, "text", None)
+                n += len(t) if isinstance(t, str) else 2000
+        else:
+            t = getattr(contents, "text", None)
+            n = len(t) if isinstance(t, str) else 0
+        return max(1, n // 4)
+    except Exception:
+        return 0
+
+
+def _gemma_input_tpm_budget() -> int:
+    """Client-side per-minute input-token budget for Gemma, at 90% of the configured tier limit
+    (10% headroom). 0 disables token pacing."""
+    try:
+        from app.core.config import get_settings
+        tpm = int(getattr(get_settings(), "gemma_free_tier_input_tpm", 0) or 0)
+    except Exception:
+        tpm = 0
+    return int(tpm * 0.9) if tpm > 0 else 0
+
+
+def _is_input_tpm_quota_error(exc: BaseException) -> bool:
+    """True when a 429 specifically names the per-minute INPUT-token quota (not RPM/RPD). These
+    can't be waited out by pacing alone when a single request exceeds the minute budget."""
+    m = str(exc)
+    if "RESOURCE_EXHAUSTED" not in m and "429" not in m:
+        return False
+    low = m.lower()
+    return "input_token" in low or "inputtokenspermodel" in low
+
+
 _GEMMA_PACE_LOCK = threading.Lock()
 _gemma_last_request_ts = 0.0
+# Rolling 60s window of (monotonic_ts, est_input_tokens) for Gemma input-TPM pacing.
+_gemma_token_window: list[tuple[float, int]] = []
 
 
-def _pace_gemma_call(model_name: str | None) -> None:
-    """Enforce a minimum wall-clock interval between successive Gemma requests — GLOBAL across
-    threads and INCLUDING retries. Free Google AI Studio keys allow only 15 requests/min on
-    gemma models (RPM-bound; TPM is unlimited), and the gemma endpoint returns far more 500s
-    under rapid-fire calls; spacing requests (default 9s ≈ 6-7 RPM, GEMMA_MIN_CALL_INTERVAL_S
-    in .env, 0 disables) stays well under the cap and gives the flaky endpoint room to recover
-    between attempts. Sleeping under the lock is deliberate: it serialises concurrent gemma
-    callers so the spacing holds even when sections draft in parallel. Only ever runs in
-    executor threads (never on the event loop). Non-gemma models pass straight through."""
+def _pace_gemma_call(model_name: str | None, *, est_input_tokens: int = 0) -> None:
+    """Enforce free-tier-safe pacing between successive Gemma requests — GLOBAL across threads and
+    INCLUDING retries. Two limits are enforced together:
+      • RPM  — a minimum wall-clock interval between calls (GEMMA_MIN_CALL_INTERVAL_S, default 9s
+        ≈ 6-7 RPM; free AI Studio keys allow ~15-30 RPM and the endpoint 500s under rapid fire).
+      • input-TPM — free keys cap Gemma at ~16,000 INPUT tokens/min per model. When the caller
+        passes an estimate, a rolling 60s window holds the request until sending it would stay
+        under GEMMA_FREE_TIER_INPUT_TPM (90% of, for headroom). A single request larger than the
+        whole budget can't be satisfied by waiting, so it is let through to 429 + fail-fast rather
+        than sleeping pointlessly.
+    Sleeping under the lock is deliberate — it serialises concurrent gemma callers so both limits
+    hold even when sections draft in parallel. Only ever runs in executor threads (never on the
+    event loop). Non-gemma models pass straight through."""
     global _gemma_last_request_ts
     if not _is_gemma_model(model_name):
         return
     try:
         from app.core.config import get_settings
-        interval = float(getattr(get_settings(), "gemma_min_call_interval_s", 9.0) or 0.0)
+        _s = get_settings()
+        interval = float(getattr(_s, "gemma_min_call_interval_s", 9.0) or 0.0)
+        max_pace_wait = float(getattr(_s, "gemma_max_pace_wait_s", 15.0) or 0.0)
     except Exception:
         interval = 9.0
-    if interval <= 0:
-        return
+        max_pace_wait = 15.0
+    tpm_budget = _gemma_input_tpm_budget()
     with _GEMMA_PACE_LOCK:
-        wait = _gemma_last_request_ts + interval - time.monotonic()
-        if wait > 0:
-            logger.info("[DocumentAI] pacing gemma request %.1fs (free-tier 15 RPM guard)", wait)
-            time.sleep(wait)
-        _gemma_last_request_ts = time.monotonic()
+        now = time.monotonic()
+        # ── input-TPM: wait until the rolling 60s window has room for this request ──
+        if tpm_budget > 0 and est_input_tokens > 0:
+            # Drop entries older than 60s.
+            _gemma_token_window[:] = [(ts, tok) for (ts, tok) in _gemma_token_window if now - ts < 60.0]
+            used = sum(tok for _, tok in _gemma_token_window)
+            if est_input_tokens <= tpm_budget and used + est_input_tokens > tpm_budget:
+                need_free = used + est_input_tokens - tpm_budget
+                freed = 0.0
+                wait_tpm = 0.0
+                for ts, tok in sorted(_gemma_token_window):  # oldest first
+                    freed += tok
+                    if freed >= need_free:
+                        wait_tpm = max(0.0, ts + 60.0 - now)
+                        break
+                wait_tpm = min(wait_tpm, 60.0)
+                # Cap the block: when the window is saturated (heavy back-to-back use), sleeping the
+                # full ~50s inside a request just blows the step timeout. Wait at most
+                # gemma_max_pace_wait_s, then proceed — a fast 429 + fail-fast message beats a long
+                # hang that times out anyway.
+                if max_pace_wait > 0 and wait_tpm > max_pace_wait:
+                    logger.info(
+                        "[DocumentAI] input-TPM needs %.1fs but capped to %.1fs — proceeding "
+                        "(quota saturated; may 429 → fail-fast)", wait_tpm, max_pace_wait,
+                    )
+                    wait_tpm = max_pace_wait
+                if wait_tpm > 0:
+                    logger.info(
+                        "[DocumentAI] pacing gemma %.1fs for input-TPM (window=%d + req=%d > budget=%d)",
+                        wait_tpm, used, est_input_tokens, tpm_budget,
+                    )
+                    time.sleep(wait_tpm)
+                    now = time.monotonic()
+                    _gemma_token_window[:] = [(ts, tok) for (ts, tok) in _gemma_token_window if now - ts < 60.0]
+            elif est_input_tokens > tpm_budget:
+                logger.warning(
+                    "[DocumentAI] gemma request est %d input tokens exceeds the whole per-minute "
+                    "budget (%d) — will 429; reduce context or raise GEMMA_FREE_TIER_INPUT_TPM",
+                    est_input_tokens, tpm_budget,
+                )
+            _gemma_token_window.append((now, est_input_tokens))
+        # ── RPM: minimum interval between calls ──
+        if interval > 0:
+            wait = _gemma_last_request_ts + interval - now
+            if wait > 0:
+                logger.info("[DocumentAI] pacing gemma request %.1fs (free-tier RPM guard)", wait)
+                time.sleep(wait)
+                now = time.monotonic()
+        _gemma_last_request_ts = now
 
 
 def _gemini_generate_content_retrying(client, *, model, contents, config, retries: int = 4, base_delay: float = 2.0):
@@ -1285,18 +1429,39 @@ def _gemini_generate_content_retrying(client, *, model, contents, config, retrie
     server-provided `retryDelay` (the per-minute quota refills); on a 5xx it backs off 2s/4s/8s
     (gemma calls are additionally paced to GEMMA_MIN_CALL_INTERVAL_S apart — see
     `_pace_gemma_call` — so a retry burst can never hammer the 15 RPM free-tier window).
-    Never retries 400/401/403. Raises the last error if all attempts fail."""
+    Input-token-TPM 429s (free-tier Gemma, 16K input tokens/min) are handled specially: a single
+    request bigger than the whole per-minute budget can NEVER succeed by retrying, so it fails fast
+    as GemmaInputTPMExceeded; otherwise it is retried at most ONCE (honouring the server retryDelay,
+    capped short so it fits the caller's step timeout) before giving up cleanly. Never retries
+    400/401/403. Raises the last error if all attempts fail."""
+    est_tokens = _estimate_input_tokens(contents) if _is_gemma_model(model) else 0
+    tpm_budget = _gemma_input_tpm_budget()
     last_exc: BaseException | None = None
+    input_tpm_retries = 0
     for attempt in range(max(1, retries)):
-        _pace_gemma_call(model)
+        _pace_gemma_call(model, est_input_tokens=est_tokens)
         try:
             return client.models.generate_content(model=model, contents=contents, config=config)
         except Exception as exc:  # inspect + selectively retry
             last_exc = exc
+            input_tpm = _is_input_tpm_quota_error(exc)
+            # A single request over the whole minute budget is unrecoverable — fail fast so the UI
+            # can show a clear message instead of hanging through futile retries.
+            if input_tpm and tpm_budget > 0 and est_tokens > tpm_budget:
+                raise GemmaInputTPMExceeded(str(exc)) from exc
             if attempt >= retries - 1 or not _is_transient_gemini_error(exc):
+                if input_tpm:
+                    raise GemmaInputTPMExceeded(str(exc)) from exc
                 raise
-            msg_u = str(exc).upper()
-            if "429" in msg_u or "RESOURCE_EXHAUSTED" in msg_u or "QUOTA" in msg_u:
+            if input_tpm:
+                # Retry the input-TPM quota at most once; a short cap keeps retry+call under the
+                # caller's timeout (a 58s server delay + a 25s call would blow an ~88s step budget).
+                input_tpm_retries += 1
+                if input_tpm_retries > 1:
+                    raise GemmaInputTPMExceeded(str(exc)) from exc
+                delay = _gemini_retry_delay(exc, base_delay * (2 ** attempt), cap=35.0)
+                reason = "input-token quota (429)"
+            elif "429" in str(exc).upper() or "RESOURCE_EXHAUSTED" in str(exc).upper() or "QUOTA" in str(exc).upper():
                 delay = _gemini_retry_delay(exc, base_delay * (2 ** attempt))
                 reason = "rate-limited (429)"
             else:
@@ -1512,6 +1677,23 @@ def _call_gemini_for_qa(
         source_names = []
         running_chars = 0
         char_limit = 80000
+        # Free-tier Gemma caps input at ~16K tokens/min, so an 80K-char (~20K token) grounding
+        # block alone 429s. Resolve the model that will answer and clamp the context to the
+        # Gemma-safe budget. get_agent_config is cached, so this extra resolve is cheap and the
+        # value is reused by _generate_text below.
+        try:
+            _qa_model, _, _ = _generation_config(
+                for_summary=True,
+                agent_name=agent_name,
+                user_id=user_id,
+                summarization_llm_config=summarization_llm_config,
+                model_name_override=model_name_override,
+            )
+            if _is_gemma_model(_qa_model):
+                from app.core.config import get_settings as _qa_settings
+                char_limit = min(char_limit, int(getattr(_qa_settings(), "gemma_max_context_chars", 48000) or 48000))
+        except Exception:
+            pass
         for doc in document_texts:
             name = doc.get("name", "document")
             text = (doc.get("text") or "").strip()
