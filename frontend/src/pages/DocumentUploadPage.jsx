@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette, HardDrive } from 'lucide-react';
+import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette, HardDrive, Info } from 'lucide-react';
 import { FileManagerContext } from '../context/FileManagerContext';
 import { useAuth } from '../context';
 import CreateFolderModal from '../components/FolderBrowser/CreateFolderModal';
 import CaseCreationFlow from './CreateCase/CaseCreationFlow';
-import { CONTENT_SERVICE_DIRECT } from '../config/apiConfig';
+import { CONTENT_SERVICE_DIRECT, PAYMENT_SERVICE_URL } from '../config/apiConfig';
 import { canUsePermission, PERMISSION_KEYS } from '../utils/permissions';
 
 const getUserIdFromToken = () => {
@@ -46,6 +46,81 @@ const formatStorage = (bytes) => {
   if (b < 1024 ** 2) return `${(b / 1024).toFixed(0)} KB`;
   if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
   return `${(b / 1024 ** 3).toFixed(2)} GB`;
+};
+
+// ── Case storage chip + hover card ───────────────────────────────────────────
+// Bar turns green while usage is small, yellow above half, red when near full.
+const storageBarColor = (pct) => (pct < 50 ? '#22c55e' : pct < 85 ? '#eab308' : '#ef4444');
+// Remaining (unfilled) portion: light tint of the same color.
+const storageTrackColor = (pct) => (pct < 50 ? '#dcfce7' : pct < 85 ? '#fef9c3' : '#fee2e2');
+
+const CaseStorageChip = ({ summary, limitBytes }) => {
+  const [open, setOpen] = useState(false);
+  if (!summary) return null;
+  const used = Number(summary.total_bytes) || 0;
+  const limit = Number(limitBytes) || 0;
+  const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+  const color = storageBarColor(pct);
+  const pctLabel = limit > 0 ? (pct > 0 && pct < 1 ? '<1% used' : `${Math.round(pct)}% used`) : null;
+
+  return (
+    <div
+      className="relative flex-shrink-0"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <div
+        className="flex items-center gap-2 text-sm font-semibold px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-600 shadow-sm cursor-pointer"
+        onClick={() => setOpen((o) => !o)}
+        title="Case storage details"
+      >
+        <HardDrive className="w-4 h-4" style={{ color }} />
+        {formatStorage(used)}
+        <Info className="w-3.5 h-3.5 text-gray-300" />
+      </div>
+
+      {open && (
+      <div className="absolute right-0 top-full z-50" style={{ paddingTop: 6 }}>
+      <div className="w-72 bg-white rounded-xl border border-gray-200 shadow-xl p-4">
+        <p className="text-[11px] font-bold text-gray-700 tracking-wide uppercase mb-3">Case Storage</p>
+        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: storageTrackColor(pct) }}>
+          <div
+            className="h-full rounded-full transition-all"
+            style={{ width: `${Math.max(pct, used > 0 ? 2 : 0)}%`, background: color }}
+          />
+        </div>
+        {pctLabel && <p className="text-[11px] text-gray-400 text-right mt-1">{pctLabel}</p>}
+        <div className="border-t border-gray-100 mt-3 pt-3 space-y-1.5 text-xs">
+          <div className="flex justify-between">
+            <span className="text-gray-400">Used</span>
+            <span className="font-semibold text-gray-800">
+              {formatStorage(used)}{limit > 0 ? ` / ${formatStorage(limit)}` : ''}
+            </span>
+          </div>
+          {limit > 0 && (
+            <div className="flex justify-between">
+              <span className="text-gray-400">Available</span>
+              <span className="font-semibold text-gray-800">{formatStorage(Math.max(0, limit - used))}</span>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <span className="text-gray-400">Documents</span>
+            <span className="font-semibold text-gray-800">{formatStorage(summary.files_bytes)} · {summary.file_count} {summary.file_count === 1 ? 'file' : 'files'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-400">Case chat history</span>
+            <span className="font-semibold text-gray-800">{formatStorage(summary.chat_bytes)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-400">Cases</span>
+            <span className="font-semibold text-gray-800">{summary.case_count}</span>
+          </div>
+        </div>
+      </div>
+      </div>
+      )}
+    </div>
+  );
 };
 
 const ProjectCard = ({ folder, onClick }) => {
@@ -139,6 +214,20 @@ const DocumentUploadPage = () => {
   const [draftData, setDraftData] = useState(null);
   const [_loadingDraft, setLoadingDraft] = useState(false);
   const [openDraftDirectly, setOpenDraftDirectly] = useState(false);
+  // Plan storage limit (same source as the billing page) for the usage bar.
+  // Must live ABOVE the showCaseFlow early return — hooks after a conditional
+  // return crash React ("Rendered fewer hooks than expected").
+  const [storageLimitBytes, setStorageLimitBytes] = useState(null);
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    fetch(`${PAYMENT_SERVICE_URL}/api/storage/usage`, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      credentials: 'include',
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.limitBytes) setStorageLimitBytes(Number(d.limitBytes)); })
+      .catch(() => {});
+  }, []);
   const foldersPerPage = 6;
   const navigate = useNavigate();
   const canCreateCases = canUsePermission(user, PERMISSION_KEYS.CREATE_CASE);
@@ -306,22 +395,9 @@ const DocumentUploadPage = () => {
               <h1 className="text-2xl font-bold text-gray-900">Projects</h1>
             </div>
             <p className="text-sm text-gray-400 ml-10">Manage and organize your legal case files</p>
-            {caseStorage && (
-              <div
-                className="flex items-center gap-1.5 ml-10 mt-2 px-3 py-1.5 rounded-lg text-xs font-medium w-fit"
-                style={{ background: '#f0fdfb', color: '#0f766e' }}
-                title={`All cases combined — documents: ${formatStorage(caseStorage.files_bytes)}, case chat history: ${formatStorage(caseStorage.chat_bytes)}`}
-              >
-                <HardDrive className="w-3.5 h-3.5 flex-shrink-0" />
-                <span>
-                  Case storage: <strong>{formatStorage(caseStorage.total_bytes)}</strong>
-                  {' '}· {caseStorage.case_count} {caseStorage.case_count === 1 ? 'case' : 'cases'}
-                  {' '}· {caseStorage.file_count} {caseStorage.file_count === 1 ? 'file' : 'files'}
-                </span>
-              </div>
-            )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            <CaseStorageChip summary={caseStorage} limitBytes={storageLimitBytes} />
             <button
               onClick={() => navigate('/batch-request')}
               className="flex items-center gap-2 text-sm font-semibold px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:border-gray-300 shadow-sm transition-all duration-200 cursor-pointer"

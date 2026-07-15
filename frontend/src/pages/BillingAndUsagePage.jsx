@@ -522,10 +522,15 @@ const TABS = [
 
 function UsageStorageCard({ tokenData, monthlyUsed, monthlyLimit, planLeft, topupBal, storageData, onBuyTokens, onUpgrade, onRefreshStorage }) {
   // ── Token calc ───────────────────────────────────────────────────────────────
+  // Shared traffic-light scale: green while low, yellow above half, red near full.
+  const usageBarColor = (pct) => (pct < 50 ? '#22c55e' : pct < 85 ? '#eab308' : '#ef4444');
+  // Remaining (unfilled) portion: light tint of the same color.
+  const usageTrackColor = (pct) => (pct < 50 ? '#dcfce7' : pct < 85 ? '#fef9c3' : '#fee2e2');
+
   const tokRawPct    = monthlyLimit > 0 ? (monthlyUsed / monthlyLimit) * 100 : 0;
   const tokCappedPct = Math.min(tokRawPct, 100);
   const tokExhausted = planLeft + topupBal === 0;
-  const tokBarColor  = tokRawPct >= 100 ? '#ef4444' : tokRawPct >= 90 ? '#f97316' : tokRawPct >= 70 ? '#f59e0b' : '#3b82f6';
+  const tokBarColor  = usageBarColor(tokRawPct);
 
   // ── Storage calc ─────────────────────────────────────────────────────────────
   const {
@@ -541,8 +546,7 @@ function UsageStorageCard({ tokenData, monthlyUsed, monthlyLimit, planLeft, topu
   const limitBytesNum = limitBytes ? Number(limitBytes) : null;
   const storagePct    = usagePct ?? (limitBytesNum > 0 ? (totalBytes / limitBytesNum) * 100 : null);
   const storExceeded  = storagePct !== null && storagePct >= 100;
-  const storWarning   = storagePct !== null && storagePct >= 80 && !storExceeded;
-  const storBarColor  = storExceeded ? '#ef4444' : storWarning ? '#f97316' : '#3b82f6';
+  const storBarColor  = usageBarColor(storagePct ?? 0);
   const availBytes    = limitBytesNum > 0 ? Math.max(0, limitBytesNum - totalBytes) : null;
 
   return (
@@ -561,7 +565,7 @@ function UsageStorageCard({ tokenData, monthlyUsed, monthlyLimit, planLeft, topu
           </p>
         </div>
         {/* Bar */}
-        <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+        <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ backgroundColor: usageTrackColor(tokRawPct) }}>
           <div className="h-full rounded-full transition-all duration-700"
             style={{ width: `${tokCappedPct}%`, backgroundColor: tokBarColor }} />
         </div>
@@ -585,7 +589,7 @@ function UsageStorageCard({ tokenData, monthlyUsed, monthlyLimit, planLeft, topu
             </p>
           </div>
           {/* Bar */}
-          <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ backgroundColor: usageTrackColor(storagePct ?? 0) }}>
             <div className="h-full rounded-full transition-all duration-700"
               style={{ width: `${Math.min(storagePct ?? 0, 100)}%`, backgroundColor: storBarColor }} />
           </div>
