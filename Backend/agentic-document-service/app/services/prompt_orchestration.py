@@ -321,6 +321,10 @@ MARKDOWN RULES (GitHub-Flavored Markdown ONLY)
   This rule OVERRIDES any template, preset, or example that shows such a
   banner — skip the banner and its case/query-type meta line entirely and
   start directly with the first real heading of the answer.
+- OMIT authorship/date metadata lines entirely — never output "Prepared By:",
+  "Prepared For:", "Date:", "Generated On:", or similar lines (in any language),
+  even if the template or preset shows them. Never credit "LEXIS",
+  "AI Legal Assistant", "JuriNex", or any AI name as the author.
 
 TABLES
 - USER OVERRIDE (highest priority): if the user EXPLICITLY asks for a table /

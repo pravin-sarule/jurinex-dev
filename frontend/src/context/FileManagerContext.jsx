@@ -5,6 +5,7 @@ export const FileManagerContext = createContext();
 
 export const FileManagerProvider = ({ children }) => {
   const [folders, setFolders] = useState([]);
+  const [storageSummary, setStorageSummary] = useState(null); // all-cases storage totals
   const [selectedFolder, setSelectedFolder] = useState(null);
   const [documents, setDocuments] = useState([]);
   const [chatSessions, setChatSessions] = useState([]);
@@ -34,6 +35,7 @@ export const FileManagerProvider = ({ children }) => {
     try {
       const data = await documentApi.getFoldersAndFiles();
       setFolders(data.folders || []);
+      setStorageSummary(data.storage_summary || null);
     } catch (err) {
       console.error('Error loading folders and files:', err);
       const isNetwork =
@@ -79,6 +81,7 @@ export const FileManagerProvider = ({ children }) => {
   const value = useMemo(() => ({
     folders,
     setFolders,
+    storageSummary,
     selectedFolder,
     setSelectedFolder,
     documents,
@@ -98,7 +101,7 @@ export const FileManagerProvider = ({ children }) => {
     createFolder,
     uploadDocuments,
   }), [
-    folders, selectedFolder, documents, chatSessions, selectedChatSessionId,
+    folders, storageSummary, selectedFolder, documents, chatSessions, selectedChatSessionId,
     loading, error, success, hasAiResponse,
     loadFoldersAndFiles, createFolder, uploadDocuments,
   ]);

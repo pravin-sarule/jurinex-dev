@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette } from 'lucide-react';
+import { Search, Plus, FolderOpen, Calendar, FileEdit, Trash2, Scale, ChevronLeft, ChevronRight, Palette, HardDrive } from 'lucide-react';
 import { FileManagerContext } from '../context/FileManagerContext';
 import { useAuth } from '../context';
 import CreateFolderModal from '../components/FolderBrowser/CreateFolderModal';
@@ -40,6 +40,14 @@ const SkeletonCard = () => (
 );
 
 // ── Project card ──────────────────────────────────────────────────────────────
+const formatStorage = (bytes) => {
+  const b = Number(bytes) || 0;
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 ** 2) return `${(b / 1024).toFixed(0)} KB`;
+  if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+  return `${(b / 1024 ** 3).toFixed(2)} GB`;
+};
+
 const ProjectCard = ({ folder, onClick }) => {
   const dateStr = folder.created_at
     ? new Date(folder.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -119,7 +127,7 @@ const DraftCard = ({ draftData, onClick, onDelete }) => {
 
 // ── Main component ────────────────────────────────────────────────────────────
 const DocumentUploadPage = () => {
-  const { folders, loadFoldersAndFiles, createFolder, loading, error } = useContext(FileManagerContext);
+  const { folders, storageSummary, loadFoldersAndFiles, createFolder, loading, error } = useContext(FileManagerContext);
   const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('activity');
@@ -268,6 +276,22 @@ const DocumentUploadPage = () => {
 
   const isEmpty = (!shouldShowDraft || !draftData || !draftData.draft_data) && projectsToShow.length === 0;
 
+  // Total storage across ALL cases (documents + case chat history). Prefer the
+  // server summary; fall back to summing folder file sizes client-side.
+  const caseStorage = storageSummary ?? (folders.length
+    ? (() => {
+        const filesBytes = folders.reduce((s, f) => s + (Number(f.storage_bytes)
+          || (Array.isArray(f.children) ? f.children.reduce((a, c) => a + (Number(c.size) || 0), 0) : 0)), 0);
+        return {
+          files_bytes: filesBytes,
+          chat_bytes: 0,
+          total_bytes: filesBytes,
+          case_count: folders.length,
+          file_count: folders.reduce((s, f) => s + (f.document_count ?? (Array.isArray(f.children) ? f.children.length : 0)), 0),
+        };
+      })()
+    : null);
+
   return (
     <div className="min-h-screen" style={{ background: '#f8fafc' }}>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -282,6 +306,20 @@ const DocumentUploadPage = () => {
               <h1 className="text-2xl font-bold text-gray-900">Projects</h1>
             </div>
             <p className="text-sm text-gray-400 ml-10">Manage and organize your legal case files</p>
+            {caseStorage && (
+              <div
+                className="flex items-center gap-1.5 ml-10 mt-2 px-3 py-1.5 rounded-lg text-xs font-medium w-fit"
+                style={{ background: '#f0fdfb', color: '#0f766e' }}
+                title={`All cases combined — documents: ${formatStorage(caseStorage.files_bytes)}, case chat history: ${formatStorage(caseStorage.chat_bytes)}`}
+              >
+                <HardDrive className="w-3.5 h-3.5 flex-shrink-0" />
+                <span>
+                  Case storage: <strong>{formatStorage(caseStorage.total_bytes)}</strong>
+                  {' '}· {caseStorage.case_count} {caseStorage.case_count === 1 ? 'case' : 'cases'}
+                  {' '}· {caseStorage.file_count} {caseStorage.file_count === 1 ? 'file' : 'files'}
+                </span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
             <button

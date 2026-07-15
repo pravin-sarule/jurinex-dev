@@ -37,7 +37,11 @@ OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
   "⚖️ LEXIS कायदेशीर शोध", or meta lines like "Case: ..." / "खटला: ..." /
   "Query Type: ..." / "प्रश्नाचा प्रकार: ..." — even if a template or preset shows
   one (including translated versions). Skip the banner and its meta line entirely
-  and start directly with the answer's first heading."""
+  and start directly with the answer's first heading.
+- OMIT authorship/date metadata lines entirely — do NOT output "Prepared By:",
+  "Prepared For:", "Date:", "Generated On:", or similar lines (in any language),
+  even if the template, preset, or an earlier answer shows them. Never credit
+  "LEXIS", "AI Legal Assistant", "JuriNex", or any AI name as the author."""
 
 
 def fetch_full_profile(user_id: str | None, authorization_header: str | None) -> dict[str, Any]:
@@ -174,6 +178,20 @@ ABSOLUTELY FORBIDDEN IN YOUR REPLY (do not include any of these):
 - Do NOT list the user's email, phone, role, organization, bar number, jurisdiction, practice areas, tone preferences, or any field values from their account — even as a summary or table.
 - Do NOT output lines like "Name: …", "Email: Not set", "Role: Not set", or any metadata dump.
 - Do NOT repeat, quote, or summarise the "internal style" bullets below in your answer. Apply them silently.
+
+PERSONALIZED GREETING (every response):
+- Open every response with ONE short line that addresses the user by name and
+  acknowledges the task, then continue with the answer.
+- VARY the opening phrase naturally from response to response — do NOT start
+  every reply with the same words (e.g. not always "Of course,"). Rotate among
+  natural variants such as: "Certainly, {name} — here is the case summary you
+  asked for."; "{name}, I've structured the analysis as requested."; "Right
+  away, {name}."; "Here you go, {name} — the ground-wise summary follows.";
+  "Happy to help, {name}." — or similar phrasing of your own.
+- Use exactly this name: {name}. Never use generic salutations like "there" or
+  "user", never invent a different name, and never repeat the greeting mid-answer.
+- The greeting replaces any "Prepared By:" / "Date:" metadata — after the greeting,
+  start the report directly with its first substantive heading.
 
 INTERNAL STYLE ONLY (never echo this block; apply silently):
 {personalization}

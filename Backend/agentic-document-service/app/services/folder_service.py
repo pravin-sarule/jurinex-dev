@@ -756,6 +756,34 @@ class FolderWorkflowService:
             raise ValueError(f"Case '{case_id}' not found.")
         return self._get_case_from_db(case_id, user_id) or self._serialize_case_row(updated_case)
 
+    def _case_storage_summary(self, user_id: str | None, folders: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate storage across ALL of the user's cases: uploaded files + case chat text."""
+        files_bytes = sum(int(f.get("storage_bytes") or 0) for f in folders)
+        file_count = sum(int(f.get("document_count") or 0) for f in folders)
+        chat_bytes = 0
+        if user_id:
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT COALESCE(SUM(
+                               OCTET_LENGTH(COALESCE(question, '')) +
+                               OCTET_LENGTH(COALESCE(answer, ''))
+                           ), 0)::bigint AS chat_bytes
+                           FROM folder_chats WHERE user_id::text = %s""",
+                        [str(user_id)],
+                    )
+                    row = cur.fetchone() or {}
+                    chat_bytes = int(row.get("chat_bytes") or 0)
+            except Exception as exc:
+                logger.warning("[FolderService] case chat storage lookup failed: %s", exc)
+        return {
+            "files_bytes": files_bytes,
+            "chat_bytes": chat_bytes,
+            "total_bytes": files_bytes + chat_bytes,
+            "case_count": len(folders),
+            "file_count": file_count,
+        }
+
     def list_folders(self, user_id: str | None = None) -> dict[str, Any]:
         if is_db_available():
             db_folders = self._list_folders_from_db(user_id)
@@ -765,7 +793,10 @@ class FolderWorkflowService:
                 len(db_folders),
             )
             if db_folders:
-                return {"folders": db_folders}
+                return {
+                    "folders": db_folders,
+                    "storage_summary": self._case_storage_summary(user_id, db_folders),
+                }
             # Fallback: if user_files folders are missing, derive folder cards from cases table.
             case_folders = self._list_folders_from_cases_db(user_id)
             logger.info(
@@ -2092,6 +2123,8 @@ class FolderWorkflowService:
                     "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
                     "children": folder_children,
                     "document_count": len(folder_children),
+                    # Per-case storage: sum of this folder's file sizes (bytes).
+                    "storage_bytes": sum(int(c.get("size") or 0) for c in folder_children),
                 }
             )
         logger.info(

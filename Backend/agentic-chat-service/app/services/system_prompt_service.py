@@ -67,11 +67,12 @@ Use markdown so responses render clearly in the JuriNex viewer:
   HTML tags as literal text. Bold is **text**, italics are *text*, headings are
   ## text — even if a template, preset, or earlier message shows HTML.
 - Open with ONE short greeting line that addresses the user by their profile
-  name, then go straight into the answer — e.g. "Of course, {name}. I will
-  analyze the provided case summary and structure the available information
-  into the requested format." Never greet a user as "there" or omit the name
-  when the profile provides one, and never emit a stray "*" line or a
-  decorative banner.
+  name and acknowledges the task, then go straight into the answer. VARY the
+  opening words between responses — do NOT start every reply with the same
+  phrase (e.g. not always "Of course,"). Natural variants: "Certainly, {name} —",
+  "{name}, here is ...", "Right away, {name}.", "Happy to help, {name}.", or
+  similar. Never greet a user as "there" or omit the name when the profile
+  provides one, and never emit a stray "*" line or a decorative banner.
 
 ---
 
@@ -188,7 +189,8 @@ def _build_profile_appendix(user_profile: dict) -> str:
         f"- Detail Level: {_f('preferred_detail_level', professional, user_profile)}\n"
         f"- Citation Style: {_f('citation_style', professional, user_profile)}\n"
         "\n\nPERSONALIZED GREETING (every response):\n"
-        f"- Open every response with ONE short line greeting the user by name, then continue with the answer — e.g. \"Of course, {name}. I will analyze the provided case summary and structure the available information into the requested format.\"\n"
+        f"- Open every response with ONE short line greeting the user by name and acknowledging the task, then continue with the answer.\n"
+        f"- VARY the opening phrase from response to response — do NOT start every reply with the same words (e.g. not always \"Of course,\"). Rotate among natural variants such as: \"Certainly, {name} — here is the case summary you asked for.\"; \"{name}, I've structured the analysis as requested.\"; \"Right away, {name}.\"; \"Here you go, {name}.\"; \"Happy to help, {name}.\" — or similar phrasing of your own.\n"
         f"- Always use the exact name from the profile above ({name}). Never use generic salutations like \"there\" or \"user\", and never invent a different name.\n"
         "\n\nREPORT METADATA (case summaries, briefs, and other system-generated reports):\n"
         "- OMIT authorship/date metadata lines entirely — do NOT output 'Prepared By:', 'Prepared For:', 'Date:', 'Generated On:', or similar lines, even if the template, preset, or an earlier message shows them.\n"
@@ -252,7 +254,8 @@ def build_profile_query_prefix(user_profile: dict | None) -> str:
         "NOTE: If the user asks anything about their own profile (name, email, role, etc.), "
         "answer from the above — never claim you lack access to this information. "
         "Also use this profile to tailor tone, jurisdiction, and technical depth for every response. "
-        f"Open your response with one short line greeting the user by name (e.g. \"Of course, {name or 'the user'}. I will ...\"). "
+        f"Open your response with one short line greeting the user by name ({name or 'the user'}), "
+        "varying the phrasing each time — never start every reply with the same words like \"Of course,\". "
         "In generated reports/summaries, OMIT metadata lines like 'Prepared By:' and 'Date:' entirely — "
         "start the report directly with its first substantive heading."
     )
