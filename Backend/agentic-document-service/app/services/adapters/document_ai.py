@@ -553,19 +553,77 @@ def _gemini_model_supports_thinking_config(model_name: str | None) -> bool:
     return False
 
 
-def _model_max_output_tokens(model_name: str | None) -> int | None:
-    """Known hard output-token ceiling per model, or None when unknown (no clamp).
+# In-memory cache of the admin-editable per-model output-token registry
+# (public.llm_max_tokens, edited via LLM Management → LLM Max Tokens). Refreshed lazily every
+# _MAX_TOKENS_REGISTRY_TTL seconds so a config build isn't a DB hit on every request.
+_MAX_TOKENS_REGISTRY: dict[str, int] = {}
+_MAX_TOKENS_REGISTRY_TS: float = 0.0
+_MAX_TOKENS_REGISTRY_TTL_DEFAULT: float = 10.0
 
-    Requesting MORE than a model's real limit is invalid: the Gemini API may silently fall
-    back to a low default (≈8192) instead of the true maximum, which truncates long answers.
-    Gemma-4 (gemma-4-31b-it) reports output_token_limit=32768 via models.get; gemini-2.5/3
-    support 65536; gemini-2.0/1.5 cap at 8192. Clamp the request to this so we always ask for
-    the model's real maximum, never above it."""
+
+def _load_max_tokens_registry() -> dict[str, int]:
+    """Return {model_name_lower: max_output_tokens} from public.llm_max_tokens.
+
+    Admin-editable (LLM Management → LLM Max Tokens) and synced to this service's DB. Cached for
+    settings.max_tokens_registry_cache_seconds (default 10s) so edits propagate almost immediately;
+    set that knob to 0 to read the DB on every call (no cache). On any error / DB-unavailable, returns
+    the last good cache (possibly empty) so the caller falls back to the hardcoded ceilings — a
+    registry read must never break generation."""
+    global _MAX_TOKENS_REGISTRY, _MAX_TOKENS_REGISTRY_TS
+    now = time.time()
+    try:
+        from app.core.config import get_settings as _gs
+        ttl = float(getattr(_gs(), "max_tokens_registry_cache_seconds", _MAX_TOKENS_REGISTRY_TTL_DEFAULT))
+    except Exception:
+        ttl = _MAX_TOKENS_REGISTRY_TTL_DEFAULT
+    if ttl > 0 and _MAX_TOKENS_REGISTRY_TS and (now - _MAX_TOKENS_REGISTRY_TS) < ttl:
+        return _MAX_TOKENS_REGISTRY
+    try:
+        from app.services.db import get_db_connection, is_db_available
+        if not is_db_available():
+            return _MAX_TOKENS_REGISTRY
+        reg: dict[str, int] = {}
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT model_name, max_output_tokens FROM public.llm_max_tokens")
+            for row in cur.fetchall():
+                d = dict(row) if hasattr(row, "keys") else {"model_name": row[0], "max_output_tokens": row[1]}
+                mn = str(d.get("model_name") or "").strip().lower()
+                mt = d.get("max_output_tokens")
+                if mn and mt:
+                    try:
+                        reg[mn] = int(mt)
+                    except (TypeError, ValueError):
+                        continue
+        _MAX_TOKENS_REGISTRY = reg
+        _MAX_TOKENS_REGISTRY_TS = now
+        return reg
+    except Exception as exc:  # noqa: BLE001 — never let a registry read break generation
+        logger.info("[DocumentAI] llm_max_tokens registry load failed (%s); using hardcoded ceilings", exc)
+        return _MAX_TOKENS_REGISTRY
+
+
+def _model_max_output_tokens(model_name: str | None) -> int | None:
+    """Per-model output-token ceiling used to clamp the requested max_output_tokens.
+
+    Source of truth (per admin directive):
+      • GEMMA → HARDCODED 32768 (free-tier managed model; NOT admin-editable via the registry).
+      • Every other model → the admin DB registry public.llm_max_tokens (LLM Management →
+        LLM Max Tokens), matched by exact model_name. Models NOT in the registry fall back to the
+        known hardcoded ceilings (gemini-2.5/3 → 65536, gemini-2.0/1.5 → 8192, else None/no clamp)
+        so nothing breaks for an unlisted model.
+
+    Requesting MORE than a model's real limit is invalid: the Gemini API may silently fall back to a
+    low default (≈8192) and truncate answers — so we always clamp the request to this ceiling."""
     m = (model_name or "").strip().lower().rsplit("/", 1)[-1]
     if not m:
         return None
     if m.startswith("gemma"):
         return 32768
+    # Admin registry wins for all non-gemma models.
+    reg = _load_max_tokens_registry()
+    if m in reg:
+        return reg[m]
+    # Fallback for a model not present in the registry.
     if "2.5" in m or "2-5" in m or "gemini-3" in m:
         return 65536
     if "gemini-2.0" in m or "gemini-1.5" in m or "gemini-1-5" in m:

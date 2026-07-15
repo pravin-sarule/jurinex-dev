@@ -227,6 +227,14 @@ class Settings(BaseSettings):
         default=20000,
         validation_alias=AliasChoices("GEMMA_CHAT_MAX_OUTPUT_TOKENS"),
     )
+    # How long (seconds) to cache the per-model output-token registry (public.llm_max_tokens, edited
+    # via LLM Management → LLM Max Tokens). 0 = check the DB on EVERY request (fully live — an admin's
+    # limit change takes effect on the very next chat, no restart). Raise it (e.g. 10) to trade a
+    # little staleness for fewer DB reads under high traffic.
+    max_tokens_registry_cache_seconds: int = Field(
+        default=0,
+        validation_alias=AliasChoices("MAX_TOKENS_REGISTRY_CACHE_SECONDS"),
+    )
     # HARDCODED temperature for a Gemma CHAT/Q&A call. Gemma runs on the free tier as a managed
     # model, so its temperature is FIXED here rather than read from the admin agent_prompts row —
     # admin-configured temperature applies only to paid Gemini models. 0.3 keeps grounded factual
