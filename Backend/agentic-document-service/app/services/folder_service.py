@@ -1460,40 +1460,30 @@ class FolderWorkflowService:
     ) -> list[dict[str, Any]]:
         if max_history <= 0:
             return []
+        # A new chat sends no session_id, and it must start from a CLEAN slate. This used to fall back
+        # to the folder's most recent Q/A pairs across ALL sessions for "case-wise continuity", which
+        # made a new chat inherit up to max_history (default 25) turns of unrelated conversations:
+        # typing "hi" replayed an earlier "summary in text as well as in tabular format" ask, so the
+        # model answered that OLD question and opened with a full case summary. History is
+        # session-scoped only; continuity across chats comes from the case documents, not stale turns.
+        if not session_id:
+            return []
         history: list[dict[str, Any]] = []
         if is_db_available():
             try:
                 with get_db_connection() as conn, conn.cursor() as cur:
-                    # If the UI did not send a session_id (or a new chat was started),
-                    # we still want *case-wise* conversational continuity. Fetch the most
-                    # recent Q/A pairs for this folder (case) and user.
-                    #
-                    # When session_id is provided we prefer session-scoped history.
-                    if session_id:
-                        cur.execute(
-                            """
-                            SELECT question, answer, created_at
-                            FROM folder_chats
-                            WHERE folder_name = %s
-                              AND user_id::text = %s
-                              AND session_id::text = %s
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                            """,
-                            [folder_name, str(user_id), str(session_id), max_history],
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            SELECT question, answer, created_at
-                            FROM folder_chats
-                            WHERE folder_name = %s
-                              AND user_id::text = %s
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                            """,
-                            [folder_name, str(user_id), max_history],
-                        )
+                    cur.execute(
+                        """
+                        SELECT question, answer, created_at
+                        FROM folder_chats
+                        WHERE folder_name = %s
+                          AND user_id::text = %s
+                          AND session_id::text = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                        """,
+                        [folder_name, str(user_id), str(session_id), max_history],
+                    )
                     rows = list(cur.fetchall())
                 history = [{"question": row.get("question"), "answer": row.get("answer")} for row in reversed(rows)]
             except Exception as exc:
