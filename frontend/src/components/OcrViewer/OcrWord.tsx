@@ -51,7 +51,7 @@ const OcrWordBox: React.FC<OcrWordProps> = ({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <span className="px-0.5 leading-none">{text}</span>
+      <span className="leading-none whitespace-nowrap">{text}</span>
 
       {hovered && (
         <div className="absolute z-20 left-1/2 -translate-x-1/2 -top-2 -translate-y-full bg-gray-900 text-white text-[11px] px-2 py-1.5 rounded shadow-lg whitespace-nowrap">

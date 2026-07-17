@@ -20,15 +20,28 @@ const OcrPageView: React.FC<OcrPageProps> = ({
     () => {
       return words.map((word, idx) => {
         const { bbox } = word;
-        
+
+        // Size the word to its bbox height, but never wider than its bbox: CSS font-size is an em
+        // size and our fallback font is wider than the source PDF's, so height alone renders text
+        // past bbox.w — it then wraps inside the box (a word breaking onto two stacked lines) and
+        // bleeds over its neighbours. At ~0.5em average glyph advance, `text.length` glyphs fit
+        // bbox.w at font-size 2*bbox.w/length; take whichever constraint binds first.
+        const glyphCount = Math.max(1, (word.text || '').trim().length);
+        const fitByWidth = (2 * bbox.w) / glyphCount;
+        const sourceFontSize = Math.min(bbox.h, fitByWidth);
+
         const style: React.CSSProperties = {
           position: 'absolute',
           left: `${(bbox.x / width) * 100}%`,
           top: `${(bbox.y / height) * 100}%`,
           width: `${(bbox.w / width) * 100}%`,
           height: `${(bbox.h / height) * 100}%`,
-          fontSize: `${Math.max(8, Math.min(14, (bbox.h / height) * 100))}px`,
+          // Container-width units, so glyphs scale with the page box at any panel size or zoom. An
+          // absolute px size cannot work: the boxes are sized as a % of the container, so fixed-size
+          // text overflows and collides. (x/width)*100cqw === x * (renderedWidth / sourceWidth).
+          fontSize: `${(sourceFontSize / width) * 100}cqw`,
           lineHeight: '1',
+          whiteSpace: 'nowrap',
         };
         return (
           <OcrWordBox
@@ -49,6 +62,8 @@ const OcrPageView: React.FC<OcrPageProps> = ({
         className="relative w-full max-h-full bg-white border border-gray-200 rounded-md shadow-sm overflow-hidden"
         style={{
           aspectRatio: `${width} / ${height}`,
+          // Makes 1cqw == 1% of this box's width, which is what the word font sizes are expressed in.
+          containerType: 'inline-size',
           transform: `scale(${zoom})`,
           transformOrigin: 'top left',
         }}
