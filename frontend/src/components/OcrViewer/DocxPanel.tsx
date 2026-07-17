@@ -19,6 +19,10 @@ import { renderAsync } from 'docx-preview';
 // must stay a name the app itself would never use. The default is the far likelier "docx".
 const DOCX_CLASS = 'jrx-docx';
 
+// Horizontal padding the wrapper puts around the page (8px per side, set in the style block below).
+// Subtracted from the panel width so fit-to-width accounts for it instead of clipping by 16px.
+const WRAPPER_PADDING_X = 16;
+
 const DOCX_OPTIONS = {
   className: DOCX_CLASS,
   // Keeps generated CSS custom properties under `.jrx-docx-wrapper`. With `inWrapper: false` they are
@@ -48,8 +52,13 @@ export interface DocxPanelProps {
 const DocxPanel: React.FC<DocxPanelProps> = ({ url, zoom, onDownload }) => {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const styleRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const zoomRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // The document's own page width in CSS px (Letter ~816, A4 ~794) and the space the panel can give it.
+  const [pageWidth, setPageWidth] = useState<number | null>(null);
+  const [panelWidth, setPanelWidth] = useState<number | null>(null);
 
   const baseUrl = url ? url.split('#')[0] : null;
 
@@ -84,6 +93,22 @@ const DocxPanel: React.FC<DocxPanelProps> = ({ url, zoom, onDownload }) => {
         // owns. Passing document.head as the style container would erase the whole head.
         await renderAsync(blob, body, styles, DOCX_OPTIONS);
         if (cancelled) return;
+
+        // docx-preview stamps the document's real page width onto each section as an inline style. That
+        // is almost always wider than this half-width panel, and the wrapper centres its pages, so an
+        // unscaled document is clipped on BOTH sides. Measure the page so it can be scaled to fit.
+        //
+        // Measured with the zoom wrapper pinned to 1: whether a CSS `zoom` ancestor scales a descendant's
+        // offsetWidth differs between engines, and this must be the document's natural width either way.
+        // Costs one forced reflow, once per document.
+        const firstPage = body.querySelector<HTMLElement>(`section.${DOCX_CLASS}`);
+        const zoomEl = zoomRef.current;
+        const previousZoom = zoomEl?.style.zoom ?? '';
+        if (zoomEl) zoomEl.style.zoom = '1';
+        const naturalWidth = firstPage?.offsetWidth || null;
+        if (zoomEl) zoomEl.style.zoom = previousZoom;
+
+        setPageWidth(naturalWidth);
         setStatus('ready');
       } catch (err: any) {
         if (cancelled) return;
@@ -98,6 +123,28 @@ const DocxPanel: React.FC<DocxPanelProps> = ({ url, zoom, onDownload }) => {
       cancelled = true;
     };
   }, [baseUrl]);
+
+  // The panel is resized by the OCR toggle, the full-size toggle and the window itself, and each one
+  // changes what "fit to width" means. Observing the element covers all three without wiring into any of
+  // them. The initial read happens on mount, before the document has even been fetched.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => setPanelWidth(el.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Scale the page down until it fits the panel, then apply the user's zoom on top — so 100% means "the
+  // whole page is visible", matching the PDF panel, where pageRenderHeight(zoom) fits a page to its slot.
+  // Never scale above 1: a page smaller than the panel should sit at its natural size, not be blown up.
+  const fitScale =
+    pageWidth && panelWidth
+      ? Math.min(1, (panelWidth - WRAPPER_PADDING_X) / pageWidth)
+      : 1;
+  const effectiveZoom = fitScale * zoom;
 
   const header = (
     <h3 className="text-sm font-semibold text-gray-900 shrink-0">
@@ -119,7 +166,10 @@ const DocxPanel: React.FC<DocxPanelProps> = ({ url, zoom, onDownload }) => {
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">
       {header}
-      <div className="jrx-docx-panel flex-1 min-h-0 rounded-lg border border-gray-200 bg-gray-100 overflow-auto relative">
+      <div
+        ref={scrollRef}
+        className="jrx-docx-panel flex-1 min-h-0 rounded-lg border border-gray-200 bg-gray-100 overflow-auto relative"
+      >
         {/* Two classes beat docx-preview's own single-class rules regardless of which <style> the
             browser sees first, so the library's gray page-viewer chrome cannot override this. */}
         <style>{`
@@ -164,8 +214,9 @@ const DocxPanel: React.FC<DocxPanelProps> = ({ url, zoom, onDownload }) => {
         )}
 
         {/* `zoom` reflows the content, so the scrollbars stay correct; a transform would scale the
-            painted output while leaving the scroll area at its unscaled size. */}
-        <div style={{ zoom }}>
+            painted output while leaving the scroll area at its unscaled size. It is applied here rather
+            than on the measured page so `pageWidth` stays the document's natural width. */}
+        <div ref={zoomRef} style={{ zoom: effectiveZoom }}>
           <div ref={styleRef} />
           <div ref={bodyRef} />
         </div>
